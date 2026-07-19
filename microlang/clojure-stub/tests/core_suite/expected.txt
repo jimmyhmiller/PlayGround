@@ -1,0 +1,720 @@
+(+ 1 2 3)	6
+(- 10 3 2)	5
+(* 2 3 4)	24
+(/ 12 3)	4
+(quot 17 5)	3
+(rem 17 5)	2
+(mod -7 3)	2
+(inc 5)	6
+(dec 5)	4
+(max 3 7 2)	7
+(min 3 7 2)	2
+(max 5)	5
+(abs -4)	4
+(abs 4)	4
+(+ )	0
+(* )	1
+(- 5)	-5
+(reduce + (range 100))	4950
+(reduce * (range 1 11))	3628800
+(inc -1)	0
+(* 1000000 1000000)	1000000000000
+(+ 9223372036854775807 1)	ERROR
+(= 1 1)	true
+(= 1 2)	false
+(= [1 2] [1 2])	true
+(= [1 2] [1 3])	false
+(= {:a 1} {:a 1})	true
+(not= 1 2)	true
+(< 1 2 3)	true
+(< 1 3 2)	false
+(> 3 2 1)	true
+(<= 1 1 2)	true
+(>= 3 3 2)	true
+(compare 1 2)	-1
+(compare 2 1)	1
+(compare "a" "b")	-1
+(== 1 1)	true
+(and true true false)	false
+(and 1 2 3)	3
+(or false nil 5)	5
+(or false nil)	nil
+(not true)	false
+(not nil)	true
+(not 5)	false
+(and)	true
+(or)	nil
+(nil? nil)	true
+(nil? 5)	false
+(some? 5)	true
+(some? nil)	false
+(zero? 0)	true
+(pos? 3)	true
+(neg? -3)	true
+(even? 4)	true
+(odd? 3)	true
+(number? 5)	true
+(number? "x")	false
+(string? "x")	true
+(keyword? :a)	true
+(symbol? 'a)	true
+(map? {})	true
+(vector? [])	true
+(set? #{})	true
+(list? '(1 2))	true
+(seq? (seq [1]))	true
+(coll? [])	true
+(coll? 5)	false
+(fn? inc)	true
+(ifn? :a)	true
+(empty? [])	true
+(empty? [1])	false
+(empty? "")	true
+(contains? {:a 1} :a)	true
+(contains? [1 2 3] 0)	true
+(contains? [1 2 3] 5)	false
+(distinct? 1 2 3)	true
+(distinct? 1 2 1)	false
+(true? true)	true
+(false? false)	true
+(boolean? true)	true
+(int? 5)	true
+(pos-int? 5)	true
+(neg-int? -5)	true
+(nat-int? 0)	true
+(even? 0)	true
+(list 1 2 3)	(1 2 3)
+(vector 1 2 3)	[1 2 3]
+(vec '(1 2 3))	[1 2 3]
+(range 5)	(0 1 2 3 4)
+(range 2 8)	(2 3 4 5 6 7)
+(range 0 10 2)	(0 2 4 6 8)
+(repeat 3 :x)	(:x :x :x)
+(take 5 (repeat :y))	(:y :y :y :y :y)
+(take 5 (iterate inc 0))	(0 1 2 3 4)
+(take 5 (cycle [1 2]))	(1 2 1 2 1)
+(take 4 (repeatedly (constantly 7)))	(7 7 7 7)
+(seq [1 2 3])	(1 2 3)
+(seq [])	nil
+(seq "abc")	(\a \b \c)
+(first [1 2 3])	1
+(first [])	nil
+(rest [1 2 3])	(2 3)
+(next [1])	nil
+(last [1 2 3])	3
+(butlast [1 2 3])	(1 2)
+(cons 0 [1 2 3])	(0 1 2 3)
+(conj [1 2] 3)	[1 2 3]
+(conj '(1 2) 0)	(0 1 2)
+(sort (conj #{1 2} 3))	(1 2 3)
+(conj {:a 1} [:b 2])	{:a 1, :b 2}
+(count [1 2 3])	3
+(count {})	0
+(count "hello")	5
+(nth [10 20 30] 1)	20
+(nth [10 20 30] 5 :none)	:none
+(take 3 (range 10))	(0 1 2)
+(take-while #(< % 3) (range 10))	(0 1 2)
+(drop 3 (range 6))	(3 4 5)
+(drop-while #(< % 3) (range 6))	(3 4 5)
+(take-last 2 [1 2 3 4])	(3 4)
+(drop-last 2 [1 2 3 4])	(1 2)
+(split-at 2 [1 2 3 4])	[(1 2) (3 4)]
+(split-with even? [2 4 5 6])	[(2 4) (5 6)]
+(partition 2 [1 2 3 4 5])	((1 2) (3 4))
+(partition-all 2 [1 2 3 4 5])	((1 2) (3 4) (5))
+(map inc [1 2 3])	(2 3 4)
+(map + [1 2 3] [10 20 30])	(11 22 33)
+(mapv inc [1 2 3])	[2 3 4]
+(map-indexed vector [:a :b])	([0 :a] [1 :b])
+(mapcat reverse [[1 2] [3 4]])	(2 1 4 3)
+(filter even? (range 10))	(0 2 4 6 8)
+(filterv odd? (range 10))	[1 3 5 7 9]
+(remove even? (range 10))	(1 3 5 7 9)
+(keep #(when (even? %) %) (range 6))	(0 2 4)
+(keep-indexed (fn [i x] (when (odd? i) x)) [:a :b :c :d])	(:b :d)
+(reduce + 0 [1 2 3 4])	10
+(reduce + [1 2 3 4])	10
+(reduce conj [] [1 2 3])	[1 2 3]
+(reductions + [1 2 3 4])	(1 3 6 10)
+(apply + [1 2 3 4])	10
+(apply max [3 1 4 1 5])	5
+(apply str ["a" "b" "c"])	"abc"
+(reverse [1 2 3])	(3 2 1)
+(sort [3 1 2])	(1 2 3)
+(sort > [3 1 2])	(3 2 1)
+(sort-by count [[1 2] [1] [1 2 3]])	([1] [1 2] [1 2 3])
+(distinct [1 1 2 3 3])	(1 2 3)
+(dedupe [1 1 2 2 1])	(1 2 1)
+(interpose :x [1 2 3])	(1 :x 2 :x 3)
+(interleave [1 2] [:a :b])	(1 :a 2 :b)
+(flatten [[1 [2]] [3]])	(1 2 3)
+(frequencies [:a :b :a :a])	{:a 3, :b 1}
+(group-by even? (range 6))	{true [0 2 4], false [1 3 5]}
+(zipmap [:a :b] [1 2])	{:a 1, :b 2}
+(concat [1 2] [3 4] [5])	(1 2 3 4 5)
+(some even? [1 3 5 6])	true
+(some even? [1 3 5])	nil
+(every? even? [2 4 6])	true
+(every? even? [2 3])	false
+(not-any? even? [1 3 5])	true
+(not-every? even? [2 4 5])	true
+(into [] (range 3))	[0 1 2]
+(sort (into #{} [1 1 2]))	(1 2)
+(into {} [[:a 1] [:b 2]])	{:a 1, :b 2}
+(into '() [1 2 3])	(3 2 1)
+(nthnext [1 2 3 4] 2)	(3 4)
+(subvec [1 2 3 4 5] 1 3)	[2 3]
+(peek [1 2 3])	3
+(pop [1 2 3])	[1 2]
+(peek '(1 2 3))	1
+(pop '(1 2 3))	(2 3)
+(replace {1 :one 2 :two} [1 2 3])	[:one :two 3]
+(get {:a 1} :a)	1
+(get {:a 1} :b)	nil
+(get {:a 1} :b :default)	:default
+(get-in {:a {:b 1}} [:a :b])	1
+(assoc {} :a 1 :b 2)	{:a 1, :b 2}
+(assoc-in {} [:a :b] 1)	{:a {:b 1}}
+(update {:a 1} :a inc)	{:a 2}
+(update-in {:a {:b 1}} [:a :b] inc)	{:a {:b 2}}
+(dissoc {:a 1 :b 2} :a)	{:b 2}
+(merge {:a 1} {:b 2})	{:a 1, :b 2}
+(merge-with + {:a 1} {:a 2 :b 3})	{:a 3, :b 3}
+(select-keys {:a 1 :b 2 :c 3} [:a :c])	{:a 1, :c 3}
+(keys (sorted-map :a 1 :b 2))	(:a :b)
+(vals (sorted-map :a 1 :b 2))	(1 2)
+(find {:a 1} :a)	[:a 1]
+(count {:a 1 :b 2})	2
+(key (first {:a 1}))	:a
+(val (first {:a 1}))	1
+(:a {:a 5})	5
+({:a 5} :a)	5
+(get {} :x :fallback)	:fallback
+(assoc [1 2 3] 1 :x)	[1 :x 3]
+(update [1 2 3] 0 inc)	[2 2 3]
+(conj #{1 2} 2)	#{1 2}
+(sort (disj #{1 2 3} 2))	(1 3)
+(contains? #{1 2} 1)	true
+(sort (clojure.set/union #{1 2} #{2 3}))	(1 2 3)
+(sort (clojure.set/intersection #{1 2 3} #{2 3 4}))	(2 3)
+(sort (clojure.set/difference #{1 2 3} #{2}))	(1 3)
+(str 1 2 3)	"123"
+(str "a" nil "b")	"ab"
+(subs "hello" 1 3)	"el"
+(subs "hello" 2)	"llo"
+(name :foo)	"foo"
+(name 'bar)	"bar"
+(namespace :a/b)	"a"
+(symbol "x")	x
+(symbol "ns" "x")	ns/x
+(keyword "kw")	:kw
+(clojure.string/upper-case "abc")	"ABC"
+(clojure.string/join "," [1 2 3])	"1,2,3"
+(clojure.string/reverse "abc")	"cba"
+(clojure.string/trim "  x  ")	"x"
+(clojure.string/replace "aaa" "a" "b")	"bbb"
+(clojure.string/blank? "  ")	true
+((comp inc inc) 5)	7
+((partial + 10) 5)	15
+((complement even?) 3)	true
+((constantly 7) 1 2 3)	7
+(identity 42)	42
+((juxt inc dec) 5)	[6 4]
+((fnil inc 0) nil)	1
+(map (partial * 2) [1 2 3])	(2 4 6)
+((comp) 5)	5
+(if true 1 2)	1
+(if false 1 2)	2
+(when true 1 2 3)	3
+(when false 1)	nil
+(cond (= 1 2) :a :else :b)	:b
+(condp = 2 1 :one 2 :two :none)	:two
+(case 2 1 :one 2 :two :none)	:two
+(let [x 5] (* x x))	25
+(loop [i 0 acc 0] (if (< i 5) (recur (inc i) (+ acc i)) acc))	10
+(-> 5 inc (* 2))	12
+(->> [1 2 3] (map inc) (reduce +))	9
+(as-> 5 x (+ x 1) (* x 2))	12
+(dotimes [i 3] i)	nil
+(if-let [x 5] x :none)	5
+(when-let [x nil] x)	nil
+(some-> {:a 1} :a inc)	2
+(cond-> 5 true inc false dec)	6
+(bit-and 12 10)	8
+(bit-or 12 10)	14
+(bit-xor 12 10)	6
+(bit-shift-left 1 4)	16
+(bit-shift-right 16 2)	4
+(sort (keys (hash-map :a 1 :b 2)))	(:a :b)
+(sorted-map :b 2 :a 1)	{:a 1, :b 2}
+(sorted-set 3 1 2)	#{1 2 3}
+(sort (hash-set 1 2 3))	(1 2 3)
+(vec (keys (array-map :a 1 :b 2)))	[:a :b]
+(max-key count [1] [1 2] [1 2 3])	[1 2 3]
+(min-key count [1] [1 2] [1 2 3])	[1]
+(seq nil)	nil
+(seq (sorted-map :a 1 :b 2))	([:a 1] [:b 2])
+(second [1 2 3])	2
+(next [1 2 3])	(2 3)
+(nnext [1 2 3 4])	(3 4)
+(nthrest [1 2 3 4 5] 2)	(3 4 5)
+(nthnext [1 2 3 4 5] 3)	(4 5)
+(cons :a (cons :b nil))	(:a :b)
+(conj [1 2 3] 4)	[1 2 3 4]
+(conj '(1 2 3) 0)	(0 1 2 3)
+(take 3 [1 2 3 4 5])	(1 2 3)
+(take 10 [1 2 3])	(1 2 3)
+(take-while even? [2 4 6 7 8])	(2 4 6)
+(take-nth 2 [1 2 3 4 5 6])	(1 3 5)
+(drop 2 [1 2 3 4 5])	(3 4 5)
+(drop-while even? [2 4 6 7 8])	(7 8)
+(drop-last 2 [1 2 3 4 5])	(1 2 3)
+(split-at 2 [1 2 3 4 5])	[(1 2) (3 4 5)]
+(partition 2 [1 2 3 4 5 6])	((1 2) (3 4) (5 6))
+(partition 2 1 [1 2 3 4])	((1 2) (2 3) (3 4))
+(partition-by even? [1 1 2 2 3 3])	((1 1) (2 2) (3 3))
+(mapcat (fn [x] [x x]) [1 2 3])	(1 1 2 2 3 3)
+(map-indexed vector [:a :b :c])	([0 :a] [1 :b] [2 :c])
+(filter even? [1 2 3 4 5 6])	(2 4 6)
+(filterv odd? [1 2 3 4 5 6])	[1 3 5]
+(remove even? [1 2 3 4 5 6])	(1 3 5)
+(keep (fn [x] (when (odd? x) (* x x))) [1 2 3 4 5])	(1 9 25)
+(keep-indexed (fn [i x] (when (even? i) x)) [:a :b :c :d :e])	(:a :c :e)
+(reduce + [1 2 3 4 5])	15
+(reduce + 100 [1 2 3])	106
+(reduce-kv (fn [acc k v] (+ acc v)) 0 (sorted-map :a 1 :b 2 :c 3))	6
+(reductions + 10 [1 2 3])	(10 11 13 16)
+(sort-by - [1 2 3])	(3 2 1)
+(distinct [1 1 2 2 3])	(1 2 3)
+(dedupe [1 1 2 2 1 1])	(1 2 1)
+(interleave [1 2 3] [:a :b :c])	(1 :a 2 :b 3 :c)
+(flatten [[1 2] [3 [4 5]]])	(1 2 3 4 5)
+(into (sorted-map) (frequencies [:a :b :a :c :b :a]))	{:a 3, :b 2, :c 1}
+(into (sorted-map) (zipmap [:a :b :c] [1 2 3]))	{:a 1, :b 2, :c 3}
+(some even? [1 3 5 6 7])	true
+(into [] [1 2 3])	[1 2 3]
+(into () [1 2 3])	(3 2 1)
+(sort (into #{} [1 2 2 3]))	(1 2 3)
+(range 1 10 2)	(1 3 5 7 9)
+(take 3 (repeat :x))	(:x :x :x)
+(take 3 (repeatedly (constantly 7)))	(7 7 7)
+(take 4 (iterate inc 0))	(0 1 2 3)
+(take 5 (cycle [1 2 3]))	(1 2 3 1 2)
+(lazy-cat [1 2] [3 4])	(1 2 3 4)
+(doall (map inc [1 2 3]))	(2 3 4)
+(not-empty [1 2 3])	[1 2 3]
+(rseq [1 2 3])	(3 2 1)
+(replace {1 :a 2 :b} [1 2 3])	[:a :b 3]
+(let [a (atom [])] (run! (fn [x] (swap! a conj x)) [1 2 3]) @a)	[1 2 3]
+(list* 1 2 [3 4])	(1 2 3 4)
+(->> (range 10) (filter even?) (map inc) (take 3))	(1 3 5)
+(some-> 5 inc inc)	7
+(str "hello" " " "world")	"hello world"
+(str \a \b \c)	"abc"
+(subs "hello world" 0 5)	"hello"
+(subs "hello world" 6)	"world"
+(namespace :foo/bar)	"foo"
+(symbol "foo")	foo
+(symbol "ns" "name")	ns/name
+(keyword "foo")	:foo
+(keyword "ns" "name")	:ns/name
+(char 97)	\a
+(clojure.string/upper-case "hello")	"HELLO"
+(clojure.string/lower-case "HELLO")	"hello"
+(clojure.string/capitalize "hello world")	"Hello world"
+(clojure.string/reverse "hello")	"olleh"
+(clojure.string/trim "  hello  ")	"hello"
+(clojure.string/triml "  hello  ")	"hello  "
+(clojure.string/trimr "  hello  ")	"  hello"
+(clojure.string/split-lines "line1\nline2\nline3")	["line1" "line2" "line3"]
+(clojure.string/index-of "hello world" "world")	6
+(clojure.string/last-index-of "hello hello" "hello")	6
+(clojure.string/starts-with? "hello" "he")	true
+(clojure.string/ends-with? "hello" "lo")	true
+(clojure.string/includes? "hello" "ell")	true
+(clojure.string/blank? "")	true
+(clojure.string/replace "hello world" "world" "clojure")	"hello clojure"
+(/ 10 2)	5
+(quot 7 2)	3
+(rem 7 2)	1
+(mod 7 2)	1
+(max 1 5 3)	5
+(min 1 5 3)	1
+(abs -5)	5
+(+' 1 2 3)	6
+(bit-not 5)	-6
+(bit-flip 5 0)	4
+(bit-set 5 1)	7
+(bit-clear 5 0)	4
+(bit-test 5 0)	true
+(pos? 5)	true
+(neg? -5)	true
+(number? 1)	true
+(integer? 1)	true
+(int? 1)	true
+(double? 1.5)	true
+(float? 1.5)	true
+(char? \a)	true
+(vector? [1 2])	true
+(set? #{1 2})	true
+(list? (list 1 2))	true
+(seq? (seq [1 2]))	true
+(coll? [1 2])	true
+(fn? +)	true
+(associative? {})	true
+(sequential? [1 2])	true
+(counted? [1 2])	true
+(indexed? [1 2])	true
+((partial + 1) 2 3)	6
+((constantly 5) 1 2 3)	5
+(identity 5)	5
+((juxt + - *) 3 4)	[7 -1 12]
+((fnil + 0) nil 5)	5
+((every-pred even? pos?) 4)	true
+((some-fn even? pos?) 3)	true
+(apply + [1 2 3])	6
+(get {:a 1 :b 2} :a)	1
+(get {:a 1} :c :default)	:default
+(get-in {:a {:b {:c 42}}} [:a :b :c])	42
+(get-in {:a 1} [:b :c] :nf)	:nf
+(into (sorted-map) (assoc {:a 1} :b 2))	{:a 1, :b 2}
+(into (sorted-map) (assoc {:a 1} :b 2 :c 3))	{:a 1, :b 2, :c 3}
+(assoc-in {:a {:b 1}} [:a :b] 99)	{:a {:b 99}}
+(assoc [1 2 3] 1 99)	[1 99 3]
+(into (sorted-map) (dissoc {:a 1 :b 2 :c 3} :b))	{:a 1, :c 3}
+(sort (keys (dissoc {:a 1 :b 2 :c 3} :a :c)))	(:b)
+(update-in {:a {:b 1}} [:a :b] + 10)	{:a {:b 11}}
+(update {:a 5} :a * 3)	{:a 15}
+(into (sorted-map) (merge {:a 1} {:b 2} {:a 3}))	{:a 3, :b 2}
+(into (sorted-map) (merge-with + {:a 1 :b 2} {:a 10 :c 3}))	{:a 11, :b 2, :c 3}
+(into (sorted-map) (select-keys {:a 1 :b 2 :c 3} [:a :c]))	{:a 1, :c 3}
+(sort (keys {:a 1 :b 2 :c 3}))	(:a :b :c)
+(sort (vals {:a 1 :b 2 :c 3}))	(1 2 3)
+(key (find {:a 1 :b 2} :a))	:a
+(val (find {:a 1 :b 2} :a))	1
+(find {:a 1} :z)	nil
+(contains? #{1 2 3} 2)	true
+(conj '(1 2 3) 4)	(4 1 2 3)
+(sort (conj #{1 2 3} 4))	(1 2 3 4)
+(into (sorted-map) (conj {:a 1} [:b 2]))	{:a 1, :b 2}
+(sort (disj #{1 2 3 4} 2 4))	(1 3)
+(into [] (map inc [1 2 3]))	[2 3 4]
+(into (sorted-map) [[:a 1] [:b 2]])	{:a 1, :b 2}
+(into (sorted-map) (hash-map :a 1 :b 2))	{:a 1, :b 2}
+(into (sorted-map) (array-map :a 1 :b 2))	{:a 1, :b 2}
+(sorted-map :b 2 :a 1 :c 3)	{:a 1, :b 2, :c 3}
+(keys (sorted-map :c 3 :a 1 :b 2))	(:a :b :c)
+(sorted-set 5 3 5 1)	#{1 3 5}
+(sort (set [1 1 2 3 3]))	(1 2 3)
+(sort (set '(3 2 1)))	(1 2 3)
+(sort (vec (sorted-set 1 2 3)))	(1 2 3)
+(count #{1 2 3})	3
+(empty [1 2 3])	[]
+(empty {:a 1})	{}
+(not-empty [])	nil
+(nth [1 2 3] 10 :nf)	:nf
+(subvec [1 2 3 4 5] 2)	[3 4 5]
+(into (sorted-map) (update-keys {:a 1 :b 2} name))	{"a" 1, "b" 2}
+(into (sorted-map) (update-vals {:a 1 :b 2} inc))	{:a 2, :b 3}
+(reduce-kv (fn [acc k v] (+ acc v)) 0 {:a 1 :b 2 :c 3})	6
+(reduce-kv (fn [acc i v] (conj acc (+ i v))) [] [10 20 30])	[10 21 32]
+(into (sorted-map) (mapcat (fn [[k v]] [[k (inc v)]]) {:a 1 :b 2}))	{:a 2, :b 3}
+(apply max-key count [[1] [1 2 3] [1 2]])	[1 2 3]
+(apply min-key count [[1 2 3] [1] [1 2]])	[1]
+(ffirst [[1 2] [3 4]])	1
+(fnext [1 2 3])	2
+(nfirst [[1 2] [3 4]])	(2)
+(sort (clojure.set/union #{1 2 3} #{3 4 5}))	(1 2 3 4 5)
+(sort (clojure.set/difference #{1 2 3 4} #{2 3}))	(1 4)
+(clojure.set/subset? #{1 2} #{1 2 3})	true
+(clojure.set/superset? #{1 2 3} #{1 2})	true
+(sort (clojure.set/select even? #{1 2 3 4 5 6}))	(2 4 6)
+(into (sorted-map) (clojure.set/rename-keys {:a 1 :b 2} {:a :x}))	{:b 2, :x 1}
+(sort (map :a (clojure.set/project #{{:a 1 :b 2} {:a 3 :b 4}} [:a])))	(1 3)
+(into (sorted-map) (clojure.set/map-invert {:a 1 :b 2}))	{1 :a, 2 :b}
+(sort-by second [[1 :b] [2 :a] [3 :c]])	([2 :a] [1 :b] [3 :c])
+(into [] (map inc) [1 2 3])	[2 3 4]
+(into [] (filter even?) [1 2 3 4 5])	[2 4]
+(into [] (comp (map inc) (filter even?)) [1 2 3 4 5])	[2 4 6]
+(transduce (map inc) + [1 2 3])	9
+(transduce (map inc) + 100 [1 2 3])	109
+(transduce (filter odd?) conj [] [1 2 3 4 5])	[1 3 5]
+(transduce (take 3) conj [] (range 100))	[0 1 2]
+(sequence (map inc) [1 2 3])	(2 3 4)
+(sequence (comp (filter even?) (map inc)) (range 10))	(1 3 5 7 9)
+(eduction (map inc) (filter even?) (range 10))	(2 4 6 8 10)
+(reduced? (reduced 5))	true
+(unreduced (reduced 5))	5
+(unreduced 5)	5
+(deref (reduced 42))	42
+(let [v (volatile! 10)] (vswap! v inc) @v)	11
+(let [v (volatile! 10)] (vreset! v 99) @v)	99
+(volatile? (volatile! 1))	true
+@(delay (+ 1 2 3))	6
+(force (delay 42))	42
+(force 42)	42
+(delay? (delay 1))	true
+(realized? (delay 1))	false
+(let [p (promise)] (deliver p 7) @p)	7
+(let [p (promise)] (deliver p 1) (deliver p 2) @p)	1
+(parse-long "42")	42
+(parse-long "-17")	-17
+(parse-long "abc")	nil
+(parse-double "3.5")	3.5
+(parse-boolean "true")	true
+(parse-boolean "nope")	nil
+(any? 5)	true
+(seqable? [1 2])	true
+(seqable? 5)	false
+(ident? :a)	true
+(ident? 'a)	true
+(ident? 5)	false
+(simple-ident? :foo)	true
+(qualified-ident? :foo/bar)	true
+(simple-keyword? :a)	true
+(qualified-keyword? :a/b)	true
+(simple-symbol? 'x)	true
+(qualified-symbol? 'x/y)	true
+(rational? 5)	true
+(NaN? (/ 0.0 0.0))	true
+(num 5)	5
+(bit-and-not 12 10)	4
+(unchecked-add 2 3)	5
+(unchecked-inc 5)	6
+(replicate 3 :x)	(:x :x :x)
+(bounded-count 2 [1 2 3 4])	4
+(trampoline (fn [] (fn [] 42)))	42
+(let [f (memoize (fn [x] (* x x)))] [(f 5) (f 5)])	[25 25]
+(letfn [(f [x] (* x 2))] (f 21))	42
+(when-some [x 5] (inc x))	6
+(when-some [x nil] (inc x))	nil
+(if-some [x 5] x :none)	5
+(if-some [x nil] x :none)	:none
+(do (defrecord Point [x y]) (:x (->Point 3 4)))	3
+(do (defrecord Point [x y]) (:y (assoc (->Point 3 4) :y 99)))	99
+(do (defrecord Point [x y]) (record? (->Point 1 2)))	true
+(do (defrecord Point [x y]) [(count (->Point 1 2)) (keys (->Point 1 2)) (vals (->Point 1 2))])	[2 (:x :y) (1 2)]
+(do (defrecord Point [x y]) (:x (map->Point {:x 7 :y 8})))	7
+(do (defrecord Point [x y]) (get (->Point 1 2) :z :nope))	:nope
+(do (defprotocol P (m [x])) (extend-protocol P Long (m [x] :n) String (m [x] :s)) [(m 1) (m "a")])	[:n :s]
+(nth "hello" 1)	\e
+(nth "hello" 0)	\h
+(nth "hi" 5 :none)	:none
+((fn f [n] (if (= n 0) 1 (* n (f (dec n))))) 5)	120
+((fn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) 10)	55
+(map (fn sq [x] (* x x)) [1 2 3 4])	(1 4 9 16)
+((fn cnt ([] (cnt 0)) ([n] (if (< n 3) (cnt (inc n)) n))))	3
+(persistent! (conj! (transient []) 1))	[1]
+(persistent! (reduce conj! (transient []) [1 2 3 4]))	[1 2 3 4]
+(persistent! (assoc! (transient {}) :a 1))	{:a 1}
+(persistent! (dissoc! (transient {:a 1 :b 2}) :a))	{:b 2}
+(sort (persistent! (disj! (transient #{1 2 3}) 2)))	(1 3)
+(persistent! (pop! (transient [1 2 3])))	[1 2]
+(tree-seq seq? identity (quote (1 (2 3))))	((1 (2 3)) 1 (2 3) 2 3)
+(tree-seq vector? seq [1 [2 [3]]])	([1 [2 [3]]] 1 [2 [3]] 2 [3] 3)
+(do (derive ::dog ::animal) (isa? ::dog ::animal))	true
+(do (derive ::cat ::animal) (derive ::animal ::thing) (isa? ::cat ::thing))	true
+(do (derive ::a ::b) (= (parents ::a) #{::b}))	true
+(do (derive ::x ::y) (derive ::y ::z) (= (ancestors ::x) #{::y ::z}))	true
+(do (derive ::p ::q) (derive ::r ::q) (contains? (descendants ::q) ::p))	true
+(isa? 5 5)	true
+(do (derive ::dog ::animal) (derive ::cat ::animal) (isa? [::dog ::cat] [::animal ::animal]))	true
+(boolean nil)	false
+(boolean 0)	true
+(boolean "")	true
+(with-out-str (println "hi"))	"hi\n"
+(with-out-str (println 1 2 3))	"1 2 3\n"
+(with-out-str (print "a" "b"))	"a b"
+(with-out-str (pr [1 2 3]))	"[1 2 3]"
+(with-out-str (prn "x"))	"\"x\"\n"
+(with-out-str (pr "quoted"))	"\"quoted\""
+(with-out-str (newline))	"\n"
+(with-out-str (dotimes [i 3] (print i)))	"012"
+(format "%d and %s" 5 "cats")	"5 and cats"
+(format "%5d" 42)	"   42"
+(format "%-5d|" 42)	"42   |"
+(format "%05d" 42)	"00042"
+(format "%x" 255)	"ff"
+(format "%X" 255)	"FF"
+(format "%o" 64)	"100"
+(format "%.2f" 3.14159)	"3.14"
+(format "%.0f" 2.7)	"3"
+(format "%.3s" "hello")	"hel"
+(format "%c%c" \h \i)	"hi"
+(format "%b" (= 1 1))	"true"
+(format "100%% done")	"100% done"
+(clojure.string/join "," (map str [1 2 3]))	"1,2,3"
+(do (defprotocol Greet (hello [x])) (extend-type String Greet (hello [x] (str "hi " x))) (satisfies? Greet "bob"))	true
+(do (defprotocol Greet (hello [x])) (extend-type String Greet (hello [x] :s)) (satisfies? Greet 5))	false
+(do (defprotocol P (m [x])) (extend-protocol P Long (m [x] :n) String (m [x] :s)) [(satisfies? P 1) (satisfies? P "a") (satisfies? P :k)])	[true true false]
+(do (defprotocol P (m [x])) (extend-type Long P (m [x] :long)) (m 42))	:long
+(do (defprotocol Area (area [s])) (defrecord Sq [side] Area (area [s] (* (:side s) (:side s)))) (area (->Sq 4)))	16
+(do (defmulti shape :kind) (defmethod shape :circle [x] :round) (defmethod shape :square [x] :boxy) [(shape {:kind :circle}) (shape {:kind :square})])	[:round :boxy]
+(do (defmulti f identity) (defmethod f :default [x] :fallback) (f 99))	:fallback
+(do (derive ::child ::parent) (defmulti g identity) (defmethod g ::parent [x] :p) (g ::child))	:p
+(let [a (atom 1)] (swap-vals! a inc))	[1 2]
+(let [a (atom 5)] (reset-vals! a 9))	[5 9]
+(let [a (atom 1)] (compare-and-set! a 1 2) (deref a))	2
+(let [a (atom 1)] (compare-and-set! a 99 2))	false
+(do (keyword "foo") (find-keyword "foo"))	:foo
+(vector-of :int 1 2 3)	[1 2 3]
+(tagged-literal? (tagged-literal (quote inst) "2020"))	true
+(tagged-literal? 5)	false
+(reader-conditional? (reader-conditional (list :clj 1) false))	true
+(reader-conditional? :nope)	false
+*assert*	true
+*read-eval*	true
+*flush-on-newline*	true
+*print-readably*	true
+*print-length*	nil
+*print-level*	nil
+*warn-on-reflection*	false
+*unchecked-math*	false
+*command-line-args*	nil
+*compile-path*	"classes"
+*print-namespace-maps*	true
+*clojure-version*	{:major 1, :minor 11, :incremental 1, :qualifier nil}
+(binding [*print-length* 3] (pr-str (range 10)))	"(0 1 2 ...)"
+(binding [*print-length* 2] (pr-str [1 2 3 4 5]))	"[1 2 ...]"
+(binding [*print-length* 0] (pr-str [1 2 3]))	"[...]"
+(binding [*print-level* 1] (pr-str [1 [2 [3]]]))	"[1 #]"
+(binding [*print-level* 2] (pr-str [1 [2 [3]]]))	"[1 [2 #]]"
+(binding [*print-level* 0] (pr-str [1 2 3]))	"#"
+(binding [*print-length* 3] (with-out-str (println (range 100))))	"(0 1 2 ...)\n"
+(binding [*print-length* 2] (pr-str {:a 1 :b 2 :c 3}))	"{:a 1, :b 2, ...}"
+(assert true)	nil
+(assert (= 1 1))	nil
+(try (assert false) :ok (catch Throwable e :caught))	:caught
+(binding [*print-length* 4] (pr-str (list 1 2 3 4 5 6)))	"(1 2 3 4 ...)"
+(do (defn- priv-fn "a docstring" [n] (* n n)) (priv-fn 6))	36
+(do (defn- ^{:dynamic true} pv "doc here" [a b] (+ a b)) (pv 3 4))	7
+(do (defn doc-multi "d" ([x] x) ([x y] (+ x y))) [(doc-multi 5) (doc-multi 2 3)])	[5 5]
+(do #^{:tag :meta} (def zz 7) zz)	7
+(list? (list))	true
+(list? nil)	false
+(= () nil)	false
+(= () ())	true
+(seq ())	nil
+(count ())	0
+(empty? ())	true
+(conj () 1)	(1)
+(cons 1 ())	(1)
+(list ())	(())
+(list (list) (list 1))	(() (1))
+(nil? ())	false
+(first ())	nil
+(vector? ())	false
+(map (fn [x] (list)) [1 2])	(() ())
+(do (defn f [& {:keys [x y]}] [x y]) (f :x 1 :y 2))	[1 2]
+(do (defn g [a & {:keys [x] :or {x 9}}] [a x]) [(g 5 :x 1) (g 5)])	[[5 1] [5 9]]
+(do (defn h [& {:keys [x]}] x) (h {:x 7}))	7
+(let [{:keys [a b] :or {b 0}} {:a 5}] [a b])	[5 0]
+(let [{a :aa b :bb} {:aa 1 :bb 2}] [a b])	[1 2]
+(= [1 2] (list 1 2))	true
+(= (list 1 2) [1 2])	true
+(= [1 2] (map identity [1 2]))	true
+(= [] (list))	true
+(= [1] #{1})	false
+(= [1 2 3] [1 2 3])	true
+(= (seq [1 2]) [1 2])	true
+(= [1 2] (list 1 2 3))	false
+(count (persistent! (reduce conj! (transient []) (range 100))))	100
+(persistent! (pop! (pop! (transient [1 2 3]))))	[1]
+(count (persistent! (reduce (fn [m i] (assoc! m i i)) (transient {}) (range 50))))	50
+(get (persistent! (assoc! (transient {}) :k 7)) :k)	7
+(nth (persistent! (conj! (transient [0]) 5)) 1)	5
+(count (into [] (range 40)))	40
+(into [5] [6 7])	[5 6 7]
+(group-by even? [1 2 3 4])	{false [1 3], true [2 4]}
+(frequencies [:a :b :a])	{:a 2, :b 1}
+(persistent! (dissoc! (transient {:a 1 :b 2 :c 3}) :b))	{:a 1, :c 3}
+(group-by odd? (range 10))	{false [0 2 4 6 8], true [1 3 5 7 9]}
+(group-by count ["a" "bb" "cc" "d" "eee"])	{1 ["a" "d"], 2 ["bb" "cc"], 3 ["eee"]}
+(group-by :k [{:k 1 :v :a} {:k 2 :v :b} {:k 1 :v :c}])	{1 [{:k 1, :v :a} {:k 1, :v :c}], 2 [{:k 2, :v :b}]}
+(into (sorted-map) (group-by #(mod % 9) (range 30)))	{0 [0 9 18 27], 1 [1 10 19 28], 2 [2 11 20 29], 3 [3 12 21], 4 [4 13 22], 5 [5 14 23], 6 [6 15 24], 7 [7 16 25], 8 [8 17 26]}
+(vector? (get (group-by odd? [1 2]) true))	true
+(count (group-by identity (range 100)))	100
+(frequencies (map #(mod % 3) (range 10)))	{0 4, 1 3, 2 3}
+(into (sorted-map) (frequencies (range 20)))	{0 1, 1 1, 2 1, 3 1, 4 1, 5 1, 6 1, 7 1, 8 1, 9 1, 10 1, 11 1, 12 1, 13 1, 14 1, 15 1, 16 1, 17 1, 18 1, 19 1}
+(zipmap [:a :b :c] [1 2 3])	{:a 1, :b 2, :c 3}
+(zipmap (range 3) (repeat :x))	{0 :x, 1 :x, 2 :x}
+(zipmap [:a] [1 2 3])	{:a 1}
+(vector)	[]
+(vector 1)	[1]
+(vector 1 2)	[1 2]
+(vector 1 2 3 4)	[1 2 3 4]
+(vector 1 2 3 4 5)	[1 2 3 4 5]
+(vector 1 2 3 4 5 6 7 8)	[1 2 3 4 5 6 7 8]
+(count (apply vector (range 100)))	100
+(nth (apply vector (range 100)) 73)	73
+(apply vector (range 5))	[0 1 2 3 4]
+(vector? (vector))	true
+(= [] (vector))	true
+(conj (get {} :missing []) 1)	[1]
+(let [v []] (conj v 1))	[1]
+(count (reduce conj [] (range 100)))	100
+(isa? (type [1 2]) clojure.lang.IPersistentVector)	true
+(isa? (type [1 2]) clojure.lang.IPersistentCollection)	true
+(isa? (type [1 2]) clojure.lang.ISeq)	false
+(isa? (type [1 2]) clojure.lang.IPersistentMap)	false
+(isa? (type {:a 1}) clojure.lang.IPersistentMap)	true
+(isa? (type {:a 1}) clojure.lang.IPersistentCollection)	true
+(isa? (type {:a 1}) clojure.lang.IPersistentVector)	false
+(isa? (type #{1}) clojure.lang.IPersistentSet)	true
+(isa? (type #{1}) clojure.lang.IPersistentCollection)	true
+(isa? (type (list 1)) clojure.lang.ISeq)	true
+(isa? (type (list 1)) clojure.lang.IPersistentCollection)	true
+(isa? (type (list 1)) clojure.lang.IPersistentVector)	false
+(= (type [1 2]) (class [1 2]))	true
+(isa? (type "s") clojure.lang.IPersistentVector)	false
+(.getName (type [1 2]))	"clojure.lang.PersistentVector"
+(.getName (type {:a 1}))	"clojure.lang.PersistentArrayMap"
+(.getName (type #{1}))	"clojure.lang.PersistentHashSet"
+(if-some [[_ v] (find {:k 9} :k)] v :none)	9
+(if-some [[_ v] (find {:k 9} :nope)] v :none)	:none
+(when-some [[_ v] (find {:k 9} :k)] v)	9
+(if-some [[a b] [1 2]] [a b] :none)	[1 2]
+(if-some [x false] [:then x] :else)	[:then false]
+(if-some [x nil] [:then x] :else)	:else
+(if-let [x false] [:then x] :else)	:else
+(if-some [{:keys [q]} {:q 7}] q :else)	7
+(if-some [{:keys [q]} nil] q :else)	:else
+(when-some [x false] [:body x])	[:body false]
+(when-some [x nil] [:body x])	nil
+(if-some [[a b] [false false]] [a b] :else)	[false false]
+(let [a (atom 0)] (if-some [x (do (swap! a inc) 1)] @a :else))	1
+(.valAt {:a 1} :a)	1
+(.valAt {:a 1} :z :d)	:d
+(.entryAt {:a 1} :a)	[:a 1]
+(.containsKey {:a 1} :a)	true
+(.assoc {:a 1} :b 2)	{:a 1, :b 2}
+(.without {:a 1 :b 2} :a)	{:b 2}
+(.disjoin #{1 2} 1)	#{2}
+(.cons [1] 2)	[1 2]
+(.empty [1 2])	[]
+(.equiv [1 2] [1 2])	true
+(.seq [1 2])	(1 2)
+(.key (first {:a 1}))	:a
+(.val (first {:a 1}))	1
+(some? (resolve {} 'inc))	true
+(resolve '{inc :local} 'inc)	nil
+(ns-resolve *ns* '{inc :local} 'inc)	nil
+(some? (ns-resolve *ns* {} 'inc))	true
+(resolve {} 'no-such-var)	nil
+(str `foo)	"user/foo"
+(str `Exception)	"java.lang.Exception"
+(str `(a b))	"(user/a user/b)"
+(str `[quote if do let* fn* recur try catch finally new set! var def throw &])	"[quote if do let* fn* recur try catch finally new set! var def throw &]"
+(do (defonce ^:private dop1 3) dop1)	3
+(do (defonce dop2 4) dop2)	4
+(do (defonce ^:dynamic *dop3* 6) *dop3*)	6
+(do (declare ^:private dop4) :ok)	:ok
+(do (def ^:private dop5 1) dop5)	1
+(do (defn ^:private dop6 [] 2) (dop6))	2
+[1 #_2 3]	[1 3]
+(+ 1 #_9 2)	3
+(pos? (.availableProcessors (Runtime/getRuntime)))	true
+(= (Runtime/getRuntime) (Runtime/getRuntime))	true
+(do (defmulti ^:private dop7 (fn [x] x)) (defmethod dop7 :default [x] [:d x]) (dop7 :q))	[:d :q]
+(do #_(inc :bad) :done)	:done

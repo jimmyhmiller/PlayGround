@@ -1,0 +1,119 @@
+; fmt/doc.coil — a Wadler/Prettier "Doc" algebra and a width-driven renderer.
+;
+; A Doc describes layout without committing to line breaks; the renderer, given a
+; target width, decides which groups break. Two indentation primitives cover Lisp
+; needs:
+;   DNest  — indent := indent + N   (relative; body indent "+2")
+;   DAlign — indent := current-column + delta   (absolute to the cursor; every
+;            list re-anchors to its own open-paren column, so alignment survives
+;            whatever indentation an ancestor chose)
+; A DGroup renders flat if its flattened width fits the remaining columns, else it
+; breaks. A hardline (or a forced group) has "infinite" flat width, so it forces
+; every enclosing group to break — the standard break-propagation trick.
+(module doc)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+
+; line kinds: 0 = line (space | newline), 1 = softline ('' | newline),
+;             2 = hardline (always newline; unflattenable)
+(defsum Doc
+  (DNil    [])
+  (DText   [(s (slice u8))])
+  (DConcat [(items (ptr (ArrayList (ptr Doc))))])
+  (DLine   [(kind i64)])
+  (DNest   [(amount i64) (doc (ptr Doc))])
+  (DAlign  [(delta i64) (doc (ptr Doc))])
+  (DGroup  [(doc (ptr Doc)) (forced i64)]))
+
+; "infinite" flat width — anything at least this wide can never be laid out flat.
+(defn doc-inf [] (-> i64) 1000000000)
+
+(defn box-doc [(a (ptr Allocator)) (k Doc)] (-> (ptr Doc))
+  (let [p (unwrap-ptr [Doc] (create [Doc] a))] (store! p k) p))
+
+; ---- constructors ----------------------------------------------------------
+(defn d-nil      [(a (ptr Allocator))] (-> (ptr Doc)) (box-doc a (DNil)))
+(defn d-text     [(a (ptr Allocator)) (s (slice u8))] (-> (ptr Doc)) (box-doc a (DText s)))
+(defn d-line     [(a (ptr Allocator))] (-> (ptr Doc)) (box-doc a (DLine 0)))
+(defn d-softline [(a (ptr Allocator))] (-> (ptr Doc)) (box-doc a (DLine 1)))
+(defn d-hardline [(a (ptr Allocator))] (-> (ptr Doc)) (box-doc a (DLine 2)))
+(defn d-nest     [(a (ptr Allocator)) (n i64) (x (ptr Doc))] (-> (ptr Doc)) (box-doc a (DNest n x)))
+(defn d-align    [(a (ptr Allocator)) (n i64) (x (ptr Doc))] (-> (ptr Doc)) (box-doc a (DAlign n x)))
+(defn d-group    [(a (ptr Allocator)) (x (ptr Doc))] (-> (ptr Doc)) (box-doc a (DGroup x 0)))
+(defn d-group-forced [(a (ptr Allocator)) (x (ptr Doc))] (-> (ptr Doc)) (box-doc a (DGroup x 1)))
+
+; ---- concat builder --------------------------------------------------------
+; A growable list of child docs; `dl-done` seals it into a DConcat.
+(defn dl-new [(a (ptr Allocator))] (-> (ptr (ArrayList (ptr Doc))))
+  (let [p (unwrap-ptr [(ArrayList (ptr Doc))] (create [(ArrayList (ptr Doc))] a))]
+    (store! p (al-new [(ptr Doc)] a)) p))
+(defn dl-push! [(dl (ptr (ArrayList (ptr Doc)))) (x (ptr Doc))] (-> i64)
+  (al-push! [(ptr Doc)] dl x) 0)
+(defn dl-done [(a (ptr Allocator)) (dl (ptr (ArrayList (ptr Doc))))] (-> (ptr Doc))
+  (box-doc a (DConcat dl)))
+
+; ---- flat width ------------------------------------------------------------
+; Width if `d` were laid out entirely flat, capped at doc-inf. A hardline or a
+; forced group yields doc-inf, so any group containing one cannot be flat.
+(defn flat-width [(d (ptr Doc))] (-> i64)
+  (match (load d)
+    (DNil    []      0)
+    (DText   [s]     (slice-len s))
+    (DLine   [k]     (if (icmp-eq k 0) 1 (if (icmp-eq k 1) 0 (doc-inf))))
+    (DNest   [n x]   (flat-width x))
+    (DAlign  [n x]   (flat-width x))
+    (DGroup  [x f]   (if (icmp-ne f 0) (doc-inf) (flat-width x)))
+    (DConcat [items]
+      (let [n (al-len [(ptr Doc)] (load items)) (mut i) 0 (mut acc) 0]
+        (loop
+          (if (icmp-ge (load i) n) (break)
+            (let [wp (flat-width (al-get [(ptr Doc)] (load items) (load i)))]
+              (if (icmp-ge wp (doc-inf)) (do (store! acc (doc-inf)) (break))
+                (do (store! acc (iadd (load acc) wp)) (store! i (iadd (load i) 1)))))))
+        (load acc)))))
+
+; ---- output helpers --------------------------------------------------------
+(defn sb-emit [(sb (ptr StrBuf)) (s (slice u8))] (-> i64)
+  (let [(mut i) 0 n (slice-len s)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field sb bytes)) (slice-get s (load i)))
+          (store! i (iadd (load i) 1)))))) 0)
+(defn sb-spaces [(sb (ptr StrBuf)) (n i64)] (-> i64)
+  (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break)
+    (do (al-push! (mut (field sb bytes)) (cast u8 32)) (store! i (iadd (load i) 1)))))) 0)
+
+; ---- renderer --------------------------------------------------------------
+; mode: 0 = FLAT, 1 = BREAK. Returns the new column.
+(defn render [(sb (ptr StrBuf)) (w i64) (col i64) (ind i64) (mode i64) (d (ptr Doc))] (-> i64)
+  (match (load d)
+    (DNil    []  col)
+    (DText   [s] (sb-emit sb s) (iadd col (slice-len s)))
+    (DLine   [k]
+      (if (icmp-eq mode 0)
+          (if (icmp-eq k 0) (do (sb-emit sb " ") (iadd col 1))
+            (if (icmp-eq k 1) col
+              (do (sb-emit sb "\n") (sb-spaces sb ind) ind)))   ; hardline breaks even flat
+          (do (sb-emit sb "\n") (sb-spaces sb ind) ind)))
+    (DNest  [n x] (render sb w col (iadd ind n) mode x))
+    (DAlign [n x] (render sb w col (iadd col n) mode x))
+    (DGroup [x f]
+      (let [fw (if (icmp-ne f 0) (doc-inf) (flat-width x))]
+        (if (and (icmp-lt fw (doc-inf)) (icmp-le (iadd col fw) w))
+            (render sb w col ind 0 x)
+            (render sb w col ind 1 x))))
+    (DConcat [items]
+      (let [n (al-len [(ptr Doc)] (load items)) (mut i) 0 (mut c) col]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! c (render sb w (load c) ind mode (al-get [(ptr Doc)] (load items) (load i))))
+              (store! i (iadd (load i) 1)))))
+        (load c)))))
+
+; ---- entry -----------------------------------------------------------------
+; Render a Doc to a fresh (slice u8) at the given width.
+(defn render-doc [(a (ptr Allocator)) (d (ptr Doc)) (w i64)] (-> (slice u8))
+  (let [sb (unwrap-ptr [StrBuf] (create [StrBuf] a))]
+    (store! (field sb bytes) (al-new [u8] a))
+    (render sb w 0 0 1 d)
+    (al-slice [u8] (load (field sb bytes)))))

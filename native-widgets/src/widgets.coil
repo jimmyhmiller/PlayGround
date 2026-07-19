@@ -1,0 +1,874 @@
+;; Copyright 2026 Jimmy Miller
+;; SPDX-License-Identifier: Apache-2.0
+;;
+;; Licensed under the Apache License, Version 2.0. See LICENSE at the
+;; repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+;; derives from.
+
+(module widgets)
+
+;; native-widgets — a render-agnostic widget library.
+;;
+;; Nothing in this file knows what a window, a GPU, or a graphics library is.
+;; Every pixel a widget wants goes through the Backend vtable the caller
+;; supplies, so the same widget code drives raylib, a software rasterizer, a
+;; PDF writer, or a test recorder.
+;;
+;; ---------------------------------------------------------------------------
+;; The component designs in this file are adapted from the Vercel Labs Native
+;; SDK canvas widgets (https://github.com/vercel-labs/native), provided under
+;; the Apache License 2.0. This file has been modified: rewritten in Coil, with
+;; the renderer replaced by the Backend vtable below, widget state moved out to
+;; the caller, and application copy replaced by parameters.
+;;
+;; See THIRD_PARTY_NOTICES.md and licenses/native-sdk-Apache-2.0.txt.
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Types
+;; ---------------------------------------------------------------------------
+
+(defstruct Frame
+  [(left f64) (top f64) (width f64) (height f64)])
+
+(defstruct Color
+  [(r u8) (g u8) (b u8) (a u8)])
+
+(defstruct Interaction
+  [(hovered i64) (pressed i64) (focused i64) (disabled i64)])
+
+;; A font is opaque to this library: it is whatever handle the backend gave the
+;; caller. The library only ever hands it back to drawText / measureText.
+;;
+;; Every entry takes the backend's own ctx pointer first and returns i64 so the
+;; vtable stays uniform; drawing entries return 0.
+(defstruct Backend
+  [(ctx (ptr i8))
+   ;; ctx, tint
+   (clear (fnptr c [(ptr i8) Color] i64))
+   ;; ctx, bounds, cornerRadiusPixels, tint
+   (fillRoundedRect (fnptr c [(ptr i8) Frame f64 Color] i64))
+   ;; ctx, bounds, cornerRadiusPixels, thickness, tint
+   (strokeRoundedRect (fnptr c [(ptr i8) Frame f64 f64 Color] i64))
+   ;; ctx, bounds, tint
+   (fillRect (fnptr c [(ptr i8) Frame Color] i64))
+   ;; ctx, fromHorizontal, fromVertical, toHorizontal, toVertical, thickness, tint
+   (line (fnptr c [(ptr i8) f64 f64 f64 f64 f64 Color] i64))
+   ;; ctx, centerHorizontal, centerVertical, radius, tint
+   (fillCircle (fnptr c [(ptr i8) f64 f64 f64 Color] i64))
+   ;; ctx, centerHorizontal, centerVertical, radius, thickness, tint
+   (strokeCircle (fnptr c [(ptr i8) f64 f64 f64 f64 Color] i64))
+   ;; ctx, centerHorizontal, centerVertical, innerRadius, outerRadius, startDegrees, endDegrees, tint
+   (ring (fnptr c [(ptr i8) f64 f64 f64 f64 f64 f64 Color] i64))
+   ;; ctx, font, text, left, top, size, tint
+   (drawText (fnptr c [(ptr i8) (ptr i8) (ptr i8) f64 f64 f64 Color] i64))
+   ;; ctx, font, text, size -> advance width in pixels
+   (measureText (fnptr c [(ptr i8) (ptr i8) (ptr i8) f64] f64))])
+
+;; ---------------------------------------------------------------------------
+;; Constructors and geometry
+;; ---------------------------------------------------------------------------
+
+(defn color-alpha [(red i64) (green i64) (blue i64) (alpha i64)] (-> Color)
+  (let [value (alloc-stack Color)]
+    (do
+      (store! (field value r) (cast u8 red))
+      (store! (field value g) (cast u8 green))
+      (store! (field value b) (cast u8 blue))
+      (store! (field value a) (cast u8 alpha))
+      (load value))))
+
+(defn color [(red i64) (green i64) (blue i64)] (-> Color)
+  (color-alpha red green blue 255))
+
+(defn smaller [(left f64) (right f64)] (-> f64)
+  (if (< left right) left right))
+
+(defn larger [(left f64) (right f64)] (-> f64)
+  (if (> left right) left right))
+
+(defn frame [(left f64) (top f64) (width f64) (height f64)] (-> Frame)
+  (let [value (alloc-stack Frame)]
+    (do
+      (store! (field value left) left)
+      (store! (field value top) top)
+      (store! (field value width) width)
+      (store! (field value height) height)
+      (load value))))
+
+(defn interaction [(hovered i64) (pressed i64) (focused i64) (disabled i64)] (-> Interaction)
+  (let [value (alloc-stack Interaction)]
+    (do
+      (store! (field value hovered) hovered)
+      (store! (field value pressed) pressed)
+      (store! (field value focused) focused)
+      (store! (field value disabled) disabled)
+      (load value))))
+
+(defn contains [(bounds Frame) (horizontal f64) (vertical f64)] (-> bool)
+  (and (>= horizontal (load (field bounds left)))
+       (and (<= horizontal (+ (load (field bounds left)) (load (field bounds width))))
+            (and (>= vertical (load (field bounds top)))
+                 (<= vertical (+ (load (field bounds top)) (load (field bounds height))))))))
+
+(defn contains-int [(bounds Frame) (horizontal f64) (vertical f64)] (-> i64)
+  (if (contains bounds horizontal vertical) 1 0))
+
+;; Derives hover/press from a pointer position without owning any state: the
+;; caller decides what is focused and what is disabled.
+(defn pointer-interaction [(bounds Frame)
+                           (horizontal f64)
+                           (vertical f64)
+                           (pointerDown i64)
+                           (focused i64)
+                           (disabled i64)] (-> Interaction)
+  (let [inside (contains bounds horizontal vertical)]
+    (interaction (if inside 1 0)
+                 (if (and inside (= pointerDown 1)) 1 0)
+                 focused
+                 disabled)))
+
+;; ---------------------------------------------------------------------------
+;; Theme tokens — house dark
+;; ---------------------------------------------------------------------------
+
+(defn background [] (-> Color) (color 10 10 10))
+(defn surface [] (-> Color) (color 23 23 23))
+(defn surface-subtle [] (-> Color) (color 38 38 38))
+(defn surface-pressed [] (-> Color) (color-alpha 255 255 255 38))
+(defn text [] (-> Color) (color 250 250 250))
+(defn text-muted [] (-> Color) (color 161 161 161))
+(defn border [] (-> Color) (color-alpha 255 255 255 26))
+(defn accent [] (-> Color) (color 229 229 229))
+(defn accent-text [] (-> Color) (color 23 23 23))
+(defn focus-ring [] (-> Color) (color 115 115 115))
+(defn danger [] (-> Color) (color 255 100 103))
+
+;; ---------------------------------------------------------------------------
+;; Backend primitives
+;; ---------------------------------------------------------------------------
+
+(defn clear [(backend (ptr Backend)) (tint Color)] (-> i64)
+  (call-ptr (load (field backend clear)) (load (field backend ctx)) tint))
+
+(defn rounded-fill [(backend (ptr Backend)) (bounds Frame) (radius f64) (tint Color)] (-> i64)
+  (call-ptr (load (field backend fillRoundedRect)) (load (field backend ctx)) bounds radius tint))
+
+(defn rounded-stroke [(backend (ptr Backend)) (bounds Frame) (radius f64) (thickness f64) (tint Color)] (-> i64)
+  (call-ptr (load (field backend strokeRoundedRect)) (load (field backend ctx)) bounds radius thickness tint))
+
+(defn fill-rect [(backend (ptr Backend)) (bounds Frame) (tint Color)] (-> i64)
+  (call-ptr (load (field backend fillRect)) (load (field backend ctx)) bounds tint))
+
+(defn draw-line [(backend (ptr Backend))
+                 (fromHorizontal f64)
+                 (fromVertical f64)
+                 (toHorizontal f64)
+                 (toVertical f64)
+                 (thickness f64)
+                 (tint Color)] (-> i64)
+  (call-ptr (load (field backend line)) (load (field backend ctx))
+            fromHorizontal fromVertical toHorizontal toVertical thickness tint))
+
+(defn fill-circle [(backend (ptr Backend)) (centerHorizontal f64) (centerVertical f64) (radius f64) (tint Color)] (-> i64)
+  (call-ptr (load (field backend fillCircle)) (load (field backend ctx)) centerHorizontal centerVertical radius tint))
+
+(defn stroke-circle [(backend (ptr Backend))
+                     (centerHorizontal f64)
+                     (centerVertical f64)
+                     (radius f64)
+                     (thickness f64)
+                     (tint Color)] (-> i64)
+  (call-ptr (load (field backend strokeCircle)) (load (field backend ctx))
+            centerHorizontal centerVertical radius thickness tint))
+
+(defn draw-ring [(backend (ptr Backend))
+                 (centerHorizontal f64)
+                 (centerVertical f64)
+                 (innerRadius f64)
+                 (outerRadius f64)
+                 (startDegrees f64)
+                 (endDegrees f64)
+                 (tint Color)] (-> i64)
+  (call-ptr (load (field backend ring)) (load (field backend ctx))
+            centerHorizontal centerVertical innerRadius outerRadius startDegrees endDegrees tint))
+
+(defn draw-label [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (label (ptr i8))
+                  (left f64)
+                  (top f64)
+                  (size f64)
+                  (tint Color)] (-> i64)
+  (call-ptr (load (field backend drawText)) (load (field backend ctx)) font label left top size tint))
+
+(defn measure-label [(backend (ptr Backend)) (font (ptr i8)) (label (ptr i8)) (size f64)] (-> f64)
+  (call-ptr (load (field backend measureText)) (load (field backend ctx)) font label size))
+
+(defn draw-centered-label [(backend (ptr Backend))
+                           (font (ptr i8))
+                           (label (ptr i8))
+                           (bounds Frame)
+                           (size f64)
+                           (tint Color)] (-> i64)
+  (let [measured (measure-label backend font label size)]
+    (draw-label backend
+                font
+                label
+                (+ (load (field bounds left)) (/ (- (load (field bounds width)) measured) 2.0))
+                (+ (load (field bounds top)) (/ (- (load (field bounds height)) size) 2.0))
+                size
+                tint)))
+
+(defn draw-focus [(backend (ptr Backend)) (bounds Frame) (radius f64) (focused i64)] (-> i64)
+  (if (= focused 1)
+    (rounded-stroke backend
+                    (frame (- (load (field bounds left)) 3.0)
+                           (- (load (field bounds top)) 3.0)
+                           (+ (load (field bounds width)) 6.0)
+                           (+ (load (field bounds height)) 6.0))
+                    (+ radius 3.0)
+                    2.0
+                    (focus-ring))
+    0))
+
+;; ---------------------------------------------------------------------------
+;; Controls
+;; ---------------------------------------------------------------------------
+
+(defn draw-button [(backend (ptr Backend)) (font (ptr i8)) (label (ptr i8)) (bounds Frame) (state Interaction)] (-> i64)
+  (let [disabled (= (load (field state disabled)) 1)
+        fill (if disabled
+               (color 70 70 70)
+               (if (= (load (field state pressed)) 1) (color 199 199 199) (accent)))
+        ink (if disabled (text-muted) (accent-text))]
+    (do
+      (rounded-fill backend bounds 6.0 fill)
+      (draw-focus backend bounds 6.0 (load (field state focused)))
+      (draw-centered-label backend font label bounds 14.0 ink)
+      0)))
+
+(defn draw-input [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (value (ptr i8))
+                  (placeholder (ptr i8))
+                  (bounds Frame)
+                  (state Interaction)] (-> i64)
+  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+    (do
+      (rounded-fill backend bounds 6.0 (surface))
+      (rounded-stroke backend bounds 6.0 1.0 (border))
+      (draw-focus backend bounds 6.0 (load (field state focused)))
+      (draw-label backend
+                  font
+                  (if hasValue value placeholder)
+                  (+ (load (field bounds left)) 10.0)
+                  (+ (load (field bounds top)) 8.0)
+                  14.0
+                  (if hasValue (text) (text-muted)))
+      0)))
+
+(defn draw-textarea [(backend (ptr Backend))
+                     (font (ptr i8))
+                     (value (ptr i8))
+                     (placeholder (ptr i8))
+                     (bounds Frame)
+                     (state Interaction)] (-> i64)
+  (let [hasValue (icmp-ne (load value) (cast i8 0))]
+    (do
+      (rounded-fill backend bounds 6.0 (surface))
+      (rounded-stroke backend bounds 6.0 1.0 (border))
+      (draw-focus backend bounds 6.0 (load (field state focused)))
+      (draw-label backend
+                  font
+                  (if hasValue value placeholder)
+                  (+ (load (field bounds left)) 10.0)
+                  (+ (load (field bounds top)) 9.0)
+                  14.0
+                  (if hasValue (text) (text-muted)))
+      0)))
+
+(defn draw-checkbox [(backend (ptr Backend))
+                     (font (ptr i8))
+                     (label (ptr i8))
+                     (bounds Frame)
+                     (checked i64)
+                     (state Interaction)] (-> i64)
+  (let [box (frame (load (field bounds left))
+                   (+ (load (field bounds top)) (/ (- (load (field bounds height)) 16.0) 2.0))
+                   16.0
+                   16.0)]
+    (do
+      (rounded-fill backend box 4.0 (if (= checked 1) (accent) (surface)))
+      (rounded-stroke backend box 4.0 1.0 (border))
+      (draw-focus backend box 4.0 (load (field state focused)))
+      (if (= checked 1)
+        (do
+          (draw-line backend
+                     (+ (load (field box left)) 4.0) (+ (load (field box top)) 8.5)
+                     (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0)
+                     2.0
+                     (accent-text))
+          (draw-line backend
+                     (+ (load (field box left)) 7.0) (+ (load (field box top)) 11.0)
+                     (+ (load (field box left)) 12.0) (+ (load (field box top)) 5.0)
+                     2.0
+                     (accent-text))
+          0)
+        0)
+      (draw-label backend font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+(defn draw-switch [(backend (ptr Backend))
+                   (font (ptr i8))
+                   (label (ptr i8))
+                   (bounds Frame)
+                   (checked i64)
+                   (state Interaction)] (-> i64)
+  (let [track (frame (load (field bounds left))
+                     (+ (load (field bounds top)) (/ (- (load (field bounds height)) 24.0) 2.0))
+                     44.0
+                     24.0)
+        knobLeft (if (= checked 1) (+ (load (field track left)) 22.0) (+ (load (field track left)) 2.0))]
+    (do
+      (rounded-fill backend track 12.0 (if (= checked 1) (accent) (surface-pressed)))
+      (fill-circle backend
+                   (+ knobLeft 10.0)
+                   (+ (load (field track top)) 12.0)
+                   10.0
+                   (if (= checked 1) (accent-text) (text)))
+      (draw-focus backend track 12.0 (load (field state focused)))
+      (draw-label backend font label (+ (load (field bounds left)) 54.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+(defn draw-slider [(backend (ptr Backend)) (bounds Frame) (value f64) (state Interaction)] (-> i64)
+  (let [clamped (larger 0.0 (smaller 1.0 value))
+        trackTop (+ (load (field bounds top)) (/ (- (load (field bounds height)) 4.0) 2.0))
+        activeWidth (* (load (field bounds width)) clamped)
+        knobHorizontal (+ (load (field bounds left)) (* (load (field bounds width)) clamped))
+        knobVertical (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))]
+    (do
+      (rounded-fill backend (frame (load (field bounds left)) trackTop (load (field bounds width)) 4.0) 2.0 (surface-subtle))
+      (if (> activeWidth 0.0)
+        (rounded-fill backend (frame (load (field bounds left)) trackTop activeWidth 4.0) 2.0 (accent))
+        0)
+      (fill-circle backend knobHorizontal knobVertical 6.0 (color 255 255 255))
+      (stroke-circle backend knobHorizontal knobVertical 6.0 1.0 (focus-ring))
+      (if (= (load (field state focused)) 1)
+        (do
+          (stroke-circle backend knobHorizontal knobVertical 9.0 1.0 (focus-ring))
+          0)
+        0)
+      0)))
+
+(defn draw-toggle [(backend (ptr Backend))
+                   (font (ptr i8))
+                   (label (ptr i8))
+                   (bounds Frame)
+                   (checked i64)
+                   (state Interaction)] (-> i64)
+  (do
+    (rounded-fill backend bounds 6.0 (if (= checked 1) (surface-pressed) (surface)))
+    (if (= checked 1) 0 (rounded-stroke backend bounds 6.0 1.0 (border)))
+    (draw-focus backend bounds 6.0 (load (field state focused)))
+    (draw-centered-label backend font label bounds 14.0 (text))
+    0))
+
+(defn draw-radio [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (label (ptr i8))
+                  (bounds Frame)
+                  (selected i64)
+                  (state Interaction)] (-> i64)
+  (let [centerHorizontal (+ (load (field bounds left)) 8.0)
+        centerVertical (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))]
+    (do
+      (fill-circle backend centerHorizontal centerVertical 8.0 (surface))
+      (stroke-circle backend centerHorizontal centerVertical 8.0 1.0 (border))
+      (if (= selected 1)
+        (do (fill-circle backend centerHorizontal centerVertical 4.0 (accent)) 0)
+        0)
+      (if (= (load (field state focused)) 1)
+        (do (stroke-circle backend centerHorizontal centerVertical 11.0 1.0 (focus-ring)) 0)
+        0)
+      (draw-label backend font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
+      0)))
+
+;; ---------------------------------------------------------------------------
+;; Surfaces
+;; ---------------------------------------------------------------------------
+
+(defn draw-alert [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (title (ptr i8))
+                  (description (ptr i8))
+                  (bounds Frame)
+                  (destructive i64)] (-> i64)
+  (do
+    (rounded-fill backend bounds 8.0 (surface))
+    (rounded-stroke backend bounds 8.0 1.0 (if (= destructive 1) (danger) (border)))
+    (draw-label backend font (if (= destructive 1) c"!" c"i")
+                (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 14.0) 14.0
+                (if (= destructive 1) (danger) (text)))
+    (draw-label backend font title (+ (load (field bounds left)) 40.0) (+ (load (field bounds top)) 12.0) 14.0 (text))
+    (draw-label backend font description (+ (load (field bounds left)) 40.0) (+ (load (field bounds top)) 36.0) 13.0 (text-muted))
+    0))
+
+(defn draw-avatar [(backend (ptr Backend)) (font (ptr i8)) (initials (ptr i8)) (bounds Frame)] (-> i64)
+  (do
+    (rounded-fill backend bounds (/ (load (field bounds height)) 2.0) (surface-subtle))
+    (draw-centered-label backend font initials bounds 14.0 (text))
+    0))
+
+(defn draw-badge [(backend (ptr Backend)) (font (ptr i8)) (label (ptr i8)) (bounds Frame) (strong i64)] (-> i64)
+  (do
+    (rounded-fill backend bounds (/ (load (field bounds height)) 2.0) (if (= strong 1) (accent) (surface-subtle)))
+    (if (= strong 1) 0 (rounded-stroke backend bounds (/ (load (field bounds height)) 2.0) 1.0 (border)))
+    (draw-centered-label backend font label bounds 12.0 (if (= strong 1) (accent-text) (text)))
+    0))
+
+(defn draw-breadcrumb [(backend (ptr Backend)) (font (ptr i8)) (left f64) (top f64) (active (ptr i8))] (-> i64)
+  (do
+    (draw-label backend font c"Workflows" left top 13.0 (text-muted))
+    (draw-label backend font c"/" (+ left 76.0) top 13.0 (text-muted))
+    (draw-label backend font c"Design" (+ left 94.0) top 13.0 (text-muted))
+    (draw-label backend font c"/" (+ left 142.0) top 13.0 (text-muted))
+    (draw-label backend font active (+ left 160.0) top 13.0 (text))
+    0))
+
+(defn draw-bubble [(backend (ptr Backend)) (font (ptr i8)) (message (ptr i8)) (bounds Frame) (agent i64)] (-> i64)
+  (do
+    (rounded-fill backend bounds 10.0 (if (= agent 1) (surface) (surface-subtle)))
+    (if (= agent 1) (rounded-stroke backend bounds 10.0 1.0 (border)) 0)
+    (draw-label backend font message (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 12.0) 13.0 (text))
+    0))
+
+(defn draw-card [(backend (ptr Backend))
+                 (font (ptr i8))
+                 (title (ptr i8))
+                 (description (ptr i8))
+                 (bounds Frame)] (-> i64)
+  (do
+    (rounded-fill backend bounds 10.0 (surface))
+    (rounded-stroke backend bounds 10.0 1.0 (border))
+    (draw-label backend font title (+ (load (field bounds left)) 18.0) (+ (load (field bounds top)) 18.0) 16.0 (text))
+    (draw-label backend font description (+ (load (field bounds left)) 18.0) (+ (load (field bounds top)) 48.0) 13.0 (text-muted))
+    0))
+
+(defn draw-separator [(backend (ptr Backend)) (bounds Frame)] (-> i64)
+  (fill-rect backend bounds (border)))
+
+(defn draw-skeleton [(backend (ptr Backend)) (bounds Frame)] (-> i64)
+  (rounded-fill backend bounds 6.0 (surface-subtle)))
+
+(defn draw-progress [(backend (ptr Backend)) (bounds Frame) (value f64)] (-> i64)
+  (let [clamped (larger 0.0 (smaller 1.0 value))]
+    (do
+      (rounded-fill backend bounds (/ (load (field bounds height)) 2.0) (surface-subtle))
+      (if (> clamped 0.0)
+        (rounded-fill backend
+                      (frame (load (field bounds left))
+                             (load (field bounds top))
+                             (* (load (field bounds width)) clamped)
+                             (load (field bounds height)))
+                      (/ (load (field bounds height)) 2.0)
+                      (accent))
+        0)
+      0)))
+
+(defn draw-spinner [(backend (ptr Backend)) (bounds Frame) (time f64)] (-> i64)
+  (let [start (* time 210.0)]
+    (do
+      (draw-ring backend
+                 (+ (load (field bounds left)) (/ (load (field bounds width)) 2.0))
+                 (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))
+                 6.0
+                 8.0
+                 start
+                 (+ start 275.0)
+                 (accent))
+      0)))
+
+;; A two-column table. `cells` is a row-major array of 2 * rowCount strings,
+;; the first row being the header. The library owns the chrome and the cell
+;; geometry; the caller owns every string.
+(defn draw-table [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (bounds Frame)
+                  (cells (ptr (ptr i8)))
+                  (rowCount i64)
+                  (columnSplit f64)] (-> i64)
+  (let [rowHeight (/ (load (field bounds height)) (cast f64 rowCount))
+        firstColumn (+ (load (field bounds left)) (* (load (field bounds width)) columnSplit))]
+    (do
+      (rounded-fill backend bounds 8.0 (surface))
+      (rounded-stroke backend bounds 8.0 1.0 (border))
+      (draw-line backend
+                 firstColumn (load (field bounds top))
+                 firstColumn (+ (load (field bounds top)) (load (field bounds height)))
+                 1.0
+                 (border))
+      (for [row 1 rowCount]
+        (draw-line backend
+                   (load (field bounds left)) (+ (load (field bounds top)) (* (cast f64 row) rowHeight))
+                   (+ (load (field bounds left)) (load (field bounds width))) (+ (load (field bounds top)) (* (cast f64 row) rowHeight))
+                   1.0
+                   (border)))
+      (for [row 0 rowCount]
+        (let [header (= row 0)
+              top (+ (+ (load (field bounds top)) (* (cast f64 row) rowHeight)) 9.0)
+              size (if header 12.0 13.0)
+              tint (if header (text-muted) (text))]
+          (do
+            (draw-label backend font (load (index cells (* row 2)))
+                        (+ (load (field bounds left)) 12.0) top size tint)
+            (draw-label backend font (load (index cells (+ (* row 2) 1)))
+                        (+ firstColumn 12.0) top size tint))))
+      0)))
+
+;; ---------------------------------------------------------------------------
+;; Navigation
+;; ---------------------------------------------------------------------------
+
+(defn draw-accordion [(backend (ptr Backend))
+                      (font (ptr i8))
+                      (title (ptr i8))
+                      (body (ptr i8))
+                      (bounds Frame)
+                      (open i64)
+                      (state Interaction)] (-> i64)
+  (do
+    (rounded-fill backend bounds 8.0 (surface))
+    (rounded-stroke backend bounds 8.0 1.0 (border))
+    (draw-label backend font title (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 13.0) 14.0 (text))
+    (draw-label backend font (if (= open 1) c"-" c"+")
+                (- (+ (load (field bounds left)) (load (field bounds width))) 26.0)
+                (+ (load (field bounds top)) 12.0) 16.0 (text-muted))
+    (if (= open 1)
+      (do
+        (draw-separator backend (frame (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 43.0) (- (load (field bounds width)) 28.0) 1.0))
+        (draw-label backend font body (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 57.0) 13.0 (text-muted))
+        0)
+      0)
+    (draw-focus backend bounds 8.0 (load (field state focused)))
+    0))
+
+(defn draw-tabs [(backend (ptr Backend))
+                 (font (ptr i8))
+                 (bounds Frame)
+                 (first (ptr i8))
+                 (second (ptr i8))
+                 (third (ptr i8))
+                 (selected i64)] (-> i64)
+  (let [segmentWidth (/ (load (field bounds width)) 3.0)]
+    (do
+      (rounded-fill backend bounds 8.0 (surface-subtle))
+      (rounded-fill backend
+                    (frame (+ (load (field bounds left)) (* segmentWidth (cast f64 selected)))
+                           (+ (load (field bounds top)) 3.0)
+                           segmentWidth
+                           (- (load (field bounds height)) 6.0))
+                    6.0
+                    (surface))
+      (draw-centered-label backend font first
+                           (frame (load (field bounds left)) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 0) (text) (text-muted)))
+      (draw-centered-label backend font second
+                           (frame (+ (load (field bounds left)) segmentWidth) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 1) (text) (text-muted)))
+      (draw-centered-label backend font third
+                           (frame (+ (load (field bounds left)) (* segmentWidth 2.0)) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 2) (text) (text-muted)))
+      0)))
+
+(defn draw-button-group [(backend (ptr Backend))
+                         (font (ptr i8))
+                         (bounds Frame)
+                         (first (ptr i8))
+                         (second (ptr i8))
+                         (third (ptr i8))
+                         (selected i64)] (-> i64)
+  (let [segmentWidth (/ (load (field bounds width)) 3.0)]
+    (do
+      (for [segment 0 3]
+        (do
+          (rounded-fill backend
+                        (frame (+ (load (field bounds left)) (* segmentWidth (cast f64 segment)))
+                               (load (field bounds top))
+                               segmentWidth
+                               (load (field bounds height)))
+                        (if (or (= segment 0) (= segment 2)) 6.0 0.1)
+                        (if (= selected segment) (accent) (surface)))
+          (rounded-stroke backend
+                          (frame (+ (load (field bounds left)) (* segmentWidth (cast f64 segment)))
+                                 (load (field bounds top))
+                                 segmentWidth
+                                 (load (field bounds height)))
+                          (if (or (= segment 0) (= segment 2)) 6.0 0.1)
+                          1.0
+                          (border))))
+      (draw-centered-label backend font first
+                           (frame (load (field bounds left)) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 0) (accent-text) (text)))
+      (draw-centered-label backend font second
+                           (frame (+ (load (field bounds left)) segmentWidth) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 1) (accent-text) (text)))
+      (draw-centered-label backend font third
+                           (frame (+ (load (field bounds left)) (* segmentWidth 2.0)) (load (field bounds top)) segmentWidth (load (field bounds height)))
+                           13.0 (if (= selected 2) (accent-text) (text)))
+      0)))
+
+(defn draw-toggle-group [(backend (ptr Backend))
+                         (font (ptr i8))
+                         (bounds Frame)
+                         (first (ptr i8))
+                         (second (ptr i8))
+                         (third (ptr i8))
+                         (selected i64)] (-> i64)
+  (draw-button-group backend font bounds first second third selected))
+
+;; Square cells laid out left to right, one per label. The caller supplies the
+;; labels, so previous/next affordances and page numbering are its choice.
+(defn pagination-cell-frame [(bounds Frame) (item i64)] (-> Frame)
+  (let [cell (load (field bounds height))]
+    (frame (+ (load (field bounds left)) (* cell (cast f64 item)))
+           (load (field bounds top))
+           cell
+           cell)))
+
+(defn draw-pagination [(backend (ptr Backend))
+                       (font (ptr i8))
+                       (bounds Frame)
+                       (labels (ptr (ptr i8)))
+                       (labelCount i64)
+                       (page i64)] (-> i64)
+  (do
+    (for [item 0 labelCount]
+      (let [cellBounds (pagination-cell-frame bounds item)
+            active (= item page)]
+        (do
+          (if active (rounded-fill backend cellBounds 6.0 (surface-subtle)) 0)
+          (draw-centered-label backend font (load (index labels item)) cellBounds 13.0
+                               (if active (text) (text-muted))))))
+    0))
+
+(defn draw-select [(backend (ptr Backend))
+                   (font (ptr i8))
+                   (label (ptr i8))
+                   (placeholder (ptr i8))
+                   (bounds Frame)
+                   (open i64)
+                   (state Interaction)] (-> i64)
+  (do
+    (draw-input backend font label placeholder bounds state)
+    (draw-label backend font (if (= open 1) c"^" c"v")
+                (- (+ (load (field bounds left)) (load (field bounds width))) 24.0)
+                (+ (load (field bounds top)) 8.0) 13.0 (text-muted))
+    0))
+
+;; The popup half of a select/combobox: drawn separately so callers control
+;; overlay ordering instead of the widget assuming it paints last.
+(defn draw-select-menu [(backend (ptr Backend)) (bounds Frame) (height f64)] (-> i64)
+  (let [panel (frame (load (field bounds left))
+                     (+ (+ (load (field bounds top)) (load (field bounds height))) 6.0)
+                     (load (field bounds width))
+                     height)]
+    (do
+      (rounded-fill backend panel 8.0 (surface))
+      (rounded-stroke backend panel 8.0 1.0 (border))
+      0)))
+
+;; `emphasis`: 0 muted, 1 active, 2 active with a highlight backing.
+(defn draw-select-option [(backend (ptr Backend))
+                          (font (ptr i8))
+                          (label (ptr i8))
+                          (bounds Frame)
+                          (top f64)
+                          (emphasis i64)] (-> i64)
+  (do
+    (if (= emphasis 2)
+      (rounded-fill backend
+                    (frame (+ (load (field bounds left)) 5.0) (- top 6.0) (- (load (field bounds width)) 10.0) 28.0)
+                    5.0
+                    (surface-subtle))
+      0)
+    (draw-label backend font label (+ (load (field bounds left)) 12.0) top 13.0
+                (if (= emphasis 0) (text-muted) (text)))
+    0))
+
+(defn draw-combobox [(backend (ptr Backend))
+                     (font (ptr i8))
+                     (query (ptr i8))
+                     (placeholder (ptr i8))
+                     (bounds Frame)
+                     (state Interaction)] (-> i64)
+  (draw-input backend font query placeholder bounds state))
+
+(defn draw-menu-surface [(backend (ptr Backend)) (bounds Frame)] (-> i64)
+  (do
+    (rounded-fill backend bounds 8.0 (surface))
+    (rounded-stroke backend bounds 8.0 1.0 (border))
+    0))
+
+(defn draw-menu-item [(backend (ptr Backend))
+                      (font (ptr i8))
+                      (label (ptr i8))
+                      (left f64)
+                      (top f64)
+                      (destructive i64)] (-> i64)
+  (draw-label backend font label left top 13.0 (if (= destructive 1) (danger) (text))))
+
+(defn draw-tooltip [(backend (ptr Backend)) (font (ptr i8)) (label (ptr i8)) (bounds Frame)] (-> i64)
+  (do
+    (rounded-fill backend bounds 6.0 (text))
+    (draw-centered-label backend font label bounds 12.0 (accent-text))
+    0))
+
+;; ---------------------------------------------------------------------------
+;; Overlays
+;; ---------------------------------------------------------------------------
+
+(defn draw-scrim [(backend (ptr Backend)) (screenWidth f64) (screenHeight f64) (opacity i64)] (-> i64)
+  (fill-rect backend (frame 0.0 0.0 screenWidth screenHeight) (color-alpha 0 0 0 opacity)))
+
+(defn dialog-frame [(screenWidth f64) (screenHeight f64) (width f64) (height f64)] (-> Frame)
+  (frame (/ (- screenWidth width) 2.0) (/ (- screenHeight height) 2.0) width height))
+
+(defn draw-dialog [(backend (ptr Backend))
+                   (font (ptr i8))
+                   (title (ptr i8))
+                   (description (ptr i8))
+                   (confirm (ptr i8))
+                   (screenWidth f64)
+                   (screenHeight f64)] (-> i64)
+  (let [bounds (dialog-frame screenWidth screenHeight 420.0 210.0)]
+    (do
+      (draw-scrim backend screenWidth screenHeight 166)
+      (draw-card backend font title description bounds)
+      (draw-button backend font confirm
+                   (frame (+ (load (field bounds left)) 252.0) (+ (load (field bounds top)) 154.0) 150.0 36.0)
+                   (interaction 0 0 1 0))
+      0)))
+
+(defn draw-drawer [(backend (ptr Backend))
+                   (font (ptr i8))
+                   (title (ptr i8))
+                   (description (ptr i8))
+                   (screenWidth f64)
+                   (screenHeight f64)] (-> i64)
+  (let [bounds (frame 0.0 (- screenHeight 250.0) screenWidth 250.0)]
+    (do
+      (draw-scrim backend screenWidth screenHeight 120)
+      (rounded-fill backend bounds 14.0 (surface))
+      (draw-label backend font title 28.0 (+ (load (field bounds top)) 28.0) 18.0 (text))
+      (draw-label backend font description 28.0 (+ (load (field bounds top)) 60.0) 13.0 (text-muted))
+      0)))
+
+(defn draw-sheet [(backend (ptr Backend))
+                  (font (ptr i8))
+                  (title (ptr i8))
+                  (description (ptr i8))
+                  (screenWidth f64)
+                  (screenHeight f64)] (-> i64)
+  (let [bounds (frame (- screenWidth 420.0) 0.0 420.0 screenHeight)]
+    (do
+      (draw-scrim backend screenWidth screenHeight 120)
+      (fill-rect backend bounds (surface))
+      (draw-label backend font title (+ (load (field bounds left)) 28.0) 32.0 18.0 (text))
+      (draw-label backend font description (+ (load (field bounds left)) 28.0) 64.0 13.0 (text-muted))
+      0)))
+
+(defn draw-resizable [(backend (ptr Backend))
+                      (font (ptr i8))
+                      (bounds Frame)
+                      (leadingLabel (ptr i8))
+                      (trailingLabel (ptr i8))
+                      (split f64)] (-> i64)
+  (let [divider (+ (load (field bounds left)) (* (load (field bounds width)) split))]
+    (do
+      (rounded-fill backend bounds 8.0 (surface))
+      (rounded-stroke backend bounds 8.0 1.0 (border))
+      (draw-line backend
+                 divider (load (field bounds top))
+                 divider (+ (load (field bounds top)) (load (field bounds height)))
+                 2.0
+                 (border))
+      (draw-label backend font leadingLabel (+ (load (field bounds left)) 14.0) (+ (load (field bounds top)) 14.0) 13.0 (text))
+      (draw-label backend font trailingLabel (+ divider 14.0) (+ (load (field bounds top)) 14.0) 13.0 (text))
+      0)))
+
+;; ---------------------------------------------------------------------------
+;; C ABI surface
+;; ---------------------------------------------------------------------------
+
+(export-c
+  [frame :as "nw_frame_make"]
+  [color :as "nw_color_make"]
+  [color-alpha :as "nw_color_rgba"]
+  [interaction :as "nw_interaction_make"]
+  [contains-int :as "nw_frame_contains"]
+  [pointer-interaction :as "nw_pointer_interaction"]
+  [dialog-frame :as "nw_dialog_frame"]
+
+  [background :as "nw_color_background"]
+  [surface :as "nw_color_surface"]
+  [surface-subtle :as "nw_color_surface_subtle"]
+  [surface-pressed :as "nw_color_surface_pressed"]
+  [text :as "nw_color_text"]
+  [text-muted :as "nw_color_text_muted"]
+  [border :as "nw_color_border"]
+  [accent :as "nw_color_accent"]
+  [accent-text :as "nw_color_accent_text"]
+  [focus-ring :as "nw_color_focus_ring"]
+  [danger :as "nw_color_danger"]
+
+  [clear :as "nw_clear"]
+  [rounded-fill :as "nw_fill_rounded_rect"]
+  [rounded-stroke :as "nw_stroke_rounded_rect"]
+  [fill-rect :as "nw_fill_rect"]
+  [draw-line :as "nw_draw_line"]
+  [draw-label :as "nw_draw_text"]
+  [measure-label :as "nw_measure_text"]
+  [draw-centered-label :as "nw_draw_centered_text"]
+  [draw-focus :as "nw_draw_focus_ring"]
+
+  [draw-button :as "nw_button"]
+  [draw-input :as "nw_input"]
+  [draw-textarea :as "nw_textarea"]
+  [draw-checkbox :as "nw_checkbox"]
+  [draw-switch :as "nw_switch"]
+  [draw-slider :as "nw_slider"]
+  [draw-toggle :as "nw_toggle"]
+  [draw-radio :as "nw_radio"]
+
+  [draw-alert :as "nw_alert"]
+  [draw-avatar :as "nw_avatar"]
+  [draw-badge :as "nw_badge"]
+  [draw-breadcrumb :as "nw_breadcrumb"]
+  [draw-bubble :as "nw_bubble"]
+  [draw-card :as "nw_card"]
+  [draw-separator :as "nw_separator"]
+  [draw-skeleton :as "nw_skeleton"]
+  [draw-progress :as "nw_progress"]
+  [draw-spinner :as "nw_spinner"]
+  [draw-table :as "nw_table"]
+
+  [draw-accordion :as "nw_accordion"]
+  [draw-tabs :as "nw_tabs"]
+  [draw-button-group :as "nw_button_group"]
+  [draw-toggle-group :as "nw_toggle_group"]
+  [draw-pagination :as "nw_pagination"]
+  [pagination-cell-frame :as "nw_pagination_cell_frame"]
+  [draw-select :as "nw_select"]
+  [draw-select-menu :as "nw_select_menu"]
+  [draw-select-option :as "nw_select_option"]
+  [draw-combobox :as "nw_combobox"]
+  [draw-menu-surface :as "nw_menu_surface"]
+  [draw-menu-item :as "nw_menu_item"]
+  [draw-tooltip :as "nw_tooltip"]
+
+  [draw-scrim :as "nw_scrim"]
+  [draw-dialog :as "nw_dialog"]
+  [draw-drawer :as "nw_drawer"]
+  [draw-sheet :as "nw_sheet"]
+  [draw-resizable :as "nw_resizable"])

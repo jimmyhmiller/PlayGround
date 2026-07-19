@@ -1,0 +1,218 @@
+// gcr_xray.ft — a Compiler Explorer for gc-rust.
+//
+// Two panes: editable source on the left, the compiled output of the LIVE
+// buffer on the right. Pick a pipeline stage (tokens · ast · core · layout ·
+// mono · llvm) and watch it recompile as you type — godbolt-style, but for
+// gc-rust's own pipeline.
+//
+// How it works: the editor buffer is written to a temp file and fed to
+// `gcr emit <stage> <tmp>`; output streams back over the event-driven proc
+// bridge. Compiles are coalesced (one in flight + one pending) so typing
+// stays responsive.
+//
+// params (set at spawn): { file: "<abs .gcr to seed the editor>", gcr: "<abs gcr binary>" }
+import "host"
+import { col_text, col_muted, col_accent, col_panel } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn gcr_bin() = param("gcr", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/target/debug/gcr")
+fn seed_file() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/examples/fib.gcr")
+
+fn tmp_path() = "/tmp/gcr_xray_" + my_id() + ".gcr"
+
+fn init_state() = {
+    src: "", stage: "mono", out: "", status: "loading…",
+    proc: -1, acc: [], busy: false, pending: false, loaded: false,
+}
+let state = atom(init_state())
+
+// ---- compile the live buffer ----------------------------------------------
+
+// Write the current buffer to the temp file and run `gcr emit <stage>` on it.
+// If a compile is already running, mark pending and coalesce — we only ever
+// care about the newest source.
+fn compile() {
+    let s = @state
+    write_file(tmp_path(), s.src)
+    if s.busy {
+        reset!(state, { ..s, pending: true })
+        return
+    }
+    let h = proc_spawn(gcr_bin(), ["emit", s.stage, tmp_path()])
+    if h == -1 {
+        reset!(state, { ..s, status: "spawn failed (check `gcr` path param)" })
+        request_render()
+        return
+    }
+    reset!(state, { ..s, proc: h, acc: [], busy: true, pending: false,
+                    status: s.stage + " · compiling…" })
+    request_render()
+}
+
+fn on_init() { request_render() }
+
+// Seed + compile here (on_start runs AFTER state rehydration on every start,
+// including hot-reload — unlike on_init, which runs before). If the buffer is
+// empty (fresh spawn, or a reload from an older state shape), normalize to the
+// current schema and seed from the file param. The buffer is the source of
+// truth after this point — edits never touch the original file.
+fn on_start() {
+    let s = @state
+    let cur = unwrap_or(get(s, "src"), "")
+    if cur == "" {
+        let r = read_file(seed_file())
+        let text = if typeof(r) == "Record" and unwrap_or(get(r, "ok"), false) {
+            unwrap_or(get(r, "text"), "")
+        } else {
+            "fn main() -> i64 {\n    let mut total = 0;\n    let mut i = 0;\n    while i < 10 { total = total + i * i; i = i + 1; }\n    total\n}\n"
+        }
+        reset!(state, { src: text, stage: "mono", out: "", status: "ready",
+                        proc: -1, acc: [], busy: false, pending: false, loaded: true })
+    }
+    compile()
+}
+
+fn on_tab_select(id, tab) {
+    reset!(state, { ..(@state), stage: tab })
+    compile()
+}
+
+fn on_input_change(id, value) {
+    if id != "src" { return }
+    reset!(state, { ..(@state), src: value })
+    compile()
+}
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "recompile" { compile() }
+    else if id == "copy" { clipboard_set((@state).out) }
+}
+
+fn on_proc_output(handle, line) {
+    let s = @state
+    if handle == s.proc { reset!(state, { ..s, acc: push(s.acc, line) }) }
+}
+
+fn on_proc_exit(handle, code) {
+    let s = @state
+    if handle != s.proc { return }
+    let text = join(s.acc, "\n")
+    let st = if code == 0 {
+        s.stage + " · " + str(len(s.acc)) + " lines"
+    } else {
+        // gc-rust prints diagnostics to stderr (not captured); a non-zero exit
+        // here usually means the buffer doesn't compile yet.
+        s.stage + " · does not compile (exit " + str(code) + ")"
+    }
+    // Keep the LAST good output visible on error; only replace on success so
+    // the right pane doesn't flash empty between keystrokes.
+    let new_out = if code == 0 { text } else { s.out }
+    reset!(state, { ..s, out: new_out, proc: -1, acc: [], busy: false, status: st })
+    request_render()
+    // Coalesced recompile: a newer edit arrived while we were busy.
+    if s.pending { compile() }
+}
+
+// ---- rendering -------------------------------------------------------------
+
+fn tab_items() {
+    let mut items = []
+    for st in ["mono", "tokens", "ast", "core", "layout", "llvm"] {
+        items = push(items, { id: st, label: st })
+    }
+    items
+}
+
+// JSON stages get the json grammar; llvm has no grammar yet → plain text.
+fn stage_lang(stage) = if stage == "llvm" { "llvm" } else { "json" }
+
+// Map a tree-sitter highlight kind → a theme color (mirrors lsp_symbol's kc).
+fn kc(k) {
+    if k == "keyword" { "#c78fe6" }
+    else if k == "string" { "#a6df99" }
+    else if k == "comment" { "#7b8494" }
+    else if k == "function" { "#8cc7ff" }
+    else if k == "type" { "#f0d18c" }
+    else if k == "constructor" { "#f0d18c" }
+    else if k == "constant" { "#f29e7a" }
+    else if k == "property" { "#d9d2f2" }
+    else if k == "operator" { "#b3bdcc" }
+    else if k == "punctuation" { "#b3bdcc" }
+    else { col_text() }
+}
+
+// One highlighted line: an hstack of colored mono spans.
+fn hl_line(runs) {
+    let mut kids = []
+    if typeof(runs) != "List" or len(runs) == 0 {
+        kids = [ { kind: "text", value: " ", family: "mono", size: 11.0, color: col_text(), selectable: true, wrap: false } ]
+    } else {
+        for r in runs {
+            kids = push(kids, { kind: "text", value: unwrap_or(get(r, "text"), ""),
+                                family: "mono", size: 11.0, selectable: true, wrap: false,
+                                color: kc(unwrap_or(get(r, "kind"), "")) })
+        }
+    }
+    { kind: "hstack", gap: 0.0, align: "start", children: kids }
+}
+
+// Up to 800 highlighted lines (large core/llvm dumps can be thousands); the
+// cap is announced, never silent.
+fn out_rows() {
+    let s = @state
+    if s.out == "" {
+        return [ { kind: "text", value: "(no output)", size: 12.0, color: col_muted() } ]
+    }
+    let lines = highlight(s.out, stage_lang(s.stage))
+    let n = len(lines)
+    let mut rows = []
+    let mut i = 0
+    for ln in lines {
+        if i < 800 { rows = push(rows, hl_line(ln)) }
+        i = i + 1
+    }
+    if n > 800 {
+        rows = push(rows, { kind: "text",
+            value: "… " + str(n - 800) + " more lines — `gcr emit` in a terminal for the full dump",
+            size: 11.0, color: col_muted() })
+    }
+    rows
+}
+
+// Side-by-side columns, neither height-capped: the output grows to its natural
+// height so the pane overflows and wheel-scrolls. (The framework only has
+// pane-level scroll — there is no independent sub-region scroll yet, so the
+// whole pane scrolls together.)
+fn left_pane(s) {
+    { kind: "vstack", gap: 6.0, style: { width: "48%", flex_grow: 1.0 }, children: [
+        { kind: "text", value: "source", size: 11.0, weight: "bold", color: col_muted() },
+        { kind: "textarea", id: "src", value: s.src, rows: 30,
+          placeholder: "fn main() -> i64 { … }",
+          style: { width: "100%" } },
+    ]}
+}
+
+fn right_pane(s) {
+    { kind: "vstack", gap: 6.0, style: { width: "52%", flex_grow: 1.0 }, children: [
+        { kind: "tabs", id: "stage", selected: s.stage, items: tab_items() },
+        { kind: "hstack", gap: 8.0, align: "center", children: [
+            { kind: "text", value: s.status, size: 11.0, color: col_muted() },
+            { kind: "button", id: "copy", label: "copy" },
+        ]},
+        { kind: "vstack", gap: 1.0, pad: 6.0, style: { background: col_panel() }, children: out_rows() },
+    ]}
+}
+
+fn render(w, h) {
+    let s = @state
+    {
+        kind: "vstack", gap: 8.0, pad: 10.0, children: [
+            { kind: "hstack", gap: 10.0, align: "center", children: [
+                { kind: "text", value: "◆ gcr explorer", size: 14.0, weight: "bold", color: col_accent() },
+                { kind: "button", id: "recompile", label: "↻ compile" },
+                { kind: "text", value: "live: edits recompile as you type · scroll for more output", size: 10.0, color: col_muted() },
+            ]},
+            { kind: "hstack", gap: 12.0, align: "start", children: [ left_pane(s), right_pane(s) ] },
+        ]
+    }
+}

@@ -1,0 +1,768 @@
+; selfhost/src/wasm.coil -- single-object WebAssembly finalizer.
+;
+; LLVM emits a relocatable Wasm object. For one Coil compilation unit its code
+; and data indices are already final; the remaining object-only work is to turn
+; LLVM's imported linear memory into a defined memory, export main, and discard
+; linking metadata. This deliberately has no C++ API and never launches a linker.
+(module wasm)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil" :use *)
+
+(defstruct WasmReader [(data (slice u8)) (pos i64)])
+(defstruct WasmImports [(items (ArrayList u8)) (count i64) (mem (ArrayList u8)) (has-mem bool) (mem-min i64)])
+; One wasm function export: its symbol name and its function-index-space index.
+(defstruct WasmExport [(name (slice u8)) (idx i64)])
+; One entry of an active `funcref` element segment: a function placed at a table slot.
+(defstruct WasmElem [(func i64) (tidx i64)])
+
+; ============================ finalizer layout constants ====================
+; The shadow stack the linker would otherwise provide. A VM recurses deep, so
+; reserve generously (wasm-ld defaults to 64 KiB); this is placed just above the
+; static-data high-water and grows down, with the JS heap above it.
+(defn wasm-stack-size [] (-> i64) 1048576)      ; 1 MiB
+(defn wasm-page []       (-> i64) 65536)         ; wasm page size
+; Round `v` up to a multiple of `a` (a must be a power of two).
+(defn wasm-align-up [(v i64) (a i64)] (-> i64) (iand (iadd v (isub a 1)) (isub 0 a)))
+
+(defn wb! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (al-push! (mut b) (cast u8 (iand v 255))) 0)
+
+(defn wbytes! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wb! (mut b) (cast i64 (slice-get s (load i))))
+          (store! i (iadd (load i) 1))))))
+  0)
+
+(defn wuleb! [(b (mut (ArrayList u8))) (v0 i64)] (-> i64)
+  (let [(mut v) v0]
+    (loop
+      (let [byte (iand (load v) 127)
+            rest (cast i64 (ishr (cast u64 (load v)) (cast u64 7)))]
+        (if (icmp-eq rest 0)
+            (do (wb! (mut b) byte) (break))
+          (do (wb! (mut b) (ior byte 128)) (store! v rest) 0))))
+  0))
+
+; Write a signed LEB128 (for i32.const init expressions). Terminates when the
+; remaining value and the encoded sign bit agree — the standard sleb128 loop.
+(defn wsleb! [(b (mut (ArrayList u8))) (v0 i64)] (-> i64)
+  (let [(mut v) v0 (mut more) 1]
+    (loop (if (icmp-eq (load more) 0) (break)
+      (let [byte (iand (load v) 127) sign (iand (load v) 64)]
+        (store! v (ishr (load v) 7))                 ; arithmetic shift (i64 ishr sign-extends)
+        (if (or (and (icmp-eq (load v) 0) (icmp-eq sign 0))
+                (and (icmp-eq (load v) -1) (icmp-ne sign 0)))
+            (do (store! more 0) (wb! (mut b) byte) 0)
+          (wb! (mut b) (ior byte 128))))))
+    0))
+
+(defn wr-byte [(r (ptr WasmReader))] (-> i64)
+  (let [p (load (field r pos))]
+    (store! (field r pos) (iadd p 1))
+    (cast i64 (slice-get (load (field r data)) p))))
+
+; Read a signed LEB128 (data-segment offset init expressions use it).
+(defn wr-sleb [(r (ptr WasmReader))] (-> i64)
+  (let [(mut shift) 0 (mut out) 0 (mut last) 0]
+    (loop
+      (let [byte (wr-byte r)]
+        (store! last byte)
+        (store! out (ior (load out) (ishl (iand byte 127) (load shift))))
+        (store! shift (iadd (load shift) 7))
+        (if (icmp-eq (iand byte 128) 0) (break) 0)))
+    (if (and (icmp-lt (load shift) 64) (icmp-ne (iand (load last) 64) 0))
+        (ior (load out) (ishl -1 (load shift)))
+      (load out))))
+
+(defn wr-uleb [(r (ptr WasmReader))] (-> i64)
+  (let [(mut shift) 0 (mut out) 0]
+    (loop
+      (let [byte (wr-byte r)]
+        (store! out (ior (load out) (ishl (iand byte 127) (load shift))))
+        (if (icmp-eq (iand byte 128) 0) (break)
+          (store! shift (iadd (load shift) 7)))))
+    (load out)))
+
+(defn wr-bytes [(r (ptr WasmReader)) (n i64)] (-> (slice u8))
+  (let [lo (load (field r pos))]
+    (store! (field r pos) (iadd lo n))
+    (subslice (load (field r data)) lo (iadd lo n))))
+
+(defn wr-name [(r (ptr WasmReader))] (-> (slice u8)) (wr-bytes r (wr-uleb r)))
+
+(defn wr-skip-limits [(r (ptr WasmReader))] (-> i64)
+  (let [flags (wr-uleb r)]
+    (wr-uleb r)
+    (if (icmp-ne (iand flags 1) 0) (wr-uleb r) 0)
+    0))
+
+(defn wasm-section! [(out (mut (ArrayList u8))) (id i64) (payload (slice u8))] (-> i64)
+  (wb! (mut out) id) (wuleb! (mut out) (slice-len payload)) (wbytes! (mut out) payload) 0)
+
+(defn wasm-custom-name [(payload (slice u8)) (a (ptr Allocator))] (-> (slice u8))
+  (let [r (alloc-stack WasmReader)]
+    (store! r (zeroed WasmReader)) (store! (field r data) payload)
+    (wr-name r)))
+
+; Read one symbol-table entry from `sr`, advancing past its full encoding. When it
+; is a function (kind 0) that is DEFINED (flag UNDEFINED=0x10 clear — imports are
+; skipped) and non-local (flag LOCAL=0x2 clear — internal helpers are skipped), push
+; it as an export. `main` and any (export-c …) function land here with flags 0.
+(defn wasm-read-sym! [(sr (ptr WasmReader)) (out (mut (ArrayList WasmExport)))] (-> i64)
+  (let [sk (wr-byte sr) flags (wr-uleb sr)]
+    (if (icmp-eq sk 1)                    ; SYMTAB_DATA: name always, then seg/off/size when defined
+        (do (wr-name sr)
+            (if (icmp-eq (iand flags 16) 0) (do (wr-uleb sr) (wr-uleb sr) (wr-uleb sr) 0) 0))
+      (if (icmp-eq sk 4)                  ; SYMTAB_SECTION: section index only, no name
+          (do (wr-uleb sr) 0)
+        ; SYMTAB_FUNCTION(0)/GLOBAL(2)/EVENT(3)/TABLE(5): index + optional name
+        (let [index (wr-uleb sr)
+              nm (if (or (icmp-eq (iand flags 16) 0) (icmp-ne (iand flags 64) 0)) (wr-name sr) "")]
+          (if (and (icmp-eq sk 0) (and (icmp-eq (iand flags 16) 0) (icmp-eq (iand flags 2) 0)))
+              (let [e (alloc-stack WasmExport)]
+                (store! (field e name) nm) (store! (field e idx) index)
+                (al-push! (mut out) (load e)) 0)
+            0))))))
+
+; Scan the linking symbol table and collect every wasm function export. Returns the
+; list in symbol-table order; the caller requires `main` to be present.
+(defn wasm-scan-exports [(obj (slice u8)) (a (ptr Allocator))] (-> (ArrayList WasmExport))
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut out) (al-new [WasmExport] a)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 0)
+            (let [cr (alloc-stack WasmReader)]
+              (store! cr (zeroed WasmReader)) (store! (field cr data) payload)
+              (let [name (wr-name cr)]
+                (if (str-eq name "linking")
+                    (do
+                      (wr-uleb cr)                          ; linking metadata version
+                      (loop (if (icmp-ge (load (field cr pos)) (slice-len payload)) (break)
+                        (let [kind (wr-byte cr) len (wr-uleb cr) sub (wr-bytes cr len)]
+                          (if (icmp-eq kind 8)              ; WASM_SYMBOL_TABLE
+                              (let [sr (alloc-stack WasmReader)]
+                                (store! sr (zeroed WasmReader)) (store! (field sr data) sub)
+                                (let [count (wr-uleb sr) (mut i) 0]
+                                  (loop (if (icmp-ge (load i) count) (break)
+                                    (do (wasm-read-sym! sr (mut out))
+                                        (store! i (iadd (load i) 1)))))))
+                            0))))
+                      0)
+                  0)))
+          0))))
+    (load out)))
+
+; True when the collected exports include the required `main` entry function.
+(defn wasm-exports-have-main [(xs (ArrayList WasmExport))] (-> bool)
+  (let [n (al-len [WasmExport] xs) (mut i) 0 (mut found) false]
+    (loop (if (or (icmp-ge (load i) n) (load found)) (break)
+      (let [e (alloc-stack WasmExport)]
+        (store! e (al-get [WasmExport] xs (load i)))
+        (if (str-eq (load (field e name)) "main") (do (store! found true) 0) 0)
+        (store! i (iadd (load i) 1)))))
+    (load found)))
+
+; ===================== linker-provided globals (GOT + __memory_base) =========
+; LLVM's relocatable Wasm output leaves data addressing to the linker: it imports
+; `env.__memory_base` (the base every data address is relative to) and one
+; `GOT.mem.<sym>` mutable global per address-taken data symbol (e.g. an alloc-static
+; cell). wasm-ld would DEFINE these; the finalizer does the same, resolving each to a
+; concrete i32.const so the module is self-contained — no JS-side GOT plumbing. Data
+; segments already carry absolute offsets and __memory_base is 0 for a single unit,
+; so a data symbol's address is just (its segment's offset + its within-offset).
+
+; Read one active data segment's offset init expr and skip its bytes; push the
+; offset (or -1 for a passive/unsupported segment) onto `offs`.
+(defn wasm-seg-offset [(dr (ptr WasmReader)) (offs (mut (ArrayList i64)))] (-> i64)
+  (let [op (wr-byte dr)]
+    (if (icmp-eq op 65)                              ; 0x41 i32.const
+        (let [v (wr-sleb dr)] (wr-byte dr) (al-push! (mut offs) v) 0)   ; consume end 0x0b
+      (do (wr-byte dr) (al-push! (mut offs) 0) 0)))
+  (let [dl (wr-uleb dr)] (store! (field dr pos) (iadd (load (field dr pos)) dl)) 0))
+
+; Absolute memory offset of each data segment, indexed by segment number.
+(defn wasm-data-offsets [(obj (slice u8)) (a (ptr Allocator))] (-> (ArrayList i64))
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut offs) (al-new [i64] a)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 11)
+            (let [dr (alloc-stack WasmReader)]
+              (store! dr (zeroed WasmReader)) (store! (field dr data) payload)
+              (let [nseg (wr-uleb dr) (mut s) 0]
+                (loop (if (icmp-ge (load s) nseg) (break)
+                  (do (let [flags (wr-uleb dr)]
+                        (if (icmp-eq flags 0) (do (wasm-seg-offset dr (mut offs)) 0)
+                          (if (icmp-eq flags 2) (do (wr-uleb dr) (wasm-seg-offset dr (mut offs)) 0)
+                            (do (al-push! (mut offs) -1)
+                                (let [dl (wr-uleb dr)] (store! (field dr pos) (iadd (load (field dr pos)) dl)) 0) 0))))
+                      (store! s (iadd (load s) 1)))))))
+          0))))
+    (load offs)))
+
+; Read one symbol; return its address if it is a defined data symbol named `target`,
+; else -1. Always advances `sr` past the symbol regardless of match.
+(defn wasm-read-datasym [(sr (ptr WasmReader)) (offs (ArrayList i64)) (target (slice u8))] (-> i64)
+  (let [sk (wr-byte sr) flags (wr-uleb sr) (mut ans) -1]
+    (if (icmp-eq sk 1)                               ; SYMTAB_DATA
+        (do (let [nm (wr-name sr)]
+              (if (icmp-eq (iand flags 16) 0)
+                  (let [seg (wr-uleb sr) off (wr-uleb sr) sz (wr-uleb sr)]
+                    (if (str-eq nm target) (do (store! ans (iadd (al-get [i64] offs seg) off)) 0) 0))
+                0)) 0)
+      (if (icmp-eq sk 4) (do (wr-uleb sr) 0)
+        (do (wr-uleb sr)
+            (if (or (icmp-eq (iand flags 16) 0) (icmp-ne (iand flags 64) 0)) (do (wr-name sr) 0) 0) 0)))
+    (load ans)))
+
+; Absolute address of the data symbol named `target`, or -1 if absent/undefined.
+(defn wasm-datasym-addr [(obj (slice u8)) (offs (ArrayList i64)) (target (slice u8))] (-> i64)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut ans) -1]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (or (icmp-ge (load (field r pos)) n) (icmp-ne (load ans) -1)) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 0)
+            (let [cr (alloc-stack WasmReader)]
+              (store! cr (zeroed WasmReader)) (store! (field cr data) payload)
+              (if (str-eq (wr-name cr) "linking")
+                  (do (wr-uleb cr)
+                      (loop (if (or (icmp-ge (load (field cr pos)) (slice-len payload)) (icmp-ne (load ans) -1)) (break)
+                        (let [kind (wr-byte cr) len (wr-uleb cr) sub (wr-bytes cr len)]
+                          (if (icmp-eq kind 8)
+                              (let [sr (alloc-stack WasmReader)]
+                                (store! sr (zeroed WasmReader)) (store! (field sr data) sub)
+                                (let [count (wr-uleb sr) (mut i) 0]
+                                  (loop (if (or (icmp-ge (load i) count) (icmp-ne (load ans) -1)) (break)
+                                    (let [addr (wasm-read-datasym sr offs target)]
+                                      (if (icmp-ge addr 0) (store! ans addr) 0)
+                                      (store! i (iadd (load i) 1)))))))
+                            0)))))
+                  0))
+          0))))
+    (load ans)))
+
+; Highest byte offset touched by any active data segment (= max segment offset +
+; its byte length), or 0 when there is no placed data. This is the static-data
+; high-water above which the shadow stack and JS heap live.
+(defn wasm-data-end [(obj (slice u8))] (-> i64)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut end) 0]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 11)
+            (let [dr (alloc-stack WasmReader)]
+              (store! dr (zeroed WasmReader)) (store! (field dr data) payload)
+              (let [nseg (wr-uleb dr) (mut s) 0]
+                (loop (if (icmp-ge (load s) nseg) (break)
+                  (do (let [flags (wr-uleb dr)]
+                        (if (icmp-eq flags 2) (wr-uleb dr) 0)          ; passive/explicit-memidx form
+                        (let [(mut off) 0]
+                          (if (or (icmp-eq flags 0) (icmp-eq flags 2))
+                              (let [op (wr-byte dr)]                    ; offset init expr
+                                (if (icmp-eq op 65) (store! off (wr-sleb dr)) 0)
+                                (wr-byte dr) 0)                          ; consume end 0x0b
+                            (store! off 0))
+                          (let [dl (wr-uleb dr) e (iadd (load off) dl)]
+                            (if (and (icmp-ne flags 1) (icmp-gt e (load end))) (store! end e) 0)
+                            (store! (field dr pos) (iadd (load (field dr pos)) dl)) 0))
+                        (store! s (iadd (load s) 1))))))))
+          0))))
+    (load end)))
+
+; True when the object imports the global `mod`.`name` (kind 3 import).
+(defn wasm-has-global-import [(obj (slice u8)) (mod (slice u8)) (name (slice u8))] (-> bool)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut found) false]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (or (icmp-ge (load (field r pos)) n) (load found)) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (or (icmp-ge (load k) ic) (load found)) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                              (if (icmp-eq kind 3)
+                                  (do (wr-byte ir) (wr-byte ir)
+                                      (if (and (str-eq imod mod) (str-eq inm name)) (do (store! found true) 0) 0) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    (load found)))
+
+; Number of global imports (kind 3) the object declares — the count of defined
+; globals wasm-globals-section emits, hence the index of an appended global.
+(defn wasm-count-global-imports [(obj (slice u8))] (-> i64)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut count) 0]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (icmp-ge (load k) ic) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                              (if (icmp-eq kind 3)
+                                  (do (wr-byte ir) (wr-byte ir) (store! count (iadd (load count) 1)) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    (load count)))
+
+; The defined-global index of the named kind-3 global import — its ordinal among all
+; global imports, which wasm-globals-section emits as defined globals in that same
+; order — or -1 if the object does not import it. Lets wasm-finalize export a specific
+; linker global (e.g. __stack_pointer) by the index it lands at.
+(defn wasm-global-import-index [(obj (slice u8)) (mod (slice u8)) (name (slice u8))] (-> i64)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut idx) 0 (mut ans) -1]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (or (icmp-ge (load (field r pos)) n) (icmp-ge (load ans) 0)) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (or (icmp-ge (load k) ic) (icmp-ge (load ans) 0)) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                              (if (icmp-eq kind 3)
+                                  (do (wr-byte ir) (wr-byte ir)
+                                      (if (and (str-eq imod mod) (str-eq inm name)) (store! ans (load idx))
+                                        (store! idx (iadd (load idx) 1))) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    (load ans)))
+
+; The shadow-stack top (initial __stack_pointer): first 16-aligned address above
+; the static data, plus the reserved stack size. The stack grows down from here.
+(defn wasm-stack-top [(obj (slice u8))] (-> i64)
+  (iadd (wasm-align-up (wasm-data-end obj) 16) (wasm-stack-size)))
+
+; The concrete i32 value for a linker-provided global import, or -1 if it cannot be
+; resolved (unknown GOT.mem symbol, or a global import this finalizer does not model).
+; wasm-finalize validates up front and turns a -1 into a clean Err, so a valid
+; single-unit object never emits a bad global. __memory_base and __table_base are 0
+; for a single unit; __stack_pointer is the top of the reserved shadow stack.
+(defn wasm-global-value [(obj (slice u8)) (offs (ArrayList i64)) (mod (slice u8)) (name (slice u8))] (-> i64)
+  (if (str-eq mod "env")
+      (if (str-eq name "__memory_base") 0
+        (if (str-eq name "__table_base") 0
+          (if (str-eq name "__stack_pointer") (wasm-stack-top obj)
+            -1)))
+    (if (str-eq mod "GOT.mem") (wasm-datasym-addr obj offs name)     ; -1 when the symbol is absent
+      -1)))
+
+; "" when every global import resolves; otherwise a message naming the problem. Lets
+; wasm-finalize reject an object with a global import it cannot model, via its Result.
+(defn wasm-globals-error [(obj (slice u8)) (a (ptr Allocator))] (-> (slice u8))
+  (let [offs (wasm-data-offsets obj a) (mut msg) ""
+        r (alloc-stack WasmReader) n (slice-len obj)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (icmp-ge (load k) ic) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                              (if (icmp-eq kind 3)
+                                  (do (wr-byte ir) (wr-byte ir)
+                                      (if (icmp-lt (wasm-global-value obj offs imod inm) 0)
+                                          (do (store! msg "wasm: unresolved global import (env.__memory_base/__table_base/__stack_pointer and GOT.mem.* are supported)") 0) 0) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    (load msg)))
+
+; Build the global section (id 6) payload defining every imported global as a
+; concrete i32.const, in import order so global indices stay valid. When add-heap
+; is set, an extra immutable `__heap_base` global (= heap-base) is appended so it
+; can be exported for the JS heap allocator. Empty ⇒ none.
+(defn wasm-globals-section [(obj (slice u8)) (add-heap bool) (heap-base i64) (a (ptr Allocator))] (-> (slice u8))
+  (let [offs (wasm-data-offsets obj a) (mut body) (al-new [u8] a) (mut count) 0
+        r (alloc-stack WasmReader) n (slice-len obj)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (icmp-ge (load k) ic) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                              (if (icmp-eq kind 3)
+                                  (let [valtype (wr-byte ir) gmut (wr-byte ir)
+                                        value (wasm-global-value obj offs imod inm)]
+                                    (wb! (mut body) valtype) (wb! (mut body) gmut)
+                                    (wb! (mut body) 65) (wsleb! (mut body) value) (wb! (mut body) 11)
+                                    (store! count (iadd (load count) 1)) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    ; Appended __heap_base: immutable i32 = heap-base (const init expr).
+    (if add-heap
+        (do (wb! (mut body) 127) (wb! (mut body) 0)
+            (wb! (mut body) 65) (wsleb! (mut body) heap-base) (wb! (mut body) 11)
+            (store! count (iadd (load count) 1)) 0) 0)
+    (if (icmp-eq (load count) 0) (slice-new [u8] (cast (ptr u8) 0) 0)
+      (let [(mut out) (al-new [u8] a)]
+        (wuleb! (mut out) (load count)) (wbytes! (mut out) (al-slice [u8] (load body)))
+        (al-slice [u8] (load out))))))
+
+; Read the min-pages field of a memory type (flags byte, then a uleb minimum).
+(defn wasm-mem-min [(memtype (slice u8))] (-> i64)
+  (let [r (alloc-stack WasmReader)]
+    (store! r (zeroed WasmReader)) (store! (field r data) memtype)
+    (wr-byte r)                                     ; limits flags
+    (wr-uleb r)))                                   ; min pages
+
+; Parse and rebuild the import section. LLVM's relocatable output imports one
+; memory as env.__linear_memory; final modules define that exact memory instead.
+; Global imports (env.__memory_base/__table_base/__stack_pointer + GOT.mem.*) and
+; the env.__indirect_function_table import are dropped here — they become defined
+; globals / a defined table (see wasm-globals-section, wasm-table-section) so their
+; bytes are not re-emitted.
+(defn wasm-imports [(payload (slice u8)) (a (ptr Allocator))] (-> WasmImports)
+  (let [r (alloc-stack WasmReader) out (alloc-stack WasmImports)]
+    (store! r (zeroed WasmReader)) (store! (field r data) payload)
+    (store! out (zeroed WasmImports))
+    (store! (field out items) (al-new [u8] a)) (store! (field out mem) (al-new [u8] a))
+    (let [count (wr-uleb r) (mut i) 0]
+      (loop (if (icmp-ge (load i) count) (break)
+        (let [start (load (field r pos)) mod (wr-name r) name (wr-name r) kind (wr-byte r) type-start (load (field r pos))]
+          (if (icmp-eq kind 0) (wr-uleb r)
+            (if (icmp-eq kind 1) (do (wr-byte r) (wr-skip-limits r))
+              (if (icmp-eq kind 2) (wr-skip-limits r)
+                (if (icmp-eq kind 3) (do (wr-byte r) (wr-byte r))
+                  (wr-uleb r)))))
+          (let [end (load (field r pos))]
+            (if (and (icmp-eq kind 2) (and (str-eq mod "env") (str-eq name "__linear_memory")))
+                (do (wbytes! (mut (field out mem)) (subslice payload type-start end))
+                    (store! (field out mem-min) (wasm-mem-min (subslice payload type-start end)))
+                    (store! (field out has-mem) true) 0)
+              (if (or (icmp-eq kind 3) (icmp-eq kind 1))   ; global import / indirect table → defined by finalizer; drop
+                  0
+                (do (wbytes! (mut (field out items)) (subslice payload start end))
+                    (store! (field out count) (iadd (load (field out count)) 1)) 0))))
+          (store! i (iadd (load i) 1)))))
+    (load out))))
+
+(defn wasm-import-payload [(a (ptr Allocator)) (im WasmImports)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a)]
+    (wuleb! (mut b) (load (field im count)))
+    (wbytes! (mut b) (al-slice [u8] (load (field im items))))
+    (al-slice [u8] (load b))))
+
+; Define one memory (count 1) with flags 0 (no max ⇒ growable, so the JS heap can
+; grow) and a minimum of at least req-pages, so static data + shadow stack fit in
+; the initial linear memory. req-pages 0 keeps the object's own minimum.
+(defn wasm-memory-payload [(a (ptr Allocator)) (im WasmImports) (req-pages i64)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a)
+        min (if (icmp-gt req-pages (load (field im mem-min))) req-pages (load (field im mem-min)))]
+    (wuleb! (mut b) 1) (wb! (mut b) 0) (wuleb! (mut b) min)
+    (al-slice [u8] (load b))))
+
+; Emit the export section payload: one entry per collected function export
+; (kind byte 0 = func), then the `memory` export (kind byte 2) when the module
+; defines memory. Each function is exported under its own symbol name, so JS sees
+; `instance.exports.<name>` for `main` and every (export-c …) function. When
+; sp-idx >= 0 the shadow-stack pointer global is also exported as __stack_pointer
+; (kind byte 3), so a host longjmp/panic landing pad can restore SP on unwind.
+(defn wasm-export-payload [(a (ptr Allocator)) (xs (ArrayList WasmExport)) (has-mem bool) (add-heap bool) (hb-idx i64) (sp-idx i64)] (-> (slice u8))
+  (let [(mut b) (al-new [u8] a) nfn (al-len [WasmExport] xs)
+        extra (iadd (iadd (if has-mem 1 0) (if add-heap 1 0)) (if (icmp-ge sp-idx 0) 1 0))]
+    (wuleb! (mut b) (iadd nfn extra))
+    (let [(mut i) 0]
+      (loop (if (icmp-ge (load i) nfn) (break)
+        (let [e (alloc-stack WasmExport)]
+          (store! e (al-get [WasmExport] xs (load i)))
+          (let [nm (load (field e name))]
+            (wuleb! (mut b) (slice-len nm)) (wbytes! (mut b) nm)
+            (wb! (mut b) 0) (wuleb! (mut b) (load (field e idx))))
+          (store! i (iadd (load i) 1))))))
+    (if has-mem (do (wuleb! (mut b) 6) (wbytes! (mut b) "memory") (wb! (mut b) 2) (wuleb! (mut b) 0)) 0)
+    ; kind byte 3 = global export; hb-idx is __heap_base's global index.
+    (if add-heap (do (wuleb! (mut b) 11) (wbytes! (mut b) "__heap_base") (wb! (mut b) 3) (wuleb! (mut b) hb-idx)) 0)
+    ; __stack_pointer: the mutable shadow-stack pointer global (index sp-idx).
+    (if (icmp-ge sp-idx 0) (do (wuleb! (mut b) 15) (wbytes! (mut b) "__stack_pointer") (wb! (mut b) 3) (wuleb! (mut b) sp-idx)) 0)
+    (al-slice [u8] (load b))))
+
+; ===================== function table (call_indirect) =======================
+; LLVM emits address-taken functions as an imported __indirect_function_table plus
+; an active `funcref` elem segment mapping table slots → function indices (slot 0 is
+; the reserved null/trap entry). At each use site the fnptr value is
+; `__table_base + <table index>`, with the table index left as a
+; R_WASM_TABLE_INDEX_REL_SLEB relocation placeholder (a padded 5-byte i32.const) in
+; reloc.CODE. The finalizer defines the table, keeps the elem segment (which already
+; references table 0), resolves __table_base = 0, and patches those placeholders to
+; the real table indices — the finalizer's one case of *consuming* a relocation.
+
+; All (func, table-index) pairs from active funcref element segments (flag 0, the
+; only form LLVM's single-unit PIC output emits: offset init expr + funcidx vec).
+(defn wasm-elems [(obj (slice u8)) (a (ptr Allocator))] (-> (ArrayList WasmElem))
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut out) (al-new [WasmElem] a)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 9)
+            (let [er (alloc-stack WasmReader)]
+              (store! er (zeroed WasmReader)) (store! (field er data) payload)
+              (let [nseg (wr-uleb er) (mut s) 0]
+                (loop (if (icmp-ge (load s) nseg) (break)
+                  (do (let [flags (wr-uleb er)]
+                        (if (icmp-eq flags 0)
+                            (let [(mut base) 0]
+                              (let [op (wr-byte er)]                       ; offset init expr
+                                (if (icmp-eq op 65) (do (store! base (wr-sleb er)) (wr-byte er) 0) 0))
+                              (let [cnt (wr-uleb er) (mut j) 0]
+                                (loop (if (icmp-ge (load j) cnt) (break)
+                                  (let [fi (wr-uleb er) e (alloc-stack WasmElem)]
+                                    (store! (field e func) fi) (store! (field e tidx) (iadd (load base) (load j)))
+                                    (al-push! (mut out) (load e))
+                                    (store! j (iadd (load j) 1)))))))
+                          0))
+                      (store! s (iadd (load s) 1)))))))
+          0))))
+    (load out)))
+
+; Highest table index used by any elem entry, or -1 if there are none (⇒ no table).
+(defn wasm-elem-max [(elems (ArrayList WasmElem))] (-> i64)
+  (let [n (al-len [WasmElem] elems) (mut i) 0 (mut mx) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (let [e (alloc-stack WasmElem)]
+        (store! e (al-get [WasmElem] elems (load i)))
+        (if (icmp-gt (load (field e tidx)) (load mx)) (store! mx (load (field e tidx))) 0)
+        (store! i (iadd (load i) 1)))))
+    (load mx)))
+
+; Table index the function is placed at, or -1 if it is not in the table.
+(defn wasm-elem-lookup [(elems (ArrayList WasmElem)) (func i64)] (-> i64)
+  (let [n (al-len [WasmElem] elems) (mut i) 0 (mut ans) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load ans) 0)) (break)
+      (let [e (alloc-stack WasmElem)]
+        (store! e (al-get [WasmElem] elems (load i)))
+        (if (icmp-eq (load (field e func)) func) (store! ans (load (field e tidx))) 0)
+        (store! i (iadd (load i) 1)))))
+    (load ans)))
+
+; Read one symbol, pushing its function index (Func symbols) or -1 onto `out`, so
+; `out` maps symbol index → function index (relocations reference symbol indices).
+(defn wasm-read-symfunc! [(sr (ptr WasmReader)) (out (mut (ArrayList i64)))] (-> i64)
+  (let [sk (wr-byte sr) flags (wr-uleb sr)]
+    (if (icmp-eq sk 1)                     ; SYMTAB_DATA
+        (do (wr-name sr)
+            (if (icmp-eq (iand flags 16) 0) (do (wr-uleb sr) (wr-uleb sr) (wr-uleb sr) 0) 0)
+            (al-push! (mut out) -1) 0)
+      (if (icmp-eq sk 4)                   ; SYMTAB_SECTION
+          (do (wr-uleb sr) (al-push! (mut out) -1) 0)
+        (let [index (wr-uleb sr)]          ; FUNCTION(0)/GLOBAL(2)/EVENT(3)/TABLE(5): index + optional name
+          (if (or (icmp-eq (iand flags 16) 0) (icmp-ne (iand flags 64) 0)) (do (wr-name sr) 0) 0)
+          (al-push! (mut out) (if (icmp-eq sk 0) index -1)) 0)))))
+
+; Map from linking symbol index → function index (or -1), in symbol-table order.
+(defn wasm-sym-funcs [(obj (slice u8)) (a (ptr Allocator))] (-> (ArrayList i64))
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut out) (al-new [i64] a)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 0)
+            (let [cr (alloc-stack WasmReader)]
+              (store! cr (zeroed WasmReader)) (store! (field cr data) payload)
+              (if (str-eq (wr-name cr) "linking")
+                  (do (wr-uleb cr)
+                      (loop (if (icmp-ge (load (field cr pos)) (slice-len payload)) (break)
+                        (let [kind (wr-byte cr) len (wr-uleb cr) sub (wr-bytes cr len)]
+                          (if (icmp-eq kind 8)
+                              (let [sr (alloc-stack WasmReader)]
+                                (store! sr (zeroed WasmReader)) (store! (field sr data) sub)
+                                (let [count (wr-uleb sr) (mut i) 0]
+                                  (loop (if (icmp-ge (load i) count) (break)
+                                    (do (wasm-read-symfunc! sr (mut out))
+                                        (store! i (iadd (load i) 1)))))))
+                            0)))) 0)
+                0))
+          0))))
+    (load out)))
+
+; True for relocation types that carry a trailing sleb addend (memory-address,
+; function-offset, section-offset families) — needed to parse reloc entries.
+(defn wasm-reloc-has-addend [(ty i64)] (-> bool)
+  (or (icmp-eq ty 3)
+  (or (icmp-eq ty 4)
+  (or (icmp-eq ty 5)
+  (or (icmp-eq ty 8)
+  (or (icmp-eq ty 9)
+  (or (icmp-eq ty 11)
+  (or (icmp-eq ty 14)
+  (or (icmp-eq ty 15)
+  (or (icmp-eq ty 16)
+  (or (icmp-eq ty 17)
+  (or (icmp-eq ty 21)
+  (or (icmp-eq ty 22)
+  (or (icmp-eq ty 23)
+      (icmp-eq ty 25)))))))))))))))
+
+; Overwrite the 5-byte padded (s)leb128 at buf[at..at+5] with `v` (a signed i32).
+(defn wasm-put-sleb5 [(buf (mut (ArrayList u8))) (at i64) (v i64)] (-> i64)
+  (al-set! (mut buf) at            (cast u8 (ior (iand v 127) 128)))
+  (al-set! (mut buf) (iadd at 1)   (cast u8 (ior (iand (ishr v 7) 127) 128)))
+  (al-set! (mut buf) (iadd at 2)   (cast u8 (ior (iand (ishr v 14) 127) 128)))
+  (al-set! (mut buf) (iadd at 3)   (cast u8 (ior (iand (ishr v 21) 127) 128)))
+  (al-set! (mut buf) (iadd at 4)   (cast u8 (iand (ishr v 28) 127)))
+  0)
+
+; The reloc.CODE section body (section index + entry count + entries), after its
+; name, or an empty slice when the object has none.
+(defn wasm-reloc-code [(obj (slice u8))] (-> (slice u8))
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut ans) (slice-new [u8] (cast (ptr u8) 0) 0)]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 0)
+            (let [cr (alloc-stack WasmReader)]
+              (store! cr (zeroed WasmReader)) (store! (field cr data) payload)
+              (if (str-eq (wr-name cr) "reloc.CODE")
+                  (do (store! ans (subslice payload (load (field cr pos)) (slice-len payload))) 0) 0))
+          0))))
+    (load ans)))
+
+; "" when every table-index relocation resolves to a table slot; otherwise a message.
+; Guarantees wasm-patch-code never silently skips a placeholder it cannot resolve.
+(defn wasm-table-reloc-error [(obj (slice u8)) (symfuncs (ArrayList i64)) (elems (ArrayList WasmElem))] (-> (slice u8))
+  (let [reloc (wasm-reloc-code obj) (mut msg) ""]
+    (if (icmp-gt (slice-len reloc) 0)
+        (let [rr (alloc-stack WasmReader)]
+          (store! rr (zeroed WasmReader)) (store! (field rr data) reloc)
+          (wr-uleb rr)
+          (let [cnt (wr-uleb rr) (mut k) 0]
+            (loop (if (icmp-ge (load k) cnt) (break)
+              (do (let [ty (wr-byte rr) off (wr-uleb rr) idx (wr-uleb rr)]
+                    (if (wasm-reloc-has-addend ty) (do (wr-sleb rr) 0) 0)
+                    (if (or (icmp-eq ty 1) (icmp-eq ty 12))
+                        (let [func (if (icmp-lt idx (al-len [i64] symfuncs)) (al-get [i64] symfuncs idx) -1)]
+                          (if (icmp-lt (wasm-elem-lookup elems func) 0)
+                              (do (store! msg "wasm: table-index relocation references a function with no table slot") 0) 0) 0)
+                      0))
+                  (store! k (iadd (load k) 1)))))))
+      0)
+    (load msg)))
+
+; Apply table-index relocations to a copy of the code section payload: each
+; R_WASM_TABLE_INDEX_(REL_)SLEB placeholder is rewritten to the referenced function's
+; table index (relative to __table_base = 0). Other relocation kinds are left alone —
+; they address globals/types/tables whose indices this finalizer preserves.
+(defn wasm-patch-code [(code-payload (slice u8)) (obj (slice u8)) (symfuncs (ArrayList i64)) (elems (ArrayList WasmElem)) (a (ptr Allocator))] (-> (slice u8))
+  (let [reloc (wasm-reloc-code obj)]
+    (if (icmp-eq (slice-len reloc) 0) code-payload
+      (let [(mut buf) (al-new [u8] a) m (slice-len code-payload) (mut i) 0]
+        (loop (if (icmp-ge (load i) m) (break)
+          (do (al-push! (mut buf) (slice-get code-payload (load i))) (store! i (iadd (load i) 1)))))
+        (let [rr (alloc-stack WasmReader)]
+          (store! rr (zeroed WasmReader)) (store! (field rr data) reloc)
+          (wr-uleb rr)                                   ; section index
+          (let [cnt (wr-uleb rr) (mut k) 0]
+            (loop (if (icmp-ge (load k) cnt) (break)
+              (do (let [ty (wr-byte rr) off (wr-uleb rr) idx (wr-uleb rr)]
+                    (if (wasm-reloc-has-addend ty) (do (wr-sleb rr) 0) 0)
+                    (if (or (icmp-eq ty 1) (icmp-eq ty 12))
+                        (let [func (if (icmp-lt idx (al-len [i64] symfuncs)) (al-get [i64] symfuncs idx) -1)
+                              tidx (wasm-elem-lookup elems func)]
+                          (if (icmp-ge tidx 0) (wasm-put-sleb5 (mut buf) off tidx) 0) 0)
+                      0))
+                  (store! k (iadd (load k) 1))))))
+          (al-slice [u8] (load buf)))))))
+
+; Table section (id 4) payload: one funcref table with min = highest slot + 1, so
+; every elem entry (and the reserved null slot 0) fits. Empty ⇒ no table needed.
+(defn wasm-table-section [(maxtidx i64) (a (ptr Allocator))] (-> (slice u8))
+  (if (icmp-lt maxtidx 0) (slice-new [u8] (cast (ptr u8) 0) 0)
+    (let [(mut b) (al-new [u8] a)]
+      (wuleb! (mut b) 1)                    ; one table
+      (wb! (mut b) 112)                     ; 0x70 funcref
+      (wb! (mut b) 0)                       ; limits: min only
+      (wuleb! (mut b) (iadd maxtidx 1))     ; min slots
+      (al-slice [u8] (load b)))))
+
+; Convert one LLVM Wasm object into an executable module. Deliberately reject
+; objects whose linking table does not follow the simple single-unit form above.
+(defn wasm-finalize [(a (ptr Allocator)) (obj (slice u8))] (-> (Result (slice u8) (slice u8)))
+  (if (or (icmp-lt (slice-len obj) 8)
+          (not (and (icmp-eq (slice-get obj 0) (cast u8 0)) (and (icmp-eq (slice-get obj 1) (cast u8 97)) (and (icmp-eq (slice-get obj 2) (cast u8 115)) (icmp-eq (slice-get obj 3) (cast u8 109)))))))
+      (Err "wasm: LLVM did not emit a Wasm object")
+    (let [exports (wasm-scan-exports obj a) gerr (wasm-globals-error obj a)
+          elems (wasm-elems obj a) symfuncs (wasm-sym-funcs obj a)
+          treloc-err (wasm-table-reloc-error obj symfuncs elems)]
+      (if (icmp-gt (slice-len gerr) 0) (Err gerr)
+      (if (icmp-gt (slice-len treloc-err) 0) (Err treloc-err)
+      (if (not (wasm-exports-have-main exports)) (Err "wasm: cannot find main in the object symbol table")
+        ; Shadow stack (C0): when the object imports __stack_pointer, reserve a stack
+        ; region above the static data, size memory to cover it, and export __heap_base.
+        ; Function table (C1): when there are elem entries, define a table and patch
+        ; the code's table-index relocation placeholders.
+        (let [r (alloc-stack WasmReader) (mut out) (al-new [u8] a) (mut im) (zeroed WasmImports)
+              (mut have-imports) false (mut put-mem) false (mut put-globals) false (mut put-exports) false
+              has-sp (wasm-has-global-import obj "env" "__stack_pointer")
+              heap-base (wasm-align-up (wasm-stack-top obj) (wasm-page))
+              req-pages (if has-sp (idiv heap-base (wasm-page)) 0)
+              hb-idx (wasm-count-global-imports obj)
+              sp-idx (if has-sp (wasm-global-import-index obj "env" "__stack_pointer") -1)
+              maxtidx (wasm-elem-max elems)
+              tsec (wasm-table-section maxtidx a)
+              gsec (wasm-globals-section obj has-sp heap-base a) n (slice-len obj)]
+          (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+          (wbytes! (mut out) (subslice obj 0 8))
+          (loop (if (icmp-ge (load (field r pos)) n) (break)
+            (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+              ; table (id 4) then memory (id 5) precede globals/exports/elem (id 6/7/9).
+              (if (and (not (load put-mem)) (or (icmp-eq id 6) (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12))))))
+                  (do (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
+                      (if (and (load have-imports) (load (field im has-mem))) (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages)) 0)
+                      (store! put-mem true) 0) 0)
+              ; globals (id 6) sit between memory (5) and export (7): emit the resolved
+              ; linker globals here, after memory, before the export section.
+              (if (and (not (load put-globals)) (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
+                  (do (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0)
+                      (store! put-globals true) 0) 0)
+              (if (and (not (load put-exports)) (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
+                  (do (wasm-section! (mut out) 7 (wasm-export-payload a exports (and (load have-imports) (load (field im has-mem))) has-sp hb-idx sp-idx))
+                      (store! put-exports true) 0) 0)
+              (if (icmp-eq id 2)
+                  (do (store! im (wasm-imports payload a)) (store! have-imports true)
+                      (let [clean (wasm-import-payload a (load im))]
+                        (if (icmp-gt (slice-len clean) 1) (wasm-section! (mut out) 2 clean) 0)))
+                (if (icmp-eq id 7) 0
+                  (if (icmp-eq id 0)
+                      (let [nm (wasm-custom-name payload a)]
+                        (if (or (str-eq nm "linking") (starts-with nm "reloc.")) 0 (wasm-section! (mut out) id payload)))
+                    (if (icmp-eq id 10)
+                        (wasm-section! (mut out) 10 (if (icmp-ge maxtidx 0) (wasm-patch-code payload obj symfuncs elems a) payload))
+                      (wasm-section! (mut out) id payload))))))))
+          (if (not (load put-mem))
+              (do (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
+                  (if (and (load have-imports) (load (field im has-mem))) (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages)) 0)) 0)
+          (if (not (load put-globals)) (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0) 0)
+          (if (not (load put-exports)) (wasm-section! (mut out) 7 (wasm-export-payload a exports (and (load have-imports) (load (field im has-mem))) has-sp hb-idx sp-idx)) 0)
+          (Ok (al-slice [u8] (load out))))))))))

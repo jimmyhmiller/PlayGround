@@ -1,0 +1,35 @@
+(defn
+  worker
+  [(arg (ptr i8))]
+  (-> (ptr i8))
+  (let
+    [counter (cast (ptr i64) arg) (mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) 100000)
+        (break)
+        (do (atomic-add counter 1) (store! i (iadd (load i) 1))))))
+  (cast (ptr i8) 0))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [counter (alloc-stack i64) threads (alloc-stack (array Thread 4)) (mut i) 0]
+    (store! counter 0)
+    (loop
+      (if
+        (icmp-ge (load i) 4)
+        (break)
+        (do
+          (thread-spawn (index threads (load i)) (fnptr-of worker) (cast (ptr i8) counter))
+          (store! i (iadd (load i) 1)))))
+    (store! i 0)
+    (loop
+      (if
+        (icmp-ge (load i) 4)
+        (break)
+        (do (thread-join (index threads (load i))) (store! i (iadd (load i) 1)))))
+    (isub (load counter) 400000)))
+

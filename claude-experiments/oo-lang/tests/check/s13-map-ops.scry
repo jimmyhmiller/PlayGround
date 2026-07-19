@@ -1,0 +1,10 @@
+fn main() {
+  let m = Map<String, Int>()
+  m.set("a", 1)
+  print(m.containsKey("a"))
+  print(m.len())
+  match m.get("a") {
+    Some(v) -> print(v)
+    None -> print(0)
+  }
+}

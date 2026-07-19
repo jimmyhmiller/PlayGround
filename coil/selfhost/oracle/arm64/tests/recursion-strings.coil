@@ -1,0 +1,70 @@
+; Deep + mutual recursion (frame discipline), string ops, hashmap stress.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/str.coil" :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/result.coil" :use *)
+(import "lib/slice.coil" :use *)
+(import "lib/control.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+; local two-string concat (sconcat lives in the selfhost tree, not lib)
+(defn sconcat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
+  (let [(mut sb) (sb-new a)]
+    (sb-push-str! (mut sb) x)
+    (sb-push-str! (mut sb) y)
+    (sb-str (load sb))))
+
+; local positive-int -> string (i64->str lives in the selfhost tree, not lib)
+(defn i64->str [(a (ptr Allocator)) (n i64)] (-> (slice u8))
+  (if (icmp-eq n 0) "0"
+    (let [(mut sb) (sb-new a) (mut digits) (al-new [u8] a) (mut v) n]
+      (loop (if (icmp-eq (load v) 0) (break)
+        (do (al-push! (mut digits) (cast u8 (iadd (irem (load v) 10) 48)))
+            (store! v (idiv (load v) 10)))))
+      (let [(mut i) (isub (al-len [u8] (load digits)) 1)]
+        (loop (if (icmp-lt (load i) 0) (break)
+          (do (sb-push-byte! (mut sb) (al-get [u8] (load digits) (load i)))
+              (store! i (isub (load i) 1))))))
+      (sb-str (load sb)))))
+
+(defn is-even [(n i64)] (-> bool) (if (icmp-eq n 0) true (is-odd (isub n 1))))
+(defn is-odd  [(n i64)] (-> bool) (if (icmp-eq n 0) false (is-even (isub n 1))))
+(defn ack [(m i64) (n i64)] (-> i64)
+  (if (icmp-eq m 0) (iadd n 1)
+    (if (icmp-eq n 0) (ack (isub m 1) 1)
+      (ack (isub m 1) (ack m (isub n 1))))))
+
+(defn main [] (-> i64)
+  (let [w (stdout) a (malloc-allocator)]
+    (print-str w "even4k=") (print-bool w (is-even 4000)) (print-nl w)
+    (print-str w "odd4k1=") (print-bool w (is-odd 4001)) (print-nl w)
+    (out w "ack23" (ack 2 3))
+    (out w "ack32" (ack 3 2))
+    ; string building + searching
+    (let [(mut sb) (sb-new a) (mut i) 0]
+      (loop (if (icmp-ge (load i) 50) (break)
+        (do (sb-push-str! (mut sb) (i64->str a (load i)))
+            (sb-push-byte! (mut sb) (cast u8 45))
+            (store! i (iadd (load i) 1)))))
+      (let [s (sb-str (load sb))]
+        (out w "sblen" (slice-len s))
+        (out w "find" (match (str-find s "25-26-") (Some [i] i) (None [] -1)))
+        (print-str w "sub=") (print-str w (subslice s 0 12)) (print-nl w)))
+    (print-str w "eq=") (print-bool w (str-eq (sconcat a "foo" "bar") "foobar")) (print-nl w)
+    ; hashmap with string keys: insert 200, look up spot values
+    (let [(mut m) (hm-new [(slice u8) i64] a (str-keyops)) (mut i) 0]
+      (loop (if (icmp-ge (load i) 200) (break)
+        (do (hm-put! (mut m) (sconcat a "key" (i64->str a (load i))) (imul (load i) 3))
+            (store! i (iadd (load i) 1)))))
+      (out w "hm0" (match (hm-get [(slice u8) i64] m "key0") (Some [v] v) (None [] -1)))
+      (out w "hm77" (match (hm-get [(slice u8) i64] m "key77") (Some [v] v) (None [] -1)))
+      (out w "hm199" (match (hm-get [(slice u8) i64] m "key199") (Some [v] v) (None [] -1)))
+      (out w "hmmiss" (match (hm-get [(slice u8) i64] m "nope") (Some [v] v) (None [] -1)))
+      (out w "hmlen" (hm-len m)))
+    0))

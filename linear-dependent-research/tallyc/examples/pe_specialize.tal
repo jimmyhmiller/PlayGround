@@ -1,0 +1,36 @@
+// STATIC-ARGUMENT SPECIALISATION — full memoisation: a recursion applied to a
+// fixed CONFIGURATION at a dynamic argument becomes a fresh specialised loop.
+//
+//   tally run  examples/pe_specialize.tal   → 37
+//   tally dump examples/pe_specialize.tal cube
+//       → \n. (fix f. \e. match e { Zero => 1, Succ(k) => mul(3, f(k)) }) n
+//
+// `pow(base, exp)` recurses on `exp`; `base` is a constant configuration.
+// Specialising `pow` to `base = 3` (in `cube`) generates a FRESH recursive
+// residual `pow$3` — base 3 substituted in (`mul(3, …)`), the recursion tied to
+// a new `Fix` binder, and the `base` parameter dropped entirely. This is the
+// classic static-argument transformation, done automatically.
+//
+// It is SOUND by construction: the transform applies only when the configuration
+// is passed VERBATIM through every recursive call (so dropping it is safe). An
+// accumulator that CHANGES its config across the recursion is detected and left
+// as the generic recursive function (correct, just not specialised) — the PE
+// pass never changes what a program computes.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+pow : Nat -> Nat -> Nat
+%partial
+fn pow(base, exp) {
+  match exp {
+    Zero    => Succ(Zero),
+    Succ(k) => mul(base, pow(base, k)),
+  }
+}
+
+cube : Nat -> Nat
+fn cube(n) { pow(Succ(Succ(Succ(Zero))), n) }   // specialises to a fresh pow$3
+
+main : Nat
+fn main() { cube(0) + cube(2) + cube(3) }        // 1 + 9 + 27

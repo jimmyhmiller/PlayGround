@@ -1,0 +1,8 @@
+(module app)
+(import "sigcheck.coil" :use *)
+(checker check-sigs)
+
+(defn add [(x i64) (y i64)] (-> i64) (iadd x y))
+
+(defn main [] (-> i64)
+  (isub (add 21 21) 42))   ; add returns i64, not a pointer → allowed → 0

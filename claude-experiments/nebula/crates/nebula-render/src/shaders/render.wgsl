@@ -1,0 +1,177 @@
+// Node + edge rendering. Nodes are instanced SDF circles (crisp at any zoom);
+// edges are 1px lines with endpoint-blended colors and low alpha so dense
+// regions read as luminous bundles rather than solid fill.
+
+struct Camera {
+    center: vec2<f32>,
+    scale: vec2<f32>,
+    viewport: vec2<f32>,
+    zoom: f32,
+    _pad: f32,
+};
+
+struct RenderParams {
+    base_radius_px: f32,
+    min_radius_px: f32,
+    max_radius_px: f32,
+    size_gamma: f32,
+    edge_alpha: f32,
+    node_alpha: f32,
+    _p0: f32,
+    _p1: f32,
+};
+
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var<uniform> params: RenderParams;
+
+@group(1) @binding(0) var<storage, read> positions: array<vec2<f32>>;
+@group(1) @binding(1) var<storage, read> colors: array<u32>;
+@group(1) @binding(2) var<storage, read> sizes: array<f32>;
+@group(1) @binding(3) var<storage, read> edges: array<u32>;
+
+// Per-edge-type style. mode 0 = color edges by endpoint node color (default);
+// mode 1 = use `color` (a fixed per-type tint).
+struct EdgeStyle {
+    color: vec4<f32>,
+    mode: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+};
+@group(1) @binding(4) var<uniform> edge_style: EdgeStyle;
+
+fn unpack_color(c: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(c & 0xffu) / 255.0,
+        f32((c >> 8u) & 0xffu) / 255.0,
+        f32((c >> 16u) & 0xffu) / 255.0,
+        f32((c >> 24u) & 0xffu) / 255.0,
+    );
+}
+
+// ---------------- Nodes ----------------
+
+struct NodeVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_node(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> NodeVsOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let corner = corners[vi];
+    let world = positions[inst];
+
+    let r = clamp(
+        params.base_radius_px * pow(max(sizes[inst], 0.0001), params.size_gamma),
+        params.min_radius_px,
+        params.max_radius_px,
+    );
+    let radius_ndc = vec2<f32>(r * 2.0 / cam.viewport.x, r * 2.0 / cam.viewport.y);
+    let center_ndc = (world - cam.center) * cam.scale;
+
+    var out: NodeVsOut;
+    // Frustum cull: if the node is well outside NDC, collapse its quad offscreen
+    // so it costs no rasterization. Big win when zoomed into a subset of a huge
+    // graph — most nodes are offscreen and contribute nothing.
+    let m = radius_ndc + vec2<f32>(0.02, 0.02);
+    if (center_ndc.x < -1.0 - m.x || center_ndc.x > 1.0 + m.x ||
+        center_ndc.y < -1.0 - m.y || center_ndc.y > 1.0 + m.y) {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.uv = corner;
+        out.color = vec4<f32>(0.0);
+        return out;
+    }
+    out.clip = vec4<f32>(center_ndc + corner * radius_ndc, 0.0, 1.0);
+    out.uv = corner;
+    var col = unpack_color(colors[inst]);
+    col.a = col.a * params.node_alpha;
+    out.color = col;
+    return out;
+}
+
+@fragment
+fn fs_node(in: NodeVsOut) -> @location(0) vec4<f32> {
+    let d = length(in.uv);
+    // Anti-aliased circle edge using screen-space derivative of the SDF.
+    let fw = fwidth(d);
+    let alpha = 1.0 - smoothstep(1.0 - fw, 1.0, d);
+    if (alpha <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+
+// ---------------- Edges ----------------
+
+struct EdgeVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+// Drawn indexed: the index buffer holds node ids (visible edges compacted by
+// edge_cull.wgsl in original order), so vertex_index IS the node id and the
+// output is a pure function of it — repeated endpoints hit the post-transform
+// vertex cache instead of re-running the shader. Frustum culling happened in
+// the compute pre-pass with the exact same test the old in-VS cull used.
+@vertex
+fn vs_edge(@builtin(vertex_index) vi: u32) -> EdgeVsOut {
+    let node = vi;
+    let world = positions[node];
+    let ndc = (world - cam.center) * cam.scale;
+    var out: EdgeVsOut;
+    out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    let node_col = unpack_color(colors[node]);
+    let rgb = select(node_col.rgb, edge_style.color.rgb, edge_style.mode == 1u);
+    out.color = vec4<f32>(rgb, params.edge_alpha);
+    return out;
+}
+
+@fragment
+fn fs_edge(in: EdgeVsOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+
+// ---------------- Picking ----------------
+// Renders each node's id (+1) into an R32Uint target; 0 means "no node".
+struct PickOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) id: u32,
+};
+
+@vertex
+fn vs_pick(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> PickOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let corner = corners[vi];
+    let world = positions[inst];
+    // Match node sizing, but enlarge the pick radius a little so small nodes are
+    // easy to click.
+    let r = clamp(
+        params.base_radius_px * pow(max(sizes[inst], 0.0001), params.size_gamma),
+        params.min_radius_px,
+        params.max_radius_px,
+    ) + 2.0;
+    let radius_ndc = vec2<f32>(r * 2.0 / cam.viewport.x, r * 2.0 / cam.viewport.y);
+    let center_ndc = (world - cam.center) * cam.scale;
+    var out: PickOut;
+    out.clip = vec4<f32>(center_ndc + corner * radius_ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.id = inst + 1u;
+    return out;
+}
+
+@fragment
+fn fs_pick(in: PickOut) -> @location(0) u32 {
+    if (length(in.uv) > 1.0) {
+        discard;
+    }
+    return in.id;
+}

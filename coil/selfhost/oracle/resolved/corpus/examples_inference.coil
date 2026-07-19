@@ -1,0 +1,14 @@
+(defstruct Pixel [(r :u8) (g :u8) (b :u8) (a :u8)])
+
+(defn channel :cc c [(base :u8)] (-> :u8) (iadd base 1))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [px (alloc-stack Pixel)]
+    (store! (field px r) 40)
+    (store! (field px g) (channel 1))
+    (iadd (cast :i64 (load (field px r))) (cast :i64 (load (field px g))))))
+

@@ -1,0 +1,10 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [src (alloc-stack (array i64 4)) dst (alloc-stack (array i64 4))]
+    (mem-fill (index src 0) 7 4)
+    (mem-copy (index dst 0) (index src 0) 4)
+    (iadd (load (index dst 3)) (if (mem-eql (index src 0) (index dst 0) 4) 100 0))))
+

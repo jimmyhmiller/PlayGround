@@ -1,0 +1,8 @@
+(module app)
+(import "typecheck.coil" :use *)
+(import "wa.coil" :as wa)
+(import "wb.coil" :as wb)
+(checker check-types)
+(defn mk-a [(x wa/Box)] (-> i64) 0)
+(defn mk-b [(x wb/Box)] (-> i64) 0)   ; wb/Box → banned; wa/Box → fine
+(defn main [] (-> i64) 0)

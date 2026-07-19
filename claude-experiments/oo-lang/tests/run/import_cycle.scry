@@ -1,0 +1,11 @@
+// a imports b imports a — legal (07-modules.md §5: cycles are legal; imports are pure
+// name-scoping over one whole-program compilation unit, they never execute anything).
+// The loader's existing abs-path dedup terminates the recursion.
+import cyclepkg.a.{AThing, callB}
+import cyclepkg.b.{makeA}
+
+fn main() {
+  print(AThing().hello())
+  print(callB())
+  print(makeA().hello())
+}

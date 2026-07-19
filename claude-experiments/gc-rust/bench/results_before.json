@@ -1,0 +1,368 @@
+{
+  "benchmarks": {
+    "nbody": {
+      "arg": "5000000",
+      "verify": "VERIFIED-MATCH",
+      "langs": {
+        "gcrust": {
+          "time": {
+            "mean_s": 0.23037801058333338,
+            "stddev_s": 0.0012740426010868994,
+            "min_s": 0.227833834,
+            "max_s": 0.23216808300000003,
+            "median_s": 0.2305322085
+          },
+          "compile_ms": 209.23766703344882,
+          "size_bytes": 1759688,
+          "output": {
+            "floats": [
+              -0.169075,
+              -0.169083
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.656534505227282
+        },
+        "rust": {
+          "time": {
+            "mean_s": 0.13907226795238095,
+            "stddev_s": 0.001400730356196134,
+            "min_s": 0.136986,
+            "max_s": 0.142127792,
+            "median_s": 0.13889104200000002
+          },
+          "compile_ms": 150.8484580554068,
+          "size_bytes": 485256,
+          "output": {
+            "floats": [
+              -0.169075,
+              -0.169083
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.0
+        },
+        "go": {
+          "time": {
+            "mean_s": 0.33489682930000003,
+            "stddev_s": 0.001346771962309138,
+            "min_s": 0.33330120900000004,
+            "max_s": 0.33682662500000005,
+            "median_s": 0.33476216700000005
+          },
+          "compile_ms": 48.75945899402723,
+          "size_bytes": 2528994,
+          "output": {
+            "floats": [
+              -0.169075,
+              -0.169083
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 2.4080777154987536
+        },
+        "java": {
+          "time": {
+            "mean_s": 0.25742706436363644,
+            "stddev_s": 0.002723943739944101,
+            "min_s": 0.251918375,
+            "max_s": 0.26045275,
+            "median_s": 0.25839870800000003
+          },
+          "compile_ms": 274.3918750202283,
+          "size_bytes": 4152,
+          "output": {
+            "floats": [
+              -0.169075,
+              -0.169083
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.8510308931740493
+        }
+      }
+    },
+    "spectralnorm": {
+      "arg": "3000",
+      "verify": "VERIFIED-MATCH",
+      "langs": {
+        "gcrust": {
+          "time": {
+            "mean_s": 0.32748172900000005,
+            "stddev_s": 0.0009847306183544083,
+            "min_s": 0.32605937500000004,
+            "max_s": 0.32902345800000005,
+            "median_s": 0.32748327050000003
+          },
+          "compile_ms": 200.8452499867417,
+          "size_bytes": 1760016,
+          "output": {
+            "floats": [
+              1.274224
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.0100610643460604
+        },
+        "rust": {
+          "time": {
+            "mean_s": 0.3242197334000001,
+            "stddev_s": 0.001064220563486017,
+            "min_s": 0.32279412500000004,
+            "max_s": 0.32588066600000004,
+            "median_s": 0.324494646
+          },
+          "compile_ms": 149.01516697136685,
+          "size_bytes": 487024,
+          "output": {
+            "floats": [
+              1.274224
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.0
+        },
+        "go": {
+          "time": {
+            "mean_s": 0.3251931208,
+            "stddev_s": 0.0010201656790630538,
+            "min_s": 0.323303542,
+            "max_s": 0.326435458,
+            "median_s": 0.3253329165
+          },
+          "compile_ms": 51.60004098434001,
+          "size_bytes": 2528594,
+          "output": {
+            "floats": [
+              1.274224
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.0030022460070283
+        },
+        "java": {
+          "time": {
+            "mean_s": 0.37545470420000004,
+            "stddev_s": 0.0014866399155015328,
+            "min_s": 0.37356675,
+            "max_s": 0.378283334,
+            "median_s": 0.3756746255
+          },
+          "compile_ms": 262.2500419965945,
+          "size_bytes": 1645,
+          "output": {
+            "floats": [
+              1.274224
+            ],
+            "ints_sample": []
+          },
+          "ratio_vs_rust": 1.158025454720826
+        }
+      }
+    },
+    "fannkuchredux": {
+      "arg": "11",
+      "verify": "VERIFIED-MATCH",
+      "langs": {
+        "gcrust": {
+          "time": {
+            "mean_s": 2.2359454209,
+            "stddev_s": 0.03747009709013131,
+            "min_s": 2.209696458,
+            "max_s": 2.336879709,
+            "median_s": 2.2260458955
+          },
+          "compile_ms": 191.6236660326831,
+          "size_bytes": 1759488,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              556355,
+              11,
+              51
+            ]
+          },
+          "ratio_vs_rust": 1.3491965475112286
+        },
+        "rust": {
+          "time": {
+            "mean_s": 1.6572421750000004,
+            "stddev_s": 0.00521160908391158,
+            "min_s": 1.650583209,
+            "max_s": 1.668074416,
+            "median_s": 1.6569361870000001
+          },
+          "compile_ms": 161.16895899176598,
+          "size_bytes": 465200,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              556355,
+              11,
+              51
+            ]
+          },
+          "ratio_vs_rust": 1.0
+        },
+        "go": {
+          "time": {
+            "mean_s": 1.3115618293,
+            "stddev_s": 0.0032836805890997444,
+            "min_s": 1.30642875,
+            "max_s": 1.31750675,
+            "median_s": 1.31087825
+          },
+          "compile_ms": 49.61608303710818,
+          "size_bytes": 2528962,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              556355,
+              11,
+              51
+            ]
+          },
+          "ratio_vs_rust": 0.7914122927145513
+        },
+        "java": {
+          "time": {
+            "mean_s": 2.1432353916,
+            "stddev_s": 0.23611304759043583,
+            "min_s": 1.842587375,
+            "max_s": 2.327851375,
+            "median_s": 2.323734313
+          },
+          "compile_ms": 257.1084579685703,
+          "size_bytes": 1643,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              556355,
+              11,
+              51
+            ]
+          },
+          "ratio_vs_rust": 1.293254192978766
+        }
+      }
+    },
+    "binarytrees": {
+      "arg": "16",
+      "verify": "VERIFIED-MATCH",
+      "langs": {
+        "gcrust": {
+          "time": {
+            "mean_s": 0.32584047222222223,
+            "stddev_s": 0.0021136561854748132,
+            "min_s": 0.323651458,
+            "max_s": 0.330806708,
+            "median_s": 0.325156292
+          },
+          "compile_ms": 173.25862497091293,
+          "size_bytes": 1759688,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              17,
+              262143,
+              65536,
+              4,
+              2031616,
+              16384
+            ]
+          },
+          "ratio_vs_rust": 0.9918661707331276
+        },
+        "rust": {
+          "time": {
+            "mean_s": 0.3285125371111111,
+            "stddev_s": 0.0015352916956082327,
+            "min_s": 0.32546200000000003,
+            "max_s": 0.330715334,
+            "median_s": 0.32843820900000004
+          },
+          "compile_ms": 124.87549998331815,
+          "size_bytes": 465408,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              17,
+              262143,
+              65536,
+              4,
+              2031616,
+              16384
+            ]
+          },
+          "ratio_vs_rust": 1.0
+        },
+        "go": {
+          "time": {
+            "mean_s": 0.28039223310000005,
+            "stddev_s": 0.0013754072900195751,
+            "min_s": 0.277528041,
+            "max_s": 0.282578167,
+            "median_s": 0.280537354
+          },
+          "compile_ms": 46.825458004605025,
+          "size_bytes": 2421762,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              17,
+              262143,
+              65536,
+              4,
+              2031616,
+              16384
+            ]
+          },
+          "ratio_vs_rust": 0.8535206466265378
+        },
+        "java": {
+          "time": {
+            "mean_s": 0.10702071762962963,
+            "stddev_s": 0.0012954790188336985,
+            "min_s": 0.104969084,
+            "max_s": 0.10920420800000001,
+            "median_s": 0.106937667
+          },
+          "compile_ms": 249.70158300129697,
+          "size_bytes": 2202,
+          "output": {
+            "floats": [],
+            "ints_sample": [
+              17,
+              262143,
+              65536,
+              4,
+              2031616,
+              16384
+            ]
+          },
+          "ratio_vs_rust": 0.3257736175634373
+        }
+      }
+    }
+  },
+  "langs": {
+    "gcrust": "gc-rust",
+    "rust": "Rust",
+    "go": "Go",
+    "java": "JVM (Java)"
+  },
+  "lang_order": [
+    "gcrust",
+    "rust",
+    "go",
+    "java"
+  ],
+  "meta": {
+    "args": {
+      "nbody": "5000000",
+      "spectralnorm": "3000",
+      "fannkuchredux": "11",
+      "binarytrees": "16"
+    }
+  }
+}

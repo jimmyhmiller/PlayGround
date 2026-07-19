@@ -1,0 +1,12 @@
+fn main() {
+  let xs = List<Int>()
+  xs.push(10)
+  xs.push(20)
+  xs.push(30)
+  var total = 0
+  for x in xs {
+    total = total + x
+  }
+  print(total)
+  print(xs.len())
+}

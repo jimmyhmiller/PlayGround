@@ -1,0 +1,65 @@
+// binary-trees — gc-rust port of the Computer Language Benchmarks Game
+// algorithm (the GC allocation/tracing stress test). Faithful translation of the
+// same algorithm as binarytrees.rs / .go / .java in this directory: a stretch
+// tree, a long-lived tree, and a depth-doubling loop of short-lived trees, all
+// node-count-checksummed. This is the one benchmark that pits gc-rust's garbage
+// collector directly against Rust's Rc/Box, Go's GC and the JVM's GC.
+//
+// Algorithm origin: The Computer Language Benchmarks Game (BSD-3-Clause); this
+// gc-rust translation written for the gc-rust benchmark comparison.
+//
+// DEPTH (n) is hardcoded to match the CLI arg the harness passes to the others.
+// Output: the same sequence of integers the canonical programs print (the
+// harness compares the integer sequence across languages).
+
+enum Tree { Leaf, Node(Tree, Tree) }
+
+fn make(depth: i64) -> Tree {
+    if depth > 0 {
+        Tree::Node(make(depth - 1), make(depth - 1))
+    } else {
+        Tree::Leaf
+    }
+}
+
+fn check(t: Tree) -> i64 {
+    match t {
+        Tree::Leaf => 1,
+        Tree::Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+fn main() -> i64 {
+    let min_depth = 4;
+    let n = 16;
+    let max_depth = if min_depth + 2 > n { min_depth + 2 } else { n };
+
+    // stretch tree
+    let stretch_depth = max_depth + 1;
+    let stretch = make(stretch_depth);
+    print_int(stretch_depth);
+    print_int(check(stretch));
+
+    // long-lived tree
+    let long_lived = make(max_depth);
+
+    let mut d = min_depth;
+    while d <= max_depth {
+        let iterations = 1 << (max_depth - d + min_depth);
+        let mut chk = 0;
+        let mut i = 0;
+        while i < iterations {
+            let t = make(d);
+            chk = chk + check(t);
+            i = i + 1;
+        }
+        print_int(iterations);
+        print_int(d);
+        print_int(chk);
+        d = d + 2;
+    }
+
+    print_int(max_depth);
+    print_int(check(long_lived));
+    0
+}

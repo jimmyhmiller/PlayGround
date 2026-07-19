@@ -1,0 +1,97 @@
+(module dbgalloc)
+; A poison-on-free DEBUG allocator (mem-2) — the `--debug-checks` build mode's answer
+; to "use-after-free / double-free are bare signals with zero diagnostic, below C".
+;
+;   (import "dbgalloc.coil" :use *)
+;   (let [a (debug-allocator (malloc-allocator))] …)   ; wrap ANY allocator
+;
+; `(debug-allocator inner)` is a MACRO: with --debug-checks OFF it is EXACTLY `inner`
+; (no wrapper, zero cost); ON it returns a wrapping allocator that, per block, prepends
+; a `{magic,size}` header and:
+;   * free() checks the magic — a SECOND free (or a corrupt header) is a located
+;     "double free or heap corruption" abort instead of a bare signal or silent reuse;
+;   * free() then POISONS the payload to 0xDE, so a use-after-free reads an obvious
+;     sentinel (0xDEDEDEDE…) instead of live-looking data, and the real block is freed.
+; It lives in its OWN module (not lib/alloc.coil) so the always-loaded core allocator
+; stays byte-for-byte unchanged in release builds — the debug hooks are concrete C-ABI
+; functions that mono cannot dead-strip, so bundling them into alloc.coil would emit
+; them into every allocating program. This module is loaded only when imported.
+(export debug-allocator)
+
+(import "alloc.coil" :use *)   ; Allocator, raw-alloc/raw-free, create, unwrap-ptr, abort
+(import "slice.coil" :use *)   ; slice-data / slice-len for the diagnostic message
+
+; write(2) for the diagnostic. Kept module-private (only `debug-allocator` is exported)
+; so it never collides with io.coil's `write` through a `:use *` re-export.
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+
+; A live block's header magic (0xDEADBEEF) and a freed block's (0xDEADDEAD). Chosen to be
+; wildly improbable as real leading payload words, and to make a freed block obvious.
+(defn dbg-magic-live [] (-> i64) 3735928559)   ; 0xDEADBEEF
+(defn dbg-magic-dead [] (-> i64) 3735936685)   ; 0xDEADFDED
+
+; Header carried in front of every user block; the payload begins `dbg-hdr-bytes` after.
+(defstruct DbgHdr [(magic i64) (size i64)])
+(defn dbg-hdr-bytes [] (-> i64) 16)            ; sizeof DbgHdr (two i64)
+
+(defn dbg-report! [(msg (slice u8))] (-> i64)
+  (write 2 (cast (ptr i8) (slice-data msg)) (cast isize (slice-len msg)))
+  (abort) 0)
+
+; Overwrite n payload bytes with 0xDE (a manual loop — no memset extern to collide).
+(defn dbg-poison! [(p (ptr i8)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index p (load i)) (cast i8 222))    ; 0xDE
+          (store! i (iadd (load i) 1))))))
+  0)
+
+; ---- the wrapping vtable hooks (C-ABI; ctx = the inner (ptr Allocator)) -------------
+(defn dbg-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (let [inner (cast (ptr Allocator) ctx)]
+    (match (raw-alloc inner (iadd size (dbg-hdr-bytes)) align)
+      (None []  (None))
+      (Some [p] (let [h (cast (ptr DbgHdr) p)]
+                  (store! (field h magic) (dbg-magic-live))
+                  (store! (field h size) size)
+                  (Some (index p (dbg-hdr-bytes))))))))    ; payload = block + header
+
+(defn dbg-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  (None))   ; no in-place resize: the caller alloc-copy-frees, which re-checks the header
+
+; free() QUARANTINES the block — it marks the header dead, poisons the payload, and
+; does NOT return the memory to the inner allocator. That is what makes detection
+; reliable: if the block were freed back, `malloc` would overwrite our header with its
+; own free-list bookkeeping, so a later double-free would read garbage (an imprecise
+; "corruption"), and a use-after-free could read a re-handed-out live value. Holding the
+; block keeps the DEAD magic and the 0xDE poison intact — a debug allocator trades
+; memory for detection (like ASan's quarantine). This is a DEBUG build only.
+(defn dbg-free [(ctx (ptr i8)) (payload (ptr i8)) (size :i64) (align :i64)] (-> :i64)
+  (let [p (index payload (isub 0 (dbg-hdr-bytes)))       ; back up to the header
+        h (cast (ptr DbgHdr) p)]
+    (if (icmp-eq (load (field h magic)) (dbg-magic-dead))
+        (dbg-report! "coil: double free in debug-allocator (--debug-checks)\n")
+      (if (icmp-ne (load (field h magic)) (dbg-magic-live))
+          (dbg-report! "coil: invalid free (bad header) in debug-allocator (--debug-checks)\n")
+        0))
+    (store! (field h magic) (dbg-magic-dead))            ; mark freed — a later free trips above
+    (dbg-poison! payload (load (field h size)))          ; make use-after-free read 0xDE
+    0))                                                  ; quarantined: never returned to inner
+
+; Build the wrapping allocator over `inner`. The wrapper's own cell is carved from
+; `inner` (untracked — it is not user data), and `inner` is stored as the ctx.
+(defn debug-allocator-on [(inner (ptr Allocator))] (-> (ptr Allocator))
+  (let [a (unwrap-ptr [Allocator] (create [Allocator] inner))]
+    (store! (field a alloc)  (fnptr-of dbg-alloc))
+    (store! (field a resize) (fnptr-of dbg-resize))
+    (store! (field a free)   (fnptr-of dbg-free))
+    (store! (field a ctx)    (cast (ptr i8) inner))
+    a))
+
+; `(debug-allocator inner)` — the surface. A macro so `(debug-checks?)` decides at
+; expansion time: OFF it is just `inner` (byte-identical, zero cost); ON it wraps.
+(defn debug-allocator [(inner Code)] (-> Code)
+  (if (debug-checks?)
+      `(debug-allocator-on ~inner)
+      inner))

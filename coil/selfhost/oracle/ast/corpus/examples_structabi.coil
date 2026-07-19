@@ -1,0 +1,12 @@
+(defstruct DivT [(quot :i32) (rem :i32)])
+
+(extern div [:i32 :i32] (-> DivT))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [d (div 47 5)]
+    (iadd (imul (cast :i64 (load (field d quot))) 10) (cast :i64 (load (field d rem))))))
+

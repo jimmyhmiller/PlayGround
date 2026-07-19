@@ -1,0 +1,3 @@
+(module badlib)
+(defn bad [] (-> i64) (iadd nope 1))
+(export bad)

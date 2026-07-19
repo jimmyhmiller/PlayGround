@@ -1,0 +1,6 @@
+module modpkg_b.shell
+
+class Shell {
+  label: String
+  fn describe() -> String { "B:" + self.label }
+}

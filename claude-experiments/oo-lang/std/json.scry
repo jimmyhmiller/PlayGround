@@ -1,0 +1,503 @@
+// std/json.scry — a JSON parser + serializer written IN Scry (Phase 8b, dogfood).
+//
+// Surface:
+//   enum JsonValue { JNull ; JBool(Bool) ; JNum(Float) ; JStr(String)
+//                    ; JArr(List<JsonValue>) ; JObj(Map<String, JsonValue>) }
+//   object Json { parse(input: String) -> Result<JsonValue, String>
+//                 stringify(v: JsonValue) -> String }
+//
+// Accessors (for the agent layer / Phase 8c to navigate a parsed body without matching):
+//   jget(v, key)   : Option<JsonValue>   — field of a JObj (None otherwise)
+//   jindex(v, i)   : Option<JsonValue>   — element of a JArr (None otherwise)
+//   jstr(v)        : Option<String>      — the String of a JStr
+//   jint(v)        : Option<Int>         — the (truncated) Int of a JNum
+//   jbool(v)       : Option<Bool>        — the Bool of a JBool
+//   jgetStr(v,key) : Option<String>      — jget then jstr (the common case)
+//   jpathStr(...)  : convenience helpers for content[0].text-style lookups live at the bottom.
+//
+// The parser is recursive descent over the raw UTF-8 bytes, driven by the Phase-8b builtins
+// String.charCode(i) / String.slice / String.toFloat() and Str.fromCharCode(cp). Numbers become
+// JNum(Float) via strtod (String.toFloat); Anthropic bodies are mostly ints + strings, and jint
+// truncates a whole-valued JNum back to Int for token counts. Errors are Result Err values with a
+// byte position — the parser NEVER panics on malformed input.
+
+module std.json
+
+enum JsonValue {
+  JNull
+  JBool(Bool)
+  JNum(Float)
+  JStr(String)
+  JArr(List<JsonValue>)
+  JObj(Map<String, JsonValue>)
+}
+
+// One mutable cursor over the input. `pos` is a byte index into `src`; `n` is its length.
+class JsonParser {
+  src: String
+  pos: Int
+  n: Int
+
+  fn init(src: String) {
+    self.src = src
+    self.pos = 0
+    self.n = src.len()
+  }
+
+  fn atEnd() -> Bool {
+    self.pos >= self.n
+  }
+
+  // The byte at the cursor, or -1 at end (charCode already returns -1 out of bounds).
+  fn cur() -> Int {
+    self.src.charCode(self.pos)
+  }
+
+  fn skipWs() {
+    while !self.atEnd() {
+      let c = self.cur()
+      // space(32) tab(9) newline(10) carriage-return(13)
+      if c == 32 || c == 9 || c == 10 || c == 13 {
+        self.pos = self.pos + 1
+      } else {
+        return
+      }
+    }
+  }
+
+  // --- value dispatch ---------------------------------------------------------
+  fn parseValue() -> Result<JsonValue, String> {
+    self.skipWs()
+    if self.atEnd() {
+      return Err("unexpected end of input at ${self.pos}")
+    }
+    let c = self.cur()
+    if c == 123 {                        // '{'
+      self.parseObject()
+    } else if c == 91 {                  // '['
+      self.parseArray()
+    } else if c == 34 {                  // '"'
+      let s = self.parseStringRaw()?
+      Ok(JStr(s))
+    } else if c == 116 {                 // 't' -> true
+      self.parseKeyword("true", JBool(true))
+    } else if c == 102 {                 // 'f' -> false
+      self.parseKeyword("false", JBool(false))
+    } else if c == 110 {                 // 'n' -> null
+      self.parseKeyword("null", JNull)
+    } else if c == 45 || (c >= 48 && c <= 57) {   // '-' or digit
+      self.parseNumber()
+    } else {
+      Err("unexpected character at ${self.pos}")
+    }
+  }
+
+  fn parseKeyword(word: String, val: JsonValue) -> Result<JsonValue, String> {
+    let wn = word.len()
+    var i = 0
+    while i < wn {
+      if self.atEnd() || self.cur() != word.charCode(i) {
+        return Err("invalid literal at ${self.pos}")
+      }
+      self.pos = self.pos + 1
+      i = i + 1
+    }
+    Ok(val)
+  }
+
+  // --- numbers ----------------------------------------------------------------
+  fn isNumberChar(c: Int) -> Bool {
+    // digit, '.', 'e'/'E', '+'/'-'
+    (c >= 48 && c <= 57) || c == 46 || c == 101 || c == 69 || c == 43 || c == 45
+  }
+
+  fn parseNumber() -> Result<JsonValue, String> {
+    let start = self.pos
+    if self.cur() == 45 {                // leading '-'
+      self.pos = self.pos + 1
+    }
+    while !self.atEnd() && self.isNumberChar(self.cur()) {
+      self.pos = self.pos + 1
+    }
+    let tok = self.src.slice(start, self.pos)
+    match tok.toFloat() {
+      Some(x) -> Ok(JNum(x))
+      None -> Err("invalid number '${tok}' at ${start}")
+    }
+  }
+
+  // --- strings ----------------------------------------------------------------
+  // Assumes cur() == '"'. Returns the decoded String (escapes resolved). Runs of ordinary bytes
+  // are sliced straight out of src (preserving raw UTF-8); escapes are decoded via decodeEscape.
+  fn parseStringRaw() -> Result<String, String> {
+    self.pos = self.pos + 1              // consume opening quote
+    var result = ""
+    var runStart = self.pos
+    while true {
+      if self.atEnd() {
+        return Err("unterminated string at ${self.pos}")
+      }
+      let c = self.cur()
+      if c == 34 {                       // closing '"'
+        result = result + self.src.slice(runStart, self.pos)
+        self.pos = self.pos + 1
+        return Ok(result)
+      } else if c == 92 {                // backslash: flush run, decode one escape
+        result = result + self.src.slice(runStart, self.pos)
+        self.pos = self.pos + 1          // consume backslash
+        if self.atEnd() {
+          return Err("dangling escape at ${self.pos}")
+        }
+        let e = self.cur()
+        let decoded = self.decodeEscape(e)?
+        result = result + decoded
+        runStart = self.pos
+      } else {
+        self.pos = self.pos + 1
+      }
+    }
+    Err("unreachable")
+  }
+
+  // `e` is the byte right after the backslash; consumes it (and any \u payload) and returns the
+  // decoded piece as a String.
+  fn decodeEscape(e: Int) -> Result<String, String> {
+    self.pos = self.pos + 1              // consume the escape selector
+    if e == 34 {                         // \"
+      Ok("\"")
+    } else if e == 92 {                  // \\
+      Ok("\\")
+    } else if e == 47 {                  // \/
+      Ok("/")
+    } else if e == 110 {                 // \n
+      Ok(Str.fromCharCode(10))
+    } else if e == 116 {                 // \t
+      Ok(Str.fromCharCode(9))
+    } else if e == 114 {                 // \r
+      Ok(Str.fromCharCode(13))
+    } else if e == 98 {                  // \b
+      Ok(Str.fromCharCode(8))
+    } else if e == 102 {                 // \f
+      Ok(Str.fromCharCode(12))
+    } else if e == 117 {                 // \uXXXX
+      self.decodeUnicode()
+    } else {
+      Err("invalid escape at ${self.pos}")
+    }
+  }
+
+  fn hexDigit(c: Int) -> Int {
+    if c >= 48 && c <= 57 {              // '0'-'9'
+      c - 48
+    } else if c >= 97 && c <= 102 {     // 'a'-'f'
+      (c - 97) + 10
+    } else if c >= 65 && c <= 70 {      // 'A'-'F'
+      (c - 65) + 10
+    } else {
+      -1
+    }
+  }
+
+  // reads exactly 4 hex digits at the cursor, advancing past them
+  fn hex4() -> Result<Int, String> {
+    var val = 0
+    var k = 0
+    while k < 4 {
+      if self.atEnd() {
+        return Err("truncated \\u escape at ${self.pos}")
+      }
+      let d = self.hexDigit(self.cur())
+      if d < 0 {
+        return Err("bad hex digit in \\u escape at ${self.pos}")
+      }
+      val = val * 16 + d
+      self.pos = self.pos + 1
+      k = k + 1
+    }
+    Ok(val)
+  }
+
+  // cursor is right after the 'u'. Handles UTF-16 surrogate pairs (😀 -> one codepoint).
+  fn decodeUnicode() -> Result<String, String> {
+    let hi = self.hex4()?
+    if hi >= 55296 && hi <= 56319 {     // high surrogate D800..DBFF
+      if self.atEnd() || self.cur() != 92 {
+        return Err("expected low surrogate at ${self.pos}")
+      }
+      self.pos = self.pos + 1           // consume '\'
+      if self.atEnd() || self.cur() != 117 {
+        return Err("expected \\u low surrogate at ${self.pos}")
+      }
+      self.pos = self.pos + 1           // consume 'u'
+      let lo = self.hex4()?
+      if lo < 56320 || lo > 57343 {     // DC00..DFFF
+        return Err("invalid low surrogate at ${self.pos}")
+      }
+      let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+      Ok(Str.fromCharCode(cp))
+    } else {
+      Ok(Str.fromCharCode(hi))
+    }
+  }
+
+  // --- arrays -----------------------------------------------------------------
+  fn parseArray() -> Result<JsonValue, String> {
+    self.pos = self.pos + 1              // consume '['
+    let xs = List<JsonValue>()
+    self.skipWs()
+    if !self.atEnd() && self.cur() == 93 {   // empty ']'
+      self.pos = self.pos + 1
+      return Ok(JArr(xs))
+    }
+    while true {
+      let v = self.parseValue()?
+      xs.push(v)
+      self.skipWs()
+      if self.atEnd() {
+        return Err("unterminated array at ${self.pos}")
+      }
+      let c = self.cur()
+      if c == 93 {                       // ']'
+        self.pos = self.pos + 1
+        return Ok(JArr(xs))
+      } else if c == 44 {                // ','
+        self.pos = self.pos + 1
+      } else {
+        return Err("expected ',' or ']' at ${self.pos}")
+      }
+    }
+    Err("unreachable")
+  }
+
+  // --- objects ----------------------------------------------------------------
+  fn parseObject() -> Result<JsonValue, String> {
+    self.pos = self.pos + 1              // consume '{'
+    let m = Map<String, JsonValue>()
+    self.skipWs()
+    if !self.atEnd() && self.cur() == 125 {  // empty '}'
+      self.pos = self.pos + 1
+      return Ok(JObj(m))
+    }
+    while true {
+      self.skipWs()
+      if self.atEnd() || self.cur() != 34 {
+        return Err("expected string key at ${self.pos}")
+      }
+      let key = self.parseStringRaw()?
+      self.skipWs()
+      if self.atEnd() || self.cur() != 58 {    // ':'
+        return Err("expected ':' at ${self.pos}")
+      }
+      self.pos = self.pos + 1            // consume ':'
+      let val = self.parseValue()?
+      m.set(key, val)
+      self.skipWs()
+      if self.atEnd() {
+        return Err("unterminated object at ${self.pos}")
+      }
+      let c = self.cur()
+      if c == 125 {                      // '}'
+        self.pos = self.pos + 1
+        return Ok(JObj(m))
+      } else if c == 44 {                // ','
+        self.pos = self.pos + 1
+      } else {
+        return Err("expected ',' or '}' at ${self.pos}")
+      }
+    }
+    Err("unreachable")
+  }
+
+  // top-level entry: one value, then only trailing whitespace allowed
+  fn parseTop() -> Result<JsonValue, String> {
+    self.skipWs()
+    let v = self.parseValue()?
+    self.skipWs()
+    if !self.atEnd() {
+      return Err("trailing content at ${self.pos}")
+    }
+    Ok(v)
+  }
+}
+
+object Json {
+  fn parse(input: String) -> Result<JsonValue, String> {
+    let p = JsonParser(src: input)
+    p.parseTop()
+  }
+
+  fn stringify(v: JsonValue) -> String {
+    match v {
+      JNull -> "null"
+      JBool(b) -> if b { "true" } else { "false" }
+      JNum(x) -> numToStr(x)
+      JStr(s) -> quoteString(s)
+      JArr(xs) -> stringifyArray(xs)
+      JObj(m) -> stringifyObject(m)
+    }
+  }
+}
+
+// A whole-valued Float re-emits with no fractional part ("42", not "42.0"); other values print
+// via the runtime's %g float formatting. This keeps the canonical round-trip of integer JSON.
+fn numToStr(x: Float) -> String {
+  "${x}"
+}
+
+fn stringifyArray(xs: List<JsonValue>) -> String {
+  var out = "["
+  var i = 0
+  let n = xs.len()
+  while i < n {
+    if i > 0 {
+      out = out + ","
+    }
+    out = out + Json.stringify(xs.get(i))
+    i = i + 1
+  }
+  out + "]"
+}
+
+fn stringifyObject(m: Map<String, JsonValue>) -> String {
+  var out = "{"
+  let ks = m.keys()
+  var i = 0
+  let n = ks.len()
+  while i < n {
+    if i > 0 {
+      out = out + ","
+    }
+    let k = ks.get(i)
+    out = out + quoteString(k) + ":"
+    match m.get(k) {
+      Some(v) -> {
+        out = out + Json.stringify(v)
+      }
+      None -> {
+        out = out + "null"
+      }
+    }
+    i = i + 1
+  }
+  out + "}"
+}
+
+// Emit a JSON string literal: wrap in quotes and escape ", \, and the C0 controls we can name.
+fn quoteString(s: String) -> String {
+  var out = "\""
+  var i = 0
+  let n = s.len()
+  while i < n {
+    let c = s.charCode(i)
+    if c == 34 {                         // "
+      out = out + "\\\""
+    } else if c == 92 {                  // backslash
+      out = out + "\\\\"
+    } else if c == 10 {                  // newline
+      out = out + "\\n"
+    } else if c == 9 {                   // tab
+      out = out + "\\t"
+    } else if c == 13 {                  // carriage return
+      out = out + "\\r"
+    } else if c == 8 {                   // backspace
+      out = out + "\\b"
+    } else if c == 12 {                  // form feed
+      out = out + "\\f"
+    } else {
+      out = out + Str.fromCharCode(c)
+    }
+    i = i + 1
+  }
+  out + "\""
+}
+
+// ============================================================================
+// Accessors — the navigation surface Phase 8c uses on a parsed response body.
+// ============================================================================
+
+// field lookup on a JObj (None for any other shape or a missing key)
+fn jget(v: JsonValue, key: String) -> Option<JsonValue> {
+  match v {
+    JObj(m) -> m.get(key)
+    JNull -> None
+    JBool(b) -> None
+    JNum(x) -> None
+    JStr(s) -> None
+    JArr(xs) -> None
+  }
+}
+
+// element lookup on a JArr (None for any other shape or out-of-range index)
+fn jindex(v: JsonValue, i: Int) -> Option<JsonValue> {
+  match v {
+    JArr(xs) -> if i >= 0 && i < xs.len() {
+      Some(xs.get(i))
+    } else {
+      None
+    }
+    JNull -> None
+    JBool(b) -> None
+    JNum(x) -> None
+    JStr(s) -> None
+    JObj(m) -> None
+  }
+}
+
+fn jstr(v: JsonValue) -> Option<String> {
+  match v {
+    JStr(s) -> Some(s)
+    JNull -> None
+    JBool(b) -> None
+    JNum(x) -> None
+    JArr(xs) -> None
+    JObj(m) -> None
+  }
+}
+
+fn jint(v: JsonValue) -> Option<Int> {
+  match v {
+    JNum(x) -> Some(floatToInt(x))
+    JNull -> None
+    JBool(b) -> None
+    JStr(s) -> None
+    JArr(xs) -> None
+    JObj(m) -> None
+  }
+}
+
+fn jbool(v: JsonValue) -> Option<Bool> {
+  match v {
+    JBool(b) -> Some(b)
+    JNull -> None
+    JNum(x) -> None
+    JStr(s) -> None
+    JArr(xs) -> None
+    JObj(m) -> None
+  }
+}
+
+// jget then jstr — the single most common lookup ("stop_reason", "text", ...).
+fn jgetStr(v: JsonValue, key: String) -> Option<String> {
+  match jget(v, key) {
+    Some(field) -> jstr(field)
+    None -> None
+  }
+}
+
+// jget then jint — for token counts etc.
+fn jgetInt(v: JsonValue, key: String) -> Option<Int> {
+  match jget(v, key) {
+    Some(field) -> jint(field)
+    None -> None
+  }
+}
+
+// Truncate a Float to an Int. Scry has no Float->Int cast op, so re-parse the %g rendering
+// (whole-valued JSON numbers render without a fraction) through toInt.
+fn floatToInt(x: Float) -> Int {
+  let s = "${x}"
+  match s.toInt() {
+    Some(n) -> n
+    None -> 0
+  }
+}

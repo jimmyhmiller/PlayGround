@@ -15,12 +15,19 @@ pub fn rule_has_input(r: &Rule) -> bool {
 }
 
 /// One end of an edge in a template. Resolved at spawn time.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeEnd {
     /// The newly-created node.
     ThisInstance,
     /// The node that did the spawning (the firing node, or an explicit parent).
     Parent,
+    /// A node sharing the spawner's enclosing-compound prefix, addressed by
+    /// its local (unqualified) name. Resolved at spawn time against the
+    /// spawner's qualified name: spawner `ASG::Scaler` + `Sibling("LB")`
+    /// → `ASG::LB`. Lets a dynamically-spawned worker wire itself to a
+    /// fixed sibling (e.g. a load balancer) rather than only to its
+    /// spawner. Hard-errors if no such sibling exists.
+    Sibling(String),
 }
 
 /// An edge declared inside a template. Created alongside the new

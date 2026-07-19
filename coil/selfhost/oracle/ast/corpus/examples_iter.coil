@@ -1,0 +1,31 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [arr (alloc-stack (array i64 3))]
+    (store! (index arr 0) 10)
+    (store! (index arr 1) 20)
+    (store! (index arr 2) 30)
+    (let
+      [(mut acc) 0]
+      (let
+        [(mut $g0) (isub 0 1)]
+        (loop
+          (store! $g0 (iadd (load $g0) 1))
+          (if
+            (icmp-lt (load $g0) 0)
+            (let [i (load $g0)] (store! acc (iadd (load acc) i)))
+            (break))))
+      (let
+        [(mut $g2) (isub 0 1)]
+        (loop
+          (store! $g2 (iadd (load $g2) 1))
+          (if
+            (icmp-lt (load $g2) 3)
+            (let
+              [$g1 (load $g2)]
+              (let [x (load (index arr $g1))] (store! acc (iadd (load acc) x))))
+            (break))))
+      (load acc))))
+

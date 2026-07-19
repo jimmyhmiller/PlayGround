@@ -1,0 +1,7 @@
+fn describe(code: Int) -> String {
+  match code {
+    200 -> "ok"
+    404 -> "not found"
+    _ -> "other"
+  }
+}

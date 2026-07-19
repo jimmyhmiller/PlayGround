@@ -70,9 +70,11 @@ impl Plugin for CompoundPlugin {
             .init_resource::<CanvasPositions>()
             .init_resource::<crate::canvas::CurrentCanvasVisual>()
             .add_message::<RebuildCompound>()
+            .init_resource::<SimTopologyFingerprint>()
             .add_systems(Update, (
                 drill_in_on_double_click,
                 drill_out_on_escape,
+                detect_dynamic_topology_change,
                 sync_canvas_population,
                 sync_grid_cell_paint,
             ).chain())
@@ -159,6 +161,54 @@ impl CompoundMembership {
             Some(n)
         })
     }
+}
+
+/// Cheap fingerprint of the sim's node/edge topology, used to notice
+/// when nodes are spawned or despawned *dynamically* (by `Effect::Spawn`
+/// / `Effect::Despawn` inside the running sim — e.g. an autoscaler) as
+/// opposed to by canvas load or compound rebuild. Those static paths
+/// already recompute [`CompoundMembership`]; the dynamic path has no
+/// other hook, so [`detect_dynamic_topology_change`] watches this.
+#[derive(Resource, Default)]
+pub struct SimTopologyFingerprint {
+    nodes: usize,
+    edges: usize,
+    /// Monotonic id high-water mark — distinguishes "spawned N, despawned
+    /// N" (same counts, different ids) from a true no-op.
+    next_node_id: u64,
+}
+
+/// Notice runtime spawn/despawn and refresh [`CompoundMembership`] so the
+/// population reconciler picks up the new/removed nodes. Membership is a
+/// pure function of node names, so dynamically-spawned nodes (whose names
+/// inherit their spawner's compound prefix) land in the right scope
+/// automatically. Writing the resource only when the fingerprint moved
+/// keeps `is_resource_changed` from firing every frame.
+pub fn detect_dynamic_topology_change(
+    mut driver: ResMut<crate::sim_driver::SimDriverRes>,
+    mut fingerprint: ResMut<SimTopologyFingerprint>,
+    mut membership: ResMut<CompoundMembership>,
+) {
+    // Copy the prior fingerprint out before the closure: `with_sim_mut`
+    // takes a `'static` closure (it may run on the sim worker thread),
+    // so it can't borrow `fingerprint`.
+    let (prev_nodes, prev_edges, prev_next) =
+        (fingerprint.nodes, fingerprint.edges, fingerprint.next_node_id);
+    let (nodes, edges, next_id, new_membership) = driver.0.with_sim_mut(move |sim| {
+        let changed = sim.nodes.len() != prev_nodes
+            || sim.edges.len() != prev_edges
+            || sim.next_node_id_hint() != prev_next;
+        let m = if changed { Some(compute_membership(sim)) } else { None };
+        (sim.nodes.len(), sim.edges.len(), sim.next_node_id_hint(), m)
+    });
+    let Some(new_membership) = new_membership else { return };
+    fingerprint.nodes = nodes;
+    fingerprint.edges = edges;
+    fingerprint.next_node_id = next_id;
+    // Assigning through `DerefMut` flags the resource changed, waking
+    // `sync_canvas_population` this same frame (it runs after us in the
+    // chain).
+    *membership = new_membership;
 }
 
 /// Build a [`CompoundMembership`] from the sim by matching node-name

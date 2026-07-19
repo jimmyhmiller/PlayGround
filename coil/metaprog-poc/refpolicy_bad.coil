@@ -1,0 +1,8 @@
+(module app)
+(import "refpolicy.coil" :use *)
+(checker check-refs)
+(defn at [(p (ptr i64))] (-> (ptr i64)) p)
+(defn take-fp [(fp (fnptr c [(ptr i64)] (ptr i64)))] (-> i64) 0)
+; `at` is never CALLED — only referenced as a function pointer. code-decl on the
+; (fnptr-of at) node still resolves it exactly and the checker bans it.
+(defn main [] (-> i64) (take-fp (fnptr-of at)))

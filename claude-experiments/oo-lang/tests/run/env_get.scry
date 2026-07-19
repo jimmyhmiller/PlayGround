@@ -1,0 +1,12 @@
+// Phase 8b: Env.get builtin. HOME is present in any shell env (=> Some); a nonsense
+// name is absent (=> None). Deterministic without hardcoding HOME's value.
+fn main() {
+  match Env.get("HOME") {
+    Some(v) -> Console.log("HOME: set")
+    None -> Console.log("HOME: unset")
+  }
+  match Env.get("SCRY_DEFINITELY_UNSET_XYZ") {
+    Some(v) -> Console.log("missing: Some")
+    None -> Console.log("missing: None")
+  }
+}

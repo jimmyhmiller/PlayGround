@@ -1,0 +1,17 @@
+(defn
+  def-arch-cc
+  [(name Code)]
+  (-> Code)
+  (if
+    (code-eq (target-arch) (quasiquote x86_64))
+    (quasiquote
+      (defcc (unquote name) :params [rax rdx] :ret rax :clobber [rax rdx rcx] :native fast))
+    (quasiquote
+      (defcc (unquote name) :params [x0 x1] :ret x0 :clobber [x0 x1 x2] :native fast))))
+
+(defcc platform-fast :params [x0 x1] :ret x0 :clobber [x0 x1 x2] :native fast)
+
+(defn add :cc platform-fast [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+
+(defn main [] (-> :i64) (add 20 22))
+

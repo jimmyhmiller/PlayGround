@@ -1,0 +1,26 @@
+(defn try [& (body Code)] (-> Code) (quasiquote (block :try (unquote-splicing body))))
+
+(defn
+  try!
+  [(e Code)]
+  (-> Code)
+  (let
+    [v (gensym) er (gensym)]
+    (quasiquote
+      (match
+        (unquote e)
+        (Ok [(unquote v)] (unquote v))
+        (Err [(unquote er)] (return-from :try (Err (unquote er))))))))
+
+(defn
+  try?
+  [(e Code)]
+  (-> Code)
+  (let
+    [v (gensym)]
+    (quasiquote
+      (match
+        (unquote e)
+        (Some [(unquote v)] (unquote v))
+        (None [] (return-from :try (None)))))))
+

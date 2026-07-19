@@ -1,0 +1,89 @@
+(defn
+  vec4f
+  [(x0 Code) (x1 Code) (x2 Code) (x3 Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir
+      (vec f32 4)
+      [(cast :f32 (unquote x0))
+        (cast :f32 (unquote x1))
+        (cast :f32 (unquote x2))
+        (cast :f32 (unquote x3))]
+      "%v0 = insertelement <4 x float> undef, $t0 $0, i32 0
+%v1 = insertelement <4 x float> %v0, $t1 $1, i32 1
+%v2 = insertelement <4 x float> %v1, $t2 $2, i32 2
+%r  = insertelement <4 x float> %v2, $t3 $3, i32 3
+ret $ret %r")))
+
+(defn
+  splat4f
+  [(x Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir
+      (vec f32 4)
+      [(cast :f32 (unquote x))]
+      "%v = insertelement <4 x float> undef, $t0 $0, i32 0
+%r = shufflevector <4 x float> %v, <4 x float> undef, <4 x i32> zeroinitializer
+ret $ret %r")))
+
+(defn
+  vadd4f
+  [(a Code) (b Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir (vec f32 4) [(unquote a) (unquote b)] "%r = fadd $ret $0, $1
+ret $ret %r")))
+
+(defn
+  vsub4f
+  [(a Code) (b Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir (vec f32 4) [(unquote a) (unquote b)] "%r = fsub $ret $0, $1
+ret $ret %r")))
+
+(defn
+  vmul4f
+  [(a Code) (b Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir (vec f32 4) [(unquote a) (unquote b)] "%r = fmul $ret $0, $1
+ret $ret %r")))
+
+(defn
+  vfma4f
+  [(a Code) (b Code) (c Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir
+      (vec f32 4)
+      [(unquote a) (unquote b) (unquote c)]
+      "declare <4 x float> @llvm.fma.v4f32(<4 x float>, <4 x float>, <4 x float>)
+%r = call $ret @llvm.fma.v4f32($t0 $0, $t1 $1, $t2 $2)
+ret $ret %r")))
+
+(defn
+  reduce-add4f
+  [(v Code)]
+  (-> Code)
+  (quasiquote
+    (llvm-ir
+      f32
+      [(unquote v)]
+      "declare float @llvm.vector.reduce.fadd.v4f32(float, <4 x float>)
+%r = call $ret @llvm.vector.reduce.fadd.v4f32(float 0.0, $t0 $0)
+ret $ret %r")))
+
+(defn
+  dot4f
+  [(a (vec f32 4)) (b (vec f32 4))]
+  (-> f32)
+  (llvm-ir
+    f32
+    [(llvm-ir (vec f32 4) [a b] "%r = fmul $ret $0, $1
+ret $ret %r")]
+    "declare float @llvm.vector.reduce.fadd.v4f32(float, <4 x float>)
+%r = call $ret @llvm.vector.reduce.fadd.v4f32(float 0.0, $t0 $0)
+ret $ret %r"))
+

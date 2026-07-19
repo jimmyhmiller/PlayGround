@@ -1,0 +1,10 @@
+error: in 'main': arithmetic on different types (f64 vs i64)
+  --> selfhost/oracle/diag/inputs/08-macro-trace.coil:3:24
+  |
+3 | (defn main [] (-> i64) (add-half 3))
+  |                        ^^^^^^^^^^^^
+note: in expansion of macro `app.add-half`
+  ::: selfhost/oracle/diag/inputs/08-macro-trace.coil:2:1
+  |
+2 | (defn add-half [(x Code)] (-> Code) `(iadd ~x 1.5))
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

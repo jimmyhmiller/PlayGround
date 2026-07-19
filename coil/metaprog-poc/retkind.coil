@@ -1,0 +1,51 @@
+(module retkind)
+; A SEMANTIC TRANSFORMER. `(retkind (f …))` is a marker whose wrapped call's callee
+; is inspected: the transform reads f's REAL declared return type from the checked
+; program (`code-decl`) and rewrites the marker to `1` if f returns a pointer, else
+; `2`. This needs post-typecheck signatures — impossible for a syntactic transform —
+; and the pipeline re-resolves + re-typechecks the rewritten program to a fixpoint.
+; Idempotent: the `retkind` marker is removed, so a second pass changes nothing.
+;
+; The marker `retkind` is a real generic identity `[(x T)] -> i64` returning 0, so
+; the ORIGINAL program typechecks and (un-transformed) would return 0. The transform
+; makes it return a value derived from the callee's type — proof it read real work.
+
+(defn callee-returns-ptr? [(call Code)] (-> bool)
+  (if (and (code-list? call) (icmp-gt (code-count call) 0))
+      (let [head (code-nth call 0)]
+        (if (code-sym? head)
+            (let [d (code-decl head)]
+              (if (and (code-list? d) (and (icmp-ge (code-count d) 5) (code-eq (code-nth d 2) `fn)))
+                  (let [ret (code-nth d 4)]
+                    (and (code-list? ret) (and (icmp-gt (code-count ret) 0) (code-eq (code-nth ret 0) `ptr))))
+                false))
+          false))
+    false))
+
+; does form `f` contain a (retkind …) marker anywhere? (only rebuild subtrees that do,
+; so untouched forms — and their vectors — are preserved exactly)
+(defn has-marker? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `retkind)) true
+        (has-marker-kids? f 0 (code-count f)))
+    false))
+(defn has-marker-kids? [(f Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false (if (has-marker? (code-nth f i)) true (has-marker-kids? f (iadd i 1) n))))
+
+(defn rewrite [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `retkind))
+          (if (callee-returns-ptr? (code-nth f 1)) `1 `2)
+        (if (has-marker? f) `(~@(rewrite-kids f 0 (code-count f))) f))
+    f))
+(defn rewrite-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(rewrite (code-nth f i)) ~@(rewrite-kids f (iadd i 1) n))))
+; MODULE-SHAPED: rewrite each module's forms (index 0 is the module name).
+(defn retkind-mod [(m Code)] (-> Code)
+  `(~(code-nth m 0) ~@(rewrite-kids m 1 (code-count m))))
+(defn retkind-mods [(mods Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(retkind-mod (code-nth mods i)) ~@(retkind-mods mods (iadd i 1) n))))
+(defn retkind-dialect [(prog Code)] (-> Code)
+  `(do ~@(retkind-mods prog 0 (code-count prog))))

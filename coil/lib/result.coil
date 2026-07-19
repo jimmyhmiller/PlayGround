@@ -1,0 +1,52 @@
+(module result)
+; `Option` (None | Some) and `Result` (Ok | Err) themselves live in the auto-loaded
+; prelude (coil.core) — they are core vocabulary, in scope with no import. This module
+; is the everyday LIBRARY over them: the small combinators every program reaches for,
+; each a few lines over `match`. Nothing here is compiler magic.
+;
+;   (import "lib/result.coil" :use *)   ; unwrap-or / opt-map / and-then / ok-or / …
+;
+; The mapping/binding combinators take a `(fnptr c …)` (Coil's first-class function
+; pointer) — pass one with `(fnptr-of your-fn)`. Every combinator is generic, so it
+; costs nothing unless you call it (a generic emits no code until it is instantiated).
+
+; ---- interrogating a value (predicates) ------------------------------------
+(defn some? [T] [(o (Option T))] (-> bool)
+  (match o (None [] false) (Some [_] true)))
+(defn none? [T] [(o (Option T))] (-> bool)
+  (match o (None [] true) (Some [_] false)))
+(defn ok? [T E] [(r (Result T E))] (-> bool)
+  (match r (Ok [_] true) (Err [_] false)))
+(defn err? [T E] [(r (Result T E))] (-> bool)
+  (match r (Ok [_] false) (Err [_] true)))
+
+; ---- unwrapping with a fallback --------------------------------------------
+; `(unwrap-or o default)` — the Some value, or `default` when None.
+(defn unwrap-or [T] [(o (Option T)) (default T)] (-> T)
+  (match o (None [] default) (Some [v] v)))
+; `(unwrap-or-else o thunk)` — the Some value, or the result of calling `thunk` (a
+; `(fnptr c [] T)`) when None. The fallback is only computed when it is needed.
+(defn unwrap-or-else [T] [(o (Option T)) (thunk (fnptr c [] T))] (-> T)
+  (match o (None [] (call-ptr thunk)) (Some [v] v)))
+
+; ---- mapping over the payload ----------------------------------------------
+; `(opt-map o f)` — apply `f : (fnptr c [T] U)` to a Some's value, leaving None alone.
+(defn opt-map [T U] [(o (Option T)) (f (fnptr c [T] U))] (-> (Option U))
+  (match o (None [] (None)) (Some [v] (Some (call-ptr f v)))))
+; `(res-map r f)` — apply `f : (fnptr c [T] U)` to an Ok's value, passing Err through.
+(defn res-map [T U E] [(r (Result T E)) (f (fnptr c [T] U))] (-> (Result U E))
+  (match r (Ok [v] (Ok (call-ptr f v))) (Err [e] (Err e))))
+; `(map-err r f)` — apply `f : (fnptr c [E] F)` to an Err's error, passing Ok through.
+(defn map-err [T E F] [(r (Result T E)) (f (fnptr c [E] F))] (-> (Result T F))
+  (match r (Ok [v] (Ok v)) (Err [e] (Err (call-ptr f e)))))
+
+; ---- chaining fallible steps (monadic bind) --------------------------------
+; `(and-then o f)` — call `f : (fnptr c [T] (Option U))` on a Some, flattening; None
+; short-circuits. This is `Option`'s bind — chain fallible lookups without nesting.
+(defn and-then [T U] [(o (Option T)) (f (fnptr c [T] (Option U)))] (-> (Option U))
+  (match o (None [] (None)) (Some [v] (call-ptr f v))))
+
+; ---- bridging Option and Result --------------------------------------------
+; `(ok-or o e)` — turn an absence into an error: `Some v` → `Ok v`, `None` → `Err e`.
+(defn ok-or [T E] [(o (Option T)) (e E)] (-> (Result T E))
+  (match o (None [] (Err e)) (Some [v] (Ok v))))

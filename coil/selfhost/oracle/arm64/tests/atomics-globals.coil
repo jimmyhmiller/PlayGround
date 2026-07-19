@@ -1,0 +1,37 @@
+; Atomic op return-value semantics (single-threaded determinism) and
+; static globals shared across calls.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/atomic.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defn counter [] (-> i64)
+  (let [c (alloc-static i64)]
+    (store! c (iadd (load c) 1))
+    (load c)))
+
+(defn main [] (-> i64)
+  (let [w (stdout) a (malloc-allocator)
+        cell (cast (ptr i64) (unwrap-ptr (raw-alloc a 8 8)))]
+    (store! cell 100)
+    (out w "add-old" (atomic-add cell 5))       ; returns OLD value
+    (out w "after-add" (atomic-load cell))
+    (out w "sub-old" (atomic-sub cell 30))
+    (out w "after-sub" (atomic-load cell))
+    (out w "xchg-old" (atomic-xchg cell 999))
+    (out w "after-xchg" (atomic-load cell))
+    ; CAS: success then failure
+    (out w "cas-hit" (atomic-cas cell 999 1))
+    (out w "after-hit" (atomic-load cell))
+    (out w "cas-miss" (atomic-cas cell 999 77))
+    (out w "after-miss" (atomic-load cell))
+    (atomic-store cell 42)
+    (out w "stored" (atomic-load cell))
+    ; static global persists across calls
+    (counter) (counter) (counter)
+    (out w "counter" (counter))
+    0))

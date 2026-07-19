@@ -1,0 +1,364 @@
+(module hashmap)
+; An open-addressing hash map `HashMap[K V]` — a generic-struct LIBRARY over the
+; allocator interface + lib/mem; no compiler support, no ambient heap (the map
+; carries its `(ptr Allocator)`).
+;
+; HASHING & EQUALITY ARE EXPLICIT CAPABILITY VALUES — a `KeyOps` vtable (hash + eq
+; fn pointers + the key size), threaded like the allocator and IO. This is correct
+; for EVERY key type and avoids the silent footgun of a byte-wise default (two
+; "equal" struct values with different uninitialized padding would silently fail
+; to match). It also handles content-keyed strings today (supply a content hash).
+;
+; Convenience: `scalar-keyops [K]` supplies the byte-wise hash/eq SAFELY — but only
+; for SCALAR/POINTER keys, where byte-equality provably IS value-equality (no
+; padding). A struct/string key MUST supply its own KeyOps (so correctness can't
+; be gotten silently wrong). `hm-new-scalar` wires the scalar ops in for you.
+;
+;   (import "lib/hashmap.coil" :use *) (import "lib/alloc.coil" :use *)
+;   (import "lib/result.coil" :use *)   ; for the (Option V) hm-get returns
+
+(import "alloc.coil"   :use *)
+(import "result.coil"  :use *)
+(import "mem.coil"     :use *)
+(import "control.coil" :use *)   ; `for` — used by the hm-for iteration macro
+
+; The key capability: hash a key, compare two keys; `size` is sizeof K (handed to
+; the byte-wise helpers; a custom hash/eq may ignore it). Type-erased over (ptr i8)
+; so one KeyOps shape serves any K. NOT generic — the map stores it by value.
+;
+; std-3 — OWNING keys. When `owns` is 1 the map treats stored keys as OWNED: on a
+; genuine insert it deep-copies the key into the map's own allocator (`copy`), and
+; on remove/clear/free it releases that storage (`free`). So a string key never
+; aliases caller memory (the footgun a `(slice u8)` key otherwise is: two keys built
+; over one reused buffer both read the buffer's *latest* bytes). When `owns` is 0 —
+; the zero-init default, since `alloc-static` zeroes the vtable and only owning ops
+; fill these in — keys are stored purely by value and never copied or freed. That is
+; the old borrow behavior, and it is correct for scalar/pointer keys (whose value
+; carries no external storage) and for the deliberate opt-in `str-keyops-borrowed`.
+; `copy`/`free` both take (allocator, key-slot) and act IN PLACE on the slot.
+(defstruct KeyOps
+  [(hash (fnptr c [(ptr i8) :i64] :i64))
+   (eq   (fnptr c [(ptr i8) (ptr i8) :i64] bool))
+   (size :i64)
+   (copy (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+   (free (fnptr c [(ptr Allocator) (ptr i8)] :i64))
+   (owns :i64)])
+
+; Safe byte-wise ops — sound ONLY where byte-equality == value-equality.
+(defn bytewise-hash [(p (ptr i8)) (n :i64)] (-> :i64)
+  (let [(mut h) -3750763034362895579   ; FNV-1a offset basis
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (do (store! h (imul (ixor (load h) (cast :i64 (load (index p (load i)))))
+                              1099511628211))
+              (store! i (iadd (load i) 1)))))
+    (load h)))
+(defn bytewise-eq [(a (ptr i8)) (b (ptr i8)) (n :i64)] (-> bool)
+  (mem-eql a b n))   ; mem-eql [i8] compares n bytes
+
+; Build the safe scalar/pointer-key ops for K (uses sizeof K). The vtable lives in
+; static storage and is handed around by pointer (like the allocator). Do NOT use
+; for struct keys with padding — define an explicit KeyOps instead.
+(defn scalar-keyops [K] [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of bytewise-hash))
+    (store! (field o eq)   (fnptr-of bytewise-eq))
+    (store! (field o size) (sizeof K))
+    o))
+
+; state: 0 empty, 1 occupied, 2 tombstone
+(defstruct Entry [K V] [(state :i64) (key K) (val V)])
+(defstruct HashMap [K V]
+  [(slots (ptr (Entry K V))) (cap :i64) (len :i64) (tombs :i64)
+   (alc (ptr Allocator)) (ops (ptr KeyOps))])
+
+; Call the key vtable.
+(defn ko-hash [(opsp (ptr KeyOps)) (kp (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp hash)) kp (load (field opsp size))))
+(defn ko-eq [(opsp (ptr KeyOps)) (a (ptr i8)) (b (ptr i8))] (-> bool)
+  (call-ptr (load (field opsp eq)) a b (load (field opsp size))))
+
+; std-3 owning-key hooks. `ko-owns?` gates every copy/free at the call sites (so a
+; borrowed/scalar map pays nothing). `ko-keycopy` replaces the borrowed key at
+; `slot` with an allocator-owned deep copy; `ko-keyfree` releases that storage.
+(defn ko-owns? [(opsp (ptr KeyOps))] (-> bool)
+  (icmp-eq (load (field opsp owns)) 1))
+(defn ko-keycopy [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp copy)) a slot))
+(defn ko-keyfree [(opsp (ptr KeyOps)) (a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
+  (call-ptr (load (field opsp free)) a slot))
+
+(defn hm-new [K V] [(a (ptr Allocator)) (ops (ptr KeyOps))] (-> (HashMap K V))
+  (let [(mut m) (zeroed (HashMap K V))]
+    (store! (field m alc) a)
+    (store! (field m ops) ops)   ; both vtables held by pointer (scalar stores)
+    (load m)))
+
+; Convenience for scalar/pointer keys: wires in the safe byte-wise ops.
+(defn hm-new-scalar [K V] [(a (ptr Allocator))] (-> (HashMap K V))
+  (hm-new [K V] a (scalar-keyops [K])))
+
+(defn hm-len [K V] [(m (HashMap K V))] (-> :i64) (load (field m len)))
+(defn hm-cap [K V] [(m (HashMap K V))] (-> :i64) (load (field m cap)))
+
+; Insert (key-at kp, v) into raw slots (power-of-two cap), linear probing via the
+; key vtable `opsp`. Probes THROUGH tombstones to find an existing key (so an
+; update lands on the real entry, never duplicating it), remembering the first
+; tombstone to reuse on a confirmed-absent insert. Returns:
+;   0 = updated an existing key   1 = filled an empty slot   2 = reused a tombstone
+; (1 and 2 both add a key; 2 additionally consumes a tombstone). Terminates because
+; the caller keeps at least one empty slot (tombstones counted toward resize).
+; `own` = 1 for a genuine caller insert (copy the key if the map owns keys); 0 for a
+; rehash MOVE (hm-grow!), where the key is already owned and only its fat pointer is
+; relocated — copying again would leak, freeing the old array must not free the key.
+(defn hm-insert-raw [K V]
+    [(opsp (ptr KeyOps)) (slots (ptr (Entry K V))) (cap :i64) (kp (ptr K)) (v V)
+     (a (ptr Allocator)) (own :i64)] (-> :i64)
+  (let [kpi (cast (ptr i8) kp)
+        (mut i) (iand (ko-hash opsp kpi) (isub cap 1))
+        (mut tomb) -1        ; index of the first tombstone seen, -1 = none yet
+        (mut result) 0
+        (mut done) 0]
+    (loop
+      (if (icmp-eq (load done) 1)
+          (break)
+          (let [e  (index slots (load i))
+                st (load (field e state))]
+            (if (icmp-eq st 0)
+                ; empty ⇒ key is absent. Insert at the first tombstone if we saw
+                ; one, else here.
+                (let [target (if (icmp-ge (load tomb) 0) (load tomb) (load i))
+                      te     (index slots target)]
+                  (store! (field te state) 1)
+                  (store! (field te key) (load kp))
+                  ; a new key entered the map — take ownership (deep-copy in place)
+                  ; iff this is a genuine insert into an owning map (never a rehash).
+                  (if (and (icmp-eq own 1) (ko-owns? opsp))
+                      (ko-keycopy opsp a (cast (ptr i8) (field te key)))
+                      0)
+                  (store! (field te val) v)
+                  (store! result (if (icmp-ge (load tomb) 0) 2 1))
+                  (store! done 1))
+                (if (icmp-eq st 1)
+                    (if (ko-eq opsp (cast (ptr i8) (field e key)) kpi)
+                        (do (store! (field e val) v) (store! result 0) (store! done 1))  ; update
+                        (store! i (iand (iadd (load i) 1) (isub cap 1))))                ; probe on
+                    (do                                                                  ; tombstone
+                      (if (icmp-lt (load tomb) 0) (store! tomb (load i)) 0)
+                      (store! i (iand (iadd (load i) 1) (isub cap 1)))))))))
+    (load result)))
+
+(defn hm-grow! [K V] [(m (mut (HashMap K V))) (newcap :i64)] (-> :i64)
+  (let [a        (load (field m alc))
+        oldslots (load (field m slots))
+        oldcap   (load (field m cap))]
+    (match (alloc-slice [(Entry K V)] a newcap)
+      (None [] (do (oom) -1))
+      (Some [ns]
+        (do
+          (mem-zero ns newcap)
+          (let [(mut j) 0]
+            (loop
+              (if (icmp-ge (load j) oldcap)
+                  (break)
+                  (do
+                    (let [e (index oldslots (load j))]
+                      (if (icmp-eq (load (field e state)) 1)
+                          (hm-insert-raw [K V] (load (field m ops)) ns newcap
+                                         (field e key) (load (field e val)) a 0)  ; MOVE
+                          0))
+                    (store! j (iadd (load j) 1))))))
+          (if (icmp-gt oldcap 0)
+              (raw-free a (cast (ptr i8) oldslots)
+                        (imul oldcap (sizeof (Entry K V))) (alignof (Entry K V)))
+              0)
+          (store! (field m slots) ns)
+          (store! (field m cap) newcap)
+          (store! (field m tombs) 0)   ; rehash dropped all tombstones
+          0)))))
+
+; Returns the insert/update SIGNAL that hm-insert-raw already computes:
+;   0 = updated an existing key   1 = inserted into an empty slot
+;   2 = inserted, reusing a tombstone
+; (so `(icmp-eq r 0)` = "key was already present". The old always-0 return threw this
+; away.)
+(defn hm-put! [K V] [(m (mut (HashMap K V))) (k K) (v V)] (-> :i64)
+  ; Resize when occupied + tombstones would pass 0.75 — counting tombstones keeps a
+  ; free slot (probe termination). Grow only if genuinely >half full; otherwise
+  ; rehash same-size to clear tombstones (so delete/insert churn can't grow forever).
+  (let [cap (load (field m cap))]
+    (if (icmp-ge (imul (iadd (iadd (load (field m len)) (load (field m tombs))) 1) 4) (imul cap 3))
+        (hm-grow! (mut m)
+                  (if (icmp-eq cap 0) 8
+                      (if (icmp-ge (imul (load (field m len)) 2) cap) (imul cap 2) cap)))
+        0))
+  (let [kp (alloc-stack K)]
+    (store! kp k)
+    (let [r (hm-insert-raw [K V] (load (field m ops)) (load (field m slots)) (load (field m cap)) kp v
+                           (load (field m alc)) 1)]
+      (if (icmp-ge r 1)                                            ; added a new key
+          (do (store! (field m len) (iadd (load (field m len)) 1))
+              (if (icmp-eq r 2)                                    ; ...reusing a tombstone
+                  (store! (field m tombs) (isub (load (field m tombs)) 1))
+                  0))
+          0)
+      r)))
+
+(defn hm-get [K V] [(m (HashMap K V)) (k K)] (-> (Option V))
+  (let [cap (load (field m cap))]
+    (if (icmp-eq cap 0)
+        (None)
+        (let [slots (load (field m slots))
+              opsp  (load (field m ops))
+              kp    (alloc-stack K)]
+          (store! kp k)
+          (let [kpi (cast (ptr i8) kp)
+                (mut i) (iand (ko-hash opsp kpi) (isub cap 1))]
+            (loop
+              (let [e  (index slots (load i))
+                    st (load (field e state))]
+                (if (icmp-eq st 0)
+                    (break)
+                    (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
+                        (break)
+                        (store! i (iand (iadd (load i) 1) (isub cap 1)))))))
+            (let [e (index slots (load i))]
+              (if (icmp-eq (load (field e state)) 1)
+                  (Some (load (field e val)))
+                  (None))))))))
+
+(defn hm-contains? [K V] [(m (HashMap K V)) (k K)] (-> bool)
+  (match (hm-get [K V] m k) (None [] false) (Some [_] true)))
+
+(defn hm-remove! [K V] [(m (mut (HashMap K V))) (k K)] (-> :i64)
+  (let [cap (load (field m cap))]
+    (if (icmp-eq cap 0)
+        0
+        (let [slots (load (field m slots))
+              opsp  (load (field m ops))
+              a     (load (field m alc))
+              kp    (alloc-stack K)
+              (mut res) 0]
+          (store! kp k)
+          (let [kpi (cast (ptr i8) kp)
+                (mut i) (iand (ko-hash opsp kpi) (isub cap 1))]
+            (loop
+              (let [e  (index slots (load i))
+                    st (load (field e state))]
+                (if (icmp-eq st 0)
+                    (break)
+                    (if (and (icmp-eq st 1) (ko-eq opsp (cast (ptr i8) (field e key)) kpi))
+                        (do (if (ko-owns? opsp)                               ; free the owned key
+                                (ko-keyfree opsp a (cast (ptr i8) (field e key))) 0)
+                            (store! (field e state) 2)                        ; tombstone
+                            (store! (field m len) (isub (load (field m len)) 1))
+                            (store! (field m tombs) (iadd (load (field m tombs)) 1))
+                            (store! res 1)
+                            (break))
+                        (store! i (iand (iadd (load i) 1) (isub cap 1))))))))
+          (load res)))))
+
+; std-3: free every OWNED key still occupying a slot (state 1). Tombstones (state 2)
+; already had their key freed by hm-remove!, and empty slots (state 0) hold nothing —
+; so only state-1 keys are dropped (freeing a tombstone's key would double-free).
+; Callers gate this on `ko-owns?`, so a borrowed/scalar map never runs the walk.
+(defn hm-drop-keys! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (let [opsp  (load (field m ops))
+        a     (load (field m alc))
+        slots (load (field m slots))
+        cap   (load (field m cap))
+        (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) cap)
+          (break)
+          (do
+            (let [e (index slots (load i))]
+              (if (icmp-eq (load (field e state)) 1)
+                  (ko-keyfree opsp a (cast (ptr i8) (field e key)))
+                  0))
+            (store! i (iadd (load i) 1)))))
+    0))
+
+(defn hm-free! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (if (icmp-gt (load (field m cap)) 0)
+      (do
+        (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)   ; std-3: free owned keys
+        (raw-free (load (field m alc)) (cast (ptr i8) (load (field m slots)))
+                  (imul (load (field m cap)) (sizeof (Entry K V))) (alignof (Entry K V))))
+      0)
+  (store! (field m slots) (cast (ptr (Entry K V)) 0))
+  (store! (field m cap) 0)
+  (store! (field m len) 0)
+  (store! (field m tombs) 0)
+  0)
+
+; Empty the map WITHOUT releasing its storage: mark every slot empty and reset the
+; counts, keeping the allocated slot array for reuse. (`hm-free!` also frees.) Zeroing
+; the slots restores state 0 = empty everywhere, dropping every key and tombstone.
+(defn hm-clear! [K V] [(m (mut (HashMap K V)))] (-> :i64)
+  (if (icmp-gt (load (field m cap)) 0)
+      (do
+        (if (ko-owns? (load (field m ops))) (hm-drop-keys! (mut m)) 0)   ; std-3: free owned keys
+        (mem-zero (load (field m slots)) (load (field m cap))))
+      0)
+  (store! (field m len) 0)
+  (store! (field m tombs) 0)
+  0)
+
+; `(hm-for [k v map-ptr] body…)` — iterate the OCCUPIED entries of a map, binding
+; `k`/`v` to each key/value. `map-ptr` is a `(ptr (HashMap K V))` (K V inferred);
+; order is unspecified (slot order). A macro over `for` + the slot array — the map
+; iteration the JSON dogfood wanted (you could query a map but not walk it).
+(defn hm-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 3))
+      (error "hm-for: binding must be [key val map-ptr]")
+      (let [k  (code-nth binding 0)
+            v  (code-nth binding 1)
+            mp (code-nth binding 2)
+            m  (gensym) i (gensym) e (gensym)]
+        `(let [~m ~mp]
+           (for [~i 0 (hm-cap (load ~m))]
+             (let [~e (index (load (field ~m slots)) ~i)]
+               (if (icmp-eq (load (field ~e state)) 1)
+                   (let [~k (load (field ~e key)) ~v (load (field ~e val))] ~@body)
+                   0)))))))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len m)` / `(get m k)` / `(set! (mut m) k v)` on any (HashMap K V). `get`
+; returns (Option V) — a map's E is optional by nature; `set!` is hm-put!
+; (insert-or-update).
+(impl [K V] Len (HashMap K V)
+  (len [(m (HashMap K V))] (-> i64) (hm-len m)))
+(impl [K V] Get (HashMap K V)
+  (get [(m (HashMap K V)) (k K)] (-> (Option V)) (hm-get m k)))
+(impl [K V] Set (HashMap K V)
+  (set! [(m (mut (HashMap K V))) (k K) (v V)] (-> i64) (hm-put! (mut m) k v)))
+
+; ---- iteration (coil.core Iterator/Iterable) --------------------------------
+; A map iterates its KEYS (`Item = K`): `(for k (iter m))` visits each occupied
+; key in slot order; recover the value with `(hm-get m k)` / `(get m k)`. This is
+; what makes `(for-in [x (in map)])` correct — std-4 was `get`-by-index on a map
+; (garbage, since a map's `get` takes a KEY, not a slot index). A `(MapIter K V)`
+; holds a copy of the map header (its `slots` pointer is shared, so the walk sees
+; the live table) plus a slot cursor. `hm-for` remains the direct key+value walk.
+(defstruct MapIter [K V] [(m (HashMap K V)) (pos i64)])
+(impl [K V] Iterable (HashMap K V)
+  (iter [(m (HashMap K V))] (-> (MapIter K V))
+    (let [it (alloc-stack (MapIter K V))]
+      (store! (field it m) m)
+      (store! (field it pos) 0)
+      (load it))))
+(impl [K V] Iterator (MapIter K V)
+  (next [(it (mut (MapIter K V)))] (-> (Option K))
+    (let [cap (hm-cap (load (field it m)))]
+      (loop
+        (let [p (load (field it pos))]
+          (if (icmp-ge p cap)
+              (break (None))
+              (let [e (index (load (field (field it m) slots)) p)]
+                (store! (field it pos) (iadd p 1))
+                (if (icmp-eq (load (field e state)) 1)
+                    (break (Some (load (field e key))))
+                    0))))))))

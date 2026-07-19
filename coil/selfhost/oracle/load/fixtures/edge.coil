@@ -1,0 +1,13 @@
+; Curated loader fixture — exercises (module …) + (import … :as … :use [names])
+; + (export …) all in one file, so the gate covers alias + named-use + export
+; recording (the corpus lib files lean on `:use *`). The import path is repo-root
+; relative because the main file's base_dir is CWD (the loader only re-bases for
+; nested imports inside an imported file).
+(module edge.main)
+
+(import "selfhost/oracle/load/fixtures/helper.coil" :as h :use [foo bar])
+
+(export thing other)
+
+(defn thing [] (-> i64) (h/foo))
+(defn other [] (-> i64) 2)

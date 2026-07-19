@@ -1,0 +1,102 @@
+(defstruct Vec [T] [(data (ptr T)) (len :i64) (cap :i64)])
+
+(defn
+  vec-init
+  [T]
+  [(v (ptr (Vec T)))]
+  (-> :i64)
+  (do
+    (store! (field v data) (cast (ptr T) 0))
+    (store! (field v len) 0)
+    (store! (field v cap) 0)))
+
+(defn
+  vec-grow
+  [T]
+  [(v (ptr (Vec T))) (a (ptr Allocator))]
+  (-> :i64)
+  (let
+    [oldcap (load (field v cap)) newcap (if (icmp-eq oldcap 0) 4 (imul oldcap 2))]
+    (match
+      (raw-resize
+        a
+        (cast (ptr i8) (load (field v data)))
+        (imul oldcap (sizeof T))
+        (imul newcap (sizeof T))
+        (alignof T))
+      (None [] 0)
+      (Some [p] (do (store! (field v data) (cast (ptr T) p)) (store! (field v cap) newcap))))))
+
+(defn
+  vec-push
+  [T]
+  [(v (ptr (Vec T))) (a (ptr Allocator)) (x T)]
+  (-> :i64)
+  (do
+    (if (icmp-ge (load (field v len)) (load (field v cap))) (vec-grow v a) 0)
+    (store! (index (load (field v data)) (load (field v len))) x)
+    (store! (field v len) (iadd (load (field v len)) 1))))
+
+(defn vec-at [T] [(v (ptr (Vec T))) (i :i64)] (-> T) (load (index (load (field v data)) i)))
+
+(defn
+  vec-get
+  [T]
+  [(v (ptr (Vec T))) (i :i64)]
+  (-> (Option T))
+  (if (icmp-lt i (load (field v len))) (Some (vec-at v i)) (None)))
+
+(defn
+  vec-free
+  [T]
+  [(v (ptr (Vec T))) (a (ptr Allocator))]
+  (-> :i64)
+  (raw-free
+    a
+    (cast (ptr i8) (load (field v data)))
+    (imul (load (field v cap)) (sizeof T))
+    (alignof T)))
+
+(defn
+  print-elems
+  [(w (ptr Writer)) (v (ptr (Vec i64))) (i :i64)]
+  (-> :i64)
+  (if
+    (icmp-ge i (load (field v len)))
+    0
+    (do (print-int w (vec-at v i)) (print-str w " ") (print-elems w v (iadd i 1)))))
+
+(defn
+  show-at
+  [(w (ptr Writer)) (v (ptr (Vec i64))) (i :i64)]
+  (-> :i64)
+  (do
+    (print-str w "v[")
+    (print-int w i)
+    (print-str w "] = ")
+    (match (vec-get v i) (None [] (print-str w "out of range")) (Some [x] (print-int w x)))
+    (print-str w "
+")
+    0))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [gpa (malloc-allocator) v (alloc-stack (Vec i64)) w (stdout)]
+    (vec-init v)
+    (vec-push v gpa 10)
+    (vec-push v gpa 20)
+    (vec-push v gpa 12)
+    (print-str w "vec = [ ")
+    (print-elems w v 0)
+    (print-str w "]
+")
+    (show-at w v 1)
+    (show-at w v 9)
+    (let
+      [total (iadd (vec-at v 0) (iadd (vec-at v 1) (vec-at v 2)))]
+      (vec-free v gpa)
+      total)))
+

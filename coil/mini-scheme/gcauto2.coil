@@ -1,0 +1,245 @@
+(module gcauto2)
+; The transparent-GC transform for the mini-Scheme: managed type is `Val`. Same
+; idea as transparent-gc/gcauto.coil (frame + root params + A-normalize managed
+; call-args) PLUS it roots managed LET-BINDINGS — an evaluator binds many
+; intermediate values that must survive later allocations, which the cons-list
+; demo never did. Runtime module `sval` is NOT rewritten (hand-rooted), but its
+; managed-returning constructors ARE collected so calls to them are detected.
+(import "control.coil" :use *)
+
+(defn managed-type? [(T Code)] (-> bool)
+  (or (code-eq T `Val)
+      (and (code-list? T) (and (>= (code-count T) 2)
+           (and (code-eq (code-nth T 0) `ptr) (code-eq (code-nth T 1) `Val))))))
+(defn rewrite-type [(T Code)] (-> Code) (if (code-eq T `Val) `(ptr Val) T))
+
+(defn mg-member? [(name Code) (l Code) (i i64) (n i64)] (-> bool)
+  (if (>= i n) false (if (code-eq (code-nth l i) name) true (mg-member? name l (+ i 1) n))))
+(defn managed-call? [(e Code) (mg Code)] (-> bool)
+  (and (code-list? e) (and (> (code-count e) 0) (and (code-sym? (code-nth e 0))
+       (mg-member? (code-nth e 0) mg 0 (code-count mg))))))
+(defn snoc [(lst Code) (x Code)] (-> Code) `(~@lst ~x))
+(defn has-managed-arg? [(e Code) (i i64) (n i64) (mg Code)] (-> bool)
+  (if (>= i n) false (if (managed-call? (code-nth e i) mg) true (has-managed-arg? e (+ i 1) n mg))))
+
+; A-normalize call args into rooted temps
+(defn wrap-args [(head Code) (args Code) (i i64) (n i64) (placed Code) (mg Code)] (-> Code)
+  (if (>= i n) `(~head ~@placed)
+    (let [orig (code-nth args i) a (root-expr orig mg)]
+      ; test the ORIGINAL arg: root-expr may have wrapped a managed call in a
+      ; local frame (a `let`), which would hide its managed-ness — but its result
+      ; still must be rooted before a LATER arg or this call allocates.
+      (if (managed-call? orig mg)
+          (let [g (gensym)]
+            `(let [~g ~a] (gc-root ~g) ~(wrap-args head args (+ i 1) n (snoc placed g) mg)))
+        (wrap-args head args (+ i 1) n (snoc placed a) mg)))))
+(defn root-exprs [(e Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) `() `(~(root-expr (code-nth e i) mg) ~@(root-exprs e (+ i 1) n mg))))
+
+; let with rooted managed bindings, all under one local frame that pops on exit
+(defn has-managed-bind? [(bv Code) (i i64) (n i64) (mg Code)] (-> bool)
+  (if (>= i n) false
+    (if (and (< (+ i 1) n) (managed-call? (code-nth bv (+ i 1)) mg)) true
+      (has-managed-bind? bv (+ i 2) n mg))))
+(defn build-let [(bv Code) (i i64) (n i64) (inner Code) (mg Code)] (-> Code)
+  (if (>= i n) inner
+    (let [name (code-nth bv i)
+          val (if (< (+ i 1) n) (root-expr (code-nth bv (+ i 1)) mg) `0)
+          rest (build-let bv (+ i 2) n inner mg)]
+      (if (and (code-sym? name) (and (< (+ i 1) n) (managed-call? (code-nth bv (+ i 1)) mg)))
+          `(let [~name ~val] (gc-root ~name) ~rest)
+        `(let [~name ~val] ~rest)))))
+(defn root-arms [(e Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) `()
+    (let [arm (code-nth e i)]
+      `(~(if (and (code-list? arm) (>= (code-count arm) 3))
+             `(~(code-nth arm 0) ~(code-nth arm 1) ~(root-expr (code-nth arm 2) mg))
+           arm)
+        ~@(root-arms e (+ i 1) n mg)))))
+(defn root-binds [(bv Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) `[]
+    (if (= (% i 2) 0)
+        `[~(code-nth bv i) ~@(root-binds bv (+ i 1) n mg)]
+      `[~(root-expr (code-nth bv i) mg) ~@(root-binds bv (+ i 1) n mg)])))
+(defn root-expr [(e Code) (mg Code)] (-> Code)
+  (if (not (code-list? e)) e
+    (if (= (code-count e) 0) e
+      (let [h (code-nth e 0)]
+        (if (not (code-sym? h)) `(~@(root-exprs e 0 (code-count e) mg))
+        (if (code-eq h `if)
+            `(if ~(root-expr (code-nth e 1) mg) ~(root-expr (code-nth e 2) mg) ~(root-expr (code-nth e 3) mg))
+        (if (code-eq h `do)  `(do ~@(root-exprs e 1 (code-count e) mg))
+        (if (code-eq h `loop) `(loop ~@(root-exprs e 1 (code-count e) mg))
+        (if (code-eq h `break)
+            (if (= (code-count e) 1) e `(break ~(root-expr (code-nth e 1) mg)))
+        (if (code-eq h `continue) e
+        (if (code-eq h `let)
+            (let [bv (code-nth e 1) nb (code-count bv) body (root-exprs e 2 (code-count e) mg)]
+              (if (has-managed-bind? bv 0 nb mg)
+                  (let [sp (gensym) r (gensym)]
+                    `(let [~sp (gc-sp)]
+                       ~(build-let bv 0 nb `(let [~r (do ~@body)] (gc-sp-set ~sp) ~r) mg)))
+                `(let ~(root-binds bv 0 nb mg) ~@body)))
+        (if (code-eq h `match)
+            `(match ~(root-expr (code-nth e 1) mg) ~@(root-arms e 2 (code-count e) mg))
+        (if (or (code-eq h `quote) (code-eq h `quasiquote)) e
+          (if (has-managed-arg? e 1 (code-count e) mg)
+              (let [sp (gensym) res (gensym)]
+                `(let [~sp (gc-sp)]
+                   (let [~res ~(wrap-args h e 1 (code-count e) `() mg)]
+                     (gc-sp-set ~sp) ~res)))
+            (wrap-args h e 1 (code-count e) `() mg)))))))))))))))
+
+; ---- TAIL-POSITION handling: reset the shadow stack to the frame base BEFORE a
+; tail call (not after), so the call stays in tail position and LLVM can TCO it.
+; Otherwise a tail-recursive ALLOCATING function recurses deeply, every frame keeps
+; its params rooted, and the heap can never be reclaimed (unbounded live set). The
+; frame base `sp` is stable across TCO iterations precisely because each iteration
+; resets to it before jumping. Constructs we don't specialise fall back to the old
+; (correct, non-tail) form. ----
+(defn tail-fallback [(e Code) (base Code) (mg Code)] (-> Code)
+  (let [r (gensym)] `(let [~r ~(root-expr e mg)] (gc-sp-set ~base) ~r)))
+; a tail call: eval args (rooting managed ones), reset sp to base, then call in tail pos
+(defn tail-wrap-args [(head Code) (args Code) (i i64) (n i64) (placed Code) (base Code) (mg Code)] (-> Code)
+  (if (>= i n) `(do (gc-sp-set ~base) (~head ~@placed))
+    (let [orig (code-nth args i) a (root-expr orig mg)]
+      (if (managed-call? orig mg)
+          (let [g (gensym)]
+            `(let [~g ~a] (gc-root ~g) ~(tail-wrap-args head args (+ i 1) n (snoc placed g) base mg)))
+        (tail-wrap-args head args (+ i 1) n (snoc placed a) base mg)))))
+(defn tail-let [(e Code) (base Code) (mg Code)] (-> Code)
+  (let [bv (code-nth e 1) nb (code-count bv) cnt (code-count e)
+        tailbody (tail-expr (code-nth e (- cnt 1)) base mg)
+        mid (root-exprs e 2 (- cnt 1) mg)]
+    (if (has-managed-bind? bv 0 nb mg)
+        (build-let bv 0 nb `(do ~@mid ~tailbody) mg)
+      `(let ~(root-binds bv 0 nb mg) ~@mid ~tailbody))))
+(defn tail-expr [(e Code) (base Code) (mg Code)] (-> Code)
+  (if (not (code-list? e)) `(do (gc-sp-set ~base) ~e)
+    (if (= (code-count e) 0) `(do (gc-sp-set ~base) ~e)
+      (let [h (code-nth e 0)]
+        (if (not (code-sym? h)) (tail-fallback e base mg)
+        (if (code-eq h `if)
+            `(if ~(root-expr (code-nth e 1) mg)
+                 ~(tail-expr (code-nth e 2) base mg)
+                 ~(tail-expr (code-nth e 3) base mg))
+        (if (code-eq h `do)
+            `(do ~@(root-exprs e 1 (- (code-count e) 1) mg)
+                 ~(tail-expr (code-nth e (- (code-count e) 1)) base mg))
+        (if (code-eq h `let) (tail-let e base mg)
+        (if (or (code-eq h `quote) (code-eq h `quasiquote)) `(do (gc-sp-set ~base) ~e)
+        ; Resetting the shadow stack BEFORE the call is only safe if the callee
+        ; re-roots its args before it can trigger a GC. Transformed functions do
+        ; (gc-root params on entry); non-allocating leaves never GC. But a base
+        ; ALLOCATOR (cons/mk-*) allocates WITHOUT rooting its args, so a tail call
+        ; to one must keep the args rooted across the call -> fall back (reset-after).
+        (if (or (code-eq h `match) (or (code-eq h `loop) (or (code-eq h `break) (or (code-eq h `continue)
+                (mg-member? h (base-allocs) 0 (code-count (base-allocs)))))))
+            (tail-fallback e base mg)
+          (tail-wrap-args h e 1 (code-count e) `() base mg)))))))))))
+
+; ---- rewrite one function (frame + param roots + rooted body) ----
+(defn rewrite-params [(ps Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `[]
+    (let [p (code-nth ps i) rest (rewrite-params ps (+ i 1) n)]
+      `[(~(code-nth p 0) ~(rewrite-type (code-nth p 1))) ~@rest])))
+(defn param-roots [(ps Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `()
+    (let [p (code-nth ps i) rest (param-roots ps (+ i 1) n)]
+      (if (managed-type? (code-nth p 1)) `((gc-root ~(code-nth p 0)) ~@rest) rest))))
+(defn rewrite-defn [(f Code) (mg Code)] (-> Code)
+  (let [name (code-nth f 1) ps (code-nth f 2) ret (code-nth f 3)
+        new-ps (rewrite-params ps 0 (code-count ps))
+        new-ret `(-> ~(rewrite-type (code-nth ret 1)))
+        proots (param-roots ps 0 (code-count ps))
+        cnt (code-count f)
+        mid (root-exprs f 4 (- cnt 1) mg)                     ; body forms but the last (non-tail)
+        sp (gensym)
+        tail (tail-expr (code-nth f (- cnt 1)) sp mg)]        ; last form in TAIL position
+    `(defn ~name ~new-ps ~new-ret
+       (let [~sp (gc-sp)]
+         (do ~@proots ~@mid ~tail)))))
+
+; ---- allocation-effect analysis ----
+; A GC can only be triggered inside alloc-val, i.e. only by the runtime allocators
+; cons/mk-sym/mk-prim/mk-closure (mk-int/mk-bool/snil are immediate = no alloc). A
+; function that never (transitively) calls one of those cannot trigger a GC, so its
+; params never need rooting and it needs no frame at all. The analysis OVER-
+; approximates (scanning any subtree, even data), which only costs optimisation,
+; never soundness: a false "allocates" just keeps the frame.
+(defn base-allocs [] (-> Code) `(cons mk-sym mk-prim mk-closure))
+(defn expr-allocs? [(e Code) (as Code)] (-> bool)
+  (if (not (code-list? e)) false
+    (if (= (code-count e) 0) false
+      (let [h (code-nth e 0)]
+        (if (and (code-sym? h) (mg-member? h as 0 (code-count as))) true
+          (children-alloc? e 0 (code-count e) as))))))
+(defn children-alloc? [(e Code) (i i64) (n i64) (as Code)] (-> bool)
+  (if (>= i n) false
+    (if (expr-allocs? (code-nth e i) as) true (children-alloc? e (+ i 1) n as))))
+(defn defn-allocs? [(f Code) (as Code)] (-> bool) (children-alloc? f 4 (code-count f) as))
+; one pass: add each scheme fn (not already known) whose body allocates under `as`
+(defn grow-pass [(m Code) (i i64) (n i64) (as Code)] (-> Code)
+  (if (>= i n) as
+    (let [f (code-nth m i)]
+      (grow-pass m (+ i 1) n
+        (if (and (is-defn? f) (and (defn-allocs? f as)
+                                   (not (mg-member? (code-nth f 1) as 0 (code-count as)))))
+            (snoc as (code-nth f 1)) as)))))
+; fixpoint (bounded by #forms) — set only grows, so it converges
+(defn fixpoint-allocs [(m Code) (iter i64) (as Code)] (-> Code)
+  (if (<= iter 0) as
+    (let [as2 (grow-pass m 1 (code-count m) as)]
+      (if (= (code-count as2) (code-count as)) as2 (fixpoint-allocs m (- iter 1) as2)))))
+; thin emission: types rewritten, but NO frame / NO roots (function can't trigger GC)
+(defn body-forms [(f Code) (i i64) (n i64)] (-> Code)
+  (if (>= i n) `() `(~(code-nth f i) ~@(body-forms f (+ i 1) n))))
+(defn rewrite-defn-thin [(f Code)] (-> Code)
+  (let [name (code-nth f 1) ps (code-nth f 2) ret (code-nth f 3)]
+    `(defn ~name ~(rewrite-params ps 0 (code-count ps)) (-> ~(rewrite-type (code-nth ret 1)))
+       ~@(body-forms f 4 (code-count f)))))
+
+(defn is-defn? [(f Code)] (-> bool)
+  (and (code-list? f) (and (>= (code-count f) 4) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn)))))
+(defn returns-managed? [(f Code)] (-> bool)
+  (and (is-defn? f) (let [ret (code-nth f 3)] (and (code-list? ret) (and (= (code-count ret) 2) (managed-type? (code-nth ret 1)))))))
+(defn from-user-mod? [(m Code)] (-> bool)
+  (and (> (code-count m) 1) (code-from-user? (code-nth m 1))))
+; rewrite: user modules EXCEPT the runtime (sval) and this transform
+; rewrite ONLY the evaluator module (`scheme`) — the runtime (sval) and the
+; imported compiler modules (reader/parser) are hand-written and must not be
+; touched; the collect pass below still scans them all for managed constructors.
+(defn rewrite-mod? [(m Code)] (-> bool) (code-eq (code-nth m 0) `scheme))
+(defn collect-mod [(m Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) mg
+    (collect-mod m (+ i 1) n (if (returns-managed? (code-nth m i)) (snoc mg (code-nth (code-nth m i) 1)) mg))))
+(defn collect-mods [(ms Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) mg
+    (collect-mods ms (+ i 1) n
+      (if (from-user-mod? (code-nth ms i)) (collect-mod (code-nth ms i) 1 (code-count (code-nth ms i)) mg) mg))))
+(defn already-rooted? [(f Code)] (-> bool)
+  (and (= (code-count f) 5)
+    (let [b (code-nth f 4)]
+      (and (code-list? b) (and (> (code-count b) 0) (and (code-eq (code-nth b 0) `let)
+        (let [bv (code-nth b 1)]
+          (and (code-list? bv) (and (>= (code-count bv) 2)
+            (let [v (code-nth bv 1)] (and (code-list? v) (and (> (code-count v) 0) (code-eq (code-nth v 0) `gc-sp)))))))))))))
+(defn xform-forms [(m Code) (i i64) (n i64) (mg Code) (as Code)] (-> Code)
+  (if (>= i n) `()
+    (let [f (code-nth m i) rest (xform-forms m (+ i 1) n mg as)]
+      (if (and (is-defn? f) (not (already-rooted? f)))
+          (if (mg-member? (code-nth f 1) as 0 (code-count as))
+              `(~(rewrite-defn f mg) ~@rest)      ; allocates -> full frame + roots
+            `(~(rewrite-defn-thin f) ~@rest))     ; can't trigger GC -> no frame
+        `(~f ~@rest)))))
+(defn xform-mod [(m Code) (mg Code)] (-> Code)
+  (if (rewrite-mod? m)
+      (let [as (fixpoint-allocs m (code-count m) (base-allocs))]
+        `(~(code-nth m 0) ~@(xform-forms m 1 (code-count m) mg as)))
+    m))
+(defn xform-mods [(ms Code) (i i64) (n i64) (mg Code)] (-> Code)
+  (if (>= i n) `() `(~(xform-mod (code-nth ms i) mg) ~@(xform-mods ms (+ i 1) n mg))))
+(defn gc-transform [(mods Code)] (-> Code)
+  (let [mg (collect-mods mods 0 (code-count mods) `(cons car cdr))]
+    `(do ~@(xform-mods mods 0 (code-count mods) mg))))
+(transform gc-transform)

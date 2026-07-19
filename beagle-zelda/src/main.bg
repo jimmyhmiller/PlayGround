@@ -64,6 +64,20 @@ fn other_map(name) {
 // Held in an atom so we don't have to thread it through the World.
 let fps_cap = atom(60)
 
+// The entire game World lives in this atom rather than being threaded through
+// `game_loop` recursively. `letonce` (Beagle's defonce) means the world is
+// built once on first load and PRESERVED across reloads — so redefining
+// functions and re-loading this file while the game runs keeps your live
+// position/score instead of snapping back to startup. It also makes the live
+// world inspectable/editable from the REPL: `deref(world_state)` to read,
+// `reset!(world_state, ...)` / `swap!(world_state, ...)` to poke it.
+//
+// Starts null and is filled lazily by `main()` — the world build calls into
+// FFI (`ffi/cell`), which isn't safe to run at namespace-load time. Thanks to
+// `letonce`, a reload keeps whatever world is already here; only the first
+// process boot sees null and builds the starting world.
+letonce world_state = atom(null)
+
 // ============================================================
 // Editor state types
 // ============================================================
@@ -398,7 +412,7 @@ fn initial_map_data(name) {
             e/Monster {
                 ...e/default_monster(pos),
                 half: v/make(18.0, 18.0),
-                speed: 190.0,
+                speed: 350.0,
                 detection_range: 280.0,
                 attack_reach: 36.0,
                 strength: 2.5,
@@ -477,6 +491,7 @@ fn default_player() {
         half: v/make(14.0, 14.0),
         aim: v/UNIT_X,
         speed_mult: 1.0,
+        stamina: 100.0,
         hp: 3.0,
         iframes: 0.0
     }
@@ -596,7 +611,7 @@ fn collect_gold(player, gold_items) {
 
 fn playing_tick(world) {
     let dt = g/current_dt()
-    // Freeze simulation entirely during a transition — player can't move or
+    // Freeze simulation entirely during a transition u014 player can't move or
     // take hits mid-fade. Camera also stops, matching the visual teleport.
     let is_transitioning = match world.transition {
         Transition.None => false,
@@ -605,20 +620,42 @@ fn playing_tick(world) {
     if is_transitioning {
         advance_transition(world, dt)
     } else {
-        let tuning = world.tuning
+        // If the world's tuning is a stale instance from before a live struct
+        // change, upgrade it to a fresh default so new fields aren't null.
+        let tuning = if world.tuning.stamina_max == null {
+            g/default_tuning()
+        } else {
+            world.tuning
+        }
         let desired = g/read_desired_dir()
-        let speed_mult = g/read_speed_mult(tuning)
+        let speed_mult = g/read_speed_mult(tuning, world.player.stamina)
         let player_a = g/advance_player(world.player, tuning, world.walls, desired, speed_mult, dt)
         let camera = g/update_camera(world.camera, player_a.pos, tuning.camera_smoothing, dt)
         let player_b = g/update_aim(player_a, camera)
         let monsters = e/advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
         let sentinels = e/advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
         let player_c = g/apply_monster_attacks(player_b, monsters, world.walls)
+        // Death: hp hit 0 this tick. Refill the player and fade-transition
+        // back to the starting room (MAP_NAMES[0]) at its "default" spawn.
+        // hp/stamina are reset now so switch_map carries a full player over.
+        let died = player_c.hp <= 0.0
+        let player_d = if died {
+            g/Player { ...player_c, hp: 3.0, stamina: tuning.stamina_max,
+                       vel: v/ZERO, iframes: 1.5 }
+        } else {
+            player_c
+        }
         // Gold pickup
-        let pickup = collect_gold(player_c, world.gold_items)
-        // If the player walked onto a door this tick, start the fade-out.
-        let maybe_door = door_under_player(player_c, world.doors)
-        let next_transition = if maybe_door == null {
+        let pickup = collect_gold(player_d, world.gold_items)
+        // Death respawn takes priority over any door under the player.
+        let maybe_door = door_under_player(player_d, world.doors)
+        let next_transition = if died {
+            Transition.Out {
+                t: 0.0,
+                target_map: MAP_NAMES[0],
+                target_spawn: "default"
+            }
+        } else if maybe_door == null {
             Transition.None
         } else {
             Transition.Out {
@@ -630,12 +667,13 @@ fn playing_tick(world) {
         World {
             ...world,
             frame: world.frame + 1,
-            player: player_c,
+            player: player_d,
             monsters: monsters,
             sentinels: sentinels,
             gold_items: pickup.remaining,
             gold_collected: world.gold_collected + pickup.collected,
             camera: camera,
+            tuning: tuning,
             transition: next_transition
         }
     }
@@ -656,6 +694,9 @@ struct UiBuffers {
     camera_smoothing
     run_mult
     sneak_mult
+    stamina_max
+    stamina_drain
+    stamina_regen
 }
 
 fn alloc_ui_buffers(t) {
@@ -669,7 +710,10 @@ fn alloc_ui_buffers(t) {
         ambient:              ffi/cell(ffi/Type.F32, t.ambient),
         camera_smoothing:     ffi/cell(ffi/Type.F32, t.camera_smoothing),
         run_mult:             ffi/cell(ffi/Type.F32, t.run_multiplier),
-        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier)
+        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier),
+        stamina_max:          ffi/cell(ffi/Type.F32, t.stamina_max),
+        stamina_drain:        ffi/cell(ffi/Type.F32, t.stamina_sprint_drain),
+        stamina_regen:        ffi/cell(ffi/Type.F32, t.stamina_regen)
     }
 }
 
@@ -684,7 +728,10 @@ fn read_tuning_from_ui(bufs) {
         ambient:              ffi/cell-get(bufs.ambient),
         camera_smoothing:     ffi/cell-get(bufs.camera_smoothing),
         run_multiplier:       ffi/cell-get(bufs.run_mult),
-        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult)
+        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult),
+        stamina_max:          ffi/cell-get(bufs.stamina_max),
+        stamina_sprint_drain: ffi/cell-get(bufs.stamina_drain),
+        stamina_regen:        ffi/cell-get(bufs.stamina_regen)
     }
 }
 
@@ -1448,7 +1495,11 @@ fn maybe_toggle_mode(world) {
 // Main loop
 // ============================================================
 
-fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
+fn game_loop(shader_ctx, ui_bufs, max_frames) {
+    // The world is read from the atom each frame (not threaded as a param), so
+    // a REPL `reset!(world_state, ...)` between frames takes effect live and a
+    // reload of this file keeps the current world (see `letonce world_state`).
+    let world = deref(world_state)
     if max_frames >= 0 && world.frame >= max_frames {
         world
     } else if r/window_should_close() {
@@ -1496,7 +1547,8 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
                 let ed = Editor { ...switched.editor, status_text: "editing ${name}" }
                 World { ...switched, editor: ed, mode: MODE_EDITING }
             } else { w3 }
-            game_loop(w4, shader_ctx, ui_bufs, max_frames)
+            reset!(world_state, w4)
+            game_loop(shader_ctx, ui_bufs, max_frames)
         } else {
             // render_world returns: 0 = no action, 1 = resume, 2 = quit.
             let menu_action = render/render_world(next, shader_ctx, fade_alpha(next))
@@ -1508,7 +1560,8 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
                 } else {
                     next
                 }
-                game_loop(w_next, shader_ctx, ui_bufs, max_frames)
+                reset!(world_state, w_next)
+                game_loop(shader_ctx, ui_bufs, max_frames)
             }
         }
     }
@@ -1540,9 +1593,13 @@ fn main() {
     r/set_target_fps(60)
 
     let shader_ctx = render/load_cone_light_shader()
-    let initial = startup_world()
-    let ui_bufs = alloc_ui_buffers(initial.tuning)
-    let final_world = game_loop(initial, shader_ctx, ui_bufs, 0 - 1)
+    // Build the starting world only on first boot; a reload keeps the live one
+    // (`world_state` is a `letonce` atom that survives reloads).
+    if deref(world_state) == null {
+        reset!(world_state, startup_world())
+    }
+    let ui_bufs = alloc_ui_buffers(deref(world_state).tuning)
+    let final_world = game_loop(shader_ctx, ui_bufs, 0 - 1)
 
     r/close_window()
     println("exited after frame ${final_world.frame}")

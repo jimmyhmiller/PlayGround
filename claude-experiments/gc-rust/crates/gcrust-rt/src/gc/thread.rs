@@ -11,6 +11,26 @@ use crate::gc::heap::Heap;
 use crate::gc::semi_space::PtrPolicy;
 use crate::gc::statemap::TraceState;
 
+// ─── Allocation-site counters ───────────────────────────────────────
+
+/// Per-(allocation-site) cumulative count + byte total. One entry per
+/// compile-time-assigned site id (see `Heap::set_alloc_sites`). Updated by
+/// the owning thread on the allocation slow path; summed across threads at
+/// dump time. Plain integers — NOT atomics — because only the owning thread
+/// ever writes them (between safepoints) and they are read only when the
+/// world is quiescent (program end / a safepoint). Keeping them non-atomic
+/// is the whole point: the allocation path must not contend on a shared
+/// counter.
+#[derive(Clone, Copy, Default, Debug)]
+#[repr(C)]
+pub struct SiteCounter {
+    /// Number of objects allocated at this site.
+    pub count: u64,
+    /// Total bytes allocated at this site (header + payload, as the allocator
+    /// sized it via `TypeInfo::allocation_size`).
+    pub bytes: u64,
+}
+
 // ─── Thread states ──────────────────────────────────────────────────
 
 pub const STATE_RUNNING: u8 = 0;
@@ -100,6 +120,15 @@ pub struct ThreadState {
     /// (between safepoints) or the collector (while it's parked).
     gc_scratch: [std::sync::atomic::AtomicU64; GC_SCRATCH_DEPTH],
     scratch_depth: std::sync::atomic::AtomicUsize,
+
+    /// Per-allocation-site counters (Target-1b allocation-site profiling).
+    /// Indexed by the compile-time site id passed to `ai_gc_alloc_*`. Grown
+    /// lazily on first use to fit the highest site id seen. `UnsafeCell` (not
+    /// atomics) because writes happen ONLY on the owning thread's allocation
+    /// path — making this contention-free is the design's whole point — and
+    /// reads happen only at a quiescent merge (program end / safepoint), same
+    /// access discipline as `satb_buffer`.
+    alloc_sites: UnsafeCell<Vec<SiteCounter>>,
 }
 
 /// Maximum nesting of runtime alloc fns parking scratch roots at once.
@@ -127,7 +156,40 @@ impl ThreadState {
             os_thread: std::thread::current().id(),
             gc_scratch: Default::default(),
             scratch_depth: std::sync::atomic::AtomicUsize::new(0),
+            alloc_sites: UnsafeCell::new(Vec::new()),
         }
+    }
+
+    /// Record one allocation at `site_id` of `bytes` bytes (Target-1b
+    /// allocation-site profiling). Called by `ai_gc_alloc_*` on the owning
+    /// thread's slow path. Non-atomic, owning-thread-only; grows the counter
+    /// vector on demand to fit `site_id` (a cold branch taken at most once per
+    /// distinct site). No allocation profiling table installed is fine — the
+    /// counters still accumulate and are simply unlabelled at merge time.
+    ///
+    /// # Safety
+    /// Must be called only by the thread that owns this `ThreadState`, never
+    /// concurrently with a quiescent read (`alloc_site_counters`).
+    #[inline]
+    pub unsafe fn record_alloc(&self, site_id: u32, bytes: u64) {
+        let v = unsafe { &mut *self.alloc_sites.get() };
+        let idx = site_id as usize;
+        if idx >= v.len() {
+            v.resize(idx + 1, SiteCounter::default());
+        }
+        let c = &mut v[idx];
+        c.count += 1;
+        c.bytes += bytes;
+    }
+
+    /// Snapshot this thread's per-site counters for a cross-thread merge.
+    /// Call only when the world is quiescent (program end / at a safepoint),
+    /// when the owning thread is not mutating the counters.
+    ///
+    /// # Safety
+    /// No concurrent `record_alloc` on the owning thread.
+    pub unsafe fn alloc_site_counters(&self) -> Vec<SiteCounter> {
+        unsafe { &*self.alloc_sites.get() }.clone()
     }
 
     /// Remember the current scratch-stack depth so a nested run of

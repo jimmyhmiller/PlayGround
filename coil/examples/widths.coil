@@ -1,0 +1,13 @@
+; Zig-style arbitrary-width integers: iN / uN for any N, with real signed and
+; unsigned semantics (sext vs zext, sdiv vs udiv, signed vs unsigned compare).
+;   coil run examples/widths.coil; echo $?   => 42
+
+(defstruct Pixel [(r :u8) (g :u8) (b :u8) (a :u8)])   ; four 8-bit channels
+
+(defn main [] (-> :i64)
+  (let [px (alloc-stack Pixel)]
+    (store! (field px r) (cast :u8 200))
+    (store! (field px g) (cast :u8 50))
+    (let [ratio (idiv (load (field px r)) (load (field px g)))]  ; unsigned 200/50 = 4
+      (iadd (imul (cast :i64 ratio) 10)        ; 40
+            (cast :i64 (cast :u2 6))))))         ; u2: 6 mod 4 = 2  -> 42

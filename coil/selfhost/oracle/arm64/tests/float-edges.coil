@@ -1,0 +1,41 @@
+; Float semantics: f32/f64 arithmetic + conversions, ordered comparisons
+; (incl. NaN behavior — printed as booleans, never cast), frem, negatives.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+(defn outb [(w (ptr Writer)) (l (slice u8)) (v bool)] (-> i64)
+  (print-str w l) (print-str w "=") (print-bool w v) (print-nl w) 0)
+
+(defn milli [(x f64)] (-> i64) (cast i64 (fmul x 1000.0)))
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    (out w "add" (milli (fadd 1.5 2.25)))
+    (out w "sub" (milli (fsub 1.0 3.5)))
+    (out w "mul" (milli (fmul -2.5 4.0)))
+    (out w "div" (milli (fdiv 7.0 2.0)))
+    (out w "rem" (milli (frem 7.5 2.0)))
+    (out w "remneg" (milli (frem -7.5 2.0)))
+    ; f32 arithmetic (rounded differently than f64)
+    (out w "f32" (cast i64 (fmul (fadd (cast f32 0.1) (cast f32 0.2)) (cast f32 10000000.0))))
+    ; conversions
+    (out w "f2i" (cast i64 -3.99))
+    (out w "f2u" (cast i64 (cast u32 3.99)))
+    (out w "i2f" (milli (fadd (cast f64 -7) 0.25)))
+    (out w "u2f" (milli (fdiv (cast f64 (cast u64 -1)) 1000000000000000000.0)))
+    (out w "narrow" (milli (cast f64 (cast f32 1.1))))
+    ; comparisons incl. NaN (0.0/0.0)
+    (let [nan (fdiv 0.0 0.0) one 1.0]
+      (outb w "ltnan" (fcmp-lt nan one))
+      (outb w "genan" (fcmp-ge nan one))
+      (outb w "eqnan" (fcmp-eq nan nan))
+      (outb w "nenan" (fcmp-ne nan nan))
+      (outb w "lt" (fcmp-lt -0.5 0.5))
+      (outb w "le" (fcmp-le 2.0 2.0))
+      (outb w "gt" (fcmp-gt 2.0 2.0))
+      (outb w "negz" (fcmp-eq 0.0 -0.0)))
+    0))

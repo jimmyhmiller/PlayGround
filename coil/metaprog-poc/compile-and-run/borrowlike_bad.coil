@@ -1,0 +1,21 @@
+(module borrowlike_bad)
+; The binding-id checker must report EXACTLY the two real use-after-free sites and
+; NOT be fooled by shadowing. `bad` frees p then uses it twice (2 errors). `ok`
+; frees the OUTER p, then SHADOWS p with a fresh inner binding and uses THAT — a
+; name-matching checker would false-positive on the inner p; the binding oracle
+; knows it is a different binding, so it stays silent.
+(import "metaprog-poc/compile-and-run/borrowlike.coil" :use *)
+(defn my-free [(x i64)] (-> i64) 0)
+(defn use1 [(x i64)] (-> i64) x)
+(defn bad [] (-> i64)
+  (let [p 42]
+    (use1 p)
+    (my-free p)
+    (use1 p)
+    (use1 p)))
+(defn ok [] (-> i64)
+  (let [p 7]
+    (my-free p)
+    (let [p 99]
+      (use1 p))))
+(defn main [] (-> :i64) (iadd (bad) (ok)))

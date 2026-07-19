@@ -1,0 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import { ScryWasm } from './scry-wasm.js';
+const prog = `fn greet() -> Int { 1 }\nfn main() { }\n`;
+const scry = await ScryWasm.instantiate(await readFile(new URL('./scry.wasm', import.meta.url)), { onStdout(){}, onStderr(t){process.stderr.write("[err] "+t)}, vfs: { "/p.scry": prog } });
+scry.exports.scry_boot(scry.writeStr("/p.scry"));
+const ev = s => { const b=scry.enc.encode(s); const p=scry._malloc(b.length); scry.u8.set(b,p);
+  const o=Number(scry.exports.scry_eval(p,BigInt(b.length))); const u=scry.u8; let e=o; while(u[e])e++; return scry.dec.decode(u.subarray(o,e)); };
+console.log("before swap :", ev("greet()"));
+console.log("swap body   :", ev("fn greet() -> Int { 99 }"));
+console.log("after swap  :", ev("greet()"));

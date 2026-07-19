@@ -1,0 +1,7 @@
+(program
+  (migrate Agent (from v1) (to v2)
+    (entry notes
+      (str ""))
+    (entry summaryTone (of old)
+      (dot status
+        (id old)))))

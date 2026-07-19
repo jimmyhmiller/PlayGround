@@ -1,0 +1,15 @@
+class Message {
+  role: String
+  content: String
+  createdAt: Int
+
+  fn init(role: String, content: String) {
+    self.role = role
+    self.content = content
+    self.createdAt = Clock.now()
+  }
+
+  fn preview(n: Int) -> String {
+    if self.content.len() <= n { self.content } else { self.content.slice(0, n) + "..." }
+  }
+}

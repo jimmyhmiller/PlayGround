@@ -1,0 +1,11 @@
+// Single-thread Mutex value semantics: lock/get/set/unlock round-trips a value; prints 42.
+fn main() {
+  let box = Mutex<Int>(0)
+  box.lock()
+  box.set(42)
+  box.unlock()
+  box.lock()
+  let v = box.get()
+  box.unlock()
+  print(v)
+}

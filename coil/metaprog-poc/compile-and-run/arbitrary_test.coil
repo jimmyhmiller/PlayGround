@@ -1,0 +1,23 @@
+(module arbitrary_test)
+; Run with the COMPILED metaprogram engine (the interpreter cannot run these
+; macros — generics, HashMap, FFI, malloc at compile time):
+;   COIL_META=compiled coil run metaprog-poc/compile-and-run/arbitrary_test.coil
+; Exit code 0 = every compile-time computation matched.
+(import "metaprog-poc/compile-and-run/arbitrary.coil" :use *)
+
+(defn main [] (-> :i64)
+  ; sum of squares 1..10 = 385, computed via a generic ArrayList in the macro
+  (let [a (sum-squares 10)
+        ; compile-time HashMap lookups
+        b (table-lookup answer)
+        c (table-lookup year)
+        ; libc strlen at expansion time
+        d (static-strlen "hello, metaprogram")
+        ; a NAME built with the StrBuf library: binds the local temp-3
+        e (let [(const-name temp 3) 99] temp-3)]
+    (if (icmp-ne a 385) 1
+    (if (icmp-ne b 42) 2
+    (if (icmp-ne c 2026) 3
+    (if (icmp-ne d 18) 4
+    (if (icmp-ne e 99) 5
+        0)))))))

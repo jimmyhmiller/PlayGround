@@ -1,0 +1,51 @@
+// THE AUTO-INJECTED STANDARD PRELUDE — a Core slice of the Idris 2 `Prelude`,
+// always in scope. This file declares NOTHING: `Nat`, `Bool`, `Ordering`,
+// `Maybe`, `Either`, `Pair`, `List`, and their functions/combinators are all
+// provided automatically (like the memory layer). See `NAT_PRELUDE` /
+// `STD_PRELUDE` in `src/rust_surface.rs`.
+//
+//   tally run examples/stdlib.tal        →  23
+//
+// `Nat` is the packed machine integer (Idris 2's default). A program keeps its
+// own representation choice simply by declaring its own `enum Nat` — that opts
+// out of the whole Nat block (a plain Peano `Nat` for type-level `Succ`-towers /
+// proofs, as in examples/proofs.rs.tal). Declaring any stdlib name likewise
+// hands that layer back to you, all-or-nothing.
+
+xs : List Nat
+fn xs() { Cons(3, Cons(1, Cons(2, Nil))) }
+
+ys : List Nat
+fn ys() { Cons(4, Cons(5, Nil)) }
+
+somePair : Pair Nat Bool
+fn somePair() { MkPair(9, True) }
+
+someMaybe : Maybe Nat
+fn someMaybe() { Just(7) }
+
+// `compareNat` returns an `Ordering`; three-way `match` on it.
+cmp : Ordering
+fn cmp() { compareNat(length(xs), length(ys)) }
+
+ordToNat : Ordering -> Nat
+fn ordToNat(o) { match o { LT => Zero, EQ => Succ(Zero), GT => Succ(Succ(Zero)) } }
+
+main : Nat
+fn main() {
+  length(append(reverse(xs), ys))   // 3 + 2 = 5
+    + fst(somePair)                 // 9
+    + fromMaybe(0, someMaybe)       // 7
+    + ordToNat(cmp)                 // length 3 vs 2 => GT => 2
+}
+
+// HIGHER-ORDER members (`map`, `filter`, `foldr`, `foldl`, `either`, `maybe`,
+// `mapMaybe`, `compose`, `flip`, …) type-check and are correct, e.g.
+//
+//   twice : List Nat -> List Nat
+//   fn twice(l) { map(double, l) }        -- CHECKS
+//
+// but RUNNING them needs first-class-function codegen (a function passed as a
+// value and applied inside a callee): `tally run`/`build` reports a clear
+// "higher-order functions are not yet compiled to native" error for now. The
+// first-order members above compile and run today.

@@ -1,0 +1,8 @@
+class P { name: String }
+fn main() {
+  let p = P(name: "bob")
+  let g = "Hi, ${p.name}, len ${p.name.len()}"
+  print(g)
+  print(p.name.slice(0, 1))
+  print("a" + "b")
+}

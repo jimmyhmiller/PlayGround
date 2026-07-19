@@ -1,0 +1,8 @@
+(module meta_stage3)
+; A generator is an ordinary Coil fn (-> Code); (meta (gen)) runs it at compile
+; time and splices the produced top-level forms, which the rest of the program
+; may depend on (Stage-3 staged macros).
+(defn gen-double [] (-> Code)
+  `(defn double [(n i64)] (-> i64) (imul n 2)))
+(meta (gen-double))
+(defn main [] (-> i64) (double 21))

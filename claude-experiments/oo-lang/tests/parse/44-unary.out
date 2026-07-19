@@ -1,0 +1,12 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let a
+        (unary !
+          (id flag)))
+      (let b
+        (binary +
+          (unary -
+            (id x))
+          (id y))))))

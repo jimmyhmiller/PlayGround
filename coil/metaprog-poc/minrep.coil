@@ -1,0 +1,3 @@
+(module minrep)
+(defn simple-check [(prog Code)] (-> Code)
+  (report (code-nth prog 0) "always report at the first form"))

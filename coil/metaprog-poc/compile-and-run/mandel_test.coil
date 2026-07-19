@@ -1,0 +1,13 @@
+(module mandel_test)
+; A program whose CONSTANTS come from a GUI you drive at COMPILE TIME.
+;
+;   COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
+;     --link-flag -framework --link-flag AppKit --link-flag -lobjc
+;
+; The build opens a Mandelbrot viewer (WASD pan, Z/X zoom, I/O iters, Q/RETURN
+; accept); the program then ASCII-renders whatever view you accepted.
+; COIL_MANDEL_AUTO=1 scripts the session (reproducible builds / CI).
+(import "metaprog-poc/compile-and-run/mandelbrot.coil" :use *)
+
+(defn main [] (-> :i64)
+  (mandel-pick))

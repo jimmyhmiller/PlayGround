@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live &amp; Typed — editing a running program</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --edge: #262d38;
+    --ink: #d7dee8;
+    --dim: #7d8998;
+    --accent: #62b0ff;
+    --ok: #56d38a;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px 14px; border-bottom: 1px solid var(--edge);
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -0.01em; }
+  header p { margin: 5px 0 0; color: var(--dim); font-size: 13px; max-width: 78ch; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 18px; padding: 18px 24px 28px; align-items: start;
+  }
+  @media (max-width: 1040px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 10px; overflow: hidden;
+  }
+  .panel > h2 {
+    margin: 0; padding: 10px 14px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim);
+    border-bottom: 1px solid var(--edge);
+  }
+  .body { padding: 14px; }
+
+  canvas {
+    display: block; width: 100%; height: auto; background: #080b0f;
+    border-bottom: 1px solid var(--edge);
+  }
+
+  /* The frozen banner sits over the canvas: the last good frame stays visible. */
+  .stage { position: relative; }
+  .frozen-veil {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center; flex-direction: column;
+    gap: 8px; background: rgba(14, 17, 22, 0.72); backdrop-filter: blur(1.5px);
+    text-align: center; padding: 20px;
+  }
+  body.frozen .frozen-veil { display: flex; }
+  .frozen-veil strong { color: var(--warn); font-size: 15px; letter-spacing: 0.02em; }
+  .value-input {
+    background: #0b0f14; color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 7px; padding: 6px 9px; font-family: var(--mono); font-size: 13px;
+  }
+  .value-input:focus { outline: none; border-color: var(--accent); }
+  .frozen-veil code {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+    background: rgba(0,0,0,.45); padding: 6px 9px; border-radius: 6px;
+    max-width: 90%; overflow-wrap: anywhere;
+  }
+
+  /* The editor is a transparent textarea over a highlighted <pre>. Both must
+     lay text out identically or the caret drifts from the glyphs. */
+  .editor-stack {
+    position: relative; background: #0b0f14;
+    border: 1px solid var(--edge); border-radius: 8px;
+    height: 420px; overflow: hidden;
+  }
+  .editor-stack:focus-within { border-color: var(--accent); }
+  .editor-stack textarea,
+  .editor-stack pre {
+    margin: 0; position: absolute; inset: 0; width: 100%; height: 100%;
+    padding: 11px 12px; border: 0; overflow: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
+    tab-size: 4;
+  }
+  /* The highlight layer sits ON TOP so number tokens can be grabbed, but is
+     click-through everywhere else, so all other input reaches the textarea
+     beneath it. The textarea's text is transparent, so what you read is this
+     layer and what you type into is the one below. */
+  .editor-stack pre { z-index: 2; pointer-events: none; color: var(--ink); }
+  .editor-stack textarea {
+    z-index: 1; resize: none; background: transparent;
+    color: transparent; caret-color: var(--ink);
+  }
+  .editor-stack textarea:focus { outline: none; }
+  .editor-stack textarea::selection { background: rgba(98,176,255,.30); }
+
+  .tok-comment { color: #5b6675; font-style: italic; }
+  .tok-keyword { color: #ff9ecd; }
+  .tok-type    { color: #7fd6c1; }
+  .tok-string  { color: #ffb454; }
+  .tok-number  { color: #c4a6ff; }
+  .tok-fn      { color: #62b0ff; }
+
+  /* Every number is draggable. The dotted underline is the affordance; a plain
+     click still falls through to the caret, so numbers stay editable by hand. */
+  .tok-number {
+    pointer-events: auto; cursor: ew-resize;
+    border-bottom: 1px dashed rgba(196,166,255,.5); border-radius: 2px;
+  }
+  .tok-number:hover {
+    background: rgba(196,166,255,.28);
+    box-shadow: 0 0 0 2px rgba(196,166,255,.28);
+  }
+  .editor-stack.scrubbing, .editor-stack.scrubbing * { cursor: ew-resize; }
+  .editor-stack.scrubbing .tok-number.active { background: rgba(196,166,255,.38); }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 12.5px; }
+  #live-status {
+    font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+    margin-top: 8px; min-height: 1.3em; overflow-wrap: anywhere;
+  }
+  #live-status.ok  { color: var(--ok); }
+  #live-status.err { color: var(--dim); }
+
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  button {
+    font: inherit; font-size: 13px; color: var(--ink); cursor: pointer;
+    background: #1e242d; border: 1px solid var(--edge);
+    border-radius: 7px; padding: 6px 12px;
+  }
+  button:hover { border-color: #3a4553; background: #232a34; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #07121f; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.warn { background: var(--warn); border-color: var(--warn); color: #241703; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--dim); font-size: 12px; }
+
+  #message {
+    margin-top: 10px; padding: 9px 11px; border-radius: 7px; display: none;
+    font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere;
+  }
+  #message.show { display: block; }
+  #message.ok  { background: rgba(86,211,138,.10); border: 1px solid rgba(86,211,138,.35); color: var(--ok); }
+  #message.err { background: rgba(255,107,107,.10); border: 1px solid rgba(255,107,107,.35); color: var(--bad); }
+  #message.warn { background: rgba(255,180,84,.10); border: 1px solid rgba(255,180,84,.38); color: var(--warn); }
+
+  /* The walkthrough is one step at a time: the dots are where you are, not a
+     menu. Each step applies its own source, so it never disturbs the editor. */
+  ol.step-dots { list-style: none; display: flex; gap: 6px; margin: 0 0 12px; padding: 0; }
+  ol.step-dots li {
+    flex: 1; height: 4px; border-radius: 2px; background: var(--edge);
+  }
+  ol.step-dots li.done { background: var(--ok); }
+  ol.step-dots li.current { background: var(--accent); }
+
+  .step-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .step-title .n {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: .07em; display: block; margin-bottom: 3px;
+  }
+  .step-watch { margin: 8px 0 12px; color: var(--dim); font-size: 13px; }
+  #step-status {
+    margin-top: 10px; font-size: 12.5px; min-height: 1.3em; overflow-wrap: anywhere;
+  }
+  #step-status.ok   { color: var(--ok); }
+  #step-status.err  { color: var(--bad); }
+  #step-status.warn { color: var(--warn); }
+
+  pre.scenario-source {
+    margin: 0 0 10px; padding: 10px 11px; background: #0b0f14;
+    border: 1px solid var(--edge); border-radius: 7px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    white-space: pre-wrap; overflow-wrap: break-word; color: var(--ink);
+    max-height: 260px; overflow: auto;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    text-align: left; font-weight: 600; color: var(--dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .06em; padding: 0 0 6px;
+  }
+  td { padding: 3px 0; font-family: var(--mono); font-size: 12px; vertical-align: baseline; }
+  td.v { color: var(--dim); width: 5.5em; }
+  td.shape { color: var(--dim); overflow-wrap: anywhere; }
+  tr.broken td { color: var(--bad); }
+  .why { color: var(--bad); font-size: 11px; }
+
+  dl.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0; }
+  dl.stats div { background: #0b0f14; border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; }
+  dl.stats dt { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+  dl.stats dd { margin: 3px 0 0; font-family: var(--mono); font-size: 17px; }
+  dl.stats dd.pinned { color: var(--ok); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Live &amp; Typed — editing a program while it runs</h1>
+  <p>
+    The animation below is one long-running computation. Every edit you apply lands
+    between two instructions of that computation: it is never restarted, and the canvas
+    it draws to is opened exactly once and then never again. Types are enforced across
+    every edit — a change that breaks something is refused at install or freezes the
+    program at the point the stale assumption would be used, never silently.
+  </p>
+</header>
+
+<main>
+  <section>
+    <div class="panel stage">
+      <canvas id="stage" width="640" height="400"></canvas>
+      <div class="frozen-veil">
+        <strong>FROZEN</strong>
+        <code id="condition"></code>
+        <span class="hint" id="frozen-hint"></span>
+        <div class="row" style="justify-content:center" id="frozen-actions">
+          <input id="resume-value" class="value-input" style="display:none" size="8">
+          <button class="warn" id="thaw">Thaw &amp; resume</button>
+        </div>
+        <span class="hint" id="resume-error" style="color: var(--bad)"></span>
+      </div>
+      <div class="body">
+        <div class="row" style="margin: 0 0 12px">
+          <button id="pause">Pause</button>
+          <button id="step">Step 1 frame</button>
+          <span class="hint" id="pause-hint">
+            Pausing stops the host from stepping the program. Edits still install while paused.
+          </span>
+        </div>
+        <dl class="stats">
+          <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
+          <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
+          <div><dt>Circles drawn</dt><dd id="stat-circles">0</dd></div>
+          <div><dt>Status</dt><dd id="stat-status">booting</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>The live world</h2>
+      <div class="body">
+        <table>
+          <thead><tr><th>Function</th><th style="width:5.5em">Version</th></tr></thead>
+          <tbody id="fns"></tbody>
+        </table>
+        <table style="margin-top:14px">
+          <thead><tr><th>Type</th><th style="width:5.5em">Version</th><th>Shape</th></tr></thead>
+          <tbody id="types"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel">
+    <h2>Source — edit and apply while it runs</h2>
+    <div class="body">
+      <div class="editor-stack" id="editor-stack">
+        <pre id="highlight" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" autocomplete="off"
+                  autocapitalize="off" autocorrect="off" wrap="soft"></textarea>
+      </div>
+      <div class="toolbar">
+        <label class="toggle">
+          <input type="checkbox" id="live-typing">
+          Apply as I type
+        </label>
+        <span class="hint">Drag any number to scrub it live · Shift for fine steps</span>
+      </div>
+      <div id="live-status"></div>
+      <div class="row">
+        <button class="primary" id="apply">Apply edit</button>
+        <button id="restart">Restart world with this source</button>
+        <button id="reload-scene">Load full scene</button>
+        <button id="reset">Reset to original</button>
+        <span class="hint">⌘/Ctrl + Enter to apply</span>
+      </div>
+      <div id="message"></div>
+    </div>
+    </div>
+
+    <div class="panel" id="walkthrough" style="margin-top:18px">
+    <h2>Walkthrough — six steps, in order</h2>
+    <div class="body">
+      <ol class="step-dots" id="step-dots"></ol>
+      <h3 class="step-title" id="step-title"></h3>
+      <p class="step-watch" id="step-watch"></p>
+      <pre class="scenario-source" id="step-source"></pre>
+      <p class="hint" style="margin: -4px 0 10px">
+        The numbers here drag too — scrubbing one applies the step live.
+      </p>
+      <div class="row">
+        <button class="primary" id="step-apply">Apply this step</button>
+        <button class="warn" id="step-resume" style="display:none">Thaw &amp; resume</button>
+        <button id="step-next">Next step →</button>
+        <button id="step-back">← Back</button>
+        <button id="step-restart">Start over</button>
+      </div>
+      <div id="step-status"></div>
+    </div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import init, { Demo } from "./pkg/livetype_wasm.js";
+
+const STATUS_RUNNING = 0, STATUS_FROZEN = 1, STATUS_DONE = 2, STATUS_CAPPED = 3;
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("stage");
+const ctx = canvas.getContext("2d");
+
+await init();
+let demo = new Demo();
+
+// ── painting ───────────────────────────────────────────────────────────────
+function paint(ops) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < ops.length; i += 4) {
+    const [x, y, r, hue] = [ops[i], ops[i + 1], ops[i + 2], ops[i + 3]];
+    const h = ((hue % 360) + 360) % 360;
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(1, r), 0, Math.PI * 2);
+    ctx.fillStyle = `hsl(${h} 72% 62% / 0.85)`;
+    ctx.fill();
+  }
+}
+
+// ── the frame loop: one `yield` of the guest per animation frame ────────────
+let lastWorld = "";
+
+// Paused is the HOST declining to step the program — nothing to do with the
+// engine. A frozen program trapped on its own; a paused one is perfectly
+// healthy and simply is not being asked to run. Edits install either way.
+let paused = false;
+
+function advanceOneFrame() {
+  const status = demo.step_frame();
+
+  if (status === STATUS_RUNNING) {
+    paint(demo.draw_ops());
+    document.body.classList.remove("frozen");
+    $("stat-status").textContent = "running";
+  } else if (status === STATUS_FROZEN) {
+    // Deliberately do NOT repaint: the last completed frame stays on screen.
+    document.body.classList.add("frozen");
+    $("condition").textContent = demo.condition || "(frozen)";
+    $("stat-status").textContent = "frozen";
+    renderFrozenActions();
+  } else if (status === STATUS_DONE) {
+    $("stat-status").textContent = "completed";
+  } else if (status === STATUS_CAPPED) {
+    $("stat-status").textContent = "no yield reached";
+  }
+  refreshStats();
+}
+
+function refreshStats() {
+  if (paused && !demo.frozen) $("stat-status").textContent = "paused";
+  // Resuming is offered only on the repair step. It is available a step
+  // earlier too — where it would simply re-trap, since nothing is fixed yet —
+  // but that is a detour from the walkthrough's one next thing to do.
+  $("step-resume").style.display =
+    demo.frozen && step === STEP_COUNT - 1 ? "" : "none";
+  $("stat-frames").textContent = demo.frames;
+  $("stat-canvas").textContent = demo.canvases_opened;
+  $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
+
+  // The inspector is read out of the engine; only redraw it when it changes.
+  const world = demo.world_json();
+  if (world !== lastWorld) {
+    lastWorld = world;
+    renderWorld(JSON.parse(world));
+  }
+}
+
+function tick() {
+  // Keep the loop alive while paused so edits, the inspector, and Step still
+  // respond — the host simply does not advance the program.
+  if (paused) refreshStats();
+  else advanceOneFrame();
+  requestAnimationFrame(tick);
+}
+
+function renderWorld({ functions, types }) {
+  $("fns").innerHTML = functions.map((f) => {
+    const why = f.broken && f.why
+      ? `<tr class="broken"><td colspan="2" class="why">↳ ${escapeHtml(f.why)}</td></tr>`
+      : "";
+    return `<tr class="${f.broken ? "broken" : ""}">
+      <td>${escapeHtml(f.name)}${f.broken ? " — BROKEN" : ""}</td>
+      <td class="v">${f.version}</td></tr>${why}`;
+  }).join("");
+
+  $("types").innerHTML = types.map((t) => `<tr>
+      <td>${escapeHtml(t.name)}</td>
+      <td class="v">${t.version}</td>
+      <td class="shape">${escapeHtml(t.shape)}</td></tr>`).join("");
+}
+
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+// ── syntax highlighting ────────────────────────────────────────────────────
+// A scanner rather than a pile of regexes over the whole text: comments and
+// strings have to win over everything inside them, and every token needs its
+// character offsets so a number can be spliced back into the source when
+// scrubbed.
+const KEYWORDS = new Set([
+  "fn", "let", "letonce", "while", "if", "else", "return", "struct", "enum",
+  "match", "foreign", "type", "emit", "yield", "push", "len", "true", "false",
+]);
+const TYPES = new Set(["i64", "f64", "bool", "str"]);
+
+const isIdentStart = (c) => /[A-Za-z_]/.test(c);
+const isIdent = (c) => /[A-Za-z0-9_]/.test(c);
+const isDigit = (c) => c >= "0" && c <= "9";
+
+// Is the `-` about to be scanned a sign rather than a subtraction? It is unless
+// something that ends a value sits before it — so `x: -3` and `return -5` are
+// signs, while `a - 1` and `f(n) - 1` are subtractions.
+function isUnaryMinus(previous, src) {
+  if (!previous) return true;
+  if (previous.cls === "number" || previous.cls === "string") return false;
+  const text = src.slice(previous.start, previous.end);
+  if (previous.cls === "plain" && /[A-Za-z0-9_)\]]/.test(text)) return false;
+  return true;
+}
+
+function tokenize(src) {
+  const tokens = [];
+  // The last token that was not whitespace, so `fn NAME` can be recognised
+  // across the space between them.
+  let previous = null;
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const start = i;
+
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      tokens.push({ cls: "comment", start, end: i });
+    } else if (c === '"') {
+      i++;
+      while (i < src.length && src[i] !== '"') i += src[i] === "\\" ? 2 : 1;
+      i++;
+      tokens.push({ cls: "string", start, end: Math.min(i, src.length) });
+    } else if (isDigit(c) || (c === "-" && isDigit(src[i + 1]) && isUnaryMinus(previous, src))) {
+      // A unary minus belongs TO the number. Left out, `-5` scans as `-` plus
+      // `5`, so a drag reads the value as positive: dragging right past zero
+      // makes it more negative, and the sign can never be crossed.
+      if (c === "-") i++;
+      while (i < src.length && isDigit(src[i])) i++;
+      // A float keeps its fractional part in one token so scrubbing never
+      // splits `1.5` into `1` and `5`.
+      let isFloat = false;
+      if (src[i] === "." && isDigit(src[i + 1])) {
+        isFloat = true;
+        i++;
+        while (i < src.length && isDigit(src[i])) i++;
+      }
+      tokens.push({ cls: "number", start, end: i, float: isFloat });
+    } else if (isIdentStart(c)) {
+      while (i < src.length && isIdent(src[i])) i++;
+      const word = src.slice(start, i);
+      // `fn NAME` — colour the definition's name, not the keyword only.
+      const afterFn = previous && previous.word === "fn";
+      const cls = KEYWORDS.has(word)
+        ? "keyword"
+        : TYPES.has(word)
+          ? "type"
+          : afterFn
+            ? "fn"
+            : "plain";
+      tokens.push({ cls, start, end: i, word });
+    } else {
+      i++;
+      tokens.push({ cls: "plain", start, end: i });
+    }
+
+    const token = tokens[tokens.length - 1];
+    if (src.slice(token.start, token.end).trim() !== "") previous = token;
+  }
+  return tokens;
+}
+
+function highlightHtml(src, { scrubbable = false } = {}) {
+  let html = "";
+  for (const t of tokenize(src)) {
+    const text = escapeHtml(src.slice(t.start, t.end));
+    html += t.cls === "plain"
+      ? text
+      : `<span class="tok-${t.cls}"${scrubbable ? ` data-s="${t.start}" data-e="${t.end}"` : ""}>${text}</span>`;
+  }
+  return html;
+}
+
+function renderHighlight() {
+  // A trailing newline needs a spare line or the two layers scroll apart.
+  $("highlight").innerHTML = highlightHtml($("editor").value, { scrubbable: true }) + "\n";
+  syncScroll();
+}
+
+function syncScroll() {
+  $("highlight").scrollTop = $("editor").scrollTop;
+  $("highlight").scrollLeft = $("editor").scrollLeft;
+}
+
+/// Replace the editor's contents while keeping the caret where it was.
+function setSource(text, { keepCaret = false } = {}) {
+  const editor = $("editor");
+  const at = editor.selectionStart;
+  editor.value = text;
+  if (keepCaret) editor.setSelectionRange(at, at);
+  renderHighlight();
+}
+
+// ── live typing ────────────────────────────────────────────────────────────
+// Applying the WHOLE source on every keystroke would reinstall every
+// definition in it — versions climbing 60x/second and a struct migration
+// churn behind them. Only the definition under the caret is applied.
+const ITEM_START = /^(fn|struct|enum|letonce|foreign)\b/;
+
+function enclosingItem(src, offset) {
+  const lines = src.split("\n");
+  let lineStart = 0;
+  const bounds = [];
+  for (const line of lines) {
+    if (ITEM_START.test(line)) bounds.push(lineStart);
+    lineStart += line.length + 1;
+  }
+  if (bounds.length === 0) return { start: 0, end: src.length };
+
+  let start = bounds[0];
+  for (const b of bounds) if (b <= offset) start = b;
+  const next = bounds.find((b) => b > start);
+  return { start, end: next === undefined ? src.length : next };
+}
+
+function liveStatus(text, kind) {
+  const el = $("live-status");
+  el.textContent = text;
+  el.className = kind ?? "";
+}
+
+// Apply quietly — a half-typed definition failing to parse is the normal
+// state while typing, not an error worth shouting about.
+//
+// `at` is which definition to install. Typing means the caret; scrubbing means
+// the number being dragged, which is NOT where the caret is — using the caret
+// for both installs whichever definition the caret happens to sit in and
+// silently leaves the scrubbed one untouched.
+function applyLive(reason, at = $("editor").selectionStart) {
+  const src = $("editor").value;
+  const { start, end } = enclosingItem(src, at);
+  const item = src.slice(start, end).trim();
+  if (item === "") return;
+
+  const result = JSON.parse(demo.eval(item));
+  lastWorld = "";
+  if (!result.ok) {
+    liveStatus(`${reason}: not yet — ${result.error}`, "err");
+  } else if (result.unobservable.length > 0) {
+    liveStatus(
+      `${reason}: installed ${result.unobservable.join(", ")}, but only a letonce ` +
+      `initializer calls it — restart to see it`,
+      "err",
+    );
+  } else {
+    liveStatus(`${reason}: ${describeResult(result)}`, result.broken.length ? "err" : "ok");
+  }
+}
+
+let liveTimer = null;
+function scheduleLive() {
+  if (!$("live-typing").checked) return;
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => applyLive("live"), 300);
+}
+
+// ── scrubbing numbers ──────────────────────────────────────────────────────
+// Drag any number to change it; the edit applies on every step, so the
+// animation responds under the cursor.
+//
+// Dragging and clicking share the same gesture, so nothing happens until the
+// pointer actually moves. A click that never moves is forwarded to the caret,
+// which keeps numbers editable by typing.
+const DRAG_THRESHOLD = 3;
+let scrub = null;
+
+// Any element rendered with `highlightHtml(src, {scrubbable: true})` can host
+// scrubbing — the editor's highlight layer and the walkthrough's step source
+// both do. The host supplies how to read and write its own text, which is the
+// only thing that differs between them.
+function attachScrubbing(el, { read, write, commit, onClick, marker = el }) {
+  el.addEventListener("pointerdown", (e) => {
+    const span = e.target.closest(".tok-number");
+    if (!span || e.button !== 0) return;
+    e.preventDefault();
+    const src = read();
+    const start = +span.dataset.s;
+    const end = +span.dataset.e;
+    const box = span.getBoundingClientRect();
+    scrub = {
+      el, write, commit, onClick, marker,
+      start,
+      value: parseFloat(src.slice(start, end)),
+      float: src.slice(start, end).includes("."),
+      x: e.clientX,
+      length: end - start,
+      moved: false,
+      // Where in the number the pointer landed, in case this turns out to be
+      // a click rather than a drag.
+      offset: start + Math.round(((e.clientX - box.left) / box.width) * (end - start)),
+      read,
+    };
+    el.setPointerCapture(e.pointerId);
+  });
+
+  el.addEventListener("pointermove", (e) => {
+    if (!scrub || scrub.el !== el) return;
+    const dx = e.clientX - scrub.x;
+    if (!scrub.moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD) return;
+      scrub.moved = true;
+      scrub.marker.classList.add("scrubbing");
+    }
+    e.preventDefault();
+
+    // Shift for fine control, as in every other scrubber.
+    const perPixel = e.shiftKey ? 1 / 12 : 1 / 3;
+    const next = scrub.float
+      ? Math.round((scrub.value + dx * perPixel) * 10) / 10
+      : Math.round(scrub.value + dx * perPixel);
+    const text = String(next);
+    const src = scrub.read();
+    scrub.write(src.slice(0, scrub.start) + text + src.slice(scrub.start + scrub.length));
+    scrub.length = text.length;
+    scrub.commit(scrub.start);
+  });
+
+  const end = () => {
+    if (!scrub || scrub.el !== el) return;
+    if (!scrub.moved && scrub.onClick) scrub.onClick(scrub.offset);
+    scrub.marker.classList.remove("scrubbing");
+    scrub = null;
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
+attachScrubbing($("highlight"), {
+  read: () => $("editor").value,
+  write: setSource,
+  commit: (at) => applyLive("scrub", at),
+  // A click, not a drag: hand the caret to the textarea underneath.
+  onClick: (at) => {
+    $("editor").focus();
+    $("editor").setSelectionRange(at, at);
+  },
+  marker: $("editor-stack"),
+});
+
+// ── editing ────────────────────────────────────────────────────────────────
+function message(text, kind) {
+  const el = $("message");
+  el.textContent = text;
+  el.className = `show ${kind}`;
+}
+
+function applyEdit(source = $("editor").value) {
+  const result = JSON.parse(demo.eval(source));
+  if (!result.ok) {
+    // A refused edit changes nothing: the program keeps running the last good
+    // version. That is the point, so say so.
+    message(`Rejected — the running program is untouched:\n${result.error}`, "err");
+  } else if (result.unobservable.length > 0) {
+    // Installed, but nothing running will ever call it. Saying only
+    // "installed" here reads as the edit having been ignored.
+    const names = result.unobservable.map((n) => `\`${n}\``).join(", ");
+    message(
+      `Installed ${names} — but the running program can no longer reach it. ` +
+      `It is only called by a \`letonce\` initializer, which ran once at boot and ` +
+      `never runs again; that is what keeps your world alive across edits. ` +
+      `To see this change: "Load full scene", make the same edit there, then ` +
+      `"Restart world with this source" — the initializer re-runs with your version.`,
+      "warn",
+    );
+  } else {
+    message(`Into the live world: ${describeResult(result)}`, result.broken.length ? "warn" : "ok");
+  }
+  lastWorld = "";
+}
+
+// Boot a fresh world from whatever is in the editor, so an edit to something
+// only a `letonce` initializer calls can actually be observed.
+function restartWithSource() {
+  try {
+    demo = Demo.restart_with($("editor").value);
+    lastWorld = "";
+    document.body.classList.remove("frozen");
+    message("Fresh world booted from this source — initializers re-ran.", "ok");
+  } catch (e) {
+    // A whole-program restart needs a whole program: a bare fragment has no
+    // `main` and no types. The running world is left alone either way.
+    message(
+      `Could not boot this source — the running world is untouched:\n${e.message ?? e}\n` +
+      `(Restart needs the full scene, not just one function.)`,
+      "err",
+    );
+  }
+}
+
+// The editor holds work the viewer typed; replacing it silently loses that.
+function replaceSource(text, note) {
+  const current = $("editor").value;
+  const edited = current !== lastLoadedSource && current.trim() !== "";
+  if (edited && !confirm("Replace the source in the editor? Your changes there will be lost.")) {
+    return false;
+  }
+  setSource(text);
+  lastLoadedSource = text;
+  if (note) message(note, "ok");
+  return true;
+}
+
+$("apply").addEventListener("click", () => applyEdit());
+$("restart").addEventListener("click", restartWithSource);
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("primary", paused);
+  refreshStats();
+});
+$("step").addEventListener("click", () => {
+  // One frame regardless of pause state — the natural companion to pausing.
+  advanceOneFrame();
+});
+$("editor").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); applyEdit(); }
+});
+$("editor").addEventListener("input", () => { renderHighlight(); scheduleLive(); });
+$("editor").addEventListener("scroll", syncScroll);
+$("live-typing").addEventListener("change", (e) => {
+  liveStatus(e.target.checked ? "live typing on — edits install as you type" : "");
+  if (e.target.checked) applyLive("live");
+});
+// A program freezes in one of two ways, and they are repaired differently.
+//
+// A Broken function is repaired by EDITING: install a good version, then thaw.
+// A trapped operation — `x / 0`, an index out of bounds — cannot be, because
+// the suspended frame is pinned to the version it is already executing. A new
+// version only affects the next call, so thawing re-runs the same division and
+// traps again. What resumes it is handing back the value the instruction could
+// not produce.
+function renderFrozenActions() {
+  const wants = demo.resumable_type;
+  $("resume-value").style.display = wants ? "" : "none";
+  if (wants) {
+    $("resume-value").placeholder = wants;
+    $("thaw").textContent = `Supply ${wants} & resume`;
+    $("frozen-hint").textContent =
+      `This frame is pinned to the version that trapped, so editing the code only ` +
+      `changes the NEXT call. Hand back the ${wants} the instruction could not ` +
+      `produce and this frame carries on — but fix the source too, or the next ` +
+      `call trips over the same thing.`;
+  } else {
+    $("thaw").textContent = "Thaw & resume";
+    $("frozen-hint").textContent =
+      "The last good frame is still on screen. Apply a repair, then resume.";
+  }
+}
+
+$("thaw").addEventListener("click", () => {
+  $("resume-error").textContent = "";
+  if (demo.resumable_type) {
+    const error = demo.resume_with($("resume-value").value);
+    if (error) {
+      $("resume-error").textContent = error;
+      return;
+    }
+    message("Resumed: the trapped instruction produced the value you supplied.", "ok");
+    return;
+  }
+  demo.thaw();
+  message("Thawed — resuming at the instruction that trapped.", "ok");
+});
+$("resume-value").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("thaw").click(); }
+});
+$("reload-scene").addEventListener("click", () => {
+  replaceSource(Demo.scene_source());
+});
+$("reset").addEventListener("click", () => {
+  if (!replaceSource(Demo.scene_source())) return;
+  demo = new Demo();
+  lastWorld = "";
+  document.body.classList.remove("frozen");
+  message("Fresh world booted from the original scene.", "ok");
+});
+
+// ── scenarios ──────────────────────────────────────────────────────────────
+// ── the walkthrough ────────────────────────────────────────────────────────
+// One step at a time, in order. Each step applies its OWN source directly to
+// the live world and never loads into the editor: the editor holds your work,
+// and the walkthrough has to stay usable after you have been playing in it.
+//
+// What to watch for is UI narration, deliberately short — the reasoning lives
+// in the step's source, which is right there to read.
+const WATCH = [
+  "The particles resize on the very next frame. Frames keep climbing and the canvas is never reopened — the loop is not restarted.",
+  "The same particles gain colour. `Particle` becomes v2 in the live world and the objects already on screen migrate as they are read. No reseeding.",
+  "The edit is refused and the animation carries on with the last good `tint`. A bad edit cannot take down a running program.",
+  "Particles on the right half become rings: a `match` on `Kind` now chooses the size.",
+  "`radius` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
+  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped.",
+];
+
+const STEP_COUNT = Demo.scenario_count();
+let step = 0;
+const applied = new Set();
+
+// Each step keeps its own copy of its source, so the numbers in it can be
+// dragged like the ones in the editor. "Start over" restores the originals.
+const stepSources = Array.from({ length: STEP_COUNT }, (_, i) => Demo.scenario_source(i));
+
+function renderStepSource() {
+  $("step-source").innerHTML = highlightHtml(stepSources[step], { scrubbable: true });
+}
+
+function renderStep() {
+  $("step-dots").innerHTML = Array.from({ length: STEP_COUNT }, (_, i) =>
+    `<li class="${i === step ? "current" : applied.has(i) ? "done" : ""}"></li>`).join("");
+  $("step-title").innerHTML =
+    `<span class="n">Step ${step + 1} of ${STEP_COUNT}</span>${escapeHtml(Demo.scenario_title(step))}`;
+  $("step-watch").textContent = WATCH[step];
+  renderStepSource();
+
+  $("step-apply").textContent = applied.has(step) ? "Apply again" : "Apply this step";
+  $("step-back").disabled = step === 0;
+  // Linear: the next step only opens once this one has been applied.
+  $("step-next").disabled = !applied.has(step) || step === STEP_COUNT - 1;
+  $("step-next").classList.toggle("primary", applied.has(step) && step < STEP_COUNT - 1);
+  $("step-apply").classList.toggle("primary", !applied.has(step));
+  stepStatus("");
+}
+
+function stepStatus(text, kind) {
+  $("step-status").textContent = text;
+  $("step-status").className = kind ?? "";
+}
+
+// What an edit did, in the demo's own terms.
+function describeResult(result) {
+  const parts = [];
+  if (result.types.length) parts.push(`evolved ${result.types.join(", ")}`);
+  if (result.installed.length) parts.push(`installed ${result.installed.join(", ")}`);
+  // Being published Broken is not an installation, and calling it one hides
+  // exactly what the breaking step is demonstrating.
+  if (result.broken.length) parts.push(`BROKE ${result.broken.join(", ")}`);
+  return parts.length ? parts.join(", ") + "." : "No change.";
+}
+
+// Dragging a number in the step's source applies it straight away, so the step
+// is live the same way the editor is.
+attachScrubbing($("step-source"), {
+  read: () => stepSources[step],
+  write: (text) => { stepSources[step] = text; renderStepSource(); },
+  commit: () => {
+    const result = JSON.parse(demo.eval(stepSources[step]));
+    lastWorld = "";
+    applied.add(step);
+    stepStatus(
+      result.ok ? describeResult(result) : `Refused: ${result.error}`,
+      result.ok ? (result.broken.length ? "warn" : "ok") : "warn",
+    );
+  },
+});
+
+$("step-apply").addEventListener("click", () => {
+  const result = JSON.parse(demo.eval(stepSources[step]));
+  lastWorld = "";
+  if (!result.ok) {
+    // Step 3 is *supposed* to be rejected — that is the lesson, not a failure.
+    stepStatus(`Refused, and the running program is untouched: ${result.error}`, "warn");
+  } else {
+    stepStatus(describeResult(result), result.broken.length ? "warn" : "ok");
+  }
+  applied.add(step);
+  const wasLast = step === STEP_COUNT - 1;
+  const text = $("step-status").textContent;
+  const kind = $("step-status").className;
+  renderStep();
+  stepStatus(text, kind);
+  if (wasLast) stepStatus(text + " Now resume the frozen program.", kind);
+});
+
+$("step-next").addEventListener("click", () => {
+  if (step < STEP_COUNT - 1) { step += 1; renderStep(); }
+});
+$("step-back").addEventListener("click", () => {
+  if (step > 0) { step -= 1; renderStep(); }
+});
+$("step-resume").addEventListener("click", () => {
+  demo.thaw();
+  stepStatus("Thawed — resuming at the instruction that trapped.", "ok");
+});
+$("step-restart").addEventListener("click", () => {
+  demo = new Demo();
+  lastWorld = "";
+  document.body.classList.remove("frozen");
+  applied.clear();
+  step = 0;
+  stepSources.forEach((_, i) => { stepSources[i] = Demo.scenario_source(i); });
+  renderStep();
+  stepStatus("Fresh world, steps restored — start from step 1.", "ok");
+});
+
+renderStep();
+
+let lastLoadedSource = Demo.scene_source();
+setSource(lastLoadedSource);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

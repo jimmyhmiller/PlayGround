@@ -1,0 +1,176 @@
+# AutoScalingGroup — a single top-level node that load-balances across a
+# fleet of workers it spawns and destroys to track load.
+#
+#   Generator ──packet──▶  ASG  ──req (pushing self)──▶  Worker_n   (×N, fan-out)
+#                           │  ◀──────── resp ──────────┘  (reverse-route)
+#                           └──packet──▶ Sink
+#
+# It is PLUGGABLE: the `worker_class` slot names the class it clones, so it
+# can autoscale a real Worker, a Queue, or any request/response gadget.
+# It never reads the worker's internals — it measures load purely from
+# its own bookkeeping (`inflight = dispatched − completed`), so it works
+# with any black-box worker. Dispatched work pushes the ASG onto the
+# return_path; the worker's `resp` reverse-routes back along the same
+# edge (exactly the Client→Worker wiring), and the ASG forwards the
+# completion to its downstream sink.
+#
+# Spawned workers are created at the TOP LEVEL, parented to the ASG, so
+# they fan out around it on the canvas with live, animated edges.
+#
+# Controls (all editable in the inspector):
+#   min_workers / max_workers   fleet bounds
+#   scale_up / scale_down       load thresholds (in-flight jobs per
+#                               worker × 10, so 12 = 1.2 jobs/worker)
+#   tick_ns                     control-loop period
+#   paused                      freeze auto-scaling (manual only)
+#   nudge                       transient: +1 / −1 to add/remove by hand
+node AutoScalingGroup {
+    slots {
+        members:     Any    = nil
+        worker_class: String  = "WorkerComposite"
+        inflight:    Int     = 0
+        dispatched:  Int     = 0
+        completed:   Int     = 0
+        count:       Int     = 0
+        load:        Int     = 0
+        min_workers: Int     = 1
+        max_workers: Int     = 6
+        scale_up:    Int     = 8
+        scale_down:  Int     = 3
+        tick_ns:     Int     = 200000000
+        # Value stamped on completions forwarded to the downstream sink.
+        # The worker's `resp` carries no payload, so we re-stamp the
+        # demo's lane colour (0) here — otherwise a colour-filtering Sink
+        # drops the completion and reads "0 absorbed".
+        done_value:  Int     = 0
+        paused:      Bool    = false
+        nudge:       Int     = 0
+    }
+    probes {
+        fleet: "{count} up"
+        load:  "{inflight} in-flight"
+    }
+    on_spawn {
+        self -> self : tick_ns
+        inject tick(nil)
+    }
+
+    # ── Data plane ──────────────────────────────────────────────────
+
+    # Incoming work from upstream: dispatch to the least-recently-used
+    # live worker (even spread without peeking at worker state). Pushing
+    # self means the worker's resp reverse-routes back here. If the fleet
+    # is momentarily empty, re-circulate the packet on the tick loop so
+    # nothing is dropped while the first worker spins up.
+    rule dispatch {
+        on p
+        when ((p.kind == "packet") || (p.kind == "req"))
+          && (length(filter(members, "m", m != nil)) > 0)
+        do {
+            inflight := inflight + 1
+            dispatched := dispatched + 1
+            emit req(p.value)
+                pushing self
+                to (argmin(filter(members, "m", m != nil), "m", edge_last_sent(m)))
+        }
+    }
+    rule hold {
+        on p
+        when (p.kind == "packet") || (p.kind == "req")
+        do { emit packet(p.value) to self }
+    }
+    # Worker completion: account for it and forward to the downstream
+    # sink (the one out-neighbor that isn't a member worker).
+    rule complete {
+        on p when p.kind == "resp"
+        do {
+            inflight := inflight - 1
+            completed := completed + 1
+            emit packet(done_value)
+                to (head(filter(out_neighbors(), "n", contains(members, n) == false)))
+        }
+    }
+
+    # ── Control plane (one rule fires per tick; all re-arm the loop) ──
+
+    # Below the floor: grow toward `min_workers`.
+    rule fill_min {
+        on tick(_)
+        when count < min_workers
+        do {
+            emit tick(nil) to self
+            spawn worker_class -> w
+            members := append(filter(members, "m", m != nil), w)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+    # Manual add (+nudge), respecting the ceiling.
+    rule nudge_up {
+        on tick(_)
+        when (nudge > 0) && (count < max_workers)
+        do {
+            emit tick(nil) to self
+            nudge := nudge - 1
+            spawn worker_class -> w
+            members := append(filter(members, "m", m != nil), w)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+    # Manual remove (−nudge), never below 1.
+    rule nudge_down {
+        on tick(_)
+        when (nudge < 0) && (count > 0)
+        do {
+            emit tick(nil) to self
+            nudge := nudge + 1
+            despawn (argmin(filter(members, "m", m != nil), "m", edge_last_sent(m)))
+            # The despawned worker's outstanding requests will never reply,
+            # so drop its proportional share of `inflight` — otherwise the
+            # leaked count inflates `load` and stalls all future scaling.
+            inflight := if count > 1 then (inflight * (count - 1)) / count else 0
+            members := filter(members, "m", m != nil)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+    # Hot fleet, room to grow: add one.
+    rule scale_up {
+        on tick(_)
+        when (paused == false) && (count > 0) && (count < max_workers) && (load > scale_up)
+        do {
+            emit tick(nil) to self
+            spawn worker_class -> w
+            members := append(filter(members, "m", m != nil), w)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+    # Cold fleet, above the floor: shed the least-busy worker.
+    rule scale_down {
+        on tick(_)
+        when (paused == false) && (count > min_workers) && (load < scale_down)
+        do {
+            emit tick(nil) to self
+            despawn (argmin(filter(members, "m", m != nil), "m", edge_last_sent(m)))
+            # Drop the despawned worker's share of in-flight work (its
+            # outstanding requests never reply), so `load` stays
+            # consistent and scaling doesn't stall — see nudge_down.
+            inflight := if count > 1 then (inflight * (count - 1)) / count else 0
+            members := filter(members, "m", m != nil)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+    # Steady: just re-measure and re-arm.
+    rule steady {
+        on tick(_)
+        do {
+            emit tick(nil) to self
+            members := filter(members, "m", m != nil)
+            count := length(filter(members, "m", m != nil))
+            load := if count > 0 then (10 * inflight) / count else 0
+        }
+    }
+}

@@ -1,0 +1,20 @@
+// FFI AT THE REAL C ABI (Phase Scalars, S3) — call C's math library.
+//
+//   tally run examples/ffi_math.tal    →  1036
+//
+// A `%foreign` whose type mentions `F32`/`F64` crosses the boundary at the FP
+// ABI: the extern is declared `double sqrt(double)` (FP register), not the old
+// uniform i64. So the whole of libm/libc is one declaration away — no glue.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+%foreign "sqrt" c_sqrt : F64 -> F64
+%foreign "pow"  c_pow  : F64 -> F64 -> F64
+
+main : Nat
+fn main() {
+    let r = c_sqrt(144.0);              // 12.0
+    let p = c_pow(2.0, 10.0);           // 1024.0
+    nat_of_f64(fadd(r, p))              // 12 + 1024 = 1036
+}

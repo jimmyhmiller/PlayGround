@@ -1,0 +1,21 @@
+(defn id [T] [(x T)] (-> T) x)
+
+(defstruct Pair [A B] [(fst A) (snd B)])
+
+(defn
+  pair-sum
+  [T]
+  [(p (ptr (Pair T T)))]
+  (-> T)
+  (iadd (load (field p fst)) (load (field p snd))))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [p (alloc-stack (Pair i64 i64))]
+    (store! (field p fst) (id 40))
+    (store! (field p snd) 2)
+    (pair-sum p)))
+

@@ -1,0 +1,1241 @@
+; selfhost/src/resolve.coil — self-host Coil compiler, resolve module.
+(module resolve)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "check.coil" :use *)
+(import "loader.coil" :use *)
+(import "parser.coil" :use *)
+(import "reader.coil" :use *)
+
+(defstruct Defs
+  [(callables (ArrayList (slice u8)))
+   (types     (ArrayList (slice u8)))
+   (traits    (ArrayList (slice u8)))
+   (convs     (ArrayList (slice u8)))
+   (externs   (ArrayList (slice u8)))])
+(defstruct DefEntry [(module (slice u8)) (defs Defs)])
+(defstruct ParsedForm [(prog (ptr Program)) (module (Option (slice u8)))])
+
+; One-field wrapper structs: an `(ArrayList X)` BY VALUE inside a heap struct, so it
+; can be GROWN via the field place `(field box items)` (al-push! needs a place; a
+; bare `(ptr (ArrayList X))` cannot be pushed into). `(field box items)` is itself a
+; `(ptr (ArrayList X))`, usable directly for read-only queries (table-find etc.).
+(defstruct PBox [(items (ArrayList ParsedForm))])
+(defstruct TBox [(items (ArrayList DefEntry))])
+(defstruct SBox [(items (ArrayList (slice u8)))])
+
+; The threaded resolution context (mirrors the args of src/resolve.rs::resolve /
+; qualify_*). `m`/`imp` change per module; `strict`/`bareok` are constant for the
+; whole program (dump-resolved resolves with strict=true).
+(defstruct Ctx
+  [(a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry))
+   (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry)))
+   (strict bool) (bareok (ptr (ArrayList (slice u8))))
+   ; the function whose body is being qualified, so a resolve error can name it the
+   ; way the checker's identical error already does ("in 'big.buried'") instead of
+   ; naming the module. Empty outside a function body (const/meta/assert).
+   (fname (slice u8))
+   ; the collect-and-continue sink for recoverable body errors: every diagnostic, and
+   ; the qualified names of the functions whose bodies failed (so the checker skips
+   ; them). Shared across modules — resolve-program allocates them once.
+   (diags    (ptr (ArrayList Diag)))
+   (poisoned (ptr (ArrayList (slice u8))))])
+
+; The merged output program, sections as BY-VALUE ArrayLists so merge can push.
+(defstruct Out
+  [(conventions (ArrayList Convention))
+   (structs (ArrayList StructDef))
+   (sums (ArrayList SumDef))
+   (externs (ArrayList Extern))
+   (funcs (ArrayList Func))
+   (asserts (ArrayList StaticAssert))
+   (consts (ArrayList Const))
+   (traits (ArrayList TraitDef))
+   (impls (ArrayList ImplDef))
+   (metas (ArrayList Expr))
+   (exports (ArrayList ExportC))])
+
+; ---- small generic + string helpers ---------------------------------------
+; pointer to element i of an ArrayList reached by pointer (live, mutable).
+(defn al-elem [T] [(p (ptr (ArrayList T))) (i i64)] (-> (ptr T))
+  (index (load (field p data)) i))
+
+(defn booleq [(x bool) (y bool)] (-> bool)
+  (or (and x y) (and (not x) (not y))))
+
+(defn has-dot [(s (slice u8))] (-> bool)
+  (let [n (slice-len s) (mut i) 0 (mut f) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! f true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load f)))
+
+(defn find-slash [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 47) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; Index of the first `::` in a symbol, or -1 (byte 58 = ':'). A `Trait::method`
+; qualified trait-method call (gen-6) carries the qualifier this way — the checker
+; splits it in synth-call, so resolve leaves the head bare and exempts it from the
+; strict undefined-reference check below.
+(defn find-coloncolon [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) (isub n 1)) (break)
+      (do (if (and (icmp-eq (cast i64 (slice-get s (load i))) 58)
+                   (icmp-eq (cast i64 (slice-get s (iadd (load i) 1))) 58))
+              (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn empty-strs [(a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+    (store! bp (al-new [(slice u8)] a)) bp))
+
+; src/ast.rs is_scalar_typename: bool / f32 / f64 / (i|u)<digits>.
+(defn is-scalar-typename [(s (slice u8))] (-> bool)
+  (if (str-eq s "bool") true
+    (if (str-eq s "f32") true
+      (if (str-eq s "f64") true
+        (let [n (slice-len s)]
+          (if (icmp-lt n 2) false
+            (let [c0 (cast i64 (slice-get s 0))]
+              (if (or (icmp-eq c0 105) (icmp-eq c0 117))
+                  (let [(mut ok) true (mut j) 1]
+                    (loop (if (icmp-ge (load j) n) (break)
+                      (do (let [ch (cast i64 (slice-get s (load j)))]
+                            (if (and (icmp-ge ch 48) (icmp-le ch 57)) 0 (do (store! ok false) (break))))
+                          (store! j (iadd (load j) 1)))))
+                    (load ok))
+                  false))))))))
+
+; ---- error messages (faithful to src/resolve.rs) --------------------------
+(defn priv-msg [(a (ptr Allocator)) (m (slice u8)) (rest (slice u8)) (target (slice u8))] (-> (slice u8))
+  (let [p1 (sconcat3 a "in module '" m "': '")
+        p2 (sconcat3 a p1 rest "' is private to module '")]
+    (sconcat3 a p2 target "' (add it to that module's (export …))")))
+; Every callable name in the def table — the candidate pool for an undefined-call
+; "did you mean" hint.
+(defn all-callables [(a (ptr Allocator)) (table (ptr (ArrayList DefEntry)))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [DefEntry] (load table)) (mut i) 0 (mut out) (al-new [(slice u8)] a)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [cs (field (field (al-elem [DefEntry] table (load i)) defs) callables) cn (al-len [(slice u8)] (load cs)) (mut j) 0]
+            (loop (if (icmp-ge (load j) cn) (break)
+              (do (al-push! (mut out) (al-get [(slice u8)] (load cs) (load j))) (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+; `where` names the enclosing function when there is one, else the module — the checker
+; emits this exact error and names the function, and resolve named only the module, so
+; which one a user saw depended on whether the file had a (module …) declaration (diag-1).
+; A "did you mean 'X'?" suggestion (nearest def-table name by edit distance) is appended
+; when there's a near miss (diag-6).
+(defn undef-msg [(a (ptr Allocator)) (c (ptr Ctx)) (func (slice u8))] (-> (slice u8))
+  (let [fname (load (field c fname))
+        where (if (icmp-gt (slice-len [u8] fname) 0)
+                  (sconcat3 a "in '" fname "'")
+                (sconcat3 a "in module '" (load (field c m)) "'"))
+        base (sconcat a (sconcat3 a where ": call to undefined function '" "") (sconcat a func "'"))]
+    (match (nearest-name a (all-callables a (load (field c table))) func)
+      (None [] base)
+      (Some [s] (sconcat3 a base "; did you mean '" (sconcat a s "'?"))))))
+(defn extern-conflict-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
+  (sconcat3 a "extern '" nm "' declared with conflicting signatures"))
+(defn const-dup-msg [(a (ptr Allocator)) (nm (slice u8))] (-> (slice u8))
+  (sconcat3 a "const '" nm "' defined more than once"))
+; A bare name is exported by more than one `:use`d module. Resolving it first-import-wins
+; would SILENTLY pick whichever import came first (reorder two import lines, run a different
+; function). Same shape as the checker's trait-method ambiguity ("… is ambiguous — …"):
+; name the competing modules and tell the user to disambiguate (NAMESPACING.md).
+(defn use-ambig-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (m1 (slice u8)) (m2 (slice u8))] (-> (slice u8))
+  (sconcat5 a (sconcat5 a "in module '" m "': '" name "' is ambiguous — exported by :use'd modules '")
+            m1 "' and '" m2 "'; :use only one, or reach it qualified via an :as alias"))
+; The SAME name is explicitly `:use [name]`'d from two different modules in one importer —
+; the same silent collision, caught eagerly at the import instead of at a later use site.
+(defn use-dup-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (m1 (slice u8)) (m2 (slice u8))] (-> (slice u8))
+  (sconcat5 a (sconcat5 a "in module '" m "': '" name "' is explicitly :use'd from two modules '")
+            m1 "' and '" m2 "' — :use it from only one"))
+; diag-10: a `:use [name]` naming a symbol the target module does not export. Uses the SAME
+; export table (`exports-check`) that resolution itself consults, so a name the resolver would
+; treat as private/absent is named at the import site instead of silently accepted. A module
+; with no (export …) exports everything, so only an explicit export list can trip this.
+(defn use-unexported-msg [(a (ptr Allocator)) (m (slice u8)) (name (slice u8)) (target (slice u8))] (-> (slice u8))
+  (let [p (sconcat5 a "in module '" m "': :use names '" name "', which module '")]
+    (sconcat3 a p target "' does not export")))
+
+; ---- table / import / export queries --------------------------------------
+(defn defs-set [(d (ptr Defs)) (kind i64)] (-> (ptr (ArrayList (slice u8))))
+  (if (icmp-eq kind 0) (field d callables)
+    (if (icmp-eq kind 1) (field d types)
+      (if (icmp-eq kind 2) (field d traits)
+        (if (icmp-eq kind 3) (field d convs)
+          (field d externs))))))
+
+(defn set-contains [(setp (ptr (ArrayList (slice u8)))) (name (slice u8))] (-> bool)
+  (let [n (al-len [(slice u8)] (load setp)) (mut i) 0 (mut f) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load setp) (load i)) name) (do (store! f true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load f)))
+
+(defn table-find [(table (ptr (ArrayList DefEntry))) (m (slice u8))] (-> (ptr DefEntry))
+  (let [n (al-len [DefEntry] (load table)) (mut i) 0 (mut r) (cast (ptr DefEntry) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [DefEntry] table (load i)) module)) m)
+              (do (store! r (al-elem [DefEntry] table (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn imports-find [(impb (ptr (ArrayList ImpEntry))) (m (slice u8))] (-> (ptr ImpEntry))
+  (let [n (al-len [ImpEntry] (load impb)) (mut i) 0 (mut r) (cast (ptr ImpEntry) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [ImpEntry] impb (load i)) name)) m)
+              (do (store! r (al-elem [ImpEntry] impb (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; macros::exports — `exports.get(m).map(contains).unwrap_or(true)`.
+(defn exports-check [(expb (ptr (ArrayList ExpEntry))) (m (slice u8)) (name (slice u8))] (-> bool)
+  (let [n (al-len [ExpEntry] (load expb)) (mut i) 0 (mut found) (cast (ptr ExpEntry) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [ExpEntry] expb (load i)) name)) m)
+              (do (store! found (al-elem [ExpEntry] expb (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (cast i64 (load found)) 0) true (set-contains (field (load found) names) name))))
+
+(defn alias-target [(imp (ptr ImpEntry)) (alias (slice u8))] (-> (Option (slice u8)))
+  (let [als (field (field imp imp) aliases) n (al-len [Alias] (load als)) (mut i) 0 (mut r) (None [(slice u8)])]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ep (alloc-stack Alias)] (store! ep (al-get [Alias] (load als) (load i)))
+            (if (str-eq (load (field ep alias)) alias)
+                (do (store! r (Some (load (field ep target)))) (break)) 0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; the `:use`d-modules branch of resolve (extracted so no try!/return runs in a loop).
+; Now collision-aware: it scans ALL `:use`d modules rather than stopping at the first
+; match, so a name exported by two distinct `:use`d modules is a hard ambiguity error
+; instead of the old first-import-wins silent pick (tool-10). Distinct modules only —
+; the same target reached via two `:use` entries is one module, not a collision.
+(defn resolve-use [(c (ptr Ctx)) (imp (ptr ImpEntry)) (name (slice u8)) (kind i64)] (-> (Result (Option (slice u8)) Diag))
+  (let [a (load (field c a)) table (load (field c table)) exp (load (field c exp))
+        uses (field (field imp imp) uses) n (al-len [Use] (load uses)) (mut i) 0
+        (mut r) (None [(slice u8)]) (mut m1) "" (mut m2) "" (mut cnt) 0]
+    (loop (if (or (icmp-ge (load cnt) 2) (icmp-ge (load i) n)) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load i)))
+            (let [target (load (field up target))
+                  used (match (load (field up spec)) (UAll [] true) (UNames [names] (set-contains names name)))]
+              (if (and used (exports-check exp target name))
+                  (let [td (table-find table target)]
+                    (if (and (icmp-ne (cast i64 td) 0) (set-contains (defs-set (field td defs) kind) name))
+                        (if (icmp-eq (load cnt) 0)
+                            (do (store! r (Some (sconcat3 a target "." name)))
+                                (store! m1 target) (store! cnt 1) 0)
+                            (if (str-eq (load m1) target) 0
+                                (do (store! m2 target) (store! cnt 2) 0)))
+                        0))
+                  0)))
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load cnt) 2)
+        (Err [(Option (slice u8)) Diag] (derr (use-ambig-msg a (load (field c m)) name (load m1) (load m2))))
+        (Ok [(Option (slice u8)) Diag] (load r)))))
+
+; src/resolve.rs::resolve — kind: 0 callables, 1 types, 2 traits, 3 convs.
+(defn resolve [(c (ptr Ctx)) (name (slice u8)) (kind i64)] (-> (Result (slice u8) Diag))
+  (let [a (load (field c a)) m (load (field c m)) imp (load (field c imp))
+        table (load (field c table)) exp (load (field c exp)) sl (find-slash name)]
+    (if (icmp-ge sl 0)
+        (let [alias (subslice name 0 sl) rest (subslice name (iadd sl 1) (slice-len name))]
+          (if (icmp-ne (cast i64 imp) 0)
+              (match (alias-target imp alias)
+                (Some [target]
+                  (if (not (exports-check exp target rest))
+                      (Err [(slice u8) Diag] (derr (priv-msg a m rest target)))
+                      (Ok [(slice u8) Diag] (sconcat3 a target "." rest))))
+                (None [] (Ok [(slice u8) Diag] name)))
+              (Ok [(slice u8) Diag] name)))
+        (let [tf (table-find table m)]
+          (if (and (icmp-ne (cast i64 tf) 0) (set-contains (defs-set (field tf defs) kind) name))
+              (Ok [(slice u8) Diag] (sconcat3 a m "." name))
+              (match (if (icmp-ne (cast i64 imp) 0) (resolve-use c imp name kind)
+                         (Ok [(Option (slice u8)) Diag] (None [(slice u8)])))
+                (Err [d] (Err [(slice u8) Diag] d))
+                (Ok [used-opt]
+                  (match used-opt
+                    (Some [q] (Ok [(slice u8) Diag] q))
+                    (None []
+                      (if (not (str-eq m "coil.core"))
+                          (let [ct (table-find table "coil.core")]
+                            (if (and (and (icmp-ne (cast i64 ct) 0) (set-contains (defs-set (field ct defs) kind) name))
+                                     (exports-check exp "coil.core" name))
+                                (Ok [(slice u8) Diag] (sconcat3 a "coil.core" "." name))
+                                (Ok [(slice u8) Diag] name)))
+                          (Ok [(slice u8) Diag] name)))))))))))
+
+; ---- type-equality (for extern dedup in merge) ----------------------------
+; All take/recurse on `(ptr Type)` — passing a `Type` sum BY VALUE into a recursive
+; call corrupts its payload (Coil by-value-aggregate-in-recursion bug), so we keep
+; everything behind pointers (as the rest of the resolver does for aggregates).
+(defn type-tag [(t (ptr Type))] (-> i64)
+  (match (load t) (TInt [_ _] 0) (TFloat [_] 1) (TBool [] 2) (TVoid [] 3) (TPtr [_] 4) (TRef [_ _] 5)
+    (TStruct [_] 6) (TArray [_ _] 7) (TSlice [_] 8) (TVec [_ _] 9) (TFn [_ _ _] 10) (TApp [_ _] 11)
+    (TNever [] 12) (TCode [] 13) (TExternRef [] 14)))
+(defn t-inner [(t (ptr Type))] (-> (ptr Type))
+  (match (load t) (TPtr [i] i) (TRef [_ i] i) (TArray [i _] i) (TSlice [i] i) (TVec [i _] i)
+    (TInt [_ _] (do (loader-abort "t-inner: not a wrapper type") (box-type (malloc-allocator) (TVoid))))
+    (TFloat [_] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TBool [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TVoid [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TStruct [_] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TFn [_ _ _] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TApp [_ _] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TNever [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))
+    (TCode [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid)))) (TExternRef [] (do (loader-abort "t-inner") (box-type (malloc-allocator) (TVoid))))))
+(defn type-struct-name [(t (ptr Type))] (-> (slice u8))
+  (match (load t) (TStruct [n] n)
+    (TInt [_ _] (do (loader-abort "type-struct-name: not a struct") ""))
+    (TFloat [_] (do (loader-abort "type-struct-name") "")) (TBool [] (do (loader-abort "type-struct-name") ""))
+    (TVoid [] (do (loader-abort "type-struct-name") "")) (TPtr [_] (do (loader-abort "type-struct-name") ""))
+    (TRef [_ _] (do (loader-abort "type-struct-name") "")) (TArray [_ _] (do (loader-abort "type-struct-name") ""))
+    (TSlice [_] (do (loader-abort "type-struct-name") "")) (TVec [_ _] (do (loader-abort "type-struct-name") ""))
+    (TFn [_ _ _] (do (loader-abort "type-struct-name") "")) (TApp [_ _] (do (loader-abort "type-struct-name") ""))
+    (TNever [] (do (loader-abort "type-struct-name") "")) (TCode [] (do (loader-abort "type-struct-name") "")) (TExternRef [] (do (loader-abort "type-struct-name") ""))))
+(defn t-int-bits [(t (ptr Type))] (-> i64) (match (load t) (TInt [b _] b) (TFloat [b] b) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TArray [_ _] 0) (TSlice [_] 0) (TVec [_ _] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0) (TExternRef [] 0)))
+(defn t-int-signed [(t (ptr Type))] (-> bool) (match (load t) (TInt [_ s] s) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TRef [_ _] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false) (TExternRef [] false)))
+(defn t-ref-mut [(t (ptr Type))] (-> bool) (match (load t) (TRef [m _] m) (TInt [_ _] false) (TFloat [_] false) (TBool [] false) (TVoid [] false) (TPtr [_] false) (TStruct [_] false) (TArray [_ _] false) (TSlice [_] false) (TVec [_ _] false) (TFn [_ _ _] false) (TApp [_ _] false) (TNever [] false) (TCode [] false) (TExternRef [] false)))
+(defn t-arrn [(t (ptr Type))] (-> i64) (match (load t) (TArray [_ n] n) (TVec [_ n] n) (TInt [_ _] 0) (TFloat [_] 0) (TBool [] 0) (TVoid [] 0) (TPtr [_] 0) (TRef [_ _] 0) (TStruct [_] 0) (TSlice [_] 0) (TFn [_ _ _] 0) (TApp [_ _] 0) (TNever [] 0) (TCode [] 0) (TExternRef [] 0)))
+(defn t-fn-cc [(t (ptr Type))] (-> (slice u8)) (match (load t) (TFn [cc _ _] cc) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TApp [_ _] "") (TNever [] "") (TCode [] "") (TExternRef [] "")))
+(defn t-fn-params [(t (ptr Type))] (-> (ptr (ArrayList Type))) (match (load t) (TFn [_ p _] p) (TApp [_ args] args) (TInt [_ _] (box-items-type (malloc-allocator))) (TFloat [_] (box-items-type (malloc-allocator))) (TBool [] (box-items-type (malloc-allocator))) (TVoid [] (box-items-type (malloc-allocator))) (TPtr [_] (box-items-type (malloc-allocator))) (TRef [_ _] (box-items-type (malloc-allocator))) (TStruct [_] (box-items-type (malloc-allocator))) (TArray [_ _] (box-items-type (malloc-allocator))) (TSlice [_] (box-items-type (malloc-allocator))) (TVec [_ _] (box-items-type (malloc-allocator))) (TNever [] (box-items-type (malloc-allocator))) (TCode [] (box-items-type (malloc-allocator))) (TExternRef [] (box-items-type (malloc-allocator)))))
+(defn t-fn-ret [(t (ptr Type))] (-> (ptr Type)) (match (load t) (TFn [_ _ r] r) (TInt [_ _] (box-type (malloc-allocator) (TVoid))) (TFloat [_] (box-type (malloc-allocator) (TVoid))) (TBool [] (box-type (malloc-allocator) (TVoid))) (TVoid [] (box-type (malloc-allocator) (TVoid))) (TPtr [_] (box-type (malloc-allocator) (TVoid))) (TRef [_ _] (box-type (malloc-allocator) (TVoid))) (TStruct [_] (box-type (malloc-allocator) (TVoid))) (TArray [_ _] (box-type (malloc-allocator) (TVoid))) (TSlice [_] (box-type (malloc-allocator) (TVoid))) (TVec [_ _] (box-type (malloc-allocator) (TVoid))) (TApp [_ _] (box-type (malloc-allocator) (TVoid))) (TNever [] (box-type (malloc-allocator) (TVoid))) (TCode [] (box-type (malloc-allocator) (TVoid))) (TExternRef [] (box-type (malloc-allocator) (TVoid)))))
+(defn t-app-name [(t (ptr Type))] (-> (slice u8)) (match (load t) (TApp [n _] n) (TInt [_ _] "") (TFloat [_] "") (TBool [] "") (TVoid [] "") (TPtr [_] "") (TRef [_ _] "") (TStruct [_] "") (TArray [_ _] "") (TSlice [_] "") (TVec [_ _] "") (TFn [_ _ _] "") (TNever [] "") (TCode [] "") (TExternRef [] "")))
+(defn box-items-type [(a (ptr Allocator))] (-> (ptr (ArrayList Type)))
+  (let [bp (unwrap-ptr [(ArrayList Type)] (create [(ArrayList Type)] a))] (store! bp (al-new [Type] a)) bp))
+
+(defn type-list-eq [(xs (ptr (ArrayList Type))) (ys (ptr (ArrayList Type)))] (-> bool)
+  (let [nx (al-len [Type] (load xs)) ny (al-len [Type] (load ys))]
+    (if (not (icmp-eq nx ny)) false
+        (let [(mut i) 0 (mut ok) true]
+          (loop (if (icmp-ge (load i) nx) (break)
+            (do (if (not (type-eq (al-elem [Type] xs (load i)) (al-elem [Type] ys (load i)))) (do (store! ok false) (break)) 0)
+                (store! i (iadd (load i) 1)))))
+          (load ok)))))
+(defn type-eq [(x (ptr Type)) (y (ptr Type))] (-> bool)
+  (if (not (icmp-eq (type-tag x) (type-tag y))) false
+    (let [tg (type-tag x)]
+      (if (icmp-eq tg 0) (and (icmp-eq (t-int-bits x) (t-int-bits y)) (booleq (t-int-signed x) (t-int-signed y)))
+      (if (icmp-eq tg 1) (icmp-eq (t-int-bits x) (t-int-bits y))
+      (if (icmp-eq tg 2) true
+      (if (icmp-eq tg 3) true
+      (if (icmp-eq tg 4) (type-eq (t-inner x) (t-inner y))
+      (if (icmp-eq tg 5) (and (booleq (t-ref-mut x) (t-ref-mut y)) (type-eq (t-inner x) (t-inner y)))
+      (if (icmp-eq tg 6) (str-eq (type-struct-name x) (type-struct-name y))
+      (if (icmp-eq tg 7) (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
+      (if (icmp-eq tg 8) (type-eq (t-inner x) (t-inner y))
+      (if (icmp-eq tg 9) (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
+      (if (icmp-eq tg 10) (and (str-eq (t-fn-cc x) (t-fn-cc y)) (and (type-list-eq (t-fn-params x) (t-fn-params y)) (type-eq (t-fn-ret x) (t-fn-ret y))))
+      (if (icmp-eq tg 11) (and (str-eq (t-app-name x) (t-app-name y)) (type-list-eq (t-fn-params x) (t-fn-params y)))
+        true)))))))))))))))
+
+(defn extern-eq [(x (ptr Extern)) (y (ptr Extern))] (-> bool)
+  (and (str-eq (load (field x cc)) (load (field y cc)))
+    (and (type-list-eq (load (field x params)) (load (field y params)))
+      (and (booleq (load (field x variadic)) (load (field y variadic)))
+           (type-eq (field x ret) (field y ret))))))
+
+; ============================ check.rs foundation =============================
+; display_name (src/check.rs:116) — strip the auto-referred "coil.core." prefix
+; from a name for diagnostics. "coil.core." is 10 bytes.
+(defn ty-str-join [(a (ptr Allocator)) (v (ptr (ArrayList Type)))] (-> (slice u8))
+  (let [(mut out) "" n (al-len [Type] (load v)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-gt (load i) 0) (do (store! out (sconcat a (load out) " ")) 0) 0)
+          (let [tp (alloc-stack Type)] (store! tp (al-get [Type] (load v) (load i)))
+            (store! out (sconcat a (load out) (ty-str a tp))))
+          (store! i (iadd (load i) 1)))))
+    (load out)))
+
+; A synthetic associated type minted for an associated-type bound
+; (check.coil::assoc-tp-name) is spelled `C$assoc$Get$K`. Render it readably as
+; `<C as Get>::K` in diagnostics. No ordinary type name contains `$assoc$`, so
+; `assoc-marker-at` returns -1 for every real type and this is a no-op there —
+; existing ty-str output is byte-for-byte unchanged.
+(defn assoc-marker-at [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) mk "$assoc$" mn (slice-len mk) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-gt (iadd (load i) mn) n) (break)
+      (do (if (str-eq (subslice [u8] s (load i) (iadd (load i) mn)) mk) (do (store! r (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn last-dollar [(s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) (isub n 1) (mut r) -1]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 36) (do (store! r (load i)) (break)) 0)
+          (store! i (isub (load i) 1)))))
+    (load r)))
+(defn assoc-render [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
+  (let [mi (assoc-marker-at s)]
+    (if (icmp-lt mi 0) s
+      (let [base (subslice [u8] s 0 mi)
+            rest (subslice [u8] s (iadd mi 7) (slice-len s))
+            di (last-dollar rest)]
+        (if (icmp-lt di 0) s
+          (let [tr (subslice [u8] rest 0 di) p (subslice [u8] rest (iadd di 1) (slice-len rest))]
+            (sconcat a "<" (sconcat a base (sconcat a " as " (sconcat3 a tr ">::" p))))))))))
+
+(defn ty-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
+  (let [tg (type-tag t)]
+    (if (icmp-eq tg 12) "!"
+    (if (icmp-eq tg 14) "externref"
+    (if (icmp-eq tg 13) "code"
+    (if (icmp-eq tg 3) "void"
+    (if (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
+    (if (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
+    (if (icmp-eq tg 2) "bool"
+    (if (icmp-eq tg 4) (sconcat3 a "(ptr " (ty-str a (t-inner t)) ")")
+    (if (icmp-eq tg 5) (if (t-ref-mut t) (sconcat3 a "(mut " (ty-str a (t-inner t)) ")") (sconcat3 a "(ref " (ty-str a (t-inner t)) ")"))
+    (if (icmp-eq tg 6) (assoc-render a (type-struct-name t))
+    (if (icmp-eq tg 7) (sconcat3 a (sconcat3 a "(array " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
+    (if (icmp-eq tg 8) (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
+    (if (icmp-eq tg 9) (sconcat3 a (sconcat3 a "(vec " (ty-str a (t-inner t)) " ") (i64->str a (t-arrn t)) ")")
+    (if (icmp-eq tg 10) (sconcat3 a (sconcat3 a (sconcat3 a "(fnptr " (t-fn-cc t) " [") (ty-str-join a (t-fn-params t)) "] ") (ty-str a (t-fn-ret t)) ")")
+    (sconcat3 a (sconcat3 a "(" (t-app-name t) " ") (ty-str-join a (t-fn-params t)) ")")))))))))))))))))
+
+; ---- qualify a Type in place (src/resolve.rs::qualify_type) ----------------
+(defn qualify-type-list [(c (ptr Ctx)) (lst (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Type] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-type c (al-elem [Type] lst (load i)) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-type [(c (ptr Ctx)) (typ (ptr Type)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [a (load (field c a))]
+    (match (load typ)
+      (TNever [] (Ok [i64 Diag] 0))
+      (TCode  [] (Ok [i64 Diag] 0)) (TExternRef [] (Ok [i64 Diag] 0))
+      (TBool  [] (Ok [i64 Diag] 0))
+      (TVoid  [] (Ok [i64 Diag] 0))
+      (TInt   [_ _] (Ok [i64 Diag] 0))
+      (TFloat [_] (Ok [i64 Diag] 0))
+      (TStruct [nm]
+        (if (set-contains tps nm) (Ok [i64 Diag] 0)
+            (match (resolve c nm 1)
+              (Err [d] (Err [i64 Diag] d))
+              (Ok [nn] (do (type-res-record (load (field c m)) nm nn) (store! typ (TStruct nn)) (Ok [i64 Diag] 0))))))
+      (TApp [nm args]
+        (let [r0 (if (set-contains tps nm) (Ok [i64 Diag] 0)
+                     (match (resolve c nm 1) (Err [d] (Err [i64 Diag] d))
+                       (Ok [nn] (do (type-res-record (load (field c m)) nm nn) (store! typ (TApp nn args)) (Ok [i64 Diag] 0)))))]
+          (match r0 (Err [d] (Err [i64 Diag] d))
+            (Ok [_] (qualify-type-list c args tps)))))
+      (TPtr  [inner] (qualify-type c inner tps))
+      (TRef  [mu inner] (qualify-type c inner tps))
+      (TArray [inner nn] (qualify-type c inner tps))
+      (TSlice [inner] (qualify-type c inner tps))
+      (TVec  [inner nn] (qualify-type c inner tps))
+      (TFn [cc params ret]
+        (match (resolve c cc 3) (Err [d] (Err [i64 Diag] d))
+          (Ok [ncc]
+            (do (store! typ (TFn ncc params ret))
+                (match (qualify-type-list c params tps) (Err [d] (Err [i64 Diag] d))
+                  (Ok [_] (qualify-type c ret tps))))))))))
+
+; ---- qualify Exprs / quasi / lists (src/resolve.rs::qualify_expr) ----------
+(defn qualify-expr-list [(c (ptr Ctx)) (lst (ptr (ArrayList Expr))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Expr] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-expr c (al-elem [Expr] lst (load i)) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-bind-list [(c (ptr Ctx)) (binds (ptr (ArrayList Bind))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Bind] (load binds)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-expr c (field (al-elem [Bind] binds (load i)) value) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-arm-list [(c (ptr Ctx)) (arms (ptr (ArrayList Arm))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Arm] (load arms)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ap (al-elem [Arm] arms (load i))]
+            (match (resolve c (load (field ap variant)) 0)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [nv] (do (store! (field ap variant) nv)
+                           (match (qualify-expr c (field ap body) tps)
+                             (Err [d] (do (store! err d) (store! failed true) (break)))
+                             (Ok [_] 0))))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-quasi-list [(c (ptr Ctx)) (items (ptr (ArrayList Quasi))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Quasi] (load items)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-quasi c (al-elem [Quasi] items (load i)) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break)))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-quasi [(c (ptr Ctx)) (qp (ptr Quasi)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (match (load qp)
+    (QLit [_] (Ok [i64 Diag] 0))
+    (QUnquote [e] (qualify-expr c e tps))
+    (QSplice [e] (qualify-expr c e tps))
+    (QList [items] (qualify-quasi-list c items tps))
+    (QVector [items] (qualify-quasi-list c items tps))))
+(defn qualify-expr [(c (ptr Ctx)) (ep (ptr Expr)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [a (load (field c a))]
+    (try
+      (do
+        (match (load (field ep kind))
+          (EInt   [_] 0) (EFloat [_] 0) (EBool [_] 0) (EStr [_] 0) (ECStr [_] 0) (EVar [_] 0)
+          (EZeroed [t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EZeroed (load tp)))) 0))
+          (EBorrow [mu place] (do (try! (qualify-expr c place tps)) 0))
+          (ELet [binds body] (do (try! (qualify-bind-list c binds tps)) (try! (qualify-expr-list c body tps)) 0))
+          (EBin [op lhs rhs] (do (try! (qualify-expr c lhs tps)) (try! (qualify-expr c rhs tps)) 0))
+          (ENot [inner] (do (try! (qualify-expr c inner tps)) 0))
+          (ECmp [op lhs rhs] (do (try! (qualify-expr c lhs tps)) (try! (qualify-expr c rhs tps)) 0))
+          (EIf [cnd thn els] (do (try! (qualify-expr c cnd tps)) (try! (qualify-expr c thn tps)) (try! (qualify-expr c els tps)) 0))
+          (EDo [body] (do (try! (qualify-expr-list c body tps)) 0))
+          (ECall [func type_args args]
+            (do (let [nf (try! (resolve c func 0))]
+                  (store! (field ep kind) (ECall nf type_args args))
+                  ; A `Trait::method` qualified call (gen-6) is validated in the checker
+                  ; (synth-call splits it and pins the trait), so it is not an undefined
+                  ; reference here even though the whole head is not a def-table name.
+                  (if (and (load (field c strict)) (and (icmp-lt (find-coloncolon nf) 0) (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf)))))
+                      ; `ep` IS the call node — its span was right here and simply unused,
+                      ; so the language's most common error lost its location the moment a
+                      ; file declared a module (i.e. in every real multi-file project). The
+                      ; message itself now also carries the did-you-mean suggestion (diag-6).
+                      (return-from :try
+                        (Err (dwspan (derr (undef-msg a c nf))
+                                     (load (field ep source)) (load (field ep lo))
+                                     (load (field ep hi)) (load (field ep ctxt)))))
+                      0))
+                (try! (qualify-type-list c type_args tps))
+                (try! (qualify-expr-list c args tps))
+                0))
+          (EAlloc [storage t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EAlloc storage (load tp)))) 0))
+          (EField [p fname] (do (try! (qualify-expr c p tps)) 0))
+          (ELoad [inner] (do (try! (qualify-expr c inner tps)) 0))
+          (EStore [p val] (do (try! (qualify-expr c p tps)) (try! (qualify-expr c val tps)) 0))
+          (EIndex [p idx] (do (try! (qualify-expr c p tps)) (try! (qualify-expr c idx tps)) 0))
+          (ECast [t inner] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (ECast (load tp) inner))) (try! (qualify-expr c inner tps)) 0))
+          (EAscribe [t inner] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EAscribe (load tp) inner))) (try! (qualify-expr c inner tps)) 0))
+          (ESizeOf [t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (ESizeOf (load tp)))) 0))
+          (EAlignOf [t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EAlignOf (load tp)))) 0))
+          (EOffsetOf [t fname] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EOffsetOf (load tp) fname))) 0))
+          (EBitGet [p fname] (do (try! (qualify-expr c p tps)) 0))
+          (EBitSet [p fname val] (do (try! (qualify-expr c p tps)) (try! (qualify-expr c val tps)) 0))
+          (EFree [inner] (do (try! (qualify-expr c inner tps)) 0))
+          (EErase [trait_name inner]
+            (do (let [tp (alloc-stack Type)] (store! tp (TStruct trait_name)) (try! (qualify-type c tp tps))
+                  (store! (field ep kind) (EErase (type-struct-name tp) inner)))
+                (try! (qualify-expr c inner tps)) 0))
+          (EMatch [scrut arms] (do (try! (qualify-expr c scrut tps)) (try! (qualify-arm-list c arms tps)) 0))
+          (EFnPtrOf [nm] (do (let [nn (try! (resolve c nm 0))] (store! (field ep kind) (EFnPtrOf nn))) 0))
+          (ECallPtr [fp args] (do (try! (qualify-expr c fp tps)) (try! (qualify-expr-list c args tps)) 0))
+          (ELoop [label body] (do (try! (qualify-expr-list c body tps)) 0))
+          (EBreak [label value] (do (match value (Some [vp] (try! (qualify-expr c vp tps))) (None [] 0)) 0))
+          (EContinue [label] 0)
+          (ELlvmIr [result args body] (do (let [tp (alloc-stack Type)] (store! tp result) (try! (qualify-type c tp tps)) (store! (field ep kind) (ELlvmIr (load tp) args body))) (try! (qualify-expr-list c args tps)) 0))
+          (ETypeQuery [q t] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (ETypeQuery q (load tp)))) 0))
+          (EFieldMeta [meta t idx] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EFieldMeta meta (load tp) idx))) (try! (qualify-expr c idx tps)) 0))
+          (EFieldIndex [t nm] (do (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp tps)) (store! (field ep kind) (EFieldIndex (load tp) nm))) (try! (qualify-expr c nm tps)) 0))
+          (EQuote [form] 0)
+          (ECodeOp [op args] (do (try! (qualify-expr-list c args tps)) 0))
+          (EQuasi [q] (do (let [qp (alloc-stack Quasi)] (store! qp q) (try! (qualify-quasi c qp tps))) 0))
+          (EComptime [inner] (do (try! (qualify-expr c inner tps)) 0))
+          ; ---- check-introduced variants: cannot occur during resolve (they are
+          ; produced by the LATER check pass), so reaching them here is a bug. ----
+          (ESpillRef [_] (do (unimplemented "qualify/ESpillRef") 0))
+          (EConstruct [_ _ _] (do (unimplemented "qualify/EConstruct") 0))
+          (ETraitCall [_ _ _ _] (do (unimplemented "qualify/ETraitCall") 0))
+          (EDynDispatch [_ _ _ _ _ _ _ _] (do (unimplemented "qualify/EDynDispatch") 0))
+          (EMakeDyn [_ _ _ _] (do (unimplemented "qualify/EMakeDyn") 0))
+          (EStaticRef [_] (do (unimplemented "qualify/EStaticRef") 0)))
+        (Ok 0)))))
+
+; ---- qualify per-section helpers (src/resolve.rs::qualify_program) ---------
+(defn qualify-param-types [(c (ptr Ctx)) (ps (ptr (ArrayList Param))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Param] (load ps)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-type c (field (al-elem [Param] ps (load i)) ty) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-field-types [(c (ptr Ctx)) (fs (ptr (ArrayList Field))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Field] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-type c (field (al-elem [Field] fs (load i)) ty) tps)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; `resolve` is deliberately lenient: a name it cannot find passes through UNQUALIFIED
+; (bare), because some names resolve later (builtins, coil.core methods). A real trait
+; always resolves to `module.Trait` — so a bound trait that comes back with no dot names
+; a trait that exists nowhere. That was accepted silently: `(defn f [(T NoSuchTrait)] …)`
+; compiled, and only failed at the CALL site as "i64 does not implement NoSuchTrait" —
+; which is nonsense, since no type could ever implement a trait that doesn't exist. Catch
+; it here, at the definition, where it belongs.
+; THE single trait-name resolver for every bound position (defn/defstruct/defsum/impl
+; trait, and `:requires` supertraits). `resolve` is lenient — an unknown name passes
+; through bare — but a real trait (kind 2) always comes back as `module.Trait`, so a
+; result with no dot names a trait that exists nowhere. Every bound position delegates
+; here, so an unknown trait produces the identical located "unknown trait '…' in bound".
+(defn qualify-trait-name [(c (ptr Ctx)) (raw (slice u8))] (-> (Result (slice u8) Diag))
+  (let [a (load (field c a))]
+    (match (resolve c raw 2)
+      (Err [d] (Err [(slice u8) Diag] d))
+      (Ok [nn]
+        (if (has-dot nn)
+            (Ok [(slice u8) Diag] nn)
+          (Err [(slice u8) Diag] (derr (sconcat3 a "unknown trait '" raw "' in bound"))))))))
+(defn qualify-trait-names [(c (ptr Ctx)) (lst (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [raw (al-get [(slice u8)] (load lst) (load i))]
+            (match (qualify-trait-name c raw)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [nn] (store! (al-elem [(slice u8)] lst (load i)) nn))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-bound-list [(c (ptr Ctx)) (bounds (ptr (ArrayList Bound)))] (-> (Result i64 Diag))
+  (let [n (al-len [Bound] (load bounds)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-trait-names c (load (field (al-elem [Bound] bounds (load i)) traits)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
+; The SIGNATURE (name, cc, bounds, param/return types). An error here is FATAL: an
+; unqualified name or a bad type corrupts the shared tables the checker reads, so
+; continuing past it cascades. These abort the pipeline as before.
+(defn qualify-func-sig [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+  (let [a (load (field c a)) m (load (field c m)) tps (load (field fp type_params))]
+    (try
+      (do
+        (if (not (str-eq (load (field fp name)) "main"))
+            (do (store! (field fp name) (sconcat3 a m "." (load (field fp name)))) 0) 0)
+        (store! (field fp cc) (try! (resolve c (load (field fp cc)) 3)))
+        (try! (qualify-bound-list c (load (field fp bounds))))
+        (try! (qualify-param-types c (load (field fp params)) tps))
+        (try! (qualify-type c (field fp ret) tps))
+        (Ok 0)))))
+
+; The BODY. An error here is RECOVERABLE: one function's body cannot corrupt another,
+; so q-funcs collects it and moves on, and the checker skips this body while keeping
+; the (already-resolved) signature. `fname` names the enclosing function in any error.
+(defn qualify-func-body [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+  (let [tps (load (field fp type_params))]
+    (try
+      (do
+        (store! (field c fname) (load (field fp name)))
+        (try! (qualify-expr-list c (load (field fp body)) tps))
+        (store! (field c fname) "")
+        (Ok 0)))))
+
+(defn qualify-one-func [(c (ptr Ctx)) (fp (ptr Func))] (-> (Result i64 Diag))
+  (try (do (try! (qualify-func-sig c fp)) (try! (qualify-func-body c fp)) (Ok 0))))
+(defn qualify-one-struct [(c (ptr Ctx)) (sp (ptr StructDef))] (-> (Result i64 Diag))
+  (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
+    (store! (field sp name) (sconcat3 a m "." (load (field sp name))))
+    (try
+      (do (try! (qualify-bound-list c (load (field sp bounds))))   ; resolve + reject unknown traits
+          (try! (qualify-field-types c (load (field sp fields)) tps))
+          (Ok 0)))))
+(defn qualify-variants [(c (ptr Ctx)) (vs (ptr (ArrayList Variant))) (m (slice u8)) (a (ptr Allocator)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [Variant] (load vs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [vp (al-elem [Variant] vs (load i))]
+            (store! (field vp name) (sconcat3 a m "." (load (field vp name))))
+            (match (qualify-field-types c (load (field vp fields)) tps)
+              (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0)))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-one-sum [(c (ptr Ctx)) (sp (ptr SumDef))] (-> (Result i64 Diag))
+  (let [a (load (field c a)) m (load (field c m)) tps (load (field sp type_params))]
+    (store! (field sp name) (sconcat3 a m "." (load (field sp name))))
+    (try
+      (do (try! (qualify-bound-list c (load (field sp bounds))))   ; resolve + reject unknown traits
+          (try! (qualify-variants c (load (field sp variants)) m a tps))
+          (Ok 0)))))
+(defn qualify-one-conv [(c (ptr Ctx)) (cp (ptr Convention))] (-> (Result i64 Diag))
+  (let [a (load (field c a)) m (load (field c m))]
+    (if (not (str-eq (load (field cp name)) "c"))
+        (do (store! (field cp name) (sconcat3 a m "." (load (field cp name)))) 0) 0)
+    (Ok [i64 Diag] 0)))
+(defn qualify-one-extern [(c (ptr Ctx)) (ep (ptr Extern)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [a (load (field c a)) m (load (field c m))]
+    (try
+      (do (store! (field ep name) (sconcat3 a m "." (load (field ep name))))
+          (try! (qualify-type-list c (load (field ep params)) empty))
+          (try! (qualify-type c (field ep ret) empty))
+          (Ok 0)))))
+(defn qualify-one-export [(c (ptr Ctx)) (ep (ptr ExportC))] (-> (Result i64 Diag))
+  (match (resolve c (load (field ep name)) 0)
+    (Err [d] (Err [i64 Diag] d))
+    (Ok [nn] (do (store! (field ep name) nn) (Ok [i64 Diag] 0)))))
+(defn qualify-one-assert [(c (ptr Ctx)) (ap (ptr StaticAssert)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (qualify-expr c (field ap cnd) empty))
+(defn qualify-one-const [(c (ptr Ctx)) (kp (ptr Const)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (try
+    (do (match (load (field kp ty))
+          (Some [t] (let [tp (alloc-stack Type)] (store! tp t) (try! (qualify-type c tp empty)) (store! (field kp ty) (Some (load tp))) 0))
+          (None [] 0))
+        (try! (qualify-expr c (field kp value) empty))
+        (Ok 0))))
+(defn qualify-trait-methods [(c (ptr Ctx)) (ms (ptr (ArrayList TraitMethod))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [n (al-len [TraitMethod] (load ms)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [mp (al-elem [TraitMethod] ms (load i))]
+            (match (qualify-param-types c (load (field mp params)) tps)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [_] (match (qualify-type c (field mp ret) tps)
+                        (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0)))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-one-trait [(c (ptr Ctx)) (tp (ptr TraitDef))] (-> (Result i64 Diag))
+  (try (let [a (load (field c a)) m (load (field c m)) (mut tl) (al-new [(slice u8)] a)]
+    (al-push! (mut tl) (load (field tp self_param)))
+    ; extra trait type parameters are in scope in method signatures too. gen-8 guard:
+    ; an extra param that NAMES A KNOWN TRAIT was almost certainly meant as a supertrait
+    ; (the two used to share this vector), so reject it with a pointer at `:requires`
+    ; rather than silently accepting it as an associated-type parameter.
+    (let [xs (load (field tp type_params)) nx (al-len [(slice u8)] (load xs)) (mut xi) 0]
+      (loop (if (icmp-ge (load xi) nx) (break)
+        (do (let [pn (al-get [(slice u8)] (load xs) (load xi))]
+              (if (has-dot (try! (resolve c pn 2)))
+                  (return-from :try (Err (derr (sconcat a (sconcat3 a "deftrait: type parameter '" pn "' names a trait — if you meant a supertrait, write ':requires [")
+                                                        (sconcat a pn "]'; if you meant an associated-type parameter, rename it")))))
+                  0)
+              (al-push! (mut tl) pn))
+            (store! xi (iadd (load xi) 1))))))
+    ; qualify the `:requires` supertrait names exactly as trait bounds are qualified —
+    ; an unknown supertrait is a located "unknown trait" error, and the stored names
+    ; become the canonical qualified ones the checker matches impls against.
+    (try! (qualify-trait-names c (load (field tp requires))))
+    (let [tlb (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! tlb (load tl))
+      (store! (field tp name) (sconcat3 a m "." (load (field tp name))))
+      (qualify-trait-methods c (load (field tp methods)) tlb)))))
+(defn qualify-impl-method [(c (ptr Ctx)) (fp (ptr Func)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (try
+    ; bounds too — an impl method now carries its impl's bounds (`(impl [(T Eq)] …)`),
+    ; and an unqualified `Eq` here would never match the checker's `coil.core.Eq`
+    (do (try! (qualify-bound-list c (load (field fp bounds))))
+        (try! (qualify-param-types c (load (field fp params)) tps))
+        (try! (qualify-type c (field fp ret) tps))
+        (try! (qualify-expr-list c (load (field fp body)) tps))
+        (Ok 0))))
+(defn qualify-impl-methods [(c (ptr Ctx)) (ms (ptr (ArrayList Func)))] (-> (Result i64 Diag))
+  (let [n (al-len [Func] (load ms)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Func] ms (load i))]
+            (match (qualify-impl-method c fp (load (field fp type_params)))
+              (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0)))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn qualify-one-impl [(c (ptr Ctx)) (ip (ptr ImplDef)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [a (load (field c a))]
+    (try
+      ; The trait being implemented is a bound position too — resolve it through the
+      ; ONE shared helper so an unknown trait errors identically to a defn/struct/sum
+      ; bound (was: lenient `resolve`, so an unknown impl trait slipped past here and was
+      ; caught late in the checker with a divergent "impl: unknown trait" message).
+      (do (store! (field ip trait_name) (try! (qualify-trait-name c (load (field ip trait_name)))))
+          ; A blanket impl — `(impl [T] Show T)`, the implementing type IS a bare type
+          ; param — was accepted and then never matched any receiver, so it was dead code
+          ; that looked live: the user got no error at the impl and "does not implement" at
+          ; every call. Reject it at the impl (blanket impls / specialization over a bare
+          ; param are not supported).
+          (match-else (load (field ip self_type))
+            (TStruct [nm] (if (set-contains (load (field ip type_params)) nm)
+                              (return-from :try (Err (derr (sconcat3 a "cannot impl on a bare type parameter '" nm "'; the implementing type must be a concrete type or type constructor")))) 0))
+            (_ 0))
+          ; Qualify the implementing type (the impl's own type params stay
+          ; unqualified — scalars and `slice` are structurally exempt), then
+          ; re-derive the dispatch base name from the qualified type
+          ; (src/resolve.rs).
+          (try! (qualify-type c (field ip self_type) (load (field ip type_params))))
+          (store! (field ip for_type) (impl-base-name a (field ip self_type)))
+          (try! (qualify-impl-methods c (load (field ip methods))))
+          (Ok 0)))))
+
+; SIGNATURE errors abort (fatal, corrupt shared tables); BODY errors are collected
+; into the sink and the loop continues, so a batch of undefined-function mistakes is
+; reported in ONE pass instead of one-recompile-at-a-time. The checker later skips
+; every poisoned body while keeping its resolved signature, so callers don't cascade.
+(defn q-funcs [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Func] fs (load i))]
+            (match (qualify-func-sig c fp)
+              (Err [d] (do (store! err d) (store! failed true) (break)))
+              (Ok [_]
+                (match (qualify-func-body c fp)
+                  (Err [d] (do (al-push! (mut (load (field c diags))) d)
+                               (al-push! (mut (load (field c poisoned))) (load (field fp name)))
+                               (store! (field c fname) "") 0))
+                  (Ok [_] 0)))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-structs [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p structs)) n (al-len [StructDef] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-struct c (al-elem [StructDef] fs (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-sums [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p sums)) n (al-len [SumDef] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-sum c (al-elem [SumDef] fs (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-convs [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p conventions)) n (al-len [Convention] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-conv c (al-elem [Convention] fs (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-externs [(c (ptr Ctx)) (p (ptr Program)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [fs (load (field p externs)) n (al-len [Extern] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-extern c (al-elem [Extern] fs (load i)) empty)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-exports [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p exports)) n (al-len [ExportC] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-export c (al-elem [ExportC] fs (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-asserts [(c (ptr Ctx)) (p (ptr Program)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [fs (load (field p asserts)) n (al-len [StaticAssert] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-assert c (al-elem [StaticAssert] fs (load i)) empty)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-consts [(c (ptr Ctx)) (p (ptr Program)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [fs (load (field p consts)) n (al-len [Const] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-const c (al-elem [Const] fs (load i)) empty)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-metas [(c (ptr Ctx)) (p (ptr Program)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [fs (load (field p metas)) n (al-len [Expr] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-expr c (al-elem [Expr] fs (load i)) empty)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-traits [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [fs (load (field p traits)) n (al-len [TraitDef] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-trait c (al-elem [TraitDef] fs (load i)))
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn q-impls [(c (ptr Ctx)) (p (ptr Program)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
+  (let [fs (load (field p impls)) n (al-len [ImplDef] (load fs)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (match (qualify-one-impl c (al-elem [ImplDef] fs (load i)) empty)
+            (Err [d] (do (store! err d) (store! failed true) (break))) (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
+(defn qualify-program [(c (ptr Ctx)) (p (ptr Program))] (-> (Result i64 Diag))
+  (let [empty (empty-strs (load (field c a)))]
+    (try
+      (do (try! (q-funcs c p)) (try! (q-structs c p)) (try! (q-sums c p)) (try! (q-convs c p))
+          (try! (q-externs c p empty)) (try! (q-exports c p)) (try! (q-asserts c p empty))
+          (try! (q-consts c p empty)) (try! (q-metas c p empty)) (try! (q-traits c p)) (try! (q-impls c p empty))
+          (Ok 0)))))
+
+; ---- merge (src/resolve.rs::merge) -----------------------------------------
+(defn out-extern [(o (mut Out)) (i i64)] (-> (ptr Extern)) (index (load (field (field o externs) data)) i))
+(defn out-const  [(o (mut Out)) (i i64)] (-> (ptr Const))  (index (load (field (field o consts) data)) i))
+
+(defn merge-structs [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p structs)) n (al-len [StructDef] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o structs)) (al-get [StructDef] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-sums [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p sums)) n (al-len [SumDef] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o sums)) (al-get [SumDef] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-funcs [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p funcs)) n (al-len [Func] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o funcs)) (al-get [Func] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-exports [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p exports)) n (al-len [ExportC] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o exports)) (al-get [ExportC] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-asserts [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p asserts)) n (al-len [StaticAssert] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o asserts)) (al-get [StaticAssert] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-metas [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p metas)) n (al-len [Expr] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o metas)) (al-get [Expr] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-traits [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p traits)) n (al-len [TraitDef] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o traits)) (al-get [TraitDef] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn merge-impls [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p impls)) n (al-len [ImplDef] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut (field o impls)) (al-get [ImplDef] (load src) (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn conv-in-out [(o (mut Out)) (name (slice u8))] (-> bool)
+  (let [n (al-len [Convention] (load (field o conventions))) (mut i) 0 (mut f) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (conv-name (al-get [Convention] (load (field o conventions)) (load i))) name) (do (store! f true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load f)))
+(defn merge-convs [(o (mut Out)) (p (ptr Program))] (-> i64)
+  (let [src (load (field p conventions)) n (al-len [Convention] (load src)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [cv (al-get [Convention] (load src) (load i))]
+            (if (conv-in-out (mut o) (conv-name cv)) 0 (al-push! (mut (field o conventions)) cv)))
+          (store! i (iadd (load i) 1)))))) 0)
+(defn merge-externs [(o (mut Out)) (p (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
+  (let [src (load (field p externs)) n (al-len [Extern] (load src)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [ev (al-get [Extern] (load src) (load i)) esp (alloc-stack Extern)] (store! esp ev)
+            (let [nm (load (field esp name)) on (al-len [Extern] (load (field o externs))) (mut idx) -1 (mut j) 0]
+              (loop (if (icmp-ge (load j) on) (break)
+                (do (if (str-eq (load (field (out-extern (mut o) (load j)) name)) nm) (do (store! idx (load j)) (break)) 0)
+                    (store! j (iadd (load j) 1)))))
+              (if (icmp-ge (load idx) 0)
+                  (if (extern-eq (out-extern (mut o) (load idx)) esp) 0
+                      (do (store! err (derr (extern-conflict-msg a nm))) (store! failed true) (break)))
+                  (al-push! (mut (field o externs)) ev))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn merge-consts [(o (mut Out)) (p (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
+  (let [src (load (field p consts)) n (al-len [Const] (load src)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [cv (al-get [Const] (load src) (load i)) csp (alloc-stack Const)] (store! csp cv)
+            (let [nm (load (field csp name)) on (al-len [Const] (load (field o consts))) (mut dup) false (mut j) 0]
+              (loop (if (icmp-ge (load j) on) (break)
+                (do (if (str-eq (load (field (out-const (mut o) (load j)) name)) nm) (do (store! dup true) (break)) 0)
+                    (store! j (iadd (load j) 1)))))
+              (if (load dup)
+                  (do (store! err (derr (const-dup-msg a nm))) (store! failed true) (break))
+                  (al-push! (mut (field o consts)) cv))))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+(defn merge-into [(o (mut Out)) (p (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
+  (merge-convs (mut o) p)
+  (merge-structs (mut o) p)
+  (merge-sums (mut o) p)
+  (match (merge-externs (mut o) p a) (Err [d] (Err [i64 Diag] d))
+    (Ok [_]
+      (do (merge-funcs (mut o) p) (merge-exports (mut o) p) (merge-asserts (mut o) p) (merge-metas (mut o) p)
+          (merge-traits (mut o) p) (merge-impls (mut o) p)
+          (merge-consts (mut o) p a)))))
+
+; ---- build the DefTable + bare-ok set (pass 1) ----------------------------
+(defn mk-empty-defs [(a (ptr Allocator))] (-> Defs)
+  (let [d (alloc-stack Defs)]
+    (store! (field d callables) (al-new [(slice u8)] a)) (store! (field d types) (al-new [(slice u8)] a))
+    (store! (field d traits) (al-new [(slice u8)] a)) (store! (field d convs) (al-new [(slice u8)] a))
+    (store! (field d externs) (al-new [(slice u8)] a))
+    (load d)))
+(defn table-getc [(a (ptr Allocator)) (tb (ptr TBox)) (m (slice u8))] (-> (ptr DefEntry))
+  (let [hit (table-find (field tb items) m)]
+    (if (icmp-ne (cast i64 hit) 0) hit
+        (let [e (alloc-stack DefEntry) n (al-len [DefEntry] (load (field tb items)))]
+          (store! (field e module) m) (store! (field e defs) (mk-empty-defs a))
+          (al-push! (mut (field tb items)) (load e))
+          (al-elem [DefEntry] (field tb items) n)))))
+(defn add-module-defs [(a (ptr Allocator)) (tb (ptr TBox)) (m (slice u8)) (prog (ptr Program))] (-> i64)
+  (let [de (table-getc a tb m)]
+    ; funcs (non-main) -> callables
+    (let [fs (load (field prog funcs)) n (al-len [Func] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [nm (func-name (al-get [Func] (load fs) (load i)))]
+              (if (not (str-eq nm "main")) (al-push! (mut (field (field de defs) callables)) nm) 0))
+            (store! i (iadd (load i) 1))))))
+    ; structs -> types
+    (let [fs (load (field prog structs)) n (al-len [StructDef] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [sp (al-elem [StructDef] fs (load i))] (al-push! (mut (field (field de defs) types)) (load (field sp name))))
+            (store! i (iadd (load i) 1))))))
+    ; sums -> types + variants -> callables
+    (let [fs (load (field prog sums)) n (al-len [SumDef] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [sp (al-elem [SumDef] fs (load i))]
+              (al-push! (mut (field (field de defs) types)) (load (field sp name)))
+              (let [vs (load (field sp variants)) vn (al-len [Variant] (load vs)) (mut j) 0]
+                (loop (if (icmp-ge (load j) vn) (break)
+                  (do (al-push! (mut (field (field de defs) callables)) (load (field (al-elem [Variant] vs (load j)) name)))
+                      (store! j (iadd (load j) 1)))))))
+            (store! i (iadd (load i) 1))))))
+    ; traits -> traits
+    (let [fs (load (field prog traits)) n (al-len [TraitDef] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (al-push! (mut (field (field de defs) traits)) (load (field (al-elem [TraitDef] fs (load i)) name)))
+            (store! i (iadd (load i) 1))))))
+    ; conventions (non-c) -> convs
+    (let [fs (load (field prog conventions)) n (al-len [Convention] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [nm (conv-name (al-get [Convention] (load fs) (load i)))]
+              (if (not (str-eq nm "c")) (al-push! (mut (field (field de defs) convs)) nm) 0))
+            (store! i (iadd (load i) 1))))))
+    ; externs -> externs + callables
+    (let [fs (load (field prog externs)) n (al-len [Extern] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [nm (load (field (al-elem [Extern] fs (load i)) name))]
+              (al-push! (mut (field (field de defs) externs)) nm)
+              (al-push! (mut (field (field de defs) callables)) nm))
+            (store! i (iadd (load i) 1))))))
+    0))
+(defn build-deftable [(a (ptr Allocator)) (parsed (ptr (ArrayList ParsedForm)))] (-> (ptr (ArrayList DefEntry)))
+  (let [tb (unwrap-ptr [TBox] (create [TBox] a))
+        n (al-len [ParsedForm] (load parsed)) (mut i) 0]
+    (store! (field tb items) (al-new [DefEntry] a))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [pf (al-elem [ParsedForm] parsed (load i))]
+            (match (load (field pf module))
+              (Some [m] (add-module-defs a tb m (load (field pf prog))))
+              (None [] 0)))
+          (store! i (iadd (load i) 1)))))
+    (field tb items)))
+(defn build-bareok [(a (ptr Allocator)) (parsed (ptr (ArrayList ParsedForm)))] (-> (ptr (ArrayList (slice u8))))
+  (let [sb (unwrap-ptr [SBox] (create [SBox] a)) n (al-len [ParsedForm] (load parsed)) (mut i) 0]
+    (store! (field sb items) (al-new [(slice u8)] a))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [prog (load (field (al-elem [ParsedForm] parsed (load i)) prog))
+                ts (load (field prog traits)) tn (al-len [TraitDef] (load ts)) (mut j) 0]
+            (loop (if (icmp-ge (load j) tn) (break)
+              (do (let [tp (al-elem [TraitDef] ts (load j))
+                        ms (load (field tp methods)) mn (al-len [TraitMethod] (load ms)) (mut k) 0]
+                    (loop (if (icmp-ge (load k) mn) (break)
+                      (do (al-push! (mut (field sb items)) (load (field (al-elem [TraitMethod] ms (load k)) name)))
+                          (store! k (iadd (load k) 1))))))
+                  (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (field sb items)))
+
+; ---- Out -> Program + Ctx/Out init -----------------------------------------
+(defn init-out [(o (ptr Out)) (a (ptr Allocator))] (-> i64)
+  (store! (field o conventions) (al-new [Convention] a)) (store! (field o structs) (al-new [StructDef] a))
+  (store! (field o sums) (al-new [SumDef] a)) (store! (field o externs) (al-new [Extern] a))
+  (store! (field o funcs) (al-new [Func] a)) (store! (field o asserts) (al-new [StaticAssert] a))
+  (store! (field o consts) (al-new [Const] a)) (store! (field o traits) (al-new [TraitDef] a))
+  (store! (field o impls) (al-new [ImplDef] a)) (store! (field o metas) (al-new [Expr] a))
+  (store! (field o exports) (al-new [ExportC] a))
+  0)
+(defn out->program [(o (ptr Out)) (a (ptr Allocator))] (-> (ptr Program))
+  (let [pp (unwrap-ptr [Program] (create [Program] a))]
+    (store! (field pp conventions) (box-al [Convention] a (load (field o conventions))))
+    (store! (field pp structs) (box-al [StructDef] a (load (field o structs))))
+    (store! (field pp sums) (box-al [SumDef] a (load (field o sums))))
+    (store! (field pp externs) (box-al [Extern] a (load (field o externs))))
+    (store! (field pp funcs) (box-al [Func] a (load (field o funcs))))
+    (store! (field pp asserts) (box-al [StaticAssert] a (load (field o asserts))))
+    (store! (field pp consts) (box-al [Const] a (load (field o consts))))
+    (store! (field pp traits) (box-al [TraitDef] a (load (field o traits))))
+    (store! (field pp impls) (box-al [ImplDef] a (load (field o impls))))
+    (store! (field pp metas) (box-al [Expr] a (load (field o metas))))
+    (store! (field pp exports) (box-al [ExportC] a (load (field o exports))))
+    pp))
+(defn init-ctx [(c (ptr Ctx)) (a (ptr Allocator)) (m (slice u8)) (imp (ptr ImpEntry)) (table (ptr (ArrayList DefEntry))) (exp (ptr (ArrayList ExpEntry))) (bareok (ptr (ArrayList (slice u8)))) (strict bool) (diags (ptr (ArrayList Diag))) (poisoned (ptr (ArrayList (slice u8))))] (-> i64)
+  (store! (field c a) a) (store! (field c m) m) (store! (field c imp) imp)
+  (store! (field c table) table) (store! (field c exp) exp) (store! (field c strict) strict) (store! (field c bareok) bareok)
+  (store! (field c fname) "")
+  (store! (field c diags) diags) (store! (field c poisoned) poisoned)
+  0)
+
+; tool-10 (import-site collision). The two parallel `(ptr SBox)`s hold, for one importer,
+; the names already explicitly `:use [name]`'d and the module each came from — a box so the
+; push survives across the per-`:use` scan (a bare ArrayList can't be grown through a ptr).
+; partner-of returns the module a name was first seen from, or "" if this is the first.
+(defn partner-of [(nbox (ptr SBox)) (tbox (ptr SBox)) (nm (slice u8))] (-> (slice u8))
+  (let [names (field nbox items) tgts (field tbox items)
+        n (al-len [(slice u8)] (load names)) (mut i) 0 (mut r) ""]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
+              (do (store! r (al-get [(slice u8)] (load tgts) (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; Scan one `:use [names]` entry: the first name already seen from a DIFFERENT module is the
+; collision (Some diag); otherwise every name is recorded and None is returned.
+(defn scan-use-names [(a (ptr Allocator)) (importer (slice u8)) (nbox (ptr SBox)) (tbox (ptr SBox)) (nms (ptr (ArrayList (slice u8)))) (tgt (slice u8))] (-> (Option Diag))
+  (let [nn (al-len [(slice u8)] (load nms)) (mut k) 0 (mut r) (None [Diag])]
+    (loop (if (icmp-ge (load k) nn) (break)
+      (do (let [nm (al-get [(slice u8)] (load nms) (load k)) prev (partner-of nbox tbox nm)]
+            (if (and (icmp-gt (slice-len [u8] prev) 0) (not (str-eq prev tgt)))
+                (do (store! r (Some (derr (use-dup-msg a importer nm prev tgt)))) (break))
+                (do (al-push! (mut (field nbox items)) nm) (al-push! (mut (field tbox items)) tgt) 0)))
+          (store! k (iadd (load k) 1)))))
+    (load r)))
+; One importer: scan every `:use [names]` entry, sharing the seen-name boxes across them.
+(defn dup-in-importer [(a (ptr Allocator)) (ie (ptr ImpEntry))] (-> (Result i64 Diag))
+  (let [importer (load (field ie name))
+        uses (field (field ie imp) uses) un (al-len [Use] (load uses)) (mut j) 0
+        nbox (unwrap-ptr [SBox] (create [SBox] a)) tbox (unwrap-ptr [SBox] (create [SBox] a))
+        (mut err) (zeroed Diag) (mut failed) false]
+    (store! (field nbox items) (al-new [(slice u8)] a))
+    (store! (field tbox items) (al-new [(slice u8)] a))
+    (loop (if (or (load failed) (icmp-ge (load j) un)) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load j)))
+            (match (load (field up spec))
+              (UAll [] 0)
+              (UNames [nms]
+                (match (scan-use-names a importer nbox tbox nms (load (field up target)))
+                  (Some [d] (do (store! err d) (store! failed true) 0))
+                  (None [] 0)))))
+          (store! j (iadd (load j) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; tool-10: reject the SAME name explicitly `:use [name]`'d from two DIFFERENT modules in one
+; importer, eagerly at the import site (before any use site is even reached).
+(defn check-explicit-use-dups [(a (ptr Allocator)) (impb (ptr (ArrayList ImpEntry)))] (-> (Result i64 Diag))
+  (let [n (al-len [ImpEntry] (load impb)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load i) n)) (break)
+      (do (match (dup-in-importer a (al-elem [ImpEntry] impb (load i)))
+            (Err [d] (do (store! err d) (store! failed true) 0))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
+; diag-10: scan one `:use [names]` entry — the first name the target module does NOT export
+; is a located error (Some diag); otherwise None.
+(defn scan-use-exports [(a (ptr Allocator)) (importer (slice u8)) (expb (ptr (ArrayList ExpEntry))) (nms (ptr (ArrayList (slice u8)))) (tgt (slice u8))] (-> (Option Diag))
+  (let [nn (al-len [(slice u8)] (load nms)) (mut k) 0 (mut r) (None [Diag])]
+    (loop (if (icmp-ge (load k) nn) (break)
+      (do (let [nm (al-get [(slice u8)] (load nms) (load k))]
+            (if (not (exports-check expb tgt nm))
+                (do (store! r (Some (derr (use-unexported-msg a importer nm tgt)))) (break))
+                0))
+          (store! k (iadd (load k) 1)))))
+    (load r)))
+; One importer: every `:use [names]` entry must name only exports of its target module.
+(defn exports-in-importer [(a (ptr Allocator)) (expb (ptr (ArrayList ExpEntry))) (ie (ptr ImpEntry))] (-> (Result i64 Diag))
+  (let [importer (load (field ie name))
+        uses (field (field ie imp) uses) un (al-len [Use] (load uses)) (mut j) 0
+        (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load j) un)) (break)
+      (do (let [up (alloc-stack Use)] (store! up (al-get [Use] (load uses) (load j)))
+            (match (load (field up spec))
+              (UAll [] 0)
+              (UNames [nms]
+                (match (scan-use-exports a importer expb nms (load (field up target)))
+                  (Some [d] (do (store! err d) (store! failed true) 0))
+                  (None [] 0)))))
+          (store! j (iadd (load j) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+; diag-10: reject `:use [name]` naming a non-exported symbol, eagerly at the import site.
+(defn check-use-exports [(a (ptr Allocator)) (impb (ptr (ArrayList ImpEntry))) (expb (ptr (ArrayList ExpEntry)))] (-> (Result i64 Diag))
+  (let [n (al-len [ImpEntry] (load impb)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
+    (loop (if (or (load failed) (icmp-ge (load i) n)) (break)
+      (do (match (exports-in-importer a expb (al-elem [ImpEntry] impb (load i)))
+            (Err [d] (do (store! err d) (store! failed true) 0))
+            (Ok [_] 0))
+          (store! i (iadd (load i) 1)))))
+    (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
+
+; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
+; `tolerant` = SKIP a top-level form that does not parse, instead of aborting. Only
+; the macro-context build (expander.coil::expand-stage3) passes true: at that point
+; macros are not yet expanded, so a top-level macro CALL — `(gctype Node)` — is not
+; yet a `defn` and cannot parse. Skipping those leaves every real definition in the
+; context, so the comptime closure walk can reach ordinary functions rather than
+; being restricted to a syntactic `Code`-signature subset. Every other caller passes
+; false and still reports a genuine syntax error. NOTE: deliberately NOT keyed on
+; `strict` — the authoritative resolve runs with strict=false whenever the program
+; has metaprograms, and must still fail loudly on a real parse error.
+(defn resolve-program [(a (ptr Allocator)) (s (mut LS)) (strict bool) (tolerant bool)] (-> (Result (ptr Program) Diag))
+  (let [impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
+        expb (unwrap-ptr [(ArrayList ExpEntry)] (create [(ArrayList ExpEntry)] a))
+        out-forms (field s out) nforms (al-len [TaggedForm] (load out-forms))
+        pb (unwrap-ptr [PBox] (create [PBox] a)) parsed (field pb items)
+        (mut perr) (zeroed Diag) (mut pfailed) false (mut fi) 0
+        (mut dupd) (zeroed Diag) (mut dupfail) false]
+    (store! impb (load (field s imports)))
+    (store! expb (load (field s exports)))
+    (match (check-explicit-use-dups a impb)
+      (Err [d] (do (store! dupd d) (store! dupfail true) 0))
+      (Ok [_] 0))
+    ; diag-10: a `:use [name]` naming a non-exported symbol is a located error, not silence.
+    (if (load dupfail) 0
+        (match (check-use-exports a impb expb)
+          (Err [d] (do (store! dupd d) (store! dupfail true) 0))
+          (Ok [_] 0)))
+    (store! (field pb items) (al-new [ParsedForm] a))
+    (type-res-reset)   ; fresh type-reference resolution registry for this pass
+    (src-mod-reset)    ; fresh source→module map
+    ; pass 0: parse each tagged form into its own Program
+    (loop (if (icmp-ge (load fi) nforms) (break)
+      (do (let [tfp (alloc-stack TaggedForm)] (store! tfp (al-get [TaggedForm] (load out-forms) (load fi)))
+            ; record which module this source file belongs to (for type-node resolution)
+            (src-mod-record (sx-source (load (field tfp form))) (match (load (field tfp module)) (Some [m] m) (None [] "")))
+            (let [single (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a)) (mut sl) (al-new [Sexp] a)]
+              (al-push! (mut sl) (load (field tfp form)))
+              (store! single (load sl))
+              (match (parse-program a single)
+                (Err [d] (if tolerant 0 (do (store! perr d) (store! pfailed true) (break))))
+                (Ok [prog]
+                  (let [pp (unwrap-ptr [Program] (create [Program] a)) pf (alloc-stack ParsedForm)]
+                    (store! pp prog)
+                    (store! (field pf prog) pp) (store! (field pf module) (load (field tfp module)))
+                    (al-push! (mut (field pb items)) (load pf)))))))
+          (store! fi (iadd (load fi) 1)))))
+    (if (load dupfail) (Err (load dupd))
+    (if (load pfailed) (Err (load perr))
+        (let [table (build-deftable a parsed) bareok (build-bareok a parsed)
+              o (alloc-stack Out) np (al-len [ParsedForm] (load parsed))
+              ; the collect-and-continue sink, allocated once and shared across modules.
+              rdiags (unwrap-ptr [(ArrayList Diag)] (create [(ArrayList Diag)] a))
+              rpoison (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))
+              (mut qerr) (zeroed Diag) (mut qfailed) false (mut qi) 0]
+          (store! rdiags (al-new [Diag] a))
+          (store! rpoison (al-new [(slice u8)] a))
+          (store! (field s resolve_diags) rdiags)
+          (store! (field s resolve_poisoned) rpoison)
+          (init-out o a)
+          (loop (if (icmp-ge (load qi) np) (break)
+            (do (let [pf (al-elem [ParsedForm] parsed (load qi)) prog (load (field pf prog))]
+                  (match (load (field pf module))
+                    (Some [m]
+                      (let [imp (imports-find impb m) cx (alloc-stack Ctx)]
+                        (init-ctx cx a m imp table expb bareok strict rdiags rpoison)
+                        (match (qualify-program cx prog)
+                          (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
+                          (Ok [_] 0))))
+                    (None [] 0))
+                  (if (load qfailed) 0
+                      (match (merge-into (mut o) prog a)
+                        (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
+                        (Ok [_] 0))))
+                (store! qi (iadd (load qi) 1)))))
+          (if (load qfailed) (Err (load qerr)) (Ok (out->program o a))))))))
+
+; ============================ check.rs: tables (Cx) ==========================
+; Mirror src/check.rs's Sig/StructInfo/SumInfo/Cx. The Rust HashMaps become
+; linear-scan ArrayList tables (the resolver's deftable idiom). Cx tables are
+; BY-VALUE ArrayList fields so they can be pushed via (mut (field cx X)); they are
+; read via (field cx X) for al-elem and (load (field cx X)) for al-len/al-get.

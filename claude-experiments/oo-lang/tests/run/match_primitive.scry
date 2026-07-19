@@ -1,0 +1,12 @@
+fn describe(n: Int) -> String {
+  match n {
+    0 -> "zero"
+    1 -> "one"
+    _ -> "many"
+  }
+}
+fn main() {
+  print(describe(0))
+  print(describe(1))
+  print(describe(42))
+}

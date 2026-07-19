@@ -1,0 +1,8 @@
+; Curated loader fixture — an imported helper module (target of edge.coil's
+; :as/:use). Standalone: declares its own (module …) and exports a subset.
+(module helper)
+
+(export foo)
+
+(defn foo [] (-> i64) 1)
+(defn bar [] (-> i64) 2)

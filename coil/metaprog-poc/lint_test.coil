@@ -1,0 +1,7 @@
+(module app)
+(import "lint.coil" :use *)
+(checker lint-icmp)
+(defn f [(x :i64) (y :i64)] (-> :i64)
+  (if (icmp-lt x y) (if (icmp-gt x 0) 1 0) (if (icmp-eq y 0) 2 3)))
+(defn main [] (-> :i64)
+  (if (icmp-gt (f 3 4) 5) 0 42))

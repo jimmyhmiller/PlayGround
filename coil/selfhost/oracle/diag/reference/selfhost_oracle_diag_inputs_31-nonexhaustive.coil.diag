@@ -1,0 +1,5 @@
+error: in 'm.name': non-exhaustive match on 'm.Color': `m.Blue` not covered
+  --> selfhost/oracle/diag/inputs/31-nonexhaustive.coil:3:33
+  |
+3 | (defn name [(c Color)] (-> i64) (match c (Red [] 1) (Green [] 2)))
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

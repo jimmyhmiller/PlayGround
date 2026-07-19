@@ -1,0 +1,115 @@
+; A runtime s-expression reader: parse `(slice u8)` text into a tree of `Sexp`
+; (numbers, symbols, and lists). The thing every Lisp/config/serialization format
+; rewrites by hand — here once, as a library over the allocator, `(slice u8)`, and
+; ArrayList. Nothing compiler-magic; `read-all` is the one-call entry, with
+; accessors so a consumer never touches the representation.
+;
+;   (let [forms (read-all a "(define x 10) (+ x 1)")]   ; -> ArrayList<(ptr Sexp)>
+;     (sexp-count (al-get [(ptr Sexp)] (load forms) 1)))   ; => 3
+(module sexp)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+
+(defsum Sexp
+  (SNum  [(v i64)])
+  (SSym  [(s (slice u8))])
+  (SList [(items (ptr (ArrayList (ptr Sexp))))]))
+
+(defn sx [(a (ptr Allocator)) (x Sexp)] (-> (ptr Sexp))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p x) p))
+
+; ---- reader cursor ---------------------------------------------------------
+(defstruct Reader [(src (slice u8)) (pos i64) (a (ptr Allocator))])
+
+(defn r-end? [(r (ptr Reader))] (-> bool) (icmp-ge (load (field r pos)) (slice-len (load (field r src)))))
+(defn r-peek [(r (ptr Reader))] (-> i64)
+  (if (r-end? r) -1 (cast i64 (slice-get (load (field r src)) (load (field r pos))))))
+(defn r-adv [(r (ptr Reader))] (-> i64) (store! (field r pos) (iadd (load (field r pos)) 1)) 0)
+
+(defn ws? [(c i64)] (-> bool)
+  (or (icmp-eq c 32) (or (icmp-eq c 10) (or (icmp-eq c 9) (icmp-eq c 13)))))
+(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+(defn delim? [(c i64)] (-> bool)
+  (or (icmp-eq c -1) (or (ws? c) (or (icmp-eq c 40) (icmp-eq c 41)))))
+
+(defn r-skip-ws [(r (ptr Reader))] (-> i64) (loop (if (ws? (r-peek r)) (r-adv r) (break))) 0)
+
+; a run of non-delimiter bytes as a (slice u8) view into the source
+(defn r-token [(r (ptr Reader))] (-> (slice u8))
+  (let [start (load (field r pos))]
+    (loop (if (delim? (r-peek r)) (break) (r-adv r)))
+    (subslice (load (field r src)) start (load (field r pos)))))
+
+(defn sexp-parse-int [(s (slice u8))] (-> i64)
+  (let [(mut i) 0 n (slice-len s) (mut acc) 0 (mut sign) 1]
+    (if (and (icmp-gt n 0) (icmp-eq (cast i64 (slice-get s 0)) 45))   ; '-'
+        (do (store! sign -1) (store! i 1)) 0)
+    (loop (if (icmp-ge (load i) n) (break)
+            (do (store! acc (iadd (imul (load acc) 10) (isub (cast i64 (slice-get s (load i))) 48)))
+                (store! i (iadd (load i) 1)))))
+    (imul (load sign) (load acc))))
+
+(defn numeric-token? [(tok (slice u8))] (-> bool)
+  (and (icmp-gt (slice-len tok) 0)
+       (or (digit? (cast i64 (slice-get tok 0)))
+           (and (icmp-eq (cast i64 (slice-get tok 0)) 45) (icmp-gt (slice-len tok) 1)))))
+
+; ---- read one form (returns a null (ptr Sexp) at end of input) -------------
+(defn read-form [(r (ptr Reader))] (-> (ptr Sexp))
+  (r-skip-ws r)
+  (let [c (r-peek r)]
+    (if (icmp-eq c -1) (cast (ptr Sexp) 0)
+      (if (icmp-eq c 40)                                ; '(' -> list
+          (do (r-adv r)
+              (let [(mut items) (al-new [(ptr Sexp)] (load (field r a)))]
+                (loop
+                  (do (r-skip-ws r)
+                      (if (icmp-eq (r-peek r) 41) (do (r-adv r) (break))
+                        (if (icmp-eq (r-peek r) -1) (break)
+                          (al-push! (mut items) (read-form r))))))
+                (let [boxed (unwrap-ptr [(ArrayList (ptr Sexp))]
+                                        (create [(ArrayList (ptr Sexp))] (load (field r a))))]
+                  (store! boxed (load items))
+                  (sx (load (field r a)) (SList boxed)))))
+          (let [tok (r-token r)]
+            (if (numeric-token? tok)
+                (sx (load (field r a)) (SNum (sexp-parse-int tok)))
+                (sx (load (field r a)) (SSym tok))))))))
+
+; ---- entry points ----------------------------------------------------------
+; read EVERY top-level form into an ArrayList<(ptr Sexp)>.
+(defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (ptr (ArrayList (ptr Sexp))))
+  (let [rstate (alloc-stack Reader)
+        (mut forms) (al-new [(ptr Sexp)] a)]
+    (store! (field rstate src) src)
+    (store! (field rstate pos) 0)
+    (store! (field rstate a) a)
+    (loop
+      (let [f (read-form rstate)]
+        (if (icmp-eq (cast i64 f) 0) (break) (al-push! (mut forms) f))))
+    (let [boxed (unwrap-ptr [(ArrayList (ptr Sexp))] (create [(ArrayList (ptr Sexp))] a))]
+      (store! boxed (load forms))
+      boxed)))
+
+; ---- accessors (a consumer never matches the representation directly) -------
+(defn sexp-num?  [(x (ptr Sexp))] (-> bool) (match (load x) (SNum [_] true)  (SSym [_] false) (SList [_] false)))
+(defn sexp-sym?  [(x (ptr Sexp))] (-> bool) (match (load x) (SSym [_] true)  (SNum [_] false) (SList [_] false)))
+(defn sexp-list? [(x (ptr Sexp))] (-> bool) (match (load x) (SList [_] true) (SNum [_] false) (SSym [_] false)))
+
+(defn sexp-num [(x (ptr Sexp))] (-> i64)
+  (match (load x) (SNum [v] v) (SSym [_] 0) (SList [_] 0)))
+(defn sexp-sym [(x (ptr Sexp))] (-> (slice u8))
+  (match (load x) (SSym [s] s) (SNum [_] "") (SList [_] "")))
+(defn sexp-items [(x (ptr Sexp))] (-> (ptr (ArrayList (ptr Sexp))))
+  (match (load x) (SList [items] items) (SNum [_] (cast (ptr (ArrayList (ptr Sexp))) 0)) (SSym [_] (cast (ptr (ArrayList (ptr Sexp))) 0))))
+
+(defn sexp-count [(x (ptr Sexp))] (-> i64)
+  (if (sexp-list? x) (al-len [(ptr Sexp)] (load (sexp-items x))) 0))
+(defn sexp-nth [(x (ptr Sexp)) (i i64)] (-> (ptr Sexp))
+  (al-get [(ptr Sexp)] (load (sexp-items x)) i))
+
+; symbol equals a literal — the common dispatch test
+(defn sexp-sym-is [(x (ptr Sexp)) (lit (slice u8))] (-> bool)
+  (and (sexp-sym? x) (str-eq (sexp-sym x) lit)))

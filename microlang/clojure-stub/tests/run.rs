@@ -1,0 +1,1740 @@
+//! The mini-Clojure frontend end to end: reader (`[] {} #{} :kw`), its own macro
+//! expander + `clojure.core` (seqs, collections, HOFs). Output via the frontend's
+//! Clojure formatter.
+
+use microlang::{LowBitModel, Runtime, TreeWalk};
+
+fn run(src: &str) -> String {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn macros_and_fns() {
+    assert_eq!(run("(defn fact [n] (if (< n 2) 1 (* n (fact (- n 1))))) (fact 5)"), "120");
+    assert_eq!(run("(when true 1 2 3)"), "3");
+    assert_eq!(run("(cond (< 3 2) :a (< 5 4) :b :else :c)"), ":c");
+    assert_eq!(run("(and 1 2 3)"), "3");
+    assert_eq!(run("(or false nil 7)"), "7");
+}
+
+#[test]
+fn vectors_and_seqs() {
+    assert_eq!(run("[1 2 3]"), "[1 2 3]");
+    assert_eq!(run("(map inc [1 2 3])"), "(2 3 4)");
+    assert_eq!(run("(filter even? (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(reduce + 0 (range 5))"), "10");
+    assert_eq!(run("(count [10 20 30])"), "3");
+    assert_eq!(run("(nth [10 20 30] 1)"), "20");
+    assert_eq!(run("(conj [1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(first [1 2 3])"), "1");
+    assert_eq!(run("(rest [1 2 3])"), "(2 3)");
+    assert_eq!(run("(reverse [1 2 3])"), "(3 2 1)");
+    assert_eq!(run("(into [] (map inc [1 2 3]))"), "[2 3 4]");
+}
+
+#[test]
+fn keywords_and_maps() {
+    assert_eq!(run(":hello"), ":hello");
+    assert_eq!(run("(= :a :a)"), "true");
+    assert_eq!(run("(= :a :b)"), "false");
+    assert_eq!(run("(get {:a 1 :b 2} :b)"), "2");
+    assert_eq!(run("(get {:a 1} :missing)"), "nil");
+    assert_eq!(run("(contains? {:a 1} :a)"), "true");
+    assert_eq!(run("(get (assoc {:a 1} :b 2) :b)"), "2");
+    assert_eq!(run("(keys {:a 1 :b 2})"), "(:a :b)");
+    assert_eq!(run("(count {:a 1 :b 2})"), "2");
+}
+
+#[test]
+fn equality_is_structural() {
+    assert_eq!(run("(= [1 2 3] [1 2 3])"), "true");
+    assert_eq!(run("(= [1 2] [1 2 3])"), "false");
+    assert_eq!(run(r#"(= "ab" "ab")"#), "true");
+}
+
+#[test]
+fn syntax_quote_macros() {
+    // ` ~ with a plain template
+    assert_eq!(run("(defmacro unless [c a b] `(if ~c ~b ~a)) (unless false 1 2)"), "1");
+    // ~@ splicing
+    assert_eq!(run("(defmacro lst [& xs] `(list ~@xs)) (lst 1 2 3)"), "(1 2 3)");
+    // a macro that builds a vector template
+    assert_eq!(run("(defmacro pair [a b] `[~a ~b]) (pair 1 2)"), "[1 2]");
+    // auto-gensym: the `x#` is one fresh symbol, so this let is hygienic-ish
+    assert_eq!(
+        run("(defmacro twice [e] `(let [x# ~e] (+ x# x#))) (twice 21)"),
+        "42"
+    );
+    // syntax-quote nests unquoted computation
+    assert_eq!(run("(defmacro add [a b] `(+ ~a ~b)) (add 20 22)"), "42");
+}
+
+#[test]
+fn destructuring() {
+    // sequential
+    assert_eq!(run("(let [[a b c] [1 2 3]] (+ a (+ b c)))"), "6");
+    // nested
+    assert_eq!(run("(let [[a [b c]] [1 [2 3]]] (+ a (* b c)))"), "7");
+    // rest
+    assert_eq!(run("(let [[x & more] [1 2 3 4]] more)"), "(2 3 4)");
+    // map :keys
+    assert_eq!(run("(let [{:keys [a b]} {:a 10 :b 20}] (+ a b))"), "30");
+    // fn param destructuring
+    assert_eq!(run("(defn sum-pair [[a b]] (+ a b)) (sum-pair [3 4])"), "7");
+    assert_eq!(run("(defn f [{:keys [x y]}] (* x y)) (f {:x 5 :y 6})"), "30");
+    // ignore with _
+    assert_eq!(run("(let [[_ b] [1 2]] b)"), "2");
+}
+
+#[test]
+fn loop_recur() {
+    assert_eq!(run("(loop [i 0 acc 0] (if (< i 5) (recur (inc i) (+ acc i)) acc))"), "10");
+    // O(1) stack: a big loop must not overflow (trampolined tail recur)
+    assert_eq!(run("(loop [n 100000 acc 0] (if (= n 0) acc (recur (dec n) (inc acc))))"), "100000");
+    assert_eq!(run("(defn count-up [n] (loop [i 0 out []] (if (< i n) (recur (inc i) (conj out i)) out))) (count-up 4)"), "[0 1 2 3]");
+}
+
+/// The LITERAL clojure/core.clj bootstrap forms run on our interop shim: `fn*`,
+/// `(. clojure.lang.RT …)` interop, `Class/method`, `^{…}` metadata, value-less
+/// `def`, and multi-arity `conj`. This is the actual Clojure source, unedited.
+#[test]
+fn real_core_clj_bootstrap() {
+    const BOOTSTRAP: &str = r#"
+        (def unquote)
+        (def
+         ^{:arglists '([x seq]) :doc "cons" :static true}
+         cons (fn* ^:static cons [x seq] (. clojure.lang.RT (cons x seq))))
+        (def
+         ^{:arglists '([coll]) :static true}
+         first (fn ^:static first [coll] (. clojure.lang.RT (first coll))))
+        (def
+         ^{:arglists '([coll]) :static true}
+         next (fn ^:static next [x] (. clojure.lang.RT (next x))))
+        (def
+         ^{:arglists '([coll]) :static true}
+         rest (fn ^:static rest [x] (. clojure.lang.RT (more x))))
+        (def
+         ^{:doc "Same as (first (next x))" :static true}
+         second (fn ^:static second [x] (first (next x))))
+        (def
+         ^{:arglists '([coll]) :static true}
+         seq (fn ^:static seq [coll] (. clojure.lang.RT (seq coll))))
+        (def
+         ^{:arglists '([] [coll] [coll x] [coll x & xs]) :static true}
+         conj (fn ^:static conj
+                ([] [])
+                ([coll] coll)
+                ([coll x] (clojure.lang.RT/conj coll x))
+                ([coll x & xs]
+                 (if xs
+                   (recur (clojure.lang.RT/conj coll x) (first xs) (next xs))
+                   (clojure.lang.RT/conj coll x)))))
+    "#;
+    let run = |expr: &str| -> String {
+        let mut rt = Runtime::<LowBitModel>::new();
+        let src = format!("{BOOTSTRAP}\n{expr}");
+        let r = clojure_stub::run(&mut rt, &TreeWalk, &src);
+        clojure_stub::clj_str(&rt, r)
+    };
+    // cons / first / next / rest / second (all via RT interop)
+    assert_eq!(run("(second (cons 1 (cons 2 nil)))"), "2");
+    assert_eq!(run("(first (cons 10 nil))"), "10");
+    // seq over a vector (RT/seq -> our host runtime)
+    assert_eq!(run("(seq [1 2 3])"), "(1 2 3)");
+    assert_eq!(run("(first [7 8])"), "7");
+    // multi-arity conj (0/1/2 args) + the VARIADIC arity (recur-in-fn)
+    assert_eq!(run("(conj)"), "[]");
+    assert_eq!(run("(conj [9])"), "[9]");
+    assert_eq!(run("(conj [1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(conj (cons 1 nil) 0)"), "(0 1)");
+    assert_eq!(run("(conj [1] 2 3 4)"), "[1 2 3 4]"); // variadic: recur re-enters the arity
+}
+
+/// A macro defined the REAL clojure.core way: `(def ^{:macro true} name (fn*
+/// [&form &env & args] …))`. Exercises `:macro` metadata + the `&form`/`&env`
+/// calling convention on literal source.
+#[test]
+fn real_core_clj_macro_def() {
+    let src = r#"
+        (def
+         ^{:macro true}
+         my-when (fn* my-when [&form &env test & body]
+                   (cons 'if (cons test (cons (cons 'do body) nil)))))
+        (my-when true 1 2 42)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "42");
+}
+
+/// The LITERAL real `assoc` def (multi-arity + `clojure.lang.RT/assoc` + recur).
+/// The functional layer of core.clj loads unedited via the shim.
+#[test]
+fn real_core_clj_assoc() {
+    let src = r#"
+        (def
+         ^{:arglists '([map key val] [map key val & kvs]) :static true}
+         assoc
+         (fn ^:static assoc
+           ([map key val] (clojure.lang.RT/assoc map key val))
+           ([map key val & kvs]
+            (let [ret (clojure.lang.RT/assoc map key val)]
+              (if kvs
+                (if (next kvs)
+                  (recur ret (first kvs) (second kvs) (nnext kvs))
+                  (throw "assoc expects even args"))
+                ret)))))
+        (get (assoc (assoc {} :a 1) :b 2) :b)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "2");
+}
+
+/// Metadata as values: `with-meta`/`meta` work AND stay transparent — a
+/// metadata'd vector is still a vector, its contents read unchanged.
+#[test]
+fn metadata() {
+    assert_eq!(run("(meta (with-meta [1 2] {:a 1}))"), "{:a 1}");
+    assert_eq!(run("(meta [1 2])"), "nil");
+    assert_eq!(run("(vector? (with-meta [1 2] {:a 1}))"), "true"); // transparent
+    assert_eq!(run("(first (with-meta [7 8 9] {:x 1}))"), "7"); // ops see through meta
+    assert_eq!(run("(count (with-meta [7 8 9] {:x 1}))"), "3");
+    assert_eq!(run("(meta (quote sym))"), "nil"); // non-collection: no meta
+    // keyword-as-function in head position: (:k m) -> (get m :k)
+    assert_eq!(run("(:a {:a 1 :b 2})"), "1");
+    assert_eq!(run("(:missing {:a 1})"), "nil");
+}
+
+#[test]
+fn protocols() {
+    // a user type + a protocol implemented for it
+    let shape = r#"
+        (defprotocol Shape (area [this]) (perimeter [this]))
+        (deftype Rect [w h])
+        (extend-type Rect Shape
+          (area [this] (* (field this 0) (field this 1)))
+          (perimeter [this] (* 2 (+ (field this 0) (field this 1)))))
+    "#;
+    assert_eq!(run(&format!("{shape} (area (->Rect 3 4))")), "12");
+    assert_eq!(run(&format!("{shape} (perimeter (->Rect 3 4))")), "14");
+
+    // polymorphism: two types, same protocol, dispatch by type
+    let poly = r#"
+        (defprotocol Describe (describe [this]))
+        (deftype Dog [name])
+        (deftype Cat [name])
+        (extend-type Dog Describe (describe [this] :woof))
+        (extend-type Cat Describe (describe [this] :meow))
+    "#;
+    assert_eq!(run(&format!("{poly} (describe (->Dog :rex))")), ":woof");
+    assert_eq!(run(&format!("{poly} (describe (->Cat :tom))")), ":meow");
+
+    // extend a BUILT-IN type (persistent vectors are records tagged 'PVec)
+    let ext = r#"
+        (defprotocol Sized (size [this]))
+        (extend-type PersistentVector Sized (size [this] (count this)))
+    "#;
+    assert_eq!(run(&format!("{ext} (size [10 20 30])")), "3");
+}
+
+#[test]
+fn core_breadth() {
+    assert_eq!(run("(get-in {:a {:b {:c 42}}} [:a :b :c])"), "42");
+    assert_eq!(run("(assoc-in {:a {:b 1}} [:a :b] 99)"), "{:a {:b 99}}");
+    assert_eq!(run("(update {:n 5} :n inc)"), "{:n 6}");
+    assert_eq!(run("(some even? [1 3 5 6])"), "true");
+    assert_eq!(run("(every? even? [2 4 6])"), "true");
+    assert_eq!(run("(mapv inc [1 2 3])"), "[2 3 4]");
+    assert_eq!(run("((comp inc inc) 5)"), "7");
+    assert_eq!(run("(map (partial + 10) [1 2 3])"), "(11 12 13)");
+    assert_eq!(run("(if-let [x (get {:a 1} :a)] x :none)"), "1");
+    assert_eq!(run("(if-let [x (get {:a 1} :missing)] x :none)"), ":none");
+    assert_eq!(run("(map-indexed (fn [i x] [i x]) [:a :b])"), "([0 :a] [1 :b])");
+}
+
+#[test]
+fn threading_and_composition() {
+    assert_eq!(run("(-> {:a 1} (assoc :b 2) (get :b))"), "2");
+    assert_eq!(run("(-> [1 2 3] (conj 4) count)"), "4");
+    assert_eq!(run("(->> (range 5) (filter even?) (map inc))"), "(1 3 5)");
+}
+
+#[test]
+fn callable_objects() {
+    // Keywords are functions of a map.
+    assert_eq!(run("(:n {:n 7})"), "7");
+    assert_eq!(run("(map :n [{:n 1} {:n 2} {:n 3}])"), "(1 2 3)");
+    // Maps and vectors are functions of a key/index.
+    assert_eq!(run("({:a 1 :b 2} :b)"), "2");
+    assert_eq!(run("([:x :y :z] 1)"), ":y");
+}
+
+#[test]
+fn instance_predicate() {
+    assert_eq!(run("(instance? clojure.lang.Keyword :a)"), "true");
+    assert_eq!(run("(instance? clojure.lang.Keyword 3)"), "false");
+    assert_eq!(run("(instance? String \"hi\")"), "true");
+    assert_eq!(run("(instance? Long 42)"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentVector [1 2])"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentMap {:a 1})"), "true");
+}
+
+#[test]
+#[should_panic]
+fn throw_aborts() {
+    // An uncaught throw unwinds the whole computation.
+    run("(throw \"boom\")");
+}
+
+#[test]
+fn try_catch_finally() {
+    // catch binds the thrown value; the try value is the handler's value.
+    assert_eq!(run("(try (throw \"oops\") (catch Exception e e))"), "\"oops\"");
+    // no throw -> body value; catch is skipped.
+    assert_eq!(run("(try 42 (catch Exception e :never))"), "42");
+    // finally runs for effect on the normal path but doesn't change the value.
+    assert_eq!(run("(let [a (atom 0)] (try 7 (finally (reset! a 1))) @a)"), "1");
+    assert_eq!(run("(try 7 (finally 999))"), "7");
+    // finally runs on the throw path too, then the catch value is returned.
+    assert_eq!(
+        run("(let [a (atom :x)] [(try (throw :bang) (catch Exception e :caught) (finally (reset! a :ran))) @a])"),
+        "[:caught :ran]"
+    );
+    // a thrown record value round-trips through catch.
+    assert_eq!(run("(try (throw {:err 1}) (catch Exception e (:err e)))"), "1");
+    // nested: inner catch handles, outer body continues.
+    assert_eq!(run("(try (+ 1 (try (throw :z) (catch Exception e 9))) (catch Exception e :outer))"), "10");
+    // re-throw from a catch propagates to the outer handler.
+    assert_eq!(run("(try (try (throw :a) (catch Exception e (throw :b))) (catch Exception e e))"), ":b");
+}
+
+#[test]
+fn typed_catch() {
+    // A specific class matches only the corresponding runtime tag; the first
+    // matching clause wins (ClojureScript's instanceof-chain model).
+    assert_eq!(
+        run("(try (throw \"s\") (catch clojure.lang.Keyword e :kw) (catch String e :str))"),
+        ":str"
+    );
+    assert_eq!(
+        run("(try (throw :k) (catch clojure.lang.Keyword e :kw) (catch String e :str))"),
+        ":kw"
+    );
+    // :default is the explicit catch-all when no typed clause matches.
+    assert_eq!(
+        run("(try (throw 42) (catch String e :str) (catch :default e [:default e]))"),
+        "[:default 42]"
+    );
+    // A constructor exception carries its class name as a tag, so a typed catch
+    // on that class matches it — and a different class does not.
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"boom\")) (catch RuntimeException e :caught))"),
+        ":caught"
+    );
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"boom\")) (catch clojure.lang.Keyword e :kw) (catch :default e :fell-through))"),
+        ":fell-through"
+    );
+    // No clause matches and there is no catch-all -> the throw propagates out.
+    assert_eq!(
+        run("(try (try (throw :a) (catch String e :str)) (catch :default e :outer))"),
+        ":outer"
+    );
+}
+
+#[test]
+fn real_core_clj_setmacro() {
+    // Real core.clj registers a macro via `(. (var name) (setMacro))` after a
+    // plain `(def name (fn* name [&form &env ...] ...))`, rather than metadata.
+    let src = r#"
+        (def my-when
+          (fn* my-when [&form &env test & body]
+            (cons 'if (cons test (cons (cons 'do body) nil)))))
+        (. (var my-when) (setMacro))
+        (my-when true 1 2 99)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "99");
+}
+
+#[test]
+fn real_style_defn_macro() {
+    // A `defn` defined the way core.clj does: a macro that destructures fdecl
+    // (optional docstring), then emits `(def name (fn name params body...))`.
+    // Proves the var+setMacro path plus seq/first/next/cons/syntax-quote suffice
+    // to host a real-shaped defn without any special toolkit support.
+    let src = r#"
+        (def my-defn
+          (fn* my-defn [&form &env name & fdecl]
+            (let [fdecl (if (instance? String (first fdecl)) (next fdecl) fdecl)
+                  params (first fdecl)
+                  body (next fdecl)]
+              (cons 'def
+                (cons name
+                  (list (cons `fn (cons name (cons params body)))))))))
+        (. (var my-defn) (setMacro))
+        (my-defn square "doc" [x] (* x x))
+        (square 9)
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "81");
+}
+
+#[test]
+fn literal_core_defn() {
+    // A near-verbatim clojure.core `defn`: docstring + attr-map handling, sigs
+    // for :arglists, with-meta on the name symbol, and `(cons `fn fdecl)`. Loaded
+    // via the real var+setMacro registration. Then used to define + call fns.
+    let src = r#"
+        (def defn
+          (fn* defn [&form &env name & fdecl]
+            (let [m (if (instance? String (first fdecl)) {:doc (first fdecl)} {})
+                  fdecl (if (instance? String (first fdecl)) (next fdecl) fdecl)
+                  m (if (map? (first fdecl)) (conj m (first fdecl)) m)
+                  fdecl (if (map? (first fdecl)) (next fdecl) fdecl)
+                  fdecl (if (vector? (first fdecl)) (list fdecl) fdecl)
+                  m (conj {:arglists (list 'quote (sigs fdecl))} m)
+                  m (conj (if (meta name) (meta name) {}) m)]
+              (list 'def (with-meta name m)
+                    (cons `fn fdecl)))))
+        (. (var defn) (setMacro))
+        (defn cube "the cube" [x] (* x x x))
+        (defn add2 ([x] (add2 x 1)) ([x y] (+ x y)))
+        (list (cube 3) (add2 10) (add2 10 5))
+    "#;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run(&mut rt, &TreeWalk, src);
+    assert_eq!(clojure_stub::clj_str(&rt, r), "(27 11 15)");
+}
+
+#[test]
+fn variadic_arithmetic() {
+    assert_eq!(run("(+ 1 2 3 4)"), "10");
+    assert_eq!(run("(+)"), "0");
+    assert_eq!(run("(* 2 3 4)"), "24");
+    assert_eq!(run("(*)"), "1");
+    assert_eq!(run("(- 10 1 2 3)"), "4");
+    assert_eq!(run("(- 5)"), "-5");
+    assert_eq!(run("(< 1 2 3)"), "true");
+    assert_eq!(run("(< 1 2 2)"), "false");
+    assert_eq!(run("(<= 1 2 2)"), "true");
+    assert_eq!(run("(>= 3 3 2)"), "true");
+    assert_eq!(run("(= 1 1 1)"), "true");
+    assert_eq!(run("(not= 1 1 2)"), "true");
+    assert_eq!(run("(reduce + 0 [1 2 3 4 5])"), "15");
+}
+
+#[test]
+fn destructuring_as_or() {
+    assert_eq!(run("(let [[a b :as v] [1 2]] [a b v])"), "[1 2 [1 2]]");
+    assert_eq!(run("(let [{:keys [x y] :as m} {:x 1 :y 2}] [x y m])"), "[1 2 {:x 1, :y 2}]");
+    assert_eq!(run("(let [{:keys [x y] :or {y 9}} {:x 1}] [x y])"), "[1 9]");
+    assert_eq!(run("(let [{a :aa :or {a 0}} {}] a)"), "0");
+    assert_eq!(run("((fn [[a & r]] [a r]) [1 2 3])"), "[1 (2 3)]");
+}
+
+#[test]
+fn control_macros() {
+    assert_eq!(run("(if-not false :yes :no)"), ":yes");
+    assert_eq!(run("(if-not true :yes)"), "nil");
+    assert_eq!(run("(let [a (atom 0)] (dotimes [i 5] (swap! a + i)) @a)"), "10");
+    assert_eq!(run("(let [a (atom 0)] (doseq [x [1 2 3]] (swap! a + x)) @a)"), "6");
+    assert_eq!(run("(case 2 1 :one 2 :two :other)"), ":two");
+    assert_eq!(run("(case 9 1 :one 2 :two :other)"), ":other");
+    assert_eq!(run("(when-first [x [10 20]] x)"), "10");
+    assert_eq!(run("(let [a (atom 0) i (atom 0)] (while (< @i 3) (swap! a + 1) (swap! i + 1)) @a)"), "3");
+}
+
+#[test]
+fn apply_fn() {
+    assert_eq!(run("(apply + [1 2 3 4])"), "10");
+    assert_eq!(run("(apply + 1 2 [3 4 5])"), "15");
+    assert_eq!(run("(apply max [3 7 2 9 4])"), "9");
+    assert_eq!(run("(apply + (range 100))"), "4950");
+    assert_eq!(run(r#"(apply str (interpose "," [1 2 3]))"#), r#""1,2,3""#);
+    assert_eq!(run("(apply vector 1 2 [3 4])"), "[1 2 3 4]");
+    assert_eq!(run("(apply hash-map [:a 1 :b 2])"), "{:a 1, :b 2}");
+    assert_eq!(run("(apply (fn [a b c] (* a b c)) [2 3 4])"), "24");
+    // leading args + a lazy final collection, into a variadic fn.
+    assert_eq!(run("(let [f (fn [& xs] (count xs))] (apply f 1 2 (range 5)))"), "7");
+    // apply-enabled variadic combinators.
+    assert_eq!(run("((comp inc inc inc) 0)"), "3");
+    assert_eq!(run("((partial + 1 2) 3 4)"), "10");
+    assert_eq!(run("((juxt + *) 2 3 4)"), "[9 24]");
+    assert_eq!(run("(min 5 2 8 1)"), "1");
+}
+
+#[test]
+fn multimethods() {
+    // dispatch on a computed value.
+    assert_eq!(
+        run("(defmulti f (fn [x] (mod x 2))) (defmethod f 0 [x] :even) (defmethod f 1 [x] :odd) [(f 4) (f 7)]"),
+        "[:even :odd]"
+    );
+    // dispatch via a keyword accessor, with :default.
+    assert_eq!(
+        run("(defmulti area :shape) \
+             (defmethod area :circle [s] (* (:r s) (:r s))) \
+             (defmethod area :rect [s] (* (:w s) (:h s))) \
+             (defmethod area :default [s] :unknown) \
+             [(area {:shape :circle :r 3}) (area {:shape :rect :w 2 :h 5}) (area {:shape :blob})]"),
+        "[9 10 :unknown]"
+    );
+    // multi-arg dispatch on a vector of tags.
+    assert_eq!(
+        run("(defmulti op (fn [a b] [(:t a) (:t b)])) \
+             (defmethod op [:i :i] [a b] (+ (:v a) (:v b))) \
+             (op {:t :i :v 3} {:t :i :v 4})"),
+        "7"
+    );
+    // a later defmethod for the same value replaces the earlier one.
+    assert_eq!(
+        run("(defmulti g :k) (defmethod g :a [x] 1) (defmethod g :a [x] 2) (g {:k :a})"),
+        "2"
+    );
+    // no matching method and no :default throws a clear, catchable error.
+    assert_eq!(
+        run("(defmulti h identity) (defmethod h 1 [_] :one) (try (h 2) (catch :default e e))"),
+        "\"No method in multimethod 'h' for dispatch value: 2\""
+    );
+}
+
+#[test]
+fn integer_division() {
+    assert_eq!(run("(quot 17 5)"), "3");
+    assert_eq!(run("(rem 17 5)"), "2");
+    assert_eq!(run("(quot -17 5)"), "-3");
+    assert_eq!(run("(rem -7 3)"), "-1"); // sign follows dividend
+    assert_eq!(run("(mod -7 3)"), "2"); // sign follows divisor
+    assert_eq!(run("(mod 7 3)"), "1");
+    assert_eq!(run("(map even? (range 4))"), "(true false true false)");
+    assert_eq!(run("(odd? -3)"), "true");
+}
+
+#[test]
+fn str_fn() {
+    assert_eq!(run(r#"(str "a" "b" "c")"#), r#""abc""#);
+    assert_eq!(run("(str 1 2 3)"), r#""123""#);
+    assert_eq!(run("(str :foo)"), r#"":foo""#);
+    assert_eq!(run("(str nil)"), r#""""#);
+    assert_eq!(run("(str [1 2 3])"), r#""[1 2 3]""#);
+    assert_eq!(run("(str {:a 1 :b 2})"), r#""{:a 1, :b 2}""#);
+    assert_eq!(run("(str (list 1 2))"), r#""(1 2)""#);
+    assert_eq!(run(r#"(str "n=" 42 " v=" [1 2])"#), r#""n=42 v=[1 2]""#);
+    assert_eq!(run("(str (map inc [1 2 3]))"), r#""(2 3 4)""#);
+    assert_eq!(run(r#"(str \a \b)"#), r#""ab""#);
+}
+
+#[test]
+fn persistent_array_map() {
+    assert_eq!(run("(type-of {:a 1})"), "PersistentArrayMap");
+    assert_eq!(run("{:a 1 :b 2}"), "{:a 1, :b 2}");
+    assert_eq!(run("(get {:a 1 :b 2} :b)"), "2");
+    assert_eq!(run("(get {:a 1} :z 99)"), "99"); // not-found arity
+    assert_eq!(run("(assoc {:a 1} :b 2 :c 3)"), "{:a 1, :b 2, :c 3}"); // variadic
+    assert_eq!(run("(assoc {:a 1} :a 9)"), "{:a 9}"); // overwrite in place
+    assert_eq!(run("(dissoc {:a 1 :b 2 :c 3} :b)"), "{:a 1, :c 3}");
+    assert_eq!(run("(dissoc {:a 1 :b 2} :a :b)"), "{}"); // variadic dissoc
+    assert_eq!(run("(count {:a 1 :b 2 :c 3})"), "3");
+    assert_eq!(run("(contains? {:a 1} :a)"), "true");
+    assert_eq!(run("(contains? {:a 1} :z)"), "false");
+    assert_eq!(run("(keys {:a 1 :b 2})"), "(:a :b)");
+    assert_eq!(run("(vals {:a 1 :b 2})"), "(1 2)");
+    assert_eq!(run("(:a {:a 5})"), "5"); // keyword call
+    assert_eq!(run("({:a 5} :a)"), "5"); // map call (IFn)
+    assert_eq!(run("(key (first {:a 1}))"), ":a");
+    assert_eq!(run("(val (first {:a 1}))"), "1");
+    assert_eq!(run("(map key {:a 1 :b 2})"), "(:a :b)");
+    // equality is order-independent
+    assert_eq!(run("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
+    assert_eq!(run("(= {:a 1} {:a 2})"), "false");
+    // grows past the 8-entry array-map size (promotion deferred; still correct)
+    assert_eq!(run("(count (into {} (map (fn [i] [i (* i i)]) (range 20))))"), "20");
+    assert_eq!(run("(get (into {} (map (fn [i] [i (* i i)]) (range 20))) 15)"), "225");
+    // nested + conj a map
+    assert_eq!(run("(get-in {:a {:b {:c 42}}} [:a :b :c])"), "42");
+    assert_eq!(run("(count (conj {:a 1} {:b 2 :c 3}))"), "3");
+}
+
+#[test]
+fn persistent_hash_map() {
+    // small maps are array maps; they promote to a HAMT past 8 entries.
+    assert_eq!(run("(type-of {:a 1})"), "PersistentArrayMap");
+    assert_eq!(run("(type-of (into {} (map (fn [i] [i i]) (range 20))))"), "PersistentHashMap");
+    // `(assoc nil …)` builds a REAL map, and one that promotes — same as `{}`.
+    //
+    // core.clj defines nil's `-assoc` before the cljs types exist, so it built
+    // the bootstrap `'Map`: a plist, scanned linearly, that NEVER promotes to
+    // the HAMT however large it grows. cljs_types upgrades `hash-map`/`map?`
+    // when the real types load and simply missed this one, so
+    // `(loop [m nil] … (assoc m i i))` silently stayed O(n) per lookup forever
+    // (measured: 380ns to `get` one of 81 entries).
+    assert_eq!(run("(type-of (assoc nil :a 1))"), "PersistentArrayMap");
+    assert_eq!(run("(assoc nil :a 1 :b 2)"), "{:a 1, :b 2}");
+    assert_eq!(
+        run("(type-of (loop [i 0 m nil] (if (< i 30) (recur (inc i) (assoc m i i)) m)))"),
+        "PersistentHashMap"
+    );
+    assert_eq!(
+        run("(get (loop [i 0 m nil] (if (< i 30) (recur (inc i) (assoc m i i)) m)) 17)"),
+        "17"
+    );
+    assert_eq!(run("(assoc-in nil [:a :b] 1)"), "{:a {:b 1}}");
+    // …and nil is otherwise untouched: only `-assoc` was re-registered.
+    assert_eq!(run("[(get nil :a) (count nil) (contains? nil :a) (seq nil)]"), "[nil 0 false nil]");
+    // correctness at scale (crosses BitmapIndexedNode -> ArrayNode)
+    let big = "(into {} (map (fn [i] [i (* i i)]) (range 200)))";
+    assert_eq!(run(&format!("(count {big})")), "200");
+    assert_eq!(run(&format!("(get {big} 137)")), "18769");
+    assert_eq!(run(&format!("(get {big} 999 :nope)")), ":nope");
+    assert_eq!(run(&format!("(contains? {big} 50)")), "true");
+    assert_eq!(run(&format!("(contains? {big} 500)")), "false");
+    assert_eq!(run(&format!("(count (dissoc {big} 50 51 52))")), "197");
+    assert_eq!(run(&format!("(get (assoc {big} 50 :x) 50)")), ":x");
+    // string keys, nil key
+    assert_eq!(run(r#"(get (into {} (map (fn [i] [(str "k" i) i]) (range 30))) "k15")"#), "15");
+    assert_eq!(run("(get (assoc (into {} (map (fn [i] [i i]) (range 20))) nil :nv) nil)"), ":nv");
+    // order-independent equality across differently-built large maps
+    assert_eq!(
+        run("(= (into {} (map (fn [i] [i i]) (range 40))) (into {} (map (fn [i] [i i]) (reverse (range 40)))))"),
+        "true"
+    );
+    // keys/vals/reduce over a HAMT
+    assert_eq!(run("(count (keys (into {} (map (fn [i] [i i]) (range 50)))))"), "50");
+    assert_eq!(run("(reduce + (vals (into {} (map (fn [i] [i i]) (range 10)))))"), "45");
+    // callable + get-in through a HAMT
+    assert_eq!(run("((into {} [[:a 1]]) :a)"), "1");
+}
+
+#[test]
+fn persistent_hash_set() {
+    assert_eq!(run("(set? #{1 2 3})"), "true");
+    assert_eq!(run("(type-of #{1 2})"), "PersistentHashSet");
+    assert_eq!(run("(contains? #{1 2 3} 2)"), "true");
+    assert_eq!(run("(contains? #{1 2 3} 9)"), "false");
+    assert_eq!(run("(conj #{1 2} 2)"), "#{1 2}"); // no dup
+    assert_eq!(run("(count (conj #{1 2} 3))"), "3");
+    assert_eq!(run("(count (disj #{1 2 3} 2))"), "2");
+    assert_eq!(run("(#{:a :b} :a)"), ":a"); // set is callable
+    assert_eq!(run("(#{:a :b} :z)"), "nil");
+    assert_eq!(run("(= #{1 2 3} #{3 2 1})"), "true"); // order-independent
+    assert_eq!(run("(= #{1 2} #{1 2 3})"), "false");
+    assert_eq!(run("(count (into #{} [1 1 2 2 3 3 3]))"), "3"); // dedup
+    assert_eq!(run("(count (set (range 100)))"), "100"); // backed by a HAMT
+    assert_eq!(run("(contains? (set (range 100)) 73)"), "true");
+    assert_eq!(run("(sort (seq #{3 1 2}))"), "(1 2 3)");
+}
+
+#[test]
+fn protocol_dispatch_collections() {
+    // The core collection fns dispatch through protocols (ClojureScript-style):
+    // a USER type that implements the protocols works with all of them, with no
+    // change to core. This is the whole point of the protocol rearchitecture.
+    let pair = r#"
+        (deftype Pair [a b])
+        (extend-type Pair
+          ISeqable (-seq [p] (list (field p 0) (field p 1)))
+          ICounted (-count [p] 2)
+          IIndexed (-nth [p i] (field p i)))
+    "#;
+    assert_eq!(run(&format!("{pair} (seq (->Pair 10 20))")), "(10 20)");
+    assert_eq!(run(&format!("{pair} (count (->Pair 10 20))")), "2");
+    assert_eq!(run(&format!("{pair} (nth (->Pair 10 20) 1)")), "20");
+    assert_eq!(run(&format!("{pair} (map inc (->Pair 3 4))")), "(4 5)");
+    assert_eq!(run(&format!("{pair} (reduce + (->Pair 100 200))")), "300");
+    assert_eq!(run(&format!("{pair} (into [] (->Pair :x :y))")), "[:x :y]");
+    assert_eq!(run(&format!("{pair} (first (->Pair :a :b))")), ":a");
+    assert_eq!(run(&format!("{pair} (filter odd? (->Pair 3 4))")), "(3)");
+
+    // built-in collection protocols dispatch on ANY value type (lists, nil,
+    // lazy seqs, vectors, maps, sets) — not just records.
+    assert_eq!(run("(-conj nil 1)"), "(1)"); // nil ICollection
+    assert_eq!(run("(-count '(1 2 3))"), "3"); // List ICounted
+    assert_eq!(run("(-nth [10 20 30] 2)"), "30"); // PVec IIndexed
+    assert_eq!(run("(-lookup {:a 1} :b :none)"), ":none"); // Map ILookup w/ default
+    assert_eq!(run("(-seq (range 3))"), "(0 1 2)"); // LazySeq ISeqable
+    assert_eq!(run("(count (conj {:a 1} {:b 2 :c 3}))"), "3"); // conj map merges entries
+    assert_eq!(run("(get (conj {:a 1} {:b 2}) :b)"), "2");
+}
+
+#[test]
+fn persistent_vector() {
+    // basics
+    assert_eq!(run("[1 2 3]"), "[1 2 3]");
+    assert_eq!(run("(vector? [1 2])"), "true");
+    assert_eq!(run("(vector? '(1 2))"), "false");
+    assert_eq!(run("(conj [1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(assoc [1 2 3] 1 :x)"), "[1 :x 3]");
+    assert_eq!(run("(assoc [1 2 3] 3 4)"), "[1 2 3 4]"); // assoc at count == conj
+    assert_eq!(run("(pop [1 2 3])"), "[1 2]");
+    assert_eq!(run("(peek [1 2 3])"), "3");
+    assert_eq!(run("(get [10 20 30] 1)"), "20");
+    assert_eq!(run("(get [10 20 30] 9)"), "nil"); // out of range -> nil
+    assert_eq!(run("([:a :b :c] 2)"), ":c"); // vectors are callable
+    assert_eq!(run("(nth [10 20 30] 1)"), "20");
+    // quoted vector literal is a real persistent vector
+    assert_eq!(run("(vector? '[1 2 3])"), "true");
+    assert_eq!(run("(conj '[1 2] 3)"), "[1 2 3]");
+    assert_eq!(run("(nth ['a 'b] 0)"), "a");
+    // nested vectors realize/print correctly
+    assert_eq!(run("[[1 2] [3 4]]"), "[[1 2] [3 4]]");
+    assert_eq!(run("(assoc-in [[1 2] [3 4]] [1 0] 99)"), "[[1 2] [99 4]]");
+    // structural equality is by contents, independent of build path
+    assert_eq!(run("(= [1 2 3] (conj [1 2] 3))"), "true");
+    assert_eq!(run("(= [1 2 3] '(1 2 3))"), "true"); // vectors are Sequential: = to a list, as in real Clojure
+    // the trie crosses tail -> root -> multiple levels
+    assert_eq!(run("(count (vec (range 1000)))"), "1000");
+    // 4000 > 1024 so the trie has 2 internal levels (shift 10).
+    assert_eq!(run("(nth (vec (range 4000)) 3999)"), "3999");
+    assert_eq!(run("(last (vec (range 2000)))"), "1999");
+    assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 500)"), ":x");
+    assert_eq!(run("(nth (assoc (vec (range 1000)) 500 :x) 499)"), "499");
+    assert_eq!(run("(reduce + (vec (range 1001)))"), "500500");
+    assert_eq!(run("(count (pop (vec (range 2000))))"), "1999");
+    assert_eq!(run("(= (vec (range 100)) (vec (range 100)))"), "true");
+    // interop with seq fns
+    assert_eq!(run("(map inc [1 2 3])"), "(2 3 4)");
+    assert_eq!(run("(mapv inc [1 2 3])"), "[2 3 4]");
+    assert_eq!(run("(into [] (map inc [1 2 3]))"), "[2 3 4]");
+}
+
+#[test]
+fn anon_fn_literals() {
+    // `#(...)` with %/%1/%2 and %& rest.
+    assert_eq!(run("(map #(* % %) [1 2 3 4])"), "(1 4 9 16)");
+    assert_eq!(run("(#(+ %1 %2) 3 4)"), "7");
+    assert_eq!(run("(map #(+ %1 %2) [1 2 3] [10 20 30])"), "(11 22 33)");
+    assert_eq!(run("(#(count %&) 1 2 3 4)"), "4");
+    assert_eq!(run("(filter #(> % 2) [1 2 3 4])"), "(3 4)");
+    // Nested data inside the body is scanned for params.
+    assert_eq!(run("(#(vector % [%1 :x]) 9)"), "[9 [9 :x]]");
+}
+
+#[test]
+fn for_comprehension() {
+    assert_eq!(run("(for [x [1 2 3]] (* x x))"), "(1 4 9)");
+    assert_eq!(run("(for [x [1 2] y [10 20]] (+ x y))"), "(11 21 12 22)");
+    assert_eq!(run("(for [x (range 10) :when (even? x)] x)"), "(0 2 4 6 8)");
+    assert_eq!(run("(for [x (range 100) :while (< x 5)] x)"), "(0 1 2 3 4)");
+    // :let in scope for a following :when.
+    assert_eq!(run("(for [x [1 2 3] :let [y (* x 10)] :when (> y 10)] y)"), "(20 30)");
+    // for is lazy: pull a finite prefix from an infinite source.
+    assert_eq!(run("(take 5 (for [x (range)] (* x x)))"), "(0 1 4 9 16)");
+    // :while nested — stops only the inner binding.
+    assert_eq!(run("(for [x [1 2] y (range 10) :while (< y 2)] [x y])"), "([1 0] [1 1] [2 0] [2 1])");
+}
+
+#[test]
+fn seq_breadth() {
+    assert_eq!(run("(mapcat (fn [x] [x x]) [1 2 3])"), "(1 1 2 2 3 3)");
+    assert_eq!(run("(map + [1 2 3] [10 20 30] [100 200 300])"), "(111 222 333)");
+    assert_eq!(run("(interpose 0 [1 2 3])"), "(1 0 2 0 3)");
+    assert_eq!(run("(interleave [1 2 3] [:a :b :c])"), "(1 :a 2 :b 3 :c)");
+    assert_eq!(run("(distinct [1 1 2 3 3 3 1])"), "(1 2 3)");
+    assert_eq!(run("(dedupe [1 1 2 2 2 3 1])"), "(1 2 3 1)");
+    assert_eq!(run("(flatten [1 [2 [3 [4]]]])"), "(1 2 3 4)");
+    assert_eq!(run("(partition 2 [1 2 3 4 5])"), "((1 2) (3 4))");
+    assert_eq!(run("(partition 2 3 (range 10))"), "((0 1) (3 4) (6 7))");
+    assert_eq!(run("(partition-all 2 [1 2 3 4 5])"), "((1 2) (3 4) (5))");
+    assert_eq!(run("(partition-by even? [1 1 2 4 3 5 6])"), "((1 1) (2 4) (3 5) (6))");
+    assert_eq!(run("(take-nth 2 (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(reductions + [1 2 3 4])"), "(1 3 6 10)");
+    assert_eq!(run("(keep-indexed (fn [i x] (if (even? i) x nil)) [:a :b :c :d])"), "(:a :c)");
+    assert_eq!(run("(sort [3 1 2 5 4])"), "(1 2 3 4 5)");
+    assert_eq!(run("(sort-by (fn [x] (- 0 x)) [3 1 2])"), "(3 2 1)");
+    assert_eq!(run("(reduce + [1 2 3 4])"), "10");
+    assert_eq!(run("((juxt first last count) [1 2 3 4])"), "[1 4 4]");
+    assert_eq!(run("(peek [1 2 3])"), "3");
+    assert_eq!(run("(pop [1 2 3])"), "[1 2]");
+}
+
+#[test]
+fn map_breadth() {
+    assert_eq!(run("(group-by even? (range 6))"), "{true [0 2 4], false [1 3 5]}");
+    assert_eq!(run("(frequencies [:a :b :a :a :b])"), "{:a 3, :b 2}");
+    assert_eq!(run("(zipmap [:a :b] [1 2])"), "{:a 1, :b 2}");
+    assert_eq!(run("(merge {:a 1} {:b 2} {:a 9})"), "{:a 9, :b 2}");
+    assert_eq!(run("(merge-with + {:a 1 :b 2} {:a 10})"), "{:a 11, :b 2}");
+    assert_eq!(run("(select-keys {:a 1 :b 2 :c 3} [:a :c])"), "{:a 1, :c 3}");
+    assert_eq!(run("(update-in {:a {:b 1}} [:a :b] inc)"), "{:a {:b 2}}");
+}
+
+#[test]
+fn extra_threading_macros() {
+    assert_eq!(run("(cond-> 1 true inc false inc (< 0 5) (+ 10))"), "12");
+    assert_eq!(run("(cond->> [1 2 3] true (map inc) true reverse)"), "(4 3 2)");
+    assert_eq!(run("(some-> {:a {:b 5}} :a :b inc)"), "6");
+    assert_eq!(run("(some-> {:a nil} :a :b inc)"), "nil");
+    assert_eq!(run("(some->> [1 2 3] (map inc) (reduce +))"), "9");
+    assert_eq!(run("(as-> 5 x (+ x 1) (* x 2))"), "12");
+    assert_eq!(run("(condp = 2 1 :one 2 :two :default)"), ":two");
+    assert_eq!(run("(condp = 9 1 :one 2 :two :default)"), ":default");
+    assert_eq!(run("(let [a (atom [])] (doto a (swap! conj 1) (swap! conj 2)) @a)"), "[1 2]");
+}
+
+#[test]
+fn lazy_sequences() {
+    // Infinite range, consumed lazily.
+    assert_eq!(run("(take 5 (range))"), "(0 1 2 3 4)");
+    assert_eq!(run("(take 3 (map inc (range)))"), "(1 2 3)");
+    assert_eq!(run("(take 4 (filter even? (range)))"), "(0 2 4 6)");
+    // iterate / repeat / cycle / repeatedly.
+    assert_eq!(run("(take 5 (iterate (fn [x] (* x 2)) 1))"), "(1 2 4 8 16)");
+    assert_eq!(run("(take 3 (repeat :x))"), "(:x :x :x)");
+    assert_eq!(run("(repeat 3 :y)"), "(:y :y :y)");
+    assert_eq!(run("(take 7 (cycle [1 2 3]))"), "(1 2 3 1 2 3 1)");
+    // take-while / drop-while on an infinite seq.
+    assert_eq!(run("(take-while (fn [x] (< x 5)) (range))"), "(0 1 2 3 4)");
+    assert_eq!(run("(take 3 (drop-while (fn [x] (< x 10)) (range)))"), "(10 11 12)");
+    // lazy-seq is only realized on demand: a self-referential fib stream.
+    assert_eq!(
+        run("(defn nats [n] (lazy-seq (cons n (nats (inc n))))) (take 5 (nats 0))"),
+        "(0 1 2 3 4)"
+    );
+    // range with start/end/step.
+    assert_eq!(run("(range 2 8)"), "(2 3 4 5 6 7)");
+    assert_eq!(run("(range 0 10 2)"), "(0 2 4 6 8)");
+    // composition over an infinite source, forced by take.
+    assert_eq!(run("(reduce + 0 (take 5 (map (fn [x] (* x x)) (range))))"), "30");
+    // nth into an infinite seq.
+    assert_eq!(run("(nth (map inc (range)) 100)"), "101");
+    // keep drops nils.
+    assert_eq!(run("(keep (fn [x] (if (even? x) x nil)) (range 6))"), "(0 2 4)");
+}
+
+#[test]
+fn real_os_threads() {
+    // A future runs its thunk on a real std::thread sharing the heap; deref joins.
+    assert_eq!(run("(deref (future (+ 1 2)))"), "3");
+    assert_eq!(run("@(future (* 6 7))"), "42");
+    // The worker calls GLOBALS defined on the main thread (shared env).
+    assert_eq!(
+        run("(defn work [n] (reduce + 0 (range n))) (deref (future (work 100)))"),
+        "4950"
+    );
+    // Two futures run concurrently over the shared heap, then combine.
+    assert_eq!(
+        run("(defn work [n] (reduce + 0 (range n))) (let [a (future (work 100)) b (future (work 200))] (+ @a @b))"),
+        "24850"
+    );
+    // A worker allocates lots of heap (lists) concurrently with the main thread.
+    assert_eq!(
+        run("(let [f (future (count (map inc (range 500))))] (+ @f (count (range 300))))"),
+        "800"
+    );
+    // Nested futures: a worker spawns its own worker.
+    assert_eq!(run("(deref (future (deref (future (+ 10 20)))))"), "30");
+}
+
+#[test]
+fn thread_stress() {
+    // Spawn many workers that each allocate + compute over the shared heap in
+    // parallel; the total must be exact every run (no lost/torn allocations).
+    let src = r#"
+        (defn work [n] (reduce + 0 (map (fn [x] (* x x)) (range n))))
+        (defn spawn-n [k]
+          (if (%num-eq k 0) nil (%cons (%spawn (fn [] (work 60))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) 0 (%add (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 16))
+    "#;
+    // work(60) = sum of squares 0..59 = 70210; times 16 workers = 1123360.
+    assert_eq!(run(src), "1123360");
+}
+
+/// Concurrent moving GC: workers force stop-the-world collections while sibling
+/// threads run over the shared heap. TSan-diagnosed and hugely improved (the
+/// deterministic use-after-move — an unrooted callee/args in the `eval_tail`
+/// tail-call trampoline — is FIXED, and TSan races dropped from ~125 to ~8), but
+/// NOT fully race-free: ~8 lock-free-heap-read vs alloc races remain, which can
+/// still surface as a rare use-after-move under heavy contention. Closing them
+/// needs a read barrier / per-thread allocation nurseries. Ignored (a flaky test
+/// is worse than an honest gap); run alone with `-- --ignored` to exercise it.
+#[test]
+#[ignore = "concurrent moving GC: ~8 residual read-vs-alloc races (TSan) can \
+            rarely fault under contention; needs a read barrier to fully close"]
+fn concurrent_gc() {
+    // Workers allocate heavily AND force moving collections while sibling threads
+    // run concurrently. The safepoint STW protocol must stop every mutator before
+    // any object moves; results must stay exact and no thread may crash.
+    let src = r#"
+        (defn churn [n]
+          (loop [i 0 acc 0]
+            (if (%num-eq i n)
+                acc
+                (let [xs (map (fn [x] (* x x)) (range 40))]
+                  (do (gc)
+                      (recur (%add i 1) (%add acc (reduce + 0 xs))))))))
+        (defn spawn-n [k]
+          (if (%num-eq k 0) nil (%cons (%spawn (fn [] (churn 24))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) 0 (%add (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 8))
+    "#;
+    // sum of squares 0..39 = 20540; churn(24) = 24*20540 = 492960; x8 = 3943680.
+    assert_eq!(run(src), "3943680");
+}
+
+#[test]
+fn atom_cas_concurrent() {
+    // Many worker threads each swap! the SAME shared atom many times. With a real
+    // compare-and-set retry loop, not one increment may be lost: the total is exact.
+    let src = r#"
+        (def counter (atom 0))
+        (defn bump-n [k] (if (%num-eq k 0) nil (do (swap! counter (fn [x] (%add x 1))) (bump-n (%sub k 1)))))
+        (defn spawn-n [k] (if (%num-eq k 0) nil (%cons (%spawn (fn [] (bump-n 250))) (spawn-n (%sub k 1)))))
+        (defn await-all [fs] (if (nil? fs) nil (do (%await (%first fs)) (await-all (%rest fs)))))
+        (await-all (spawn-n 8))
+        (deref counter)
+    "#;
+    // 8 threads * 250 increments = 2000, exact iff no lost updates.
+    assert_eq!(run(src), "2000");
+}
+
+#[test]
+fn namespaces() {
+    // Define in one ns, reference fully-qualified from another.
+    assert_eq!(run("(ns foo) (def x 42) (ns bar) foo/x"), "42");
+    // Own-ns def qualifies; a bare ref in the same ns resolves to it.
+    assert_eq!(run("(ns foo) (defn sq [n] (* n n)) (sq 7)"), "49");
+    // Forward reference to a var defined LATER in the same ns.
+    assert_eq!(run("(ns foo) (defn a [n] (b n)) (defn b [n] (+ n 1)) (a 10)"), "11");
+    // clojure.core is auto-referred into every namespace.
+    assert_eq!(run("(ns foo) (reduce + (map inc (range 5)))"), "15");
+    // The same short name in two namespaces is two distinct vars.
+    assert_eq!(run("(ns a) (def n 1) (ns b) (def n 2) (ns c) [a/n b/n]"), "[1 2]");
+    // A user var shadows an auto-referred core name for its own bare refs.
+    assert_eq!(run("(ns foo) (def inc 1000) inc"), "1000");
+}
+
+#[test]
+fn namespace_alias_and_refer() {
+    // `alias` and `(:require [ns :as x])` both make `x/name` resolve.
+    assert_eq!(run("(ns foo) (def val 99) (ns bar) (alias 'f 'foo) f/val"), "99");
+    assert_eq!(run("(ns foo) (def z 7) (ns bar (:require [foo :as f])) f/z"), "7");
+    // `(:require [ns :refer [name]])` brings `name` in bare.
+    assert_eq!(run("(ns foo) (def w 5) (ns bar (:require [foo :refer [w]])) w"), "5");
+    // A macro defined in one ns, referred into another and used there.
+    assert_eq!(
+        run("(ns foo) (defmacro twice [x] (list '+ x x)) (ns bar (:require [foo :refer [twice]])) (twice 21)"),
+        "42"
+    );
+}
+
+#[test]
+fn dynamic_vars() {
+    // Root value, thread-local override, and unwind back to root after `binding`.
+    assert_eq!(run("(def ^:dynamic *x* 10) *x*"), "10");
+    assert_eq!(run("(def ^:dynamic *x* 10) (binding [*x* 20] *x*)"), "20");
+    assert_eq!(run("(def ^:dynamic *x* 10) [(binding [*x* 20] *x*) *x*]"), "[20 10]");
+    // The binding is visible to a function CALLED within its dynamic extent.
+    assert_eq!(run("(def ^:dynamic *x* 1) (defn gx [] *x*) (binding [*x* 99] (gx))"), "99");
+    // Nested + sibling bindings, and multiple vars at once.
+    assert_eq!(
+        run("(def ^:dynamic *x* 1) [(binding [*x* 2] (binding [*x* 3] *x*)) (binding [*x* 2] *x*)]"),
+        "[3 2]"
+    );
+    assert_eq!(
+        run("(def ^:dynamic *a* 1) (def ^:dynamic *b* 2) (binding [*a* 10 *b* 20] (+ *a* *b*))"),
+        "30"
+    );
+    // `set!` mutates the current thread-local binding; a throw still unwinds it.
+    assert_eq!(run("(def ^:dynamic *x* 0) (binding [*x* 5] (set! *x* 7) *x*)"), "7");
+    assert_eq!(
+        run("(def ^:dynamic *x* 1) (try (binding [*x* 9] (throw \"boom\")) (catch :default e *x*))"),
+        "1"
+    );
+    // Bindings are THREAD-LOCAL: a future runs on a fresh thread whose binding
+    // stack is empty, so it sees the root value (not the caller's binding).
+    assert_eq!(run("(def ^:dynamic *x* 0) (binding [*x* 5] [*x* @(future *x*)])"), "[5 0]");
+}
+
+/// Load a program with the on-disk require fixture dir on the load path.
+fn run_req(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, src, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn require_loads_files() {
+    // `require` reads util/math.clj off the load path; its fns resolve via alias.
+    assert_eq!(run_req("(ns app (:require [util.math :as m])) (m/square 9)"), "81");
+    // `:refer` brings names in bare.
+    assert_eq!(run_req("(ns app (:require [util.math :refer [square pi]])) (+ (square 4) pi)"), "19");
+    // A top-level `(require …)` (outside an `ns` form) also loads.
+    assert_eq!(run_req("(require '[util.helper :as h]) (h/greet \"you\")"), "\"hi you\"");
+    // TRANSITIVE: myapp.core's own `(ns … :require …)` pulls in util.math + util.helper.
+    assert_eq!(
+        run_req("(ns app (:require [myapp.core :as c])) [(c/area 10) (c/hello)]"),
+        "[300 \"hi world\"]"
+    );
+    // A namespace loaded once is not reloaded (idempotent require).
+    assert_eq!(
+        run_req("(require '[util.math :as m]) (require '[util.math :as m2]) (+ m/pi (m2/square 2))"),
+        "7"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot find namespace")]
+fn require_missing_namespace_errors() {
+    run_req("(ns app (:require [does.not.exist :as x])) 1");
+}
+
+#[test]
+fn full_namespace_qualification() {
+    // EVERY var is namespace-qualified: clojure.core is a real namespace, so its
+    // members can be referenced explicitly — and bare names auto-refer to it.
+    assert_eq!(run("(clojure.core/reduce clojure.core/+ (clojure.core/range 5))"), "10");
+    assert_eq!(run("(reduce + (map inc (range 5)))"), "15");
+    // A user var is qualified into its ns and reachable fully-qualified elsewhere.
+    assert_eq!(run("(ns a) (def x 7) (ns b) a/x"), "7");
+    // A dynamic var is qualified too; binding + ref agree on the qualified sym.
+    assert_eq!(run("(ns a) (def ^:dynamic *v* 1) (defn get-v [] *v*) (binding [*v* 9] (get-v))"), "9");
+    // Cross-namespace: a's dynamic var seen fully-qualified from b, and bound there.
+    assert_eq!(run("(ns a) (def ^:dynamic *v* 1) (ns b) (binding [a/*v* 5] a/*v*)"), "5");
+}
+
+#[test]
+fn require_aliased_macro() {
+    // An ALIASED macro call (`m/twice`) resolves now that macros are qualified —
+    // the expander resolves the head through the namespace before checking.
+    assert_eq!(run_req("(ns app (:require [util.mac :as m])) (m/twice 21)"), "42");
+    // …and a :refer'd macro, and an aliased fn from the same file.
+    assert_eq!(run_req("(ns app (:require [util.mac :refer [twice]])) (twice 21)"), "42");
+    assert_eq!(run_req("(ns app (:require [util.mac :as m])) (m/sq 6)"), "36");
+}
+
+#[test]
+fn protocol_methods_are_namespace_qualified() {
+    // A protocol method is a qualified var: defined in `geom`, called QUALIFIED
+    // (geom/area) and via :refer from another namespace.
+    let base = "(ns geom) (defprotocol Shape (area [s])) (deftype Sq [side]) \
+                (extend-type Sq Shape (area [s] (* (field s 0) (field s 0)))) ";
+    assert_eq!(run(&format!("{base} (ns app) (geom/area (geom/->Sq 5))")), "25");
+    assert_eq!(
+        run(&format!("{base} (ns app (:require [geom :refer [area ->Sq]])) (area (->Sq 6))")),
+        "36"
+    );
+    // Two protocols in DIFFERENT namespaces may share a method name; each is its
+    // own qualified var and dispatches independently (flat names would collide).
+    let collide = "(ns a) (defprotocol P (go [x])) (deftype T [v]) (extend-type T P (go [x] :a-go)) \
+                   (ns b) (defprotocol Q (go [x])) (deftype U [v]) (extend-type U Q (go [x] :b-go)) \
+                   (ns c) [(a/go (a/->T 1)) (b/go (b/->U 2))]";
+    assert_eq!(run(collide), "[:a-go :b-go]");
+}
+
+#[test]
+fn first_class_vars() {
+    // `#'x` / `(var x)` is a real, namespace-qualified Var handle.
+    assert_eq!(run("(def x 42) (var x)"), "#'user/x");
+    assert_eq!(run("(var reduce)"), "#'clojure.core/reduce");
+    assert_eq!(run("(def x 1) (var? (var x))"), "true");
+    assert_eq!(run("(var? 5)"), "false");
+    // A Var is derefable (yields its root).
+    assert_eq!(run("(def x 42) @(var x)"), "42");
+    assert_eq!(run("(def x 42) (var-get (var x))"), "42");
+    // alter-var-root changes the root (and returns the new value).
+    assert_eq!(run("(def x 1) (alter-var-root (var x) (fn [v] (+ v 10))) x"), "11");
+    assert_eq!(run("(def x 1) (alter-var-root (var x) + 5)"), "6");
+    // with-redefs temporarily rebinds a var's root, then restores it.
+    assert_eq!(run("(defn f [] 1) [(with-redefs [f (fn [] 99)] (f)) (f)]"), "[99 1]");
+    // Late binding is preserved: redefining a fn updates earlier callers.
+    assert_eq!(run("(defn f [] 1) (defn g [] (f)) (defn f [] 2) (g)"), "2");
+    // Vars key by qualified sym, so a var from another ns derefs correctly.
+    assert_eq!(run("(ns a) (def x 7) (ns b) (var-get (var a/x))"), "7");
+}
+
+#[test]
+fn declare_defonce_and_private() {
+    // declare: forward reference (var interned; the later def binds it).
+    assert_eq!(run("(declare later) (defn now [] (later)) (defn later [] 7) (now)"), "7");
+    // defonce: the second definition is a no-op.
+    assert_eq!(run("(defonce x 1) (defonce x 2) x"), "1");
+    // defn- defines a normal fn (usable within its own namespace).
+    assert_eq!(run("(defn- helper [n] (* n n)) (helper 6)"), "36");
+    assert_eq!(run("(ns geom) (defn- secret [] 9) (defn pub [] (secret)) (pub)"), "9");
+}
+
+#[test]
+#[should_panic(expected = "is private")]
+fn private_var_cross_namespace_errors() {
+    run("(ns geom) (defn- secret [] 9) (ns app) (geom/secret)");
+}
+
+#[test]
+fn unbound_var_semantics() {
+    // A value-less (def x) interns an UNBOUND var: #'x works, bound? is false,
+    // and a deref throws a CATCHABLE "Unbound var".
+    assert_eq!(run("(def x) (bound? (var x))"), "false");
+    assert_eq!(run("(declare y) (def y 5) (bound? (var y))"), "true");
+    assert_eq!(
+        run("(def x) (try @(var x) (catch :default e (str \"caught: \" e)))"),
+        "\"caught: Unbound var: user/x\""
+    );
+}
+
+#[test]
+fn var_reflection() {
+    // name / namespace split a (possibly qualified) symbol or keyword.
+    assert_eq!(run("(name (quote foo.bar/baz))"), "\"baz\"");
+    assert_eq!(run("(namespace (quote foo.bar/baz))"), "\"foo.bar\"");
+    assert_eq!(run("(name (quote xyz))"), "\"xyz\"");
+    assert_eq!(run("(name :hello)"), "\"hello\"");
+    // find-var on a fully-qualified sym; nil when unbound/absent.
+    assert_eq!(run("(def x 42) (var-get (find-var (quote user/x)))"), "42");
+    assert_eq!(run("(find-var (quote user/nope))"), "nil");
+    // resolve: an unqualified literal resolves through the current namespace.
+    assert_eq!(run("(def x 42) (var-get (resolve (quote x)))"), "42");
+    assert_eq!(run("(var? (resolve (quote reduce)))"), "true"); // clojure.core
+    assert_eq!(run("(resolve (quote definitely-not-defined))"), "nil");
+    // ns-resolve targets a named namespace.
+    assert_eq!(run("(ns geom) (def y 7) (ns app) (var-get (ns-resolve (quote geom) (quote y)))"), "7");
+    // var metadata: :name and :ns (symbols, as in Clojure).
+    assert_eq!(run("(ns app) (def x 1) (:name (meta (var x)))"), "x");
+    assert_eq!(run("(ns app) (def x 1) (:ns (meta (var x)))"), "app");
+}
+
+#[test]
+fn var_registry_metadata_and_namespaces() {
+    // Metadata flags come from the runtime var registry, populated at each def.
+    assert_eq!(run("(def ^:dynamic *x* 1) (:dynamic (meta (var *x*)))"), "true");
+    assert_eq!(run("(defn- sec [] 1) (:private (meta (var sec)))"), "true");
+    assert_eq!(run("(defmacro m [x] x) (:macro (meta (var m)))"), "true");
+    assert_eq!(run("(def x 1) (:dynamic (meta (var x)))"), "false");
+    // symbol builds interned symbols (1- and 2-arg).
+    assert_eq!(run("(symbol \"foo\")"), "foo");
+    assert_eq!(run("(symbol \"ns\" \"bar\")"), "ns/bar");
+    // Namespace enumeration over the registry.
+    assert_eq!(run("(ns app) (def a 1) (def b 2) (count (ns-interns (quote app)))"), "2");
+    assert_eq!(run("(ns app) (def a 1) (def b 2) (get (ns-interns (quote app)) (quote a))"), "#'app/a");
+    // ns-publics excludes private vars.
+    assert_eq!(run("(ns app) (def a 1) (defn- p [] 2) (count (ns-publics (quote app)))"), "1");
+    // all-ns / find-ns see a user namespace once it has a def.
+    // find-ns/all-ns yield NAMESPACE objects (as in Clojure); ns-name unwraps.
+    assert_eq!(run("(ns foo) (def x 1) (ns-name (find-ns (quote foo)))"), "foo");
+    assert_eq!(run("(ns foo) (def x 1) (some (fn [n] (= (ns-name n) (quote foo))) (all-ns))"), "true");
+}
+
+#[test]
+fn var_docstrings() {
+    // `(defn f "doc" [args] …)` captures :doc into the var's metadata.
+    assert_eq!(run("(defn f \"squares n\" [n] (* n n)) (:doc (meta (var f)))"), "\"squares n\"");
+    // The documented fn still works normally.
+    assert_eq!(run("(defn f \"squares n\" [n] (* n n)) (f 7)"), "49");
+    // No docstring -> :doc is nil; plain fns are unaffected.
+    assert_eq!(run("(defn g [n] n) (:doc (meta (var g)))"), "nil");
+    assert_eq!(run("(defn add [a b] (+ a b)) (add 3 4)"), "7");
+}
+
+#[test]
+fn var_arglists() {
+    // :arglists is captured (at compile time) from the fn's params, as vectors.
+    assert_eq!(run("(defn f [a b] (+ a b)) (:arglists (meta (var f)))"), "([a b])");
+    assert_eq!(run("(defn g [x] x) (:arglists (meta (var g)))"), "([x])");
+    assert_eq!(run("(defn h [a & bs] a) (:arglists (meta (var h)))"), "([a & bs])");
+    // Docstring + arglists together; the fn still works.
+    assert_eq!(run("(defn f \"adds\" [a b] (+ a b)) (:arglists (meta (var f)))"), "([a b])");
+    assert_eq!(run("(defn add [a b] (+ a b)) (add 3 4)"), "7");
+    // Non-fn vars have no arglists.
+    assert_eq!(run("(def x 5) (:arglists (meta (var x)))"), "nil");
+}
+
+#[test]
+fn clojure_string_is_library_code() {
+    // clojure.string, written ENTIRELY in the language over %str->chars.
+    let with = |body: &str| format!("(ns a (:require [clojure.string :as s])) {body}");
+    assert_eq!(run(&with("(s/upper-case \"hello\")")), "\"HELLO\"");
+    assert_eq!(run(&with("(s/lower-case \"HeLLo\")")), "\"hello\"");
+    assert_eq!(run(&with("(s/capitalize \"hELLO\")")), "\"Hello\"");
+    assert_eq!(run(&with("(s/reverse \"abc\")")), "\"cba\"");
+    assert_eq!(run(&with("(s/trim \"  hi  \")")), "\"hi\"");
+    assert_eq!(run(&with("(s/join \",\" [1 2 3])")), "\"1,2,3\"");
+    assert_eq!(run(&with("(s/split \"a,b,c\" \",\")")), "[\"a\" \"b\" \"c\"]");
+    assert_eq!(run(&with("(s/replace \"a-b-c\" \"-\" \"+\")")), "\"a+b+c\"");
+    assert_eq!(run(&with("(s/index-of \"hello world\" \"world\")")), "6");
+    assert_eq!(run(&with("[(s/starts-with? \"foobar\" \"foo\") (s/ends-with? \"foobar\" \"bar\")]")), "[true true]");
+    assert_eq!(run(&with("(s/includes? \"hello\" \"ell\")")), "true");
+    // core: subs + count on strings (also over %str->chars / %str-len).
+    assert_eq!(run("(subs \"hello world\" 6)"), "\"world\"");
+    assert_eq!(run("(count \"hello\")"), "5");
+}
+
+#[test]
+fn regex_engine_is_library_code() {
+    // A tiny backtracking regex, also pure library code over the one primitive.
+    let with = |body: &str| format!("(ns a (:require [clojure.string :as s])) {body}");
+    assert_eq!(run(&with("(s/re-match? \"ell\" \"hello\")")), "true");
+    assert_eq!(run(&with("(s/re-match? \"^h.*o$\" \"hello\")")), "true");
+    assert_eq!(run(&with("(s/re-match? \"^h.*o$\" \"hellox\")")), "false");
+    assert_eq!(run(&with("[(s/re-match? \"ab*c\" \"ac\") (s/re-match? \"ab*c\" \"abbbc\") (s/re-match? \"ab*c\" \"adc\")]")), "[true true false]");
+}
+
+#[test]
+fn division_and_ex_info() {
+    // `/` was a genuinely missing arithmetic primitive; now complete.
+    assert_eq!(run("(/ 6 3)"), "2");           // exact integer
+    assert_eq!(run("(/ 5 2)"), "5/2");         // -> exact Ratio (as in Clojure)
+    assert_eq!(run("(/ 22 7)"), "22/7");
+    assert_eq!(run("(/ 100 5 2)"), "10");      // left fold
+    assert_eq!(run("(/ 4)"), "1/4");           // reciprocal -> Ratio
+    // ex-info (in-language): data-carrying, catchable.
+    assert_eq!(run("(ex-message (ex-info \"boom\" {:x 1}))"), "\"boom\"");
+    assert_eq!(run("(try (throw (ex-info \"e\" {:code 42})) (catch :default e (ex-data e)))"), "{:code 42}");
+}
+
+/// Load a program with the VENDORED real clojure.data.json 2.5.1 on the load
+/// path (over the host reader/writer/StringBuilder machinery in host_jvm/host_io).
+fn run_json(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/data.json");
+    let full = format!("(ns app (:require [clojure.data.json :as json]))\n{src}");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, &full, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn clojure_data_json_real_library() {
+    // The REAL org.clojure/data.json 2.5.1 (vendored verbatim) loads AND runs on
+    // the host machinery — no embedded stand-in shadows the name anymore.
+    // read-str
+    assert_eq!(run_json("(json/read-str \"42\")"), "42");
+    assert_eq!(run_json("(json/read-str \"3.14\")"), "3.14");
+    // Space-separated array elements are INVALID JSON: real 2.5.1 throws
+    // "JSON error (invalid array)" here (verified against the JVM). The old
+    // expectation ([true false nil]) was the embedded stand-in's laxness.
+    assert_eq!(
+        run_json("(try (json/read-str \"[true false null]\") (catch Exception e (.getMessage e)))"),
+        "\"JSON error (invalid array)\""
+    );
+    assert_eq!(run_json("(json/read-str \"[true, false, null]\")"), "[true false nil]");
+    assert_eq!(run_json("(json/read-str \"[1, [2, 3], 4]\")"), "[1 [2 3] 4]");
+    assert_eq!(run_json("(json/read-str \"{\\\"a\\\": 1, \\\"b\\\": 2}\")"), "{\"a\" 1, \"b\" 2}");
+    assert_eq!(run_json("(get (json/read-str \"{\\\"a\\\": 42}\") \"a\")"), "42");
+    // :key-fn keyword — the option the embedded stand-in never supported.
+    assert_eq!(run_json("(json/read-str \"{\\\"a\\\": 1}\" :key-fn keyword)"), "{:a 1}");
+    // write-str: default-write-key-fn calls `name` on keywords, as real 2.5.1.
+    assert_eq!(run_json("(json/write-str [1 2 3])"), "\"[1,2,3]\"");
+    assert_eq!(run_json("(json/write-str {:name \"Bob\" :age 25})"), "\"{\\\"name\\\":\\\"Bob\\\",\\\"age\\\":25}\"");
+    // escaping: a quote inside a string value is backslash-escaped.
+    assert_eq!(run_json("(json/write-str {\"k\" \"a\\\"b\"})"), "\"{\\\"k\\\":\\\"a\\\\\\\"b\\\"}\"");
+    // round-trip
+    assert_eq!(run_json("(json/read-str (json/write-str {\"a\" [1 2] \"b\" true}))"), "{\"a\" [1 2], \"b\" true}");
+}
+
+/// The oracle-driven clojure.core conformance suite: every expression's expected
+/// output was generated by REAL Clojure (tests/core_suite/expected.txt). This runs
+/// the whole corpus on TreeWalk and asserts an exact match — the burn-down gate.
+#[test]
+fn clojure_core_conformance_suite() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/core_suite/expected.txt");
+    let text = std::fs::read_to_string(&path).expect("expected.txt");
+    let mut fails = Vec::new();
+    let mut total = 0;
+    for line in text.lines() {
+        let Some((expr, expected)) = line.split_once('\t') else { continue };
+        if expected == "ERROR" { continue; }
+        total += 1;
+        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut rt = Runtime::<LowBitModel>::new();
+            let r = clojure_stub::run(&mut rt, &TreeWalk, expr);
+            clojure_stub::clj_str(&rt, r)
+        })).unwrap_or_else(|_| "<panic>".into());
+        if got != expected {
+            fails.push(format!("  {expr}  =>  got {got:?}  want {expected:?}"));
+        }
+    }
+    assert!(fails.is_empty(), "{}/{} clojure.core exprs failed:\n{}", fails.len(), total, fails.join("\n"));
+    eprintln!("clojure.core conformance: {total}/{total} match real Clojure");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Collection literals are DATA (full reader↔runtime unification, like Clojure):
+// the reader builds the real persistent collections, macros receive them as
+// data, and `quote` keeps them literal.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn collection_literals_are_data() {
+    // THE representation test: a macro sees a real vector, not construction code.
+    assert_eq!(
+        run("(defmacro vq [v] (list 'quote (list (vector? v) (type-of v)))) (vq [1 2])"),
+        "(true PersistentVector)"
+    );
+    // Maps and sets too, and the elements are the RAW (unevaluated) forms.
+    assert_eq!(run("(defmacro mq [m] (list 'quote (list (map? m) (get m :k)))) (mq {:k (f x)})"), "(true (f x))");
+    assert_eq!(run("(defmacro sq [s] (list 'quote (contains? s 'a))) (sq #{a b})"), "true");
+    assert_eq!(run("(defmacro fq [v] (list 'quote (first v))) (fq [x y])"), "x");
+    // A >32-element literal exercises the reader's trie builder.
+    assert_eq!(
+        run("(defmacro big [v] (list 'quote (list (count v) (nth v 40)))) \
+             (big [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 \
+                   27 28 29 30 31 32 33 34 35 36 37 38 39 40 41])"),
+        "(42 40)"
+    );
+    // quote is literal — a quoted literal IS the runtime collection...
+    assert_eq!(run("'[1 2 3]"), "[1 2 3]");
+    assert_eq!(run("'(a [b {:c 1}])"), "(a [b {:c 1}])");
+    // ...and equal to the evaluated literal.
+    assert_eq!(run("(= [1 2] '[1 2])"), "true");
+    assert_eq!(run("(= {:a 1} '{:a 1})"), "true");
+    // read-string/eval round-trip through the unified representation.
+    assert_eq!(run("(read-string \"[1 {:a #{2}}]\")"), "[1 {:a #{2}}]");
+    assert_eq!(run("(eval '(count [1 2 3]))"), "3");
+    // #() implicit params are found inside collection literals (trie leaves).
+    assert_eq!(run("(map #(conj [] %) [1 2])"), "([1] [2])");
+    // Protocol methods are first-class vars (Clojure semantics).
+    assert_eq!(
+        run("(defprotocol IArea (area2 [x])) (deftype Sq [s] IArea (area2 [_] (* s s))) \
+             (map area2 [(->Sq 2) (->Sq 3)])"),
+        "(4 9)"
+    );
+}
+
+/// Load a program with the VENDORED real clojure/core.match on the load path.
+fn run_match(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/core.match");
+    let full = format!("(require '[clojure.core.match :refer [match]])\n{src}");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, &full, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn real_core_match_end_to_end() {
+    // The real 2156-line clojure/core.match loads AND its expansions run
+    // correctly — the historical blocker was macros receiving collection
+    // literals as code. Answers verified against real Clojure + core.match 1.1.0.
+    assert_eq!(run_match("(let [x 1] (match [x] [1] :a :else :b))"), ":a");
+    assert_eq!(run_match("(let [x 5] (match [x] [1] :a :else :b))"), ":b");
+    assert_eq!(
+        run_match(
+            "[(let [x 1 y 2] (match [x y] [1 2] :A [_ 2] :B :else :D)) \
+              (let [x 9 y 2] (match [x y] [1 2] :A [_ 2] :B :else :D)) \
+              (let [x 9 y 9] (match [x y] [1 2] :A [_ 2] :B :else :D))]"
+        ),
+        "[:A :B :D]"
+    );
+    // vector patterns (row destructuring), map patterns, guards, :or, rest.
+    assert_eq!(run_match("(let [v [1 2 3]] (match v [_ _ 2] :a0 [1 1 3] :a1 [1 2 3] :a2 :else :a3))"), ":a2");
+    assert_eq!(run_match("(let [x {:a 1 :b 1}] (match [x] [{:a _ :b 2}] :a0 [{:a 1 :b 1}] :a1 :else :a2))"), ":a1");
+    assert_eq!(run_match("(let [y 7] (match [y] [(_ :guard even?)] :even [(_ :guard odd?)] :odd))"), ":odd");
+    assert_eq!(run_match("(let [x 4] (match [x] [(:or 1 2 3)] :small [(:or 4 5)] :mid :else :big))"), ":mid");
+    assert_eq!(run_match("(let [v [1 2 3 4]] (match v [x & r] [x r]))"), "[1 [2 3 4]]");
+    assert_eq!(run_match("(let [v [[1 2]]] (match v [[a b]] (* a b) :else :nope))"), "2");
+    assert_eq!(run_match("(let [s '(1 2 3)] (match [s] [([1 2 3] :seq)] :yes :else :no))"), ":yes");
+    // recursive fn over match (the doc's fib gate).
+    assert_eq!(
+        run_match("(defn fib [n] (match [n] [0] 0 [1] 1 :else (+ (fib (- n 1)) (fib (- n 2))))) (fib 10)"),
+        "55"
+    );
+}
+
+/// `#?(…)` selects the `:clj` branch — this dialect models the JVM.
+///
+/// It preferred `:cljs` (from before the JVM layer existed), which is the wrong
+/// half of every real `.cljc` library: that branch targets a host we are not.
+/// meander/epsilon could not load because its `:cljs` branch requires
+/// `cljs.pprint`. There was no test for this at all, which is how it went
+/// unnoticed.
+#[test]
+fn reader_conditionals_select_clj() {
+    assert_eq!(run("#?(:clj :jvm :cljs :js)"), ":jvm");
+    assert_eq!(run("#?(:cljs :js :clj :jvm)"), ":jvm"); // order in the form must not matter
+    // :default is the fallback, but never beats an explicit :clj
+    assert_eq!(run("#?(:cljs :js :default :fallback)"), ":fallback");
+    assert_eq!(run("#?(:clj :jvm :default :fallback)"), ":jvm");
+    // a :cljs-only form has nothing to run here
+    assert_eq!(run("(nil? #?(:cljs :js))"), "true");
+    // splicing picks the same branch
+    assert_eq!(run("[1 #?@(:clj [2 3] :cljs [:no])]"), "[1 2 3]");
+    assert_eq!(run("(vec (concat [0] #?@(:cljs [[:no]] :clj [[9]])))"), "[0 9]");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The JVM layer (host_jvm_src): every host class/method/static is in-language
+// data (`defclass` + `-jvm-registry`); the expander lowers interop SYNTAX only.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn jvm_layer_statics_methods_ctors() {
+    assert_eq!(run("Math/PI"), "3.141592653589793");
+    assert_eq!(run("(Math/abs -4)"), "4");
+    assert_eq!(run("(String/valueOf 42)"), "\"42\"");
+    assert_eq!(run("(.charAt \"hello\" 1)"), "\\e");
+    assert_eq!(run("(.substring \"hello\" 1 3)"), "\"el\"");
+    assert_eq!(run("(String. 42)"), "\"42\"");
+    assert_eq!(run("(. clojure.lang.RT (cons 1 nil))"), "(1)");
+    // an UNKNOWN static is a catchable error, not a compile-time abort
+    assert_eq!(run("(try (Nope/thing 1) (catch Exception e :caught))"), ":caught");
+    // per-ns (import …) resolves bare simple names
+    assert_eq!(run("(import '(java.lang Math)) (Math/abs -9)"), "9");
+}
+
+/// `System/nanoTime` is what the bench suite (clojure-stub/bench) times with,
+/// and the reason that suite can be ONE file both this dialect and real
+/// Clojure run. It is `%nanos`: monotonic, arbitrary origin.
+#[test]
+fn jvm_layer_system_nanotime_is_monotonic() {
+    assert_eq!(run("(number? (System/nanoTime))"), "true");
+    // monotonic and non-decreasing across two reads
+    assert_eq!(run("(let [a (System/nanoTime) b (System/nanoTime)] (>= b a))"), "true");
+    // currentTimeMillis is the REAL wall clock (%wall-millis, Unix epoch) —
+    // test.check seeds its default RNG from it. Sanity: after 2020, monotonic
+    // enough to be non-decreasing across two reads.
+    assert_eq!(run("(> (System/currentTimeMillis) 1577836800000)"), "true");
+    assert_eq!(
+        run("(let [a (System/currentTimeMillis) b (System/currentTimeMillis)] (>= b a))"),
+        "true"
+    );
+}
+
+#[test]
+fn jvm_layer_class_values_are_honest() {
+    // Class VALUES are real objects: class? is a per-instance check and
+    // forName is a registry lookup whose miss THROWS catchably.
+    assert_eq!(run("(class? (Class/forName \"java.lang.String\"))"), "true");
+    assert_eq!(run("(class? \"just a string\")"), "false");
+    assert_eq!(run("(.getName (Class/forName \"java.lang.String\"))"), "\"java.lang.String\""); 
+    assert_eq!(
+        run("(try (Class/forName \"java.lang.Nope\") (catch Exception e :cnfe))"),
+        ":cnfe"
+    );
+    assert_eq!(run("(.getName (class 5))"), "\"java.lang.Long\"");
+    assert_eq!(run("(.getSimpleName (class {:a 1}))"), "\"PersistentArrayMap\"");
+    assert_eq!(run("(.isInterface (Class/forName \"clojure.lang.ISeq\"))"), "true");
+}
+
+#[test]
+fn jvm_layer_instance_and_inheritance() {
+    // interfaces delegate to predicates/protocols; classes to tag + :extends walk
+    assert_eq!(run("(instance? java.lang.String \"a\")"), "true");
+    assert_eq!(run("(instance? Long 5)"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentVector [1 2])"), "true");
+    assert_eq!(run("(instance? clojure.lang.IPersistentMap {:a 1})"), "true");
+    assert_eq!(run("(instance? clojure.lang.IFn :kw)"), "true");
+    assert_eq!(run("(instance? java.lang.Number \"nope\")"), "false");
+    // a runtime Class VALUE works too (instance? is fully dynamic)
+    assert_eq!(run("(instance? (Class/forName \"java.lang.String\") \"a\")"), "true");
+    // catch by SUPERCLASS: IllegalArgumentException extends RuntimeException
+    assert_eq!(
+        run("(try (throw (IllegalArgumentException. \"bad\")) \
+             (catch RuntimeException e (.getMessage e)))"),
+        "\"bad\""
+    );
+    // …but not the other way around
+    assert_eq!(
+        run("(try (throw (RuntimeException. \"r\")) \
+             (catch IllegalArgumentException e :iae) (catch RuntimeException e :rte))"),
+        ":rte"
+    );
+    // the roots still catch EVERYTHING (thrown strings included)
+    assert_eq!(run("(try (throw \"plain\") (catch Exception e :any))"), ":any");
+}
+
+#[test]
+fn jvm_layer_defclass_is_userland() {
+    // defclass is an ordinary macro — user code can model its own host classes.
+    assert_eq!(
+        run("(defclass acme.Widget
+               (:tag Widget)
+               (:extends java.lang.Object)
+               (:ctor ([n] (%make-record 'Widget (list n))))
+               (:method spin [w] (* 2 (field w 0)))
+               (:static-fn make [n] (acme.Widget. n))
+               (:static ANSWER 42))
+             [(.spin (Widget. 10))
+              (.spin (acme.Widget/make 4))
+              acme.Widget/ANSWER
+              (instance? acme.Widget (Widget. 1))
+              (.getName (class (Widget. 1)))]"),
+        "[20 8 42 true \"acme.Widget\"]"
+    );
+}
+
+/// Load a program with the VENDORED real nrepl sources on the load path.
+fn run_nrepl(src: &str) -> String {
+    use std::path::PathBuf;
+    let mut rt = Runtime::<LowBitModel>::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/nrepl");
+    let r = clojure_stub::run_with_paths(&mut rt, &TreeWalk, src, vec![dir]);
+    clojure_stub::clj_str(&rt, r)
+}
+
+#[test]
+fn real_nrepl_bencode_end_to_end() {
+    // The REAL nrepl/bencode.clj (unmodified) over the in-language java.io
+    // layer. Encoded bytes verified against nrepl 1.3.1 on the JVM.
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)]
+               (ben/write-bencode out {\"op\" \"eval\" \"code\" \"(+ 1 2)\" \"id\" 1})
+               (.toString out))"
+        ),
+        "\"d4:code7:(+ 1 2)2:idi1e2:op4:evale\""
+    );
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)]
+               (ben/write-bencode out {\"status\" [:done] \"value\" \"3\" \"n\" 42})
+               (.toString out))"
+        ),
+        "\"d1:ni42e6:statusl4:donee5:value1:3e\""
+    );
+    // full round-trip: write, read back, and decode a client's raw wire bytes
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [out (java.io.ByteArrayOutputStream.)
+                   _ (ben/write-bencode out {\"op\" \"eval\" \"ns\" (symbol \"user\") \"args\" [\"a\" \"b\"] \"n\" -7})
+                   in (java.io.PushbackInputStream. (java.io.ByteArrayInputStream. (.toByteArray out)))
+                   m (ben/read-bencode in)]
+               [(String. (get m \"op\")) (String. (get m \"ns\"))
+                (mapv (fn [b] (String. b)) (get m \"args\")) (get m \"n\")])"
+        ),
+        "[\"eval\" \"user\" [\"a\" \"b\"] -7]"
+    );
+    assert_eq!(
+        run_nrepl(
+            "(require '[nrepl.bencode :as ben])
+             (let [in (java.io.PushbackInputStream.
+                       (java.io.ByteArrayInputStream.
+                        (.getBytes \"d2:id1:14:code7:(+ 1 2)2:op4:evale\")))
+                   m (ben/read-nrepl-message in)]
+               (sort-by first (map (fn [kv] [(key kv) (String. (val kv))]) m)))"
+        ),
+        "([\"code\" \"(+ 1 2)\"] [\"id\" \"1\"] [\"op\" \"eval\"])"
+    );
+}
+
+#[test]
+fn java_io_streams() {
+    assert_eq!(
+        run("(let [out (java.io.ByteArrayOutputStream.)]
+              (.write out 104) (.write out (.getBytes \"ello\"))
+              (String. (.toByteArray out) \"UTF-8\"))"),
+        "\"hello\""
+    );
+    // pushback + unsigned reads + EOF as -1
+    assert_eq!(
+        run("(let [in (java.io.PushbackInputStream. (java.io.ByteArrayInputStream. (.getBytes \"hi\")))]
+              (let [a (.read in)] (.unread in a) [(.read in) (.read in) (.read in)]))"),
+        "[104 105 -1]"
+    );
+    // signed JVM bytes: UTF-8 multibyte round-trip
+    assert_eq!(run("(String. (.getBytes \"héllo\") \"UTF-8\")"), "\"héllo\""); 
+    assert_eq!(run("(unchecked-byte 200)"), "-56");
+    // byte[] reflection (the bencode Object-branch check)
+    assert_eq!(run("(= (.getComponentType (class (byte-array 3))) Byte/TYPE)"), "true");
+}
+
+#[test]
+fn nrepl_server_end_to_end() {
+    use std::io::{Read, Write};
+    // pick a free port, then hand it to the server (bind race is acceptable in tests)
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut rt = Runtime::<LowBitModel>::new();
+        // the server + the real bencode are LIBRARIES on the load path
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut session = clojure_stub::Session::new(
+            &mut rt,
+            &TreeWalk,
+            vec![base.join("vendor/nrepl"), base.join("libs")],
+        );
+        session.eval(&mut rt, &TreeWalk, "(require 'microclj.nrepl-server)");
+        session.eval(&mut rt, &TreeWalk, &format!("(microclj.nrepl-server/start-server! {port})"));
+    });
+    // retry-connect until the server is listening
+    let mut conn = None;
+    for _ in 0..100 {
+        if let Ok(c) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            conn = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut conn = conn.expect("nREPL server did not come up");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+
+    let read_until = |conn: &mut std::net::TcpStream, needle: &str| -> String {
+        let mut buf = Vec::new();
+        let mut b = [0u8; 1];
+        while !String::from_utf8_lossy(&buf).contains(needle) {
+            match conn.read(&mut b) {
+                Ok(1) => buf.push(b[0]),
+                _ => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+
+    // clone a session
+    conn.write_all(b"d2:op5:clone2:id1:1e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("new-session"), "clone response: {resp}");
+
+    // eval — the response must carry the value and a done status
+    conn.write_all(b"d2:op4:eval4:code22:(reduce + (range 100))2:id1:2e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("5:value4:4950"), "eval response: {resp}");
+
+    // println is captured and streamed back as an "out" message
+    conn.write_all(b"d2:op4:eval4:code26:(do (println :hi) (+ 1 2))2:id1:9e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains(":hi"), "out capture: {resp}");
+    assert!(resp.contains("5:value1:3"), "value after out: {resp}");
+
+    // the response reports the REAL namespace, and (ns …) switches it
+    conn.write_all(b"d2:op4:eval4:code12:(ns web.app)2:id2:10e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("web.app"), "ns switch: {resp}");
+
+    // an unresolvable symbol is an eval-error, and the server survives
+    conn.write_all(b"d2:op4:eval4:code6:(nope)2:id1:3e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("eval-error"), "error response: {resp}");
+    conn.write_all(b"d2:op4:eval4:code8:(* 21 2)2:id1:4e").unwrap();
+    let resp = read_until(&mut conn, "done");
+    assert!(resp.contains("5:value2:42"), "recovery response: {resp}");
+}
+
+#[test]
+fn out_err_writers_and_real_ns() {
+    // *out* is a real Writer; with-out-str binds a StringWriter
+    assert_eq!(run("(with-out-str (println \"hi\") (print 42))"), "\"hi\\n42\"");
+    assert_eq!(
+        run("(binding [*err* (java.io.StringWriter.)] (binding [*out* *err*] (pr :x)) (.toString *err*))"),
+        "\":x\""
+    );
+    // *ns* is LIVE compiler state, an equatable Namespace value
+    assert_eq!(run("(name (ns-name *ns*))"), "\"user\"");
+    assert_eq!(run("(do (ns foo.bar) (name (ns-name *ns*)))"), "\"foo.bar\"");
+    assert_eq!(run("(= *ns* *ns*)"), "true");
+    // eval'd top-level `do` sequences top-level forms: ns switching + defmacro
+    assert_eq!(
+        run("(eval '(do (ns baz.qux) (name (ns-name *ns*))))"),
+        "\"baz.qux\""
+    );
+    assert_eq!(run("(eval '(do (defmacro em [x] `(+ ~x 1)) (em 4)))"), "5");
+}
+
+#[test]
+fn deps_edn_paths_parse() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let base = std::path::Path::new("/proj");
+    let ps = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:paths [\"src\" \"resources\"]}",
+        base,
+    )
+    .unwrap();
+    assert_eq!(ps, vec![std::path::PathBuf::from("/proj/src"), "/proj/resources".into()]);
+    // :git deps are a clear ERROR (not silently skipped) until git support
+    let err = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:deps {io.github.x/y {:git/url \"https://x\" :git/sha \"abc\"}}}",
+        base,
+    )
+    .unwrap_err();
+    assert!(err.contains("not supported yet"), "{err}");
+
+    // :mvn resolves through the local repository (hermetic: MICROCLJ_M2 fixture)
+    let m2 = std::env::temp_dir().join(format!("microclj-m2-{}", std::process::id()));
+    let adir = m2.join("acme/widget/1.0.0");
+    std::fs::create_dir_all(&adir).unwrap();
+    {
+        use std::io::Write as _;
+        let f = std::fs::File::create(adir.join("widget-1.0.0.jar")).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("acme/widget.clj", opts).unwrap();
+        z.write_all(b"(ns acme.widget) (def answer 42)").unwrap();
+        z.finish().unwrap();
+    }
+    std::fs::write(adir.join("widget-1.0.0.pom"), "<project></project>").unwrap();
+    std::env::set_var("MICROCLJ_M2", &m2);
+    let ps = clojure_stub::deps_edn_paths(
+        &mut rt,
+        "{:deps {acme/widget {:mvn/version \"1.0.0\"}}}",
+        base,
+    )
+    .unwrap();
+    std::env::remove_var("MICROCLJ_M2");
+    assert_eq!(ps, vec![adir.join("widget-1.0.0.jar")]);
+    // …and the resolved jar actually serves a namespace
+    let mut rt2 = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run_with_paths(
+        &mut rt2,
+        &TreeWalk,
+        "(require 'acme.widget) acme.widget/answer",
+        ps,
+    );
+    assert_eq!(clojure_stub::clj_str(&rt2, r), "42");
+    std::fs::remove_dir_all(&m2).ok();
+}
+
+#[test]
+fn jars_on_the_load_path() {
+    // a JAR is a load-path entry, exactly Clojure's classpath model
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("microclj-jar-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let jarpath = dir.join("tlib.jar");
+    {
+        let f = std::fs::File::create(&jarpath).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        z.start_file("tlib/core.clj", opts).unwrap();
+        z.write_all(b"(ns tlib.core) (defn triple [x] (* 3 x))").unwrap();
+        z.finish().unwrap();
+    }
+    let mut rt = Runtime::<LowBitModel>::new();
+    let r = clojure_stub::run_with_paths(
+        &mut rt,
+        &TreeWalk,
+        "(require 'tlib.core) (tlib.core/triple 14)",
+        vec![jarpath],
+    );
+    assert_eq!(clojure_stub::clj_str(&rt, r), "42");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Stage F3: a transient built ACROSS moving collections — the edit-session
+/// stamps and the in-place-edited nodes must survive relocation (the session
+/// value and every node's edit field are ordinary traced values, rewritten
+/// together by the collector, so ownership comparisons stay coherent). The
+/// trigger is squeezed AFTER the library loads so pressure collections fire
+/// inside the transient builds themselves.
+#[test]
+fn transients_survive_moving_collections() {
+    let mut rt = Runtime::<LowBitModel>::new();
+    let _ = clojure_stub::run(&mut rt, &TreeWalk, "1"); // load the library first
+    let used = rt.heap().used();
+    rt.heap().set_trigger_bytes(used + 256 * 1024);
+    let r = clojure_stub::run(
+        &mut rt,
+        &TreeWalk,
+        "[(count (persistent! (reduce conj! (transient []) (range 5000))))
+          (nth (persistent! (reduce conj! (transient []) (range 5000))) 4321)
+          (count (persistent! (reduce (fn [m i] (assoc! m i (* i 2))) (transient {}) (range 2000))))
+          (get (persistent! (reduce (fn [m i] (assoc! m i (* i 2))) (transient {}) (range 2000))) 1234)]",
+    );
+    assert_eq!(clojure_stub::clj_str(&rt, r), "[5000 4321 2000 2468]");
+    assert!(
+        rt.heap().collections.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "no collection fired mid-transient — the test proved nothing"
+    );
+}

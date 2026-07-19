@@ -1,0 +1,20 @@
+interface Greeter {
+  fn greet() -> String
+}
+class Friendly implements Greeter {
+  name: String
+  fn greet() -> String { "Hi, I'm " + self.name }
+}
+class Formal implements Greeter {
+  title: String
+  fn greet() -> String { "Good day, " + self.title }
+}
+fn main() {
+  let gs = List<Greeter>()
+  gs.push(Friendly(name: "Ada"))
+  gs.push(Formal(title: "Prof"))
+  gs.push(Friendly(name: "Bob"))
+  for g in gs {
+    print(g.greet())
+  }
+}

@@ -1,0 +1,29 @@
+(module dialect)
+; does form `f` contain an (inc …) call anywhere?
+(defn has-inc? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `inc)) true
+        (has-inc-kids? f 0 (code-count f)))
+    false))
+(defn has-inc-kids? [(f Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (has-inc? (code-nth f i)) true (has-inc-kids? f (iadd i 1) n))))
+; rewrite (inc E) -> (iadd E 1); leave inc-free forms UNTOUCHED (preserve structure)
+(defn rewrite [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (and (icmp-gt (code-count f) 0) (code-eq (code-nth f 0) `inc))
+          `(iadd ~(rewrite (code-nth f 1)) 1)
+        (if (has-inc? f) `(~@(rewrite-kids f 0 (code-count f))) f))
+    f))
+(defn rewrite-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(rewrite (code-nth f i)) ~@(rewrite-kids f (iadd i 1) n))))
+; the transformer is MODULE-SHAPED: it receives ((name form…) …) and returns the
+; same shape. Rewrite each module's forms (indices 1.. ; index 0 is the name).
+(defn desugar-mod [(m Code)] (-> Code)
+  `(~(code-nth m 0) ~@(rewrite-kids m 1 (code-count m))))
+(defn desugar-mods [(mods Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `(~(desugar-mod (code-nth mods i)) ~@(desugar-mods mods (iadd i 1) n))))
+(defn desugar-inc [(mods Code)] (-> Code)
+  `(do ~@(desugar-mods mods 0 (code-count mods))))

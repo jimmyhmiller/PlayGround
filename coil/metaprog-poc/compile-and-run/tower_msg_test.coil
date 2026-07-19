@@ -1,0 +1,13 @@
+(module tower_msg_test)
+(extern objc_msgSend :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+; the classic objc `msg` macro: TYPE-SYNTAX arguments
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(call-ptr
+     (cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret) (fnptr-of objc_msgSend))
+     ~recv ~selector ~@args))
+; a METAPROGRAM whose body uses msg with (ptr i8) ret and a [vector] of arg types
+(defn probe [(c Code)] (-> Code)
+  (let [p (cast (ptr i8) 0)
+        r (msg (ptr i8) p p [i64] 7)]
+    `~(cast i64 r)))
+(defn main [] (-> :i64) (probe 1))

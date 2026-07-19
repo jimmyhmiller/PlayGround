@@ -1,0 +1,47 @@
+; Memory-mapped I/O device registers as a typed bitfield — a PURE MACRO. The §7
+; capstone: "expressiveness through macros" at its hardest domain (hardware device
+; registers), with ZERO core feature. `defmmio-reg` takes a register spec (name,
+; MMIO address, and named bit-fields) and GENERATES — entirely via the macro system —
+; a volatile-load reader, a volatile-store writer, and a shift+mask getter per field,
+; over the existing `llvm-ir` (volatile load/store) + `iand`/`ishr`/`ishl` primitives.
+; No core MMIO/register/bitfield support exists; it's all library.
+;
+;   (defmmio-reg UARTFR 150994968        ; 0x09000018 — PL011 flag register
+;     [(rxfe 4 1) (txff 5 1)])           ; (field, bit-offset, width)
+; expands to:
+;   UARTFR-read  []        -> i32        ; volatile load the 32-bit register
+;   UARTFR-write [(v i32)] -> i64        ; volatile store
+;   UARTFR-rxfe  []        -> i32        ; (read >> 4) & 1
+;   UARTFR-txff  []        -> i32        ; (read >> 5) & 1
+(module mmio)
+
+; one shift+mask getter per field (recurse by index). The mask `(1 << width) - 1`
+; is emitted as ordinary code (LLVM const-folds it), so no macro-time bit ops.
+(defn defmmio--fields [(name Code) (fields Code) (i i64)] (-> Code)
+  (if (icmp-eq i (code-count fields)) `()
+    (let [f      (code-nth fields i)
+          fname  (code-nth f 0)
+          offset (code-nth f 1)
+          width  (code-nth f 2)]
+      `((defn ~(code-symbol name "-" fname) [] (-> u32)
+          (iand (ishr (~(code-symbol name "-read")) ~offset)
+                (isub (ishl 1 ~width) 1)))
+        ~@(defmmio--fields name fields (iadd i 1))))))
+
+(defn defmmio-reg [(name Code) (addr Code) (fields Code)] (-> Code)
+  `(do
+     ; volatile 32-bit load from the fixed MMIO address (address spliced into the IR).
+     ; Registers are UNSIGNED (u32) — so field extraction uses a LOGICAL shift (lshr),
+     ; the conventional + correct choice for register fields. (LLVM i32 == u32's repr.)
+     (defn ~(code-symbol name "-read") [] (-> u32)
+       (llvm-ir u32 []
+         ~(code-str "%p = inttoptr i64 " addr " to ptr\n"
+                    "%v = load volatile i32, ptr %p\n"
+                    "ret i32 %v")))
+     ; volatile 32-bit store.
+     (defn ~(code-symbol name "-write") [(v u32)] (-> i64)
+       (llvm-ir i64 [v]
+         ~(code-str "%p = inttoptr i64 " addr " to ptr\n"
+                    "store volatile i32 $0, ptr %p\n"
+                    "ret i64 0")))
+     ~@(defmmio--fields name fields 0)))

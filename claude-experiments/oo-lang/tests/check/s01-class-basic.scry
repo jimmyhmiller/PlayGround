@@ -1,0 +1,10 @@
+class Task {
+  title: String
+  priority: Int
+  done: Bool
+}
+fn main() {
+  let t = Task(title: "scrape", priority: 2, done: false)
+  print(t.title)
+  print(t.priority)
+}

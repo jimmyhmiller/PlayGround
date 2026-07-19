@@ -1,0 +1,93 @@
+; evalrt.coil — eval-time error handling for the server (Phase 4).
+;
+; An eval must NEVER kill the process: a syntax error, a stale reference, an
+; arena-OOM, a bad opcode, all have to come back as {id, error:{...}} JSON, with the
+; server still live. The parser and several VM/compiler paths hard-`exit` on error
+; (correct for `scry run` of a whole file, wrong for a REPL). So:
+;
+;  - the eval driver arms a setjmp landing pad and sets `eval-active`;
+;  - every hard-exit site instead calls `eval-panic`, which — when eval-active — records
+;    the error into globals and `longjmp`s back to the landing pad (all surviving state
+;    is in alloc-static globals, so this is safe regardless of optimizer aggressiveness);
+;  - typecheck errors are non-fatal already (they only bump a counter + write to stderr),
+;    so for the duration of the eval we turn on ioutil's fd-2 capture sink and read the
+;    real compiler message back out of that in-memory buffer (no temp file, no fd
+;    redirection — so this works identically on native and on wasm, where fd 2 / open /
+;    dup2 do not exist).
+;
+; Leaf module (imports only ioutil). Imported by parser/compile/vm (for eval-panic) and
+; by the server (for the landing pad + capture).
+(module evalrt)
+(import "ioutil.coil" :use *)
+
+; ---- error kinds (JSON `kind` strings assigned in server.coil) ----
+(const EK_SYNTAX 0)
+(const EK_TYPE 1)
+(const EK_RUNTIME 2)
+(const EK_STALE 3)
+(const EK_NOTIMPL 4)
+(const EK_READONLY 5)
+(const EK_BADREQUEST 6)
+
+; ---- state (all alloc-static: survives longjmp) ----
+(defn ev-active [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-jmpbuf [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array i64 64))))
+(defn ev-kind [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-line [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-col [] (-> (ptr i64)) (alloc-static i64))
+(defn ev-msgbuf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 1024))))
+(defn ev-msglen [] (-> (ptr i64)) (alloc-static i64))
+
+(defn eval-active? [] (-> bool) (= (load (ev-active)) 1))
+(defn eval-set-active [(v i64)] (-> i64) (store! (ev-active) v) 0)
+
+(defn ev-set-msg [(s (ptr i8))] (-> i64)
+  (let [n (s-len s) m (if (> n 1023) 1023 n) (mut i) 0]
+    (loop (if (< (load i) m) (do (store! (index (ev-msgbuf) (load i)) (load (index (cast (ptr u8) s) (load i)))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (ev-msglen) m) 0))
+(defn ev-set-msg-bytes [(p (ptr u8)) (n i64)] (-> i64)
+  (let [m (if (> n 1023) 1023 n) (mut i) 0]
+    (loop (if (< (load i) m) (do (store! (index (ev-msgbuf) (load i)) (load (index p (load i)))) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (ev-msglen) m) 0))
+
+; the one raise point. If we're inside an eval, record + longjmp; otherwise (normal
+; `scry run`) behave exactly as before: message to stderr, exit nonzero.
+(defn eval-panic [(kind i64) (msg (ptr i8)) (line i64) (col i64)] (-> i64)
+  (if (eval-active?)
+    (do (store! (ev-kind) kind) (store! (ev-line) line) (store! (ev-col) col)
+        (ev-set-msg msg)
+        (longjmp (ev-jmpbuf) 1) 0)
+    (do (w-cstr 2 msg) (w-cstr 2 c"\n") (exit (cast i32 70)) 0)))
+
+; convenience: raise with no source location
+(defn eval-panic0 [(kind i64) (msg (ptr i8))] (-> i64) (eval-panic kind msg 0 0))
+
+; An "internal fatal" site (a compile/type-table invariant the typechecker should have caught):
+; during a NORMAL run it prints + exits, but DURING AN EVAL it must NOT kill the process —
+; longjmp back to the eval landing pad with a clean error instead. Every parser/compile/types
+; hard-exit that an eval's source can reach must go through this (or the parser's own guarded
+; perror), or a stray eval takes down the whole running program.
+(defn fatal-or-panic [(kind i64) (msg (ptr i8)) (code i64)] (-> i64)
+  (w-cstr 2 msg) (w-cstr 2 c"\n")
+  (if (eval-active?) (eval-panic0 kind msg) 0)
+  (exit (cast i32 code))
+  0)
+
+; ---- stderr capture (in-memory diag sink; no temp file, no fd redirection) ----
+; The capture buffer lives in ioutil's diag sink (the fd-2 write choke point), so this works
+; identically on native and wasm (where open/dup2/lseek/fd-2 do not exist). The server reads the
+; captured text via ev-capbuf/ev-caplen exactly as before — they now delegate to the sink.
+(defn ev-capbuf [] (-> (ptr u8)) (diag-sink-buf))
+(defn ev-caplen [] (-> (ptr i64)) (diag-sink-len))
+
+; turn on the fd-2 capture sink; reset it empty.
+(defn diag-capture-begin [] (-> i64)
+  (store! (diag-sink-len) 0)
+  (store! (index (diag-sink-buf) 0) (cast u8 0))
+  (store! (diag-sink-on) 1)
+  0)
+
+; turn the sink off; the captured bytes remain in diag-sink-buf/len for ev-capbuf/ev-caplen.
+(defn diag-capture-end [] (-> i64)
+  (store! (diag-sink-on) 0)
+  0)

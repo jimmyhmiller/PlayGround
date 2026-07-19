@@ -1,0 +1,15 @@
+class Tool { name: String }
+class Widget { id: Int }
+class Inventory<T> {
+  items: List<T>
+  fn init() { self.items = List<T>() }
+  fn add(item: T) { self.items.push(item) }
+  fn count() -> Int { self.items.len() }
+}
+fn main() {
+  let a = Inventory<Tool>()
+  a.add(Tool(name: "x"))
+  let b = Inventory<Widget>()
+  b.add(Widget(id: 1))
+  print(a.count() + b.count())
+}

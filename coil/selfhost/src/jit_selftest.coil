@@ -1,0 +1,111 @@
+; selfhost/src/jit_selftest.coil — proves the in-memory loader before it is wired
+; into the compiler. Hand-builds one MObj exercising every relocation the arm64
+; backend emits, loads it with jit-load, calls the entry, checks the answer.
+;
+;   _leaf:   mov x0, #7 ; ret
+;   _gv:     (data) 100
+;   _fp:     (data) 0, with an UNSIGNED reloc naming _leaf
+;   _entry:  acc  = *_gv          -> 100   PAGE21 + PAGEOFF12
+;            acc += _leaf()       -> 107   BRANCH26 (defined)
+;            acc += (*_fp)()      -> 114   UNSIGNED (data holds a code address)
+;            acc += abs(-5)       -> 119   BRANCH26 to an UNDEFINED symbol (dlsym)
+;
+;   coil build selfhost/src/jit_selftest.coil -o /tmp/jit-selftest && /tmp/jit-selftest
+(module jit_selftest)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+(import "a64.coil" :use *)
+(import "macho.coil" :use *)
+(import "jit.coil" :use *)
+
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+
+(defn main [] (-> i64)
+  (let [a (malloc-allocator)
+        (mut o) (mobj-new a)
+        textord (mobj-add-sect! (mut o) "__TEXT" "__text" 2 2147484672)
+        dataord (mobj-add-sect! (mut o) "__DATA" "__data" 3 0)]
+
+    ; ---- data: gv = 100, fp = &_leaf (filled by an UNSIGNED reloc) ----
+    (let [dbuf (mobj-sect-buf (mut o) dataord)]
+      (b-u32! (mut dbuf) 100) (b-u32! (mut dbuf) 0)      ; gv  @ 0
+      (b-u32! (mut dbuf) 0)   (b-u32! (mut dbuf) 0))     ; fp  @ 8
+
+    (let [gv (mobj-add-sym! (mut o) "_gv" dataord 0 false)
+          fp (mobj-add-sym! (mut o) "_fp" dataord 8 false)
+          tbuf (mobj-sect-buf (mut o) textord)
+          leafoff (al-len [u8] (load tbuf))]
+
+      ; ---- _leaf ----
+      (b-u32! (mut tbuf) (a64-movz 0 7 0))               ; mov x0, #7
+      (b-u32! (mut tbuf) (a64-ret))
+
+      (let [leaf (mobj-add-sym! (mut o) "_leaf" textord leafoff false)
+            abs (mobj-add-sym! (mut o) "_abs" 0 0 true)
+            entryoff (al-len [u8] (load tbuf))]
+        ; the UNSIGNED fixup in __data that makes _fp point at _leaf
+        (mobj-add-reloc! (mut o) dataord 8 leaf (reloc-unsigned) false 3)
+
+        ; ---- _entry ----
+        (b-u32! (mut tbuf) (a64-sub-imm 31 31 32))       ; sub sp, sp, #32
+        (b-u32! (mut tbuf) (a64-str-x 30 31 24))         ; str x30, [sp,#24]
+        (b-u32! (mut tbuf) (a64-str-x 19 31 16))         ; str x19, [sp,#16]
+        (b-u32! (mut tbuf) (a64-movz 19 0 0))            ; mov x19, #0
+
+        ; acc += *gv     (PAGE21 + PAGEOFF12)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) gv (reloc-page21) true 2)
+        (b-u32! (mut tbuf) (a64-adrp 1))
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) gv (reloc-pageoff12) false 2)
+        (b-u32! (mut tbuf) (a64-add-imm 1 1 0))
+        (b-u32! (mut tbuf) (a64-ldr-x 2 1 0))
+        (b-u32! (mut tbuf) (a64-add-reg 19 19 2))
+
+        ; acc += _leaf()   (BRANCH26, defined)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) leaf (reloc-branch26) true 2)
+        (b-u32! (mut tbuf) (a64-bl-raw))
+        (b-u32! (mut tbuf) (a64-add-reg 19 19 0))
+
+        ; acc += (*fp)()   (the UNSIGNED-patched code pointer in __data)
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) fp (reloc-page21) true 2)
+        (b-u32! (mut tbuf) (a64-adrp 1))
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) fp (reloc-pageoff12) false 2)
+        (b-u32! (mut tbuf) (a64-add-imm 1 1 0))
+        (b-u32! (mut tbuf) (a64-ldr-x 1 1 0))
+        (b-u32! (mut tbuf) (a64-blr 1))
+        (b-u32! (mut tbuf) (a64-add-reg 19 19 0))
+
+        ; acc += abs(-5)   (BRANCH26 to an UNDEFINED symbol -> dlsym)
+        (b-u32! (mut tbuf) (a64-movn 0 4 0))             ; mov x0, #-5
+        (mobj-add-reloc! (mut o) textord (al-len [u8] (load tbuf)) abs (reloc-branch26) true 2)
+        (b-u32! (mut tbuf) (a64-bl-raw))
+        (b-u32! (mut tbuf) (a64-add-reg 19 19 0))
+
+        (b-u32! (mut tbuf) (a64-mov-reg 0 19))
+        (b-u32! (mut tbuf) (a64-ldr-x 19 31 16))
+        (b-u32! (mut tbuf) (a64-ldr-x 30 31 24))
+        (b-u32! (mut tbuf) (a64-add-imm 31 31 32))
+        (b-u32! (mut tbuf) (a64-ret))
+        (mobj-add-sym! (mut o) "_entry" textord entryoff true)
+
+        ; ---- load and run ----
+        (match (jit-load a (mut o))
+          (Err [m] (do (printf c"jit-selftest: load failed: %.*s\n"
+                               (cast i32 (slice-len m)) (slice-data m))
+                       1))
+          (Ok [img0]
+            (let [img (alloc-stack JitImage)]
+              (store! img img0)
+              (let [fpv (jit-lookup img "entry")]
+                (if (icmp-eq (cast i64 fpv) 0)
+                    (do (printf c"jit-selftest: entry symbol not found\n") 1)
+                  (let [got (call-ptr (cast (fnptr c [] i64) fpv))]
+                    (printf c"jit-selftest: entry() = %ld (want 119)\n" got)
+                    (if (icmp-eq got 119)
+                        (do (printf c"jit-selftest: PASS\n") 0)
+                      (do (printf c"jit-selftest: FAIL\n") 1))))))))))))

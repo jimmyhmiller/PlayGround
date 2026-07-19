@@ -107,6 +107,7 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 tool_button(g, &theme, Kind::Worker.glyph(), "Worker", ToolBtn(Tool::Drop(Kind::Worker)));
                 tool_button(g, &theme, Kind::Router.glyph(), "Router", ToolBtn(Tool::Drop(Kind::Router)));
                 tool_button(g, &theme, Kind::Queue.glyph(),  "Queue",  ToolBtn(Tool::Drop(Kind::Queue)));
+                tool_button(g, &theme, Kind::AutoScalingGroup.glyph(), "AutoScale", ToolBtn(Tool::Drop(Kind::AutoScalingGroup)));
             });
 
             section(body, &theme, "Terminals");
@@ -184,6 +185,7 @@ fn handle_hotkeys(
     if keys.just_pressed(KeyCode::KeyR) { active.0 = Tool::Drop(Kind::Router); }
     if keys.just_pressed(KeyCode::KeyQ) { active.0 = Tool::Drop(Kind::Queue); }
     if keys.just_pressed(KeyCode::KeyS) { active.0 = Tool::Drop(Kind::Sink); }
+    if keys.just_pressed(KeyCode::KeyA) { active.0 = Tool::Drop(Kind::AutoScalingGroup); }
     if keys.just_pressed(KeyCode::KeyP) { active.0 = Tool::Probe; }
     if keys.just_pressed(KeyCode::KeyE) {
         active.0 = match active.0 {

@@ -1,0 +1,11 @@
+module cyclepkg.a
+
+import cyclepkg.b.{ping}
+
+class AThing {
+  fn hello() -> String { "hello-from-a" }
+}
+
+fn callB() -> String {
+  ping()
+}

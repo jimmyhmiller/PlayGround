@@ -1,0 +1,423 @@
+(defn
+  when
+  [(c Code) & (body Code)]
+  (-> Code)
+  (quasiquote (if (unquote c) (do (unquote-splicing body)) 0)))
+
+(defn
+  unless
+  [(c Code) & (body Code)]
+  (-> Code)
+  (quasiquote (if (unquote c) 0 (do (unquote-splicing body)))))
+
+(defn
+  cond-arms
+  [(cs Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count cs) 0)
+    (quasiquote 0)
+    (if
+      (icmp-eq (code-count cs) 1)
+      (code-nth cs 0)
+      (quasiquote
+        (if
+          (unquote (code-nth cs 0))
+          (unquote (code-nth cs 1))
+          (unquote (cond-arms (code-rest (code-rest cs)))))))))
+
+(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
+
+(defn
+  case-arms
+  [(v Code) (eq Code) (clauses Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count clauses) 0)
+    (quasiquote 0)
+    (if
+      (icmp-eq (code-count clauses) 1)
+      (code-nth clauses 0)
+      (quasiquote
+        (if
+          ((unquote eq) (unquote v) (unquote (code-nth clauses 0)))
+          (unquote (code-nth clauses 1))
+          (unquote (case-arms v eq (code-rest (code-rest clauses)))))))))
+
+(defn
+  case
+  [(x Code) & (clauses Code)]
+  (-> Code)
+  (let
+    [v (gensym)]
+    (quasiquote
+      (let [(unquote v) (unquote x)] (unquote (case-arms v (quasiquote =) clauses))))))
+
+(defn
+  case-by
+  [(x Code) (eq Code) & (clauses Code)]
+  (-> Code)
+  (let
+    [v (gensym)]
+    (quasiquote (let [(unquote v) (unquote x)] (unquote (case-arms v eq clauses))))))
+
+(defn
+  while
+  [(c Code) & (body Code)]
+  (-> Code)
+  (quasiquote (loop (if (unquote c) (do (unquote-splicing body)) (break)))))
+
+(defn
+  for
+  [(binding Code) & (body Code)]
+  (-> Code)
+  (if
+    (code-sym? binding)
+    (quasiquote
+      (for-in
+        [(unquote binding) (unquote (code-nth body 0))]
+        (unquote-splicing (code-rest body))))
+    (if
+      (not (icmp-eq (code-count binding) 3))
+      (error "for: binding must be [i LO HI], or (for x COLL …) for a collection")
+      (let
+        [i
+          (code-nth binding 0)
+          lo
+          (code-nth binding 1)
+          hi
+          (code-nth binding 2)
+          idx
+          (gensym)]
+        (quasiquote
+          (let
+            [(mut (unquote idx)) (isub (unquote lo) 1)]
+            (loop
+              (store! (unquote idx) (iadd (load (unquote idx)) 1))
+              (if
+                (icmp-lt (load (unquote idx)) (unquote hi))
+                (let [(unquote i) (load (unquote idx))] (unquote-splicing body))
+                (break)))))))))
+
+(defn
+  for-in
+  [(binding Code) & (body Code)]
+  (-> Code)
+  (if
+    (not (icmp-eq (code-count binding) 2))
+    (error "for-in: binding must be [x COLL]")
+    (let
+      [x (code-nth binding 0) coll (code-nth binding 1)]
+      (if
+        (not (code-list? coll))
+        (error
+          "for-in: COLL must be a form, e.g. (iter coll), (in coll), (range lo hi), or (over arr len)")
+        (let
+          [h (code-nth coll 0)]
+          (if
+            (code-eq h (quasiquote range))
+            (quasiquote
+              (for
+                [(unquote x) (unquote (code-nth coll 1)) (unquote (code-nth coll 2))]
+                (unquote-splicing body)))
+            (if
+              (code-eq h (quasiquote over))
+              (let
+                [arr (code-nth coll 1) len (code-nth coll 2) i (gensym)]
+                (quasiquote
+                  (for
+                    [(unquote i) 0 (unquote len)]
+                    (let
+                      [(unquote x) (load (index (unquote arr) (unquote i)))]
+                      (unquote-splicing body)))))
+              (if
+                (or (code-eq h (quasiquote iter)) (code-eq h (quasiquote in)))
+                (let
+                  [it (gensym)]
+                  (quasiquote
+                    (let
+                      [(mut (unquote it)) (iter (unquote (code-nth coll 1)))]
+                      (loop
+                        (match
+                          (next (mut (unquote it)))
+                          (None [] (break))
+                          (Some [(unquote x)] (unquote-splicing body)))))))
+                (error
+                  "for-in: unsupported collection; use (iter coll), (in coll), (range lo hi), or (over arr len)")))))))))
+
+(defn
+  thread-first
+  [(x Code) (forms Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count forms) 0)
+    x
+    (thread-first
+      (let
+        [form (code-nth forms 0)]
+        (if
+          (code-list? form)
+          (quasiquote
+            ((unquote (code-nth form 0)) (unquote x) (unquote-splicing (code-rest form))))
+          (quasiquote ((unquote form) (unquote x)))))
+      (code-rest forms))))
+
+(defn |> [(x Code) & (forms Code)] (-> Code) (thread-first x forms))
+
+(defn
+  thread-last
+  [(x Code) (forms Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count forms) 0)
+    x
+    (thread-last
+      (let
+        [form (code-nth forms 0)]
+        (if
+          (code-list? form)
+          (quasiquote ((unquote-splicing form) (unquote x)))
+          (quasiquote ((unquote form) (unquote x)))))
+      (code-rest forms))))
+
+(defn |>> [(x Code) & (forms Code)] (-> Code) (thread-last x forms))
+
+(defn
+  block
+  [(label Code) & (body Code)]
+  (-> Code)
+  (quasiquote (loop (unquote label) (break (unquote label) (do (unquote-splicing body))))))
+
+(defn
+  return-from
+  [(label Code) (v Code)]
+  (-> Code)
+  (quasiquote (break (unquote label) (unquote v))))
+
+(defn
+  is-control?
+  [(h Code)]
+  (-> bool)
+  (if
+    (code-eq h (quasiquote break))
+    true
+    (if (code-eq h (quasiquote continue)) true (code-eq h (quasiquote return-from)))))
+
+(defn
+  loop-introducer?
+  [(h Code)]
+  (-> bool)
+  (if
+    (code-eq h (quasiquote loop))
+    true
+    (if
+      (code-eq h (quasiquote while))
+      true
+      (if
+        (code-eq h (quasiquote for))
+        true
+        (if (code-eq h (quasiquote block)) true (code-eq h (quasiquote scope)))))))
+
+(defn
+  control-label
+  [(form Code)]
+  (-> Code)
+  (if
+    (icmp-lt 1 (code-count form))
+    (let [a (code-nth form 1)] (if (code-keyword? a) a (quasiquote no-label)))
+    (quasiquote no-label)))
+
+(defn
+  label-member?
+  [(x Code) (xs Code) (i i64)]
+  (-> bool)
+  (if
+    (not (icmp-lt i (code-count xs)))
+    false
+    (if (code-eq x (code-nth xs i)) true (label-member? x xs (iadd i 1)))))
+
+(defn
+  escape-labels
+  [(form Code) (labels Code)]
+  (-> Code)
+  (if
+    (icmp-lt 1 (code-count form))
+    (let
+      [a (code-nth form 1)]
+      (if (code-keyword? a) (quasiquote ((unquote a) (unquote-splicing labels))) labels))
+    labels))
+
+(defn
+  is-defer?
+  [(f Code)]
+  (-> bool)
+  (if
+    (code-list? f)
+    (if (icmp-lt 0 (code-count f)) (code-eq (code-nth f 0) (quasiquote defer)) false)
+    false))
+
+(defn
+  scope-escape
+  [(form Code) (depth i64) (labels Code) (slabel Code)]
+  (-> i64)
+  (if
+    (not (code-list? form))
+    0
+    (if
+      (not (icmp-lt 0 (code-count form)))
+      0
+      (let
+        [h (code-nth form 0)]
+        (if
+          (is-control? h)
+          (let
+            [lab (control-label form)]
+            (if
+              (not (code-eq lab (quasiquote no-label)))
+              (if
+                (label-member? lab labels 0)
+                0
+                (if
+                  (code-eq lab slabel)
+                  (if
+                    (code-eq h (quasiquote continue))
+                    (error
+                      "scope: (continue) cannot target the scope label; use return-from to exit")
+                    0)
+                  (error
+                    "scope: a labeled break/continue escapes the (scope ...) past its defers")))
+              (if
+                (icmp-lt 0 depth)
+                0
+                (error
+                  "scope: an unlabeled break/continue cannot exit a (scope ...); use (return-from :label v)"))))
+          (if
+            (loop-introducer? h)
+            (scope-escape-list
+              (code-rest form)
+              (iadd depth 1)
+              (escape-labels form labels)
+              slabel)
+            (scope-escape-list (code-rest form) depth labels slabel)))))))
+
+(defn
+  scope-escape-list
+  [(forms Code) (depth i64) (labels Code) (slabel Code)]
+  (-> i64)
+  (if
+    (not (icmp-lt 0 (code-count forms)))
+    0
+    (let
+      [chk (scope-escape (code-nth forms 0) depth labels slabel)]
+      (scope-escape-list (code-rest forms) depth labels slabel))))
+
+(defn
+  scope-cleanups
+  [(body Code) (i i64) (acc Code)]
+  (-> Code)
+  (if
+    (not (icmp-lt i (code-count body)))
+    acc
+    (let
+      [f (code-nth body i)]
+      (scope-cleanups
+        body
+        (iadd i 1)
+        (if
+          (is-defer? f)
+          (quasiquote ((unquote (code-nth f 1)) (unquote-splicing acc)))
+          acc)))))
+
+(defn
+  scope-mains
+  [(body Code) (i i64) (acc Code)]
+  (-> Code)
+  (if
+    (not (icmp-lt i (code-count body)))
+    acc
+    (let
+      [f (code-nth body i)]
+      (scope-mains
+        body
+        (iadd i 1)
+        (if (is-defer? f) acc (quasiquote ((unquote-splicing acc) (unquote f))))))))
+
+(defn
+  scope
+  [(label Code) & (body Code)]
+  (-> Code)
+  (if
+    (not (code-keyword? label))
+    (error "scope: first argument must be a :label, e.g. (scope :s body...)")
+    (let
+      [chk
+        (scope-escape-list body 0 (quasiquote ()) label)
+        cleanups
+        (scope-cleanups body 0 (quasiquote ()))
+        mains
+        (scope-mains body 0 (quasiquote ()))
+        r
+        (gensym)]
+      (quasiquote
+        (let
+          [(unquote r) (block (unquote label) (unquote-splicing mains))]
+          (unquote-splicing cleanups)
+          (unquote r))))))
+
+(defn
+  defer
+  [& (_ Code)]
+  (-> Code)
+  (error "defer: (defer expr) is only valid as a DIRECT form inside (scope :s ...)"))
+
+(defn
+  inline-for-iters
+  [(i Code) (lo i64) (hi i64) (body Code)]
+  (-> Code)
+  (if
+    (icmp-lt lo hi)
+    (quasiquote
+      ((let [(unquote i) (unquote lo)] (unquote-splicing body))
+        (unquote-splicing (inline-for-iters i (iadd lo 1) hi body))))
+    (quasiquote ())))
+
+(defn
+  inline-for
+  [(binding Code) & (body Code)]
+  (-> Code)
+  (if
+    (not (icmp-eq (code-count binding) 3))
+    (error "inline-for: binding must be [i LO HI] with literal integer bounds")
+    (let
+      [i
+        (code-nth binding 0)
+        lo
+        (code-int (code-nth binding 1))
+        hi
+        (code-int (code-nth binding 2))]
+      (quasiquote (do (unquote-splicing (inline-for-iters i lo hi body)))))))
+
+(defn
+  all
+  [& (xs Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count xs) 0)
+    (quasiquote true)
+    (if
+      (icmp-eq (code-count xs) 1)
+      (code-nth xs 0)
+      (quasiquote (and (unquote (code-nth xs 0)) (all (unquote-splicing (code-rest xs))))))))
+
+(defn
+  any
+  [& (xs Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count xs) 0)
+    (quasiquote false)
+    (if
+      (icmp-eq (code-count xs) 1)
+      (code-nth xs 0)
+      (quasiquote (or (unquote (code-nth xs 0)) (any (unquote-splicing (code-rest xs))))))))
+

@@ -1,0 +1,5 @@
+(module errtest)
+(defstruct Pt [(x i64) (y i64)])
+(defn main [] (-> i64)
+  (let [p (alloc-stack Pt)]
+    (load (field p z))))

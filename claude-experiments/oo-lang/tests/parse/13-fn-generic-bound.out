@@ -1,0 +1,32 @@
+(program
+  (fn largest
+    (typeparams
+      (typeparam T
+        (type Comparable)))
+    (params
+      (param items
+        (type List (type T))))
+    (type T)
+    (block
+      (var best
+        (call
+          (dot get
+            (id items))
+          (arg
+            (int 0))))
+      (for x
+        (id items)
+        (block
+          (if
+            (binary >
+              (call
+                (dot compareTo
+                  (id x))
+                (arg
+                  (id best)))
+              (int 0))
+            (block
+              (assign
+                (id best)
+                (id x))))))
+      (id best))))

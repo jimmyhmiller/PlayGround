@@ -1,0 +1,49 @@
+// FIRST-CLASS FUNCTIONS (P1) — closures are data; the only primitive is that a
+// closed function is a callable value. This file exercises the representation
+// family from docs/FIRST_CLASS_FUNCTIONS.md, and it RUNS:
+//
+//   tally run examples/first_class.tal        →  60
+//
+// No allocation is implicit anywhere here: read the `alloc`s — there is exactly
+// one, in the owned/one-shot closure, and it is written by hand.
+
+// ── 1. a bare function VALUE: passed around, applied indirectly, zero alloc ──
+inc : Nat -> Nat
+fn inc(x) { Succ(x) }
+twice : {0 a : Type} -> (a -> a) -> a -> a       // takes a function value
+fn twice(f, x) { f(f(x)) }
+
+// ── 2. a FLAT closure: a struct pairing a captured env (value) with code ──────
+// `\x. x + k` as data: { env = k, code = addK }. A value in registers — no heap.
+struct FlatClo (e : Type) (a : Type) (b : Type) { env : e, code : e -> a -> b }
+applyFlat : {0 e : Type} -> {0 a : Type} -> {0 b : Type} -> FlatClo e a b -> a -> b
+fn applyFlat(c, x) { match c { FlatClo(env, code) => code(env, x) } }
+addK : Nat -> Nat -> Nat
+fn addK(k, x) { x + k }
+
+// map over a flat closure (higher-order, monomorphised — no runtime closure):
+mapC : {0 e : Type} -> {0 a : Type} -> {0 b : Type} -> FlatClo e a b -> List a -> List b
+fn mapC(f, xs) { match xs { Nil => Nil, Cons(h,t) => Cons(applyFlat(f,h), mapC(f,t)) } }
+
+xs : List Nat
+fn xs() { Cons(1, Cons(2, Cons(3, Nil))) }
+add10 : FlatClo Nat Nat Nat
+fn add10() { FlatClo(10, addK) }              // the closure value — no malloc
+
+// ── 3. a ONE-SHOT closure that captures a LINEAR resource (Own) ──────────────
+// Calling it consumes (frees) the capture; the type makes it callable ONCE.
+struct Sink (e : Type) { res : e, run : (1 r : e) -> Nat }
+fireSink : {0 e : Type} -> (1 s : Sink e) -> Nat
+fn fireSink(s) { match s { Sink(res, run) => run(res) } }
+drain : (1 o : Own Nat) -> Nat
+fn drain(o) { let n = unbox(o); n }           // consumes the owned cell once
+oneshot : Sink (Own Nat)
+fn oneshot() { Sink(alloc(30), drain) }       // the only `alloc` in this file
+
+main : Nat
+fn main() {
+  twice(inc, 7)                               // 9   — bare function value
+    + length(mapC(add10, xs))                 // 3   — map over a flat closure
+    + applyFlat(add10, 8)                     // 18  — apply a flat closure
+    + fireSink(oneshot)                       // 30  — one-shot linear closure (frees its capture)
+}                                             // 9 + 3 + 18 + 30 = 60

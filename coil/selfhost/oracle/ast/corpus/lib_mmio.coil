@@ -1,0 +1,66 @@
+(defn
+  defmmio--fields
+  [(name Code) (fields Code) (i i64)]
+  (-> Code)
+  (if
+    (icmp-eq i (code-count fields))
+    (quasiquote ())
+    (let
+      [f
+        (code-nth fields i)
+        fname
+        (code-nth f 0)
+        offset
+        (code-nth f 1)
+        width
+        (code-nth f 2)]
+      (quasiquote
+        ((defn
+           (unquote (code-symbol name "-" fname))
+           []
+           (-> u32)
+           (iand
+             (ishr ((unquote (code-symbol name "-read"))) (unquote offset))
+             (isub (ishl 1 (unquote width)) 1)))
+          (unquote-splicing (defmmio--fields name fields (iadd i 1))))))))
+
+(defn
+  defmmio-reg
+  [(name Code) (addr Code) (fields Code)]
+  (-> Code)
+  (quasiquote
+    (do
+      (defn
+        (unquote (code-symbol name "-read"))
+        []
+        (-> u32)
+        (llvm-ir
+          u32
+          []
+          (unquote
+            (code-str
+              "%p = inttoptr i64 "
+              addr
+              " to ptr
+"
+              "%v = load volatile i32, ptr %p
+"
+              "ret i32 %v"))))
+      (defn
+        (unquote (code-symbol name "-write"))
+        [(v u32)]
+        (-> i64)
+        (llvm-ir
+          i64
+          [v]
+          (unquote
+            (code-str
+              "%p = inttoptr i64 "
+              addr
+              " to ptr
+"
+              "store volatile i32 $0, ptr %p
+"
+              "ret i64 0"))))
+      (unquote-splicing (defmmio--fields name fields 0)))))
+

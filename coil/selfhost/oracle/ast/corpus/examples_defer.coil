@@ -1,0 +1,13 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [(mut n) 20]
+    (let
+      [$g0 (loop :s (break :s (do (store! n 20) (break :s 0))))]
+      (store! n (imul (load n) 2))
+      (store! n (iadd (load n) 2))
+      $g0)
+    (load n)))
+

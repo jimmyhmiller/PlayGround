@@ -1,0 +1,19 @@
+; Total layout control: :layout explicit places every field at an exact byte
+; offset (gaps = padding), and overlapping offsets make a union. The realization
+; is a byte blob with byte-offset field access -- the layout analog of a shim.
+;   coil run examples/explicit-layout.coil; echo $?   => 42
+
+(defstruct Reg :layout explicit :size 16 :align 8
+  [(status :u32          :at 0)
+   (sbytes (array u8 4)  :at 0)    ; overlaps status -> a union view of its bytes
+   (data   :i64          :at 8)])  ; bytes 4..7 are explicit padding
+
+(static-assert (icmp-eq (sizeof Reg) 16)       "Reg must be 16 bytes")
+(static-assert (icmp-eq (offsetof Reg data) 8) "data at offset 8")
+
+(defn main [] (-> :i64)
+  (let [r (alloc-stack Reg)]
+    (store! (field r status) (cast :u32 2))      ; write the 32-bit word
+    (store! (field r data) 40)                    ; write the 64-bit field
+    (iadd (cast :i64 (load (index (field r sbytes) 0)))  ; low byte of status = 2
+          (load (field r data)))))                        ; 40  -> 42

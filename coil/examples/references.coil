@@ -1,0 +1,32 @@
+; The reference tier: opt-in `mut` + `let` stack locals, no `ptr` ceremony.
+;
+;   * a bare struct parameter `(p Point)` is an *immutable reference* — read its
+;     fields, but a `store!` through it is a compile error;
+;   * `(mut Point)` is a *mutable reference* — writes are visible to the caller;
+;   * `(let [(mut r) (zeroed Rect)] …)` is a stack local of value type `Rect`
+;     (no `(ptr …)`, no `alloc-stack`);
+;   * `(mut place)` borrows a place mutably at the call site — the one marker in
+;     the program, pointing exactly where a write can escape.
+; `ptr` still exists for the metal (here, nothing needs it).
+;   coil run examples/references.coil; echo $?   => 42
+
+(defstruct Point [(x i64) (y i64)])
+(defstruct Rect  [(lo Point) (hi Point)])
+
+; immutable reference: reads only (a store! here would not type-check).
+(defn area [(r Rect)] (-> i64)
+  (imul (isub (load (field (field r hi) x)) (load (field (field r lo) x)))
+        (isub (load (field (field r hi) y)) (load (field (field r lo) y)))))
+
+; mutable reference: opt in with (mut T); the caller sees the writes.
+(defn translate [(p (mut Point)) (dx i64) (dy i64)] (-> i64)
+  (store! (field p x) (iadd (load (field p x)) dx))
+  (store! (field p y) (iadd (load (field p y)) dy))
+  0)
+
+(defn main [] (-> i64)
+  (let [(mut r) (zeroed Rect)]            ; stack local of type Rect, zero-filled
+    (store! (field (field r hi) x) 5)
+    (store! (field (field r hi) y) 5)     ; hi = (5,5), lo = (0,0)
+    (translate (mut (field r hi)) 1 2)    ; mutably borrow a nested field's place
+    (area r)))                            ; hi now (6,7): 6 * 7 = 42

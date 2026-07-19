@@ -1,0 +1,10 @@
+;; A first coil program (reads today; elaborates once the evaluator lands).
+;; Everything but the reader and a handful of kernel ops is library code.
+
+(require-dialect arith func)
+
+(defn add [(: a i32) (: b i32)] -> i32
+  (func.return (arith.addi a b)))
+
+(defn main [] -> i32
+  (func.return (add (: 10 i32) (: 32 i32))))

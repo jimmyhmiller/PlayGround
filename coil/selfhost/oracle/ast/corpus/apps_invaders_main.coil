@@ -1,0 +1,306 @@
+(extern printf :cc c [(ptr i8) ...] (-> :i32))
+
+(extern CGColorSpaceCreateDeviceRGB :cc c [] (-> (ptr i8)))
+
+(extern
+  CGBitmapContextCreate
+  :cc
+  c
+  [(ptr i8) :i64 :i64 :i64 :i64 (ptr i8) :i64]
+  (-> (ptr i8)))
+
+(extern CGBitmapContextCreateImage :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern CGContextRelease :cc c [(ptr i8)] (-> :i64))
+
+(extern CGColorSpaceRelease :cc c [(ptr i8)] (-> :i64))
+
+(extern CGImageRelease :cc c [(ptr i8)] (-> :i64))
+
+(extern usleep :cc c [:i64] (-> :i32))
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+
+(defn
+  make-window
+  [(w f64) (h f64)]
+  (-> (ptr i8))
+  (let
+    [rect
+      (alloc-stack CGRect)
+      win
+      (call-ptr
+        (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+        (class c"NSWindow")
+        (sel c"alloc"))]
+    (do
+      (store! (field rect x) <1>)
+      (store! (field rect y) <1>)
+      (store! (field rect w) w)
+      (store! (field rect h) h)
+      (call-ptr
+        (cast
+          (fnptr c [(ptr i8) (ptr i8) CGRect i64 i64 i64] (ptr i8))
+          (fnptr-of objc_msgSend))
+        win
+        (sel c"initWithContentRect:styleMask:backing:defer:")
+        (load rect)
+        15
+        2
+        0))))
+
+(defn
+  blit
+  [(s (ptr Cpu)) (layer (ptr i8)) (fb (ptr u8)) (rgba (ptr u8))]
+  (-> i64)
+  (let
+    [space (CGColorSpaceCreateDeviceRGB)]
+    (do
+      (decode s fb)
+      (let
+        [(mut $g4) (isub 0 1)]
+        (loop
+          (store! $g4 (iadd (load $g4) 1))
+          (if
+            (icmp-lt (load $g4) 256)
+            (let
+              [y (load $g4)]
+              (let
+                [(mut $g5) (isub 0 1)]
+                (loop
+                  (store! $g5 (iadd (load $g5) 1))
+                  (if
+                    (icmp-lt (load $g5) 224)
+                    (let
+                      [x (load $g5)]
+                      (let
+                        [lit
+                          (cast :i64 (load (index fb (+ (* y 224) x))))
+                          o
+                          (* (+ (* y 224) x) 4)]
+                        (do
+                          (if
+                            (< y 32)
+                            (do
+                              (store! (index rgba o) (cast :u8 lit))
+                              (store! (index rgba (+ o 1)) (cast :u8 0))
+                              (store! (index rgba (+ o 2)) (cast :u8 0)))
+                            (if
+                              (> y 183)
+                              (do
+                                (store! (index rgba o) (cast :u8 0))
+                                (store! (index rgba (+ o 1)) (cast :u8 lit))
+                                (store! (index rgba (+ o 2)) (cast :u8 0)))
+                              (do
+                                (store! (index rgba o) (cast :u8 lit))
+                                (store! (index rgba (+ o 1)) (cast :u8 lit))
+                                (store! (index rgba (+ o 2)) (cast :u8 lit)))))
+                          (store! (index rgba (+ o 3)) (cast :u8 255)))))
+                    (break)))))
+            (break))))
+      (let
+        [ctx
+          (CGBitmapContextCreate (index rgba 0) 224 256 8 896 space 1)
+          img
+          (CGBitmapContextCreateImage ctx)]
+        (do
+          (call-ptr
+            (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+            layer
+            (sel c"setContents:")
+            img)
+          (CGImageRelease img)
+          (CGContextRelease ctx)
+          (CGColorSpaceRelease space)
+          0)))))
+
+(defn
+  key-bit
+  [(kc i64)]
+  (-> i64)
+  (if
+    (= kc 18)
+    1
+    (if
+      (= kc 8)
+      1
+      (if
+        (= kc 19)
+        4
+        (if
+          (= kc 36)
+          4
+          (if
+            (= kc 49)
+            16
+            (if (= kc 123) 32 (if (= kc 0) 32 (if (= kc 124) 64 (if (= kc 2) 64 0))))))))))
+
+(defn
+  handle-key
+  [(m (ptr Machine)) (ev (ptr i8)) (down i64)]
+  (-> i64)
+  (let
+    [bit
+      (key-bit
+        (call-ptr
+          (cast (fnptr c [(ptr i8) (ptr i8)] i64) (fnptr-of objc_msgSend))
+          ev
+          (sel c"keyCode")))]
+    (if (= bit 0) 0 (if (= down 1) (set-in1 m bit) (clr-in1 m bit)))))
+
+(defn
+  pump
+  [(app (ptr i8)) (m (ptr Machine)) (mode (ptr i8))]
+  (-> i64)
+  (loop
+    (if
+      1
+      (do
+        (let
+          [ev
+            (call-ptr
+              (cast
+                (fnptr c [(ptr i8) (ptr i8) i64 (ptr i8) (ptr i8) i64] (ptr i8))
+                (fnptr-of objc_msgSend))
+              app
+              (sel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+              -1
+              (cast (ptr i8) 0)
+              mode
+              1)]
+          (if
+            (= (cast :i64 ev) 0)
+            (break 0)
+            (let
+              [ty
+                (call-ptr
+                  (cast (fnptr c [(ptr i8) (ptr i8)] i64) (fnptr-of objc_msgSend))
+                  ev
+                  (sel c"type"))]
+              (do
+                (if (= ty 10) (handle-key m ev 1) 0)
+                (if (= ty 11) (handle-key m ev 0) 0)
+                (call-ptr
+                  (cast
+                    (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                    (fnptr-of objc_msgSend))
+                  app
+                  (sel c"sendEvent:")
+                  ev)
+                0)))))
+      (break))))
+
+(defn
+  main
+  [(argc :i32) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (if
+    (< (cast :i64 argc) 2)
+    (do (printf c"usage: invaders <invaders.rom>
+") 1)
+    (let
+      [s
+        (alloc-stack Cpu)
+        m
+        (alloc-stack Machine)
+        fbb
+        (alloc-stack (array u8 57344))
+        rgb
+        (alloc-stack (array u8 229376))
+        app
+        (call-ptr
+          (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+          (class c"NSApplication")
+          (sel c"sharedApplication"))]
+      (do
+        (init s)
+        (minit m)
+        (if
+          (< (load-com s (load (index argv 1)) 0) 0)
+          (do (printf c"invaders: cannot open ROM
+") 1)
+          (let
+            [win
+              (make-window <1> <1>)
+              mode
+              (call-ptr
+                (cast
+                  (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                  (fnptr-of objc_msgSend))
+                (class c"NSString")
+                (sel c"stringWithUTF8String:")
+                c"kCFRunLoopDefaultMode")
+              near
+              (call-ptr
+                (cast
+                  (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                  (fnptr-of objc_msgSend))
+                (class c"NSString")
+                (sel c"stringWithUTF8String:")
+                c"nearest")]
+            (do
+              (call-ptr
+                (cast (fnptr c [(ptr i8) (ptr i8) i64] (ptr i8)) (fnptr-of objc_msgSend))
+                app
+                (sel c"setActivationPolicy:")
+                0)
+              (call-ptr
+                (cast (fnptr c [(ptr i8) (ptr i8) i64] (ptr i8)) (fnptr-of objc_msgSend))
+                (call-ptr
+                  (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+                  win
+                  (sel c"contentView"))
+                (sel c"setWantsLayer:")
+                1)
+              (call-ptr
+                (cast
+                  (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                  (fnptr-of objc_msgSend))
+                win
+                (sel c"makeKeyAndOrderFront:")
+                (cast (ptr i8) 0))
+              (call-ptr
+                (cast (fnptr c [(ptr i8) (ptr i8) i64] (ptr i8)) (fnptr-of objc_msgSend))
+                app
+                (sel c"activateIgnoringOtherApps:")
+                1)
+              (call-ptr
+                (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+                app
+                (sel c"finishLaunching"))
+              (let
+                [layer
+                  (call-ptr
+                    (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+                    (call-ptr
+                      (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) (fnptr-of objc_msgSend))
+                      win
+                      (sel c"contentView"))
+                    (sel c"layer"))]
+                (do
+                  (call-ptr
+                    (cast
+                      (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                      (fnptr-of objc_msgSend))
+                    layer
+                    (sel c"setMagnificationFilter:")
+                    near)
+                  (call-ptr
+                    (cast
+                      (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8))
+                      (fnptr-of objc_msgSend))
+                    layer
+                    (sel c"setMinificationFilter:")
+                    near)
+                  (loop
+                    (if
+                      1
+                      (do
+                        (do
+                          (pump app m mode)
+                          (step-frame s m)
+                          (blit s layer (index fbb 0) (index rgb 0))
+                          (usleep 16000)))
+                      (break)))))
+              0)))))))
+

@@ -1,0 +1,887 @@
+; vm.coil — the Scry bytecode interpreter (02-runtime.md §2/§7). A stack VM with the
+; clox dispatch-loop shape (Coil's dense `case` -> a jump table), UNTAGGED slots and TYPED
+; opcodes: the compiler already proved every value's type, so the loop never tag-checks.
+;
+; PHASE 5: N real OS threads. Each Scry-level thread is a genuine pthread running this
+; dispatch loop against its OWN `VMThread` (frames + value stack); the Program, heap,
+; arenas, and globals are shared. `run-to` takes its VMThread as an explicit parameter
+; (Coil has no thread-local storage — the pointer is threaded through), and polls the
+; generalized safepoint (safepoint.coil) at the top of the loop so any coordinator can park
+; every thread at once for an eval (and, later, GC / shape migration).
+;
+;  - Thread.spawn(task: Runnable): OP_THREAD_SPAWN allocates a VMThread, registers it,
+;    resolves task.run() through the itable, and starts a pthread on the dispatch loop.
+;  - ThreadHandle.join(): OP_THREAD_JOIN cooperatively waits on the target's `done` flag
+;    (polling its own safepoint the whole time, so a join never blocks a global stop).
+;  - Clock.sleep / Mutex.lock are safepoint-cooperative spins (never a blocking syscall
+;    that would delay a stop past one short slice).
+(module vm)
+(import "ioutil.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "safepoint.coil" :use *)
+(import "reflect.coil" :use *)
+(import "evalrt.coil" :use *)
+(import "thread.coil" :use *)
+(import "atomic.coil" :use *)
+(import "http.coil" :use *)
+(import "trace.coil" :use *)
+(import "gcstate.coil" :use *)
+(import "gc.coil" :use *)
+
+(const DK_OBJECT_KIND 3)
+(const STACK_MAX 65536)
+(const FRAMES_MAX 256)
+
+(defstruct CallFrame [(method (ptr MethodInfo)) (ip i64) (base i64)])
+
+; Per-thread interpreter state (02 §2). One per Scry-level thread. `parked`/`done` are
+; atomic 0/1 words the safepoint protocol reads; `os-thread` is lib/thread.coil's pthread.
+(defstruct VMThread
+  [(stack (array i64 65536))
+   (stack-top i64)
+   (frames (array CallFrame 256))
+   (frame-count i64)
+   (parked i64)          ; atomic: 1 while stopped at a safepoint (or dead)
+   (done i64)            ; atomic: 1 once this thread's dispatch loop returned
+   (thread-id i64)
+   (os-thread Thread)])
+
+; Shared VM state: just the Program (types/methods/arenas hang off it). Heap + arenas are
+; global via their own modules; the thread registry lives in safepoint.coil.
+(defstruct VM [(program (ptr Program))])
+(defn vm [] (-> (ptr VM)) (alloc-static VM))
+
+; The main thread's and the eval-coordinator's VMThreads are singletons (one each);
+; agent threads are heap-allocated at spawn.
+(defn vm-thread-main [] (-> (ptr VMThread)) (alloc-static VMThread))
+(defn vm-thread-eval [] (-> (ptr VMThread)) (alloc-static VMThread))
+(defn vm-main-parked [] (-> (ptr i64)) (field (vm-thread-main) parked))   ; server: post-main poll
+(defn vm-eval-parked [] (-> (ptr i64)) (field (vm-thread-eval) parked))   ; server: coordinator id
+
+; ---- VMThread registry (GC roots, 02 §6) ----------------------------------------------------
+; Every language thread (main + spawned agents) records its VMThread here so gc-mark-roots can
+; walk its live frames. The eval coordinator is NOT here (it never runs concurrently with the
+; language threads); it is scanned separately when an eval is in flight. Grows monotonically —
+; a finished thread stays registered but has frame-count 0, so scanning it is a no-op. Bounded
+; by SP_MAX_THREADS (64), same as the safepoint registry it parallels.
+(defn vm-threads-cell [] (-> (ptr (array i64 64))) (alloc-static (array i64 64)))
+(defn vm-nthreads-cell [] (-> (ptr i64)) (alloc-static i64))
+(defn vm-register-thread [(vt (ptr VMThread))] (-> i64)
+  (let [i (atomic-load (vm-nthreads-cell))]
+    (store! (index (vm-threads-cell) i) (cast i64 vt))
+    (atomic-store (vm-nthreads-cell) (+ i 1)) 0))
+
+; scan ONE thread's live call frames for reference roots, using each frame's per-ip stack map
+; (compile.coil). A frame's slot extent is [base, next-frame-base) — or [base, stack-top) for the
+; top frame — so a caller suspended at a CALL scans exactly its own residual slots (its arg slots
+; already belong to the callee frame, its not-yet-pushed result slot is beyond the extent). The
+; map at frame.ip tells us which of those slots hold a live reference at that instruction boundary.
+(defn gc-mark-thread [(vt (ptr VMThread))] (-> i64)
+  (let [fc (load (field vt frame-count)) (mut i) 0]
+    (loop
+      (if (< (load i) fc)
+        (let [fr (index (field vt frames) (load i)) m (load (field fr method))
+              base (load (field fr base)) ip (load (field fr ip))
+              extent (- (if (< (load i) (- fc 1)) (load (field (index (field vt frames) (+ (load i) 1)) base)) (load (field vt stack-top))) base)
+              maps (load (field m opmaps)) stride (load (field m map-stride))]
+          (if (= (cast i64 maps) 0) 0     ; no map (should not happen once every method is built)
+            (let [bm (index maps (* ip stride)) (mut s) 0]
+              (loop (if (< (load s) extent)
+                      (do (if (= (bitmap-test bm (load s)) 1)
+                            (gc-mark-object (cast (ptr u8) (load (index (field vt stack) (+ base (load s)))))) 0)
+                          (store! s (+ (load s) 1)) 0)
+                      (break)))))
+          (store! i (+ (load i) 1)) 0)
+        (break))))
+  0)
+
+; object singletons are permanent roots — the program can reference `SomeObject` at any point.
+(defn gc-mark-singletons [] (-> i64)
+  (let [p (load (field (vm) program)) n (load (field p type-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [ti (load (index (load (field p types)) (load i)))]
+              (if (and (!= (cast i64 ti) 0) (!= (cast i64 (load (field ti singleton))) 0))
+                (gc-mark-object (load (field ti singleton))) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))) 0)
+
+; the full precise root set: every registered thread's frames, the eval coordinator's frames
+; (only while an eval runs), object singletons, and the shared empty-string sentinel.
+(defn gc-mark-roots [] (-> i64)
+  (let [n (atomic-load (vm-nthreads-cell)) (mut t) 0]
+    (loop (if (< (load t) n) (do (gc-mark-thread (cast (ptr VMThread) (load (index (vm-threads-cell) (load t))))) (store! t (+ (load t) 1)) 0) (break))))
+  (if (eval-active?) (gc-mark-thread (vm-thread-eval)) 0)
+  (gc-mark-singletons)
+  (if (!= (cast i64 (vm-str-sentinel)) 0) (gc-mark-object (cast (ptr u8) (vm-str-sentinel))) 0)
+  0)
+
+; drive a full collection. If the caller already owns the global stop (a GC triggered from inside
+; an eval, where the eval thread is the coordinator and the world is already quiescent) we mark and
+; sweep in place; otherwise we stop the world ourselves. Reusing the single-coordinator stop keeps
+; GC exclusive against evals and shape migrations — never two coordinators at once.
+; MAJOR: full mark + sweep of both generations (survivors -> OLD; young list + remembered set reset).
+(defn gc-major-cycle [] (-> i64)
+  (gc-set-major)
+  (gc-wl-reset)
+  (gc-mark-roots)                                  ; mark-object (major mode) marks young AND old
+  (gc-drain (load (field (vm) program)))
+  (gc-sweep-all (load (field (vm) program)))
+  0)
+
+; MINOR: roots (stacks/singletons/sentinel, old ignored) + the remembered set (old->young edges),
+; then drain the young grey set and sweep ONLY the young list. The old generation is never touched.
+(defn gc-minor-cycle [] (-> i64)
+  (gc-set-minor)
+  (gc-wl-reset)
+  (gc-mark-roots)                                  ; mark-object (minor mode) greys only young roots
+  (gc-rem-blacken (load (field (vm) program)))     ; young children reachable from remembered olds
+  (gc-drain (load (field (vm) program)))
+  (gc-minor-sweep (load (field (vm) program)))
+  (gc-minors-inc)
+  0)
+
+; run one collection, choosing minor vs major: a major every GC_MAJOR_EVERY minors, or when the
+; remembered set overflowed, or when an arena filled and forced one (only a major reclaims old).
+(defn gc-cycle [] (-> i64)
+  (if (or (>= (gc-minors) GC_MAJOR_EVERY) (or (= (gc-rem-overflow?) 1) (= (gc-force-major?) 1)))
+    (gc-major-cycle)
+    (gc-minor-cycle))
+  (gc-rearm)
+  0)
+
+(defn gc-collect [(vt (ptr VMThread))] (-> i64)
+  (if (and (= (safepoint-stopped?) 1) (= (safepoint-is-coordinator? (field vt parked)) 1))
+    ; we already own the stop (a GC triggered from inside our own eval) — the heap is quiescent.
+    (gc-cycle)
+    ; try to win the stop WITHOUT spinning. If another thread is already coordinating (a concurrent
+    ; GC or an eval), park instead of contending — its collection covers us, and we re-check the
+    ; threshold on our next dispatch step. This is what prevents two GC initiators from deadlocking.
+    (if (= (request-global-stop-try (field vt parked)) 1)
+      (do (gc-cycle) (release-global-stop) 0)
+      (do (safepoint-poll (field vt parked)) 0))))
+
+; force a full MAJOR collection now. Called from the viewer's `gc()` reflection op, which runs
+; inside the eval coordinator with the world already stopped — so gc-collect takes its
+; already-coordinator path and marks+sweeps in place. A major (not a minor) so the whole effect
+; of reclaiming both generations is visible.
+(defn vm-gc-major [] (-> i64)
+  (if (= (gc-enabled?) 1) (do (gc-request-major) (gc-collect (vm-thread-eval)) 0) 0))
+
+; force a MINOR collection now (young generation only). Like vm-gc-major it runs inside the eval
+; coordinator with the world already stopped, so it drives gc-minor-cycle directly (no need for
+; gc-collect's coordination) — bypassing gc-cycle's "every N minors, do a major" cadence so the
+; viewer can watch a pure young-generation sweep in isolation.
+(defn vm-gc-minor [] (-> i64)
+  (if (= (gc-enabled?) 1) (do (gc-minor-cycle) (gc-rearm) 0) 0))
+
+; allocate one instance for OP_NEW. If the type's arena is full, a minor can't help (it never
+; reclaims OLD instances), so FORCE a major and retry; only then is it a genuine capacity error.
+; Rewinds fr.ip to the OP_NEW instruction start across the collection so this frame's stack map
+; matches the physical stack (the freshly-allocated result is not pushed yet).
+(defn vm-alloc-instance [(vt (ptr VMThread)) (fr (ptr CallFrame)) (a (ptr TypeArena))] (-> i64)
+  (let [p (arena-alloc-or-null a)]
+    (if (!= (cast i64 p) 0) (cast i64 p)
+      (if (= (gc-enabled?) 1)
+        (let [saved (load (field fr ip))]
+          (store! (field fr ip) (- saved 3))          ; OP_NEW is 3 bytes (op + u16 type-id)
+          (gc-request-major) (gc-collect vt)
+          (store! (field fr ip) saved)
+          (let [p2 (arena-alloc-or-null a)]
+            (if (!= (cast i64 p2) 0) (cast i64 p2) (do (arena-oom a) 0))))
+        (do (arena-oom a) 0)))))
+
+; ---- f64 <-> i64 bit reinterpret (NOT a numeric cast). Per-call stack cell => thread-safe.
+(defn to-bits [(x f64)] (-> i64) (let [p (alloc-stack i64)] (store! (cast (ptr f64) p) x) (load p)))
+(defn to-f64 [(b i64)] (-> f64) (let [p (alloc-stack i64)] (store! p b) (load (cast (ptr f64) p))))
+
+; ---- per-thread stack ----
+(defn vpush [(vt (ptr VMThread)) (v i64)] (-> i64)
+  (store! (index (field vt stack) (load (field vt stack-top))) v)
+  (store! (field vt stack-top) (+ (load (field vt stack-top)) 1)) 0)
+(defn vpop [(vt (ptr VMThread))] (-> i64)
+  (store! (field vt stack-top) (- (load (field vt stack-top)) 1))
+  (load (index (field vt stack) (load (field vt stack-top)))))
+(defn vpeek [(vt (ptr VMThread)) (d i64)] (-> i64)
+  (load (index (field vt stack) (- (- (load (field vt stack-top)) 1) d))))
+
+; ---- code reading ----
+(defn read-byte [(fr (ptr CallFrame))] (-> i64)
+  (let [code (load (field (load (field (load (field fr method)) chunk)) code))
+        b (cast i64 (load (index code (load (field fr ip)))))]
+    (store! (field fr ip) (+ (load (field fr ip)) 1)) b))
+(defn read-u16 [(fr (ptr CallFrame))] (-> i64)
+  (let [hi (read-byte fr) lo (read-byte fr)] (+ (* hi 256) lo)))
+
+; ---- frame setup ----
+(defn push-frame [(vt (ptr VMThread)) (m (ptr MethodInfo)) (argc i64)] (-> i64)
+  (let [base (- (load (field vt stack-top)) argc)
+        fr (index (field vt frames) (load (field vt frame-count)))]
+    (store! (field fr method) m) (store! (field fr ip) 0) (store! (field fr base) base)
+    (store! (field vt frame-count) (+ (load (field vt frame-count)) 1))
+    (let [top (+ base (load (field m local-count))) (mut i) (+ base argc)]
+      (loop (if (< (load i) top) (do (store! (index (field vt stack) (load i)) 0) (store! i (+ (load i) 1)) 0) (break)))
+      (store! (field vt stack-top) top))
+    0))
+
+; obj-field helpers: byte offset already includes the header (compiler bakes it in)
+(defn field-addr [(obj i64) (off i64)] (-> (ptr i64)) (cast (ptr i64) (+ obj off)))
+
+; ---- safepoint-cooperative pacing + locking (need the VMThread in scope) ----
+; Clock.sleep(ms): sleep in short slices, polling the safepoint each slice so a sleeping
+; thread never delays a global stop by more than one slice (02 §7 pacing subsection).
+(defn vm-sleep [(vt (ptr VMThread)) (ms i64)] (-> i64)
+  (let [deadline (+ (clock-now) ms) ts (alloc-stack (array i64 2))]
+    (store! (index ts 0) 0) (store! (index ts 1) 2000000)      ; 2ms slice
+    (loop
+      (do (safepoint-poll (field vt parked))
+          (if (>= (clock-now) deadline) (break)
+            (do (when-wasm (store! (sched-budget) 0)                    ; end this slice; resume later
+                           (nanosleep (cast (ptr i8) (index ts 0)) (cast (ptr i8) 0)))
+                (continue))))))
+  0)
+
+; Console.readLine(): blocking FROM THE PROGRAM'S VIEW, but never parks the OS thread in a
+; blocking read() — that would stall every STW/eval while the user thinks. Instead poll(fd 0)
+; with a short timeout in a loop that calls safepoint-poll each pass (exactly Clock.sleep's
+; cooperative-slicing shape): a coordinator that requests a global stop while we sit here waiting
+; for input sees us park within one 20ms slice, so evals answer promptly mid-readLine. Returns an
+; Option<String> box: Some(line) for a completed line (newline stripped; an empty line is Some(""))
+; and None at EOF (Ctrl-D / closed pipe) — 01 has no null, so EOF is an honest None.
+(defn vm-readline [(vt (ptr VMThread))] (-> (ptr i64))
+  (let [pfd (alloc-stack i64) chp (alloc-stack u8)
+        (mut cap) 64 (mut len) 0 (mut buf) (xalloc 64) (mut iseof) 0]
+    (store! pfd (<< 1 32))          ; struct pollfd { fd=0; events=POLLIN(1); revents=0 }
+    (loop
+      (do
+        (safepoint-poll (field vt parked))
+        (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
+          (if (<= r 0) (continue)   ; timeout / EINTR: re-poll after the next safepoint
+            (let [n (cast i64 (read (cast i32 0) (cast (ptr i8) chp) 1))]
+              (if (= n 0) (do (store! iseof 1) (break))            ; EOF
+                (if (< n 0) (continue)                             ; EINTR mid-read
+                  (if (= (cast i64 (load chp)) \newline) (break)   ; end of line
+                    (do
+                      (if (>= (load len) (load cap))
+                        (do (store! cap (* (load cap) 2))
+                            (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                      (store! (index (load buf) (load len)) (load chp))
+                      (store! len (+ (load len) 1))
+                      (continue))))))))))
+    (if (and (= (load iseof) 1) (= (load len) 0))
+      ; Nothing buffered. Native: real EOF -> None. Wasm: there is no stdin to be "at the end
+      ; of" — input arrives later from the terminal — so SUSPEND instead and re-run this
+      ; instruction on a later tick (vm-blocked). Nothing was consumed, so the retry is exact:
+      ; the host only ever delivers whole newline-terminated lines, so a line is either fully
+      ; readable now or not started.
+      (when-wasm (do (store! (vm-blocked) 1) (cast (ptr i64) 0))
+                 (enum-none))
+      (enum-some-r (cast i64 (str-make (load buf) (load len))) 1))))   ; Some(line) — String payload is a ref
+
+; Mutex.lock: CAS-acquire, but back off through the safepoint so a waiter still parks for a
+; global stop (otherwise a spinning waiter would hang request-global-stop). During a global
+; stop the coordinator has EXCLUSIVE access, so lock/unlock are no-ops for it — this also
+; avoids deadlocking on a lock an agent happens to hold while parked.
+(defn vm-mutex-lock [(vt (ptr VMThread)) (m (ptr MutexObj))] (-> i64)
+  (if (= (safepoint-is-coordinator? (field vt parked)) 1) 0
+    (do
+      (loop
+        (if (= (safepoint-stopped?) 1)
+          (do (safepoint-poll (field vt parked)) (continue))
+          (if (= (atomic-cas (field m lock) 0 1) 0) (break)
+            (do (usleep (cast i32 10)) (continue)))))
+      0)))
+(defn vm-mutex-unlock [(vt (ptr VMThread)) (m (ptr MutexObj))] (-> i64)
+  (if (= (safepoint-is-coordinator? (field vt parked)) 1) 0
+    (do (atomic-store (field m lock) 0) 0)))
+
+; ============================ green threads (wasm only) ============================
+; wasm32 has no pthreads, so on that target Thread.spawn does NOT start an OS thread: the
+; VMThread is registered and its run() frame pushed exactly as on native, but it is then
+; driven cooperatively by this scheduler. That works because a language thread's ENTIRE
+; execution state (stack, frames, ip) lives in its heap-allocated VMThread — `run-to` never
+; recurses for a Scry call (OP_CALL push-frames and continues the loop), so "yield" is just
+; returning from run-to, and "resume" is calling it again with the same VMThread.
+;
+; DECISIONS #4b pins real OS threads for the native build; this is a wasm-target-only
+; concession (docs/08-wasm-port.md §1), and native codegen is untouched — the dispatch-loop
+; hook below compiles to nothing off wasm32.
+(defn sched-budget [] (-> (ptr i64)) (alloc-static i64))     ; instructions left in this slice
+; Set by a builtin that cannot complete yet (readLine with no input buffered). The dispatch
+; loop rewinds ip to re-run that instruction and suspends the thread; nothing was popped or
+; pushed, so the retry is exact. This is what makes Console.readLine() BLOCK on wasm instead
+; of returning None — a suspended thread resumes on a later tick, once the host feeds a line.
+(defn vm-blocked [] (-> (ptr i64)) (alloc-static i64))
+(defn sched-yielded [] (-> (ptr i64)) (alloc-static i64))    ; 1 = last run-to stopped on budget
+(const SCHED_UNBOUNDED 1000000000)   ; main/eval run to completion: effectively no budget
+(const SCHED_SLICE 20000)            ; instructions per background-thread slice
+
+; Called at the dispatch-loop seam ON WASM ONLY. Returns 1 when this slice is spent, which
+; makes run-to return; the VMThread is left mid-execution and resumes on the next slice.
+(defn sched-should-yield [] (-> i64)
+  (let [b (load (sched-budget))]
+    (if (<= b 0) (do (store! (sched-yielded) 1) 1)
+      (do (store! (sched-budget) (- b 1)) 0))))
+
+; Give one registered, unfinished thread a slice. Returns 1 if it is still runnable.
+(defn sched-run-slice [(avt (ptr VMThread))] (-> i64)
+  (if (= (atomic-load (field avt done)) 1) 0
+    (if (<= (load (field avt frame-count)) 0)
+      (do (atomic-store (field avt done) 1) (atomic-store (field avt parked) 1) 0)
+      (do (store! (sched-budget) SCHED_SLICE)
+          (store! (sched-yielded) 0)
+          (run-to avt 0)
+          (store! (sched-budget) SCHED_UNBOUNDED)
+          (if (= (load (sched-yielded)) 1) 1                    ; slice expired — still runnable
+            (do (atomic-store (field avt done) 1)               ; ran to completion
+                (atomic-store (field avt parked) 1) 0))))))
+
+; One scheduler pass over every registered language thread. Returns the number still
+; runnable, so the host knows whether to keep ticking.
+(defn sched-tick [] (-> i64)
+  (let [n (atomic-load (vm-nthreads-cell)) (mut i) 0 (mut live) 0]
+    (loop (if (< (load i) n)
+            (let [avt (cast (ptr VMThread) (load (index (vm-threads-cell) (load i))))]
+              ; main IS scheduled here too: it runs unbounded during boot, but if it
+              ; suspends on Console.readLine (vm-blocked) it still has frames, and this is
+              ; what resumes it once the host has fed a line.
+              (if (= (cast i64 avt) 0) 0
+                (store! live (+ (load live) (sched-run-slice avt))))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load live)))
+
+; ---- the pthread body: run this thread's own dispatch loop, then mark dead-and-parked ----
+(defn interpreter-thread-main [(arg (ptr i8))] (-> (ptr i8))
+  (let [vt (cast (ptr VMThread) arg)]
+    (run-to vt 0)
+    (atomic-store (field vt done) 1)
+    (atomic-store (field vt parked) 1)     ; a finished thread counts as parked forever
+    (cast (ptr i8) 0)))
+
+(defn vt-alloc [] (-> (ptr VMThread))
+  (let [vt (cast (ptr VMThread) (xalloc (sizeof VMThread)))]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    (store! (field vt parked) 0) (store! (field vt done) 0) (store! (field vt thread-id) 0)
+    vt))
+
+; ---- Phase 8a: HttpResponse as a real arena-backed ENTITY -----------------
+; HttpResponse is registered (typecheck.coil) as a builtin class with fields
+; { status: Int, body: String } and, being class-kinded, gets an entity mono + a TypeArena
+; built by build-program exactly like a user class. We find its TypeInfo by name, arena-alloc a
+; slot (stamps the header: type-id/slot-index/gen/live), and store the two fields at their decl
+; offsets (status @ header+0, body @ header+8). The result is a live, browsable HttpResponse
+; instance in its own arena — the viewer lists it like any other entity.
+; raw byte-string equality (types.coil's name-eq isn't imported here to avoid a heavy dep).
+(defn vm-name-eq [(a (ptr u8)) (an i64) (b (ptr u8)) (bn i64)] (-> bool)
+  (if (!= an bn) false
+    (let [(mut i) 0 (mut ok) true]
+      (loop (if (and (load ok) (< (load i) an))
+              (do (if (!= (cast i64 (load (index a (load i)))) (cast i64 (load (index b (load i))))) (do (store! ok false) 0) 0)
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      (load ok))))
+
+(defn find-typeinfo-by-name [(p (ptr Program)) (name (ptr u8)) (len i64)] (-> (ptr TypeInfo))
+  (let [n (load (field p type-count)) (mut i) 0 (mut r) (cast (ptr TypeInfo) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [ti (load (index (load (field p types)) (load i)))]
+              (if (and (!= (cast i64 ti) 0) (vm-name-eq (load (field ti name)) (load (field ti name-len)) name len))
+                (do (store! r ti) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+(defn http-alloc-response [(status i64) (body (ptr StringObj))] (-> i64)
+  (let [ti (find-typeinfo-by-name (load (field (vm) program)) (cast (ptr u8) c"HttpResponse") 12)]
+    (if (= (cast i64 ti) 0)
+      (do (eval-panic0 EK_RUNTIME c"internal: HttpResponse type not registered") (exit (cast i32 70)) 0)
+      (let [inst (cast i64 (arena-alloc (load (field ti arena))))]
+        (vm-init-string-fields ti inst)
+        (store! (field-addr inst (sizeof InstanceHeader)) status)                 ; field 0: status (Int)
+        (store! (field-addr inst (+ (sizeof InstanceHeader) 8)) (cast i64 body))   ; field 1: body (String)
+        inst))))
+
+; ---- construction-visibility guard (02-runtime.md §4 / 05 M1 "construction ordering") ----
+; A freshly arena-allocated object is published LIVE with zeroed fields, but its constructor
+; stores the real field values over the FOLLOWING bytecodes — and there is a safepoint between
+; each op. A viewer poll that stops the world while the constructor is parked mid-construction
+; therefore reads a not-yet-written field. Reference-shaped fields are already null-safe when
+; serialized (a null entity ref -> "null", a null List/Map -> empty), but a String field that is
+; still 0 makes serialize.serialize-value dereference NULL and crash. Point every String field at
+; a shared empty-string sentinel at allocation time, so a torn read renders "" (consistent with
+; how a null ref renders) instead of segfaulting; the real string lands microseconds later. The
+; sentinel is created once at vm-bind-program (before any language thread exists).
+(defn vm-str-sentinel-cell [] (-> (ptr (ptr StringObj))) (alloc-static (ptr StringObj)))
+(defn vm-str-sentinel [] (-> (ptr StringObj)) (load (vm-str-sentinel-cell)))
+(defn vm-init-str-sentinel [] (-> i64)
+  (if (= (cast i64 (load (vm-str-sentinel-cell))) 0)
+    (do (store! (vm-str-sentinel-cell) (str-make-perm (cast (ptr u8) c"") 0)) 0) 0) 0)
+(defn vm-init-string-fields [(ti (ptr TypeInfo)) (inst i64)] (-> i64)
+  (let [n (load (field ti field-count)) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [fi (index (load (field ti fields)) (load i))]
+              (if (= (load (field fi kind)) FIELD_STRING)
+                (do (store! (cast (ptr i64) (+ inst (load (field fi offset)))) (cast i64 (vm-str-sentinel))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))) 0)
+
+; ---- Phase 8b: Env + String char/number builtins ----------------------------
+; A StringObj is {len,data} and is NOT NUL-terminated; getenv needs a C string, so copy
+; the bytes into a malloc'd buffer and append a NUL.
+(defn str-to-cstr-copy [(s (ptr StringObj))] (-> (ptr i8))
+  (let [n (load (field s len)) buf (xalloc (+ n 1))]
+    (if (> n 0) (do (xmemcpy (cast (ptr i8) buf) (cast (ptr i8) (load (field s data))) n) 0) 0)
+    (store! (index buf n) (cast u8 0))
+    (cast (ptr i8) buf)))
+
+; Env.get(name) -> Option<String>. getenv returns a pointer into the process environment; copy
+; its bytes into our own buffer (str-make owns {len,data}) so a later setenv/GC can't dangle it.
+(defn vm-env-get [(name (ptr StringObj))] (-> (ptr i64))
+  (let [cn (str-to-cstr-copy name) v (getenv cn)]
+    (if (= (cast i64 v) 0)
+      (enum-none)
+      (let [vl (s-len v) buf (xalloc (+ vl 1))]
+        (if (> vl 0) (do (xmemcpy (cast (ptr i8) buf) v vl) 0) 0)
+        (store! (index buf vl) (cast u8 0))
+        (enum-some-r (cast i64 (str-make buf vl)) 1)))))   ; Some(value) — String payload is a ref
+
+; String.charCode(i) -> the byte at index i as i64 (0..255); out of bounds => -1 (never traps).
+(defn vm-str-charcode [(s (ptr StringObj)) (i i64)] (-> i64)
+  (if (or (< i 0) (>= i (load (field s len)))) -1
+    (cast i64 (load (index (load (field s data)) i)))))
+
+; String.toInt() -> Option<Int>. Strict base-10 signed parse: optional leading +/-, then one or
+; more ASCII digits and NOTHING else (no whitespace, no trailing junk). Empty or malformed => None.
+(defn vm-str-toint [(s (ptr StringObj))] (-> (ptr i64))
+  (let [n (load (field s len)) d (load (field s data))
+        (mut i) 0 (mut neg) 0 (mut val) 0 (mut ok) 1 (mut any) 0]
+    (if (< (load i) n)
+      (let [c0 (cast i64 (load (index d 0)))]
+        (if (or (= c0 45) (= c0 43))          ; '-' or '+'
+          (do (if (= c0 45) (store! neg 1) 0) (store! i 1) 0) 0)) 0)
+    (loop
+      (if (< (load i) n)
+        (let [c (cast i64 (load (index d (load i))))]
+          (if (and (>= c 48) (<= c 57))       ; '0'..'9'
+            (do (store! val (+ (* (load val) 10) (- c 48))) (store! any 1) (store! i (+ (load i) 1)) 0)
+            (do (store! ok 0) (break))))
+        (break)))
+    (if (and (= (load ok) 1) (= (load any) 1))
+      (enum-some (if (= (load neg) 1) (- 0 (load val)) (load val)))
+      (enum-none))))
+
+; String.toFloat() -> Option<Float>. strtod over a NUL-terminated copy: parse fails (None) when no
+; character was consumed OR trailing non-whitespace remains (strict, like toInt). Payload is f64 bits.
+(defn vm-str-tofloat [(s (ptr StringObj))] (-> (ptr i64))
+  (let [n (load (field s len)) cn (str-to-cstr-copy s)
+        endp (alloc-stack (ptr i8))
+        x (strtod cn endp)
+        consumed (- (cast i64 (load endp)) (cast i64 cn))]
+    (if (or (= n 0) (!= consumed n))
+      (enum-none)
+      (let [p (alloc-static i64)]
+        (store! (cast (ptr f64) p) x)
+        (enum-some (load p))))))
+
+; Str.fromCharCode(cp) -> a String holding the UTF-8 encoding of Unicode codepoint cp. Used by the
+; Scry Json parser to rebuild escaped string content (\uXXXX and friends) as real characters.
+(defn vm-str-fromcharcode [(cp i64)] (-> (ptr StringObj))
+  (let [buf (xalloc 5)]
+    (cond
+      (< cp 128)
+        (do (store! (index buf 0) (cast u8 cp)) (str-make buf 1))
+      (< cp 2048)
+        (do (store! (index buf 0) (cast u8 (ior 192 (ishr cp 6))))
+            (store! (index buf 1) (cast u8 (ior 128 (iand cp 63))))
+            (str-make buf 2))
+      (< cp 65536)
+        (do (store! (index buf 0) (cast u8 (ior 224 (ishr cp 12))))
+            (store! (index buf 1) (cast u8 (ior 128 (iand (ishr cp 6) 63))))
+            (store! (index buf 2) (cast u8 (ior 128 (iand cp 63))))
+            (str-make buf 3))
+      (do (store! (index buf 0) (cast u8 (ior 240 (ishr cp 18))))
+          (store! (index buf 1) (cast u8 (ior 128 (iand (ishr cp 12) 63))))
+          (store! (index buf 2) (cast u8 (ior 128 (iand (ishr cp 6) 63))))
+          (store! (index buf 3) (cast u8 (ior 128 (iand cp 63))))
+          (str-make buf 4)))))
+
+; ---- real OS work: subprocess + files ----------------------------------------
+; Process.run(cmd): run `/bin/sh -c "<cmd> 2>&1"` (popen), returning combined stdout+stderr. The
+; pipe fd is read COOPERATIVELY — poll(20ms) + safepoint-poll each pass — so a long-running command
+; never stalls a global stop: the viewer stays live and evals answer while a tool executes.
+; wasm: the host serves the command from its mock shell + VFS. Kept in its own defn so the
+; popen/fileno/pclose path below is NOT REFERENCED there (a stub that still called popen would
+; keep those imports, and they trap).
+(defn vm-proc-run-host [(cmd (ptr StringObj))] (-> (ptr StringObj))
+  (let [out (host_proc_run (load (field cmd data)) (load (field cmd len)))]
+    (if (= (cast i64 out) 0) (str-copy (cast (ptr u8) c"") 0)
+      (str-copy out (s-len (cast (ptr i8) out))))))
+
+(defn vm-proc-run [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
+  (when-wasm (vm-proc-run-host cmd) (vm-proc-run-exec vt cmd)))
+
+(defn vm-proc-run-exec [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
+  (let [clen (load (field cmd len)) full (xalloc (+ clen 6))]
+    (if (> clen 0) (do (xmemcpy (cast (ptr i8) full) (cast (ptr i8) (load (field cmd data))) clen) 0) 0)
+    (xmemcpy (cast (ptr i8) (index full clen)) (cast (ptr i8) c" 2>&1") 5)
+    (store! (index full (+ clen 5)) (cast u8 0))
+    (let [f (popen (cast (ptr i8) full) c"r")]
+      (if (= (cast i64 f) 0) (str-copy (cast (ptr u8) c"(command failed to start)") 25)
+        (let [fd (fileno f) pfd (alloc-stack i64) chunk (alloc-stack (array i8 8192))
+              (mut cap) 1024 (mut len) 0 (mut buf) (xalloc 1024)]
+          (store! pfd (ior (cast i64 fd) (<< 1 32)))     ; struct pollfd { fd; events=POLLIN(1); revents=0 }
+          (loop
+            (do
+              (safepoint-poll (field vt parked))
+              (let [r (cast i64 (poll (cast (ptr i8) pfd) 1 20))]
+                (if (<= r 0) (continue)                   ; timeout / EINTR: re-poll after the safepoint
+                  (let [n (cast i64 (read (cast i32 fd) (cast (ptr i8) (index chunk 0)) 8192))]
+                    (if (= n 0) (break)                   ; EOF -> child done
+                      (if (< n 0) (continue)
+                        (do
+                          (if (> (+ (load len) n) (load cap))
+                            (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
+                                (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                          (xmemcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                          (store! len (+ (load len) n)) (continue)))))))))
+          (pclose f)
+          (str-make (load buf) (load len)))))))
+
+; File.read(path): whole-file slurp -> Some(String), or None if it can't be opened. Uses fopen (not
+; open+mode) so we never touch open's variadic `mode` arg — that doesn't pass in a register on
+; arm64, so open would have created files with a garbage mode.
+(defn vm-file-read [(path (ptr StringObj))] (-> (ptr i64))
+  (let [f (fopen (str-to-cstr-copy path) c"r")]
+    (if (= (cast i64 f) 0) (enum-none)
+      (let [chunk (alloc-stack (array i8 65536)) (mut cap) 4096 (mut len) 0 (mut buf) (xalloc 4096)]
+        (loop
+          (let [n (fread (cast (ptr i8) (index chunk 0)) 1 65536 (cast (ptr i8) f))]
+            (if (<= n 0) (break)
+              (do
+                (if (> (+ (load len) n) (load cap))
+                  (do (loop (if (< (load cap) (+ (load len) n)) (do (store! cap (* (load cap) 2)) 0) (break)))
+                      (store! buf (cast (ptr u8) (xrealloc (cast (ptr i8) (load buf)) (load cap)))) 0) 0)
+                (xmemcpy (cast (ptr i8) (index (load buf) (load len))) (cast (ptr i8) (index chunk 0)) n)
+                (store! len (+ (load len) n)) (continue)))))
+        (fclose (cast (ptr i8) f))
+        (enum-some-r (cast i64 (str-make (load buf) (load len))) 1)))))
+
+; File.write/append(path, content): fopen mode "w" (truncate) or "a" (append) -> 1 ok / 0 fail.
+(defn vm-file-write-mode [(path (ptr StringObj)) (content (ptr StringObj)) (mode (ptr i8))] (-> i64)
+  (let [f (fopen (str-to-cstr-copy path) mode)]
+    (if (= (cast i64 f) 0) 0
+      (let [n (load (field content len))
+            w (if (> n 0) (fwrite (cast (ptr i8) (load (field content data))) 1 n (cast (ptr i8) f)) 0)]
+        (fclose (cast (ptr i8) f))
+        (if (= w n) 1 0)))))
+
+; File.exists(path) -> 1 iff stat succeeds.
+(defn vm-file-exists [(path (ptr StringObj))] (-> i64)
+  (let [sb (alloc-stack (array i8 256))]   ; struct stat is ~144 bytes on darwin
+    (if (= (cast i64 (stat (str-to-cstr-copy path) (cast (ptr i8) (index sb 0)))) 0) 1 0)))
+
+; the builtin dispatch (fixed arities; arg order = pushed order)
+(defn do-builtin [(vt (ptr VMThread)) (blt i64)] (-> i64)
+  (cond
+    (= blt BLT_PRINT_I64) (do (print-i64 (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_F64) (do (print-f64bits (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_BOOL) (do (print-bool (vpop vt)) (vpush vt 0))
+    (= blt BLT_PRINT_STR) (do (print-str (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_LOG) (do (console-log (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_PRINT) (do (console-print (cast (ptr StringObj) (vpop vt))) (vpush vt 0))
+    (= blt BLT_CONSOLE_READLINE)
+      (let [r (vm-readline vt)]
+        ; on wasm a "would block" leaves the stack untouched: the dispatch loop re-runs this
+        ; instruction after the host supplies input (see vm-blocked).
+        (when-wasm (if (= (load (vm-blocked)) 1) 0 (vpush vt (cast i64 r)))
+                   (vpush vt (cast i64 r))))
+    (= blt BLT_LIST_NEW) (let [er (vpop vt) l (list-new)] (list-set-elemref l er) (vpush vt (cast i64 l)))
+    (= blt BLT_LIST_PUSH) (let [v (vpop vt) l (vpop vt)] (list-push (cast (ptr ListObj) l) v) (vpush vt 0))
+    (= blt BLT_LIST_GET) (let [i (vpop vt) l (vpop vt)] (vpush vt (list-get (cast (ptr ListObj) l) i)))
+    (= blt BLT_LIST_LEN) (let [l (vpop vt)] (vpush vt (list-len (cast (ptr ListObj) l))))
+    (= blt BLT_MAP_NEW) (let [vr (vpop vt) sk (vpop vt) m (map-new (= sk 1))] (map-set-valref m vr) (vpush vt (cast i64 m)))
+    (= blt BLT_MAP_SET) (let [v (vpop vt) k (vpop vt) m (vpop vt)] (map-set (cast (ptr MapObj) m) k v) (vpush vt 0))
+    (= blt BLT_MAP_GET) (let [k (vpop vt) m (vpop vt)] (vpush vt (cast i64 (map-get (cast (ptr MapObj) m) k))))
+    (= blt BLT_MAP_HAS) (let [k (vpop vt) m (vpop vt)] (vpush vt (map-has (cast (ptr MapObj) m) k)))
+    (= blt BLT_MAP_LEN) (let [m (vpop vt)] (vpush vt (map-len (cast (ptr MapObj) m))))
+    (= blt BLT_MAP_KEYS) (let [m (vpop vt)] (vpush vt (cast i64 (map-keys (cast (ptr MapObj) m)))))
+    (= blt BLT_STR_LEN) (let [s (vpop vt)] (vpush vt (str-len (cast (ptr StringObj) s))))
+    (= blt BLT_STR_SLICE) (let [hi (vpop vt) lo (vpop vt) s (vpop vt)] (vpush vt (cast i64 (str-slice (cast (ptr StringObj) s) lo hi))))
+    (= blt BLT_CLOCK_NOW) (vpush vt (clock-now))
+    (= blt BLT_CLOCK_SLEEP) (let [ms (vpop vt)] (vm-sleep vt ms) (vpush vt 0))
+    (= blt BLT_MUTEX_NEW) (let [vr (vpop vt) v (vpop vt) m (mutex-new v)] (mutex-set-valref m vr) (vpush vt (cast i64 m)))
+    (= blt BLT_MUTEX_LOCK) (let [m (vpop vt)] (vm-mutex-lock vt (cast (ptr MutexObj) m)) (vpush vt 0))
+    (= blt BLT_MUTEX_UNLOCK) (let [m (vpop vt)] (vm-mutex-unlock vt (cast (ptr MutexObj) m)) (vpush vt 0))
+    (= blt BLT_MUTEX_GET) (let [m (vpop vt)] (vpush vt (mutex-get (cast (ptr MutexObj) m))))
+    (= blt BLT_MUTEX_SET) (let [v (vpop vt) m (vpop vt)] (mutex-set (cast (ptr MutexObj) m) v) (vpush vt 0))
+    ; args pushed left-to-right (method,url,headers,body) => pop right-to-left.
+    (= blt BLT_HTTP_REQUEST)
+      (let [body (vpop vt) headers (vpop vt) url (vpop vt) method (vpop vt)
+            res (http-request (field vt parked)
+                              (cast (ptr StringObj) method) (cast (ptr StringObj) url)
+                              (cast (ptr ListObj) headers) (cast (ptr StringObj) body))]
+        (vpush vt (http-alloc-response (load (field res status)) (load (field res body)))))
+    (= blt BLT_ENV_GET) (let [name (vpop vt)] (vpush vt (cast i64 (vm-env-get (cast (ptr StringObj) name)))))
+    ; charCode(i): args pushed (string, i) => pop i then string.
+    (= blt BLT_STR_CHARCODE) (let [i (vpop vt) s (vpop vt)] (vpush vt (vm-str-charcode (cast (ptr StringObj) s) i)))
+    (= blt BLT_STR_TOINT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-toint (cast (ptr StringObj) s)))))
+    (= blt BLT_STR_TOFLOAT) (let [s (vpop vt)] (vpush vt (cast i64 (vm-str-tofloat (cast (ptr StringObj) s)))))
+    (= blt BLT_STR_FROMCHARCODE) (let [cp (vpop vt)] (vpush vt (cast i64 (vm-str-fromcharcode cp))))
+    ; Process.run(cmd) -> String
+    (= blt BLT_PROC_RUN) (let [cmd (vpop vt)] (vpush vt (cast i64 (vm-proc-run vt (cast (ptr StringObj) cmd)))))
+    ; File.read(path) -> Option<String>
+    (= blt BLT_FILE_READ) (let [path (vpop vt)] (vpush vt (cast i64 (vm-file-read (cast (ptr StringObj) path)))))
+    ; File.write/append(path, content) -> Bool.  Args pushed (path, content) => pop content then path.
+    (= blt BLT_FILE_WRITE) (let [content (vpop vt) path (vpop vt)] (vpush vt (vm-file-write-mode (cast (ptr StringObj) path) (cast (ptr StringObj) content) (cast (ptr i8) c"w"))))
+    (= blt BLT_FILE_APPEND) (let [content (vpop vt) path (vpop vt)] (vpush vt (vm-file-write-mode (cast (ptr StringObj) path) (cast (ptr StringObj) content) (cast (ptr i8) c"a"))))
+    ; File.exists(path) -> Bool
+    (= blt BLT_FILE_EXISTS) (let [path (vpop vt)] (vpush vt (vm-file-exists (cast (ptr StringObj) path))))
+    (do (eval-panic0 EK_RUNTIME c"vm: unknown builtin") (exit (cast i32 70)) 0)))
+
+; spawn a language thread running task.<slot>() (task implements the interface `iface`).
+(defn vm-spawn [(vt (ptr VMThread)) (task i64) (iface i64) (slot i64)] (-> i64)
+  (let [tid (load (field (cast (ptr InstanceHeader) task) type-id))
+        ti (load (index (load (field (load (field (vm) program)) types)) tid))
+        it (load (index (load (field ti itables)) iface))
+        midx (load (index (load (field it slots)) slot))
+        m (load (index (load (field (load (field (vm) program)) methods)) midx))
+        avt (vt-alloc)]
+    (sp-register (field avt parked))
+    (vm-register-thread avt)                            ; GC roots: scan this agent's stack too
+    (store! (index (field avt stack) 0) task)          ; task is arg0 / self of run()
+    (store! (field avt stack-top) 1)
+    (push-frame avt m 1)
+    (when-wasm 0                                     ; wasm: scheduled by sched-tick, no pthread
+      (thread-spawn (field avt os-thread) (fnptr-of interpreter-thread-main) (cast (ptr i8) avt)))
+    (cast i64 avt)))
+
+; cooperatively join a spawned thread: spin on its `done` flag while still polling MY own
+; safepoint, so a join never blocks a global stop.
+(defn vm-join [(vt (ptr VMThread)) (handle i64)] (-> i64)
+  (let [avt (cast (ptr VMThread) handle)]
+    (loop (if (= (atomic-load (field avt done)) 1) (break)
+            (do (safepoint-poll (field vt parked))
+                (when-wasm (sched-run-slice avt) (usleep (cast i32 500)))
+                (continue))))
+    (when-wasm 0 (thread-join (field avt os-thread)))
+    0))
+
+; ---- the dispatch loop ----
+; Runs until frame-count returns to `stop-fc`. `(run-to vt 0)` runs a whole method to
+; completion; an eval invocation runs to the caller's saved depth. safepoint-poll at the
+; loop top is the single seam every instruction passes — a coordinator parks every thread
+; here for an eval (Phase 6 reuses it for table swaps / migration).
+(defn run-to [(vt (ptr VMThread)) (stop-fc i64)] (-> i64)
+  (let [(mut fr) (index (field vt frames) (- (load (field vt frame-count)) 1))
+        (mut result) 0 (mut done) false]
+    (loop
+      (if (load done) (break)
+        (do
+          (safepoint-poll (field vt parked))
+          ; green-thread yield seam (wasm only — `when-wasm` emits NOTHING on native, so the
+          ; native dispatch loop is byte-for-byte unchanged). Budget is UNBOUNDED except while
+          ; the scheduler is running a background thread's slice, so main/eval never yield.
+          (if (when-wasm (sched-should-yield) 0) (do (store! done true) 0) 0)
+          ; GC trigger (02 §6): at the dispatch loop top, fr.ip is exactly an instruction
+          ; boundary, so every thread parked here for the stop has a valid stack map. Firing here
+          ; (never mid-instruction) is what makes precise root scanning of THIS frame sound.
+          (if (= (gc-should?) 1) (gc-collect vt) 0)
+        (let [op (read-byte (load fr))]
+          (case op
+            OP_CONST (let [idx (read-u16 (load fr)) c (load (field (load (field (load fr) method)) chunk))] (vpush vt (load (index (load (field c consts)) idx))))
+            OP_TRUE (vpush vt 1) OP_FALSE (vpush vt 0) OP_UNIT (vpush vt 0)
+            OP_POP (do (vpop vt) 0)
+            OP_DUP (vpush vt (vpeek vt 0))
+            OP_LOAD_LOCAL (vpush vt (load (index (field vt stack) (+ (load (field (load fr) base)) (read-u16 (load fr))))))
+            OP_STORE_LOCAL (let [slot (read-u16 (load fr)) v (vpop vt)] (store! (index (field vt stack) (+ (load (field (load fr) base)) slot)) v) 0)
+            OP_LOAD_FIELD_I64 (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_LOAD_FIELD_F64 (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_LOAD_FIELD_REF (let [off (read-u16 (load fr)) obj (vpop vt)] (vpush vt (load (field-addr obj off))))
+            OP_STORE_FIELD_I64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_STORE_FIELD_F64 (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) 0)
+            OP_STORE_FIELD_REF (let [off (read-u16 (load fr)) v (vpop vt) obj (vpop vt)] (store! (field-addr obj off) v) (arena-write-barrier (cast (ptr InstanceHeader) obj)) 0)
+            OP_ADD_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (+ a b)))
+            OP_SUB_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (- a b)))
+            OP_MUL_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (* a b)))
+            OP_DIV_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (idiv a b)))
+            OP_REM_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (irem a b)))
+            OP_NEG_I64 (let [a (vpop vt)] (vpush vt (- 0 a)))
+            OP_ADD_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fadd (to-f64 a) (to-f64 b)))))
+            OP_SUB_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fsub (to-f64 a) (to-f64 b)))))
+            OP_MUL_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fmul (to-f64 a) (to-f64 b)))))
+            OP_DIV_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (to-bits (fdiv (to-f64 a) (to-f64 b)))))
+            OP_NEG_F64 (let [a (vpop vt)] (vpush vt (to-bits (fsub 0.0 (to-f64 a)))))
+            OP_LT_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (< a b) 1 0)))
+            OP_LE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (<= a b) 1 0)))
+            OP_GT_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (> a b) 1 0)))
+            OP_GE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (>= a b) 1 0)))
+            OP_EQ_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_I64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_LT_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-lt (to-f64 a) (to-f64 b)) 1 0)))
+            OP_LE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-le (to-f64 a) (to-f64 b)) 1 0)))
+            OP_GT_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-gt (to-f64 a) (to-f64 b)) 1 0)))
+            OP_GE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-ge (to-f64 a) (to-f64 b)) 1 0)))
+            OP_EQ_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-eq (to-f64 a) (to-f64 b)) 1 0)))
+            OP_NE_F64 (let [b (vpop vt) a (vpop vt)] (vpush vt (if (fcmp-ne (to-f64 a) (to-f64 b)) 1 0)))
+            OP_EQ_BOOL (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_BOOL (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_NOT (let [a (vpop vt)] (vpush vt (if (= a 0) 1 0)))
+            OP_EQ_REF (let [b (vpop vt) a (vpop vt)] (vpush vt (if (= a b) 1 0)))
+            OP_NE_REF (let [b (vpop vt) a (vpop vt)] (vpush vt (if (!= a b) 1 0)))
+            OP_EQ_ENUM (let [b (vpop vt) a (vpop vt)] (vpush vt (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 1 0)))
+            OP_NE_ENUM (let [b (vpop vt) a (vpop vt)] (vpush vt (if (enum-equal (cast (ptr i64) a) (cast (ptr i64) b)) 0 1)))
+            OP_CONCAT (let [b (vpop vt) a (vpop vt)] (vpush vt (cast i64 (str-concat (cast (ptr StringObj) a) (cast (ptr StringObj) b)))))
+            OP_I64_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-i64 v))))
+            OP_F64_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-f64bits v))))
+            OP_BOOL_TO_STR (let [v (vpop vt)] (vpush vt (cast i64 (str-from-bool v))))
+            OP_JUMP (let [off (read-u16 (load fr))] (store! (field (load fr) ip) (+ (load (field (load fr) ip)) off)) 0)
+            OP_JUMP_IF_FALSE (let [off (read-u16 (load fr)) c (vpop vt)] (if (= c 0) (do (store! (field (load fr) ip) (+ (load (field (load fr) ip)) off)) 0) 0))
+            OP_LOOP (let [off (read-u16 (load fr))] (store! (field (load fr) ip) (- (load (field (load fr) ip)) off)) 0)
+            OP_CALL_STATIC
+              (let [idx (read-u16 (load fr)) argc (read-byte (load fr))
+                    m (load (index (load (field (load (field (vm) program)) methods)) idx))]
+                (push-frame vt m argc)
+                (if (= (load (trace-flag)) 1) (trace-enter m argc (index (field vt stack) (load (field (index (field vt frames) (- (load (field vt frame-count)) 1)) base)))) 0)
+                (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
+            OP_CALL_VIRTUAL
+              (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) argc (read-byte (load fr))
+                    recv (vpeek vt (- argc 1))
+                    tid (load (field (cast (ptr InstanceHeader) recv) type-id))
+                    ti (load (index (load (field (load (field (vm) program)) types)) tid))
+                    it (load (index (load (field ti itables)) iface))
+                    midx (load (index (load (field it slots)) slot))
+                    m (load (index (load (field (load (field (vm) program)) methods)) midx))]
+                (push-frame vt m argc)
+                (if (= (load (trace-flag)) 1) (trace-enter m argc (index (field vt stack) (load (field (index (field vt frames) (- (load (field vt frame-count)) 1)) base)))) 0)
+                (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1))) 0)
+            OP_CALL_BUILTIN
+              (do (do-builtin vt (read-byte (load fr)))
+                  (when-wasm
+                    (if (= (load (vm-blocked)) 1)
+                      (do (store! (vm-blocked) 0)
+                          ; re-run this OP_CALL_BUILTIN (opcode byte + builtin id) next time
+                          (store! (field (load fr) ip) (- (load (field (load fr) ip)) 2))
+                          (store! (sched-budget) 0)        ; give up the rest of the slice
+                          ; mark it a YIELD, not a return: the thread is suspended waiting on
+                          ; input and is still runnable. Without this sched-run-slice would
+                          ; see a plain return and mark the thread done — it would resume
+                          ; exactly once and then never again.
+                          (store! (sched-yielded) 1)
+                          (store! done true) 0)
+                      0)
+                    0))
+            OP_THREAD_SPAWN
+              (let [iface (read-u16 (load fr)) slot (read-byte (load fr)) task (vpop vt)]
+                (vpush vt (vm-spawn vt task iface slot)))
+            OP_THREAD_JOIN (let [h (vpop vt)] (vm-join vt h) (vpush vt 0))
+            OP_RETURN
+              (let [res (vpop vt) base (load (field (load fr) base))]
+                (if (= (load (trace-flag)) 1) (trace-exit res) 0)
+                (store! (field vt frame-count) (- (load (field vt frame-count)) 1))
+                (store! (field vt stack-top) base)
+                (if (= (load (field vt frame-count)) stop-fc)
+                  (do (store! result res) (store! done true) 0)
+                  (do (store! fr (index (field vt frames) (- (load (field vt frame-count)) 1)))
+                      (vpush vt res) 0)))
+            OP_NEW
+              (let [tid (read-u16 (load fr))
+                    ti (load (index (load (field (load (field (vm) program)) types)) tid))
+                    inst (vm-alloc-instance vt (load fr) (load (field ti arena)))]
+                (vm-init-string-fields ti inst)
+                (vpush vt inst))
+            OP_LOAD_SINGLETON
+              (let [tid (read-u16 (load fr))]
+                (vpush vt (cast i64 (load (field (load (index (load (field (load (field (vm) program)) types)) tid)) singleton)))))
+            OP_MAKE_ENUM
+              (let [tag (read-byte (load fr)) argc (read-byte (load fr)) rm (read-byte (load fr)) box (enum-alloc-rm tag argc rm) (mut k) 0]
+                (loop (if (< (load k) argc) (do (enum-set-arg box (- (- argc 1) (load k)) (vpop vt)) (store! k (+ (load k) 1)) 0) (break)))
+                (vpush vt (cast i64 box)))
+            OP_ENUM_TAG (let [p (vpop vt)] (vpush vt (enum-tag (cast (ptr i64) p))))
+            OP_ENUM_GET (let [idx (read-byte (load fr)) p (vpop vt)] (vpush vt (enum-arg (cast (ptr i64) p) idx)))
+            OP_STR_EQ (let [b (vpop vt) a (vpop vt)] (vpush vt (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 1 0)))
+            OP_STR_NE (let [b (vpop vt) a (vpop vt)] (vpush vt (if (str-eq (cast (ptr StringObj) a) (cast (ptr StringObj) b)) 0 1)))
+            OP_ARENA_AT
+              (let [tid (read-u16 (load fr)) gen (vpop vt) slot (vpop vt)]
+                (vpush vt (arena-at (load (field (vm) program)) tid slot gen)))
+            OP_ARENA_INSTANCE
+              (let [tid (read-u16 (load fr)) slot (vpop vt)]
+                (vpush vt (arena-instance (load (field (vm) program)) tid slot)))
+            OP_ARENA_INSTANCES
+              (let [tid (read-u16 (load fr)) lim (vpop vt) off (vpop vt) filt (vpop vt)]
+                (vpush vt (cast i64 (arena-instances (load (field (vm) program)) tid (cast (ptr StringObj) filt) off lim))))
+            (do (w-cstr 2 c"vm: bad opcode ") (w-int 2 op) (w-cstr 2 c"\n") (eval-panic0 EK_RUNTIME c"internal: bad opcode") 0))))))
+    (load result)))
+
+; invoke an already-compiled, args-already-pushed method to completion, on the dedicated
+; eval-coordinator VMThread — the exact push-frame + run-to path bytecode uses (02 §8:
+; "not a special code path"). The caller (server.coil) has already parked every language
+; thread via request-global-stop, so this runs with the heap quiescent. The eval-vt is NOT
+; registered in the thread table (it is the coordinator; safepoint-poll never parks it).
+(defn vm-eval-invoke [(m (ptr MethodInfo)) (argc i64)] (-> i64)
+  (let [vt (vm-thread-eval)]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    ; An eval must ALWAYS run to completion — it is not a scheduled green thread. The budget
+    ; is global, and a language thread that suspended (e.g. main blocking on Console.readLine)
+    ; leaves it at 0, so without this reset the very next eval would hit the yield seam on its
+    ; first instruction and return nothing — silently answering `1+1` with 0 and then reading
+    ; garbage. (Only visible on wasm; when-wasm compiles the seam out natively.)
+    (store! (sched-budget) SCHED_UNBOUNDED)
+    (push-frame vt m argc)
+    (run-to vt 0)))
+
+; Bind the shared VM handle to `p`. This is REQUIRED before the interpreter can execute ANY
+; opcode that touches Program state (OP_NEW, OP_LOAD_SINGLETON, OP_ARENA_AT/_INSTANCE/
+; _INSTANCES, OP_CALL_STATIC/_VIRTUAL, OP_THREAD_SPAWN — every one of these reads `(field
+; (vm) program)` directly) — even when main() never runs: `scry inspect` builds the Program
+; and serves the eval channel without calling vm-run, but an eval like `Agent.instances()`
+; still compiles down to OP_ARENA_INSTANCES and runs on the VM, so `(vm).program` must be
+; non-null before the FIRST eval, not just before main(). (Previously only `vm-run` set it,
+; so an inspect-mode eval dereferenced a null program pointer — this is the fix for
+; reflect.arena-instances's null-pointer segfault.)
+;
+; Deliberately does NOT allocate object singletons — that stays inside `vm-run` only. An
+; `object` singleton is arena-allocated (bumps live-count), and `scry inspect`'s whole
+; contract (asserted by tests/run-tests.py's inspect gate) is that EVERY type — singletons
+; included — reads liveCount 0 until main() actually runs. Binding the program pointer here
+; is side-effect-free on the heap; allocating a singleton is not, so it stays gated on
+; main() via vm-run, same as every other instance in the program.
+(defn vm-bind-program [(p (ptr Program))] (-> i64)
+  (store! (field (vm) program) p)
+  (gc-young-init) (gc-rem-init)   ; young list / remembered set ready before the FIRST allocation
+                                  ; (inspect-mode evals allocate too, though GC stays disabled there)
+  (vm-init-str-sentinel)   ; construction-visibility guard: sentinel ready before the first alloc
+  0)
+
+; bind the program, allocate object singletons, then invoke main() on the main VMThread
+; (registered so a concurrent eval can park it too, including once it's finished and looping
+; post-main).
+(defn vm-run [(p (ptr Program))] (-> i64)
+  (vm-bind-program p)
+  ; The scheduler budget is alloc-static (starts 0). main() and every eval must run to
+  ; COMPLETION, never yield, so seed it unbounded — sched-run-slice is the only thing that
+  ; ever narrows it, and it restores unbounded when its slice ends.
+  (store! (sched-budget) SCHED_UNBOUNDED)
+  (http-init)   ; libcurl global init once, on the main thread, before any thread can race
+
+  (let [vt (vm-thread-main)]
+    (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    (store! (field vt parked) 0) (store! (field vt done) 0)
+    (sp-register (field vt parked))
+    (vm-register-thread vt)
+    ; arm the collector: main is about to run and every method now has stack maps. Collections
+    ; (mostly cheap minors) fire every GC_MINOR_THRESHOLD of fresh allocation; a major runs
+    ; periodically to reclaim the old generation. gc-bytes is monotonic.
+    (gc-set-bytes 0) (gc-rearm) (gc-enable)
+    (let [nt (load (field p type-count)) (mut i) 0]
+      (loop (if (< (load i) nt)
+              (let [ti (load (index (load (field p types)) (load i)))]
+                (if (!= (cast i64 ti) 0)
+                  (if (and (load (field ti is-entity)) (= (load (field ti kind)) DK_OBJECT_KIND))
+                    (do (store! (field ti singleton) (arena-alloc (load (field ti arena))))
+                        (vm-init-string-fields ti (cast i64 (load (field ti singleton)))) 0) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (push-frame vt (load (index (load (field p methods)) (load (field p entry)))) 0)
+    (run-to vt 0)))

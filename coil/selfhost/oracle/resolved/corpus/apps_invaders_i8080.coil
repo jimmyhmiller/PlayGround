@@ -1,0 +1,607 @@
+(extern open :cc c [(ptr i8) :i64] (-> :i32))
+
+(extern read :cc c [i32 (ptr i8) isize] (-> isize))
+
+(extern close :cc c [:i64] (-> :i32))
+
+(extern memset :cc c [(ptr i8) :i64 :i64] (-> (ptr i8)))
+
+(defstruct
+  Cpu
+  [(mem (array u8 65536))
+    (regs (array u8 8))
+    (cyc (array u8 256))
+    (sp i64)
+    (pc i64)
+    (f i64)
+    (ie i64)])
+
+(defn reg [(s (ptr Cpu)) (i i64)] (-> i64) (cast :i64 (load (index (field s regs) i))))
+
+(defn
+  setr
+  [(s (ptr Cpu)) (i i64) (v i64)]
+  (-> i64)
+  (do (store! (index (field s regs) i) (cast :u8 v)) 0))
+
+(defn
+  rb
+  [(s (ptr Cpu)) (a i64)]
+  (-> i64)
+  (cast :i64 (load (index (field s mem) (& a 65535)))))
+
+(defn
+  wb
+  [(s (ptr Cpu)) (a i64) (v i64)]
+  (-> i64)
+  (do (store! (index (field s mem) (& a 65535)) (cast :u8 v)) 0))
+
+(defn hl [(s (ptr Cpu))] (-> i64) (| (<< (reg s 4) 8) (reg s 5)))
+
+(defn getr [(s (ptr Cpu)) (i i64)] (-> i64) (if (= i 6) (rb s (hl s)) (reg s i)))
+
+(defn
+  setr8
+  [(s (ptr Cpu)) (i i64) (v i64)]
+  (-> i64)
+  (if (= i 6) (wb s (hl s) v) (setr s i v)))
+
+(defn rpc [(s (ptr Cpu))] (-> i64) (load (field s pc)))
+
+(defn spc [(s (ptr Cpu)) (v i64)] (-> i64) (do (store! (field s pc) (& v 65535)) 0))
+
+(defn addpc [(s (ptr Cpu)) (n i64)] (-> i64) (spc s (+ (rpc s) n)))
+
+(defn
+  pget
+  [(s (ptr Cpu)) (code i64)]
+  (-> i64)
+  (if
+    (= code 0)
+    (| (<< (reg s 0) 8) (reg s 1))
+    (if
+      (= code 1)
+      (| (<< (reg s 2) 8) (reg s 3))
+      (if (= code 2) (| (<< (reg s 4) 8) (reg s 5)) (load (field s sp))))))
+
+(defn
+  pset
+  [(s (ptr Cpu)) (code i64) (v i64)]
+  (-> i64)
+  (let
+    [hi (& (>> v 8) 255) lo (& v 255)]
+    (if
+      (= code 0)
+      (do (setr s 0 hi) (setr s 1 lo))
+      (if
+        (= code 1)
+        (do (setr s 2 hi) (setr s 3 lo))
+        (if
+          (= code 2)
+          (do (setr s 4 hi) (setr s 5 lo))
+          (do (store! (field s sp) (& v 65535)) 0))))))
+
+(defn
+  push16
+  [(s (ptr Cpu)) (v i64)]
+  (-> i64)
+  (let
+    [sp (load (field s sp))]
+    (do
+      (wb s (& (- sp 1) 65535) (& (>> v 8) 255))
+      (wb s (& (- sp 2) 65535) (& v 255))
+      (store! (field s sp) (& (- sp 2) 65535))
+      0)))
+
+(defn
+  pop16
+  [(s (ptr Cpu))]
+  (-> i64)
+  (let
+    [sp (load (field s sp)) lo (rb s sp) hi (rb s (+ sp 1))]
+    (do (store! (field s sp) (& (+ sp 2) 65535)) (| (<< hi 8) lo))))
+
+(defn getf [(s (ptr Cpu)) (bit i64)] (-> i64) (& (>> (load (field s f)) bit) 1))
+
+(defn
+  setf
+  [(s (ptr Cpu)) (bit i64) (v i64)]
+  (-> i64)
+  (let
+    [cur (load (field s f))]
+    (do (store! (field s f) (| (& cur (^ 255 (<< 1 bit))) (<< (& v 1) bit))) 0)))
+
+(defn
+  parity8
+  [(x i64)]
+  (-> i64)
+  (let
+    [p (alloc-stack i64) y (alloc-stack i64)]
+    (do
+      (store! p 0)
+      (store! y (& x 255))
+      (let
+        [(mut $g0) (isub 0 1)]
+        (loop
+          (store! $g0 (iadd (load $g0) 1))
+          (if
+            (icmp-lt (load $g0) 8)
+            (let
+              [i (load $g0)]
+              (do (store! p (+ (load p) (& (load y) 1))) (store! y (>> (load y) 1))))
+            (break))))
+      (if (= (& (load p) 1) 0) 1 0))))
+
+(defn
+  flags-zsp
+  [(s (ptr Cpu)) (val i64)]
+  (-> i64)
+  (let
+    [v (& val 255)]
+    (do
+      (setf s 6 (if (= v 0) 1 0))
+      (setf s 7 (if (= (& v 128) 128) 1 0))
+      (setf s 2 (parity8 v))
+      0)))
+
+(defn
+  arith-flags
+  [(s (ptr Cpu)) (res i64)]
+  (-> i64)
+  (do
+    (setf s 0 (if (> res 255) 1 0))
+    (setf s 6 (if (= (& res 255) 0) 1 0))
+    (setf s 7 (if (= (& res 128) 128) 1 0))
+    (setf s 2 (parity8 (& res 255)))
+    0))
+
+(defn
+  logic-flags
+  [(s (ptr Cpu))]
+  (-> i64)
+  (let
+    [a (reg s 7)]
+    (do
+      (setf s 0 0)
+      (setf s 4 0)
+      (setf s 6 (if (= a 0) 1 0))
+      (setf s 7 (if (= (& a 128) 128) 1 0))
+      (setf s 2 (parity8 a))
+      0)))
+
+(defn
+  inr
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let [r (& (>> op 3) 7) v (& (+ (getr s r) 1) 255)] (do (setr8 s r v) (flags-zsp s v))))
+
+(defn
+  dcr
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let [r (& (>> op 3) 7) v (& (- (getr s r) 1) 255)] (do (setr8 s r v) (flags-zsp s v))))
+
+(defn
+  inx
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let [rp (& (>> op 4) 3)] (pset s rp (& (+ (pget s rp) 1) 65535))))
+
+(defn
+  dcx
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let [rp (& (>> op 4) 3)] (pset s rp (& (- (pget s rp) 1) 65535))))
+
+(defn
+  dad
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let
+    [rp (& (>> op 4) 3) res (+ (hl s) (pget s rp))]
+    (do (pset s 2 (& res 65535)) (setf s 0 (if (> res 65535) 1 0)))))
+
+(defn
+  rot
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let
+    [kind (& (>> op 3) 3) a (reg s 7)]
+    (if
+      (= kind 0)
+      (do (setr s 7 (& (| (>> a 7) (<< a 1)) 255)) (setf s 0 (if (= (& a 128) 128) 1 0)))
+      (if
+        (= kind 1)
+        (do (setr s 7 (& (| (<< (& a 1) 7) (>> a 1)) 255)) (setf s 0 (& a 1)))
+        (if
+          (= kind 2)
+          (do
+            (setr s 7 (& (| (getf s 0) (<< a 1)) 255))
+            (setf s 0 (if (= (& a 128) 128) 1 0)))
+          (do (setr s 7 (& (| (<< (getf s 0) 7) (>> a 1)) 255)) (setf s 0 (& a 1))))))))
+
+(defn
+  daa
+  [(s (ptr Cpu))]
+  (-> i64)
+  (do
+    (if (> (& (reg s 7) 15) 9) (setr s 7 (& (+ (reg s 7) 6) 255)) 0)
+    (if
+      (> (& (reg s 7) 240) 144)
+      (let [res (+ (reg s 7) 96)] (do (setr s 7 (& res 255)) (arith-flags s res)))
+      0)))
+
+(defn
+  alu
+  [(s (ptr Cpu)) (op i64)]
+  (-> i64)
+  (let
+    [kind (& (>> op 3) 7) x (getr s (& op 7)) a (reg s 7)]
+    (if
+      (= kind 0)
+      (let [r (& (+ a x) 65535)] (do (arith-flags s r) (setr s 7 (& r 255))))
+      (if
+        (= kind 1)
+        (let
+          [r (& (+ (+ a x) (getf s 0)) 65535)]
+          (do (arith-flags s r) (setr s 7 (& r 255))))
+        (if
+          (= kind 2)
+          (let [r (& (- a x) 65535)] (do (arith-flags s r) (setr s 7 (& r 255))))
+          (if
+            (= kind 3)
+            (let
+              [r (& (- (- a x) (getf s 0)) 65535)]
+              (do (arith-flags s r) (setr s 7 (& r 255))))
+            (if
+              (= kind 4)
+              (do (setr s 7 (& a x)) (logic-flags s))
+              (if
+                (= kind 5)
+                (do (setr s 7 (^ a x)) (logic-flags s))
+                (if
+                  (= kind 6)
+                  (do (setr s 7 (| a x)) (logic-flags s))
+                  (arith-flags s (& (- a x) 65535)))))))))))
+
+(defn
+  test-cc
+  [(s (ptr Cpu)) (code i64)]
+  (-> i64)
+  (if
+    (= code 0)
+    (if (= (getf s 6) 0) 1 0)
+    (if
+      (= code 1)
+      (getf s 6)
+      (if
+        (= code 2)
+        (if (= (getf s 0) 0) 1 0)
+        (if
+          (= code 3)
+          (getf s 0)
+          (if
+            (= code 4)
+            (if (= (getf s 2) 0) 1 0)
+            (if (= code 5) (getf s 2) (if (= code 6) (if (= (getf s 7) 0) 1 0) (getf s 7)))))))))
+
+(defn
+  call-sub
+  [(s (ptr Cpu)) (addr i64)]
+  (-> i64)
+  (let [ret (+ (rpc s) 2)] (do (push16 s ret) (spc s addr))))
+
+(defn
+  lo
+  [(s (ptr Cpu)) (op i64) (b1 i64) (b2 i64)]
+  (-> i64)
+  (if
+    (= (& op 199) 4)
+    (inr s op)
+    (if
+      (= (& op 199) 5)
+      (dcr s op)
+      (if
+        (= (& op 199) 6)
+        (do (setr8 s (& (>> op 3) 7) b1) (addpc s 1))
+        (if
+          (= (& op 207) 1)
+          (do (pset s (& (>> op 4) 3) (| (<< b2 8) b1)) (addpc s 2))
+          (if
+            (= (& op 207) 3)
+            (inx s op)
+            (if
+              (= (& op 207) 11)
+              (dcx s op)
+              (if
+                (= (& op 207) 9)
+                (dad s op)
+                (if
+                  (= (& op 231) 7)
+                  (rot s op)
+                  (if
+                    (= op 2)
+                    (wb s (pget s 0) (reg s 7))
+                    (if
+                      (= op 10)
+                      (setr s 7 (rb s (pget s 0)))
+                      (if
+                        (= op 18)
+                        (wb s (pget s 1) (reg s 7))
+                        (if
+                          (= op 26)
+                          (setr s 7 (rb s (pget s 1)))
+                          (if
+                            (= op 34)
+                            (let
+                              [a (| (<< b2 8) b1)]
+                              (do (wb s a (reg s 5)) (wb s (+ a 1) (reg s 4)) (addpc s 2)))
+                            (if
+                              (= op 42)
+                              (let
+                                [a (| (<< b2 8) b1)]
+                                (do
+                                  (setr s 5 (rb s a))
+                                  (setr s 4 (rb s (+ a 1)))
+                                  (addpc s 2)))
+                              (if
+                                (= op 39)
+                                (daa s)
+                                (if
+                                  (= op 47)
+                                  (setr s 7 (& (^ (reg s 7) 255) 255))
+                                  (if
+                                    (= op 50)
+                                    (do (wb s (| (<< b2 8) b1) (reg s 7)) (addpc s 2))
+                                    (if
+                                      (= op 55)
+                                      (setf s 0 1)
+                                      (if
+                                        (= op 58)
+                                        (do (setr s 7 (rb s (| (<< b2 8) b1))) (addpc s 2))
+                                        (if (= op 63) (setf s 0 0) 0)))))))))))))))))))))
+
+(defn
+  hi
+  [(s (ptr Cpu)) (op i64) (b1 i64) (b2 i64)]
+  (-> i64)
+  (let
+    [addr (| (<< b2 8) b1)]
+    (if
+      (= (& op 207) 197)
+      (let
+        [rp (& (>> op 4) 3)]
+        (if
+          (= rp 3)
+          (push16 s (| (<< (reg s 7) 8) (load (field s f))))
+          (push16 s (pget s rp))))
+      (if
+        (= (& op 207) 193)
+        (let
+          [rp (& (>> op 4) 3) v (pop16 s)]
+          (if
+            (= rp 3)
+            (do (setr s 7 (& (>> v 8) 255)) (store! (field s f) (& v 255)) 0)
+            (pset s rp v)))
+        (if
+          (= (& op 199) 199)
+          (let [n (& (>> op 3) 7) ret (+ (rpc s) 2)] (do (push16 s ret) (spc s (* n 8))))
+          (if
+            (= (& op 199) 192)
+            (if (= (test-cc s (& (>> op 3) 7)) 1) (spc s (pop16 s)) 0)
+            (if
+              (= (& op 199) 194)
+              (if (= (test-cc s (& (>> op 3) 7)) 1) (spc s addr) (addpc s 2))
+              (if
+                (= (& op 199) 196)
+                (if (= (test-cc s (& (>> op 3) 7)) 1) (call-sub s addr) (addpc s 2))
+                (if
+                  (= op 195)
+                  (spc s addr)
+                  (if
+                    (= op 201)
+                    (spc s (pop16 s))
+                    (if
+                      (= op 205)
+                      (call-sub s addr)
+                      (if
+                        (= op 198)
+                        (let
+                          [x (+ (reg s 7) b1)]
+                          (do
+                            (flags-zsp s (& x 255))
+                            (setf s 0 (if (> x 255) 1 0))
+                            (setr s 7 (& x 255))
+                            (addpc s 1)))
+                        (if
+                          (= op 206)
+                          (let
+                            [x (+ (+ (reg s 7) b1) (getf s 0))]
+                            (do
+                              (flags-zsp s (& x 255))
+                              (setf s 0 (if (> x 255) 1 0))
+                              (setr s 7 (& x 255))
+                              (addpc s 1)))
+                          (if
+                            (= op 214)
+                            (let
+                              [old (reg s 7) x (& (- (reg s 7) b1) 255)]
+                              (do
+                                (flags-zsp s x)
+                                (setf s 0 (if (< old b1) 1 0))
+                                (setr s 7 x)
+                                (addpc s 1)))
+                            (if
+                              (= op 222)
+                              (let
+                                [x (& (- (- (reg s 7) b1) (getf s 0)) 65535)]
+                                (do
+                                  (flags-zsp s (& x 255))
+                                  (setf s 0 (if (> x 255) 1 0))
+                                  (setr s 7 (& x 255))
+                                  (addpc s 1)))
+                              (if
+                                (= op 230)
+                                (do (setr s 7 (& (reg s 7) b1)) (logic-flags s) (addpc s 1))
+                                (if
+                                  (= op 238)
+                                  (let
+                                    [x (& (^ (reg s 7) b1) 255)]
+                                    (do
+                                      (flags-zsp s x)
+                                      (setf s 0 0)
+                                      (setr s 7 x)
+                                      (addpc s 1)))
+                                  (if
+                                    (= op 246)
+                                    (let
+                                      [x (& (| (reg s 7) b1) 255)]
+                                      (do
+                                        (flags-zsp s x)
+                                        (setf s 0 0)
+                                        (setr s 7 x)
+                                        (addpc s 1)))
+                                    (if
+                                      (= op 254)
+                                      (let
+                                        [old (reg s 7) x (& (- (reg s 7) b1) 255)]
+                                        (do
+                                          (flags-zsp s x)
+                                          (setf s 0 (if (< old b1) 1 0))
+                                          (addpc s 1)))
+                                      (if
+                                        (= op 227)
+                                        (let
+                                          [sp (load (field s sp)) l (reg s 5) h (reg s 4)]
+                                          (do
+                                            (setr s 5 (rb s sp))
+                                            (setr s 4 (rb s (+ sp 1)))
+                                            (wb s sp l)
+                                            (wb s (+ sp 1) h)))
+                                        (if
+                                          (= op 233)
+                                          (spc s (hl s))
+                                          (if
+                                            (= op 235)
+                                            (let
+                                              [d (reg s 2) e (reg s 3)]
+                                              (do
+                                                (setr s 2 (reg s 4))
+                                                (setr s 3 (reg s 5))
+                                                (setr s 4 d)
+                                                (setr s 5 e)))
+                                            (if
+                                              (= op 249)
+                                              (do (store! (field s sp) (hl s)) 0)
+                                              (if
+                                                (= op 243)
+                                                (do (store! (field s ie) 0) 0)
+                                                (if
+                                                  (= op 251)
+                                                  (do (store! (field s ie) 1) 0)
+                                                  (if
+                                                    (= op 211)
+                                                    (addpc s 1)
+                                                    (if (= op 219) (addpc s 1) 0)))))))))))))))))))))))))))
+
+(defn
+  emulate
+  [(s (ptr Cpu))]
+  (-> i64)
+  (let
+    [pc (rpc s) op (rb s pc) b1 (rb s (+ pc 1)) b2 (rb s (+ pc 2))]
+    (do
+      (spc s (+ pc 1))
+      (if
+        (= (& op 192) 0)
+        (lo s op b1 b2)
+        (if
+          (= (& op 192) 64)
+          (if (= op 118) 0 (setr8 s (& (>> op 3) 7) (getr s (& op 7))))
+          (if (= (& op 192) 128) (alu s op) (hi s op b1 b2))))
+      (cast :i64 (load (index (field s cyc) op))))))
+
+(defn
+  gen-interrupt
+  [(s (ptr Cpu)) (n i64)]
+  (-> i64)
+  (do (push16 s (rpc s)) (spc s (* n 8)) (store! (field s ie) 0) 0))
+
+(defn ienabled [(s (ptr Cpu))] (-> i64) (load (field s ie)))
+
+(defn
+  crow
+  [(s (ptr Cpu))
+    (o i64)
+    (a i64)
+    (b i64)
+    (c i64)
+    (d i64)
+    (e i64)
+    (f i64)
+    (g i64)
+    (h i64)
+    (i i64)
+    (j i64)
+    (k i64)
+    (l i64)
+    (m i64)
+    (n i64)
+    (p i64)
+    (q i64)]
+  (-> i64)
+  (do
+    (store! (index (field s cyc) (+ o 0)) (cast :u8 a))
+    (store! (index (field s cyc) (+ o 1)) (cast :u8 b))
+    (store! (index (field s cyc) (+ o 2)) (cast :u8 c))
+    (store! (index (field s cyc) (+ o 3)) (cast :u8 d))
+    (store! (index (field s cyc) (+ o 4)) (cast :u8 e))
+    (store! (index (field s cyc) (+ o 5)) (cast :u8 f))
+    (store! (index (field s cyc) (+ o 6)) (cast :u8 g))
+    (store! (index (field s cyc) (+ o 7)) (cast :u8 h))
+    (store! (index (field s cyc) (+ o 8)) (cast :u8 i))
+    (store! (index (field s cyc) (+ o 9)) (cast :u8 j))
+    (store! (index (field s cyc) (+ o 10)) (cast :u8 k))
+    (store! (index (field s cyc) (+ o 11)) (cast :u8 l))
+    (store! (index (field s cyc) (+ o 12)) (cast :u8 m))
+    (store! (index (field s cyc) (+ o 13)) (cast :u8 n))
+    (store! (index (field s cyc) (+ o 14)) (cast :u8 p))
+    (store! (index (field s cyc) (+ o 15)) (cast :u8 q))
+    0))
+
+(defn
+  load-cycles
+  [(s (ptr Cpu))]
+  (-> i64)
+  (do
+    (crow s 0 4 10 7 5 5 5 7 4 4 10 7 5 5 5 7 4)
+    (crow s 16 4 10 7 5 5 5 7 4 4 10 7 5 5 5 7 4)
+    (crow s 32 4 10 16 5 5 5 7 4 4 10 16 5 5 5 7 4)
+    (crow s 48 4 10 13 5 10 10 10 4 4 10 13 5 5 5 7 4)
+    (crow s 64 5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 80 5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 96 5 5 5 5 5 5 7 5 5 5 5 5 5 5 7 5)
+    (crow s 112 7 7 7 7 7 7 7 7 5 5 5 5 5 5 7 5)
+    (crow s 128 4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 144 4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 160 4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 176 4 4 4 4 4 4 7 4 4 4 4 4 4 4 7 4)
+    (crow s 192 11 10 10 10 17 11 7 11 11 10 10 10 10 17 7 11)
+    (crow s 208 11 10 10 10 17 11 7 11 11 10 10 10 10 17 7 11)
+    (crow s 224 11 10 10 18 17 11 7 11 11 5 10 5 17 17 7 11)
+    (crow s 240 11 10 10 4 17 11 7 11 11 5 10 4 17 17 7 11)
+    0))
+
+(defn init [(s (ptr Cpu))] (-> i64) (do (memset s 0 (sizeof Cpu)) (load-cycles s) 0))
+
+(defn
+  load-com
+  [(s (ptr Cpu)) (path (ptr i8)) (at i64)]
+  (-> i64)
+  (let
+    [fd (cast :i64 (open path 0))]
+    (if
+      (< fd 0)
+      -1
+      (do (read (cast i32 fd) (index (field s mem) at) (- 65536 at)) (close fd) 0))))
+

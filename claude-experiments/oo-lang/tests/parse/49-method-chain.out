@@ -1,0 +1,17 @@
+(program
+  (fn main
+    (params)
+    (block
+      (call
+        (dot append
+          (call
+            (dot get
+              (dot conversation
+                self))))
+        (arg
+          (call
+            (id Message)
+            (arg role
+              (str "assistant"))
+            (arg content
+              (id reply))))))))

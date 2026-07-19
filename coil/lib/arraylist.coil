@@ -1,0 +1,174 @@
+(module arraylist)
+; A growable array — `ArrayList T` — built on slices + the allocator-as-value
+; interface (lib/alloc.coil). Like everything else, an ORDINARY generic struct +
+; functions/macros; the compiler has no notion of it, and there is no ambient
+; heap: an ArrayList carries the `(ptr Allocator)` it grows with.
+;
+;   (import "lib/arraylist.coil" :use *)
+;   (let [a (malloc-allocator) (mut xs) (al-new [i64] a)]
+;     (al-push! (mut xs) 10) (al-for [v xs] …) (al-free! (mut xs)))
+;
+; Mutating ops take `(mut (ArrayList T))` — pass `(mut xs)`. Reads take it by
+; value. `al-push!` grows by doubling (initial cap 4); it tries the allocator's
+; in-place `resize`, else allocates-copies-frees (so arena allocators work too),
+; and HARD-ABORTS on genuine OOM (never a silent-wrong value). Bounds are not
+; checked (debug bounds-checks are Phase-2 safety work).
+
+(import "alloc.coil"  :use *)   ; Allocator, raw-*, alloc-slice, malloc-allocator
+(import "result.coil" :use *)   ; Option/Some/None for the allocator's results
+(import "slice.coil"  :use *)   ; (slice T) / slice-new, for al-slice + al-for
+; OOM hard-fail routes through alloc's `oom` (a shared defn) rather than a local
+; `abort` extern, so ArrayList + HashMap can be imported together (Coil doesn't
+; dedup identical extern decls across modules).
+
+(defstruct ArrayList [T]
+  [(data (ptr T)) (len i64) (cap i64) (alc (ptr Allocator))])
+
+; An empty list that will grow with allocator `a` (no allocation until first push).
+(defn al-new [T] [(a (ptr Allocator))] (-> (ArrayList T))
+  (let [(mut l) (zeroed (ArrayList T))]
+    (store! (field l alc) a)
+    (load l)))
+
+(defn al-len [T] [(l (ArrayList T))] (-> i64) (load (field l len)))
+(defn al-cap [T] [(l (ArrayList T))] (-> i64) (load (field l cap)))
+(defn al-empty? [T] [(l (ArrayList T))] (-> bool) (icmp-eq (load (field l len)) 0))
+
+(defn al-get [T] [(l (ArrayList T)) (i i64)] (-> T)
+  (load (index (load (field l data)) i)))
+(defn al-set! [T] [(l (mut (ArrayList T))) (i i64) (v T)] (-> i64)
+  (store! (index (load (field l data)) i) v)
+  0)
+
+; Grow capacity to at least `newcap`. Tries in-place resize; on failure (e.g. an
+; arena, which never resizes) allocates fresh, copies, frees the old block; a
+; genuine allocation failure aborts.
+(defn al-reserve! [T] [(l (mut (ArrayList T))) (newcap i64)] (-> i64)
+  (let [oldcap (load (field l cap))
+        a      (load (field l alc))]
+    (if (icmp-le newcap oldcap)
+        0
+        (match (raw-resize a (cast (ptr i8) (load (field l data)))
+                           (imul oldcap (sizeof T)) (imul newcap (sizeof T)) (alignof T))
+          (Some [p] (do (store! (field l data) (cast (ptr T) p))
+                        (store! (field l cap) newcap)
+                        0))
+          (None []
+            (match (alloc-slice [T] a newcap)
+              (None [] (do (oom) -1))   ; out of memory — hard fail, no silent wrong
+              (Some [np]
+                (do
+                  (let [(mut i) 0]
+                    (loop
+                      (if (icmp-ge (load i) (load (field l len)))
+                          (break)
+                          (do (store! (index np (load i))
+                                      (load (index (load (field l data)) (load i))))
+                              (store! i (iadd (load i) 1))))))
+                  (if (icmp-gt oldcap 0)
+                      (raw-free a (cast (ptr i8) (load (field l data)))
+                                (imul oldcap (sizeof T)) (alignof T))
+                      0)
+                  (store! (field l data) np)
+                  (store! (field l cap) newcap)
+                  0))))))))
+
+; Append v; grows (doubling, min 4) if full. Returns the new length.
+(defn al-push! [T] [(l (mut (ArrayList T))) (v T)] (-> i64)
+  (let [n (load (field l len))]
+    (if (icmp-ge n (load (field l cap)))
+        (al-reserve! (mut l)
+                     (if (icmp-eq (load (field l cap)) 0) 4 (imul (load (field l cap)) 2)))
+        0)
+    (store! (index (load (field l data)) n) v)
+    (store! (field l len) (iadd n 1))
+    (iadd n 1)))
+
+; Remove and return the last element as (Some v); (None) if empty.
+(defn al-pop! [T] [(l (mut (ArrayList T)))] (-> (Option T))
+  (let [n (load (field l len))]
+    (if (icmp-eq n 0)
+        (None)
+        (let [v (load (index (load (field l data)) (isub n 1)))]
+          (store! (field l len) (isub n 1))
+          (Some v)))))
+
+; A slice view over the current elements (shares storage; invalidated by a later
+; grow that moves the buffer).
+(defn al-slice [T] [(l (ArrayList T))] (-> (slice T))
+  (slice-new (load (field l data)) (load (field l len))))
+
+; Free the backing buffer and reset to empty (the allocator itself is untouched).
+(defn al-free! [T] [(l (mut (ArrayList T)))] (-> i64)
+  (if (icmp-gt (load (field l cap)) 0)
+      (raw-free (load (field l alc)) (cast (ptr i8) (load (field l data)))
+                (imul (load (field l cap)) (sizeof T)) (alignof T))
+      0)
+  (store! (field l data) (cast (ptr T) 0))
+  (store! (field l len) 0)
+  (store! (field l cap) 0)
+  0)
+
+; Reset to empty WITHOUT freeing the buffer — length becomes 0 but the capacity is
+; kept for reuse (the elements are logically gone; a later push overwrites them). Use
+; `al-free!` to also release the storage.
+(defn al-clear! [T] [(l (mut (ArrayList T)))] (-> i64)
+  (store! (field l len) 0)
+  0)
+
+; Hand over ownership of the elements as a right-sized `(slice T)`, resetting the list
+; to empty. The buffer is shrunk to exactly `len` (via the allocator's resize) so the
+; returned slice owns a freeable, dangling-capacity-free block — free it with
+; `(raw-free a (cast (ptr i8) (slice-data s)) (* (slice-len s) (sizeof T)) (alignof T))`.
+; This is the safe hand-off `al-slice` is NOT: `al-slice` returns a borrowed view that
+; the next `al-push!` can invalidate by moving the buffer, whereas this transfers the
+; storage out of the list entirely. On an empty list the result is an empty slice.
+(defn al-into-slice [T] [(l (mut (ArrayList T)))] (-> (slice T))
+  (let [a    (load (field l alc))
+        n    (load (field l len))
+        cap  (load (field l cap))
+        data (load (field l data))
+        final (if (and (icmp-gt cap n) (icmp-gt n 0))
+                  ; shrink to exactly n; if the allocator can't, keep the full block
+                  ; (the extra capacity is leaked, never a use-after-free).
+                  (match (raw-resize a (cast (ptr i8) data)
+                                     (imul cap (sizeof T)) (imul n (sizeof T)) (alignof T))
+                    (Some [p] (cast (ptr T) p))
+                    (None []  data))
+                  data)]
+    (store! (field l data) (cast (ptr T) 0))
+    (store! (field l len) 0)
+    (store! (field l cap) 0)
+    (slice-new final n)))
+
+; `(al-for [x xs] body...)` — iterate the list's elements. A thin alias for the
+; unified iterator protocol `(for x (iter xs))` (gen-1): it expands to
+; `(for-in [x (iter xs)])`, driving the list's `Iterator` impl (a `SliceIter` over
+; its `al-slice` view). Kept as a convenience spelling.
+(defn al-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 2))
+      (error "al-for: binding must be [x arraylist]")
+      `(for-in [~(code-nth binding 0) (iter ~(code-nth binding 1))] ~@body)))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len xs)` / `(get xs i)` / `(set! (mut xs) i v)` / `(push! (mut xs) v)` /
+; `(pop! (mut xs))` on any (ArrayList T) — the al-* functions remain the named
+; API these delegate to.
+(impl [T] Len (ArrayList T)
+  (len [(xs (ArrayList T))] (-> i64) (al-len xs)))
+(impl [T] Get (ArrayList T)
+  (get [(xs (ArrayList T)) (i i64)] (-> T) (al-get xs i)))
+(impl [T] Set (ArrayList T)
+  (set! [(xs (mut (ArrayList T))) (i i64) (v T)] (-> i64) (al-set! (mut xs) i v)))
+(impl [T] Push (ArrayList T)
+  (push! [(xs (mut (ArrayList T))) (v T)] (-> i64) (al-push! (mut xs) v)))
+(impl [T] Pop (ArrayList T)
+  (pop! [(xs (mut (ArrayList T)))] (-> (Option T)) (al-pop! (mut xs))))
+
+; ---- iteration (coil.core Iterable) -----------------------------------------
+; A list iterates through a `(SliceIter T)` over its `al-slice` view — the same
+; iterator slices use — so `(for x (iter xs))` and `(al-for [x xs] …)` walk the
+; elements identically. The view is valid for the duration of a read-only walk
+; (don't push/pop the list mid-iteration, exactly as `al-slice` already warns).
+(impl [T] Iterable (ArrayList T)
+  (iter [(xs (ArrayList T))] (-> (SliceIter T)) (iter (al-slice xs))))

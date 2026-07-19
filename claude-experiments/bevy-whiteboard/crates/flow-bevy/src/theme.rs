@@ -23,5 +23,8 @@ pub fn kind_color(theme: &Theme, kind: Kind) -> Color {
         Kind::Router => theme.node_fill.router,
         Kind::Queue => theme.node_fill.queue,
         Kind::Sink => theme.node_fill.sink,
+        // A fleet of workers — share the worker fill so the family reads
+        // as related.
+        Kind::AutoScalingGroup => theme.node_fill.worker,
     }
 }

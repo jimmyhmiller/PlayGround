@@ -1,0 +1,6 @@
+{:lib org.clojure/core.match
+ :version "1.1.0"
+ :vendor "clojure-stub/vendor/core.match"
+ :jvm-alias :match          ;; bench/deps.edn alias supplying the real Maven dep
+ ;; a var only the REAL library binds — the driver requires provenance
+ :sentinel clojure.core.match/match}

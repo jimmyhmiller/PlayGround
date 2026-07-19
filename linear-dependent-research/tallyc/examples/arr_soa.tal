@@ -1,0 +1,40 @@
+// STRUCTURE OF ARRAYS — struct-heavy numeric loops, flat, today.
+//
+//   tally run examples/arr_soa.tal        →  75
+//
+// tallyc does not yet have flat multi-field structs BY VALUE (that is Phase B2,
+// docs/PHASE_B2_VALUE_STRUCTS.md — the typed-codegen rewrite). But the loop C
+// programmers actually write over `struct Point { x, y }[]` is expressible FLAT
+// right now as a structure of arrays: one contiguous `Arr` per field. Each
+// field access is a bare indexed load (bounds erased), the layout is exactly
+// two flat buffers, and SoA is usually the FASTER layout for numeric sweeps
+// anyway (better cache lines, vectorizes cleanly).
+//
+// Here: a dot product — two linear arrays threaded through the SAME loop (the
+// Nat convoy abstracts both; each is refined to `Arr Nat (Succ k + m)` in the
+// arm and consumed exactly once), every bound a solver-discharged erased proof.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+mul : Nat -> Nat -> Nat
+fn mul(m, n) { match m { Zero => Zero, Succ(k) => n + mul(k, n) } }
+
+dot : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 xs : Arr Nat (b + m)) -> (1 ys : Arr Nat (b + m)) -> Nat
+%partial fn dot(m, b, acc, xs, ys) {
+    match b {
+        Zero => let u = afree(xs); let v = afree(ys); acc,
+        Succ(k) =>
+            let (x, xs2) = aget(m, lt(m, Succ(k) + m), xs);
+            let (y, ys2) = aget(m, lt(m, Succ(k) + m), ys);
+            dot(Succ(m), k, acc + mul(x, y), xs2, ys2),
+    }
+}
+
+main : Nat
+fn main() {
+    let xs = anew(4, 3);                  // x = [3, 3, 3, 3]
+    let ys0 = anew(4, 5);
+    let ys = aset(2, lt(2, 4), 10, ys0);  // y = [5, 5, 10, 5]
+    dot(0, 4, 0, xs, ys)                  // 15 + 15 + 30 + 15 = 75
+}

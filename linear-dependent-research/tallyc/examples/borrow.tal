@@ -1,0 +1,68 @@
+// PHASE C — &mut BORROWS: safe in-place mutation with ZERO runtime trace.
+//
+//   tally run examples/borrow.tal        →  51
+//
+// `borrow` splits an `Own a` into three pieces:
+//     MkBorrowed(p : Ptr l,  v : PtsTo l a,  ln : Loan l a)
+//       - `p`  — the address, ω (copy it freely)
+//       - `v`  — the VIEW: the linear permission to read/write the cell.
+//                ZERO-WIDTH at runtime — the checker's accounting is its whole
+//                existence; the machine sees nothing.
+//       - `ln` — the LOAN: the linear obligation to `restore`, which reunites
+//                view + loan back into the Own. Also zero-width.
+//
+// So `borrow` and `restore` compile to NOTHING (identity on the address), and
+// a mutation through a borrow is a bare load/store into the original cell:
+// this whole program — four in-place mutations across two owned cells — is
+// exactly TWO mallocs (the allocs) and TWO frees (the unboxes).
+//
+// The discipline is the existing QTT accounting, no new checker:
+//   - drop the view/loan (forget to restore)      → compile error (0 ⋢ 1)
+//   - vfree the cell while borrowed               → the loan is stranded (0 ⋢ 1)
+//   - use a view twice / write through a stale one → compile error
+//   - read without consuming: `vtake` then `vwrite` back — for a LINEAR
+//     payload you cannot both keep it and write it back (ω ⋢ 1), so
+//     duplication through a borrow is unrepresentable.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+struct Point { x : Nat, y : Nat }
+
+// &mut a scalar: load, add, store — in place.
+bump : (1 o : Own Nat) -> Own Nat
+fn bump(o) {
+    match borrow(o) {
+        MkBorrowed(p, v, ln) =>
+            let (x, vh) = vtake(p, v);
+            let v2 = vwrite(p, vh, x + 1);
+            restore(p, v2, ln),
+    }
+}
+
+// &mut a STRUCT field: the record moves out into registers, one field
+// changes, it moves back into the same cell.
+nudge : (1 o : Own Point) -> Own Point
+fn nudge(o) {
+    match borrow(o) {
+        MkBorrowed(p, v, ln) =>
+            let (pt, vh) = vtake(p, v);
+            match pt {
+                Point(a, b) =>
+                    let v2 = vwrite(p, vh, Point(a + 1, b));
+                    restore(p, v2, ln),
+            },
+    }
+}
+
+main : Nat
+fn main() {
+    let n0 = alloc(40);
+    let n1 = bump(n0);
+    let n2 = bump(n1);              // 42, mutated in place twice
+    let p0 = alloc(Point(3, 4));
+    let p1 = nudge(p0);
+    let p2 = nudge(p1);             // (5, 4), mutated in place twice
+    let a = unbox(n2);
+    let q = unbox(p2);
+    match q { Point(x, y) => a + x + y }   // 42 + 5 + 4 = 51
+}

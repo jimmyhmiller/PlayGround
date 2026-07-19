@@ -1,0 +1,17 @@
+; Explicit SIMD -- guaranteed-width vector code, not auto-vectorization.
+;
+; None of this is in the compiler. `(vec f32 4)` is the one new *type*; every
+; *operation* (build, splat, multiply, add, fma, horizontal reduce, the dot
+; product) is a macro over the `(llvm-ir ...)` raw-IR primitive, living in
+; lib/simd.coil. The macros expand to LLVM IR templates, the LLVM verifier
+; checks them, and -O3 inlines them away to bare NEON (`fmul.4s`, ...) / SSE.
+;   coil run examples/simd.coil; echo $?   => 42
+;   coil emit-ir examples/simd.coil        => the <4 x float> ops, pre-inline
+(module app)
+(import "lib/simd.coil" :use *)
+
+(defn main [] (-> :i64)
+  ; dot([10,10,10,12], [1,1,1,1]) = 10 + 10 + 10 + 12 = 42
+  (let [a (vec4f 10 10 10 12)        ; build a <4 x float> from four scalars
+        b (splat4f 1)]               ; broadcast 1.0 across all four lanes
+    (cast :i64 (dot4f a b))))        ; lane-wise multiply + horizontal sum

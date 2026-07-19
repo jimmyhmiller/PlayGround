@@ -14,7 +14,7 @@ use gcrust::lower::lower_program;
 use gcrust::resolve::resolve_module;
 
 fn prog_of(src: &str) -> gcrust::core::CoreProgram {
-    let module = parse_with_prelude(src).unwrap();
+    let (module, _) = parse_with_prelude(src).unwrap();
     let resolved = resolve_module(module).unwrap();
     lower_program(&resolved.globals).unwrap()
 }
@@ -96,7 +96,7 @@ const JOIN_LIVE_ROOTS_SRC: &str = r#"
         let child = t.join();
         let mut s = 0;
         let mut j = 0;
-        while j < vec_len(m) { s = s + vec_get(m, j); j = j + 1; }
+        while j < vec_len(m) { s = s + vec_get_unchecked(m, j); j = j + 1; }
         s + child
     }
 "#;
@@ -188,7 +188,7 @@ fn thread_returns_vec() {
             let t = Thread::spawn(|| build(100));
             let r = t.join();
             let mut s = 0; let mut j = 0;
-            while j < vec_len(r) { s = s + vec_get(r, j); j = j + 1; }
+            while j < vec_len(r) { s = s + vec_get_unchecked(r, j); j = j + 1; }
             s
         }
     "#;
@@ -210,7 +210,7 @@ fn thread_returns_vec_under_stress() {
             let t = Thread::spawn(|| build(80));
             let r = t.join();
             let mut s = 0; let mut j = 0;
-            while j < vec_len(r) { s = s + vec_get(r, j); j = j + 1; }
+            while j < vec_len(r) { s = s + vec_get_unchecked(r, j); j = j + 1; }
             s
         }
     "#;
@@ -263,7 +263,7 @@ fn aot_spawn_join() {
     out.push(format!("gcrust_threads_test_{}", std::process::id()));
 
     let src = include_str!("../examples/threads.gcr");
-    build_executable(&prog_of(src), &out).expect("build_executable failed");
+    build_executable(&prog_of(src), &out, &[]).expect("build_executable failed");
     // 37492500 & 0xFF = 0x... low byte
     assert_eq!(run_exit_code(&out), 37492500 & 0xFF);
     let _ = std::fs::remove_file(&out);

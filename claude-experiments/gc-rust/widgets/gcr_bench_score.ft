@@ -1,0 +1,167 @@
+// gcr_bench_score.ft — VIEW: the headline scoreboard (schema-driven).
+//
+// A standalone node in the bench toolkit (bench.ft). It focuses the "gc-rust"
+// series (or the first series) and shows the at-a-glance story for the selected
+// metric: stat cards + a per-group bar with the value and the row winner. In
+// ratio mode (a baseline exists) the cards/bars are × vs the baseline; otherwise
+// they are absolute, scaled to the max across groups.
+//
+// params: { file, metric: "<metric key>", metric_topic }
+import "host"
+import { gv, has, series_color, load_doc, normalize, metric_keys, metric_def,
+         series_scalar, max_scalar, baseline_scalar, group_winner, gcrust_avg_ratio,
+         fmt_ratio, fmt_value, metric_topic } from "bench"
+import { col_text, col_muted, col_accent, col_panel, col_err, col_warn } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn results_path() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/bench/results.json")
+fn topic() = param("metric_topic", metric_topic())
+
+fn init_state() = { norm: {}, loaded: false, status: "loading…", metric: "" }
+let state = atom(init_state())
+
+fn ensure_metric(norm, cur) {
+    let keys = metric_keys(norm)
+    if len(keys) == 0 { return cur }
+    if cur != "" and contains(keys, cur) { cur } else { keys[0] }
+}
+
+fn reload() {
+    let r = load_doc(results_path())
+    if not r.ok { reset!(state, { ..(@state), loaded: false, status: r.error }); request_render(); return }
+    let norm = normalize(r.raw)
+    reset!(state, { ..(@state), norm: norm, loaded: true, status: "", metric: ensure_metric(norm, (@state).metric) })
+    request_render()
+}
+
+fn on_start() {
+    let m0 = param("metric", "")
+    if m0 != "" { reset!(state, { ..(@state), metric: m0 }) }
+    reload()
+}
+
+fn on_message(topic_, payload, sender) {
+    if topic_ != topic() { return }
+    let m = gv(payload, "metric", "")
+    if m != "" and contains(metric_keys((@state).norm), m) and m != (@state).metric {
+        reset!(state, { ..(@state), metric: m }); request_render()
+    }
+    if gv(payload, "reload", false) { reload() }
+}
+
+fn ratio_mode(norm) = gv(norm, "baseline", "") != ""
+
+// The series this scoreboard focuses on: gc-rust if present, else the first.
+fn focus_series(group) {
+    for s in gv(group, "series", []) { if gv(s, "label", "") == "gc-rust" { return s } }
+    let ss = gv(group, "series", [])
+    if len(ss) > 0 { ss[0] } else { {} }
+}
+
+fn focus_label(norm) {
+    let groups = gv(norm, "groups", [])
+    if len(groups) == 0 { return "—" }
+    gv(focus_series(groups[0]), "label", "—")
+}
+
+fn pad_right(s, n) {
+    let mut r = s
+    while len(r) < n { r = r + " " }
+    r
+}
+
+fn stat_card(label, value, color) =
+    { kind: "vstack", gap: 2.0, pad: 8.0, style: { background: col_panel(), width: "118" }, children: [
+        { kind: "text", value: value, size: 19.0, weight: "bold", color: color },
+        { kind: "text", value: label, size: 10.0, color: col_muted() },
+    ]}
+
+fn cards(norm, key) {
+    if ratio_mode(norm) {
+        let mut le = 0
+        let mut slow = 0
+        let mut verok = 0
+        let mut anyver = false
+        for g in gv(norm, "groups", []) {
+            let base = baseline_scalar(norm, g, key)
+            let v = to_float(series_scalar(focus_series(g), key))
+            let r = if base > 0.0 { v / base } else { 0.0 }
+            if r <= 1.02 { le = le + 1 } else { slow = slow + 1 }
+            if has(g, "verify") { anyver = true  if gv(g, "verify", false) { verok = verok + 1 } }
+        }
+        let n = len(gv(norm, "groups", []))
+        let avg = gcrust_avg_ratio(norm, key)
+        let mut cs = [
+            stat_card("avg vs " + gv(norm, "baseline", ""), fmt_ratio(avg), if avg <= 1.05 { "#7ee0a0" } else { col_warn() }),
+            stat_card("≤ baseline", str(le) + "/" + str(n), "#7ee0a0"),
+            stat_card("slower", str(slow) + "/" + str(n), col_warn()),
+        ]
+        if anyver { cs = push(cs, stat_card("verified", str(verok) + "/" + str(n), if verok == n { "#7ee0a0" } else { col_err() })) }
+        cs
+    } else {
+        // absolute mode: summarize the focus series across groups
+        let unit = gv(metric_def(norm, key), "unit", "")
+        let mut best = ""
+        let mut bestv = 0.0
+        let mut worst = ""
+        let mut worstv = 0.0
+        for g in gv(norm, "groups", []) {
+            let v = to_float(series_scalar(focus_series(g), key))
+            if best == "" or v < bestv { best = gv(g, "name", "?")  bestv = v }
+            if worst == "" or v > worstv { worst = gv(g, "name", "?")  worstv = v }
+        }
+        [
+            stat_card("programs", str(len(gv(norm, "groups", []))), col_accent()),
+            stat_card("lowest · " + best, fmt_value(bestv, unit), "#7ee0a0"),
+            stat_card("highest · " + worst, fmt_value(worstv, unit), col_warn()),
+        ]
+    }
+}
+
+fn bench_row(norm, group, key, scale) {
+    let unit = gv(metric_def(norm, key), "unit", "")
+    let s = focus_series(group)
+    let raw = to_float(series_scalar(s, key))
+    let rmode = ratio_mode(norm)
+    let base = baseline_scalar(norm, group, key)
+    let val = if rmode { if base > 0.0 { raw / base } else { 0.0 } } else { raw }
+    let good = if rmode { val <= 1.02 } else { true }
+    let lbl = if rmode { fmt_ratio(val) } else { fmt_value(raw, unit) }
+    let win = group_winner(norm, group, key)
+    { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "text", value: pad_right(gv(group, "name", "?"), 15), family: "mono", size: 11.0, color: col_text(), wrap: false },
+        { kind: "bar", value: val, max: scale, width: 120.0, height: 8.0,
+          color: if good { "#7ee0a0" } else { col_warn() }, track: col_panel() },
+        { kind: "text", value: pad_right(lbl, 8), family: "mono", size: 11.0,
+          color: if good { "#7ee0a0" } else { col_warn() }, wrap: false },
+        { kind: "text", value: "best: " + win, family: "mono", size: 10.0, color: series_color(win, 0), wrap: false },
+    ]}
+}
+
+fn render(w, h) {
+    let s = @state
+    let def = metric_def(s.norm, s.metric)
+    let mut kids = []
+    kids = push(kids, { kind: "text", value: "★ scoreboard — " + gv(def, "label", s.metric) +
+        "  (" + focus_label(s.norm) + ")", size: 13.0, weight: "bold", color: col_accent() })
+    if not s.loaded {
+        kids = push(kids, { kind: "text", value: s.status, size: 12.0, color: col_err(), wrap: true })
+        return { kind: "vstack", gap: 8.0, pad: 12.0, style: { height: "100%" }, children: kids }
+    }
+    kids = push(kids, { kind: "hstack", gap: 8.0, align: "start", children: cards(s.norm, s.metric) })
+    kids = push(kids, { kind: "divider" })
+    let rmode = ratio_mode(s.norm)
+    let mut scale = 1.2
+    if rmode {
+        for g in gv(s.norm, "groups", []) {
+            let base = baseline_scalar(s.norm, g, s.metric)
+            let raw = to_float(series_scalar(focus_series(g), s.metric))
+            let v = if base > 0.0 { raw / base } else { 0.0 }
+            if v > scale { scale = v }
+        }
+    } else { scale = max_scalar(s.norm, s.metric) }
+    for g in gv(s.norm, "groups", []) {
+        kids = push(kids, bench_row(s.norm, g, s.metric, scale * 1.1))
+    }
+    { kind: "vstack", gap: 6.0, pad: 12.0, style: { height: "100%" }, children: kids }
+}

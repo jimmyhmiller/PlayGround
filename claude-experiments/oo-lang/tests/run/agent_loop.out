@@ -1,0 +1,7 @@
+[agent] -> tool_use: calculate({"a":17,"b":23,"op":"mul"})
+[agent] <- tool_result: calculate => 17 * 23 = 391
+answer1=Here you go: 17 * 23 = 391
+messages1=4
+[agent] -> tool_use: get_weather({"location":"Tokyo"})
+[agent] <- tool_result: get_weather => Tokyo: 18C, cloudy
+answer2=Here you go: Tokyo: 18C, cloudy

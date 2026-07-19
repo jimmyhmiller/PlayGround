@@ -1,0 +1,40 @@
+// threads-mini.scry — a small, fast-terminating threaded program for the eval golden
+// tests (scry-eval-cli runs it to completion, then evaluates one expression against the
+// final, quiescent heap). 3 threads each bump a shared Mutex-guarded counter 1000 times
+// and allocate 1000 Message instances; after join the counter is exactly 3000 and the
+// Message arena holds exactly 3000 live.
+
+class Message {
+  n: Int
+  fn init(n: Int) { self.n = n }
+}
+
+class Worker implements Runnable {
+  box: Mutex<Int>
+  fn run() -> Void {
+    var i = 0
+    while i < 1000 {
+      self.box.lock()
+      self.box.set(self.box.get() + 1)
+      self.box.unlock()
+      let m = Message(n: i)
+      i = i + 1
+    }
+  }
+}
+
+fn main() {
+  let box = Mutex<Int>(0)
+  let hs = List<ThreadHandle>()
+  var t = 0
+  while t < 3 {
+    hs.push(Thread.spawn(Worker(box: box)))
+    t = t + 1
+  }
+  var j = 0
+  while j < 3 {
+    hs.get(j).join()
+    j = j + 1
+  }
+  print(box.get())
+}

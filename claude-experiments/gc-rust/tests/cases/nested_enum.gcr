@@ -1,0 +1,7 @@
+fn main() -> i64 {
+  let x: Option<Option<i64>> = Option::Some(Option::Some(20));
+  let a = match x { Option::Some(inner) => match inner { Option::Some(v) => v, Option::None => 0 }, Option::None => 0 };
+  let y: Result<Result<i64,i64>,i64> = Result::Ok(Result::Ok(22));
+  let b = match y { Result::Ok(i) => match i { Result::Ok(v) => v, Result::Err(e) => 0 }, Result::Err(e) => 0 };
+  a + b
+}

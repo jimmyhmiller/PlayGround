@@ -1,0 +1,42 @@
+{
+  "name": "tanstack-start-example-basic",
+  "private": true,
+  "sideEffects": false,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build && tsc --noEmit",
+    "acceptance:reference": "node acceptance.mjs reference --strict",
+    "acceptance:status": "node acceptance.mjs diffpack",
+    "acceptance:diffpack": "node acceptance.mjs diffpack --strict",
+    "browser:hydration": "node hydration-check.mjs",
+    "browser:serverfn": "node serverfn-check.mjs",
+    "browser:tailwind": "node tailwind-check.mjs",
+    "browser:routes": "node routes-check.mjs",
+    "browser:sourcemap": "node sourcemap-check.mjs",
+    "browser:dev": "node dev-check.mjs",
+    "browser:all": "node hydration-check.mjs && node serverfn-check.mjs && node tailwind-check.mjs && node routes-check.mjs",
+    "preview": "vite preview",
+    "start": "node .output/server/index.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-router": "1.170.18",
+    "@tanstack/react-router-devtools": "1.167.0",
+    "@tanstack/react-start": "1.168.28",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "tailwind-merge": "3.6.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "nitro": "3.0.260610-beta",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "vite": "8.1.5"
+  }
+}

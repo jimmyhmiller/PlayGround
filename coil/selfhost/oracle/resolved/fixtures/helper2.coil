@@ -1,0 +1,11 @@
+; Curated resolve fixture — a sibling module imported by app.coil. Standalone:
+; declares its own (module …) and exports a SUBSET (so `secret` stays private and
+; the export-restriction path in resolve is exercised by app's qualified access to
+; the exported names only). Core forms only (no macros — resolve consumes core).
+(module rmod.helper)
+
+(export inc twice)
+
+(defn inc   [(x i64)] (-> i64) (iadd x 1))
+(defn twice [(x i64)] (-> i64) (iadd x x))
+(defn secret [(x i64)] (-> i64) (isub x 1))

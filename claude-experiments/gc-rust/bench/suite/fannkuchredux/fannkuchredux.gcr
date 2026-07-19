@@ -1,0 +1,98 @@
+// fannkuch-redux — gc-rust implementation of the classic sequential reference
+// algorithm for the Computer Language Benchmarks Game problem. fannkuch-redux is
+// a well-defined problem (checksum + maximum flip count for permutations of n),
+// so this produces output identical to the Rust/Go/Java versions in this
+// directory regardless of internal permutation method; the harness verifies the
+// two integers match.
+//
+// Algorithm: the standard sequential fannkuch-redux (public reference);
+// gc-rust translation written for the gc-rust benchmark comparison.
+//
+// N is hardcoded to match the CLI arg the harness passes to the other langs.
+
+fn fannkuch(n: i64) -> i64 {
+    let mut perm1: Array<i64> = array_new(n);
+    let mut perm: Array<i64> = array_new(n);
+    let mut count: Array<i64> = array_new(n);
+    let mut i = 0;
+    while i < n {
+        let _a = array_set(perm1, i, i);
+        i = i + 1;
+    }
+    let mut max_flips = 0;
+    let mut checksum = 0;
+    let mut perm_count = 0;
+    let mut r = n;
+    let mut running = 1;
+    while running == 1 {
+        while r != 1 {
+            let _c = array_set(count, r - 1, r);
+            r = r - 1;
+        }
+        // copy perm1 -> perm
+        let mut k0 = 0;
+        while k0 < n {
+            let _p = array_set(perm, k0, array_get_unchecked(perm1, k0));
+            k0 = k0 + 1;
+        }
+        // count flips
+        let mut flips = 0;
+        let mut k = array_get_unchecked(perm, 0);
+        while k != 0 {
+            let mut a = 0;
+            let mut b = k;
+            while a < b {
+                let ta = array_get_unchecked(perm, a);
+                let tb = array_get_unchecked(perm, b);
+                let _x = array_set(perm, a, tb);
+                let _y = array_set(perm, b, ta);
+                a = a + 1;
+                b = b - 1;
+            }
+            flips = flips + 1;
+            k = array_get_unchecked(perm, 0);
+        }
+        if flips > max_flips {
+            max_flips = flips;
+        }
+        if perm_count % 2 == 0 {
+            checksum = checksum + flips;
+        } else {
+            checksum = checksum - flips;
+        }
+        // next permutation
+        let mut done = 0;
+        while done == 0 {
+            if r == n {
+                running = 0;
+                done = 1;
+            } else {
+                let perm0 = array_get_unchecked(perm1, 0);
+                let mut m = 0;
+                while m < r {
+                    let _s = array_set(perm1, m, array_get_unchecked(perm1, m + 1));
+                    m = m + 1;
+                }
+                let _e = array_set(perm1, r, perm0);
+                let cr = array_get_unchecked(count, r) - 1;
+                let _f = array_set(count, r, cr);
+                if cr > 0 {
+                    done = 1;
+                } else {
+                    r = r + 1;
+                }
+            }
+        }
+        perm_count = perm_count + 1;
+    }
+    print_int(checksum);
+    max_flips
+}
+
+fn main() -> i64 {
+    let n = 11;
+    let mf = fannkuch(n);   // prints the checksum
+    print_int(n);           // matches the "Pfannkuchen(n)" echo in the others
+    print_int(mf);          // max flip count
+    0
+}

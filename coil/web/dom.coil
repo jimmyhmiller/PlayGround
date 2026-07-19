@@ -1,0 +1,39 @@
+; dom.coil -- a DOM vocabulary, written entirely in Coil over js.coil. Nodes and
+; events are `externref` (real JS values held by the wasm runtime). There is no
+; DOM-specific JavaScript anywhere.
+(module dom)
+(import "slice.coil" :use *)
+(import "js.coil"    :use *)
+
+(defn document []                       (-> externref) (js-global "document"))
+(defn body []                           (-> externref) (js-get (document) "body"))
+(defn query [(sel (slice u8))]          (-> externref) (js-call-s (document) "querySelector" sel))
+(defn create [(tag (slice u8))]         (-> externref) (js-call-s (document) "createElement" tag))
+
+(defn append! [(parent externref) (child externref)] (-> externref) (js-call1 parent "appendChild" child))
+(defn remove! [(node externref)]                     (-> externref) (js-call node "remove"))
+(defn parent-of [(node externref)]                   (-> externref) (js-get node "parentNode"))
+
+(defn set-text!     [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "textContent" s))
+(defn set-text-ref! [(node externref) (r externref)]  (-> i32) (js-set! node "textContent" r))
+(defn set-class!    [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "className" s))
+(defn set-value!    [(node externref) (s (slice u8))] (-> i32) (js-set-str! node "value" s))
+(defn set-attr!     [(node externref) (k (slice u8)) (v (slice u8))] (-> externref)
+  (js-call2 node "setAttribute" (js-str k) (js-str v)))
+
+(defn class-list [(node externref)]                     (-> externref) (js-get node "classList"))
+(defn add-class!    [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "add" c))
+(defn remove-class! [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "remove" c))
+(defn toggle-class! [(node externref) (c (slice u8))] (-> externref) (js-call-s (class-list node) "toggle" c))
+
+; a node/event property (e.g. an <input>'s "value", an event's "target"/"keyCode")
+(defn prop     [(node externref) (p (slice u8))] (-> externref) (js-get node p))
+(defn prop-int [(node externref) (p (slice u8))] (-> i32)       (js-int (js-get node p)))
+
+; a callback handle: the exported Coil `handler` bound with `userdata` (its first arg).
+(defn make-cb [(handler (slice u8)) (userdata i32)] (-> externref)
+  (js_cb (slice-data [u8] handler) (cast i32 (slice-len [u8] handler)) userdata))
+(defn add-listener! [(node externref) (evt (slice u8)) (cb externref)] (-> externref)
+  (js-call2 node "addEventListener" (js-str evt) cb))
+(defn on! [(node externref) (evt (slice u8)) (handler (slice u8)) (userdata i32)] (-> externref)
+  (add-listener! node evt (make-cb handler userdata)))

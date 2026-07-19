@@ -1,0 +1,50 @@
+name: YoloCamFlip
+options:
+  bundleIdPrefix: com.jimmyhmiller
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 7J8U597P7P
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "4"
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  YoloCamFlip:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jimmyhmiller.YoloCamFlip
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - target: YoloCamFlipExtension
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/SystemExtensions
+
+  YoloCamFlipExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jimmyhmiller.YoloCamFlip.Extension
+        # Match Apple's Camera Extension template: the product (executable +
+        # .systemextension wrapper) is named after the full bundle identifier.
+        PRODUCT_NAME: com.jimmyhmiller.YoloCamFlip.Extension
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/Extension.entitlements

@@ -82,11 +82,21 @@ struct Mono {
     /// Fully-formed lifted closure functions, keyed by their FuncId, to be
     /// installed into `prog.funcs` by the driver.
     closures: Vec<(FuncId, CoreFn)>,
+    /// Interned source spans (span-threading). Accumulated across all lowered
+    /// functions; moved into `CoreProgram::spans` at the end. A returned id `k`
+    /// means `spans[k-1]`; `NO_SPAN` (0) is never returned here.
+    spans: Vec<Span>,
 }
 
 impl Mono {
     fn new() -> Self {
-        Mono { ids: HashMap::new(), worklist: Vec::new(), closures: Vec::new() }
+        Mono { ids: HashMap::new(), worklist: Vec::new(), closures: Vec::new(), spans: Vec::new() }
+    }
+    /// Intern a source span, returning its 1-based `SpanId` (so `NO_SPAN`=0 stays
+    /// reserved). Threaded onto construction/alloc Core nodes for file:line:col.
+    fn intern_span(&mut self, s: Span) -> crate::core::SpanId {
+        self.spans.push(s);
+        self.spans.len() as crate::core::SpanId
     }
     /// Allocate a fresh FuncId for a lifted closure function (not name-keyed).
     fn fresh_closure_id(&mut self, count: &mut u32) -> FuncId {
@@ -152,6 +162,10 @@ pub fn lower_program(globals: &crate::resolve::GlobalTable) -> LResult<CoreProgr
 
     prog.layouts = reg.layouts;
     prog.values = reg.values;
+    prog.spans = std::mem::take(&mut mono.spans);
+    // GC-safety normalization: let-bind every GC temporary so the collector can
+    // find it (no live pointer is ever stranded in a register across a safepoint).
+    crate::anf::anf_program(&mut prog);
     Ok(prog)
 }
 
@@ -198,7 +212,7 @@ fn install_fn(prog: &mut CoreProgram, id: FuncId, f: CoreFn) {
 }
 
 fn placeholder_fn() -> CoreFn {
-    CoreFn { name: String::new(), params: vec![], ret: Repr::Unit, locals: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false }
+    CoreFn { name: String::new(), params: vec![], extern_by_ref: vec![], ret: Repr::Unit, locals: vec![], local_names: vec![], body: CoreBlock { stmts: vec![], tail: None }, closure_captures: vec![], is_extern: false, span: crate::core::NO_SPAN }
 }
 
 /// Collect free variable names referenced in `e`: single-segment path uses that
@@ -400,6 +414,10 @@ struct FnLowerer<'a, 'r, 'm> {
     scope: Vec<HashMap<String, (LocalId, Ty, bool)>>,
     /// All locals' reprs, indexed by LocalId.
     locals: Vec<Repr>,
+    /// Parallel to `locals`: each local's source name, when it has one (set by
+    /// `bind_mut`). `None` for compiler temps. Carried onto `CoreFn.local_names`
+    /// for DWARF locals (debugger P3).
+    local_names: Vec<Option<String>>,
     /// Parallel: each local's semantic Ty (for checking).
     local_tys: Vec<Ty>,
     ret_ty: Ty,
@@ -414,6 +432,9 @@ fn lower_fn<'a>(
 ) -> LResult<CoreFn> {
     let f = &job.f;
     let subst = &job.subst;
+    // Intern the function's definition span (for DWARF: its DISubprogram file +
+    // line) before `mono` is borrowed by the lowerer. Carries the def's source.
+    let fn_span = mono.intern_span(f.span);
     let ret_ty = match &f.ret {
         Some(t) => ground_type(t, subst, ctx)?,
         None => Ty::unit(),
@@ -429,15 +450,18 @@ fn lower_fn<'a>(
             subst: subst.clone(),
             scope: vec![HashMap::new()],
             locals: vec![],
+            local_names: vec![],
             local_tys: vec![],
             ret_ty: ret_ty.clone(),
         };
         let mut params = Vec::new();
+        let mut extern_by_ref = Vec::new();
         for p in &f.params {
             let ty = ground_type(&p.ty, subst, ctx)?;
             let repr = reg_lo.repr_of(&ty, p.span)?;
             // Scalars cross by value; `#[repr(C)]` value structs of transitively
-            // blittable fields cross by pointer (caller passes a stack alloca).
+            // blittable fields cross either by value (non-`mut`, per the C ABI) or
+            // by pointer (a `mut` out-param — `gettimeofday(struct timeval*)`).
             // A managed heap (`Ref`) type never crosses. See `docs/ffi.md`.
             if !repr_is_blittable(&repr, &reg_lo.reg.values) {
                 return err(
@@ -450,14 +474,29 @@ fn lower_fn<'a>(
                     p.span,
                 );
             }
+            // A value-struct parameter is by-pointer iff declared `mut`; scalars
+            // are always by value (`false`).
+            extern_by_ref.push(matches!(repr, Repr::Value(_)) && p.is_mut);
             params.push(repr);
         }
         let ret = reg_lo.repr_of(&ret_ty, f.span)?;
-        if !matches!(ret, Repr::Scalar(_) | Repr::Unit) {
+        // A return may be a scalar, nothing, or a blittable value struct that the
+        // C ABI returns in registers (≤ 16 bytes — larger needs sret, not yet
+        // supported). The codegen coerces it per AAPCS64.
+        let ret_ok = match &ret {
+            Repr::Scalar(_) | Repr::Unit => true,
+            Repr::Value(vid) => {
+                repr_is_blittable(&ret, &reg_lo.reg.values)
+                    && reg_lo.reg.values[*vid as usize].size <= 16
+            }
+            _ => false,
+        };
+        if !ret_ok {
             return err(
                 format!(
-                    "extern function `{}` returns `{}`, but only scalar types (or no return) \
-                     may cross the FFI boundary (see docs/ffi.md)",
+                    "extern function `{}` returns `{}`, but only scalar types, nothing, or a \
+                     value struct of scalar fields ≤ 16 bytes may cross the FFI boundary \
+                     (see docs/ffi.md)",
                     f.name, ty_display(&ret_ty),
                 ),
                 f.span,
@@ -466,11 +505,14 @@ fn lower_fn<'a>(
         return Ok(CoreFn {
             name: f.name.clone(),
             params,
+            extern_by_ref,
             ret,
             locals: vec![],
+            local_names: vec![],
             body: CoreBlock { stmts: vec![], tail: None },
             closure_captures: vec![],
             is_extern: true,
+            span: fn_span,
         });
     }
 
@@ -482,6 +524,7 @@ fn lower_fn<'a>(
         subst: subst.clone(),
         scope: vec![HashMap::new()],
         locals: vec![],
+        local_names: vec![],
         local_tys: vec![],
         ret_ty: ret_ty.clone(),
     };
@@ -511,7 +554,7 @@ fn lower_fn<'a>(
     check_assignable(&body_ty, &ret_ty, body_err_span)?;
     let ret = lo.repr_of(&ret_ty, f.span)?;
 
-    Ok(CoreFn { name: job.mangled.clone(), params, ret, locals: lo.locals, body, closure_captures: vec![], is_extern: false })
+    Ok(CoreFn { name: job.mangled.clone(), params, extern_by_ref: vec![], ret, locals: lo.locals, local_names: lo.local_names, body, closure_captures: vec![], is_extern: false, span: fn_span })
 }
 
 /// Lower a surface type to a ground `Ty`, applying the instantiation subst.
@@ -556,6 +599,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
     fn fresh_local(&mut self, repr: Repr, ty: Ty) -> LocalId {
         let id = self.locals.len() as LocalId;
         self.locals.push(repr);
+        self.local_names.push(None);
         self.local_tys.push(ty);
         id
     }
@@ -565,6 +609,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         self.bind_mut(name, id, ty, false);
     }
     fn bind_mut(&mut self, name: &str, id: LocalId, ty: Ty, is_mut: bool) {
+        // Record the source name for this local (DWARF locals, debugger P3). The
+        // FIRST binding of a slot names it; later rebindings of the same name get
+        // their own fresh slots, so we never clobber a name with a shadow.
+        if let Some(slot) = self.local_names.get_mut(id as usize) {
+            if slot.is_none() {
+                *slot = Some(name.to_string());
+            }
+        }
         self.scope.last_mut().unwrap().insert(name.to_string(), (id, ty, is_mut));
     }
     fn lookup(&self, name: &str) -> Option<(LocalId, Ty)> {
@@ -658,6 +710,15 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                                 }
                                 (ce, at)
                             };
+                            // P2 (DWARF): give the statement a source line for
+                            // stepping, unless the value already carries a more
+                            // precise span (e.g. a construction/alloc node).
+                            let init_expr = if init_expr.span == NO_SPAN {
+                                let sid = self.mono.intern_span(e.span);
+                                init_expr.at(sid)
+                            } else {
+                                init_expr
+                            };
                             let repr = init_expr.repr.clone();
                             let id = self.fresh_local(repr, init_ty.clone());
                             self.bind_mut(&name, id, init_ty, is_mut);
@@ -687,6 +748,12 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 }
                 Stmt::Expr(e) => {
                     let (ce, _) = self.expr(e, None)?;
+                    let ce = if ce.span == NO_SPAN {
+                        let sid = self.mono.intern_span(e.span);
+                        ce.at(sid)
+                    } else {
+                        ce
+                    };
                     stmts.push(CoreStmt::Expr(ce));
                 }
                 Stmt::Item(_) => return err("nested items not supported in v0", b.span),
@@ -695,6 +762,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let (tail, ty) = match &b.tail {
             Some(e) => {
                 let (ce, t) = self.expr(e, expected)?;
+                // P2 (DWARF): the block's tail/result expression is steppable.
+                let ce = if ce.span == NO_SPAN {
+                    let sid = self.mono.intern_span(e.span);
+                    ce.at(sid)
+                } else {
+                    ce
+                };
                 (Some(ce), t)
             }
             None => (None, Ty::unit()),
@@ -727,7 +801,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             ExprKind::Str(s) => {
                 let repr = self.repr_of(&Ty::Prim(Prim::Str), e.span)?;
                 let Repr::Ref(lid) = repr else { return err("String repr is not a reference", e.span) };
-                Ok((CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)), Ty::Prim(Prim::Str)))
+                let sid = self.mono.intern_span(e.span);
+                Ok((CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)).at(sid), Ty::Prim(Prim::Str)))
             }
             ExprKind::Unit => Ok((CoreExpr::new(CoreExprKind::Unit, Repr::Unit), Ty::unit())),
 
@@ -811,7 +886,9 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                     None => None,
                 };
                 // `return` diverges — type never (assignable to any context).
-                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit), never_ty()))
+                // P2 (DWARF): span the return so stepping stops on it.
+                let sid = self.mono.intern_span(e.span);
+                Ok((CoreExpr::new(CoreExprKind::Return(cv), Repr::Unit).at(sid), never_ty()))
             }
 
             ExprKind::While { cond, body } => {
@@ -968,7 +1045,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
 
             ExprKind::Field { base, field } => self.field_access(base, field, e.span),
 
-            ExprKind::Index { base, index } => self.array_get_op(base, index, e.span),
+            ExprKind::Index { base, index } => self.array_get_checked_op(base, index, e.span),
 
             ExprKind::Tuple(elems) => {
                 let mut cfields = Vec::with_capacity(elems.len());
@@ -1058,7 +1135,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             Repr::Value(vid) => CoreExprKind::MakeValue { value: vid, fields: cfields },
             _ => return err("struct must be a ref or value type", span),
         };
-        Ok((CoreExpr::new(kind, repr), ty))
+        let sid = self.mono.intern_span(span);
+        Ok((CoreExpr::new(kind, repr).at(sid), ty))
     }
 
     /// Construct an enum variant. `path` is `Enum::Variant`; `args` are payload
@@ -1115,7 +1193,12 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let ty = Ty::Named { name: enum_name.clone(), args: enum_args };
         let repr = self.repr_of(&ty, span)?;
         match repr {
-            Repr::Ref(lid) => Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr), ty)),
+            // Only the Ref (heap-allocating) variant is an alloc site → intern a
+            // span only here, not for the inline MakeValueVariant.
+            Repr::Ref(lid) => {
+                let sid = self.mono.intern_span(span);
+                Ok((CoreExpr::new(CoreExprKind::MakeVariant { layout: lid, tag, fields: cargs }, repr).at(sid), ty))
+            }
             Repr::Value(vid) => {
                 Ok((CoreExpr::new(CoreExprKind::MakeValueVariant { value: vid, tag, fields: cargs }, repr), ty))
             }
@@ -1597,7 +1680,10 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             LitPattern::Str(s) => {
                 if !matches!(sty, Ty::Prim(Prim::Str)) { return err("string literal pattern against a non-string scrutinee", span); }
                 let lid = match self.repr_of(&Ty::Prim(Prim::Str), span)? { Repr::Ref(l) => l, _ => return err("internal: String repr", span) };
-                let k = CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid));
+                // This ConstStr is a real varlen heap alloc at codegen — span it so
+                // string-literal match patterns get file:line:col like every other.
+                let sid = self.mono.intern_span(span);
+                let k = CoreExpr::new(CoreExprKind::ConstStr(s.clone()), Repr::Ref(lid)).at(sid);
                 Ok(CoreExpr::new(CoreExprKind::StrEq(Box::new(scrut.clone()), Box::new(k)), bool_repr))
             }
         }
@@ -1614,7 +1700,8 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let (clen, lt) = self.expr(len, Some(&Ty::i64()))?;
         check_assignable(&lt, &Ty::i64(), len.span)?;
         let ty = Ty::Named { name: "Array".into(), args: vec![elem_ty] };
-        Ok((CoreExpr::new(CoreExprKind::ArrayNew { layout: lid, len: Box::new(clen), elem }, Repr::Ref(lid)), ty))
+        let sid = self.mono.intern_span(span);
+        Ok((CoreExpr::new(CoreExprKind::ArrayNew { layout: lid, len: Box::new(clen), elem }, Repr::Ref(lid)).at(sid), ty))
     }
 
     fn array_len_op(&mut self, arr: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -1628,7 +1715,36 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let elem = self.repr_of(&elem_ty, span)?;
         let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
         check_assignable(&it, &Ty::i64(), idx.span)?;
-        Ok((CoreExpr::new(CoreExprKind::ArrayGet { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
+        // `array_get` yields `Option<T>` — `None` for an out-of-bounds index —
+        // so the absence of a value is carried in the type rather than aborting.
+        // The `elem` repr drives the in-bounds load; the CoreExpr repr is the
+        // Option value enum that codegen constructs (Some/None).
+        let opt_ty = Ty::Named { name: "Option".to_string(), args: vec![elem_ty] };
+        let opt_repr = self.repr_of(&opt_ty, span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGet { array: Box::new(ca), index: Box::new(ci), elem }, opt_repr), opt_ty))
+    }
+
+    /// The `a[i]` index operator: bounds-checked, yields `T` directly, aborts on
+    /// out-of-bounds (Rust-like). The `array_get` function returns `Option<T>`.
+    fn array_get_checked_op(&mut self, arr: &Expr, idx: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (ca, aty) = self.expr(arr, None)?;
+        let elem_ty = array_elem_ty(&aty).ok_or_else(|| LowerError { msg: "indexing a non-array".into(), span })?;
+        let elem = self.repr_of(&elem_ty, span)?;
+        let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
+        check_assignable(&it, &Ty::i64(), idx.span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGetChecked { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
+    }
+
+    /// `array_get_unchecked(a, i)` — the unsafe escape hatch behind `array_get`:
+    /// a raw load returning `T` with NO bounds check (out-of-bounds is undefined
+    /// behaviour). For trusted, already-bounds-checked code and hot paths.
+    fn array_get_unchecked_op(&mut self, arr: &Expr, idx: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
+        let (ca, aty) = self.expr(arr, None)?;
+        let elem_ty = array_elem_ty(&aty).ok_or_else(|| LowerError { msg: "array_get_unchecked on a non-array".into(), span })?;
+        let elem = self.repr_of(&elem_ty, span)?;
+        let (ci, it) = self.expr(idx, Some(&Ty::i64()))?;
+        check_assignable(&it, &Ty::i64(), idx.span)?;
+        Ok((CoreExpr::new(CoreExprKind::ArrayGetUnchecked { array: Box::new(ca), index: Box::new(ci), elem: elem.clone() }, elem), elem_ty))
     }
 
     fn array_set_op(&mut self, arr: &Expr, idx: &Expr, val: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -1659,6 +1775,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 if args.len() != 1 { return err("`print_str` takes 1 argument", span); }
                 let a = str_arg(self, &args[0])?;
                 Ok((CoreExpr::new(CoreExprKind::PrintStr(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "print" => {
+                if args.len() != 1 { return err("`print` takes 1 argument", span); }
+                let a = str_arg(self, &args[0])?;
+                Ok((CoreExpr::new(CoreExprKind::PrintStrRaw(Box::new(a)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "char_to_str" => {
+                if args.len() != 1 { return err("`char_to_str` takes 1 argument", span); }
+                let (cp, cpt) = self.expr(&args[0], Some(&Ty::i64()))?;
+                check_assignable(&cpt, &Ty::i64(), args[0].span)?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::StrFromChar { layout, cp: Box::new(cp) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
             }
             "str_len" => {
                 if args.len() != 1 { return err("`str_len` takes 1 argument", span); }
@@ -1692,6 +1823,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 if args.len() != 1 { return err("`str_to_float` takes 1 argument", span); }
                 let s = str_arg(self, &args[0])?;
                 Ok((CoreExpr::new(CoreExprKind::StrToFloat(Box::new(s)), Repr::Scalar(ScalarRepr::F64)), Ty::Prim(Prim::F64)))
+            }
+            "float_bits" => {
+                if args.len() != 1 { return err("`float_bits` takes 1 argument", span); }
+                let (f, ft) = self.expr(&args[0], Some(&Ty::Prim(Prim::F64)))?;
+                check_assignable(&ft, &Ty::Prim(Prim::F64), args[0].span)?;
+                Ok((CoreExpr::new(CoreExprKind::FloatBits(Box::new(f)), Repr::Scalar(ScalarRepr::I64)), Ty::i64()))
+            }
+            "read_file" => {
+                if args.len() != 1 { return err("`read_file` takes 1 argument", span); }
+                let p = str_arg(self, &args[0])?;
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(CoreExprKind::ReadFile { layout, path: Box::new(p) }, Repr::Ref(layout)),
+                    str_ty,
+                ))
             }
             "str_hash" => {
                 if args.len() != 1 { return err("`str_hash` takes 1 argument", span); }
@@ -1729,6 +1875,99 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 ))
             }
             _ => err(format!("unknown string intrinsic `{}`", name), span),
+        }
+    }
+
+    /// Lower the built-in reflection intrinsics. The first argument is always a
+    /// heap (`Ref`) value — reflection reads its object header (`type_id`) and the
+    /// metadata table. Field intrinsics take a second `i64` field index and lower
+    /// to `RuntimeCall`s into the `ai_reflect_*` externs.
+    ///
+    /// Surface:
+    ///   `type_id_of(x) -> i64`, `type_name_of(x) -> String`
+    ///   `field_count(x) -> i64`
+    ///   `field_name(x, i) -> String`, `field_kind(x, i) -> i64`, `field_i64(x, i) -> i64`
+    fn reflect_intrinsic(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<(CoreExpr, Ty)> {
+        let arity = if matches!(name, "type_id_of" | "type_name_of" | "field_count") { 1 } else { 2 };
+        if args.len() != arity {
+            return err(format!("`{}` takes {} argument(s)", name, arity), span);
+        }
+        let (obj, oty) = self.expr(&args[0], None)?;
+        if !matches!(obj.repr, Repr::Ref(_)) {
+            return err(
+                format!("`{}` requires a heap (reference) value, got `{:?}`", name, oty),
+                span,
+            );
+        }
+        // Field intrinsics take an i64 index as the second argument.
+        let idx = if arity == 2 {
+            let (i, it) = self.expr(&args[1], Some(&Ty::i64()))?;
+            check_assignable(&it, &Ty::i64(), args[1].span)?;
+            Some(i)
+        } else {
+            None
+        };
+        let i64r = Repr::Scalar(ScalarRepr::I64);
+        match name {
+            "type_id_of" => Ok((
+                CoreExpr::new(CoreExprKind::TypeIdOf(Box::new(obj)), i64r),
+                Ty::i64(),
+            )),
+            "type_name_of" => {
+                let layout = self.string_layout_id(span)?;
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::TypeNameOf { layout, obj: Box::new(obj) },
+                        Repr::Ref(layout),
+                    ),
+                    Ty::Prim(Prim::Str),
+                ))
+            }
+            "field_count" => Ok((
+                CoreExpr::new(
+                    CoreExprKind::RuntimeCall {
+                        func: "ai_reflect_field_count",
+                        args: vec![obj],
+                        ret: i64r.clone(),
+                    },
+                    i64r,
+                ),
+                Ty::i64(),
+            )),
+            "field_kind" | "field_i64" => {
+                let func = if name == "field_kind" { "ai_reflect_field_kind" } else { "ai_reflect_field_i64" };
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::RuntimeCall {
+                            func,
+                            args: vec![obj, idx.unwrap()],
+                            ret: i64r.clone(),
+                        },
+                        i64r,
+                    ),
+                    Ty::i64(),
+                ))
+            }
+            "field_name" => {
+                let layout = self.string_layout_id(span)?;
+                // ai_reflect_field_name(thread, i64 str_type_id, ptr obj, i64 i)
+                let str_tid = CoreExpr::new(
+                    CoreExprKind::ConstInt(layout as u64, ScalarRepr::I64),
+                    Repr::Scalar(ScalarRepr::I64),
+                );
+                Ok((
+                    CoreExpr::new(
+                        CoreExprKind::RuntimeCall {
+                            func: "ai_reflect_field_name",
+                            args: vec![str_tid, obj, idx.unwrap()],
+                            ret: Repr::Ref(layout),
+                        },
+                        Repr::Ref(layout),
+                    ),
+                    Ty::Prim(Prim::Str),
+                ))
+            }
+            _ => err(format!("unknown reflection intrinsic `{}`", name), span),
         }
     }
 
@@ -1861,11 +2100,13 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         self.mono.closures.push((code_id, lifted));
 
         let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
+        let sid = self.mono.intern_span(span);
         Ok((
             CoreExpr::new(
                 CoreExprKind::MakeClosure { code: code_id, env: env_lid, captures: capture_exprs },
                 Repr::Ref(env_lid),
-            ),
+            )
+            .at(sid),
             fn_ty,
         ))
     }
@@ -1886,11 +2127,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         code_id: FuncId,
         span: Span,
     ) -> LResult<(CoreFn, Ty)> {
+        // The closure literal's span = the lifted function's def location (DWARF).
+        let fn_span = self.mono.intern_span(span);
         // Swap in a fresh body-lowering context. The return type defaults to
         // the declared one if any (so `return` inside the body checks), else
         // unit until the body tail tells us otherwise.
         let saved_scope = std::mem::replace(&mut self.scope, vec![HashMap::new()]);
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_local_names = std::mem::take(&mut self.local_names);
         let saved_local_tys = std::mem::take(&mut self.local_tys);
         let saved_ret = std::mem::replace(&mut self.ret_ty, declared_ret.clone().unwrap_or_else(Ty::unit));
 
@@ -1919,6 +2163,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         let ret_repr = self.repr_of(&ret_ty, span)?;
 
         let locals = std::mem::replace(&mut self.locals, saved_locals);
+        let local_names = std::mem::replace(&mut self.local_names, saved_local_names);
         self.scope = saved_scope;
         self.local_tys = saved_local_tys;
         self.ret_ty = saved_ret;
@@ -1961,11 +2206,14 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         Ok((CoreFn {
             name: format!("__closure_{}", env_lid),
             params: param_reprs,
+            extern_by_ref: vec![],
             ret: ret_repr,
             locals,
+            local_names,
             body: CoreBlock { stmts: body_block.stmts, tail: body_block.tail },
             closure_captures,
             is_extern: false,
+            span: fn_span,
         }, ret_ty))
     }
 
@@ -2193,11 +2441,15 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
             (vec![elocal], vec![CoreExpr::new(CoreExprKind::Local(elocal), erepr)])
         };
         // Build the return value: MakeVariant of the fn's return enum, err_tag.
+        // This is a real heap alloc (gen_alloc) — span it with the `?` location so
+        // `?`-induced allocations carry a file:line:col (best available for desugar).
         let _ = rargs;
+        let sid = self.mono.intern_span(span);
         let rebuilt = CoreExpr::new(
             CoreExprKind::MakeVariant { layout: ret_lid, tag: err_tag, fields: err_fields },
             Repr::Ref(ret_lid),
-        );
+        )
+        .at(sid);
         let err_body = CoreExpr::new(CoreExprKind::Return(Some(Box::new(rebuilt))), Repr::Unit);
 
         let arms = vec![
@@ -2236,13 +2488,21 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         }
     }
 
-    fn variant_in(&self, _enum_name: &str, vlast: &str, variants: &[(u32, Vec<Ty>)], span: Span) -> LResult<(u32, Vec<Ty>)> {
-        if let Some((_, tag)) = self.ctx.variants.get(vlast).cloned() {
-            if let Some((t, tys)) = variants.iter().find(|(i, _)| *i == tag) {
-                return Ok((*t, tys.clone()));
+    fn variant_in(&self, enum_name: &str, vlast: &str, variants: &[(u32, Vec<Ty>)], span: Span) -> LResult<(u32, Vec<Ty>)> {
+        // Resolve the variant by name WITHIN this enum — variant names are
+        // per-enum, not global (two enums may share a variant name, e.g.
+        // `TokKind::Not` and `UnOp::Not`). Looking it up in the global
+        // `ctx.variants` map (keyed partly by bare name) conflated same-named
+        // variants across enums; scope it to `enum_name`'s own declaration.
+        if let Some(edef) = self.ctx.enums.get(enum_name) {
+            if let Some(idx) = edef.variants.iter().position(|v| v.name == vlast) {
+                let tag = idx as u32;
+                if let Some((t, tys)) = variants.iter().find(|(i, _)| *i == tag) {
+                    return Ok((*t, tys.clone()));
+                }
             }
         }
-        err(format!("unknown variant `{}`", vlast), span)
+        err(format!("unknown variant `{}` of `{}`", vlast, enum_name), span)
     }
 
     fn binary(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> LResult<(CoreExpr, Ty)> {
@@ -2457,6 +2717,7 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
                 "array_new" if args.len() == 1 => return self.array_new(&args[0], expected, span),
                 "array_len" if args.len() == 1 => return self.array_len_op(&args[0], span),
                 "array_get" if args.len() == 2 => return self.array_get_op(&args[0], &args[1], span),
+                "array_get_unchecked" if args.len() == 2 => return self.array_get_unchecked_op(&args[0], &args[1], span),
                 "array_set" if args.len() == 3 => return self.array_set_op(&args[0], &args[1], &args[2], span),
                 _ => {}
             }
@@ -2465,9 +2726,32 @@ impl<'a, 'r, 'm> FnLowerer<'a, 'r, 'm> {
         // Skipped if shadowed by a user-defined function of the same name.
         if !self.ctx.fns.keys().any(|k| k.rsplit("::").next().unwrap() == name) {
             match name {
-                "print_str" | "str_len" | "str_eq" | "str_concat"
-                | "str_get" | "str_substring" | "to_string" | "str_to_float" | "str_hash" => {
+                "print_str" | "print" | "str_len" | "str_eq" | "str_concat"
+                | "str_get" | "str_substring" | "to_string" | "str_to_float" | "str_hash"
+                | "read_file" | "float_bits" | "char_to_str" => {
                     return self.str_intrinsic(name, args, span);
+                }
+                "type_id_of" | "type_name_of" | "field_count" | "field_name" | "field_kind"
+                | "field_i64" => {
+                    return self.reflect_intrinsic(name, args, span);
+                }
+                // Heap-explorer P2: on-demand mid-execution heap snapshot. Called
+                // from managed code → at a safepoint by construction (signal-safe).
+                "heap_snapshot" => {
+                    if !args.is_empty() {
+                        return err("heap_snapshot() takes no arguments", span);
+                    }
+                    return Ok((
+                        CoreExpr::new(
+                            CoreExprKind::RuntimeCall {
+                                func: "ai_heap_snapshot",
+                                args: vec![],
+                                ret: Repr::Unit,
+                            },
+                            Repr::Unit,
+                        ),
+                        Ty::unit(),
+                    ));
                 }
                 _ => {}
             }

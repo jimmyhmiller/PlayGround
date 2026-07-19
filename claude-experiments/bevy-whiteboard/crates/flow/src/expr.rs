@@ -138,6 +138,16 @@ pub enum Expr {
     /// All-but-first of a `Value::List`, or empty list if the list is
     /// empty or has one element.
     Tail(Box<Expr>),
+    /// Append an item to a list, yielding a new `Value::List`. A `Nil`
+    /// list is treated as empty, so a slot can be initialised to `nil`
+    /// and grown with `members := append(members, x)` without a
+    /// list-literal. Never mutates in place.
+    Append { list: Box<Expr>, item: Box<Expr> },
+    /// `true` iff `item` is equal (by `Value`'s `PartialEq`) to some
+    /// element of `list`. `Nil` list reads as empty (→ `false`). Lets a
+    /// rule ask "is this node one of my members?" — e.g. an autoscaler
+    /// telling its worker fleet apart from its downstream sink.
+    Contains { list: Box<Expr>, item: Box<Expr> },
 }
 
 /// Helpers for building expressions concisely.
@@ -146,6 +156,7 @@ impl Expr {
     pub fn int(n: i64) -> Self { Expr::Lit(Value::Int(n)) }
     pub fn float(f: f64) -> Self { Expr::Lit(Value::Float(f)) }
     pub fn bool(b: bool) -> Self { Expr::Lit(Value::Bool(b)) }
+    pub fn str(s: impl Into<String>) -> Self { Expr::Lit(Value::Str(s.into())) }
     pub fn var(name: impl Into<String>) -> Self { Expr::Var(name.into()) }
     pub fn slot(name: impl Into<String>) -> Self { Expr::Slot(name.into()) }
     pub fn now() -> Self { Expr::Now }
@@ -209,6 +220,12 @@ impl Expr {
     pub fn return_path() -> Self { Expr::ReturnPath }
     pub fn head(list: Expr) -> Self { Expr::Head(Box::new(list)) }
     pub fn tail(list: Expr) -> Self { Expr::Tail(Box::new(list)) }
+    pub fn append(list: Expr, item: Expr) -> Self {
+        Expr::Append { list: Box::new(list), item: Box::new(item) }
+    }
+    pub fn contains(list: Expr, item: Expr) -> Self {
+        Expr::Contains { list: Box::new(list), item: Box::new(item) }
+    }
     pub fn filter(list: Expr, bind: impl Into<String>, pred: Expr) -> Self {
         Expr::Filter { list: Box::new(list), bind: bind.into(), pred: Box::new(pred) }
     }
@@ -444,8 +461,32 @@ impl Expr {
                 match v {
                     Value::List(items) => Value::Int(items.len() as i64),
                     Value::Samples(s) => Value::Int(s.len() as i64),
-                    other => panic!("Length: expected List or Samples, got {:?}", other),
+                    // `Nil` is the "empty list" reading — lets a slot
+                    // initialised to `nil` be `length`-ed before it's
+                    // first grown with `append`.
+                    Value::Nil => Value::Int(0),
+                    other => panic!("Length: expected List, Samples, or Nil, got {:?}", other),
                 }
+            }
+            Expr::Append { list, item } => {
+                let lv = list.eval(ctx);
+                let mut items = match lv {
+                    Value::List(v) => v,
+                    Value::Nil => Vec::new(),
+                    other => panic!("Append: first arg must be a List or Nil, got {:?}", other),
+                };
+                items.push(item.eval(ctx));
+                Value::List(items)
+            }
+            Expr::Contains { list, item } => {
+                let lv = list.eval(ctx);
+                let needle = item.eval(ctx);
+                let found = match lv {
+                    Value::List(items) => items.iter().any(|x| *x == needle),
+                    Value::Nil => false,
+                    other => panic!("Contains: first arg must be a List or Nil, got {:?}", other),
+                };
+                Value::Bool(found)
             }
             Expr::Index { list, i } => {
                 let lv = list.eval(ctx);
@@ -472,7 +513,8 @@ impl Expr {
                 let lv = list.eval(ctx);
                 let items = match lv {
                     Value::List(v) => v,
-                    other => panic!("Filter: first arg must be a List, got {:?}", other),
+                    Value::Nil => Vec::new(),
+                    other => panic!("Filter: first arg must be a List or Nil, got {:?}", other),
                 };
                 let mut out: Vec<Value> = Vec::new();
                 let mut local = ctx.bindings.clone();
@@ -500,7 +542,8 @@ impl Expr {
                 let lv = list.eval(ctx);
                 let items = match lv {
                     Value::List(v) => v,
-                    other => panic!("Map: first arg must be a List, got {:?}", other),
+                    Value::Nil => Vec::new(),
+                    other => panic!("Map: first arg must be a List or Nil, got {:?}", other),
                 };
                 let mut out: Vec<Value> = Vec::with_capacity(items.len());
                 let mut local = ctx.bindings.clone();
@@ -526,7 +569,8 @@ impl Expr {
                 let lv = list.eval(ctx);
                 let items = match lv {
                     Value::List(v) => v,
-                    other => panic!("Reduce: first arg must be a List, got {:?}", other),
+                    Value::Nil => Vec::new(),
+                    other => panic!("Reduce: first arg must be a List or Nil, got {:?}", other),
                 };
                 let mut accumulator = init.eval(ctx);
                 let mut local = ctx.bindings.clone();
@@ -585,7 +629,8 @@ impl Expr {
                 let lv = list.eval(ctx);
                 let items = match lv {
                     Value::List(v) => v,
-                    other => panic!("Argmin: first arg must be a List, got {:?}", other),
+                    Value::Nil => Vec::new(),
+                    other => panic!("Argmin: first arg must be a List or Nil, got {:?}", other),
                 };
                 let mut best: Option<(i64, Value)> = None;
                 let mut local = ctx.bindings.clone();

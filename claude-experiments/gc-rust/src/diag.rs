@@ -13,7 +13,7 @@
 use crate::lexer::Span;
 
 /// Map a byte offset to a 1-based (line, column).
-fn line_col(src: &str, offset: usize) -> (usize, usize) {
+pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(src.len());
     let mut line = 1usize;
     let mut col = 1usize;

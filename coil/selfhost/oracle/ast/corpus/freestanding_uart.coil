@@ -1,0 +1,80 @@
+(defn
+  UARTDR-read
+  []
+  (-> u32)
+  (llvm-ir
+    u32
+    []
+    "%p = inttoptr i64 150994944 to ptr
+%v = load volatile i32, ptr %p
+ret i32 %v"))
+
+(defn
+  UARTDR-write
+  [(v u32)]
+  (-> i64)
+  (llvm-ir
+    i64
+    [v]
+    "%p = inttoptr i64 150994944 to ptr
+store volatile i32 $0, ptr %p
+ret i64 0"))
+
+(defn
+  UARTFR-read
+  []
+  (-> u32)
+  (llvm-ir
+    u32
+    []
+    "%p = inttoptr i64 150994968 to ptr
+%v = load volatile i32, ptr %p
+ret i32 %v"))
+
+(defn
+  UARTFR-write
+  [(v u32)]
+  (-> i64)
+  (llvm-ir
+    i64
+    [v]
+    "%p = inttoptr i64 150994968 to ptr
+store volatile i32 $0, ptr %p
+ret i64 0"))
+
+(defn UARTFR-txff [] (-> u32) (iand (ishr (UARTFR-read) 5) (isub (ishl 1 1) 1)))
+
+(defn
+  uart-putc
+  [(c i64)]
+  (-> i64)
+  (loop (if (icmp-eq (UARTFR-txff) (cast u32 0)) (break) 0))
+  (UARTDR-write (cast u32 c))
+  0)
+
+(defn
+  uart-puts
+  [(s (ptr i8)) (n i64)]
+  (-> i64)
+  (let
+    [(mut i) 0]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (do (uart-putc (cast i64 (load (index s (load i))))) (store! i (iadd (load i) 1))))))
+  0)
+
+(defn
+  poweroff
+  []
+  (-> i64)
+  (llvm-ir
+    i64
+    []
+    "call void asm sideeffect "movz x0, #0x8400, lsl #16 ; movk x0, #8 ; hvc #0", "~{x0}"()
+ret i64 0"))
+
+(defn start [] (-> i64) (uart-puts c"PL011 via typed registers
+" 26) (poweroff) (loop 0))
+

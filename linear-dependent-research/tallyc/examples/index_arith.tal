@@ -1,0 +1,33 @@
+// Stratum (A): the decidable linear-Nat index domain (src/solver.rs, docs/03).
+//
+//   tally check examples/index_arith.tal
+//
+// The kernel now decides index-level `+` up to COMMUTATIVITY, ASSOCIATIVITY,
+// `+ 0`, and `Succ n = n + 1` — all as *definitional* equality, so these proofs
+// are just `refl`, with no hand-written rewriting. This is what everyday
+// length-indexed code needs (`Vec (m + n)` unifying with `Vec (n + m)`), and it
+// is what the view layer's bounds/index reasoning will build on. `+` requires the
+// packed built-in Nat, so the enum is opted in with `%builtin Nat`.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// n + m = m + n
+comm : (n : Nat) -> (m : Nat) -> Eq Nat (n + m) (m + n)
+fn comm(n, m) { refl(n + m) }
+
+// n + 0 = n
+rid : (n : Nat) -> Eq Nat (n + Zero) n
+fn rid(n) { refl(n) }
+
+// (a + b) + c = a + (b + c)
+assoc : (a : Nat) -> (b : Nat) -> (c : Nat) -> Eq Nat ((a + b) + c) (a + (b + c))
+fn assoc(a, b, c) { refl(a + b + c) }
+
+// Succ n = n + 1
+succ_r : (n : Nat) -> Eq Nat (Succ n) (n + Succ Zero)
+fn succ_r(n) { refl(Succ(n)) }
+
+// The safety net: `n + m = n` is NOT a linear-Nat identity, so — copy it in —
+//   nope : (n : Nat) -> (m : Nat) -> Eq Nat (n + m) n
+//   fn nope(n, m) { refl(n + m) }        -- REJECTED: the equation does not hold

@@ -1,0 +1,59 @@
+// SPECIALISING INTERPRETERS by PARTIAL EVALUATION — tallyc's answer to
+// https://docs.idris-lang.org/en/latest/reference/partial-evaluation.html
+//
+//   tally run   examples/pe_interp.tal          → 33   (run(0)+run(5)+run(10))
+//   TALLY_PE_LOG=1 tally check examples/pe_interp.tal   → logs `[pe] specialised run`
+//   tally dump  examples/pe_interp.tal run       → the residual: \x. 1 + mul(2, x)
+//
+// `eval` is an ordinary first-order interpreter over an OWNED expression tree
+// (built with `alloc`, walked and freed with `unbox`, general `%partial`
+// recursion — real interpretive overhead: one heap cell per AST node plus a
+// tag dispatch per node). `run` applies it to a FIXED program `prog` at a
+// DYNAMIC input `x`.
+//
+// The partial-evaluation pass (src/dep.rs `pe_reduce_body`) sees a recursive
+// function applied to a static constructor tree and specialises it away: the
+// `Fix`, the `Case` dispatch, and the tree's `alloc`/`unbox` ALL vanish,
+// leaving `run` as straight-line arithmetic `\x. 1 + mul(2, x)` — byte-for-byte
+// what you would write by hand in C, with ZERO heap traffic.
+//
+// It is UNTRUSTED and SELF-VERIFYING: the residual is re-checked by the kernel
+// against `run`'s original type and reverted on any failure, so PE can only
+// make a well-typed program faster, never change what it means. Partial
+// evaluation here is just NbE with the dynamic input left symbolic — the same
+// machinery that computes at the type level, turned on runtime code.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+boxed enum Expr {
+  Var : Expr,                              // the input x
+  Lit : Nat -> Expr,
+  Add : Own Expr -> Own Expr -> Expr,
+  Mul : Own Expr -> Own Expr -> Expr,
+}
+
+eval : Own Expr -> Nat -> Nat
+%partial
+fn eval(e, x) {
+  match unbox(e) {
+    Var       => x,
+    Lit(n)    => n,
+    Add(a, b) => let va = eval(a, x); let vb = eval(b, x); va + vb,
+    Mul(a, b) => let va = eval(a, x); let vb = eval(b, x); mul(va, vb),
+  }
+}
+
+// the fixed program:  1 + (2 * x)
+prog : Own Expr
+fn prog() {
+  alloc(Add(alloc(Lit(Succ(Zero))),
+            alloc(Mul(alloc(Lit(Succ(Succ(Zero)))), alloc(Var)))))
+}
+
+// eval `prog` at a dynamic input — PARTIAL-EVALUATED to `\x. 1 + mul(2, x)`
+run : Nat -> Nat
+fn run(x) { eval(prog(), x) }
+
+main : Nat
+fn main() { run(0) + run(5) + run(10) }

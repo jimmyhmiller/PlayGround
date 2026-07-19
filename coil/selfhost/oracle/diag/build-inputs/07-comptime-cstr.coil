@@ -1,0 +1,4 @@
+; A comptime that USES a C-string but yields i64 — the tree-walk interpreter rejects
+; the ECStr, while the compiled comptime engine (interp deletion step 1, mac-8) runs
+; `(do c"hi" 0)` as real code and folds it to the literal 0, so this now BUILDS (exit 0).
+(defn main [] (-> :i64) (comptime (do c"hi" 0)))

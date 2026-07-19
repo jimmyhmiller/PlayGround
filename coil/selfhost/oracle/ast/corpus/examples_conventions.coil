@@ -1,0 +1,17 @@
+(defcc
+  fast2
+  :params
+  [rax rdx]
+  :ret
+  rax
+  :clobber
+  [rax rdx rcx]
+  :preserve
+  [rbx rbp]
+  :native
+  fast)
+
+(defn add :cc fast2 [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+
+(defn main [] (-> :i64) (add 20 22))
+

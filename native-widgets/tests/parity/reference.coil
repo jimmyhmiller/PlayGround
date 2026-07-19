@@ -1,0 +1,41 @@
+;; Temporary harness: renders all four catalog pages from the ORIGINAL widget
+;; code so the extracted library can be pixel-compared against it.
+(module _refsnap)
+
+(import "../../../claude-experiments/agent/src/raylib.coil" :as raylib)
+(import "../../../claude-experiments/agent/src/native.coil" :as native)
+
+(defn main [] (-> i64)
+  (do
+    (raylib.SetConfigFlags (cast u32 8292))
+    (raylib.InitWindow (cast i32 960) (cast i32 700) c"reference")
+    (let [state (alloc-stack native.CatalogState)
+          input (native.input-at 0.0 0.0 0 0)
+          names (alloc-stack (array (ptr i8) 4))]
+      (do
+        (store! state (native.catalog-state))
+        (store! (field state mono)
+                (raylib.LoadFontEx c"assets/fonts/IBMPlexMono-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+        (store! (field state sans)
+                (raylib.LoadFontEx c"assets/fonts/IBMPlexSans-Regular.ttf" (cast i32 42) (cast (ptr i32) 0) (cast i32 0)))
+        (raylib.SetTextureFilter (load (field (field state mono) texture)) (cast i32 1))
+        (raylib.SetTextureFilter (load (field (field state sans) texture)) (cast i32 1))
+        (store! (index (cast (ptr (ptr i8)) names) 0) c"ref-controls.png")
+        (store! (index (cast (ptr (ptr i8)) names) 1) c"ref-surfaces.png")
+        (store! (index (cast (ptr (ptr i8)) names) 2) c"ref-navigation.png")
+        (store! (index (cast (ptr (ptr i8)) names) 3) c"ref-overlays.png")
+        (for [page 0 4]
+          (do
+            (store! (field state page) page)
+            ;; Shapes only reach the framebuffer when EndDrawing flushes the
+            ;; batch, so capture after a completed frame, not inside one.
+            (for [warm 0 3]
+              (do
+                (raylib.BeginDrawing)
+                (native.draw-catalog (load state) input)
+                (raylib.EndDrawing)))
+            (raylib.TakeScreenshot (load (index (cast (ptr (ptr i8)) names) page)))))
+        (raylib.UnloadFont (load (field state mono)))
+        (raylib.UnloadFont (load (field state sans)))))
+    (raylib.CloseWindow)
+    0))

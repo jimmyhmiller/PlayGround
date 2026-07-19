@@ -1,0 +1,23 @@
+(extern objc_getClass :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern sel_registerName :cc c [(ptr i8)] (-> (ptr i8)))
+
+(extern objc_msgSend :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(defn class [(n (ptr i8))] (-> (ptr i8)) (objc_getClass n))
+
+(defn sel [(n (ptr i8))] (-> (ptr i8)) (sel_registerName n))
+
+(defn
+  msg
+  [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)]
+  (-> Code)
+  (quasiquote
+    (call-ptr
+      (cast
+        (fnptr c [(ptr i8) (ptr i8) (unquote-splicing argtypes)] (unquote ret))
+        (fnptr-of objc_msgSend))
+      (unquote recv)
+      (unquote selector)
+      (unquote-splicing args))))
+

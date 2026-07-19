@@ -1,0 +1,49 @@
+// BINDING-TIME via ERASURE: the program is a PURE COMPILE-TIME value.
+//
+//   tally run examples/pe_erased.tal   → 33      (and ZERO heap allocation)
+//
+// `eval`'s program argument is ERASED (`(0 e : Expr)`) — it has NO runtime
+// representation at all. Matching on it would normally be a type error (you
+// cannot dispatch on data that does not exist at runtime: `1 ⋢ 0`). tallyc
+// accepts it because `0` on the argument IS the static/dynamic binding-time
+// annotation: the function is a PARTIAL-EVALUATION TEMPLATE, and PE specialises
+// every use of it away — erasure then GUARANTEES the specialisation happened.
+//
+// This is the tallyc-native form of Idris's `%static`, but stronger: `%static`
+// is a hint you can ignore (falling back to interpreting); an erased program
+// CANNOT be interpreted, so specialisation is not optional — it is demanded by
+// the type. An interpreter over a program that is not statically known is a
+// compile error (see `bad` in the gate test), not a slow path.
+//
+// The AST here is written as a plain value (no `alloc`), never built at runtime,
+// and `run` specialises to `\x. 1 + mul(2, x)`.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+boxed enum Expr {
+  Var : Expr,
+  Lit : Nat -> Expr,
+  Add : Expr -> Expr -> Expr,
+  Mul : Expr -> Expr -> Expr,
+}
+
+eval : (0 e : Expr) -> Nat -> Nat     // the program is ERASED / compile-time only
+%partial
+fn eval(e, x) {
+  match e {
+    Var       => x,
+    Lit(n)    => n,
+    Add(a, b) => eval(a, x) + eval(b, x),
+    Mul(a, b) => mul(eval(a, x), eval(b, x)),
+  }
+}
+
+prog : Expr
+fn prog() { Add(Lit(Succ(Zero)), Mul(Lit(Succ(Succ(Zero))), Var)) }
+
+run : Nat -> Nat
+fn run(x) { eval(prog(), x) }
+
+main : Nat
+fn main() { run(0) + run(5) + run(10) }

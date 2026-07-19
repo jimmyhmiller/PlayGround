@@ -1,0 +1,825 @@
+#!/usr/bin/env node
+"use strict";
+/*
+ * hivemind — drive a swarm of cheap LLM agents to fill stub markers in a codebase.
+ *
+ * The pattern (generalized from a hand-rolled DeepSeek harness):
+ *   1. A skeleton holds independent units stubbed as `UNIMPLEMENTED("MARKER")`.
+ *   2. A manifest (tasks.json) describes each stub: spec, signature, reference, deps.
+ *   3. A conventions doc (AGENTS.md) + frozen context files tell agents the rules.
+ *   4. For each stub: ask an OpenAI-compatible model for {impl, test}, then UNDER A
+ *      PER-FILE LOCK: snapshot -> splice impl over the stub line -> write the test ->
+ *      run the gate command. Keep iff the gate passes; otherwise REVERT (the shared
+ *      file is always left valid). Loop in passes to a fixpoint, so a stub whose dep
+ *      is still a stub just fails its gate and is retried next pass.
+ *
+ * Commands:  init [dir] | list | run | help
+ * Run `hivemind help` for flags.
+ */
+
+const VERSION = "0.1.0";
+
+const fs = require("fs");
+const path = require("path");
+const cp = require("child_process");
+
+// ----------------------------------------------------------------------------- util
+const die = (msg, code = 1) => { console.error("hivemind: " + msg); process.exit(code); };
+const readFile = (p) => fs.readFileSync(p, "utf8");
+const writeFile = (p, s) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s); };
+const exists = (p) => { try { fs.accessSync(p); return true; } catch { return false; } };
+
+// {name} template substitution; missing keys become "".
+function fill(tpl, vars) {
+  return String(tpl).replace(/\{(\w+)\}/g, (_, k) => (k in vars && vars[k] != null ? String(vars[k]) : ""));
+}
+
+// Convert a glob like "src/**/*.js" to a RegExp over a forward-slash relative path.
+function globToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
+      else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (".+^${}()|[]\\".includes(c)) re += "\\" + c;
+    else re += c;
+  }
+  return new RegExp("^" + re + "$");
+}
+
+// Strip a leading ```lang / trailing ``` fence the model may have added.
+function stripFence(s) {
+  let t = String(s).trim();
+  const m = t.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$/);
+  return m ? m[1] : t;
+}
+
+// ----------------------------------------------------------------------------- config
+const DEFAULT_CONFIG = {
+  // source: where units come from.
+  //   "markers"  — scan files for stub markers (the unit is gone once filled; stateless).
+  //   "manifest" — units ARE the manifest tasks (for refactoring existing code that has no
+  //                marker; completion is tracked in .hivemind/done.json).
+  source: "markers",
+  // task: selects the prompt framing + how the model's output is applied.
+  //   "implement" — fill a stub: replace the marked line/region with the returned code.
+  //   "refactor"  — replace a whole unit/file with a transformed version (gate = safety net).
+  //   "edit"      — the model returns a LIST of {old,new} find/replace pairs (output key =
+  //                 output.implKey, e.g. "edits"); each "old" is applied by EXACT, UNIQUE
+  //                 match, so only those spans change. Best for many SCATTERED small edits,
+  //                 or files too big to re-emit whole — output scales with the edits, not the
+  //                 file size. Pairs with a `verify`-style semantic gate nicely.
+  task: "implement",
+  provider: {
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-v4-pro",
+    keyEnv: "DEEPSEEK_KEY",
+    baseUrlEnv: "DEEPSEEK_BASE",
+    modelEnv: "DEEPSEEK_MODEL",
+    temperature: 0,
+    maxTokens: 8192,
+    jsonMode: false,   // reasoning models (e.g. deepseek-v4-pro) reject response_format json_object
+  },
+  stubs: {
+    files: [],                                  // explicit list (relative to root)
+    glob: "**/*.js",                            // used only when `files` is empty
+    marker: "UNIMPLEMENTED\\(\"([^\"]+)\"\\)",  // capture group 1 is the marker id
+    // endMarker: optional. When set, a unit is a multi-line REGION from the marker line
+    // through the first line matching endMarker (inclusive); the model's impl replaces the
+    // whole span (markers included). Leave null for single-line stub replacement.
+    // {marker} is substituted, e.g. "END\\(\"{marker}\"\\)".
+    endMarker: null,
+  },
+  manifest: "tasks.json",        // optional; matched to markers by id/symbol
+  context: ["AGENTS.md"],        // files inlined verbatim into every prompt
+  gate: {
+    command: "node test/run.js {marker}",  // per-stub gate; {marker} substituted
+    final: "node test/run.js",             // run once after the fixpoint (optional)
+  },
+  output: {
+    implKey: "impl",
+    testKey: "test",                       // null => model returns only impl, no test file
+    testPath: "test/{marker}.test.js",
+  },
+  concurrency: 5,
+  attempts: 3,
+  prompt: { system: null, user: null },    // null => built-in generic templates
+};
+
+const BUILTIN_SYSTEM = `You complete ONE unit of work in a larger codebase.
+Return ONLY a JSON object: {"{implKey}": "<code>", "{testKey}": "<code>"}.
+- {implKey}: {applyNote} No markdown fences, no commentary.
+- {testKey}: a test file that follows the project's test conventions (see the context
+  section). Include >= 3 meaningful cases derived from the reference. No markdown fences.
+Edit nothing else. Match the referenced specification exactly. Leave a one-line comment
+citing the reference.`;
+
+const BUILTIN_SYSTEM_NOTEST = `You complete ONE unit of work in a larger codebase.
+Return ONLY a JSON object: {"{implKey}": "<code>"}.
+- {implKey}: {applyNote} No markdown
+  fences, no commentary.
+Edit nothing else. Match the referenced specification exactly.`;
+
+const BUILTIN_USER = `{contextBlock}## File you are editing: {file}
+\`\`\`
+{fileSrc}
+\`\`\`
+
+## Your task — complete the unit marked "{marker}"
+{specComment}
+{spec}
+{reference}
+Signature: {signature}
+{feedback}`;
+
+// Refactor framing: the model sees real, working code and must transform it WITHOUT changing
+// behavior. The test suite (the gate) is the contract.
+const BUILTIN_REFACTOR_SYSTEM = `You refactor ONE unit of existing, working code.
+Return ONLY a JSON object: {"{implKey}": "<code>"{testClause}}.
+- {implKey}: {applyNote} No markdown fences, no commentary.
+{testLine}Apply ONLY the requested transformation. Preserve observable behavior EXACTLY — the
+project's test suite must still pass unchanged. Do not fix unrelated things, rename unrelated
+symbols, or reformat code you weren't asked to touch. Keep public signatures stable unless
+the instruction says otherwise.`;
+
+const BUILTIN_REFACTOR_USER = `{contextBlock}## File: {file}
+The unit you must transform is shown below (this exact text will be replaced by your output).
+\`\`\`
+{unitSrc}
+\`\`\`
+{fileContextNote}
+## Refactor instruction
+{spec}
+{reference}
+{feedback}`;
+
+// Edit framing: instead of returning a whole new span (which doesn't scale to many
+// scattered edits in a big file, and risks the model drifting the unchanged parts), the
+// model returns a LIST of exact find/replace pairs. Only the matched spans change; every
+// other byte is preserved by construction. Output is proportional to the number of edits,
+// not the file size — so this works on arbitrarily large files.
+const BUILTIN_EDIT_SYSTEM = `You make a set of SMALL, TARGETED edits to ONE file, returned as exact find/replace pairs.
+Return ONLY a JSON object: {"{implKey}": [{"old": "<exact text to find>", "new": "<replacement>"}, ...]}.
+- Each "old" MUST appear in the file VERBATIM (match whitespace exactly) and be UNIQUE. If the
+  text you want to change is not unique on its own, include enough surrounding lines in BOTH
+  "old" and "new" to make it unique.
+- Change ONLY what the instruction asks. Every line you do not list stays byte-for-byte identical
+  — do NOT reformat, renumber, or touch anything else.
+- "old" and "new" may each span multiple lines. Order doesn't matter; edits must not overlap.
+- If nothing needs changing, return {"{implKey}": []}.
+No markdown fences, no commentary.`;
+
+const BUILTIN_EDIT_USER = `{contextBlock}## File: {file}
+\`\`\`
+{fileSrc}
+\`\`\`
+
+## Edit instruction
+{spec}
+{reference}
+{feedback}`;
+
+function deepMerge(base, over) {
+  if (Array.isArray(over) || typeof over !== "object" || over === null) return over;
+  const out = Array.isArray(base) ? base.slice() : Object.assign({}, base);
+  for (const k of Object.keys(over)) {
+    out[k] = (k in base && typeof base[k] === "object" && base[k] && !Array.isArray(base[k]))
+      ? deepMerge(base[k], over[k]) : over[k];
+  }
+  return out;
+}
+
+function loadConfig(root) {
+  const p = path.join(root, "hivemind.config.json");
+  if (!exists(p)) die(`no hivemind.config.json in ${root}. Run \`hivemind init\` first.`, 2);
+  let user;
+  try { user = JSON.parse(readFile(p)); } catch (e) { die("hivemind.config.json is not valid JSON: " + e.message); }
+  return deepMerge(DEFAULT_CONFIG, user);
+}
+
+// ----------------------------------------------------------------------------- discovery
+function discoverFiles(root, cfg) {
+  if (cfg.stubs.files && cfg.stubs.files.length) return cfg.stubs.files;
+  const re = globToRegExp(cfg.stubs.glob);
+  const out = [];
+  const skip = new Set(["node_modules", ".git", ".hg", "target", "dist"]);
+  (function walk(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name.startsWith(".") && ent.isDirectory()) continue;
+      const abs = path.join(dir, ent.name);
+      const rel = path.relative(root, abs).split(path.sep).join("/");
+      if (ent.isDirectory()) { if (!skip.has(ent.name)) walk(abs); }
+      else if (re.test(rel)) out.push(rel);
+    }
+  })(root);
+  return out.sort();
+}
+
+function loadManifest(root, cfg) {
+  if (!cfg.manifest) return [];
+  const p = path.join(root, cfg.manifest);
+  if (!exists(p)) return [];
+  let data;
+  try { data = JSON.parse(readFile(p)); } catch (e) { die(`${cfg.manifest} is not valid JSON: ` + e.message); }
+  const tasks = Array.isArray(data) ? data : (data.tasks || []);
+  return tasks;
+}
+
+function taskFor(tasks, marker) {
+  return tasks.find((t) => t.id === marker)
+    || tasks.find((t) => t.symbol === marker)
+    || tasks.find((t) => t.marker === marker)
+    || tasks.find((t) => t.symbol && (marker.endsWith(String(t.symbol).split(".").pop()) || String(t.symbol).includes(marker)))
+    || null;
+}
+
+// ---- completion state (manifest source only; marker source is stateless) ----
+const statePath = (root) => path.join(root, ".hivemind", "done.json");
+function loadDone(root) {
+  const p = statePath(root);
+  if (!exists(p)) return {};
+  try { return JSON.parse(readFile(p)).done || {}; } catch { return {}; }
+}
+function markDone(root, id) {
+  const done = loadDone(root); done[id] = true;
+  writeFile(statePath(root), JSON.stringify({ done }, null, 2) + "\n");
+}
+function clearDone(root, substr) {
+  const done = loadDone(root);
+  for (const id of Object.keys(done)) if (substr == null || id.includes(substr)) delete done[id];
+  writeFile(statePath(root), JSON.stringify({ done }, null, 2) + "\n");
+}
+
+// Locate the [start..end] line span a unit occupies in its file, for both prompt display
+// and apply. Returns { lines, start, end, abs } or { missing, reason } / { gone }.
+function locateSpan(root, cfg, item) {
+  const abs = path.join(root, item.file);
+  let lines;
+  try { lines = readFile(abs).split("\n"); } catch { return { missing: true, reason: `cannot read ${item.file}` }; }
+  if (cfg.source === "manifest") {
+    const t = item.task || {};
+    if (t.begin) {
+      const bRe = new RegExp(t.begin);
+      const start = lines.findIndex((l) => bRe.test(l));
+      if (start < 0) return { missing: true, reason: `begin anchor /${t.begin}/ not found in ${item.file}` };
+      let end = start;
+      if (t.end) {
+        const eRe = new RegExp(fill(t.end, { marker: item.marker }));
+        end = lines.findIndex((l, i) => i >= start && eRe.test(l));
+        if (end < 0) return { missing: true, reason: `end anchor /${t.end}/ not found after begin in ${item.file}` };
+      }
+      return { lines, start, end, abs };
+    }
+    return { lines, start: 0, end: lines.length - 1, abs };   // whole-file unit
+  }
+  // marker source
+  const re = new RegExp(cfg.stubs.marker);
+  const start = lines.findIndex((l) => { const m = l.match(re); return m && (m[1] || m[0]) === item.marker; });
+  if (start < 0) return { gone: true };   // marker already filled => unit is done
+  let end = start;
+  if (cfg.stubs.endMarker) {
+    const endRe = new RegExp(fill(cfg.stubs.endMarker, { marker: item.marker }));
+    end = lines.findIndex((l, i) => i >= start && endRe.test(l));
+    if (end < 0) return { missing: true, reason: `end marker for "${item.marker}" not found after line ${start + 1}` };
+  }
+  return { lines, start, end, abs };
+}
+
+function scan(root, cfg, tasks, opts) {
+  const items = [];
+  if (cfg.source === "manifest") {
+    const done = loadDone(root);
+    for (const t of tasks) {
+      if (!t.id) die(`manifest task missing "id": ${JSON.stringify(t).slice(0, 120)}`);
+      if (!t.file) die(`manifest task "${t.id}" missing "file" (required for source=manifest)`);
+      if (done[t.id]) continue;
+      items.push({ marker: t.id, file: t.file, line: 0, specComment: "", task: t });
+    }
+  } else {
+    const files = discoverFiles(root, cfg);
+    for (const f of files) {
+      const abs = path.join(root, f);
+      let lines;
+      try { lines = readFile(abs).split("\n"); } catch { continue; }
+      for (let i = 0; i < lines.length; i++) {
+        const re = new RegExp(cfg.stubs.marker);
+        const m = lines[i].match(re);
+        if (!m) continue;
+        const marker = m[1] || m[0];
+        // gather the contiguous `//` comment block immediately above as the local spec
+        let c = i - 1; const spec = [];
+        while (c >= 0 && lines[c].trim().startsWith("//")) { spec.unshift(lines[c].trim().replace(/^\/\/\s?/, "")); c--; }
+        items.push({ marker, file: f, line: i, specComment: spec.join("\n"), task: taskFor(tasks, marker) });
+      }
+    }
+  }
+  let filtered = items;
+  if (opts.only) filtered = filtered.filter((it) => it.marker.includes(opts.only));
+  if (opts.limit) filtered = filtered.slice(0, opts.limit);
+  return filtered;
+}
+
+// ----------------------------------------------------------------------------- prompt
+function buildContextBlock(root, cfg) {
+  if (!cfg.context || !cfg.context.length) return "";
+  const parts = [];
+  for (const rel of cfg.context) {
+    const p = path.join(root, rel);
+    if (!exists(p)) continue;
+    parts.push(`## Context: ${rel}\n\`\`\`\n${readFile(p)}\n\`\`\`\n`);
+  }
+  return parts.length ? parts.join("\n") + "\n" : "";
+}
+
+function buildMessages(root, cfg, item, contextBlock, feedback) {
+  const fileSrc = readFile(path.join(root, item.file));
+  const t = item.task || {};
+  const hasTest = cfg.output.testKey != null;
+  const isRefactor = cfg.task === "refactor";
+  const isEdit = cfg.task === "edit";
+  // The unit's current text (the span that will be replaced). Whole file unless anchored.
+  const span = locateSpan(root, cfg, item);
+  const region = (!span.missing && !span.gone) ? span.lines.slice(span.start, span.end + 1).join("\n") : fileSrc;
+  const wholeFile = !span.missing && !span.gone && span.start === 0 && span.end === span.lines.length - 1;
+
+  let sys, usr;
+  if (isEdit) {
+    sys = cfg.prompt.system || BUILTIN_EDIT_SYSTEM;
+    usr = cfg.prompt.user || BUILTIN_EDIT_USER;
+  } else if (isRefactor) {
+    sys = cfg.prompt.system || BUILTIN_REFACTOR_SYSTEM;
+    usr = cfg.prompt.user || BUILTIN_REFACTOR_USER;
+  } else {
+    sys = cfg.prompt.system || (hasTest ? BUILTIN_SYSTEM : BUILTIN_SYSTEM_NOTEST);
+    usr = cfg.prompt.user || BUILTIN_USER;
+  }
+
+  const vars = {
+    implKey: cfg.output.implKey,
+    testKey: cfg.output.testKey || "",
+    marker: item.marker,
+    file: item.file,
+    reqPath: "../" + item.file,
+    fileSrc,
+    unitSrc: region,
+    contextBlock,
+    specComment: item.specComment ? "Local spec: " + item.specComment : "",
+    spec: t.spec ? "Spec: " + t.spec : (t.instruction ? "Instruction: " + t.instruction : ""),
+    reference: t.rustRef ? "Reference (the oracle of truth): " + t.rustRef
+             : t.reference ? "Reference: " + t.reference : "",
+    signature: t.signature || "(see the marked location)",
+    // implement-mode apply note
+    applyNote: isRefactor
+      ? (wholeFile
+          ? "the COMPLETE new contents of the file shown above (the entire file is replaced by your output)."
+          : "the COMPLETE replacement for the unit shown above (that exact span is replaced by your output). It may span many lines.")
+      : (cfg.stubs.endMarker
+          ? "the COMPLETE replacement for the entire region from the marker line through its end marker (both markers are removed — output the full implementation that takes their place). It may span many lines."
+          : "the COMPLETE replacement for the single marked line shown. Keep the EXACT left-hand side / declaration; just implement it. It may span multiple lines."),
+    // refactor-mode test clauses (refactors usually rely on the existing suite, no new test)
+    testClause: (isRefactor && hasTest) ? `, "${cfg.output.testKey}": "<code>"` : "",
+    testLine: (isRefactor && hasTest)
+      ? `- ${cfg.output.testKey}: a focused test pinning the refactored unit's behavior (project conventions, no fences).\n` : "",
+    fileContextNote: wholeFile ? "" : `Full file for context (edit only the span above):\n\`\`\`\n${fileSrc}\n\`\`\`\n`,
+    feedback: feedback ? "\nThe previous attempt FAILED its gate. Fix it. Failure output:\n" + String(feedback).slice(0, 1500) : "",
+  };
+  return [
+    { role: "system", content: fill(sys, vars) },
+    { role: "user", content: fill(usr, vars) },
+  ];
+}
+
+// ----------------------------------------------------------------------------- llm
+async function callLLM(cfg, key, messages) {
+  const base = process.env[cfg.provider.baseUrlEnv] || cfg.provider.baseUrl;
+  const model = process.env[cfg.provider.modelEnv] || cfg.provider.model;
+  const body = { model, messages, temperature: cfg.provider.temperature, max_tokens: cfg.provider.maxTokens };
+  if (cfg.provider.jsonMode) body.response_format = { type: "json_object" };
+  const res = await fetch(base.replace(/\/$/, "") + "/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("API " + res.status + ": " + (await res.text()).slice(0, 300));
+  const j = await res.json();
+  let content = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+  if (typeof content !== "string") throw new Error("no content in model response");
+  let obj;
+  try { obj = JSON.parse(content); }
+  catch {
+    const m = content.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("model did not return JSON");
+    obj = JSON.parse(m[0]);
+  }
+  const implKey = cfg.output.implKey, testKey = cfg.output.testKey;
+  if (cfg.task === "edit") {
+    const edits = obj[implKey];
+    if (!Array.isArray(edits)) throw new Error(`model did not return "${implKey}" as an array of {old,new} edits`);
+    for (const e of edits) {
+      if (!e || typeof e.old !== "string" || typeof e.new !== "string")
+        throw new Error(`each edit must be {"old": string, "new": string}; got ${JSON.stringify(e).slice(0, 120)}`);
+    }
+    return { impl: edits, test: null };
+  }
+  if (typeof obj[implKey] !== "string") throw new Error(`model did not return "${implKey}"`);
+  if (testKey && typeof obj[testKey] !== "string") throw new Error(`model did not return "${testKey}"`);
+  return { impl: stripFence(obj[implKey]), test: testKey ? stripFence(obj[testKey]) : null };
+}
+
+// ----------------------------------------------------------------------------- apply + gate
+// One mutex per file: concurrent agents editing the same file are serialized so a gate
+// run never sees a half-applied sibling edit.
+const locks = {};
+function withLock(file, fn) {
+  const prev = locks[file] || Promise.resolve();
+  let release; const gate = new Promise((r) => (release = r));
+  locks[file] = prev.then(() => gate);
+  return prev.then(() => Promise.resolve().then(fn)).finally(release);
+}
+
+function applyGate(root, cfg, item, impl, test) {
+  return withLock(item.file, () => {
+    // ---- edit mode: apply a list of {old,new} find/replace pairs to the whole file.
+    // Each "old" must match exactly once; only those spans change, so an arbitrarily
+    // large file's untouched bytes are preserved by construction.
+    if (cfg.task === "edit") {
+      const abs = path.join(root, item.file);
+      let src;
+      try { src = readFile(abs); } catch { return { ok: false, output: `cannot read ${item.file}` }; }
+      const snapshot = src;
+      let out = src;
+      for (const e of impl) {                       // impl is the array of {old,new}
+        if (e.old === e.new) continue;
+        const idx = out.indexOf(e.old);
+        if (idx < 0) return { ok: false, output: `edit "old" not found verbatim in ${item.file}:\n` + e.old.slice(0, 240) };
+        if (out.indexOf(e.old, idx + e.old.length) >= 0)
+          return { ok: false, output: `edit "old" is ambiguous (matches more than once) in ${item.file}; include surrounding lines to disambiguate:\n` + e.old.slice(0, 240) };
+        out = out.slice(0, idx) + e.new + out.slice(idx + e.old.length);
+      }
+      // ALWAYS run the gate — even on a no-op (empty/identical edits). Otherwise a lazy
+      // agent that returns [] would mark the unit done without doing the work; the gate is
+      // what decides whether the file is actually acceptable.
+      const changed = out !== snapshot;
+      if (changed) writeFile(abs, out);
+      const gateCmd = fill(cfg.gate.command, { marker: item.marker, file: item.file });
+      let r;
+      try { cp.execSync(gateCmd, { cwd: root, stdio: "pipe" }); r = { ok: true }; }
+      catch (e) { r = { ok: false, output: (e.stdout || "") + (e.stderr || "") + (e.message || "") }; }
+      if (r.ok) { if (cfg.source === "manifest") markDone(root, item.marker); }
+      else if (changed) writeFile(abs, snapshot);   // revert: tree stays valid
+      return r;
+    }
+
+    const span = locateSpan(root, cfg, item);
+    if (span.gone) return { ok: true, note: "already done" };       // marker already filled
+    if (span.missing) return { ok: false, output: span.reason };     // anchor/end not found
+    const { lines, start, end, abs } = span;
+    const snapshot = lines.join("\n");
+    lines.splice(start, end - start + 1, impl);   // impl replaces the whole [start..end] span
+    writeFile(abs, lines.join("\n"));
+    let testAbs = null;
+    if (test != null && cfg.output.testKey) {
+      testAbs = path.join(root, fill(cfg.output.testPath, { marker: item.marker }));
+      writeFile(testAbs, test);
+    }
+    const gateCmd = fill(cfg.gate.command, { marker: item.marker, file: item.file });
+    let r;
+    try { cp.execSync(gateCmd, { cwd: root, stdio: "pipe" }); r = { ok: true }; }
+    catch (e) { r = { ok: false, output: (e.stdout || "") + (e.stderr || "") + (e.message || "") }; }
+    if (r.ok) {
+      if (cfg.source === "manifest") markDone(root, item.marker);   // no marker to consume; record it
+    } else {
+      writeFile(abs, snapshot);
+      if (testAbs) { try { fs.unlinkSync(testAbs); } catch {} }
+    }
+    return r;
+  });
+}
+
+async function doItem(root, cfg, key, contextBlock, item) {
+  let feedback = null;
+  for (let a = 0; a < cfg.attempts; a++) {
+    let resp;
+    try { resp = await callLLM(cfg, key, buildMessages(root, cfg, item, contextBlock, feedback)); }
+    catch (e) { feedback = "LLM error: " + e.message; continue; }
+    const r = await applyGate(root, cfg, item, resp.impl, resp.test);
+    if (r.ok) return { marker: item.marker, ok: true };
+    feedback = r.output;
+  }
+  return { marker: item.marker, ok: false, feedback };
+}
+
+async function pool(items, n, fn) {
+  const out = []; let i = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
+
+// ----------------------------------------------------------------------------- commands
+function parseFlags(argv) {
+  const o = {};
+  for (const a of argv) {
+    if (a === "--dry") o.dry = true;
+    else if (a === "--list") o.list = true;
+    else if (a.startsWith("--only=")) o.only = a.slice(7);
+    else if (a.startsWith("--limit=")) o.limit = +a.slice(8);
+    else if (a.startsWith("--concurrency=")) o.concurrency = +a.slice(14);
+    else if (a.startsWith("--attempts=")) o.attempts = +a.slice(11);
+    else if (a === "--flash") o.model = "deepseek-v4-flash";
+    else if (a === "--pro") o.model = "deepseek-v4-pro";
+    else if (a.startsWith("--model=")) o.model = a.slice(8);
+    else if (a.startsWith("--root=")) o.root = a.slice(7);
+    else if (a === "--redo") o.redo = "";
+    else if (a.startsWith("--redo=")) o.redo = a.slice(7);
+  }
+  return o;
+}
+
+function cmdList(root, cfg, opts) {
+  const tasks = loadManifest(root, cfg);
+  const items = scan(root, cfg, tasks, opts);
+  for (const it of items) console.log(it.marker.padEnd(28), it.file + ":" + (it.line + 1) + (it.task ? "" : "  (no manifest entry)"));
+  console.log(`\n${items.length} unit(s)`);
+}
+
+async function cmdRun(root, cfg, opts) {
+  if (opts.concurrency) cfg.concurrency = opts.concurrency;
+  if (opts.model) { cfg.provider.model = opts.model; cfg.provider.modelEnv = null; }   // CLI flag wins over env
+  if (opts.attempts) cfg.attempts = opts.attempts;
+  if (opts.redo != null) {
+    if (cfg.source !== "manifest") die("--redo only applies to source=manifest (marker mode is stateless; just re-add the marker).", 2);
+    clearDone(root, opts.redo || null);
+    console.log(`hivemind: cleared completion state${opts.redo ? ` matching "${opts.redo}"` : ""}`);
+  }
+  const tasks = loadManifest(root, cfg);
+  const contextBlock = buildContextBlock(root, cfg);
+
+  if (opts.dry) {
+    const first = scan(root, cfg, tasks, opts)[0];
+    if (!first) return console.log("no units found");
+    const base = process.env[cfg.provider.baseUrlEnv] || cfg.provider.baseUrl;
+    const model = process.env[cfg.provider.modelEnv] || cfg.provider.model;
+    console.log(`model: ${model}  base: ${base}\n--- first prompt (${first.marker}) ---\n`);
+    console.log(buildMessages(root, cfg, first, contextBlock, null).map((m) => `[${m.role}]\n${m.content}`).join("\n\n"));
+    return;
+  }
+
+  const key = process.env[cfg.provider.keyEnv] || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
+  if (!key) die(`set $${cfg.provider.keyEnv} (the API key)`, 2);
+
+  const base = process.env[cfg.provider.baseUrlEnv] || cfg.provider.baseUrl;
+  const model = process.env[cfg.provider.modelEnv] || cfg.provider.model;
+  console.log(`hivemind: ${model} @ ${base}, concurrency ${cfg.concurrency}, attempts ${cfg.attempts}`);
+
+  const failed = new Map();
+  for (let pass = 1; ; pass++) {
+    const todo = scan(root, cfg, tasks, opts);
+    if (!todo.length) { console.log("\nALL UNITS DONE \u{1F389}"); break; }
+    const before = todo.length;
+    console.log(`\n=== pass ${pass}: ${before} unit(s) remaining ===`);
+    const results = await pool(todo, cfg.concurrency, (it) => doItem(root, cfg, key, contextBlock, it));
+    for (const r of results) {
+      if (r.ok) console.log("  ✓ " + r.marker);
+      else { console.log("  ✗ " + r.marker); failed.set(r.marker, r.feedback); }
+    }
+    const remaining = scan(root, cfg, tasks, opts).length;
+    if (remaining === before) {
+      console.log(`\nFIXPOINT: ${before} unit(s) could not be resolved this pass. Stuck:`);
+      for (const it of scan(root, cfg, tasks, opts)) {
+        console.log("  - " + it.marker + "  (" + it.file + ")");
+        const fb = failed.get(it.marker);
+        if (fb) console.log("      last failure: " + String(fb).split("\n")[0].slice(0, 160));
+      }
+      process.exitCode = 1;
+      break;
+    }
+  }
+  if (cfg.gate.final) { try { cp.execSync(cfg.gate.final, { cwd: root, stdio: "inherit" }); } catch {} }
+}
+
+// ----------------------------------------------------------------------------- init scaffold
+const TPL_AGENTS = `# Agent task conventions
+
+Agents complete independent units of work, each marked \`UNIMPLEMENTED("id")\`. The win is
+that units are INDEPENDENT — they stitch back together with no merge coordination and a bug
+stays localized to one unit. How you carve the work into units is up to you; common choices:
+a function, a whole module/file, one handler/case, or one dispatch-table entry. Smaller +
+more independent = better parallelism and easier debugging.
+
+## How to complete a unit
+1. Read this file, any frozen context files, the unit's local \`//\` comment, and the
+   manifest entry (\`tasks.json\`) for spec + signature + reference.
+2. Fill in the marked unit (a single line, or a whole region if the project uses end
+   markers). Keep the surrounding structure intact.
+3. Also write the test file the orchestrator expects (unless this project's gate is a
+   build/lint/typecheck instead of per-unit tests).
+4. The gate command must pass.
+
+## Test format (this project's runner: \`test/run.js\`)
+A test file exports an array of cases; each \`fn\` throws on failure:
+\`\`\`js
+module.exports = [
+  { name: "does X", fn: () => { if (real !== expected) throw new Error("..."); } },
+  // >= 3 cases
+];
+\`\`\`
+Require the module under test relative to \`test/\` (e.g. \`require("../mymod.js")\`).
+
+## Rules
+- Edit ONLY your own unit and your own test file. Never touch other units, shared
+  scaffolding, context files, or the runner.
+- The reference in the manifest is the spec. Match its behavior exactly.
+- Leave a one-line comment citing the reference.
+`;
+
+const TPL_RUNNER = `// Test runner.  node test/run.js [marker]
+//   - no arg: run every test/*.test.js
+//   - marker: run only test/<marker>.test.js
+// A test file exports an array of { name, fn }; fn throws on failure.
+const fs = require("fs"), path = require("path");
+const DIR = __dirname;
+const only = process.argv[2];
+const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".test.js") && (!only || f === only + ".test.js"));
+let pass = 0, fail = 0;
+for (const f of files) {
+  let cases;
+  try { cases = require(path.join(DIR, f)); }
+  catch (e) { console.log("LOAD FAIL " + f + ": " + e.message); fail++; continue; }
+  for (const c of cases) {
+    try { c.fn(); pass++; }
+    catch (e) { fail++; console.log("FAIL " + f + " :: " + c.name + "\\n   " + (e && e.message)); }
+  }
+}
+console.log(\`\\n\${pass} passed, \${fail} failed\` + (only ? \` (marker \${only})\` : \` over \${files.length} files\`));
+process.exit(fail ? 1 : 0);
+`;
+
+const TPL_MANIFEST = JSON.stringify({
+  meta: { project: "REPLACE ME", note: "One task per unit. id MUST match the UNIMPLEMENTED(\"id\") marker." },
+  tasks: [
+    { id: "demo.add", file: "demo.js", symbol: "add", wave: 1, deps: [],
+      signature: "(a:number, b:number) -> number",
+      reference: "spec.md#add — integer addition, no coercion",
+      spec: "Return a + b. Throw if either argument is not a finite number." },
+  ],
+}, null, 2) + "\n";
+
+const TPL_DEMO = `// A skeleton module. You commit the structure; agents fill the marked units.
+// A unit can be as small as one line or, with stubs.endMarker set, a whole region/body.
+// Each unit's id matches a task in tasks.json.
+function UNIMPLEMENTED(id) { throw new Error("UNIMPLEMENTED: " + id); }
+
+// add two finite numbers (see tasks.json: demo.add)
+function add(a, b) { return UNIMPLEMENTED("demo.add"); }
+
+module.exports = { add };
+`;
+
+const TPL_REFACTOR_MANIFEST = JSON.stringify({
+  meta: { project: "REPLACE ME", note: "source=manifest: each task is an existing file (or anchored region) to refactor. id is arbitrary but unique." },
+  tasks: [
+    { id: "callbacks-to-async:demo.js", file: "demo.js",
+      instruction: "Convert callback-style functions to async/await. Keep the public API and behavior identical.",
+      reference: "team style guide: prefer async/await over node-style callbacks" },
+    { id: "extract-fn:helpers.js", file: "helpers.js",
+      begin: "^function oldName\\(", end: "^}",
+      instruction: "Rename oldName to newName and update its body; do not touch other functions." },
+  ],
+}, null, 2) + "\n";
+
+function cmdInit(targetDir, isRefactor) {
+  const root = path.resolve(targetDir || ".");
+  fs.mkdirSync(root, { recursive: true });
+  const cfgPath = path.join(root, "hivemind.config.json");
+  if (exists(cfgPath)) die(`${cfgPath} already exists — refusing to overwrite.`, 2);
+
+  const wrote = [];
+  const put = (rel, content, skipIfExists) => {
+    const p = path.join(root, rel);
+    if (skipIfExists && exists(p)) return;
+    writeFile(p, content); wrote.push(rel);
+  };
+
+  if (isRefactor) {
+    // refactor an existing project: units come from the manifest; gate is your real suite.
+    const cfg = {
+      source: "manifest",
+      task: "refactor",
+      provider: DEFAULT_CONFIG.provider,
+      manifest: "hivemind.tasks.json",
+      context: ["AGENTS.md"],
+      gate: { command: "npm test", final: "npm test" },
+      output: { implKey: "code", testKey: null, testPath: "" },
+      concurrency: 4,
+      attempts: 3,
+      prompt: { system: null, user: null },
+    };
+    put("hivemind.config.json", JSON.stringify(cfg, null, 2) + "\n");
+    put("hivemind.tasks.json", TPL_REFACTOR_MANIFEST, true);
+    put("AGENTS.md", TPL_AGENTS, true);
+    console.log("hivemind: scaffolded REFACTOR setup in " + root);
+    for (const w of wrote) console.log("  + " + w);
+    console.log(`
+Next:
+  1. Edit hivemind.config.json: set "gate.command" to YOUR behavior-preserving check
+     (e.g. "npm test", "cargo test", "tsc --noEmit && eslint {file}").
+  2. Fill hivemind.tasks.json: one task per file (whole-file) or per anchored region
+     (begin/end regexes). Put the transformation in "instruction".
+  3. export ${cfg.provider.keyEnv}=...   then:  hivemind list   and   hivemind run --dry
+  4. hivemind run        (re-run a unit with: hivemind run --redo=<id substr>)
+  Completion is tracked in .hivemind/done.json (git-ignore it).`);
+    return;
+  }
+
+  // a concrete, working stub-filling config (explicit so it's easy to edit)
+  const cfg = {
+    source: "markers",
+    task: "implement",
+    provider: DEFAULT_CONFIG.provider,
+    stubs: { glob: "**/*.js", marker: "UNIMPLEMENTED\\(\"([^\"]+)\"\\)", endMarker: null },
+    manifest: "tasks.json",
+    context: ["AGENTS.md"],
+    gate: { command: "node test/run.js {marker}", final: "node test/run.js" },
+    output: { implKey: "impl", testKey: "test", testPath: "test/{marker}.test.js" },
+    concurrency: 5,
+    attempts: 3,
+    prompt: { system: null, user: null },
+  };
+  put("hivemind.config.json", JSON.stringify(cfg, null, 2) + "\n");
+  put("AGENTS.md", TPL_AGENTS, true);
+  put("tasks.json", TPL_MANIFEST, true);
+  put("test/run.js", TPL_RUNNER, true);
+  put("demo.js", TPL_DEMO, true);
+
+  console.log("hivemind: scaffolded in " + root);
+  for (const w of wrote) console.log("  + " + w);
+  console.log(`
+Next:
+  1. Edit hivemind.config.json (provider, stubs.glob, gate command).
+  2. Build your skeleton: commit dispatchers, stub each unit with UNIMPLEMENTED("id").
+  3. Fill tasks.json — one entry per stub (id matches the marker).
+  4. export ${cfg.provider.keyEnv}=...   then:  hivemind list   and   hivemind run --dry
+  5. hivemind run
+  (Refactoring existing code instead? Use \`hivemind init --refactor\`.)`);
+}
+
+// ----------------------------------------------------------------------------- help
+const HELP = `hivemind — run a swarm of LLM agents over many independent units, each gated by a command.
+
+Two modes (config "source"):
+  markers   — fill UNIMPLEMENTED("id") stubs in a skeleton (stateless; marker gone = done).
+  manifest  — refactor existing files/regions named in the manifest (state in .hivemind/done.json).
+
+Usage:
+  hivemind init [dir]            Scaffold a stub-filling project (config + manifest + runner + AGENTS.md).
+  hivemind init --refactor [dir] Scaffold a refactor project (manifest of files + your test gate).
+  hivemind list [flags]          List the units that still need work.
+  hivemind run  [flags]          Run the orchestration loop to a fixpoint.
+  hivemind help                  This message.
+  hivemind version               Print the version.
+
+Flags (list/run):
+  --root=DIR            Project root (default: cwd; the dir holding hivemind.config.json).
+  --only=SUBSTR         Only units whose id/marker contains SUBSTR.
+  --limit=N             At most N units.
+Flags (run):
+  --dry                 Print the model/base and the first full prompt; make no calls.
+  --concurrency=N       Parallel agents (default from config).
+  --attempts=N          Retries per unit with failure feedback (default from config).
+  --flash               use deepseek-v4-flash (fast, cheap)
+  --pro                 use deepseek-v4-pro (reasoning; the default)
+  --model=NAME          override the model for this run
+  --redo[=SUBSTR]       (manifest mode) clear completion state (all, or ids matching SUBSTR) and re-run.
+
+The gate: for each unit the model returns the code (and, when configured, a test); under a
+per-file lock the code is spliced in (a line, a region, or the whole file), any test is
+written, and the gate command runs. Pass => keep; fail => revert (the tree is always valid).
+Passes loop until none resolve (fixpoint). Refactors preserve behavior — the gate is the
+contract, so point it at your real test suite.
+
+Provider: any OpenAI-compatible /chat/completions endpoint. Key/base/model come from the
+env vars named in config (default DEEPSEEK_KEY / DEEPSEEK_BASE / DEEPSEEK_MODEL).
+`;
+
+// ----------------------------------------------------------------------------- main
+(async () => {
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (cmd === "version" || cmd === "--version" || cmd === "-v") return console.log("hivemind " + VERSION);
+  if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") return console.log(HELP);
+  if (cmd === "init") {
+    const refactor = rest.includes("--refactor");
+    return cmdInit(rest.find((a) => !a.startsWith("--")), refactor);
+  }
+
+  const opts = parseFlags(rest);
+  const root = path.resolve(opts.root || ".");
+  const cfg = loadConfig(root);
+
+  if (cmd === "list") return cmdList(root, cfg, opts);
+  if (cmd === "run") return cmdRun(root, cfg, opts);
+  die(`unknown command "${cmd}". Try \`hivemind help\`.`, 2);
+})().catch((e) => die(e && e.stack ? e.stack : String(e)));

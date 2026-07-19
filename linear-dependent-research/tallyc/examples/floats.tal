@@ -1,0 +1,29 @@
+// FLOATS (Phase Scalars, S4) — IEEE-754 F32/F64 with real arithmetic.
+//
+//   tally run examples/floats.tal      →  9
+//
+// `fadd`/`fsub`/`fmul`/`fdiv`/`fneg` and the ordered comparisons
+// `flt`/`fle`/`feq` (→ Nat 0/1), polymorphic over `F32`/`F64`. Float literals
+// (`3.5`, `2.0f32`) are real; `f64_of_nat`/`nat_of_f64` bridge to `Nat` and
+// `cast` covers int↔float. Floats ride the i64 register as their bit pattern —
+// decoded only at these ops — so no representation rewrite was needed.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// Newton step for sqrt: x' = (x + n/x) / 2
+newton : F64 -> F64 -> F64
+fn newton(n, x) { fdiv(fadd(x, fdiv(n, x)), 2.0) }
+
+main : Nat
+fn main() {
+    // sqrt(81) by a few Newton iterations from x0 = 9-ish... start at 40
+    let n = 81.0;
+    let x1 = newton(n, 40.0);
+    let x2 = newton(n, x1);
+    let x3 = newton(n, x2);
+    let x4 = newton(n, x3);
+    let x5 = newton(n, x4);
+    let x6 = newton(n, x5);
+    nat_of_f64(x6)                     // converges to 9.0 -> 9
+}

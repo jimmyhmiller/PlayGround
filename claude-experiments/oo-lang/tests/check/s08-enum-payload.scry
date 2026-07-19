@@ -1,0 +1,8 @@
+enum Shape { Circle(Float) Rectangle(Float, Float) }
+fn area(s: Shape) -> Float {
+  match s {
+    Circle(r) -> 3.14159 * r * r
+    Rectangle(w, h) -> w * h
+  }
+}
+fn main() { print(area(Circle(2.0))) }

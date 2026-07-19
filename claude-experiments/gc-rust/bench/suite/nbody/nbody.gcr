@@ -1,0 +1,154 @@
+// n-body — gc-rust port of the Computer Language Benchmarks Game algorithm
+// (the classic 5-body solar-system simulation, single-threaded). Faithful
+// translation of the same algorithm as nbody.go / .rs / .java in this directory
+// (based on the C program by Christoph Bauer), so the printed energy is directly
+// comparable. Bodies are held in parallel f64 arrays because gc-rust value
+// structs are immutable; the arithmetic is identical.
+//
+// Algorithm origin: The Computer Language Benchmarks Game (BSD-3-Clause); this
+// gc-rust translation written for the gc-rust benchmark comparison.
+//
+// STEPS is hardcoded to match the CLI arg the harness passes to the other langs.
+
+fn energy(x: Array<f64>, y: Array<f64>, z: Array<f64>,
+          vx: Array<f64>, vy: Array<f64>, vz: Array<f64>,
+          mass: Array<f64>, nb: i64) -> f64 {
+    let mut e = 0.0;
+    let mut i = 0;
+    while i < nb {
+        let mi = array_get_unchecked(mass, i);
+        e = e + 0.5 * mi *
+            (array_get_unchecked(vx, i) * array_get_unchecked(vx, i) +
+             array_get_unchecked(vy, i) * array_get_unchecked(vy, i) +
+             array_get_unchecked(vz, i) * array_get_unchecked(vz, i));
+        let mut j = i + 1;
+        while j < nb {
+            let dx = array_get_unchecked(x, i) - array_get_unchecked(x, j);
+            let dy = array_get_unchecked(y, i) - array_get_unchecked(y, j);
+            let dz = array_get_unchecked(z, i) - array_get_unchecked(z, j);
+            let dist = sqrt(dx * dx + dy * dy + dz * dz);
+            e = e - mi * array_get_unchecked(mass, j) / dist;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    e
+}
+
+fn advance(mut x: Array<f64>, mut y: Array<f64>, mut z: Array<f64>,
+           mut vx: Array<f64>, mut vy: Array<f64>, mut vz: Array<f64>,
+           mass: Array<f64>, nb: i64, dt: f64) -> i64 {
+    let mut i = 0;
+    while i < nb {
+        let mut ivx = array_get_unchecked(vx, i);
+        let mut ivy = array_get_unchecked(vy, i);
+        let mut ivz = array_get_unchecked(vz, i);
+        let mi = array_get_unchecked(mass, i);
+        let mut j = i + 1;
+        while j < nb {
+            let dx = array_get_unchecked(x, i) - array_get_unchecked(x, j);
+            let dy = array_get_unchecked(y, i) - array_get_unchecked(y, j);
+            let dz = array_get_unchecked(z, i) - array_get_unchecked(z, j);
+            let d2 = dx * dx + dy * dy + dz * dz;
+            let dist = sqrt(d2);
+            let mag = dt / (d2 * dist);
+            let mj = array_get_unchecked(mass, j);
+            ivx = ivx - dx * mj * mag;
+            ivy = ivy - dy * mj * mag;
+            ivz = ivz - dz * mj * mag;
+            let _a = array_set(vx, j, array_get_unchecked(vx, j) + dx * mi * mag);
+            let _b = array_set(vy, j, array_get_unchecked(vy, j) + dy * mi * mag);
+            let _c = array_set(vz, j, array_get_unchecked(vz, j) + dz * mi * mag);
+            j = j + 1;
+        }
+        let _d = array_set(vx, i, ivx);
+        let _e = array_set(vy, i, ivy);
+        let _f = array_set(vz, i, ivz);
+        let _g = array_set(x, i, array_get_unchecked(x, i) + dt * ivx);
+        let _h = array_set(y, i, array_get_unchecked(y, i) + dt * ivy);
+        let _k = array_set(z, i, array_get_unchecked(z, i) + dt * ivz);
+        i = i + 1;
+    }
+    0
+}
+
+fn main() -> i64 {
+    let steps = 5000000;
+    let pi = 3.141592653589793;
+    let solar_mass = 4.0 * pi * pi;
+    let year = 365.24;
+    let nb = 5;
+
+    let mut x: Array<f64> = array_new(nb);
+    let mut y: Array<f64> = array_new(nb);
+    let mut z: Array<f64> = array_new(nb);
+    let mut vx: Array<f64> = array_new(nb);
+    let mut vy: Array<f64> = array_new(nb);
+    let mut vz: Array<f64> = array_new(nb);
+    let mut mass: Array<f64> = array_new(nb);
+
+    // Sun
+    let _s0 = array_set(x, 0, 0.0);  let _s1 = array_set(y, 0, 0.0);  let _s2 = array_set(z, 0, 0.0);
+    let _s3 = array_set(vx, 0, 0.0); let _s4 = array_set(vy, 0, 0.0); let _s5 = array_set(vz, 0, 0.0);
+    let _s6 = array_set(mass, 0, solar_mass);
+
+    // Jupiter
+    let _j0 = array_set(x, 1, 4.84143144246472090e+00);
+    let _j1 = array_set(y, 1, -1.16032004402742839e+00);
+    let _j2 = array_set(z, 1, -1.03622044471123109e-01);
+    let _j3 = array_set(vx, 1, 1.66007664274403694e-03 * year);
+    let _j4 = array_set(vy, 1, 7.69901118419740425e-03 * year);
+    let _j5 = array_set(vz, 1, -6.90460016972063023e-05 * year);
+    let _j6 = array_set(mass, 1, 9.54791938424326609e-04 * solar_mass);
+
+    // Saturn
+    let _t0 = array_set(x, 2, 8.34336671824457987e+00);
+    let _t1 = array_set(y, 2, 4.12479856412430479e+00);
+    let _t2 = array_set(z, 2, -4.03523417114321381e-01);
+    let _t3 = array_set(vx, 2, -2.76742510726862411e-03 * year);
+    let _t4 = array_set(vy, 2, 4.99852801234917238e-03 * year);
+    let _t5 = array_set(vz, 2, 2.30417297573763929e-05 * year);
+    let _t6 = array_set(mass, 2, 2.85885980666130812e-04 * solar_mass);
+
+    // Uranus
+    let _u0 = array_set(x, 3, 1.28943695621391310e+01);
+    let _u1 = array_set(y, 3, -1.51111514016986312e+01);
+    let _u2 = array_set(z, 3, -2.23307578892655734e-01);
+    let _u3 = array_set(vx, 3, 2.96460137564761618e-03 * year);
+    let _u4 = array_set(vy, 3, 2.37847173959480950e-03 * year);
+    let _u5 = array_set(vz, 3, -2.96589568540237556e-05 * year);
+    let _u6 = array_set(mass, 3, 4.36624404335156298e-05 * solar_mass);
+
+    // Neptune
+    let _n0 = array_set(x, 4, 1.53796971148509165e+01);
+    let _n1 = array_set(y, 4, -2.59193146099879641e+01);
+    let _n2 = array_set(z, 4, 1.79258772950371181e-01);
+    let _n3 = array_set(vx, 4, 2.68067772490389322e-03 * year);
+    let _n4 = array_set(vy, 4, 1.62824170038242295e-03 * year);
+    let _n5 = array_set(vz, 4, -9.51592254519715870e-05 * year);
+    let _n6 = array_set(mass, 4, 5.15138902046611451e-05 * solar_mass);
+
+    // offset momentum so the sun cancels the system's total momentum
+    let mut px = 0.0;
+    let mut py = 0.0;
+    let mut pz = 0.0;
+    let mut i = 0;
+    while i < nb {
+        px = px + array_get_unchecked(vx, i) * array_get_unchecked(mass, i);
+        py = py + array_get_unchecked(vy, i) * array_get_unchecked(mass, i);
+        pz = pz + array_get_unchecked(vz, i) * array_get_unchecked(mass, i);
+        i = i + 1;
+    }
+    let _o0 = array_set(vx, 0, 0.0 - px / solar_mass);
+    let _o1 = array_set(vy, 0, 0.0 - py / solar_mass);
+    let _o2 = array_set(vz, 0, 0.0 - pz / solar_mass);
+
+    print_float(energy(x, y, z, vx, vy, vz, mass, nb));
+    let mut s = 0;
+    while s < steps {
+        let _a = advance(x, y, z, vx, vy, vz, mass, nb, 0.01);
+        s = s + 1;
+    }
+    print_float(energy(x, y, z, vx, vy, vz, mass, nb));
+    0
+}

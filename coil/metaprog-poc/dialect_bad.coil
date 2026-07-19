@@ -1,0 +1,5 @@
+(module app)
+(import "safe_dialect.coil" :use *)
+(defn forbidden-op [(x :i64)] (-> :i64) x)
+(defn f [(x :i64)] (-> :i64) (forbidden-op (inc x)))   ; banned by the dialect's checker
+(defn main [] (-> :i64) (f 41))

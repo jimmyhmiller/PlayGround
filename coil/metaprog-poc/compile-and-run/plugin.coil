@@ -1,0 +1,6 @@
+(module plugin)
+; The plugin calls BACK into the host process. host_add is not linked here; it is
+; resolved at dlopen time against the host executable's exported symbols.
+(extern host_add :cc c [:i64 :i64] (-> :i64))
+(defn plugin-entry [(x :i64)] (-> :i64) (host_add x 22))
+(export-c [plugin-entry :as "plugin_entry"])

@@ -1,0 +1,31 @@
+enum Lookup { Found(List<Task>)  Empty }
+
+class Task {
+  title: String
+  done: Bool
+  fn complete() { self.done = true }
+}
+
+class Project {
+  name: String
+  tasks: List<Task>
+  fn add(t: Task) { self.tasks.push(t) }
+  fn findOpen() -> Lookup {
+    var out = List<Task>()
+    for t in self.tasks { if !t.done { out.push(t) } }
+    if out.len() == 0 { Lookup.Empty } else { Lookup.Found(out) }
+  }
+  fn openCount() -> Int {
+    var n = 0
+    for t in self.tasks { if !t.done { n = n + 1 } }
+    n
+  }
+}
+
+fn main() {
+  let p = Project(name: "Scry in the browser", tasks: List<Task>())
+  p.add(Task(title: "compile the VM to wasm", done: true))
+  p.add(Task(title: "run the viewer in-page", done: true))
+  p.add(Task(title: "wire up the terminal", done: false))
+  Console.log("demo booted: " + p.name)
+}

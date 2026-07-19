@@ -1,0 +1,3 @@
+(module m)
+(defn add [(a i64) (b i64)] (-> i64) (iadd a b))
+(defn main [] (-> i64) (add 1))

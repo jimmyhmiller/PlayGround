@@ -1,0 +1,173 @@
+(defn
+  dyn--has-self?
+  [(c Code)]
+  (-> bool)
+  (if
+    (code-sym? c)
+    (code-eq c (quasiquote Self))
+    (if (code-list? c) (dyn--has-self-list? c 0 (code-count c)) false)))
+
+(defn
+  dyn--has-self-list?
+  [(c Code) (i i64) (n i64)]
+  (-> bool)
+  (if
+    (icmp-eq i n)
+    false
+    (if (dyn--has-self? (code-nth c i)) true (dyn--has-self-list? c (iadd i 1) n))))
+
+(defn
+  dyn--check-method
+  [(tn Code) (mi i64)]
+  (-> bool)
+  (let
+    [arity (code-trait-arity tn mi)]
+    (if
+      (icmp-le arity 0)
+      (error "defdyn: a dyn-trait method must take a self parameter")
+      (if
+        (dyn--check-params tn mi 1 arity)
+        (if
+          (dyn--has-self? (code-trait-ret-type tn mi))
+          (error
+            "defdyn: a dyn-trait method's return type may not mention Self (not object-safe)")
+          true)
+        false))))
+
+(defn
+  dyn--check-params
+  [(tn Code) (mi i64) (j i64) (arity i64)]
+  (-> bool)
+  (if
+    (icmp-eq j arity)
+    true
+    (if
+      (dyn--has-self? (code-trait-param-type tn mi j))
+      (error
+        "defdyn: a dyn-trait method parameter (past self) may not mention Self (not object-safe)")
+      (dyn--check-params tn mi (iadd j 1) arity))))
+
+(defn
+  dyn--check-all
+  [(tn Code) (i i64) (n i64)]
+  (-> bool)
+  (if
+    (icmp-eq i n)
+    true
+    (if (dyn--check-method tn i) (dyn--check-all tn (iadd i 1) n) false)))
+
+(defn
+  dyn--vt-params
+  [(tn Code) (mi i64) (j i64) (arity i64)]
+  (-> Code)
+  (if
+    (icmp-eq j arity)
+    (quasiquote ())
+    (let
+      [pty (if (icmp-eq j 0) (quasiquote (ptr i8)) (code-trait-param-type tn mi j))]
+      (quasiquote
+        ((unquote pty) (unquote-splicing (dyn--vt-params tn mi (iadd j 1) arity)))))))
+
+(defn
+  dyn--vt-field
+  [(tn Code) (mi i64)]
+  (-> Code)
+  (let
+    [mname
+      (code-trait-method-name tn mi)
+      arity
+      (code-trait-arity tn mi)
+      ret
+      (code-trait-ret-type tn mi)]
+    (quasiquote
+      ((unquote mname)
+        (fnptr c [(unquote-splicing (dyn--vt-params tn mi 0 arity))] (unquote ret))))))
+
+(defn
+  dyn--vt-fields
+  [(tn Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote ())
+    (quasiquote
+      ((unquote (dyn--vt-field tn i)) (unquote-splicing (dyn--vt-fields tn (iadd i 1) n))))))
+
+(defn
+  dyn--impl-params
+  [(tn Code) (dynname Code) (mi i64) (j i64) (arity i64)]
+  (-> Code)
+  (if
+    (icmp-eq j arity)
+    (quasiquote ())
+    (let
+      [p
+        (if
+          (icmp-eq j 0)
+          (quasiquote (self (ptr (unquote dynname))))
+          (quasiquote
+            ((unquote (code-trait-param-name tn mi j))
+              (unquote (code-trait-param-type tn mi j)))))]
+      (quasiquote
+        ((unquote p) (unquote-splicing (dyn--impl-params tn dynname mi (iadd j 1) arity)))))))
+
+(defn
+  dyn--arg-names
+  [(tn Code) (mi i64) (j i64) (arity i64)]
+  (-> Code)
+  (if
+    (icmp-eq j arity)
+    (quasiquote ())
+    (quasiquote
+      ((unquote (code-trait-param-name tn mi j))
+        (unquote-splicing (dyn--arg-names tn mi (iadd j 1) arity))))))
+
+(defn
+  dyn--impl-method
+  [(tn Code) (dynname Code) (mi i64)]
+  (-> Code)
+  (let
+    [mname
+      (code-trait-method-name tn mi)
+      arity
+      (code-trait-arity tn mi)
+      ret
+      (code-trait-ret-type tn mi)]
+    (quasiquote
+      ((unquote mname)
+        [(unquote-splicing (dyn--impl-params tn dynname mi 0 arity))]
+        (-> (unquote ret))
+        (call-ptr
+          (load (field (load (field self vtable)) (unquote mname)))
+          (load (field self data))
+          (unquote-splicing (dyn--arg-names tn mi 1 arity)))))))
+
+(defn
+  dyn--impl-methods
+  [(tn Code) (dynname Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote ())
+    (quasiquote
+      ((unquote (dyn--impl-method tn dynname i))
+        (unquote-splicing (dyn--impl-methods tn dynname (iadd i 1) n))))))
+
+(defn
+  defdyn
+  [(tn Code)]
+  (-> Code)
+  (let
+    [n
+      (code-trait-method-count tn)
+      _safe
+      (dyn--check-all tn 0 n)
+      vtname
+      (code-symbol tn "-vtable")
+      dynname
+      (code-symbol tn "-dyn")]
+    (quasiquote
+      (do
+        (defstruct (unquote vtname) [(unquote-splicing (dyn--vt-fields tn 0 n))])
+        (defstruct (unquote dynname) [(data (ptr i8)) (vtable (ptr (unquote vtname)))])))))
+

@@ -5,20 +5,33 @@
 //! nested block comments, and recognizes typed numeric literals.
 
 use std::fmt;
+use serde::Serialize;
 
-/// A byte range into the source, `[start, end)`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Identifies which source text a span's byte offsets index into. The primary
+/// (user) source is `0`; the injected prelude and each `mod` file get their own
+/// id (assigned in `compile.rs`), so spans from sources lexed in separate
+/// offset spaces resolve against the RIGHT text — the debugger's multi-source
+/// foundation (see docs/DEBUGGER_SOURCEID_HANDOFF.md). Resolved via the
+/// `CoreProgram` SourceMap.
+pub type SourceId = u16;
+
+/// A byte range into a source, `[start, end)`, tagged with which source.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
+    /// Which source the offsets index (0 = primary/user). See [`SourceId`].
+    pub source: SourceId,
 }
 
 impl Span {
     pub fn new(start: usize, end: usize) -> Self {
-        Span { start: start as u32, end: end as u32 }
+        Span { start: start as u32, end: end as u32, source: 0 }
     }
+    /// Combine `self.start .. other.end`, keeping `self`'s source (both operands
+    /// come from the same source — this is how the parser builds compound spans).
     pub fn to(self, other: Span) -> Span {
-        Span { start: self.start, end: other.end }
+        Span { start: self.start, end: other.end, source: self.source }
     }
 }
 
@@ -29,7 +42,7 @@ impl fmt::Debug for Span {
 }
 
 /// Integer/float literal suffix recording the requested concrete type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum NumSuffix {
     None,
     I8, I16, I32, I64,
@@ -37,7 +50,7 @@ pub enum NumSuffix {
     F32, F64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TokKind {
     // literals
     Int(u64, NumSuffix),
@@ -59,7 +72,7 @@ pub enum TokKind {
     Eof,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Kw {
     Fn, Let, Mut, Struct, Enum, Impl, Trait, For, In, If, Else, Match,
     While, Loop, Return, Break, Continue, True, False, As, Where, Pub, Mod,
@@ -86,7 +99,7 @@ impl Kw {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Token {
     pub kind: TokKind,
     pub span: Span,
@@ -100,6 +113,17 @@ pub struct LexError {
 
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
     Lexer::new(src).run()
+}
+
+/// Lex `src` tagging every token span with `source` (the source's [`SourceId`]).
+/// Used by `compile.rs` for the prelude / `mod` files (lexed in their own offset
+/// spaces) so their spans resolve against the right text. `lex` is `source = 0`.
+pub fn lex_with_source(src: &str, source: SourceId) -> Result<Vec<Token>, LexError> {
+    let mut toks = Lexer::new(src).run()?;
+    for t in &mut toks {
+        t.span.source = source;
+    }
+    Ok(toks)
 }
 
 struct Lexer<'a> {

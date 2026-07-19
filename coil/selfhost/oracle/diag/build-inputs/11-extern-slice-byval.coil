@@ -1,0 +1,7 @@
+; An extern taking a `(slice u8)` BY VALUE across the C ABI. Rust rejects this
+; EAGERLY at the extern declaration (src/codegen.rs check_c_abi_types, run over
+; every extern before body codegen): `error: extern 'foo': a slice cannot cross
+; the C ABI by value …` exit 1. The self-host only checked struct-param externs, so
+; it SILENTLY ACCEPTED this (rc 0); the check is now eager for every extern.
+(extern foo :cc c [(slice u8)] (-> i64))
+(defn main [] (-> :i64) 0)

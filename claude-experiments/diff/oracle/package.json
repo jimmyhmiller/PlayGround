@@ -1,0 +1,15 @@
+{
+  "name": "diffpack-oracle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node runner.mjs",
+    "parity": "node parity.mjs",
+    "parity:strict": "node parity.mjs --strict",
+    "bench": "node benchmark.mjs",
+    "bench:capabilities": "node capability-benchmark.mjs"
+  },
+  "dependencies": {
+    "rolldown": "1.2.0"
+  }
+}

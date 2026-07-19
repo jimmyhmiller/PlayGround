@@ -1,0 +1,20 @@
+(defn
+  print
+  [(f Code) & (args Code)]
+  (-> Code)
+  (let
+    [w (gensym)]
+    (quasiquote
+      (let [(unquote w) (stdout)] (fmt (unquote w) (unquote f) (unquote-splicing args))))))
+
+(defn
+  println
+  [(f Code) & (args Code)]
+  (-> Code)
+  (let
+    [w (gensym)]
+    (quasiquote
+      (let
+        [(unquote w) (stdout)]
+        (do (fmt (unquote w) (unquote f) (unquote-splicing args)) (print-nl (unquote w)))))))
+

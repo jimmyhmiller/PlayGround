@@ -1,0 +1,5 @@
+error: in 'main': arithmetic on different types (f64 vs i64)
+  --> selfhost/oracle/diag/inputs/05-type-mismatch.coil:2:24
+  |
+2 | (defn main [] (-> i64) (iadd 1 2.0))
+  |                        ^^^^^^^^^^^^

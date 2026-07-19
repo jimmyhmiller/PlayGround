@@ -1,0 +1,35 @@
+; ============================================================================
+; objc.coil — talk to the Objective-C runtime (Cocoa / AppKit / Foundation)
+; directly, with no wrapper library. Everything in Cocoa is dispatched through
+; the C function `objc_msgSend`, which must be called with the EXACT signature of
+; the selector being sent (on arm64: pointer/int args in x-registers, CGFloat /
+; struct args in d-registers / as HFAs). One symbol, many ABIs — so the `msg`
+; macro retypes a function pointer to `objc_msgSend` per call site and `call-ptr`s
+; it (see fnptr->fnptr casts).
+;
+; Usage (`:use *` to get these unimported):
+;   (msg (ptr i8) (class c"NSApplication") (sel c"sharedApplication") [])
+;   (msg (ptr i8) win (sel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+;   (msg (ptr i8) a  (sel c"initWithContentRect:styleMask:backing:defer:")
+;        [CGRect i64 i64 i64] (load rect) 15 2 0)     ; CGRect crosses by value
+;
+; Link with:  --link-flag -framework --link-flag AppKit --link-flag -lobjc
+; ============================================================================
+
+(module objc)
+(export class sel msg objc_getClass sel_registerName objc_msgSend)
+
+(extern objc_getClass    :cc c [(ptr i8)] (-> (ptr i8)))
+(extern sel_registerName :cc c [(ptr i8)] (-> (ptr i8)))
+(extern objc_msgSend     :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; base decl; retyped per call
+
+(defn class [(n (ptr i8))] (-> (ptr i8)) (objc_getClass n))         ; Class by name
+(defn sel   [(n (ptr i8))] (-> (ptr i8)) (sel_registerName n))      ; SEL by name
+
+; (msg RET RECV SEL [ARG-TYPES…] ARGS…) — send `SEL` to `RECV`, returning RET.
+; ARG-TYPES are the types of the extra arguments after (id, SEL); they are spliced
+; into the objc_msgSend signature so the C ABI places each argument correctly.
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(call-ptr
+     (cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret) (fnptr-of objc_msgSend))
+     ~recv ~selector ~@args))

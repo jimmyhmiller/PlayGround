@@ -1,0 +1,38 @@
+; Concurrency dogfood: N worker threads each do M atomic increments on a SHARED
+; counter. The result is exactly N·M — race-free — proving the atomic library (over
+; llvm-ir, zero core feature) genuinely synchronizes across real threads. A plain
+; load+add+store would race and lose updates (shown in tests/threads.rs as a
+; demonstration — non-deterministic, so NOT an asserted test).
+;   coil run examples/threads.coil; echo $?   => 0   (counter == 4 * 100000)
+(module app)
+(import "lib/atomic.coil" :use *)
+(import "lib/thread.coil" :use *)
+
+(defn worker [(arg (ptr i8))] (-> (ptr i8))
+  (let [counter (cast (ptr i64) arg) (mut i) 0]
+    (loop
+      (if (icmp-ge (load i) 100000)
+          (break)
+          (do (atomic-add counter 1)               ; the atomic fetch-add
+              (store! i (iadd (load i) 1))))))
+  (cast (ptr i8) 0))
+
+(defn main [] (-> :i64)
+  (let [counter (alloc-stack i64)
+        threads (alloc-stack (array Thread 4))
+        (mut i) 0]
+    (store! counter 0)
+    ; spawn 4 workers, all sharing `counter`
+    (loop
+      (if (icmp-ge (load i) 4)
+          (break)
+          (do (thread-spawn (index threads (load i)) (fnptr-of worker) (cast (ptr i8) counter))
+              (store! i (iadd (load i) 1)))))
+    ; join them all
+    (store! i 0)
+    (loop
+      (if (icmp-ge (load i) 4)
+          (break)
+          (do (thread-join (index threads (load i)))
+              (store! i (iadd (load i) 1)))))
+    (isub (load counter) 400000)))   ; 0 iff race-free (4 threads x 100k)

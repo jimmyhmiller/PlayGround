@@ -1,0 +1,372 @@
+# Resumable native execution
+
+> **2026-07 — one executor.** The system now has exactly ONE executor:
+> `Engine` (core `engine.rs`), a tiered actor loop over the one thread-safe
+> runtime `Shared`. Interpreted execution is its cold tier, compiled `step`
+> functions (via the `TierSource` seam; the `livetype` crate is only the
+> compiler) are its hot tier, and worker threads run the same loop.
+> References below to "the interpreter", "the JIT driver", or "the
+> concurrent tier" describe *configurations* of that engine; see
+> `UNIFICATION.md` ("The final architecture") for the current shape.
+
+The production execution unit is not a conventional native stack frame. It is a
+heap-resident `Frame` containing a function-version ID, program counter, typed
+register slots, and return destination. This makes the exact paused computation
+GC-visible and durable across recompilation.
+
+The compiler lowers source to typed, register-based continuation IR. Every
+potentially trapping operation ends a basic block. Initially the interpreter
+executes one instruction at a time. LLVM later compiles groups of non-trapping
+instructions into functions with this ABI:
+
+```text
+step(frame*, runtime*) -> { continue, call, return, condition, yield }
+```
+
+LLVM therefore accelerates execution without owning continuation semantics.
+Native temporaries never survive a step boundary; all live references are in
+typed frame slots, giving the precise GC a complete root map.
+
+## Updating code
+
+Published function versions are immutable. Existing frames pin their version.
+New calls resolve the current entry. A schema edit re-verifies affected current
+functions and publishes broken entries for invalid ones while retaining old code
+for pinned frames. Entering a broken function raises a condition before any of
+its instructions execute.
+
+Brokenness propagates through the call graph to a fixpoint: a caller of a broken
+function is itself published broken, so a frame traps at the outermost boundary
+*before* performing any of the effects beneath it, rather than half-executing and
+failing partway down.
+
+Revival is the exact inverse, and runs on every successful install. Being broken
+is a verdict about the *world*, not about a function's code, so repairing the
+cause makes its callers valid again: each currently-broken function has its last
+Ready code re-verified against the new world and is republished Ready if it now
+checks out, looping to a fixpoint because reviving a callee can revive its
+callers. Fixing the root cause is therefore sufficient — a repair never requires
+re-stating untouched callers just to un-break them. Code that is broken on its
+own merits fails verification again and stays broken.
+
+Old code can be reclaimed when no frame identifies its version. Later optimized
+direct calls must remain within one immutable code-version group; every call
+that may cross a live boundary goes through an entry slot.
+
+## Updating data
+
+References name stable object handles. Each handle owns a body tagged with a
+schema version. Field access is a migration barrier. A migration builds and
+validates a replacement body before swapping it into the handle, preserving
+aliases and preventing partial layouts from becoming observable. Missing plans
+raise conditions without advancing the frame.
+
+The prototype uses a map as the stable-handle table and implements precise
+mark/sweep collection from frame registers. A native runtime can use moving
+bodies behind non-moving handles, or add a handle-resolution read barrier. The
+nominal type ID and schema version must not be conflated with a compact GC layout
+table index.
+
+## Effects
+
+A frame advances past `Emit` only after the effect is committed. A later pause
+resumes at its exact PC, so earlier effects are not replayed. For compound
+external operations, actors will use a transactional outbox: stage messages and
+state changes, commit them together, and assign stable effect IDs for downstream
+deduplication.
+
+## What “resume” means
+
+Repair resumes the suspended continuation, not an arbitrary machine instruction
+and not the beginning of a tick. Values already computed remain in registers;
+completed effects remain completed. The repair may satisfy the condition by
+installing a valid function version or a validated migration. The trapping
+instruction is then retried.
+
+This model supports loops, branches, and suspension once they are added to the
+IR: their continuation is simply a PC plus registers. It does not require stack
+copying, native deoptimization, or replay of an entire callback.
+
+## Implementation status
+
+### A Rust-flavored frontend
+
+Programs are no longer hand-built IR: `crates/livetype-core/src/frontend/`
+(lexer → parser → lower) compiles a Rust-shaped surface syntax to the IR.
+`struct Name { field: Type = default? }` becomes a `Schema`; `fn name(p: T, …)
+-> R { … }` becomes a `Function`. The body language has `let`, assignment,
+`if`/`else`, `while`, `return`, tail-expression returns, `emit`, `yield`, struct
+literals, field access `a.b.c`, calls (including **recursion and mutual
+recursion**), the operators `+ - * < > <= >= == !=` and unary `!`. Types are
+`i64`, `bool`, `()`, and a bare struct name like `Account` — since the language
+is garbage-collected, a struct-typed value is simply a heap reference (no
+borrow/own distinction, so no `&`). Lowering
+gives locals fixed registers (this IR has no phi), sub-expressions fresh
+temporaries, and emits control flow with symbolic labels patched to program
+counters; a bad type is a clean *compile* error. IR ops added to make the
+language real: `Copy`, `AddI64`, `MulI64`, `EqI64`, `Not`. Recursion works
+because functions install as a **batch verified against each other's
+signatures** (`verify_function_with` + `install_verified_function`), not in
+callee-before-caller order. `tests/frontend.rs` covers structs/fields, all the
+operators, loops, `if`/`else`, tail returns, recursion, nested structs, and
+compile errors; `tests/frontend_jit.rs` runs a compiled program on both
+executors and gets the same answer.
+
+### Live editing from source
+
+`Session` (`frontend::Session`) is the live-programming object: a running
+`Runtime` plus a persistent symbol table (`IdEnv`) that keeps each definition's
+id — and each field's id *by name* — stable across edits. `session.eval(src)`
+installs the definitions it names as the **next versions** of what's already
+there, driving migration, invalidation, and trap-and-repair on whatever is
+running. Because field ids are name-stable, an additive struct edit
+auto-migrates live objects; a breaking edit republishes the affected function
+Broken and freezes the frame that reaches it; a repair edit that type-checks
+thaws it. `tests/live_edit.rs` drives both: an additive edit that changes
+behavior and migrates data mid-run with no restart, and a breaking edit that
+traps and is then repaired (function fix + a supplied migration) to completion.
+`src/poc.rs` (`cargo run --bin livetype-poc`) narrates the whole loop end to
+end, and `src/repl.rs` (`cargo run --bin livetype-repl`) is an **interactive
+REPL**: type `struct`/`fn` definitions to edit the world live, `:run main` to
+start a program, `:go` to advance it to the next `yield` / pause, and `:migrate`
+to supply a transformer when a repair needs one — so you make the edits by hand
+while the program is running.
+
+### Executors
+
+Both executors exist and are proven equivalent:
+
+- **Interpreter** (`src/runtime.rs`) — the reference executor, one instruction
+  per step, over heap-resident frames.
+- **LLVM `step` backend** (`src/jit.rs`) — each Ready function version is
+  JIT-compiled (inkwell / LLVM 21) to a native
+  `step(RawFrame*, NativeHost*) -> outcome` over a C-ABI frame. Native code runs
+  the pure ops (`Const`/`SubI64`/`LtI64`) and the non-pausing runtime calls
+  (`New`/`GetField`/`Emit`, via the `lt_*` externs), and hands control back to
+  the Rust driver for the boundaries that own continuation semantics —
+  `Call` (push a frame), `Return` (pop), a migration barrier (`condition`), and
+  `Yield` (recurring safe point). It resumes at an exact PC via a
+  `switch(frame->pc)` dispatch. Crucially, **no SSA value crosses a basic
+  block**: every register read/write goes through `frame->regs[i]`, so loops and
+  branches need no phi nodes and every live reference is a typed frame slot the
+  GC roots from directly (`Actor::roots`).
+
+The IR now includes control flow (`LtI64`, `Jump`, `Branch`, `Yield`), verified
+by a CFG-worklist type checker (`src/verify.rs`) that joins register
+environments at merge points.
+
+### The soundness invariant is enforced, not asserted
+
+The §4 invariant — *no running code ever observes an ill-typed value* — is now a
+runtime check (`Heap::value_ok`) applied at every boundary
+where a value would be observed or published:
+
+- **Call arguments** vs the callee's parameter types,
+- **Return values** vs the function version's result type,
+- **New / migration** object bodies vs the schema's field types (`value_ok`),
+- **operand tags** for `SubI64`/`LtI64`/`Branch` (the interpreter matches by
+  value; the JIT emits an explicit tag guard, `Codegen::guard_tags`).
+
+Because references match at the *nominal* type, a migrated object still satisfies
+a `Ref(T)`-typed use; the check fires only on a genuine representation confusion.
+This closes the con-freeness corner (T2): a frame paused at a `Yield` inside an
+**old pinned function** that resumes after a migration changed a field's
+representation now **traps** (quarantining the frame) instead of proceeding — and
+the JIT traps *identically* to the interpreter rather than silently reading a
+`Ref`'s object id as an integer.
+
+### Con-freeness traps are repairable
+
+A type trap is not a dead end — the frozen frame is a one-shot delimited
+continuation, and repair resumes it, optionally supplying the value the trapping
+instruction should have produced (`Runtime::resume_with` / `jit::resume_with`,
+shaped by `resume_shape`). A subtraction that froze on a `Ref` resumes with the
+`Int` it should have yielded; a `Return` that froze resumes with the function's
+result; a `Branch` with the `Bool` to take. The offering is checked against the
+trap's expected type (`pause_expected` reports it), so **repair can never
+reintroduce an ill-typed value** — a wrong-typed offering is rejected and the
+frame stays quarantined. `tests/repair.rs` proves the arithmetic and return
+cases resume identically on both executors and that an ill-typed offering is
+refused without consuming the trap.
+
+### Migrations are auto-derived where trivial
+
+Installing a new schema version auto-derives the previous-version migration
+(`Runtime::derive_migration`): a field is **copied** when it survives unchanged,
+**default-initialized** when it is new (or retyped) and has a default, and
+otherwise is a **gap** that abandons derivation and leaves a developer to supply
+the transformer (a `MissingMigration` trap on first cross). Derived migrations
+are copy/default only, so they are type-sound by construction; an explicit
+`install_migration` for the same step overrides them. Adding a defaulted field
+therefore needs no hand-written migration, while a genuine representation change
+(e.g. `Int → Ref`, no default) still traps for one.
+
+### Invalidation is demand-driven
+
+A schema change no longer re-verifies every function. Each Ready function stores
+the set of nominal types it references (`World.function_deps`, produced by
+`verify_function`); `invalidate_functions` re-verifies only the functions whose
+set contains the changed type, then propagates through the call graph — when a
+function newly breaks, its callers are enqueued, because a call to a broken
+function no longer type-checks. This reaches a fixpoint over exactly the affected
+functions (and is *more* complete than the old single map-order pass, which could
+miss a caller re-checked before its callee broke). `tests/invalidation.rs`
+asserts both directions: an unrelated function is never re-versioned, and
+brokenness propagates to a transitive caller.
+
+`tests/jit_matches_interpreter.rs` drives both executors through the same hot
+updates on the Box/Wrapper migration, the Account/Money break-fix-migrate story,
+a loop with a mid-loop update at a `Yield`, two con-freeness traps (arithmetic
+and return), and auto-derived vs abstained migrations — asserting identical
+effects, pause conditions, migrations, heaps, and results at every boundary. A
+further test collects garbage precisely from native frame slots.
+
+### Concurrency: quarantine holds over a shared heap
+
+The design's highest-value open question (§7 corner 1) was whether the soundness
+invariant survives when several computations **share a heap and one migrates a
+value mid-flight while another holds it**. It does — and no world-freeze or
+ownership rule was needed. `run_interleaved` schedules multiple actors over the
+one `Runtime` (shared heap, world, effects), round-robin at `Yield` granularity.
+`tests/concurrent.rs` builds the exact race: actor X reads a shared object with
+new code, migrating it `v1 → v2` in place; actor Y — a *pinned old reader* of the
+same object — then resumes and reads the migrated value. Y traps at the use
+(quarantined, never observing the value as the wrong type) while X completes
+cleanly. The reason it composes for free: soundness is enforced at each value
+*use* (`value_ok`), independent of which actor caused the migration, so a
+migrated value is caught the moment any old-typed frame tries to consume it.
+
+This is *semantic* concurrency — deterministic interleaving over a shared heap,
+which is precisely the setting the soundness question is about.
+
+### Real OS threads over a shared heap
+
+The object model is now a **non-moving handle over an atomically-swappable
+body** (`Object` = a stable `ObjectId` plus an `Arc<Body>`; a migration builds a
+new `Body` and swaps the pointer, old bodies reclaimed by refcount — no hazard
+pointers). On that, `src/mt.rs` adds a thread-safe runtime tier: setup runs
+through the ordinary single-threaded `Runtime` and is frozen via `into_parts`,
+then `Shared` drives actors on **real `std::thread`s** over one shared heap
+(per-object `Mutex<Arc<Body>>`, a locked handle table, atomic id counter; the
+world is immutable during a run since updates land at quiescent points).
+Concurrent migration is race-free: a migrator builds the next body without
+holding the object lock, then swaps under it with a double-check, so two threads
+migrating the same object never tear and the loser's work is discarded as
+garbage. `tests/mt_threads.rs` drives **8 threads racing to migrate one shared
+object over 200 iterations** and they all agree.
+
+The GC is a **preemptive stop-the-world collector** (`request_gc`): any thread
+can request a collection, every running actor parks at its next safepoint
+(checked each instruction) after publishing its live roots, and once all have
+parked the collector sweeps from the union of roots and releases them — the way
+a real STW runtime collects *while mutators run*, not only at quiescence.
+`tests/mt_threads.rs` runs four actors churning allocations while a separate
+thread hammers `request_gc`, over 20 iterations: every actor finishes correctly
+despite being repeatedly paused and having its garbage swept mid-run, and
+nothing leaks. Actors are **multi-frame** (`Call`/`Return` push and pop a real
+call stack) and communicate by **message passing**: `Send { target, value }`
+drops a value into another actor's mailbox and `Recv { dst, ty }` blocks until
+one arrives — checking it has type `ty`, so a wrong-typed message traps like any
+other con-freeness violation. Messages may carry `Ref`s, so actors share heap
+objects *and* pass messages, over the same shared heap. (`Send`/`Recv` are
+concurrent-tier only; the interpreter and JIT reject them with a clear error.)
+
+The runtime is split into two crates so the concurrency can be race-checked: the
+LLVM-free **`livetype-core`** (IR, verifier, interpreter, `mt`) and **`livetype`**
+(which adds the inkwell JIT and depends on core). Because `livetype-core` links
+no LLVM, its thread tests run under **Miri's data-race detector**
+(`cargo +nightly miri test -p livetype-core --test mt_threads`) — all pass,
+including across varied scheduler interleavings via `-Zmiri-many-seeds`, so the
+shared-heap migration and the STW-GC coordination are *machine-verified*
+race-free, not just race-free by construction. (ThreadSanitizer's own runtime
+SIGSEGVs on `aarch64-apple-darwin` regardless of the code — confirmed with a
+non-threaded, LLVM-free test — so Miri is the gate on this platform.)
+
+### Migration chains cross many versions at once
+
+A type may change repeatedly; an object first touched only after several updates
+migrates across the whole chain in a single `GetField` (`migrate` loops until the
+object reaches the current schema). `tests/migration_chain.rs` covers a
+three-version auto-derived chain and a mixed chain (an auto-derived step followed
+by an explicit retype), on both executors — closing the design's "a type can
+change more than once" concern. Every change is a forward version with a
+per-step migration, so a "revert" is just another forward version.
+
+### Differential fuzzing
+
+`tests/differential_fuzz.rs` generates random *valid* programs (type-directed, so
+every instruction is well-typed by construction) plus random schema evolutions
+(auto-derivable additions and no-migration retypes), then runs the same scenario
+— up to a `Yield`, apply updates, resume — on both executors and asserts they
+agree on effects, status, and heap. Over 600 seeds it reaches normal completion,
+migration-gap traps, and con-freeness traps (~526 / 22 / 52 by outcome); the JIT
+and interpreter agree on every one. A divergence would pin a bug in codegen, the
+verifier, migration, or the soundness checks.
+
+### FFI: live editing across a native boundary
+
+The endgame — live-editing a GUI without a restart — needs FFI, and FFI breaks
+the assumptions the trap-and-repair story rests on: native stacks aren't scanned,
+native calls can't be paused, and native code holds resources that must *survive*
+edits. The model absorbs this by keeping the native side a **stable substrate**
+and the reloadable, trappable world strictly on our side of it. Five moves, all
+built (`frontend` `foreign`/`letonce`, `Runtime::{register_foreign, call_foreign,
+globals}`, `Session::{register_foreign, call}`); demoed in `src/ffi_gui.rs`;
+covered by `crates/livetype-core/tests/ffi.rs`:
+
+1. **Foreign handles are opaque, never migratable.** `foreign type Window` gives
+   `Type::Foreign(kind)` / `Value::Foreign { kind, ptr }` — a tagged native
+   pointer with no schema version, so it can never go stale and never traps at a
+   use-boundary. The GC never traces through it (native owns the pointee).
+2. **A foreign call is one uninterruptible step.** `CallForeign` runs the
+   registered native fn to completion with no safepoint, GC, trap, or hot-update
+   inside it; reference arguments are pinned in frame slots across the call
+   (non-moving GC), so a raw pointer handed to C stays valid for its duration.
+3. **Callbacks late-bind through a stable trampoline.** `Session::call(name, …)`
+   is the native → managed direction: it resolves the *current version* of the
+   callback each invocation, so editing `on_frame` is picked up by the next frame
+   with no re-registration — the window never blinks. The native → managed return
+   is a use-boundary, so a lying native value traps (`value_ok`) instead of
+   poisoning the caller.
+4. **Under a native frame, a trap degrades to report, not freeze.** A callback
+   can't freeze-and-wait (a native frame is on the stack expecting a return, and
+   freezing would hang the UI thread). `Session::call` surfaces a con-freeness
+   trap as a returned `Condition`; the host supplies a default / logs it, and the
+   next callback picks up the repair.
+5. **State persists, native init runs once.** `letonce win = open_window()` is a
+   persistent global (`Runtime::globals`, a GC root) whose initializer runs
+   exactly once and survives every reload — the code changes, the running world
+   (and its native resources) does not.
+
+`src/ffi_gui.rs` runs a fake native "toolkit" event loop on its own thread that
+calls up into `on_frame` each frame while another thread edits the callback; the
+loop hot-swaps `42 → 84` mid-flight and the `letonce` window (opened once) keeps
+rendering. Honest limits (mirrored in the code): the JIT and `Shared` tiers don't
+run FFI (they trap clearly — it lives on the interpreter/live-edit tier); a trap
+under a native frame can't freeze; and changing the *ABI shape* a callback
+presents to C would need an explicit re-register (only the logic hot-swaps).
+
+### Still open
+
+All nine core design decisions (D1–D9) are realized; the shared-heap concurrency
+question is answered; multi-version migration chains work; con-freeness traps are
+repairable. What remains, in the owner's chosen direction:
+
+- **A properly thread-safe runtime** (JVM-shaped): built so far — a
+  non-moving-handle / atomic-body object model, a `Shared` tier running real OS
+  threads over one heap with race-free concurrent migration, and a **preemptive
+  stop-the-world collector** that parks running threads at safepoints and sweeps
+  mid-run, multi-frame actors, and message passing over the shared heap
+  (`crates/livetype-core/src/mt.rs`), split into an LLVM-free crate and
+  **race-checked under Miri**. Remaining: the JIT under threads; a concurrent
+  (non-STW) collector; and a blocking (rather than polling) `Recv`.
+  *(Largely there.)*
+- **Name-based instant propagation** is the identity model (not content
+  addressing): callers already resolve a callee's current version by name, so a
+  signature-compatible republish is visible instantly. The one gap is eager
+  re-verification of callers on a signature *change* (today they are caught
+  dynamically at the call boundary instead). Small follow-up.
+- **Update timing as a mode**: prefer static knowledge of where an update is
+  safe, fall back to the runtime trap where it isn't. Needs the con-free
+  liveness analysis; the trap stays as the floor.
+

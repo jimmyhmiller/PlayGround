@@ -1,0 +1,17 @@
+(defstruct Point [(x :i64) (y :i64)])
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [p (alloc-stack Point) a (alloc-stack (array i64 3))]
+    (store! (field p x) 30)
+    (store! (field p y) 4)
+    (store! (index a 0) 1)
+    (store! (index a 1) 2)
+    (store! (index a 2) 5)
+    (iadd
+      (iadd (load (field p x)) (load (field p y)))
+      (iadd (load (index a 0)) (iadd (load (index a 1)) (load (index a 2)))))))
+

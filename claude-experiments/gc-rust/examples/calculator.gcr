@@ -1,0 +1,47 @@
+// A precedence-correct arithmetic evaluator (recursive descent over the raw string).
+struct PR { val: i64, pos: i64 }
+fn skip_ws(s: String, p: i64) -> i64 { let mut q = p; while q < str_len(s) && str_get(s, q) == 32 { q = q + 1; } q }
+fn parse_factor(s: String, p0: i64) -> PR {
+    let p = skip_ws(s, p0);
+    let c = str_get(s, p);
+    if c == 40 {                                 
+        let inner = parse_expr(s, p + 1);
+        let p2 = skip_ws(s, inner.pos);
+        PR { val: inner.val, pos: p2 + 1 }
+    } else {                                     
+        let mut q = p; let mut n = 0;
+        while q < str_len(s) && str_get(s, q) >= 48 && str_get(s, q) <= 57 { n = n * 10 + (str_get(s, q) - 48); q = q + 1; }
+        PR { val: n, pos: q }
+    }
+}
+fn parse_term(s: String, p0: i64) -> PR {
+    let mut r = parse_factor(s, p0);
+    let mut p = skip_ws(s, r.pos);
+    while p < str_len(s) && (str_get(s, p) == 42 || str_get(s, p) == 47) {  
+        let op = str_get(s, p);
+        let rhs = parse_factor(s, p + 1);
+        let v = if op == 42 { r.val * rhs.val } else { r.val / rhs.val };
+        r = PR { val: v, pos: rhs.pos };
+        p = skip_ws(s, r.pos);
+    }
+    r
+}
+fn parse_expr(s: String, p0: i64) -> PR {
+    let mut r = parse_term(s, p0);
+    let mut p = skip_ws(s, r.pos);
+    while p < str_len(s) && (str_get(s, p) == 43 || str_get(s, p) == 45) {  
+        let op = str_get(s, p);
+        let rhs = parse_term(s, p + 1);
+        let v = if op == 43 { r.val + rhs.val } else { r.val - rhs.val };
+        r = PR { val: v, pos: rhs.pos };
+        p = skip_ws(s, r.pos);
+    }
+    r
+}
+fn eval_expr(s: String) -> i64 { let r = parse_expr(s, 0); r.val }
+fn main() -> i64 {
+    let a = eval_expr("6 * (3 + 4)");
+    let b = eval_expr("2 + 3 * 4 - 1");
+    let c = eval_expr("(10 - 2) * (1 + 2)");
+    if a == 42 && b == 13 && c == 24 { 42 } else { 0 }
+}

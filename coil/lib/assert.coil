@@ -1,0 +1,178 @@
+(module assert)
+; Testing + assertions as a pure LIBRARY (macros + a whole-program transform) — no
+; compiler builtin. The macro-power thesis applied to the test story (tool-12).
+;
+;   (import "assert.coil" :use *)          ; or just `coil test FILE` (auto-uses this)
+;   (deftest math
+;     (assert    (> (fib 10) 50))
+;     (assert-eq (+ 1 2) 3))
+;
+; `(assert COND)` / `(assert-eq A B)` check at runtime; on failure they print the
+; offending expression AND its `file:line` — recovered through the span machinery via
+; the `code-src` / `code-file` / `code-line` comptime ops — then abort (SIGABRT),
+; exactly like C's assert(). `(deftest NAME body…)` defines a test. `coil test FILE`
+; discovers every test (the `(transform …)` below synthesizes a `main`) and runs each
+; in a FORKED child, so one failing / segfaulting test never stops the rest.
+
+(import "io.coil"    :use *)   ; Writer, stdout / stderr, print-str  (UNBUFFERED — safe across fork/abort)
+(import "fmt.coil"   :use *)   ; fmt
+(import "slice.coil" :use *)   ; subslice / slice-len  (transform: strip the test-name prefix)
+(import "str.coil"   :use *)   ; starts-with           (transform: recognise a test defn)
+(import "alloc.coil" :use *)   ; abort
+
+; ============================ assertion reporting ===========================
+; Print a located failure to stderr, then abort (SIGABRT) — like C's assert(). io's
+; Writer is unbuffered (a direct write() per call), so the message is on the terminal
+; BEFORE the abort, and nothing is lost across a fork.
+(defn assert-fail [(expr (slice u8)) (file (slice u8)) (line i64)] (-> i64)
+  (let [w (stderr)] (fmt w "assertion failed: {s}\n  at {s}:{d}\n" expr file line))
+  (abort) 0)
+; A binary comparison failure: `LEFT OP RIGHT` (op = "==" / "!=") with both expressions.
+(defn assert-fail-cmp [(op (slice u8)) (lx (slice u8)) (rx (slice u8)) (file (slice u8)) (line i64)] (-> i64)
+  (let [w (stderr)] (fmt w "assertion failed: {s} {s} {s}\n  at {s}:{d}\n" lx op rx file line))
+  (abort) 0)
+
+; ============================ assertion macros ==============================
+; `(assert COND)` — COND must be bool. On false: report the source of COND + its
+; location and abort. Yields 0 (i64) so it sequences in a `do` / test body.
+(defn assert [(c Code)] (-> Code)
+  `(if ~c 0 (do (assert-fail ~(code-src c) ~(code-file c) ~(code-line c)) 0)))
+
+; `(assert-eq A B)` — asserts `(= A B)` (any `Eq` type). Prints BOTH expressions on
+; failure. A and B are each evaluated exactly once.
+(defn assert-eq [(x Code) (y Code)] (-> Code)
+  `(if (= ~x ~y) 0
+     (do (assert-fail-cmp "==" ~(code-src x) ~(code-src y) ~(code-file x) ~(code-line x)) 0)))
+
+; `(assert-ne A B)` — asserts `(!= A B)`.
+(defn assert-ne [(x Code) (y Code)] (-> Code)
+  `(if (!= ~x ~y) 0
+     (do (assert-fail-cmp "!=" ~(code-src x) ~(code-src y) ~(code-file x) ~(code-line x)) 0)))
+
+; `(deftest NAME body…)` — define a test as the zero-arg fn `coil-test$NAME` (i64,
+; returns 0). The body runs the asserts; a failed assert aborts the fn. The `$` marks
+; it for discovery by the transform below (no user identifier collides with the prefix).
+(defn deftest [(name Code) & (body Code)] (-> Code)
+  `(defn ~(code-symbol "coil-test$" name) [] (-> i64) ~@body 0))
+
+; ============================ the test runner ===============================
+; A `[(prog Code)] -> Code` TRANSFORM. It receives the whole program as modules
+; ((name form…) …) and, for the FIRST module that defines ≥1 `coil-test$…` and has no
+; `main`, APPENDS a `main` that runs each test in a forked child. Registering this
+; transform (by importing this module) is what turns a file of `deftest`s into a
+; runnable test binary — `coil test` just builds+runs it.
+
+; the name symbol of a `(defn coil-test$… …)` form, else `() (an empty list).
+(defn tr-test-name [(f Code)] (-> Code)
+  (if (and (code-list? f)
+       (and (icmp-ge (code-count f) 2)
+        (and (code-eq (code-nth f 0) `defn)
+         (and (code-sym? (code-nth f 1)) (tr-is-test-sym? (code-nth f 1))))))
+      (code-nth f 1)
+    `()))
+(defn tr-is-test-sym? [(s Code)] (-> bool)
+  (starts-with (code-str s) "coil-test$"))
+
+; count the test defns in a module (its forms are m[1..])
+(defn tr-count [(m Code) (i i64) (n i64)] (-> i64)
+  (if (icmp-ge i n) 0
+    (iadd (if (code-list? (tr-test-name (code-nth m i))) 0 1)
+          (tr-count m (iadd i 1) n))))
+
+; does the module already define a `main`? (idempotence + respect a user's own main)
+(defn tr-has-main? [(m Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (let [f (code-nth m i)]
+      (if (and (code-list? f)
+           (and (icmp-ge (code-count f) 2)
+            (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `main)))) true
+        (tr-has-main? m (iadd i 1) n)))))
+
+; one `(test-run-one "DISPLAY" (fnptr-of coil-test$NAME))` per test, in source order.
+; DISPLAY = the name with the `coil-test$` (10 bytes) prefix stripped — computed here,
+; at macro time (this transform is native code), and spliced as a string literal.
+(defn tr-calls [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    (let [nm (tr-test-name (code-nth m i))]
+      (if (code-list? nm)
+          (tr-calls m (iadd i 1) n)
+        (let [full (code-str nm)
+              disp (subslice [u8] full 10 (slice-len [u8] full))]
+          `((test-run-one ~disp (fnptr-of ~nm)) ~@(tr-calls m (iadd i 1) n)))))))
+
+; append the synthesized main to a module
+(defn tr-emit-main [(m Code)] (-> Code)
+  `(~@m (defn main [] (-> i64)
+          (test-run-begin ~(tr-count m 1 (code-count m)))
+          ~@(tr-calls m 1 (code-count m))
+          (test-run-end))))
+
+; walk the modules; emit main into the first eligible one (threaded `emitted` flag, so
+; exactly one main is ever added even if several modules define tests).
+(defn tr-mods [(ms Code) (i i64) (n i64) (emitted bool)] (-> Code)
+  (if (icmp-ge i n) `()
+    (let [m (code-nth ms i)
+          wants (and (not emitted)
+                  (and (icmp-gt (tr-count m 1 (code-count m)) 0)
+                       (not (tr-has-main? m 1 (code-count m)))))]
+      (if wants
+          `(~(tr-emit-main m) ~@(tr-mods ms (iadd i 1) n true))
+        `(~m ~@(tr-mods ms (iadd i 1) n emitted))))))
+
+(defn tr-run [(modules Code)] (-> Code)
+  `(do ~@(tr-mods modules 0 (code-count modules) false)))
+(transform tr-run)
+
+; ============================ runtime (linked into the test binary) =========
+(extern fork    :cc c [] (-> i32))
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+(extern _exit   :cc c [i32] (-> void))
+
+(defstruct TestState [(total i64) (passed i64) (failed i64)])
+(defn test-state [] (-> (ptr TestState)) (alloc-static TestState))
+
+(defn test-run-begin [(n i64)] (-> i64)
+  (let [s (test-state)]
+    (store! (field s total)  n)
+    (store! (field s passed) 0)
+    (store! (field s failed) 0))
+  (let [w (stdout)] (fmt w "\nrunning {d} test{s}\n" n (if (icmp-eq n 1) "" "s"))) 0)
+
+; decode a waitpid status (same encoding driver.coil::wait-code decodes): a terminating
+; signal in the low 7 bits, else the exit code in the high byte. 0 iff the child ran the
+; test and exited 0 — any nonzero (a failed assert's SIGABRT, a segfault, a nonzero exit)
+; is a failure.
+(defn test-wait-code [(st i64)] (-> i64)
+  (let [sig (iand st 127)]
+    (if (icmp-ne sig 0) (iadd 128 sig) (iand (udiv st 256) 255))))
+
+(defn test-run-one [(name (slice u8)) (fp (fnptr c [] i64))] (-> i64)
+  (let [w (stdout)] (fmt w "test {s} ... " name))
+  (let [pid (cast i64 (fork))]
+    (if (icmp-lt pid 0)
+        ; fork failed: count it as a failure rather than pretend the test ran.
+        (let [s (test-state) w (stdout)]
+          (store! (field s failed) (iadd (load (field s failed)) 1))
+          (fmt w "FAILED (could not fork)\n") 0)
+      (if (icmp-eq pid 0)
+          ; CHILD: run the test, then exit 0. A failed assert aborts (SIGABRT) before
+          ; here; a crash dies with its own signal — either way the parent sees nonzero.
+          (do (call-ptr fp) (_exit 0) 0)
+        ; PARENT: reap the child and record the outcome.
+        (let [stp (alloc-stack i32)]
+          (store! stp 0)
+          (waitpid (cast i32 pid) stp 0)
+          (let [code (test-wait-code (cast i64 (load stp)))
+                s (test-state) w (stdout)]
+            (if (icmp-eq code 0)
+                (do (store! (field s passed) (iadd (load (field s passed)) 1)) (fmt w "ok\n") 0)
+              (do (store! (field s failed) (iadd (load (field s failed)) 1))
+                  (if (icmp-gt code 128)
+                      (fmt w "FAILED (signal {d})\n" (isub code 128))
+                    (fmt w "FAILED\n")) 0))))))))
+
+(defn test-run-end [] (-> i64)
+  (let [s (test-state) w (stdout)
+        p (load (field s passed)) f (load (field s failed))]
+    (fmt w "\ntest result: {s}. {d} passed; {d} failed\n" (if (icmp-eq f 0) "ok" "FAILED") p f)
+    (if (icmp-gt f 0) 1 0)))

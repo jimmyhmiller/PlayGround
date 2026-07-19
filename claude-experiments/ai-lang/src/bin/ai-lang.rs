@@ -26,6 +26,7 @@ use ai_lang::Hash;
 use ai_lang::ast::{Def, Type};
 use ai_lang::codebase::Codebase;
 use ai_lang::depindex::DependencyIndex;
+use ai_lang::effects::EffectSet;
 use ai_lang::edit::{self, Direction};
 use ai_lang::printer::print_def;
 use ai_lang::codegen::{
@@ -678,6 +679,28 @@ fn main() {
         "lambda-worker" => {
             cmd_lambda_worker();
         }
+        "at-serve" => {
+            // `at-serve`: a GENERIC warm node. It starts with only the stdlib
+            // resident and serves self-contained KIND_BUNDLE frames forever
+            // over a localhost TCP socket — each request ships its own code,
+            // which we install on demand (a no-op once warm) and run. The
+            // JIT'd code stays resident across calls. Prints `READY <port>`.
+            cmd_at_serve();
+        }
+        "at-handle" => {
+            // `at-handle <app.ail>`: compile the app (with stdlib), read ONE
+            // request frame (`[KIND_CALL] ++ closure`) from stdin, run it,
+            // write the reply frame (`[KIND_RESULT] ++ value`) to stdout.
+            // This is the node front-end for a request/response transport
+            // (HTTP / a Vercel function): the bridge hands us the body, we
+            // hand back the body. The app must define the same source the
+            // client compiled, so the shipped closure's code is resident.
+            if args.is_empty() {
+                eprintln!("usage: ai-lang at-handle <app.ail>");
+                std::process::exit(2);
+            }
+            cmd_at_handle(&args[0]);
+        }
         other => {
             eprintln!("unknown subcommand: {}", other);
             usage(2);
@@ -697,6 +720,184 @@ fn main() {
 // -> String`>","in64":"<base64 input string>"}. The worker compiles the
 // source (with the stdlib), calls `task(input)`, and returns the String.
 // =============================================================================
+
+/// A server-side `Channel` that replays one request frame and captures the
+/// one reply frame — lets `serve_one` process a frame handed to us out of
+/// band (here: an HTTP/FaaS request body on stdin).
+struct OneShotChannel {
+    request: Option<Vec<u8>>,
+    response: Option<Vec<u8>>,
+}
+impl ai_lang::net::Channel for OneShotChannel {
+    fn read_frame(&mut self) -> Result<Vec<u8>, ai_lang::net::NetError> {
+        self.request
+            .take()
+            .ok_or(ai_lang::net::NetError::ConnectionClosed)
+    }
+    fn write_frame(&mut self, body: &[u8]) -> Result<(), ai_lang::net::NetError> {
+        self.response = Some(body.to_vec());
+        Ok(())
+    }
+}
+
+/// `at-serve <app.ail>`: compile the app once, then serve `at` frames
+/// forever on a localhost TCP socket, a thread per connection. The runtime
+/// (JIT'd code + any node `state`) is shared and stays resident across all
+/// calls — so a warm instance never re-compiles, and `state` persists for
+/// the process's lifetime.
+fn cmd_at_serve() {
+    init_native_target().expect("init native target");
+
+    // A GENERIC node: start with only the stdlib in a warm IncrementalJit;
+    // each request ships its own program in a self-contained KIND_BUNDLE,
+    // which we install on demand (idempotent — a no-op once warm) and run.
+    let ctx = Context::create();
+    let empty_r = resolve_module(&parse_module("").unwrap()).unwrap();
+    let empty_cm = CompiledModule::build(&ctx, &empty_r).expect("build empty");
+    let mut rt = Runtime::new_with_metadata(
+        empty_cm.closure_type_infos.clone(),
+        empty_cm.shape_registry.clone(),
+        empty_cm.shape_meta.clone(),
+        empty_cm.shape_by_type_id.clone(),
+    );
+    let mut jit = IncrementalJit::new(empty_cm, &rt).expect("incremental jit");
+
+    let stdlib_m = parse_module(STDLIB).expect("parse stdlib");
+    let stdlib_r = resolve_module(&stdlib_m).expect("resolve stdlib");
+    let stdlib_kb = KnowledgeBase::build(&stdlib_r);
+    let stdlib_roots: Vec<Hash> = stdlib_r.defs.iter().map(|d| d.hash).collect();
+    if let Err(e) = install_from_kb(&mut jit, &mut rt, &stdlib_kb, &stdlib_roots) {
+        eprintln!("at-serve: stdlib install failed: {}", e);
+        std::process::exit(1);
+    }
+    install_current_runtime(&rt);
+    install_current_knowledge_base(&stdlib_kb);
+
+    // The effect policy: the set of effects shipped code is ALLOWED to
+    // perform. The node infers each bundle's effects and refuses any that
+    // exceed this (never installing or running them). Default is the safe
+    // "compute + node-state" set — every effect EXCEPT the dangerous ones
+    // (IO, Net, FFI): shipped code can compute and touch this node's state,
+    // but cannot call arbitrary C, hit the network, or do process I/O.
+    // Override with `AI_LANG_AT_EFFECTS` (e.g. `all`, `pure`, `io,net`).
+    let policy = match std::env::var("AI_LANG_AT_EFFECTS") {
+        Ok(s) => EffectSet::from_tokens(&s).unwrap_or_else(|e| {
+            eprintln!("at-serve: bad AI_LANG_AT_EFFECTS: {}", e);
+            std::process::exit(2);
+        }),
+        Err(_) => EffectSet::ALL.without(EffectSet::IO | EffectSet::NET | EffectSet::FFI),
+    };
+    // Precompute the resident stdlib's effects once; seeds the per-request
+    // inference so shipped `TopRef`s into the stdlib resolve correctly.
+    let stdlib_effects = ai_lang::knowledge::transitive_effects(
+        &stdlib_r.defs,
+        &[],
+        &std::collections::HashMap::new(),
+    );
+    let policy_tokens = policy.tokens();
+    eprintln!(
+        "[at-serve] effect policy: allow [{}] (set AI_LANG_AT_EFFECTS to change)",
+        if policy_tokens.is_empty() { "pure".to_string() } else { policy_tokens.join(",") }
+    );
+
+    let listener = ai_lang::net::bind("127.0.0.1:0").unwrap_or_else(|e| {
+        eprintln!("at-serve: bind: {}", e);
+        std::process::exit(1);
+    });
+    let port = listener.local_addr().unwrap().port();
+    println!("READY {}", port);
+    let _ = io::stdout().flush();
+
+    // Single-threaded on the home thread (the proven serve model). Each
+    // accepted connection is served frame-by-frame until the peer
+    // disconnects; the proxy opens a fresh short connection per request.
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                loop {
+                    match unsafe {
+                        ai_lang::net::serve_bundle_one(
+                            &mut rt,
+                            &mut jit,
+                            &mut stream,
+                            policy,
+                            &stdlib_effects,
+                        )
+                    } {
+                        Ok(()) => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("at-serve: accept: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+/// `at-handle <app.ail>`: compile the app (+ stdlib), then process exactly
+/// one `at` request frame from stdin and write the reply frame to stdout.
+/// The node front-end for a request/response transport — a Vercel function's
+/// Rust handler spawns this per request, piping the HTTP body through.
+fn cmd_at_handle(app_path: &str) {
+    use std::io::{Read, Write};
+    init_native_target().expect("init native target");
+
+    let app_src = std::fs::read_to_string(app_path).unwrap_or_else(|e| {
+        eprintln!("at-handle: cannot read {}: {}", app_path, e);
+        std::process::exit(1);
+    });
+    let full = format!("{}\n{}", STDLIB, app_src);
+    let m = parse_module(&full).unwrap_or_else(|e| {
+        eprintln!("at-handle: parse: {:?}", e);
+        std::process::exit(1);
+    });
+    let r = resolve_module(&m).unwrap_or_else(|e| {
+        eprintln!("at-handle: resolve: {:?}", e);
+        std::process::exit(1);
+    });
+    let ctx = Context::create();
+    let cm = CompiledModule::build(&ctx, &r).unwrap_or_else(|e| {
+        eprintln!("at-handle: build: {:?}", e);
+        std::process::exit(1);
+    });
+    let rt = Runtime::new_with_metadata(
+        cm.closure_type_infos.clone(),
+        cm.shape_registry.clone(),
+        cm.shape_meta.clone(),
+        cm.shape_by_type_id.clone(),
+    );
+    let _jit = Jit::new(cm, &rt).unwrap_or_else(|e| {
+        eprintln!("at-handle: jit: {:?}", e);
+        std::process::exit(1);
+    });
+    install_current_runtime(&rt);
+    let kb = KnowledgeBase::build(&r);
+    install_current_knowledge_base(&kb);
+
+    let mut frame = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut frame) {
+        eprintln!("at-handle: read stdin: {}", e);
+        std::process::exit(1);
+    }
+    let mut ch = OneShotChannel {
+        request: Some(frame),
+        response: None,
+    };
+    if let Err(e) = unsafe { ai_lang::net::serve_one(&rt, &mut ch) } {
+        eprintln!("at-handle: serve_one: {}", e);
+        std::process::exit(1);
+    }
+    let resp = ch.response.unwrap_or_default();
+    let mut out = std::io::stdout();
+    out.write_all(&resp).and_then(|_| out.flush()).unwrap_or_else(|e| {
+        eprintln!("at-handle: write stdout: {}", e);
+        std::process::exit(1);
+    });
+}
 
 fn cmd_lambda_worker() {
     init_native_target().expect("init native target");
@@ -727,10 +928,21 @@ fn cmd_lambda_worker() {
         eprintln!("[lambda-worker] FATAL: stdlib install failed: {}", e);
         std::process::exit(1);
     }
+    // Effect policy: shipped code may only perform allowed effects (default
+    // = everything except IO/Net/FFI). Override with `AI_LANG_AT_EFFECTS`.
+    let policy = match std::env::var("AI_LANG_AT_EFFECTS") {
+        Ok(s) => EffectSet::from_tokens(&s).unwrap_or_else(|e| {
+            eprintln!("[lambda-worker] bad AI_LANG_AT_EFFECTS: {}", e);
+            std::process::exit(2);
+        }),
+        Err(_) => EffectSet::ALL.without(EffectSet::IO | EffectSet::NET | EffectSet::FFI),
+    };
+    let pt = policy.tokens();
     eprintln!(
-        "[ai-lang lambda-worker] generic runtime ready ({} stdlib defs JIT'd in {:.2}s); awaiting code",
+        "[ai-lang lambda-worker] generic runtime ready ({} stdlib defs JIT'd in {:.2}s); effect policy allow [{}]; awaiting code",
         stdlib_roots.len(),
-        t0.elapsed().as_secs_f64()
+        t0.elapsed().as_secs_f64(),
+        if pt.is_empty() { "pure".to_string() } else { pt.join(",") },
     );
 
     loop {
@@ -742,7 +954,7 @@ fn cmd_lambda_worker() {
                 continue;
             }
         };
-        let outcome = run_handed_code(&mut jit, &mut rt, &stdlib_set, &event);
+        let outcome = run_handed_code(&mut jit, &mut rt, &stdlib_set, policy, &event);
         let (path_kind, body) = match outcome {
             Ok(result) => ("response", result),
             Err(msg) => (
@@ -793,6 +1005,7 @@ fn run_handed_code(
     jit: &mut IncrementalJit<'_>,
     rt: &mut Runtime,
     stdlib_set: &HashSet<Hash>,
+    policy: EffectSet,
     event: &[u8],
 ) -> Result<String, String> {
     let text = std::str::from_utf8(event).map_err(|_| "event not UTF-8".to_string())?;
@@ -813,6 +1026,26 @@ fn run_handed_code(
         .map(|d| d.hash)
         .ok_or("source must define `task(input: String) -> String`")?;
     let _ = stdlib_set; // stdlib defs are deduped by install via its own set.
+
+    // Effect gate (BEFORE install/run): infer `task`'s effects (over the
+    // whole module, so stdlib calls resolve) and refuse anything beyond the
+    // node's policy. `r` already includes the stdlib, so an empty seed is
+    // complete here.
+    let effects = ai_lang::knowledge::transitive_effects(
+        &r.defs,
+        &[],
+        &std::collections::HashMap::new(),
+    );
+    let task_eff = effects.get(&task_hash).copied().unwrap_or(EffectSet::EMPTY);
+    let excess = task_eff.without(policy);
+    if !excess.is_empty() {
+        let allow = policy.tokens();
+        return Err(format!(
+            "effect policy [{}] forbids effect(s) [{}] in shipped code",
+            if allow.is_empty() { "pure".to_string() } else { allow.join(",") },
+            excess.tokens().join(","),
+        ));
+    }
 
     // Install only the delta (install skips defs already in the engine).
     let kb = KnowledgeBase::build(&r);
@@ -1295,7 +1528,7 @@ fn cmd_deps(target: &str, reverse: bool, transitive: bool, json: bool, cb_path: 
 /// `ai-lang effects <name|hashprefix>` — show a def's inferred effect
 /// signature and the guarantees derived from it (pure / mobile / cacheable).
 fn cmd_effects(target: &str, json: bool, cb_path: &PathBuf) {
-    use ai_lang::effects::{EffectSet, infer_effects};
+    use ai_lang::effects::infer_effects;
 
     let cb = Codebase::open(cb_path).expect("open codebase");
     let root_hash = match edit::resolve_target(&cb, target) {

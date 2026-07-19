@@ -1,0 +1,12 @@
+(program
+  (interface Container
+    (typeparams
+      (typeparam T))
+    (fn get
+      (params
+        (param i
+          (type Int)))
+      (type T))
+    (fn len
+      (params)
+      (type Int))))

@@ -1,0 +1,212 @@
+(module sval)
+; The runtime a Scheme program ASSUMES: a GC-managed universal value `Val`, the
+; primitives (cons/car/cdr/+/…), symbol interning, mutable environment frames,
+; and a printer. Hand-written low-level plumbing (like gcrun) — the transform
+; (gcauto) makes the EVALUATOR that uses this transparent.
+(import "control.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "alloc.coil" :use *)
+(import "../selfhost/src/reader.coil" :use *)
+(extern read :cc c [i64 (ptr i8) i64] (-> i64))
+(extern malloc :cc c [i64] (-> (ptr u8)))
+(extern free   :cc c [(ptr u8)] (-> i64))
+
+; tags: 0 nil  1 int  2 pair  3 sym  4 bool  5 closure  6 prim
+; pair:    a=car(Val*) b=cdr(Val*)
+; closure: a=(params body env) list(Val*)   int/sym/bool/prim: a=payload
+(defstruct Val [(tag i64) (a i64) (b i64)])
+(defstruct GcHeader [(next (ptr GcHeader)) (mark i64)])
+
+(defn g-slabs [] (-> (ptr (array i64 4096))) (alloc-static (array i64 4096)))  ; slab base addrs
+(defn g-nslabs [] (-> (ptr i64)) (alloc-static i64))
+(defn g-roots [] (-> (ptr (array (ptr u8) 1048576))) (alloc-static (array (ptr u8) 1048576)))
+(defn g-rtop [] (-> (ptr i64)) (alloc-static i64))
+(defn g-live [] (-> (ptr i64)) (alloc-static i64))
+(defn g-peak [] (-> (ptr i64)) (alloc-static i64))
+(defn g-ncol [] (-> (ptr i64)) (alloc-static i64))
+(defn g-total [] (-> (ptr i64)) (alloc-static i64))
+(defn hdr-of [(p (ptr u8))] (-> (ptr GcHeader)) (cast (ptr GcHeader) (- (cast i64 p) (sizeof GcHeader))))
+
+; --- pool allocator: objects are fixed-size (GcHeader+Val), bump-allocated from
+;     big slabs. There is NO per-object live-list — allocation touches only the
+;     object itself. Sweep scans slabs LINEARLY (cache-friendly) and rebuilds the
+;     free-list from every unmarked slot. This removes both malloc/free AND the
+;     live-list threading from the hot path. next-field = free-list link only. ---
+(defn g-free [] (-> (ptr (ptr GcHeader))) (alloc-static (ptr GcHeader)))  ; free-list head
+(defn g-cur  [] (-> (ptr i64)) (alloc-static i64))                        ; slab bump cursor
+(defn g-end  [] (-> (ptr i64)) (alloc-static i64))                        ; slab end address
+; object size = sizeof GcHeader (16) + sizeof Val (24) = 40; slab = 40 * 1M = 41943040
+
+; --- immediate values: nil, booleans, and integers are IMMEDIATE tagged words,
+;     not heap boxes. Heap objects are malloc'd (8-byte aligned) so their low bit
+;     is always 0; low bit 1 marks an immediate. Two-bit encoding:
+;       ...01  fixnum   value = word >> 2 (arithmetic)
+;       ...11  special  #f = 3, #t = 7, nil = 11  (payload = word >> 2)
+;     This removes ALL int/bool/nil allocation — including the two boxed bools the
+;     generated env lookups allocated per iteration — and the GC skips them. ---
+(defn is-imm [(p (ptr Val))] (-> bool) (= (iand (cast i64 p) 1) 1))
+
+; --- root-stack primitives the transform emits ---
+(defn gc-sp [] (-> i64) (load (g-rtop)))
+(defn gc-sp-set [(n i64)] (-> i64) (store! (g-rtop) n) 0)
+(defn gc-root [(p (ptr Val))] (-> i64)
+  (let [t (load (g-rtop))]
+    (store! (index (g-roots) t) (cast (ptr u8) p)) (store! (g-rtop) (+ t 1)) 0))
+
+; --- mark (tag-dispatched) / sweep ---
+(defn gc-mark [(p (ptr Val))] (-> i64)
+  (if (or (= (cast i64 p) 0) (is-imm p)) 0                ; skip null + immediate fixnums
+    (let [h (hdr-of (cast (ptr u8) p))]
+      (if (= (load (field h mark)) 1) 0
+        (do (store! (field h mark) 1)
+            (let [tg (load (field p tag))]
+              (if (= tg 2) (do (gc-mark (cast (ptr Val) (load (field p a)))) (gc-mark (cast (ptr Val) (load (field p b)))) 0)
+                (if (= tg 5) (do (gc-mark (cast (ptr Val) (load (field p a)))) 0) 0))))))))
+; linear sweep of one slab: marked -> unmark + count live; unmarked -> free-list
+(defn sweep-slab [(base i64) (hw i64)] (-> i64)
+  (let [(mut a) base]
+    (loop (if (>= (load a) hw) (break)
+      (let [h (cast (ptr GcHeader) (load a))]
+        (if (= (load (field h mark)) 1)
+            (do (store! (field h mark) 0) (store! (g-live) (+ (load (g-live)) 1)) 0)
+          (do (store! (field h next) (load (g-free))) (store! (g-free) h) 0))
+        (store! a (+ (load a) 40))))) 0))
+(defn gc-collect [] (-> i64)
+  (if (> (load (g-live)) (load (g-peak))) (store! (g-peak) (load (g-live))) 0)  ; peak = pre-collect live
+  (gc-mark (genv))                              ; the global env is always reachable
+  (let [top (load (g-rtop))]
+    (for [i 0 top] (gc-mark (cast (ptr Val) (load (index (g-roots) i))))))
+  (store! (g-free) (cast (ptr GcHeader) 0))     ; free-list rebuilt entirely from unmarked slots
+  (store! (g-live) 0)                            ; recount live during the sweep
+  (let [ns (load (g-nslabs)) cur (load (g-cur))]
+    (for [i 0 ns]
+      (let [base (index (g-slabs) i)]
+        (sweep-slab (load base) (if (= i (- ns 1)) cur (+ (load base) 41943040))))))
+  (store! (g-ncol) (+ (load (g-ncol)) 1)) 0)
+
+(defn gc-threshold [] (-> i64) 500000)
+; tight inlined fast path: free-list pop or slab bump, no helper calls, literal
+; sizes, no per-alloc peak tracking (peak is captured in gc-collect instead).
+(defn alloc-val [(tg i64) (av i64) (bv i64)] (-> (ptr Val))
+  (if (>= (load (g-live)) 500000) (gc-collect) 0)
+  (let [fl (load (g-free))
+        h (if (not (= (cast i64 fl) 0))
+              (do (store! (g-free) (load (field fl next))) fl)
+            (let [cur (load (g-cur))]
+              (if (< cur (load (g-end)))
+                  (do (store! (g-cur) (+ cur 40)) (cast (ptr GcHeader) cur))
+                (let [slab (cast i64 (malloc 41943040)) ns (load (g-nslabs))]
+                  (store! (index (g-slabs) ns) slab) (store! (g-nslabs) (+ ns 1))
+                  (store! (g-cur) (+ slab 40)) (store! (g-end) (+ slab 41943040))
+                  (cast (ptr GcHeader) slab)))))
+        p (cast (ptr Val) (+ (cast i64 h) 16))]
+    (store! (field h mark) 0)                    ; no live-list: only the mark bit
+    (store! (g-total) (+ (load (g-total)) 1)) (store! (g-live) (+ (load (g-live)) 1))
+    (store! (field p tag) tg) (store! (field p a) av) (store! (field p b) bv)
+    p))
+
+; --- constructors (managed: return Val) ---
+(defn mk-int [(v i64)] (-> (ptr Val)) (cast (ptr Val) (ior (ishl v 2) 1)))   ; immediate fixnum
+(defn mk-bool [(v i64)] (-> (ptr Val)) (cast (ptr Val) (if (= v 0) 3 7)))    ; immediate #f/#t
+(defn mk-sym [(id i64)] (-> (ptr Val)) (alloc-val 3 id 0))
+(defn mk-prim [(op i64)] (-> (ptr Val)) (alloc-val 6 op 0))
+(defn snil [] (-> (ptr Val)) (cast (ptr Val) 11))                            ; immediate nil
+(defn cons [(x (ptr Val)) (y (ptr Val))] (-> (ptr Val)) (alloc-val 2 (cast i64 x) (cast i64 y)))
+(defn mk-closure [(pbe (ptr Val))] (-> (ptr Val)) (alloc-val 5 (cast i64 pbe) 0))
+
+; --- accessors (unmanaged: return i64 / bool) ---
+(defn tag-of [(p (ptr Val))] (-> i64)
+  (if (is-imm p)
+      (if (= (iand (cast i64 p) 3) 1) 1              ; fixnum -> int tag 1
+        (if (= (cast i64 p) 11) 0 4))                ; nil -> 0, #f/#t -> bool tag 4
+    (load (field p tag))))
+(defn ival [(p (ptr Val))] (-> i64) (if (is-imm p) (ishr (cast i64 p) 2) (load (field p a))))
+(defn sym-id [(p (ptr Val))] (-> i64) (load (field p a)))
+(defn prim-op [(p (ptr Val))] (-> i64) (load (field p a)))
+(defn car [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p a))))
+(defn cdr [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p b))))
+(defn clos-pbe [(p (ptr Val))] (-> (ptr Val)) (cast (ptr Val) (load (field p a))))
+(defn set-car! [(p (ptr Val)) (v (ptr Val))] (-> i64) (store! (field p a) (cast i64 v)) 0)
+(defn nullp [(p (ptr Val))] (-> bool) (= (cast i64 p) 11))    ; nil is the immediate 11
+(defn pairp [(p (ptr Val))] (-> bool) (= (tag-of p) 2))
+(defn symp  [(p (ptr Val))] (-> bool) (= (tag-of p) 3))
+(defn truthy [(p (ptr Val))] (-> bool) (not (= (cast i64 p) 3)))  ; scheme: only #f (word 3) is false
+
+; --- symbol interning: global growable name table; id = index ---
+(defstruct SymTab [(init i64) (names (ptr (ArrayList (slice u8))))])
+(defn symtab [] (-> (ptr SymTab)) (alloc-static SymTab))
+(defn sym-names [] (-> (ptr (ArrayList (slice u8))))
+  (let [t (symtab)]
+    (if (= (load (field t init)) 0)
+        (let [b (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator)))]
+          (store! b (al-new [(slice u8)] (malloc-allocator)))
+          (store! (field t names) b) (store! (field t init) 1) 0) 0)
+    (load (field t names))))
+(defn intern [(name (slice u8))] (-> i64)
+  (let [ns (sym-names) n (al-len [(slice u8)] (load ns)) (mut found) -1]
+    (for [i 0 n] (if (and (< found 0) (str-eq (al-get [(slice u8)] (load ns) i) name)) (do (store! found i) 0) 0))
+    (if (>= found 0) found
+      (do (al-push! [(slice u8)] ns name) n))))
+(defn sym-name [(id i64)] (-> (slice u8)) (al-get [(slice u8)] (load (sym-names)) id))
+
+; --- Scheme primitives as Val->Val ops (what the compiled evaluator calls) ---
+(defn s-add [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (+ (ival a) (ival b))))
+(defn s-sub [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (- (ival a) (ival b))))
+(defn s-mul [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-int (* (ival a) (ival b))))
+(defn s-lt  [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-bool (if (< (ival a) (ival b)) 1 0)))
+(defn s-eqn [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val)) (mk-bool (if (= (ival a) (ival b)) 1 0)))
+(defn s-null [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (nullp a) 1 0)))
+(defn s-pair [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (pairp a) 1 0)))
+(defn s-num  [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (= (tag-of a) 1) 1 0)))
+(defn s-symp [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (symp a) 1 0)))
+(defn s-not  [(a (ptr Val))] (-> (ptr Val)) (mk-bool (if (truthy a) 0 1)))
+(defn s-eq [(a (ptr Val)) (b (ptr Val))] (-> (ptr Val))
+  (mk-bool (if (= (tag-of a) (tag-of b))
+               (if (= (tag-of a) 1) (if (= (ival a) (ival b)) 1 0)
+               (if (= (tag-of a) 3) (if (= (sym-id a) (sym-id b)) 1 0)
+               (if (= (tag-of a) 0) 1
+               (if (= (cast i64 a) (cast i64 b)) 1 0)))) 0)))
+
+; --- the mutable global environment (a permanent GC root) ---
+(defn genv-cell [] (-> (ptr (ptr Val))) (alloc-static (ptr Val)))
+(defn genv [] (-> (ptr Val)) (load (genv-cell)))
+(defn set-genv! [(v (ptr Val))] (-> i64) (store! (genv-cell) v) 0)
+
+; --- printer (write a Val to stdout, scheme syntax) ---
+(defn print-val [(p (ptr Val))] (-> i64)
+  (let [tg (tag-of p)]
+    (if (= tg 0) (do (fmt (stdout) "()") 0)
+    (if (= tg 1) (do (fmt (stdout) "{d}" (ival p)) 0)
+    (if (= tg 3) (do (fmt (stdout) "{s}" (sym-name (sym-id p))) 0)
+    (if (= tg 4) (do (fmt (stdout) "{s}" (if (= (ival p) 0) "#f" "#t")) 0)
+    (if (= tg 5) (do (fmt (stdout) "#<procedure>") 0)
+    (if (= tg 6) (do (fmt (stdout) "#<primitive>") 0)
+    (if (= tg 2)
+        (do (fmt (stdout) "(") (print-list p) (fmt (stdout) ")") 0)
+        0)))))))))
+(defn print-list [(p (ptr Val))] (-> i64)
+  (do (print-val (car p))
+      (let [d (cdr p)]
+        (if (= (tag-of d) 2) (do (fmt (stdout) " ") (print-list d) 0)
+          (if (= (tag-of d) 0) 0
+            (do (fmt (stdout) " . ") (print-val d) 0))))))
+
+; --- read stdin + parsed-form accessors (kept here so the transformed evaluator
+;     never contains a type-argument vector like [u8] / [Sexp]) ---
+(defn read-stdin [(a (ptr Allocator))] (-> (slice u8))
+  (let [(mut buf) (al-new [u8] a) tmp (alloc-stack (array u8 8192))]
+    (loop
+      (let [n (read 0 (cast (ptr i8) (index tmp 0)) 8192)]
+        (if (icmp-le n 0) (break)
+          (do (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut buf) (load (index tmp (load i)))) (store! i (iadd (load i) 1)))))) 0))))
+    (al-slice [u8] (load buf))))
+(defn forms-count [(fs (ptr (ArrayList Sexp)))] (-> i64) (al-len [Sexp] (load fs)))
+(defn forms-nth [(fs (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load fs) i))
+
+(defn gc-peak [] (-> i64) (load (g-peak)))
+(defn gc-collections [] (-> i64) (load (g-ncol)))
+(defn gc-total [] (-> i64) (load (g-total)))

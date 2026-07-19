@@ -1,0 +1,207 @@
+(defstruct ArrayList [T] [(data (ptr T)) (len i64) (cap i64) (alc (ptr Allocator))])
+
+(defn
+  al-new
+  [T]
+  [(a (ptr Allocator))]
+  (-> (ArrayList T))
+  (let [(mut l) (zeroed (ArrayList T))] (store! (field l alc) a) (load l)))
+
+(defn al-len [T] [(l (ArrayList T))] (-> i64) (load (field l len)))
+
+(defn al-cap [T] [(l (ArrayList T))] (-> i64) (load (field l cap)))
+
+(defn al-empty? [T] [(l (ArrayList T))] (-> bool) (icmp-eq (load (field l len)) 0))
+
+(defn al-get [T] [(l (ArrayList T)) (i i64)] (-> T) (load (index (load (field l data)) i)))
+
+(defn
+  al-set!
+  [T]
+  [(l (mut (ArrayList T))) (i i64) (v T)]
+  (-> i64)
+  (store! (index (load (field l data)) i) v)
+  0)
+
+(defn
+  al-reserve!
+  [T]
+  [(l (mut (ArrayList T))) (newcap i64)]
+  (-> i64)
+  (let
+    [oldcap (load (field l cap)) a (load (field l alc))]
+    (if
+      (icmp-le newcap oldcap)
+      0
+      (match
+        (raw-resize
+          a
+          (cast (ptr i8) (load (field l data)))
+          (imul oldcap (sizeof T))
+          (imul newcap (sizeof T))
+          (alignof T))
+        (Some
+          [p]
+          (do (store! (field l data) (cast (ptr T) p)) (store! (field l cap) newcap) 0))
+        (None
+          []
+          (match
+            (alloc-slice [T] a newcap)
+            (None [] (do (oom) -1))
+            (Some
+              [np]
+              (do
+                (let
+                  [(mut i) 0]
+                  (loop
+                    (if
+                      (icmp-ge (load i) (load (field l len)))
+                      (break)
+                      (do
+                        (store!
+                          (index np (load i))
+                          (load (index (load (field l data)) (load i))))
+                        (store! i (iadd (load i) 1))))))
+                (if
+                  (icmp-gt oldcap 0)
+                  (raw-free
+                    a
+                    (cast (ptr i8) (load (field l data)))
+                    (imul oldcap (sizeof T))
+                    (alignof T))
+                  0)
+                (store! (field l data) np)
+                (store! (field l cap) newcap)
+                0))))))))
+
+(defn
+  al-push!
+  [T]
+  [(l (mut (ArrayList T))) (v T)]
+  (-> i64)
+  (let
+    [n (load (field l len))]
+    (if
+      (icmp-ge n (load (field l cap)))
+      (al-reserve!
+        (mut l)
+        (if (icmp-eq (load (field l cap)) 0) 4 (imul (load (field l cap)) 2)))
+      0)
+    (store! (index (load (field l data)) n) v)
+    (store! (field l len) (iadd n 1))
+    (iadd n 1)))
+
+(defn
+  al-pop!
+  [T]
+  [(l (mut (ArrayList T)))]
+  (-> (Option T))
+  (let
+    [n (load (field l len))]
+    (if
+      (icmp-eq n 0)
+      (None)
+      (let
+        [v (load (index (load (field l data)) (isub n 1)))]
+        (store! (field l len) (isub n 1))
+        (Some v)))))
+
+(defn
+  al-slice
+  [T]
+  [(l (ArrayList T))]
+  (-> (slice T))
+  (slice-new (load (field l data)) (load (field l len))))
+
+(defn
+  al-free!
+  [T]
+  [(l (mut (ArrayList T)))]
+  (-> i64)
+  (if
+    (icmp-gt (load (field l cap)) 0)
+    (raw-free
+      (load (field l alc))
+      (cast (ptr i8) (load (field l data)))
+      (imul (load (field l cap)) (sizeof T))
+      (alignof T))
+    0)
+  (store! (field l data) (cast (ptr T) 0))
+  (store! (field l len) 0)
+  (store! (field l cap) 0)
+  0)
+
+(defn al-clear! [T] [(l (mut (ArrayList T)))] (-> i64) (store! (field l len) 0) 0)
+
+(defn
+  al-into-slice
+  [T]
+  [(l (mut (ArrayList T)))]
+  (-> (slice T))
+  (let
+    [a
+      (load (field l alc))
+      n
+      (load (field l len))
+      cap
+      (load (field l cap))
+      data
+      (load (field l data))
+      final
+      (if
+        (and (icmp-gt cap n) (icmp-gt n 0))
+        (match
+          (raw-resize
+            a
+            (cast (ptr i8) data)
+            (imul cap (sizeof T))
+            (imul n (sizeof T))
+            (alignof T))
+          (Some [p] (cast (ptr T) p))
+          (None [] data))
+        data)]
+    (store! (field l data) (cast (ptr T) 0))
+    (store! (field l len) 0)
+    (store! (field l cap) 0)
+    (slice-new final n)))
+
+(defn
+  al-for
+  [(binding Code) & (body Code)]
+  (-> Code)
+  (if
+    (not (icmp-eq (code-count binding) 2))
+    (error "al-for: binding must be [x arraylist]")
+    (quasiquote
+      (for-in
+        [(unquote (code-nth binding 0)) (iter (unquote (code-nth binding 1)))]
+        (unquote-splicing body)))))
+
+(impl [T] Len (ArrayList T) (len [(xs (ArrayList T))] (-> i64) (al-len xs)))
+
+(impl [T] Get (ArrayList T) (get [(xs (ArrayList T)) (i i64)] (-> T) (al-get xs i)))
+
+(impl
+  [T]
+  Set
+  (ArrayList T)
+  (set! [(xs (mut (ArrayList T))) (i i64) (v T)] (-> i64) (al-set! (mut xs) i v)))
+
+(impl
+  [T]
+  Push
+  (ArrayList T)
+  (push! [(xs (mut (ArrayList T))) (v T)] (-> i64) (al-push! (mut xs) v)))
+
+(impl
+  [T]
+  Pop
+  (ArrayList T)
+  (pop! [(xs (mut (ArrayList T)))] (-> (Option T)) (al-pop! (mut xs))))
+
+(impl
+  [T]
+  Iterable
+  (ArrayList T)
+  (iter [(xs (ArrayList T))] (-> (SliceIter T)) (iter (al-slice xs))))
+

@@ -1,0 +1,558 @@
+use crate::strings::StrId;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub type DefId = u64;
+pub type FieldId = u64;
+pub type ObjectId = u64;
+pub type ActorId = u64;
+/// The identity of one variant of an `enum` type. Stable by name across
+/// versions (the frontend's symbol table guarantees it), which is what lets a
+/// migration know "this is still the same variant".
+pub type VariantId = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Version(pub u64);
+
+/// A foreign resource kind — the nominal identity of a `foreign type`
+/// (a `Window`, a socket, a GL context). It is opaque: the runtime never
+/// inspects its layout, so it has no schema version and can never go stale,
+/// which is exactly why a foreign handle never traps at a use-boundary.
+pub type ForeignKind = u32;
+/// The id of a `foreign fn` — a native function registered on the [`Runtime`].
+pub type ForeignFnId = u32;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Type {
+    Unit,
+    I64,
+    /// IEEE-754 double. Runtime `==`/`<` use IEEE semantics; structural
+    /// equality of *values* (tests, heap comparison) is bitwise.
+    F64,
+    Bool,
+    /// An interned, immutable string (see [`crate::strings`]).
+    Str,
+    /// A mutable, growable array of `elem`. Structural (no version, no
+    /// migration): only nominal types evolve; an array's identity is its
+    /// element type, checked at every write.
+    Array(Box<Type>),
+    /// A first-class function value. Structural; the *value* is a function
+    /// NAME (a `DefId`), so calling it late-binds to the current version —
+    /// redefining a function updates every stored reference to it.
+    Fn(Vec<Type>, Box<Type>),
+    Ref(DefId),
+    /// An opaque handle to a native resource. Matched nominally by kind; the GC
+    /// never traces through it (native code owns the pointee's lifetime).
+    Foreign(ForeignKind),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Value {
+    Unit,
+    I64(i64),
+    /// Structural equality (`PartialEq`, used by tests and heap comparison) is
+    /// BITWISE — an equivalence, so `Eq` holds. The runtime's `==` operator
+    /// (`EqF64`) uses IEEE semantics (`NaN != NaN`).
+    F64(f64),
+    Bool(bool),
+    /// An interned string — a plain scalar id (equal text ⇒ equal id), so it
+    /// needs no GC tracing and survives every tier boundary untouched.
+    Str(StrId),
+    /// A first-class function value: the NAME of a function. Calling it
+    /// resolves the current version at call time (late binding), so a live
+    /// edit updates the behavior of every stored reference.
+    FnRef(DefId),
+    Ref(ObjectId),
+    /// A native pointer behind a kind tag. Passed to and returned from foreign
+    /// calls; stored in globals and object fields like any other value. Opaque
+    /// to the GC — `ptr` is never dereferenced or traced by the runtime.
+    Foreign { kind: ForeignKind, ptr: u64 },
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::I64(a), Value::I64(b)) => a == b,
+            (Value::F64(a), Value::F64(b)) => a.to_bits() == b.to_bits(),
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::FnRef(a), Value::FnRef(b)) => a == b,
+            (Value::Ref(a), Value::Ref(b)) => a == b,
+            (
+                Value::Foreign { kind: ak, ptr: ap },
+                Value::Foreign { kind: bk, ptr: bp },
+            ) => ak == bk && ap == bp,
+            _ => false,
+        }
+    }
+}
+impl Eq for Value {}
+
+impl Value {
+    /// The nominal type of a *scalar* value — everything except a reference,
+    /// whose type depends on its object's current schema and is resolved by the
+    /// [`crate::Heap`]. Used where no heap is in scope (e.g. checking a code
+    /// constant, which is never a reference).
+    pub fn scalar_type(&self) -> Option<Type> {
+        match self {
+            Self::Unit => Some(Type::Unit),
+            Self::I64(_) => Some(Type::I64),
+            Self::F64(_) => Some(Type::F64),
+            Self::Bool(_) => Some(Type::Bool),
+            Self::Str(_) => Some(Type::Str),
+            // A function value's type (its signature) and a reference's type
+            // (its object's schema) both depend on live state — the heap/world
+            // resolve them, not this shallow view.
+            Self::FnRef(_) => None,
+            Self::Foreign { kind, .. } => Some(Type::Foreign(*kind)),
+            Self::Ref(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub id: FieldId,
+    pub name: String,
+    pub ty: Type,
+    pub default: Option<Value>,
+}
+
+/// One variant of an `enum` type: a named case with its own fields. Field ids
+/// are unique across the whole enum (not just within the variant), so field
+/// reads and migrations name them unambiguously.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Variant {
+    pub id: VariantId,
+    pub name: String,
+    pub fields: Vec<Field>,
+}
+
+/// The versioned layout of a nominal type. A **struct** has `fields` and no
+/// `variants`; an **enum** has `variants` and no top-level `fields`. Both
+/// evolve the same way: install a new version, and live objects cross the
+/// migration barrier lazily at their next use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Schema {
+    pub type_id: DefId,
+    pub version: Version,
+    pub name: String,
+    pub fields: Vec<Field>,
+    pub variants: Vec<Variant>,
+}
+
+impl Schema {
+    pub fn is_enum(&self) -> bool {
+        !self.variants.is_empty()
+    }
+    /// A field by id — searching the struct fields and every variant's fields
+    /// (ids are unique across the whole schema).
+    pub fn field(&self, id: FieldId) -> Option<&Field> {
+        self.fields
+            .iter()
+            .chain(self.variants.iter().flat_map(|v| v.fields.iter()))
+            .find(|field| field.id == id)
+    }
+    pub fn variant(&self, id: VariantId) -> Option<&Variant> {
+        self.variants.iter().find(|v| v.id == id)
+    }
+}
+
+/// The mutable-by-migration part of an object: its schema-versioned layout and
+/// field values. A migration builds a *new* `Body` and swaps it in; the body
+/// itself is never mutated in place. Held behind an [`Arc`] so a swap is a
+/// cheap pointer replacement and readers keep the body they loaded alive — the
+/// reclamation half of "moving bodies behind non-moving handles."
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Body {
+    pub type_id: DefId,
+    pub schema: Version,
+    /// `Some` iff this object is an enum value: which variant it currently is.
+    /// A migration may map it to a different variant of the new version.
+    pub variant: Option<VariantId>,
+    pub fields: BTreeMap<FieldId, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MigrationSource {
+    Copy(FieldId),
+    Value(Value),
+    /// Construct a new object around a migrated scalar/reference. This remains
+    /// declarative, so the runtime can validate and stage it before publication.
+    Wrap {
+        type_id: DefId,
+        field: FieldId,
+        source: FieldId,
+    },
+}
+
+/// How one *variant* of an enum migrates across a version step: which variant
+/// it becomes in the new version, and how each of that variant's fields is
+/// produced (sources read the OLD variant's fields).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantMigration {
+    pub to_variant: VariantId,
+    pub fields: BTreeMap<FieldId, MigrationSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Migration {
+    pub type_id: DefId,
+    pub from: Version,
+    pub to: Version,
+    /// Struct migration: how each field of the new version is produced.
+    pub fields: BTreeMap<FieldId, MigrationSource>,
+    /// Enum migration: how each OLD variant maps forward. A variant with no
+    /// entry is a *gap* — objects currently of that variant trap
+    /// `MissingMigration` at their next use until a covering migration is
+    /// installed (the classic removed-variant repair story).
+    pub variants: BTreeMap<VariantId, VariantMigration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Instruction {
+    Const {
+        dst: usize,
+        value: Value,
+    },
+    New {
+        dst: usize,
+        type_id: DefId,
+        fields: Vec<(FieldId, usize)>,
+    },
+    GetField {
+        dst: usize,
+        object: usize,
+        field: FieldId,
+    },
+    /// Construct an enum value as `variant` of `type_id` at its current schema.
+    /// The enum counterpart of `New`.
+    NewVariant {
+        dst: usize,
+        type_id: DefId,
+        variant: VariantId,
+        fields: Vec<(FieldId, usize)>,
+    },
+    /// The verified multi-way branch of a `match`: migrate `object` to its
+    /// type's current schema, then jump to the arm for its variant. The
+    /// verifier requires the arms to cover the current schema's variants
+    /// EXACTLY — which is what makes adding a variant statically invalidate
+    /// every non-exhaustive match (D7), instead of misbehaving at runtime. A
+    /// *pinned old* frame whose object migrates to a variant it has no arm for
+    /// traps at this use — the con-freeness quarantine, same as a field read.
+    CaseVariant {
+        object: usize,
+        arms: Vec<(VariantId, usize)>,
+    },
+    /// Allocate a mutable array of `elem` from the item registers.
+    NewArray {
+        dst: usize,
+        elem: Type,
+        items: Vec<usize>,
+    },
+    /// `dst := array[index]`; out of bounds is a (resumable) trap.
+    IndexGet {
+        dst: usize,
+        array: usize,
+        index: usize,
+    },
+    /// `array[index] := value`; the value is checked against the array's
+    /// element type at the write (the con-freeness boundary for containers).
+    IndexSet {
+        array: usize,
+        index: usize,
+        value: usize,
+    },
+    /// `dst := length of array`.
+    ArrayLen {
+        dst: usize,
+        array: usize,
+    },
+    /// Append `value` (checked against the element type).
+    ArrayPush {
+        array: usize,
+        value: usize,
+    },
+    /// Copy a value from one register to another (any type). The one op that
+    /// isn't produced by a single source construct — the frontend emits it to
+    /// bind a local to another local's value and to land branch results in a
+    /// common register (this IR has no phi nodes).
+    Copy {
+        dst: usize,
+        src: usize,
+    },
+    AddI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    SubI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    MulI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// Signed division; a zero divisor is a (resumable) con-freeness-style
+    /// trap, never UB or a wrapped sentinel.
+    DivI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    AddF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    SubF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    MulF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// IEEE division — never traps (inf/NaN follow the standard).
+    DivF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left < right` (IEEE ordered). Produces a `Bool`.
+    LtF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left <= right` (IEEE ordered — NOT `!(right < left)`, which
+    /// would be wrong for NaN). Produces a `Bool`.
+    LeF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left == right` (IEEE: `NaN != NaN`). Produces a `Bool`.
+    EqF64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left < right` (signed). Produces a `Bool`, the only condition
+    /// source for `Branch`. Pure, so it never ends a basic block.
+    LtI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left == right` (on i64). Produces a `Bool`.
+    EqI64 {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := !src` (on a Bool). Produces a `Bool`; lets the frontend build
+    /// `!=`, `<=`, `>=`, and unary `!` from `<`/`==`.
+    Not {
+        dst: usize,
+        src: usize,
+    },
+    /// `dst := left ++ right` (on interned strings); the result is interned.
+    ConcatStr {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// `dst := left == right` (on interned strings). Interning dedups, so this
+    /// is id equality — identical in every tier.
+    EqStr {
+        dst: usize,
+        left: usize,
+        right: usize,
+    },
+    /// Unconditional transfer to another program counter. A back-edge (a target
+    /// at or before this pc) forms a loop.
+    Jump {
+        target: usize,
+    },
+    /// Transfer to `then_pc` when `cond` is `true`, else `else_pc`.
+    Branch {
+        cond: usize,
+        then_pc: usize,
+        else_pc: usize,
+    },
+    /// A recurring safe point (DESIGN.md T5). The native `step` hands control
+    /// back here so a pending hot update can land between iterations; the
+    /// interpreter treats it as a no-op advance. It computes nothing, so both
+    /// executors stay observationally identical.
+    Yield,
+    Call {
+        dst: usize,
+        function: DefId,
+        args: Vec<usize>,
+    },
+    /// Call through a function VALUE (`Value::FnRef` in `callee`): resolve the
+    /// named function's *current* version at call time — late binding, so a
+    /// stored function value picks up live edits — with the same argument /
+    /// broken-callee checks as a direct `Call`.
+    IndirectCall {
+        dst: usize,
+        callee: usize,
+        args: Vec<usize>,
+    },
+    /// Call a registered native function (managed → native). Atomic and
+    /// uninterruptible from the runtime's view: it runs to completion with no
+    /// safepoint, GC, trap, or hot-update landing inside it. All reference
+    /// arguments are pinned in frame slots across the call (non-moving GC), so
+    /// a raw pointer handed to native code stays valid for its duration.
+    CallForeign {
+        dst: usize,
+        foreign: ForeignFnId,
+        args: Vec<usize>,
+    },
+    /// Read a top-level `letonce` binding. Globals are persistent runtime state
+    /// that survives hot edits — where native resources (a window, a context)
+    /// live so a reload changes code, not the running world.
+    LoadGlobal {
+        dst: usize,
+        global: DefId,
+    },
+    Emit {
+        value: usize,
+    },
+    /// Send a value to another actor's mailbox. `target` holds the recipient
+    /// actor id (an `I64`); `value` is any value (including a `Ref` into the
+    /// shared heap). Concurrent tier only.
+    Send {
+        target: usize,
+        value: usize,
+    },
+    /// Block until a message arrives in this actor's mailbox, then bind it to
+    /// `dst`. The message is checked to have type `ty` — a mismatch traps like
+    /// any other con-freeness violation, so message contracts stay sound.
+    /// Concurrent tier only.
+    Recv {
+        dst: usize,
+        ty: Type,
+    },
+    Return {
+        value: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Function {
+    pub id: DefId,
+    pub version: Version,
+    pub name: String,
+    pub params: Vec<Type>,
+    pub result: Type,
+    pub registers: usize,
+    pub code: Vec<Instruction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FunctionState {
+    Ready(Function),
+    Broken {
+        id: DefId,
+        version: Version,
+        name: String,
+        diagnostics: Vec<String>,
+    },
+}
+
+impl FunctionState {
+    pub fn id(&self) -> DefId {
+        match self {
+            Self::Ready(f) => f.id,
+            Self::Broken { id, .. } => *id,
+        }
+    }
+    pub fn version(&self) -> Version {
+        match self {
+            Self::Ready(f) => f.version,
+            Self::Broken { version, .. } => *version,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct World {
+    pub epoch: u64,
+    pub schemas: BTreeMap<(DefId, Version), Schema>,
+    pub current_schemas: BTreeMap<DefId, Version>,
+    pub functions: BTreeMap<(DefId, Version), FunctionState>,
+    pub current_functions: BTreeMap<DefId, Version>,
+    pub migrations: BTreeMap<(DefId, Version), Migration>,
+    /// The nominal types each function's current Ready version references (its
+    /// dependency set, D7). A schema change re-verifies only the functions whose
+    /// set contains the changed type instead of every current function.
+    pub function_deps: BTreeMap<DefId, BTreeSet<DefId>>,
+    /// Declared signatures of `foreign fn`s (the ABI contract with native code).
+    /// The verifier checks `CallForeign` arguments against these; the native
+    /// implementations themselves live on the [`Runtime`], not in the `World`.
+    pub foreign_sigs: BTreeMap<ForeignFnId, (Vec<Type>, Type)>,
+    /// Declared types of top-level `letonce` globals, so a `LoadGlobal` types.
+    pub global_types: BTreeMap<DefId, Type>,
+}
+
+/// One call frame — the single frame representation shared by the interpreter
+/// and the concurrent worker (the JIT keeps a C-ABI mirror it marshals per step;
+/// see `RawFrame`). Registers are the complete live-value set at any pause
+/// boundary, so they are also the complete GC root map for this frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub function: (DefId, Version),
+    pub pc: usize,
+    pub registers: Vec<Option<Value>>,
+    /// The caller register the result lands in on return; `None` when this is
+    /// the actor's entry frame (its return completes the actor).
+    pub return_to: Option<usize>,
+}
+
+/// The object references live in a set of frames — the frame half of the GC
+/// root set. One routine, used by both the single-threaded collector and each
+/// concurrent worker's safepoint, so the two can never disagree on what a frame
+/// keeps alive.
+pub fn frame_roots(frames: &[Frame]) -> Vec<ObjectId> {
+    frames
+        .iter()
+        .flat_map(|f| f.registers.iter().flatten())
+        .filter_map(|v| match v {
+            Value::Ref(id) => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActorStatus {
+    Runnable,
+    Paused(Condition),
+    Complete(Value),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Condition {
+    BrokenFunction {
+        function: DefId,
+        diagnostics: Vec<String>,
+    },
+    MissingMigration {
+        object: ObjectId,
+        type_id: DefId,
+        from: Version,
+        to: Version,
+    },
+    RuntimeTypeError {
+        function: DefId,
+        pc: usize,
+        message: String,
+    },
+}

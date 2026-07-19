@@ -1,0 +1,6 @@
+; A front-end (checker) error compiled via `coil build`. Rust HALTS: it renders
+; only the diagnostic and exits nonzero, never invoking `cc`. The self-host must
+; do the same — no spurious `clang: no such file: <out>.o` / `Undefined symbols`
+; link junk after the diagnostic. (Divergence #1: build must halt on a compile
+; error BEFORE the object-emit + link step, mirroring src/lib.rs + src/main.rs.)
+(defn main [] (-> i64) "hello")

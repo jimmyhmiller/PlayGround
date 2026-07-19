@@ -1,0 +1,43 @@
+// MULTIPLICITY-POLYMORPHIC CLOSURES (P1.5) — "map polymorphic over linearity"
+// for a STORED closure. A datatype may take a `(m : Mult)` parameter; it is
+// monomorphised (`FlatClo$1`/`FlatClo$w`) exactly like a mult-poly function, so
+// the kernel's rig stays concrete. See docs/FIRST_CLASS_FUNCTIONS.md §5/§P1.5.
+//
+//   tally run examples/closures_linearity.tal        →  156
+//
+// The closure's `code` field consumes its argument at multiplicity `m`; ONE
+// generic `applyC` then serves BOTH an ω callback (reused) and a LINEAR callback
+// (consumes an owned cell exactly once). Passing the linear closure where an ω
+// one is expected is a type error (`FlatClo$1` ≠ `FlatClo$w`).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+struct FlatClo (m : Mult) (e : Type) (a : Type) (b : Type) {
+  env  : e,
+  code : e -> (m x : a) -> b,           // consumes its argument at multiplicity m
+}
+
+// ONE apply, generic over the callback's argument multiplicity `m`:
+applyC : (m : Mult) -> {0 e : Type} -> {0 a : Type} -> {0 b : Type}
+       -> FlatClo m e a b -> (m x : a) -> b
+fn applyC(m, c, x) { match c { FlatClo(env, code) => code(env, x) } }
+
+// an ω callback — reuses its argument:
+addK : Nat -> Nat -> Nat
+fn addK(env, x) { x + env }
+add10 : FlatClo w Nat Nat Nat
+fn add10() { FlatClo(10, addK) }
+
+// a LINEAR callback — consumes an owned cell exactly once (a leak/double-free
+// would be a compile error):
+drainK : Nat -> (1 o : Own Nat) -> Nat
+fn drainK(env, o) { let n = unbox(o); n + env }
+drain100 : FlatClo 1 Nat (Own Nat) Nat
+fn drain100() { FlatClo(100, drainK) }
+
+main : Nat
+fn main() {
+  applyC(w, add10, 5)                   // 5 + 10  = 15   (ω)
+    + applyC(1, drain100, alloc(41))    // 41 + 100 = 141 (linear; frees the cell)
+}                                       // 15 + 141 = 156

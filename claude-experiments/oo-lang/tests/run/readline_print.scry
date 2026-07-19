@@ -1,0 +1,11 @@
+// Console.print writes with NO trailing newline (for prompts); Console.log appends one.
+fn main() {
+  Console.print("A")
+  Console.print("B")
+  Console.log("C")
+  Console.print("prompt> ")
+  match Console.readLine() {
+    Some(l) -> Console.log("[" + l + "]")
+    None -> Console.log("[none]")
+  }
+}

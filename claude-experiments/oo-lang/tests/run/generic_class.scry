@@ -1,0 +1,17 @@
+class Inventory<T> {
+  items: List<T>
+  fn add(x: T) { self.items.push(x) }
+  fn count() -> Int { self.items.len() }
+  fn first() -> T { self.items.get(0) }
+}
+fn main() {
+  let ints = Inventory<Int>(items: List<Int>())
+  ints.add(7)
+  ints.add(8)
+  print(ints.count())
+  print(ints.first())
+  let strs = Inventory<String>(items: List<String>())
+  strs.add("hello")
+  print(strs.count())
+  print(strs.first())
+}

@@ -1,0 +1,331 @@
+(defn
+  derive--field-eq
+  [(T Code) (a Code) (b Code) (i i64)]
+  (-> Code)
+  (let
+    [fname
+      (code-field-name T i)
+      kind
+      (code-field-kind T i)
+      pa
+      (quasiquote (field (unquote a) (unquote fname)))
+      pb
+      (quasiquote (field (unquote b) (unquote fname)))]
+    (if
+      (icmp-eq kind 3)
+      (quasiquote
+        ((unquote (code-symbol (code-field-type T i) "-eq")) (unquote pa) (unquote pb)))
+      (if
+        (icmp-eq kind 4)
+        (error "derive-eq: sum fields unsupported in v1; write eq by hand")
+        (if
+          (icmp-eq kind 1)
+          (quasiquote (fcmp-eq (load (unquote pa)) (load (unquote pb))))
+          (quasiquote (icmp-eq (load (unquote pa)) (load (unquote pb)))))))))
+
+(defn
+  derive--eq-and
+  [(T Code) (a Code) (b Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote true)
+    (let
+      [this (derive--field-eq T a b i)]
+      (if
+        (icmp-eq (iadd i 1) n)
+        this
+        (quasiquote (and (unquote this) (unquote (derive--eq-and T a b (iadd i 1) n))))))))
+
+(defn
+  derive-eq
+  [(tname Code)]
+  (-> Code)
+  (quasiquote
+    (do
+      (defn
+        (unquote (code-symbol tname "-eq"))
+        [(a (unquote tname)) (b (unquote tname))]
+        (-> bool)
+        (unquote
+          (derive--eq-and tname (quasiquote a) (quasiquote b) 0 (code-field-count tname))))
+      (impl
+        Eq
+        (unquote tname)
+        (=
+          [(a (unquote tname)) (b (unquote tname))]
+          (-> bool)
+          ((unquote (code-symbol tname "-eq")) a b))))))
+
+(defn
+  derive--field-hash
+  [(T Code) (x Code) (i i64)]
+  (-> Code)
+  (let
+    [fname
+      (code-field-name T i)
+      kind
+      (code-field-kind T i)
+      p
+      (quasiquote (field (unquote x) (unquote fname)))]
+    (if
+      (icmp-eq kind 3)
+      (quasiquote ((unquote (code-symbol (code-field-type T i) "-hash")) (unquote p)))
+      (if
+        (icmp-eq kind 4)
+        (error "derive-hash: sum fields unsupported in v1; write hash by hand")
+        (if
+          (icmp-eq kind 1)
+          (error
+            "derive-hash: float fields unsupported (bit-hashing is lossy); write hash by hand")
+          (quasiquote (load (unquote p))))))))
+
+(defn
+  derive--hash-steps
+  [(T Code) (x Code) (h Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote ())
+    (let
+      [fh (derive--field-hash T x i)]
+      (quasiquote
+        ((store! (unquote h) (imul (ixor (load (unquote h)) (unquote fh)) 1099511628211))
+          (unquote-splicing (derive--hash-steps T x h (iadd i 1) n)))))))
+
+(defn
+  derive-hash
+  [(tname Code)]
+  (-> Code)
+  (quasiquote
+    (defn
+      (unquote (code-symbol tname "-hash"))
+      [(x (unquote tname))]
+      (-> i64)
+      (let
+        [(mut h) -3750763034362895579]
+        (unquote-splicing
+          (derive--hash-steps
+            tname
+            (quasiquote x)
+            (quasiquote h)
+            0
+            (code-field-count tname)))
+        (load h)))))
+
+(defn
+  derive--tparams
+  [(tname Code) (trait-name Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-ge i n)
+    (quasiquote ())
+    (quasiquote
+      (((unquote (code-nth tname i)) (unquote trait-name))
+        (unquote-splicing (derive--tparams tname trait-name (iadd i 1) n))))))
+
+(defn
+  derive--tparam-field?
+  [(tname Code) (fty Code) (i i64) (n i64)]
+  (-> bool)
+  (if
+    (icmp-ge i n)
+    false
+    (if
+      (code-eq fty (code-nth tname i))
+      true
+      (derive--tparam-field? tname fty (iadd i 1) n))))
+
+(defn
+  derive--generic-field?
+  [(tname Code) (fty Code)]
+  (-> bool)
+  (if (code-list? tname) (derive--tparam-field? tname fty 1 (code-count tname)) false))
+
+(defn
+  derive--teq-field
+  [(T Code) (a Code) (b Code) (i i64)]
+  (-> Code)
+  (let
+    [fname
+      (code-field-name T i)
+      kind
+      (code-field-kind T i)
+      pa
+      (quasiquote (field (unquote a) (unquote fname)))
+      pb
+      (quasiquote (field (unquote b) (unquote fname)))]
+    (if
+      (derive--generic-field? T (code-field-type T i))
+      (quasiquote (= (unquote pa) (unquote pb)))
+      (if
+        (icmp-eq kind 3)
+        (quasiquote (= (unquote pa) (unquote pb)))
+        (if
+          (icmp-eq kind 4)
+          (error "derive Eq: sum fields unsupported; impl by hand")
+          (if
+            (icmp-eq kind 1)
+            (quasiquote (fcmp-eq (load (unquote pa)) (load (unquote pb))))
+            (quasiquote (icmp-eq (load (unquote pa)) (load (unquote pb))))))))))
+
+(defn
+  derive--teq-and
+  [(T Code) (a Code) (b Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote true)
+    (let
+      [this (derive--teq-field T a b i)]
+      (if
+        (icmp-eq (iadd i 1) n)
+        this
+        (quasiquote (and (unquote this) (unquote (derive--teq-and T a b (iadd i 1) n))))))))
+
+(defn
+  derive--thash-field
+  [(T Code) (x Code) (i i64)]
+  (-> Code)
+  (let
+    [fname
+      (code-field-name T i)
+      kind
+      (code-field-kind T i)
+      p
+      (quasiquote (field (unquote x) (unquote fname)))]
+    (if
+      (derive--generic-field? T (code-field-type T i))
+      (quasiquote (hash (unquote p)))
+      (if
+        (icmp-eq kind 3)
+        (quasiquote (hash (unquote p)))
+        (if
+          (icmp-eq kind 4)
+          (error "derive Hash: sum fields unsupported; impl by hand")
+          (if
+            (icmp-eq kind 1)
+            (error
+              "derive Hash: float fields unsupported (bit-hashing is lossy); impl by hand")
+            (quasiquote (load (unquote p)))))))))
+
+(defn
+  derive--thash-steps
+  [(T Code) (x Code) (h Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq i n)
+    (quasiquote ())
+    (let
+      [fh (derive--thash-field T x i)]
+      (quasiquote
+        ((store! (unquote h) (imul (ixor (load (unquote h)) (unquote fh)) 1099511628211))
+          (unquote-splicing (derive--thash-steps T x h (iadd i 1) n)))))))
+
+(defn
+  derive
+  [(trait-name Code) (tname Code)]
+  (-> Code)
+  (if
+    (code-eq trait-name (quasiquote Eq))
+    (if
+      (code-list? tname)
+      (quasiquote
+        (impl
+          [(unquote-splicing (derive--tparams tname trait-name 1 (code-count tname)))]
+          Eq
+          (unquote tname)
+          (=
+            [(a (unquote tname)) (b (unquote tname))]
+            (-> bool)
+            (unquote
+              (derive--teq-and
+                tname
+                (quasiquote a)
+                (quasiquote b)
+                0
+                (code-field-count tname))))))
+      (quasiquote
+        (impl
+          Eq
+          (unquote tname)
+          (=
+            [(a (unquote tname)) (b (unquote tname))]
+            (-> bool)
+            (unquote
+              (derive--teq-and
+                tname
+                (quasiquote a)
+                (quasiquote b)
+                0
+                (code-field-count tname)))))))
+    (if
+      (code-eq trait-name (quasiquote Hash))
+      (if
+        (code-list? tname)
+        (quasiquote
+          (impl
+            [(unquote-splicing (derive--tparams tname trait-name 1 (code-count tname)))]
+            Hash
+            (unquote tname)
+            (hash
+              [(x (unquote tname))]
+              (-> i64)
+              (let
+                [(mut h) -3750763034362895579]
+                (unquote-splicing
+                  (derive--thash-steps
+                    tname
+                    (quasiquote x)
+                    (quasiquote h)
+                    0
+                    (code-field-count tname)))
+                (load h)))))
+        (quasiquote
+          (impl
+            Hash
+            (unquote tname)
+            (hash
+              [(x (unquote tname))]
+              (-> i64)
+              (let
+                [(mut h) -3750763034362895579]
+                (unquote-splicing
+                  (derive--thash-steps
+                    tname
+                    (quasiquote x)
+                    (quasiquote h)
+                    0
+                    (code-field-count tname)))
+                (load h))))))
+      (error "derive: only Eq and Hash are supported (impl other traits by hand)"))))
+
+(defn
+  derive-keyops
+  [(tname Code)]
+  (-> Code)
+  (quasiquote
+    (do
+      (defn
+        (unquote (code-symbol tname "-keyhash"))
+        [(slot (ptr i8)) (n i64)]
+        (-> i64)
+        ((unquote (code-symbol tname "-hash")) (cast (ptr (unquote tname)) slot)))
+      (defn
+        (unquote (code-symbol tname "-keyeq"))
+        [(ka (ptr i8)) (kb (ptr i8)) (n i64)]
+        (-> bool)
+        ((unquote (code-symbol tname "-eq"))
+          (cast (ptr (unquote tname)) ka)
+          (cast (ptr (unquote tname)) kb)))
+      (defn
+        (unquote (code-symbol tname "-keyops"))
+        []
+        (-> (ptr KeyOps))
+        (let
+          [o (alloc-static KeyOps)]
+          (store! (field o hash) (fnptr-of (unquote (code-symbol tname "-keyhash"))))
+          (store! (field o eq) (fnptr-of (unquote (code-symbol tname "-keyeq"))))
+          (store! (field o size) (sizeof (unquote tname)))
+          o)))))
+

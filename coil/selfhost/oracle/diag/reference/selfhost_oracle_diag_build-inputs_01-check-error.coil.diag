@@ -1,0 +1,5 @@
+error: function 'main': body has type (slice u8) but the declared return type is i64
+  --> selfhost/oracle/diag/build-inputs/01-check-error.coil:6:24
+  |
+6 | (defn main [] (-> i64) "hello")
+  |                        ^^^^^^^

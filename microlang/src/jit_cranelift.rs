@@ -1,0 +1,7937 @@
+//! A NATIVE emit tier: a Cranelift JIT.
+//!
+//! This is the machine-code analogue of `bytecode.rs`. Where the bytecode tier
+//! lowers each `Ir` to a stack-VM op stream, this tier lowers the same `Ir` to
+//! real Cranelift IR and compiles it to host machine code. It is the first
+//! backend to make the CODEGEN_AXES "emit half" produce actual instructions.
+//!
+//! ## Per-model arithmetic, now with the numeric tower
+//!
+//! `bytecode.rs` introduced `ModelEmit`: the value model's EMIT half for `+ - * <`,
+//! *differing by representation* (LowBit shifts to untag, HighBit does not, NanBox
+//! boxes to a slow call). That recipe is the fixnum FAST PATH and it *wraps* on
+//! overflow. This tier keeps the same per-model split via `ModelArithJit`
+//! (`emit_both_int`/`emit_untag`/`emit_tag`) but wraps it in a guard: take the fast
+//! path only when both operands are immediate fixnums AND the result fits fixnum
+//! range; otherwise call the runtime's checked, promoting `prim`. So the JIT has
+//! the FULL numeric tower — bignum promotion, floats, mixed — that the tree-walker
+//! has, and is strictly more correct than the wrapping bytecode tier. That guard +
+//! fallback is the emit half of codegen axis #2 (overflow policy).
+//!
+//! ## What is inline vs. what calls the runtime
+//!
+//! Emitted as native instructions (no call): guarded arithmetic, control flow
+//! (`if`/`do`/`let`), constant loads (from the pool base cached in `JitCtx`),
+//! `if` truthiness (two compares against the model's `nil`/`false` words), and
+//! innermost-frame (`up == 0`) local reads/writes (a load/store through the cached
+//! `cur_slots` pointer — every function param and hot-loop variable). What still
+//! funnels back through `extern "C"` shims: globals, `up > 0` locals (the parent
+//! chain walk), closure construction, non-arith prims, and the calling convention
+//! (`shim_call`/`shim_tail_call` -> `invoke`). Those keep the value-model + GC +
+//! dispatch contracts in one place; the hot straight-line path is compiled code.
+//!
+//! ## Calling convention: a frame pool
+//!
+//! Calls used to heap-allocate an `Arc<Frame>` per callee — the dominant cost. Now
+//! a freed frame (uniquely owned, `strong_count == 1`, so provably not captured by
+//! any closure) is returned to a pool and refilled via `Arc::get_mut` on the next
+//! call. Deep recursion converges to ~depth frames; a tail loop reuses one; and
+//! tail args reuse the trampoline's buffer. The `get_mut`/`strong_count` guard is
+//! the exact test for "no other owner", so a captured frame can NEVER be recycled
+//! (see `jit_frame_pool_never_recycles_a_captured_frame`). This closed most of the
+//! per-call gap to a production compiler without touching the frame/GC model; the
+//! rest (register args, a direct code pointer, native-stack frames) is the deeper
+//! calling-convention overhaul still ahead.
+//!
+//! ## Scope
+//!
+//! Covered: constants, locals, globals, `if`, `do`, `def`, `let`, `set!`,
+//! `fn`/closures, calls (with PROPER TAIL CALLS via a trampoline, so unbounded
+//! tail recursion runs in O(1) stack), the arithmetic prims, and other prims via a
+//! runtime escape. That is all of Scheme except first-class continuations. NOT
+//! covered — each errors clearly, and `Tiered` routes it to the `CekMachine`:
+//! `%callcc`/`%reset`/`%shift`/`%callec`, `apply`, records/`dispatch`, and the
+//! `(gc)` safepoint. Like the bytecode tier this tier does not yet model the GC
+//! safepoint (native temporaries are not yet roots — the frame/roots emit axis,
+//! the next honest step).
+
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::types::{I128, I64, I8};
+use cranelift_codegen::ir::{
+    AbiParam, AtomicRmwOp, Block, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value,
+};
+use cranelift_codegen::settings::{self, Configurable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{FuncId, Linkage, Module};
+
+use crate::bytecode::ModelEmit;
+use crate::code::CodeSpace;
+use crate::heap::{
+    kind, CLOSURE_CAPS_OFF, CLOSURE_CODE_OFF, CLOSURE_META_OFF, HEADER_SIZE, MULTIFN_FIXED_OFF,
+    RECORD_FIELDS_OFF,
+};
+use crate::ir::{CapSrc, Ir, Prim};
+use crate::model::{Repr, ValueModel};
+use crate::runtime::{ObjView, Runtime};
+use crate::value::{frame_get, frame_set, Frame, Locals, Obj, RawTag, Sym, Val};
+
+// ─────────────────────────────────────────────────────────────────────────
+// The runtime-interaction ABI.
+//
+// A compiled body is `extern "C" fn(*mut JitCtx<M>) -> u64`. Everything it
+// cannot do with a bare arithmetic/branch instruction it does by calling one of
+// the shims below with that context pointer. This mirrors how the tree-walker
+// and bytecode VM call back into `Runtime` — the difference is only that here
+// the caller is machine code.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The per-invocation context handed to compiled code. Held on the Rust stack in
+/// `run`; the compiled function only ever sees a `*mut` to it. Pointers (not
+/// references) so the shims can re-borrow `&mut Runtime` at each call boundary
+/// without fighting the borrow checker — the same single-threaded, reentrant
+/// discipline the interpreter tiers already rely on.
+///
+/// `#[repr(C)]` so `cur_slots` and `consts_base` sit at stable offsets: compiled
+/// code loads them directly (via `offset_of!`) to read innermost locals and
+/// constants inline, without a shim call. See `emit_local_load` / the `Const` arm.
+#[repr(C)]
+pub struct JitCtx<'a, M: ValueModel> {
+    /// Pointer to the "run context" — the outermost `JitCtx` of this call tree,
+    /// which owns the fields that DON'T change per call (`rt`, `top`, the four
+    /// base pointers, `direct`, `tail_args`). Every child copies just this pointer
+    /// (plus its own `cur_slots` / `self_closure` / `tail_pending`), and reads the
+    /// shared fields through it — so a native call builds a 4-store context instead
+    /// of copying nine fields. The top context points at itself.
+    rc: *const JitCtx<'a, M>,
+    top: &'a dyn CodeSpace<M>,
+    rt: *mut Runtime<M>,
+    /// Raw base pointer of the INNERMOST frame's slot array (`AtomicU64` is
+    /// transparent over `u64`). Compiled code reads `up == 0` locals as
+    /// `*(cur_slots + idx)` — no call. Kept in sync with `cur` on entry and on
+    /// every `let` enter/exit.
+    cur_slots: Cell<*const u64>,
+    /// Raw base pointer of the constant pool, for inline `Const`/`Quote` loads.
+    consts_base: Cell<*const u64>,
+    /// Raw base + length of the dense global mirror (`Runtime::global_slots`), for
+    /// inline `Global` reads. A slot holding `GLOBAL_UNBOUND` means "not bound
+    /// yet" and the compiled code falls back to the slow late-binding lookup.
+    global_base: Cell<*const u64>,
+    global_len: Cell<usize>,
+    /// Address of the heap's `AllocWindow` (cursor ptr / base / limit at
+    /// offsets 0/8/16 — ABI, see heap.rs), for the inline allocation fast path
+    /// (D5). Emitted code re-reads the fields on every allocation: they change
+    /// at space flips (under STW) and `limit == 0` is gc-stress mode.
+    alloc_window: Cell<*const u8>,
+    /// Address of the card table's `CardWindow` (old base / old size / card
+    /// array base at offsets 0/8/16 — ABI, see heap.rs), for the inline write
+    /// barrier (I3). Emitted code re-reads the fields on every mark: the base
+    /// follows the old gen's major flip (under STW).
+    card_window: Cell<*const u8>,
+    /// Address of `Shared.relocated` (the collection counter) — one half of the
+    /// dispatch-IC epoch. Stable for the runtime's lifetime; mutated only under
+    /// STW, so a plain load is sound.
+    reloc_ptr: Cell<*const u64>,
+    /// Address of `Shared.dispatch_version` (bumped per `register_method`) —
+    /// the other epoch half, so a redefinition invalidates immediately.
+    dispver_ptr: Cell<*const u64>,
+    /// Address of the heap's one-byte safepoint poll word (`Heap::poll`) —
+    /// emitted code polls it at body entry and loop back-edges (Stage E).
+    poll_ptr: Cell<*const u8>,
+    /// Is the native fast call path enabled? True only when this backend is the
+    /// OUTERMOST one (`top == self`). When wrapped (e.g. by `Traced`, which must
+    /// observe every call, or a future router), this is 0 and every call takes the
+    /// shim path through `top` — so composition is preserved exactly.
+    direct: Cell<u8>,
+    /// The bits of the closure currently running (0 if none / top-level). A tail
+    /// call to THIS same closure becomes an in-place native loop (redefine the
+    /// SSA loop variables, branch back) — O(1) stack, no FFI. A tail call to
+    /// anything else falls back to the shim + trampoline, so mutual tail
+    /// recursion keeps full TCO. Emitted bodies read this ONCE at entry into a
+    /// stack-mapped SSA variable; capture reads derive the capture base from
+    /// it per read (Stage E — no cached derived pointer can go stale).
+    self_closure: Cell<u64>,
+    /// The activation frame, as an `Arc` handle — only for MEMORY-mode bodies
+    /// (those containing `try`/`(gc)`/`%await`, whose locals must be GC roots /
+    /// interpreter-visible). SSA-mode bodies never touch it.
+    cur: RefCell<Locals>,
+    /// The backend itself (type-erased `*const JitCranelift<M>`), so shims can
+    /// consult its compiled-body cache / per-template compiled-code map. Null
+    /// when the running backend is wrapped (non-direct) — callers must check.
+    jit: *const (),
+    /// Proper-tail-call signalling. A tail `Call` stashes its (callee, args) here
+    /// and returns; the `invoke` trampoline reuses this native frame for the next
+    /// body instead of recursing — so a million-deep tail loop runs in O(1) stack,
+    /// the JIT analogue of the tree-walker's `Bounce`/`eval_tail` trampoline.
+    tail_pending: Cell<bool>,
+    tail_callee: Cell<u64>,
+    /// Raw pointer to the trampoline's reusable args buffer. A tail call writes
+    /// its evaluated args here (reusing the capacity), so a tail loop allocates
+    /// nothing per bounce.
+    tail_args: *mut Vec<u64>,
+    /// Phase 4 — DIRECT tail-chain depth. Non-self tail calls to a live closure
+    /// are made as REAL native calls (arguments in registers, no sentinel round
+    /// trip through the trampoline) instead of returning a bounce token — but a
+    /// native call grows the stack, so an unbounded mutual tail loop (`a`->`b`->
+    /// `a`->…) would overflow. This counter, shared across the whole call tree
+    /// via `rc`, caps the chain: at the limit the emitted site falls back to the
+    /// sentinel path, unwinding to the nearest bounce owner (a non-tail call site
+    /// or the trampoline) which continues in O(1) stack. Only the OUTERMOST ctx's
+    /// counter is ever read/written (emitted code reaches it through `rc`); child
+    /// stack contexts leave it 0.
+    direct_depth: Cell<u32>,
+}
+
+/// Cap on consecutive DIRECT (native, non-bounced) non-self tail calls before
+/// the chain unwinds to a trampoline bounce. Bounds the native stack a mutual
+/// tail loop can consume; real dispatch chains (JSON parse nesting, transducer
+/// step fns) are far shallower than this, so it is off the hot path. 64 frames
+/// is negligible stack yet amortizes the bounce across a long direct run.
+const DIRECT_TAIL_MAX_DEPTH: u32 = 64;
+
+/// Whole-feature kill switch: `MICROLANG_NO_DIRECT_TAIL=1` disables Phase 4's
+/// direct tail-chain calls, so every non-self tail call takes the sentinel +
+/// trampoline bounce path (Phases 1-3 behaviour). Evaluated once.
+fn direct_tail_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MICROLANG_NO_DIRECT_TAIL").is_none())
+}
+
+/// Raw base pointer of a frame's slot array (null for the empty environment).
+/// `AtomicU64` is `repr(transparent)` over `UnsafeCell<u64>` (same layout as `u64`), so this doubles as a `*const u64`
+/// the compiled code reads and writes slots through.
+fn slots_ptr(l: &Locals) -> *const u64 {
+    match l {
+        Some(f) => f.slots.as_ptr() as *const u64,
+        None => std::ptr::null(),
+    }
+}
+
+/// A minimal identity-ish hasher for the pointer-keyed compiled-body cache. The
+/// default `SipHash` is overkill for a `*const Ir` looked up on every call; this
+/// multiplies the pointer by a 64-bit odd constant (Fibonacci hashing) for good
+/// bucket spread at a fraction of the cost.
+#[derive(Default)]
+struct PtrHasher(u64);
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback (not hit by pointer keys): fold bytes in.
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+type PtrBuildHasher = std::hash::BuildHasherDefault<PtrHasher>;
+
+extern "C" fn shim_load_local<M: ValueModel>(ctx: *mut JitCtx<M>, up: u32, idx: u32) -> u64 {
+    let ctx = unsafe { &*ctx };
+    frame_get(&ctx.cur.borrow(), up as u16, idx as u16)
+}
+
+extern "C" fn shim_set_local<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    up: u32,
+    idx: u32,
+    val: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    frame_set(&ctx.cur.borrow(), up as u16, idx as u16, val);
+    val // `set!` evaluates to the assigned value (matches the tree-walker)
+}
+
+extern "C" fn shim_set_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    if !rt.set_global_val(sym as Sym, val) {
+        panic!("set!: unbound variable: {}", rt.sym_name(sym as Sym));
+    }
+    val
+}
+
+extern "C" fn shim_load_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    match rt.global(sym as Sym) {
+        Some(v) => v,
+        None => {
+            // Catchable, as on the tree-walk tier: signal a throw and yield nil
+            // (the signal is observed at the next check point / try frame).
+            let id = rt.alloc(Obj::Str(format!(
+                "Unable to resolve symbol: {}",
+                rt.sym_name(sym as Sym)
+            )));
+            rt.signal_throw(M::R::enc_ref(id));
+            M::R::enc_nil()
+        }
+    }
+}
+
+extern "C" fn shim_def_global<M: ValueModel>(ctx: *mut JitCtx<M>, sym: u32, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.define_global(sym as Sym, val);
+    // Match the tree-walker: `def` evaluates to the (encoded) defined symbol.
+    rt.encode(Val::Sym(sym as Sym))
+}
+
+/// Allocate a closure: the caller (emitted `Ir::Lambda` code) has already
+/// RESOLVED the capture values (from its SSA registers / frame slots / own
+/// captures) and spilled them, in order, at `caps_ptr`; `nparams`/`variadic`/
+/// `nslots` are the Lambda node's own (compile-time-constant) arity, baked in
+/// as immediates. `template_id` is the STABLE, GLOBAL id `rt.register_template`
+/// handed out for this Lambda's body at compile time — the SAME id
+/// `ObjView::Closure::template` reports, and the index into `template_code`.
+extern "C" fn shim_make_closure<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    template_id: u32,
+    nparams: u32,
+    variadic: u32,
+    nslots: u32,
+    caps_ptr: *const u64,
+    ncaps: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let caps: &[u64] =
+        if ncaps == 0 { &[] } else { unsafe { std::slice::from_raw_parts(caps_ptr, ncaps as usize) } };
+    let variadic = variadic != 0;
+    let g = rt.alloc_closure(nparams as usize, variadic, nslots as u16, template_id, caps);
+    // Stamp the new closure's CODE word NOW when the body is already compiled:
+    // a freshly-allocated closure that is called once — every lazy-seq thunk,
+    // every per-element step fn — would otherwise take the slow invoke on its
+    // only call. The object IS the fast-call table (see
+    // docs/STAGE_D_MIGRATION.md), so this is a single conditional store.
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() && !variadic && (nparams as usize) <= MAX_REG_ARGS {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        let code = jit.template_code.borrow().get(template_id as usize).copied().unwrap_or(std::ptr::null());
+        if !code.is_null() {
+            unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = code as u64 };
+        }
+    }
+    M::R::enc_ref(g)
+}
+
+/// Finish a NON-self tail call left by a natively-called fast body: it set
+/// `tail_pending` + `tail_callee` + `tail_args` (via `shim_tail_call`) and
+/// returned, and its stack frame is already gone, so invoking the target here
+/// through `top` preserves TCO (bounded stack) and composition. The common self
+/// tail case never reaches this (it loops in place); this only handles a fast body
+/// tail-calling a DIFFERENT function.
+extern "C" fn shim_finish_tail<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    finish_tail_fast::<M>(ctx.rc, rt, ctx)
+}
+
+/// Finish a pending NON-SELF tail chain on the register path. This is the
+/// per-element shape of every transducer/protocol step fn (`(rf a (inc x))`
+/// ends in a tail call to `rf`), so bounce it in a LOOP — bounded stack,
+/// exactly like the trampoline's bounce but without the frame/resolve
+/// machinery: select the arity clause, jump straight to stamped code.
+/// Anything the register path can't take (rest-arity clause, unstamped code,
+/// oversize arity, non-direct top) finishes through `top.invoke` as before.
+///
+/// `ctx` is reused for the bounced calls; only the fields the emitted
+/// fast-call path initializes (`rc`, `self_closure`, `tail_pending`,
+/// `tail_callee`) are touched — the 3-store stack contexts are valid here.
+fn finish_tail_fast<M: ValueModel>(
+    rc: *const JitCtx<M>,
+    rt: &mut Runtime<M>,
+    ctx: &JitCtx<M>,
+) -> u64 {
+    let rcr = unsafe { &*rc };
+    let top = rcr.top;
+    let cp = ctx as *const JitCtx<M> as u64;
+    'bounce: loop {
+        ctx.tail_pending.set(false);
+        let next = ctx.tail_callee.get();
+        let tbuf = unsafe { &*rcr.tail_args };
+        'fast: {
+            if rcr.direct.get() == 0 {
+                break 'fast; // a wrapper is observing calls: through `top`
+            }
+            let tn = tbuf.len();
+            if tn > MAX_REG_ARGS {
+                break 'fast;
+            }
+            // Same guards as the register call sites: arity clause, real
+            // closure, fixed arity match, stamped code.
+            let sel = match rt.multifn_select_raw(next, tn) {
+                Some(sel) => {
+                    if rt.pending() {
+                        return M::R::enc_nil();
+                    }
+                    sel
+                }
+                None => next,
+            };
+            if M::R::tag_of(sel) != RawTag::Ref {
+                break 'fast;
+            }
+            let g = M::R::as_ref(sel);
+            if unsafe { g.type_id() } != kind::CLOSURE {
+                break 'fast;
+            }
+            let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+            if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != tn {
+                break 'fast;
+            }
+            let code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+            if code.is_null() {
+                break 'fast;
+            }
+            let mut a = [0u64; MAX_REG_ARGS];
+            a[..tn].copy_from_slice(tbuf);
+            ctx.self_closure.set(sel);
+            let ret = unsafe {
+                match tn {
+                    0 => std::mem::transmute::<*const u8, extern "C" fn(u64) -> u64>(code)(cp),
+                    1 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64) -> u64>(code)(cp, a[0]),
+                    2 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(code)(cp, a[0], a[1]),
+                    3 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2]),
+                    4 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3]),
+                    5 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4]),
+                    6 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5]),
+                    7 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+                    8 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+                    _ => unreachable!(),
+                }
+            };
+            if !ctx.tail_pending.get() {
+                return ret;
+            }
+            continue 'bounce;
+        }
+        // Slow finish: through `top`, preserving composition.
+        let targs = tbuf.clone();
+        return top.invoke(top, rt, next, &targs);
+    }
+}
+
+extern "C" fn shim_call<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    callee: u64,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let args: &[u64] = if argc == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(args, argc as usize) }
+    };
+    // Direct fast path (multifn arity selection + register entry) with the
+    // caller's run context; falls back through `top` so composition /
+    // macro-reentrancy hold, exactly like the other tiers' `invoke` call sites.
+    if unsafe { (*ctx.rc).direct.get() } != 0 {
+        if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, callee, args) {
+            return r;
+        }
+    }
+    top.invoke(top, rt, callee, args)
+}
+
+/// Record a tail call for the trampoline instead of recursing. Returns a dummy
+/// value that flows to the function's `return`; the trampoline ignores it and
+/// reads the stashed callee/args.
+extern "C" fn shim_tail_call<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    callee: u64,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let buf = unsafe { &mut *(*ctx.rc).tail_args };
+    buf.clear();
+    if argc != 0 {
+        buf.extend_from_slice(unsafe { std::slice::from_raw_parts(args, argc as usize) });
+    }
+    ctx.tail_callee.set(callee);
+    ctx.tail_pending.set(true);
+    0
+}
+
+// ── Stage F2: MONOMORPHIC register-arg shims for the hot collection prims ──
+// The generic `shim_prim` costs an arg spill to a stack slot, a
+// `prim_from_tag` round trip, and the giant prim match — per element in
+// collection-building loops (the vecbuild/group-by profile). These call the
+// runtime methods directly with register args, exactly the treatment the
+// arithmetic slow paths got in Stage A3. They ALLOCATE, and are classified
+// PARKING for the fence policy (plain `call_shim`; `body_pure_loop` treats
+// them as impure), so loops around them use Cranelift's precise demotion.
+
+extern "C" fn shim_pv_conj<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, o: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.pv_conj(pv, o)
+}
+
+extern "C" fn shim_pv_nth<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, i: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let i = rt.raw_i64(i, "pv-nth: index must be an int");
+    rt.pv_nth(pv, i)
+}
+
+extern "C" fn shim_pv_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, pv: u64, i: u64, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let i = rt.raw_i64(i, "pv-assoc: index must be an int");
+    rt.pv_assoc(pv, i, val)
+}
+
+extern "C" fn shim_hamt_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, root: u64, key: u64, val: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let (new_root, added) = rt.hamt_map_assoc(root, key, val);
+    let addedb = rt.encode(Val::Bool(added));
+    M::R::enc_ref(rt.alloc_vector(&[new_root, addedb]))
+}
+
+extern "C" fn shim_hamt_lookup<M: ModelArithJit>(ctx: *mut JitCtx<M>, root: u64, key: u64, nf: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.hamt_map_lookup(root, key, nf)
+}
+
+// Array-map lookup via a register-arg, non-fenced shim (like `first`/`rest`/`=`).
+// `amap_get` only scans the kv array and returns an existing value — it never
+// allocates and never reaches a safepoint — so it skips the general spill-args +
+// fenced prim call. `%amap-get` is the hottest op in a `core.match` classify
+// (every map pattern lookup routes through it).
+extern "C" fn shim_amap_get<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, k: u64, nf: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.amap_get(arr, k, nf)
+}
+
+extern "C" fn shim_arr_push<M: ModelArithJit>(ctx: *mut JitCtx<M>, arr: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let Some(g) = rt.raw_gc(arr) else { panic!("apush: not an array") };
+    rt.arr_extend(g, &[v]);
+    arr
+}
+
+extern "C" fn shim_tv_conj<M: ModelArithJit>(ctx: *mut JitCtx<M>, tv: u64, x: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.tv_conj(tv, x)
+}
+
+extern "C" fn shim_tam_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, tam: u64, k: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.tam_assoc(tam, k, v)
+}
+
+extern "C" fn shim_thm_assoc<M: ModelArithJit>(ctx: *mut JitCtx<M>, thm: u64, k: u64, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.thm_assoc(thm, k, v)
+}
+
+extern "C" fn shim_cons2<M: ModelArithJit>(ctx: *mut JitCtx<M>, h: u64, t: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.cons(h, t)
+}
+
+// `=` (2-arg) via a register-arg, non-fenced shim. Eq2 never allocates and
+// never reaches a safepoint (the scalar branch compares scalars in place; the
+// collection / nil branches return `nil` BEFORE touching `equal`), so it can
+// ride the same non-fenced path as `first`/`rest` instead of the general
+// spill-args + fenced prim call. The answer is identical to
+// `rt.prim(Prim::Eq2, &[a, b])` — this literally delegates to it.
+extern "C" fn shim_eq2<M: ModelArithJit>(ctx: *mut JitCtx<M>, a: u64, b: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::Eq2, &[a, b])
+}
+
+// `%str-char-at` / `char->integer` / `integer->char` via register-arg shims:
+// a char-at-a-time text reader (data.json's StringPBR) issues one of each per
+// character read, and the general spill-args + prim-tag + fenced path per
+// character is pure overhead. StrCharAt/IntToChar can ALLOCATE (a char beyond
+// the interned ASCII range), so like the F2 collection shims they are
+// PARKING-classified in `body_pure_loop`; CharToInt never allocates and rides
+// the same non-fenced treatment as `first`/`rest`/`=`.
+extern "C" fn shim_str_char_at<M: ModelArithJit>(ctx: *mut JitCtx<M>, s: u64, i: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::StrCharAt, &[s, i])
+}
+
+extern "C" fn shim_char_to_int<M: ModelArithJit>(ctx: *mut JitCtx<M>, c: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::CharToInt, &[c])
+}
+
+extern "C" fn shim_int_to_char<M: ModelArithJit>(ctx: *mut JitCtx<M>, n: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.prim(Prim::IntToChar, &[n])
+}
+
+extern "C" fn shim_first1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    // Exactly `rt.prim(Prim::First, ..)`'s arm.
+    if let Some((h, _)) = rt.as_cons(v) {
+        h
+    } else if let Some((arr, off, _, _)) = rt.as_chunked(v) {
+        rt.arr_at_pub(arr, off as usize)
+    } else {
+        rt.enc_nil()
+    }
+}
+
+extern "C" fn shim_rest1<M: ModelArithJit>(ctx: *mut JitCtx<M>, v: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    // Exactly `rt.prim(Prim::Rest, ..)`'s arm.
+    if let Some((_, t)) = rt.as_cons(v) {
+        t
+    } else if let Some((arr, off, end, more)) = rt.as_chunked(v) {
+        if off + 1 < end {
+            rt.mk_chunked(arr, off + 1, end, more)
+        } else {
+            more
+        }
+    } else {
+        rt.enc_nil()
+    }
+}
+
+extern "C" fn shim_prim<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    prim_tag: u32,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let args: &[u64] = if argc == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(args, argc as usize) }
+    };
+    rt.prim(prim_from_tag(prim_tag), args)
+}
+
+/// `(.-field obj)` — the inline-cached field read, same as TreeWalk's `FieldGet`.
+extern "C" fn shim_field_get<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    field: u32,
+    obj: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.field_get(site as usize, field, obj)
+}
+
+/// A protocol/method dispatch: resolve the impl for the receiver's type (with the
+/// `Object` default) and invoke it through `top` — identical to TreeWalk.
+/// Invoke `callee` with `args` REUSING the caller's run context: multifn
+/// arity selection, a fast-path read straight off the callee OBJECT (header
+/// type_id, meta arity, code word — the SAME table the emitted call site
+/// reads), a minimal child context, and a register-arg `call_indirect`-
+/// equivalent — no `make_ctx`, no trampoline, no `resolve_call`. `None` when
+/// the callee is not a compiled, matching-arity closure (the caller falls
+/// back to `top.invoke`). Only sound when `direct` (checked by the caller):
+/// it bypasses `top`.
+fn shim_fast_invoke<M: ValueModel>(
+    rc: *const JitCtx<M>,
+    rt: &mut Runtime<M>,
+    callee: u64,
+    args: &[u64],
+) -> Option<u64> {
+    let rcr = unsafe { &*rc };
+    let n = args.len();
+    if n > MAX_REG_ARGS {
+        return None;
+    }
+    // Multi-arity: select the clause serving this arg count (cheap heap read;
+    // errors pend a signal and yield nil like every shim error path).
+    let callee = match rt.multifn_select_raw(callee, n) {
+        Some(sel) => {
+            if rt.pending() {
+                return Some(M::R::enc_nil());
+            }
+            sel
+        }
+        None => callee,
+    };
+    if M::R::tag_of(callee) != RawTag::Ref {
+        return None;
+    }
+    let g = M::R::as_ref(callee);
+    if unsafe { g.type_id() } != kind::CLOSURE {
+        return None;
+    }
+    let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+    if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != n {
+        return None;
+    }
+    let code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+    if code.is_null() {
+        return None;
+    }
+    // Minimal child context: everything shared rides through `rc`.
+    let mut ctx = JitCtx {
+        rc,
+        top: rcr.top,
+        rt: rt as *mut Runtime<M>,
+        cur_slots: Cell::new(std::ptr::null()),
+        consts_base: Cell::new(std::ptr::null()),
+        global_base: Cell::new(std::ptr::null()),
+        global_len: Cell::new(0),
+        alloc_window: Cell::new(std::ptr::null()),
+        card_window: Cell::new(std::ptr::null()),
+        reloc_ptr: Cell::new(std::ptr::null()),
+        dispver_ptr: Cell::new(std::ptr::null()),
+        poll_ptr: Cell::new(std::ptr::null()),
+        direct: Cell::new(1),
+        self_closure: Cell::new(callee),
+        cur: RefCell::new(None),
+        jit: rcr.jit,
+        tail_pending: Cell::new(false),
+        tail_callee: Cell::new(0),
+        tail_args: rcr.tail_args,
+        direct_depth: Cell::new(0),
+    };
+    let cp = &mut ctx as *mut JitCtx<M> as u64;
+    let a = args;
+    let ret = unsafe {
+        match n {
+            0 => std::mem::transmute::<*const u8, extern "C" fn(u64) -> u64>(code)(cp),
+            1 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64) -> u64>(code)(cp, a[0]),
+            2 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(code)(cp, a[0], a[1]),
+            3 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2]),
+            4 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3]),
+            5 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4]),
+            6 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5]),
+            7 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+            8 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+            _ => unreachable!(),
+        }
+    };
+    if ctx.tail_pending.get() {
+        // The callee ended in a NON-self tail call: bounce the chain on the
+        // register path (see `finish_tail_fast`).
+        return Some(finish_tail_fast::<M>(rc, rt, &ctx));
+    }
+    Some(ret)
+}
+
+extern "C" fn shim_dispatch<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    method: u32,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    // Every entry here is the COLD dispatch path (an inline-IC hit never calls
+    // the shim), so the raw count localizes megamorphic sites.
+    crate::stats::DISPATCH_SHIM_CALLS.fetch_add(1, Ordering::Relaxed);
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let args: &[u64] =
+        if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
+    let ty = rt.type_tag(args[0]);
+    // Warmup feedback (Phase 1): record this cold JIT dispatch's receiver type
+    // directly at the shim entry — the emitted 2-way IC absorbs the hot
+    // monomorphic/bimorphic repeats, so whatever reaches HERE is precisely the
+    // cold-dispatch traffic a recompile wants to see. `resolve_or_default` also
+    // records on its own slow path; the overlap only inflates counts uniformly
+    // and never changes which type dominates. Populated UNCONDITIONALLY — not
+    // gated on `thread_cacheable`, unlike the emitted IC fill below.
+    {
+        let reloc = rt.relocated();
+        let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+        let epoch = dispatch_epoch(reloc, ver);
+        // The impl is recorded advisory-only after resolution below; record the
+        // TYPE now with a 0 impl (revalidated by epoch at use, so 0 is inert).
+        rt.shared.feedback.record(site as usize, ty, 0, epoch);
+    }
+    let imp = match rt.resolve_or_default(site as usize, method, ty) {
+        Some(imp) => imp,
+        None => {
+            // A CATCHABLE throw (matching TreeWalk), not an abort — the caller
+            // checks `pending()` after the dispatch shim and bubbles to the try.
+            let msg = format!("no method '{}' for type '{}'", rt.sym_name(method), rt.sym_name(ty));
+            let id = rt.alloc(Obj::Str(msg));
+            rt.signal_throw(M::R::enc_ref(id));
+            return M::R::enc_nil();
+        }
+    };
+    // Refill this site's emitted 2-way IC — but only when the installed
+    // dispatch strategy is a pure lookup (`thread_cacheable`): an OBSERVING
+    // strategy (per-site ICs, speculation counters) must keep seeing every
+    // repeat dispatch, exactly the rule `resolve_or_default` applies to the
+    // runtime's own per-thread cache. A slot exists only for sites compiled
+    // with the inline path (INLINE_OBJECTS models).
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        let mut ics = jit.dispatch_ic.borrow_mut();
+        if let Some(slot) = ics.get_mut(site as usize) {
+            if rt.shared.tables.read().unwrap().dispatch.thread_cacheable() {
+                let reloc = rt.relocated();
+                let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+                let way = (ty as usize) & (DISPATCH_IC_WAYS - 1);
+                slot[way] =
+                    DispatchIcEntry { epoch: dispatch_epoch(reloc, ver), ty: ty as u64, imp };
+            }
+        }
+    }
+    // Direct fast path: call the impl's register entry with the caller's run
+    // context (no make_ctx / trampoline / resolve). Only when unwrapped.
+    if unsafe { (*ctx.rc).direct.get() } != 0 {
+        if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, imp, args) {
+            return r;
+        }
+    }
+    top.invoke(top, rt, imp, args)
+}
+
+/// Adaptive tier: a feedback-speculated dispatch guard failed at `site` — the
+/// live receiver type or the dispatch version diverged from what the recompile
+/// baked, so the generic edge ran. Count the deopt (drives the blacklist +
+/// re-speculation policy). A pure counter bump — never allocates or throws, so
+/// it is safe on the JIT's nounwind edge.
+extern "C" fn shim_deopt<M: ValueModel>(ctx: *mut JitCtx<M>, site: u32) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.shared.feedback.record_deopt(site as usize);
+    crate::stats::bump(&crate::stats::SPEC_DISPATCH_DEOPTS);
+    0
+}
+
+/// Adaptive tier: the running body crossed its hotness threshold. Recompile it
+/// with type feedback and republish, so its NEXT call enters the optimized
+/// body (running frames finish on the current one — no on-stack replacement).
+/// `cell` is the body's hotness counter, reset here so the trigger re-arms
+/// rather than firing on every subsequent call. Reached from the emitted
+/// prologue / back-edge on the nounwind edge, so it must never panic — every
+/// failure mode just leaves the body as-is.
+extern "C" fn shim_reopt<M: ModelArithJit>(ctx: *mut JitCtx<M>, cell: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let self_closure = ctx.self_closure.get();
+    let jitp = unsafe { (*ctx.rc).jit };
+    if !jitp.is_null() {
+        let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+        jit.reoptimize(rt, self_closure);
+    }
+    // Re-arm the trigger: zero the counter so it climbs again over another
+    // `REOPT_THRESHOLD` calls (a straggler upgrade / deopt re-check amortizes to
+    // one shim per threshold, not one per call). Racy across threads — a lost
+    // write only delays the next arming, never breaks anything.
+    if cell != 0 {
+        unsafe { *(cell as *mut u32) = 0 };
+    }
+    0
+}
+
+/// Register a `deftype`/protocol method impl (type-indexed dispatch table).
+extern "C" fn shim_def_method<M: ValueModel>(
+    ctx: *mut JitCtx<M>,
+    name: u32,
+    ty: u32,
+    imp: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.register_method(name, ty, imp);
+    rt.encode(Val::Nil)
+}
+
+/// `(apply f a … lst)` — invoke `f` on the leading args + the elements of the
+/// final sequence, flattened NATIVELY (`seq_flatten` walks cons/chunked spines
+/// and forces lazy nodes through the registered `seq` fn). The rest arg is
+/// deliberately re-materialized as a realized list by the invoke path: this
+/// dialect's variadic bodies may walk their rest arg with raw `%first`/`%rest`
+/// prims, so handing them a lazy-tailed seq would break them.
+extern "C" fn shim_apply<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    args: *const u64,
+    argc: u32,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let argv: &[u64] =
+        if argc == 0 { &[] } else { unsafe { std::slice::from_raw_parts(args, argc as usize) } };
+    let f = argv[0];
+    let rest = &argv[1..];
+    // F4 FAST PATH: a SHORT, fully REALIZED cons-list tail (the overwhelmingly
+    // common shape — an `&`-rest list or a literal list) flattens into a stack
+    // buffer and invokes directly: no Vec round trip, no seq forcing, and the
+    // register-arity fast invoke when unwrapped. Anything else — chunked,
+    // lazy, vectors, > 8 total args — takes the general seq_flatten path
+    // unchanged. Semantics identical (a realized list stays realized; the
+    // callee's rest-arg materialization in build_call_frame is the same).
+    let lead = rest.len().saturating_sub(1);
+    if lead < 8 {
+        if let Some(&last) = rest.last() {
+            let mut buf = [0u64; 8];
+            buf[..lead].copy_from_slice(&rest[..lead]);
+            let mut n = lead;
+            let mut cur = last;
+            let realized_short = loop {
+                if M::R::tag_of(cur) == RawTag::Nil {
+                    break true;
+                }
+                if let Some(g) = rt.raw_gc(cur) {
+                    if unsafe { g.type_id() } == kind::EMPTY_LIST {
+                        break true;
+                    }
+                }
+                match rt.as_cons(cur) {
+                    Some((h, t)) => {
+                        if n >= 8 {
+                            break false;
+                        }
+                        buf[n] = h;
+                        n += 1;
+                        cur = t;
+                    }
+                    None => break false,
+                }
+            };
+            if realized_short {
+                if unsafe { (*ctx.rc).direct.get() } != 0 {
+                    if let Some(r) = shim_fast_invoke::<M>(ctx.rc, rt, f, &buf[..n]) {
+                        return r;
+                    }
+                }
+                return top.invoke(top, rt, f, &buf[..n]);
+            }
+        }
+    }
+    // GENERAL PATH. `invoke_apply` plans the call (resolving arity so the
+    // applied seq can be handed to the callee as its rest arg, uncopied) and
+    // invokes. It INVOKES the seq fn to force the head — a SAFEPOINT, which
+    // relocates the callee and every leading arg — so they are ROOTED across
+    // it and re-read after; the bare `f`/`rest` copied out above point into
+    // the collected space once it returns. (Exactly the TreeWalk
+    // `Prim::Apply` arm's discipline — see `code.rs`.)
+    let base = rt.root_depth();
+    for &a in argv {
+        rt.push_root(a);
+    }
+    if argc < 2 {
+        let f = rt.root_get(base);
+        rt.truncate_roots(base);
+        return top.invoke(top, rt, f, &[]);
+    }
+    let last_slot = base + argc as usize - 1;
+    let last = rt.root_get(last_slot);
+    let leading: Vec<u64> = (base + 1..last_slot).map(|i| rt.root_get(i)).collect();
+    let f = rt.root_get(base);
+    rt.truncate_roots(base);
+    rt.invoke_apply(top, f, &leading, last)
+}
+
+/// `(%spawn thunk)` — spawn an OS thread that runs `thunk` on the JIT. The worker
+/// builds its OWN `JitCranelift` in-thread (so the JIT need not be `Send`) and
+/// shares this runtime's heap/globals via the thread handle; the closure and
+/// everything it calls run NATIVE on the worker. Mirrors the TreeWalk `Spawn` arm
+/// but with a JIT worker instead of a tree-walker.
+extern "C" fn shim_spawn<M: ModelArithJit>(ctx: *mut JitCtx<M>, thunk: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let mut child = rt.thread_handle();
+    // Root the thunk in the CHILD's shadow stack before the thread exists
+    // (Stage E): a collection can fire before the worker's first safepoint
+    // only after the worker PARKS — and by then the rooted slot has been
+    // published and rewritten, so the re-read below always sees the current
+    // address. A bare moved `u64` would go stale.
+    let thunk_slot = child.push_root(thunk);
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(crate::value::FutureSlot {
+        handle: None,
+        result: None,
+    }));
+    let slot_worker = slot.clone();
+    let slot_obj = slot.clone();
+    let handle = std::thread::spawn(move || {
+        let cs = JitCranelift::<M>::new();
+        let mut crt = child;
+        let thunk = crt.root_get(thunk_slot);
+        let r = cs.invoke(&cs, &mut crt, thunk, &[]);
+        // Publish the result before the worker's handle drops (see TreeWalk Spawn).
+        slot_worker.lock().unwrap().result = Some(r);
+        r
+    });
+    slot.lock().unwrap().handle = Some(handle);
+    let id = rt.alloc(Obj::Future(slot_obj));
+    M::R::enc_ref(id)
+}
+
+/// `(%await fut)` — join the future's worker, PARKING this thread while blocked so
+/// a concurrent stop-the-world collector can proceed (the reason this is backend-
+/// handled and not a plain `rt.prim`). Uses `ctx.cur` for the roots to publish.
+extern "C" fn shim_await<M: ValueModel>(ctx: *mut JitCtx<M>, fut: u64) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let locals = ctx.cur.borrow().clone();
+    rt.await_future(fut, &locals)
+}
+
+/// `(gc)` — a modeled safepoint for the JIT tier. `ctx.cur` is the live frame
+/// chain; `collect` walks its whole parent chain (`update_env`), so every JIT
+/// local is a root and survives the move (its slot is rewritten in place).
+/// Native-register temporaries in FRAMES BELOW us are covered by the stack
+/// maps + frame walker (Stage E). Concurrent `(gc)` calls rendezvous via
+/// `stw_collect` (losers park + participate).
+extern "C" fn shim_gc<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let locals = ctx.cur.borrow().clone();
+    rt.collect(&locals);
+    M::R::enc_nil()
+}
+
+/// The emitted POLL's cold path (Stage E): a body's entry or a self-loop
+/// back-edge saw a nonzero poll word. This is an ordinary call, so Cranelift
+/// spilled every live stack-mapped value around it — parking here (or
+/// collecting, on allocation pressure) walks those spill slots via the frame
+/// walker and the collector rewrites them in place; the body reloads them
+/// when this returns.
+///
+/// NO `ctx.cur` read here: a native fast call builds a MINIMAL 3-store child
+/// context whose other fields (including `cur`) are uninitialized stack
+/// memory. Fast bodies' roots live in the stack maps, and memory-mode bodies'
+/// frames ride the dynamic env chain (`run_ctx_entry` pushes them), so the
+/// safepoint needs no locals of its own.
+/// Take the pending signal and hand back its carried value. Only ever reached on
+/// the throwing edge of an INLINED `try`, so it costs nothing on the normal path.
+extern "C" fn shim_take_signal<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.take_signal().value
+}
+
+/// Refill an instance-check site's monomorphic cache: {epoch, ty, result-bool}.
+extern "C" fn shim_instance_fill<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    site: u32,
+    ty: u64,
+    result: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let jitp = unsafe { (*ctx.rc).jit };
+    if jitp.is_null() {
+        return 0;
+    }
+    let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+    // InstanceCheck caches a BOOL keyed by the receiver's TYPE SYM (a stable
+    // interned immediate) in a NON-heap Vec — nothing here is a heap pointer, so
+    // GC relocation is irrelevant to its validity. Only the dispatch VERSION
+    // (extend-type / defprotocol / deftype registration) can change the answer,
+    // so the epoch omits `relocated()`. This matters because allocating workloads
+    // (e.g. core.match's per-element `(match [x] …)` builds a vector each call)
+    // bump `relocated()` constantly; mixing it in invalidated the cache every GC,
+    // so even a repeated record receiver never hit and took the `satisfies?` shim.
+    let ver = rt.shared.dispatch_version.load(Ordering::Relaxed);
+    let mut ics = jit.instance_ic.borrow_mut();
+    if let Some(ways) = ics.get_mut(site as usize) {
+        let epoch = instance_epoch(ver);
+        // Way choice: an existing entry for this ty, else a stale way, else a
+        // key-derived victim (eviction only happens when a site legitimately
+        // sees more than INSTANCE_IC_WAYS receiver types).
+        let way = ways
+            .iter()
+            .position(|w| w.ty == ty)
+            .or_else(|| ways.iter().position(|w| w.epoch != epoch))
+            .unwrap_or((ty as usize) & (INSTANCE_IC_WAYS - 1));
+        ways[way] = DispatchIcEntry { epoch, ty, imp: result };
+    }
+    0
+}
+
+/// The InstanceCheck cache epoch — dispatch-version only (see `shim_instance_fill`).
+fn instance_epoch(ver: u64) -> u64 {
+    ver
+}
+
+extern "C" fn shim_safepoint<M: ValueModel>(ctx: *mut JitCtx<M>) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    rt.safepoint(&None);
+    0
+}
+
+/// `(try body (catch e handler) (finally f))` — the body/catch/finally Ir nodes
+/// are passed by raw pointer (they outlive the compiled code) and evaluated via
+/// `top`, so this mirrors TreeWalk's `Ir::Try` EXACTLY: catch_unwind the body, on
+/// a `Thrown` bind the value in a fresh one-slot frame and run the handler, run
+/// finally on every path, re-raise anything else. Requires unwind info on the
+/// emitted frames so the panic can cross them (enabled in the ISA flags).
+extern "C" fn shim_try<M: ModelArithJit>(
+    ctx: *mut JitCtx<M>,
+    body: *const Ir,
+    catch: *const Ir,
+    finally: *const Ir,
+    cslot: u32,
+    site: u64,
+) -> u64 {
+    let ctx = unsafe { &*ctx };
+    let rt = unsafe { &mut *(*ctx.rc).rt };
+    let top = unsafe { (*ctx.rc).top };
+    let locals = ctx.cur.borrow().clone();
+    let body = unsafe { &*body };
+
+    // Run a try arm. Through `top.eval_ir` this Cranelift-compiled the arm on
+    // EVERY execution (74.7µs/call vs 24ns without the `try`, ~3000x) — that
+    // path deliberately does not cache, because top-level `Ir`s are transient.
+    // These arms are not: the emit site keeps them alive as long as the code.
+    // So when the backend is the bare JIT, compile them ONCE (`run_nested_body`);
+    // when it is wrapped (Traced/Tiered — `jit` is null), keep going through
+    // `top` so the wrapper still observes the arm.
+    let jitp = unsafe { (*ctx.rc).jit };
+    // The three arms are three distinct bodies under ONE site, so each gets its
+    // own cache key derived from it (`arm`: 0 body, 1 catch, 2 finally).
+    let run = |rt: &mut Runtime<M>, ir: &Ir, locals: &Locals, arm: u64| -> u64 {
+        if jitp.is_null() {
+            top.eval_ir(top, rt, ir, locals)
+        } else {
+            let jit = unsafe { &*(jitp as *const JitCranelift<M>) };
+            jit.run_nested_body(top, rt, ir, locals, site * 4 + arm)
+        }
+    };
+
+    // `throw` is a flag on the runtime now, not a panic — so this is the exact
+    // signal-checking logic of TreeWalk's `Ir::Try`, no unwinding involved. The
+    // body/handlers run on `top` (the JIT), which propagates the flag natively via
+    // the per-call pending checks; this shim just checks + routes.
+    let mut result = run(rt, body, &locals, 0);
+    if rt.pending_throw() && !catch.is_null() {
+        let thrown = rt.take_signal().value;
+        let cbody = unsafe { &*catch };
+        // The catch binding was re-homed by `flatten` to a slot of THIS
+        // activation frame (no fresh frame).
+        frame_set(&locals, 0, cslot as u16, thrown);
+        result = run(rt, cbody, &locals, 1);
+    }
+    if !finally.is_null() {
+        let fbody = unsafe { &*finally };
+        let suspended = rt.take_signal();
+        // Mirrors TreeWalk's `Ir::Try` exactly, rooting included: `finally` runs
+        // ARBITRARY code (safepoints), and both `result` (returned below) and the
+        // suspended signal's payload (taken OUT of the signal, so the signal root
+        // does not cover it) are bare heap pointers across it.
+        let base = rt.push_root(result);
+        rt.push_root(suspended.value);
+        let fv = run(rt, fbody, &locals, 2);
+        result = rt.root_get(base);
+        let value = rt.root_get(base + 1);
+        rt.truncate_roots(base);
+        if rt.pending() {
+            return fv;
+        }
+        rt.signal = crate::runtime::Signal { value, ..suspended };
+    }
+    result
+}
+
+// A stable integer tag so the emitted code can name one. (The `Prim`
+// enum carries no `#[repr]`, so this is an explicit, total mapping.)
+fn prim_tag(p: Prim) -> u32 {
+    use Prim::*;
+    match p {
+        Add => 0,
+        Sub => 1,
+        Mul => 2,
+        Lt => 3,
+        Eq => 4,
+        List => 5,
+        Cons => 6,
+        First => 7,
+        Rest => 8,
+        IsNil => 9,
+        Println => 10,
+        Print => 67,
+        MethodTypes => 68,
+        Record => 11,
+        Field => 12,
+        Identical => 13,
+        StrLen => 14,
+        StrCharAt => 139,
+        StrGetChars => 140,
+        StrToLong => 141,
+        StrToDouble => 142,
+        CharsToStr => 143,
+        CharToInt => 15,
+        IntToChar => 16,
+        Vector => 17,
+        VectorRef => 18,
+        VectorSet => 19,
+        VectorLen => 20,
+        Values => 21,
+        ValuesToList => 22,
+        TypeOf => 23,
+        NFields => 24,
+        Throw => 25,
+        Await => 26,
+        Spawn => 27,
+        AtomNew => 28,
+        AtomGet => 29,
+        AtomSet => 30,
+        AtomCas => 31,
+        Quot => 32,
+        Rem => 33,
+        Mod => 34,
+        Div => 64,
+        StrCat => 35,
+        StrOf => 36,
+        MakeArray => 37,
+        AClone => 38,
+        BitAnd => 39,
+        BitOr => 40,
+        BitXor => 41,
+        BitShl => 42,
+        BitShr => 43,
+        BitCount => 44,
+        RegisterFields => 45,
+        FieldByName => 46,
+        Hash => 47,
+        DynGet => 48,
+        DynSet => 49,
+        DynMark => 50,
+        DynBind => 51,
+        DynUnwind => 52,
+        GlobalGet => 53,
+        GlobalSet => 54,
+        GlobalBound => 55,
+        SymName => 56,
+        SymNs => 57,
+        VarFlags => 58,
+        NsInterns => 59,
+        NsAliases => 131,
+        ResolveInNs => 132,
+        Rand => 133,
+        CpuCount => 134,
+        AmapGet => 135,
+        ProtoHasType => 136,
+        ScalarType => 137,
+        Eq2 => 138,
+        AllNs => 60,
+        SymbolOf => 61,
+        VarArglists => 62,
+        StrChars => 63,
+        FieldNames => 65,
+        MakeRecord => 66,
+        ArrPush => 69,
+        ArrShift => 70,
+        ArrClear => 71,
+        ReadString => 72,
+        Eval => 73,
+        MacroExpand1 => 74,
+        Numerator => 75,
+        Denominator => 76,
+        BigIntP => 77,
+        ToLong => 78,
+        StrToBytes => 79,
+        BytesToStr => 80,
+        TcpListen => 81,
+        TcpAccept => 82,
+        TcpRead => 83,
+        TcpWrite => 84,
+        TcpClose => 85,
+        TcpLocalPort => 86,
+        ErrPrint => 87,
+        CurrentNs => 88,
+        Nanos => 104,
+        Keyword => 105,
+        MethodHasType => 106,
+        Pow => 107,
+        PvConj => 89,
+        PvNth => 90,
+        PvAssoc => 91,
+        LazyRealize => 92,
+        RangeFill => 93,
+        HamtAssoc => 94,
+        HamtLookup => 95,
+        HamtWithout => 96,
+        StrJoinArr => 97,
+        StrCmp => 98,
+        PvConjChunk => 99,
+        PvFromArray => 100,
+        ApushChunk => 101,
+        MultiFnNew => 102,
+        SortArr => 103,
+        TvNew => 117,
+        TvConj => 118,
+        TvAssoc => 119,
+        TvNth => 120,
+        TvPersistent => 121,
+        TamNew => 122,
+        TamAssoc => 123,
+        TamDissoc => 124,
+        TamPersistent => 125,
+        ThmNew => 126,
+        ThmAssoc => 127,
+        ThmDissoc => 128,
+        ThmPersistent => 129,
+        TvPop => 130,
+        Wrap64 => 144,
+        WallMillis => 145,
+        ThreadId => 146,
+        Floor => 147,
+        Ceil => 148,
+        Log => 149,
+        Exp => 150,
+        DoubleBits => 151,
+        BitReverse => 152,
+        Stats => 153,
+        Subs => 154,
+        Sleep => 155,
+        DynFrameGet => 156,
+        DynFrameSet => 157,
+        // These require a backend the JIT tier does not model; rejected at
+        // compile time, so they never reach a tag. Listed for totality.
+        Gc | CallEc | Apply | CallCc | Reset | Shift => {
+            panic!("prim {p:?} is not lowerable by the JIT tier")
+        }
+        // Optimizer-introduced ops the JIT lowers INLINE (never through a shim
+        // tag): `Fx*` go via `emit_unguarded_arith` after `dechecked()`, and
+        // `AllFixnum` via `emit_all_fixnum`. Listed for totality.
+        FxAdd | FxSub | FxMul | FxLt | FxEq | AllFixnum => {
+            panic!("prim {p:?} is lowered inline by the JIT, not via a shim tag")
+        }
+    }
+}
+
+fn prim_from_tag(tag: u32) -> Prim {
+    use Prim::*;
+    match tag {
+        0 => Add,
+        1 => Sub,
+        2 => Mul,
+        3 => Lt,
+        4 => Eq,
+        5 => List,
+        6 => Cons,
+        7 => First,
+        8 => Rest,
+        9 => IsNil,
+        10 => Println,
+        67 => Print,
+        68 => MethodTypes,
+        11 => Record,
+        12 => Field,
+        13 => Identical,
+        14 => StrLen,
+        139 => StrCharAt,
+        140 => StrGetChars,
+        141 => StrToLong,
+        142 => StrToDouble,
+        143 => CharsToStr,
+        15 => CharToInt,
+        16 => IntToChar,
+        17 => Vector,
+        18 => VectorRef,
+        19 => VectorSet,
+        20 => VectorLen,
+        21 => Values,
+        22 => ValuesToList,
+        23 => TypeOf,
+        24 => NFields,
+        25 => Throw,
+        26 => Await,
+        27 => Spawn,
+        28 => AtomNew,
+        29 => AtomGet,
+        30 => AtomSet,
+        31 => AtomCas,
+        32 => Quot,
+        33 => Rem,
+        34 => Mod,
+        35 => StrCat,
+        36 => StrOf,
+        37 => MakeArray,
+        38 => AClone,
+        39 => BitAnd,
+        40 => BitOr,
+        41 => BitXor,
+        42 => BitShl,
+        43 => BitShr,
+        44 => BitCount,
+        45 => RegisterFields,
+        46 => FieldByName,
+        47 => Hash,
+        48 => DynGet,
+        49 => DynSet,
+        50 => DynMark,
+        51 => DynBind,
+        52 => DynUnwind,
+        53 => GlobalGet,
+        54 => GlobalSet,
+        55 => GlobalBound,
+        56 => SymName,
+        57 => SymNs,
+        58 => VarFlags,
+        59 => NsInterns,
+        131 => NsAliases,
+        132 => ResolveInNs,
+        133 => Rand,
+        134 => CpuCount,
+        135 => AmapGet,
+        136 => ProtoHasType,
+        137 => ScalarType,
+        138 => Eq2,
+        60 => AllNs,
+        61 => SymbolOf,
+        62 => VarArglists,
+        63 => StrChars,
+        65 => FieldNames,
+        66 => MakeRecord,
+        69 => ArrPush,
+        70 => ArrShift,
+        71 => ArrClear,
+        72 => ReadString,
+        73 => Eval,
+        74 => MacroExpand1,
+        75 => Numerator,
+        76 => Denominator,
+        77 => BigIntP,
+        78 => ToLong,
+        79 => StrToBytes,
+        80 => BytesToStr,
+        81 => TcpListen,
+        82 => TcpAccept,
+        83 => TcpRead,
+        84 => TcpWrite,
+        85 => TcpClose,
+        86 => TcpLocalPort,
+        87 => ErrPrint,
+        88 => CurrentNs,
+        104 => Nanos,
+        105 => Keyword,
+        106 => MethodHasType,
+        107 => Pow,
+        64 => Div,
+        89 => PvConj,
+        90 => PvNth,
+        91 => PvAssoc,
+        92 => LazyRealize,
+        93 => RangeFill,
+        94 => HamtAssoc,
+        95 => HamtLookup,
+        96 => HamtWithout,
+        97 => StrJoinArr,
+        98 => StrCmp,
+        99 => PvConjChunk,
+        100 => PvFromArray,
+        101 => ApushChunk,
+        102 => MultiFnNew,
+        103 => SortArr,
+        117 => TvNew,
+        118 => TvConj,
+        119 => TvAssoc,
+        120 => TvNth,
+        121 => TvPersistent,
+        122 => TamNew,
+        123 => TamAssoc,
+        124 => TamDissoc,
+        125 => TamPersistent,
+        126 => ThmNew,
+        127 => ThmAssoc,
+        128 => ThmDissoc,
+        129 => ThmPersistent,
+        130 => TvPop,
+        144 => Wrap64,
+        145 => WallMillis,
+        146 => ThreadId,
+        147 => Floor,
+        148 => Ceil,
+        149 => Log,
+        150 => Exp,
+        151 => DoubleBits,
+        152 => BitReverse,
+        153 => Stats,
+        154 => Subs,
+        155 => Sleep,
+        156 => DynFrameGet,
+        157 => DynFrameSet,
+        other => panic!("bad prim tag {other}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The imported-shim function ids, and the per-function `FuncRef`s.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct Shims {
+    load_local: FuncId,
+    load_global: FuncId,
+    def_global: FuncId,
+    make_closure: FuncId,
+    call: FuncId,
+    tail_call: FuncId,
+    finish_tail: FuncId,
+    prim: FuncId,
+    set_local: FuncId,
+    set_global: FuncId,
+    field_get: FuncId,
+    dispatch: FuncId,
+    def_method: FuncId,
+    apply: FuncId,
+    try_: FuncId,
+    spawn: FuncId,
+    await_: FuncId,
+    gc: FuncId,
+    safepoint: FuncId,
+    take_signal: FuncId,
+    instance_fill: FuncId,
+    // Stage F2 monomorphic collection shims.
+    pv_conj: FuncId,
+    pv_nth: FuncId,
+    pv_assoc: FuncId,
+    hamt_assoc: FuncId,
+    hamt_lookup: FuncId,
+    amap_get: FuncId,
+    arr_push: FuncId,
+    cons2: FuncId,
+    first1: FuncId,
+    rest1: FuncId,
+    eq2: FuncId,
+    tv_conj: FuncId,
+    tam_assoc: FuncId,
+    thm_assoc: FuncId,
+    str_char_at: FuncId,
+    char_to_int: FuncId,
+    int_to_char: FuncId,
+    /// Adaptive tier: a hot body crossed its threshold — recompile with feedback.
+    reopt: FuncId,
+    /// Adaptive tier: a feedback-speculated dispatch guard failed — count it.
+    deopt: FuncId,
+}
+
+#[derive(Clone, Copy)]
+struct ShimRefs {
+    load_local: cranelift_codegen::ir::FuncRef,
+    load_global: cranelift_codegen::ir::FuncRef,
+    def_global: cranelift_codegen::ir::FuncRef,
+    make_closure: cranelift_codegen::ir::FuncRef,
+    call: cranelift_codegen::ir::FuncRef,
+    tail_call: cranelift_codegen::ir::FuncRef,
+    finish_tail: cranelift_codegen::ir::FuncRef,
+    prim: cranelift_codegen::ir::FuncRef,
+    set_local: cranelift_codegen::ir::FuncRef,
+    set_global: cranelift_codegen::ir::FuncRef,
+    field_get: cranelift_codegen::ir::FuncRef,
+    dispatch: cranelift_codegen::ir::FuncRef,
+    def_method: cranelift_codegen::ir::FuncRef,
+    apply: cranelift_codegen::ir::FuncRef,
+    try_: cranelift_codegen::ir::FuncRef,
+    spawn: cranelift_codegen::ir::FuncRef,
+    await_: cranelift_codegen::ir::FuncRef,
+    gc: cranelift_codegen::ir::FuncRef,
+    safepoint: cranelift_codegen::ir::FuncRef,
+    take_signal: cranelift_codegen::ir::FuncRef,
+    instance_fill: cranelift_codegen::ir::FuncRef,
+    pv_conj: cranelift_codegen::ir::FuncRef,
+    pv_nth: cranelift_codegen::ir::FuncRef,
+    pv_assoc: cranelift_codegen::ir::FuncRef,
+    hamt_assoc: cranelift_codegen::ir::FuncRef,
+    hamt_lookup: cranelift_codegen::ir::FuncRef,
+    amap_get: cranelift_codegen::ir::FuncRef,
+    arr_push: cranelift_codegen::ir::FuncRef,
+    cons2: cranelift_codegen::ir::FuncRef,
+    first1: cranelift_codegen::ir::FuncRef,
+    rest1: cranelift_codegen::ir::FuncRef,
+    eq2: cranelift_codegen::ir::FuncRef,
+    tv_conj: cranelift_codegen::ir::FuncRef,
+    tam_assoc: cranelift_codegen::ir::FuncRef,
+    thm_assoc: cranelift_codegen::ir::FuncRef,
+    str_char_at: cranelift_codegen::ir::FuncRef,
+    char_to_int: cranelift_codegen::ir::FuncRef,
+    int_to_char: cranelift_codegen::ir::FuncRef,
+    reopt: cranelift_codegen::ir::FuncRef,
+    deopt: cranelift_codegen::ir::FuncRef,
+}
+
+/// A finished, runnable body.
+struct Compiled {
+    code: *const u8,
+    /// `Some(k)` — a REGISTER-ARG entry `fn(*mut JitCtx, a0..a{k-1}) -> u64`
+    /// (SSA-mode, non-variadic, k ≤ MAX_REG_ARGS): no activation frame is ever
+    /// built for a call. `None` — the ctx-only entry `fn(*mut JitCtx) -> u64`:
+    /// the caller builds a real heap frame (variadic / many params / memory
+    /// mode) and the prologue reads it.
+    entry_arity: Option<usize>,
+    /// MEMORY mode: the body contains `try`/`(gc)`/`%await`, so its locals live
+    /// in the heap activation frame (GC-rootable, interpreter-visible via
+    /// `shim_try`) and `ctx.cur` must hold the frame handle. SSA mode keeps
+    /// every local in a register.
+    mem_mode: bool,
+}
+
+/// Is there a `Call`/`Dispatch` in TAIL position of `ir`? Such a body may set
+/// `tail_pending` and return; native call sites finish it via
+/// `shim_finish_tail`, the invoke trampoline by bouncing.
+fn has_tail_call(ir: &Ir) -> bool {
+    match ir {
+        Ir::Call(..) | Ir::Dispatch { .. } => true,
+        Ir::If(_, t, e) => has_tail_call(t) || has_tail_call(e),
+        Ir::Do(xs) => xs.last().is_some_and(has_tail_call),
+        _ => false,
+    }
+}
+
+/// Is this body a PURE self-loop candidate: every `Call`/`Dispatch` is in tail
+/// position (so the only non-tail calls the body makes are non-parking shims —
+/// arithmetic slow paths, prim escapes, the poll)? Such bodies profit from
+/// FENCING those shims (`call_shim_fenced`): their loop variables never cross
+/// an unfenced call and stay in registers. Bodies with non-tail calls demote
+/// their live values at those calls anyway, so fencing would only add
+/// merge/spill churn — they use plain calls throughout.
+fn body_pure_loop(ir: &Ir, tail: bool) -> bool {
+    match ir {
+        // A call is pure-loop-compatible only in TAIL position (the self-loop
+        // back-edge or a trampolined tail), with a simple callee reference and
+        // call-free arguments — a call anywhere else parks.
+        Ir::Call(f, args) => {
+            tail
+                && matches!(f.as_ref(), Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_))
+                && args.iter().all(|a| body_pure_loop(a, false))
+        }
+        Ir::Dispatch { .. } => false,
+        Ir::InstanceCheck { .. } => false,
+        Ir::Prim(Prim::Apply | Prim::CallCc | Prim::CallEc | Prim::Reset | Prim::Shift, _) => false,
+        // The Stage F2 monomorphic collection shims are PARKING-classified
+        // (plain calls) — a loop around them demotes its live values there
+        // anyway, so fencing would only add churn.
+        Ir::Prim(
+            Prim::PvConj | Prim::PvNth | Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup
+            | Prim::ArrPush | Prim::TvConj | Prim::TamAssoc | Prim::ThmAssoc
+            | Prim::StrCharAt | Prim::IntToChar,
+            _,
+        ) => false,
+        Ir::If(c, t, e) => {
+            body_pure_loop(c, false) && body_pure_loop(t, tail) && body_pure_loop(e, tail)
+        }
+        Ir::Do(xs) => match xs.split_last() {
+            None => true,
+            Some((last, init)) => {
+                init.iter().all(|x| body_pure_loop(x, false)) && body_pure_loop(last, tail)
+            }
+        },
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => body_pure_loop(val, false),
+        Ir::Def { init, .. } => body_pure_loop(init, false),
+        Ir::DefMethod { imp, .. } => body_pure_loop(imp, false),
+        Ir::FieldGet { obj, .. } => body_pure_loop(obj, false),
+        Ir::Prim(_, xs) => xs.iter().all(|x| body_pure_loop(x, false)),
+        Ir::Try { .. } => false,
+        Ir::Lambda { .. } => true, // creation only; its body compiles separately
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_) => true,
+        Ir::Let(..) => false,
+    }
+}
+
+/// Can this self-tail loop carry its params UNTAGGED across the back-edge
+/// (Phase 2 — the untagged-loop-variable pass)? The caller has already checked
+/// the loop SHAPE (self-tail, non-variadic, SSA mode) and that there are no
+/// let/catch slots (`nslots == nparams`), so the only body forms are the params
+/// themselves and the recur. This is a PROFITABILITY + assignment-safety gate,
+/// not a per-use type proof: correctness of every USE is handled at emit time
+/// (`compile_int` retags an escaping read and DEOPTS a non-fixnum recur arg or
+/// an overflow to the tagged generic arm). We only need to know (a) no `set!`
+/// mutates a carried slot — the untagged copy is redefined solely at the recur
+/// — and (b) some param actually feeds arithmetic, else unboxing would add
+/// retag-on-read cost for no untag/spill saving. Nested `Lambda` bodies are
+/// ignored (they compile separately).
+fn loop_unboxable(ir: &Ir, nparams: usize) -> Vec<bool> {
+    if !pure_arith_loop(ir, true) {
+        return vec![false; nparams];
+    }
+    // A param is unboxed iff it feeds arithmetic AND is never used as a call
+    // callee. The second clause is what keeps the loop's self-param `g`
+    // (`(g g …)` — a ref, the recur target) tagged: it is the callee, so it is
+    // excluded even though it appears as a `Call` argument too.
+    let mut arith = vec![false; nparams];
+    let mut callee = vec![false; nparams];
+    scan_unbox(ir, nparams, &mut arith, &mut callee);
+    (0..nparams).map(|i| arith[i] && !callee[i]).collect()
+}
+
+/// Mark, for each of the loop's `nparams` params: `arith[i]` if `Local{0,i}` is
+/// a direct operand of an arithmetic/comparison prim; `callee[i]` if it is the
+/// callee `f` of a `Call` (the recur target). Does not descend into a nested
+/// `Lambda`. `up == 0` names our params throughout — a `pure_arith_loop` has no
+/// binding forms to shift the depth.
+fn scan_unbox(ir: &Ir, nparams: usize, arith: &mut [bool], callee: &mut [bool]) {
+    match ir {
+        Ir::Prim(op, args) if is_unbox_arith(*op) => {
+            for a in args {
+                if let Ir::Local { up: 0, idx } = a {
+                    if (*idx as usize) < nparams {
+                        arith[*idx as usize] = true;
+                    }
+                }
+                scan_unbox(a, nparams, arith, callee);
+            }
+        }
+        Ir::Call(f, args) => {
+            if let Ir::Local { up: 0, idx } = f.as_ref() {
+                if (*idx as usize) < nparams {
+                    callee[*idx as usize] = true;
+                }
+            }
+            scan_unbox(f, nparams, arith, callee);
+            for a in args {
+                scan_unbox(a, nparams, arith, callee);
+            }
+        }
+        Ir::Lambda { .. } => {}
+        _ => {
+            for c in crate::optimize::ir_children(ir) {
+                scan_unbox(c, nparams, arith, callee);
+            }
+        }
+    }
+}
+
+/// Is `ir` (in tail position `tail`) a PURE ARITHMETIC self-tail loop — built
+/// only from arithmetic/comparison prims, `if`/`do`, immediate reads, and the
+/// tail self-recur? This is the soundness gate for the untagged carry's DEOPT:
+/// a deopt re-runs the whole iteration on the generic arm, so the iteration
+/// must be free of OBSERVABLE side effects (no I/O, no mutation, no allocation
+/// whose identity matters) and re-executable. Everything here is a pure value
+/// computation, so re-running produces the identical result — the deopt is
+/// invisible. Deliberately narrow (no calls except the recur, no dispatch, no
+/// alloc/collection prims, no `set!`): a loop whose recur args are themselves
+/// calls (`(recur (inc i) (add3 acc i))`) is left to the tagged path until a
+/// deopt-without-re-execution scheme (Phase 3) makes side effects safe.
+fn pure_arith_loop(ir: &Ir, tail: bool) -> bool {
+    match ir {
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { up: 0, .. } | Ir::Capture(_) | Ir::Global(_) => {
+            true
+        }
+        // Arithmetic / comparison / bitwise / `nil?` — pure, re-runnable.
+        Ir::Prim(op, args) if is_unbox_arith(*op) || matches!(op, Prim::IsNil | Prim::Identical) => {
+            args.iter().all(|a| pure_arith_loop(a, false))
+        }
+        Ir::If(c, t, e) => {
+            pure_arith_loop(c, false) && pure_arith_loop(t, tail) && pure_arith_loop(e, tail)
+        }
+        Ir::Do(xs) => match xs.split_last() {
+            None => true,
+            Some((last, init)) => {
+                init.iter().all(|x| pure_arith_loop(x, false)) && pure_arith_loop(last, tail)
+            }
+        },
+        // The self-recur: a tail Call to a simple callee with pure args. A
+        // non-tail call, or any call outside this shape, is rejected below.
+        Ir::Call(f, args) => {
+            tail
+                && matches!(f.as_ref(), Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_))
+                && args.iter().all(|a| pure_arith_loop(a, false))
+        }
+        _ => false,
+    }
+}
+
+/// The prims `compile_int` lowers to bare untagged machine ops (with an
+/// overflow / divide-by-zero deopt where the tower can promote). Anything else
+/// in an int position takes the retag-guard-deopt fallback.
+fn is_unbox_arith(op: Prim) -> bool {
+    matches!(
+        op,
+        Prim::Add | Prim::Sub | Prim::Mul | Prim::Lt | Prim::Eq
+            | Prim::Quot | Prim::Rem | Prim::BitAnd | Prim::BitOr | Prim::BitXor
+    )
+}
+
+/// MEMORY mode? True iff the body (not descending into nested `Lambda` bodies —
+/// those compile separately) contains a construct whose locals must be visible
+/// outside the compiled code: `try` (the interpreter runs the catch against the
+/// frame), `(gc)` / `%await` (the frame is the GC root set for the parked
+/// thread). Everything else runs its locals in SSA registers.
+fn body_mem_mode(ir: &Ir) -> bool {
+    match ir {
+        // A try/catch with NO finally is emitted INLINE (see the Try arm), so its
+        // catch binding is an ordinary SSA slot and nothing runs against a frame —
+        // it no longer forces the whole body into memory. `finally` still goes
+        // through the shim, which evaluates its arms against the frame.
+        Ir::Try { catch: Some(c), finally: None, body, .. } => {
+            body_mem_mode(body) || body_mem_mode(c)
+        }
+        Ir::Try { .. } => true,
+        Ir::Prim(Prim::Await | Prim::Gc, _) => true,
+        Ir::Lambda { .. } => false,
+        Ir::Const(_) | Ir::Quote(_) | Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_) => false,
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => body_mem_mode(val),
+        Ir::If(a, b, c) => body_mem_mode(a) || body_mem_mode(b) || body_mem_mode(c),
+        Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().any(body_mem_mode),
+        Ir::Call(f, args) => body_mem_mode(f) || args.iter().any(body_mem_mode),
+        Ir::Def { init, .. } => body_mem_mode(init),
+        Ir::DefMethod { imp, .. } => body_mem_mode(imp),
+        Ir::Dispatch { args, .. } => args.iter().any(body_mem_mode),
+        Ir::InstanceCheck { proto, arg, .. } => body_mem_mode(proto) || body_mem_mode(arg),
+        Ir::FieldGet { obj, .. } => body_mem_mode(obj),
+        Ir::Let(..) => panic!("unflattened Ir reached the JIT: Let"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The numeric-overflow axis, emit half.
+//
+// The `ModelEmit` recipe is the fixnum FAST PATH: it wraps on overflow and
+// assumes both operands are immediate ints, exactly like the bytecode tier. To
+// match the tree-walker's numeric tower (promote to BigInt on overflow, handle
+// floats/mixed), the JIT wraps that fast path in a guard: take it only when both
+// operands are immediate fixnums AND the result fits fixnum range; otherwise call
+// the runtime's checked+promoting `prim`. This trait supplies the model-specific
+// pieces the guard needs (tag test, untag, retag). It is the emit form of
+// codegen axis #2.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The model's contribution to guarded native arithmetic: how to test for /
+/// unwrap / rewrap an immediate integer. Fixnum range is shared (±2^60).
+pub trait ModelArithJit: ModelEmit {
+    /// Emit: are BOTH `a` and `b` immediate integers of this model? Returns a
+    /// branch-ready bool. Folding the two operand tests into one `(a|b)`-based
+    /// check halves the guard's tag work on the hot path. (For a model that boxes
+    /// integers this is constant-`false`, so the guard always takes the runtime
+    /// slow path — correct, since there is no fast one.)
+    fn emit_both_int(c: &mut Compiler, a: Value, b: Value) -> Value;
+    /// Emit: may `(%num-eq a b)` be decided by comparing the two words' BITS?
+    /// True whenever NEITHER operand is a heap ref AND the model has no
+    /// immediate float (immediates are canonical, so bit-equality is value
+    /// equality — exactly `Runtime::equal`'s immediate fast path). The default
+    /// is the both-int guard (always sound); a model widens it only when its
+    /// non-ref immediates are all canonical (LowBit: int/bool/nil/sym, floats
+    /// boxed).
+    fn emit_eq_immediates(c: &mut Compiler, a: Value, b: Value) -> Value {
+        Self::emit_both_int(c, a, b)
+    }
+    /// Emit a TAGGED add/sub of two words already known to be immediate ints,
+    /// with a branch-ready "overflowed the fixnum range" bool — or `None` if this
+    /// model has no such shortcut (callers then untag, operate, range-check and
+    /// retag).
+    ///
+    /// A model whose int tag is a zero-valued LOW field can do this directly: the
+    /// tagged words ARE `v << k`, so `(a<<k) + (b<<k) == (a+b)<<k` — already
+    /// tagged, no untag and no retag — and the i64 signed overflow of that add is
+    /// EXACTLY the fixnum-range check, because the sum fits in `64-k` bits signed
+    /// iff the shifted sum fits in i64. The two-sided range compare is redundant.
+    fn emit_tagged_addsub_checked(
+        _c: &mut Compiler,
+        _a: Value,
+        _b: Value,
+        _is_sub: bool,
+    ) -> Option<(Value, Value)> {
+        None
+    }
+    /// Emit the tagged `rem` of two immediate-fixnum words. The generic
+    /// spelling untags, takes the remainder and retags; a model whose int
+    /// encoding is a pure left-shift can skip both, because `(x*k) % (y*k)` is
+    /// `(x % y)*k`. The caller has already proved both operands are fixnums and
+    /// that the divisor is nonzero.
+    fn emit_srem_tagged(c: &mut Compiler, a: Value, b: Value) -> Value {
+        let x = Self::emit_untag(c, a);
+        let y = Self::emit_untag(c, b);
+        let r = c.fb.ins().srem(x, y);
+        Self::emit_tag(c, r)
+    }
+    /// Emit: the signed i64 VALUE of immediate int `v` (untagged).
+    fn emit_untag(c: &mut Compiler, v: Value) -> Value;
+    /// Emit: encode signed i64 `x` back into an immediate int word.
+    fn emit_tag(c: &mut Compiler, x: Value) -> Value;
+    /// Emit `(is_ref, addr)` for `v`: `is_ref` is a branch-ready bool, `addr` is
+    /// the REAL heap address (mask off the tag — Stage D refs ARE addresses),
+    /// meaningful only when `is_ref` holds. Used to resolve a native call target
+    /// inline by reading the callee OBJECT directly (header type_id, meta arity,
+    /// code word — see `emit_call`). A model may return a constant-false
+    /// `is_ref` to opt out of native fast calls entirely (correct — the call
+    /// site then always takes the shim path); NanBox/HighBit do this today.
+    fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value);
+
+    /// Emit the raw heap ADDRESS of `v`, which the caller has already PROVEN
+    /// is a ref — a mask, no tag test. Unlike `emit_ref_addr` (whose opt-out
+    /// only disables native fast CALLS), every model implements this: capture
+    /// reads derive the running closure's capture base from its stack-mapped
+    /// bits on every model (Stage E).
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value;
+
+    /// Emit the `RawTag` discriminant (Int=0, Float=1, Bool=2, Nil=3, Sym=4)
+    /// of a word the caller has already PROVEN is NOT a ref — the
+    /// immediate-receiver cache key for the InstanceCheck / Dispatch inline
+    /// caches. `None` (the default) opts the model out: its immediates keep
+    /// taking the slow path, exactly as before. Only meaningful for models
+    /// whose `emit_ref_addr` produces a REAL `is_ref` (a constant-false
+    /// `is_ref` would route refs into the "immediate" branch and mis-key
+    /// them), so the opt-out and `emit_ref_addr`'s must travel together.
+    fn emit_imm_cat(_c: &mut Compiler, _v: Value) -> Option<Value> {
+        None
+    }
+
+    /// May emitted code read, write, and ALLOCATE heap objects inline under
+    /// this model (D5)? Requires a real `emit_ref_addr`, a working
+    /// `emit_tag`/`emit_untag` (immediate ints), and `emit_enc_ref`. LowBit
+    /// only today; the models that opt out keep every object op on the shims —
+    /// correct, just not inline.
+    const INLINE_OBJECTS: bool = false;
+    /// Emit: encode a raw heap ADDRESS into this model's ref word. Only called
+    /// when `INLINE_OBJECTS`; the default is a loud dead-end so a model can
+    /// never silently flip the const on without supplying the encoder.
+    fn emit_enc_ref(_c: &mut Compiler, _addr: Value) -> Value {
+        panic!("emit_enc_ref: INLINE_OBJECTS is on but the model supplied no ref encoder")
+    }
+    /// Emit: encode a raw `Sym` word (an i64 holding the interner id) into this
+    /// model's sym value. Only called when `INLINE_OBJECTS` (the inline
+    /// `type-of` fast path reads a record's type sym straight off the object);
+    /// same loud dead-end contract as `emit_enc_ref`.
+    fn emit_enc_sym(_c: &mut Compiler, _sym: Value) -> Value {
+        panic!("emit_enc_sym: INLINE_OBJECTS is on but the model supplied no sym encoder")
+    }
+}
+
+const FIXNUM_MIN: i64 = -(1 << 60);
+const FIXNUM_MAX: i64 = (1 << 60) - 1;
+
+impl ModelArithJit for crate::model::LowBitModel {
+    fn emit_both_int(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // both have low 3 bits clear  <=>  (a|b) & 7 == 0
+        let or = c.fb.ins().bor(a, b);
+        let masked = c.fb.ins().band_imm(or, 0b111);
+        c.fb.ins().icmp_imm(IntCC::Equal, masked, 0)
+    }
+    fn emit_eq_immediates(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // Neither is a ref (tag 0b001): int/bool/nil/sym are all canonical
+        // immediates under LowBit (no immediate float), so bits decide `=`.
+        let ta = c.fb.ins().band_imm(a, 0b111);
+        let na = c.fb.ins().icmp_imm(IntCC::NotEqual, ta, 0b001);
+        let tb = c.fb.ins().band_imm(b, 0b111);
+        let nb = c.fb.ins().icmp_imm(IntCC::NotEqual, tb, 0b001);
+        c.fb.ins().band(na, nb)
+    }
+    fn emit_tagged_addsub_checked(
+        c: &mut Compiler,
+        a: Value,
+        b: Value,
+        is_sub: bool,
+    ) -> Option<(Value, Value)> {
+        // LB_INT is 0b000, so a tagged fixnum IS `v << 3` and the tagged words add
+        // directly: the result carries the right tag with no shifting either way.
+        // The machine's own signed-overflow flag IS the fixnum-range check here
+        // (FIXNUM_MAX is 2^60-1 and 8*(2^60-1) is i64::MAX-7), so this is one
+        // `adds`/`subs` plus a flag read — no sign-juggling to synthesize it.
+        let (r, ovf) = if is_sub {
+            let v = c.fb.ins().ssub_overflow(a, b);
+            (v.0, v.1)
+        } else {
+            let v = c.fb.ins().sadd_overflow(a, b);
+            (v.0, v.1)
+        };
+        Some((r, ovf))
+    }
+    fn emit_srem_tagged(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // LB_INT is 0b000, so a tagged fixnum IS `v << 3` and `(x<<3) % (y<<3)`
+        // is `(x % y) << 3` — already correctly tagged. Truncating remainder,
+        // so the sign follows the dividend on both sides of the identity.
+        c.fb.ins().srem(a, b)
+    }
+    fn emit_untag(c: &mut Compiler, v: Value) -> Value {
+        c.fb.ins().sshr_imm(v, 3) // arithmetic shift drops the tag, keeps sign
+    }
+    fn emit_tag(c: &mut Compiler, x: Value) -> Value {
+        c.fb.ins().ishl_imm(x, 3) // tag bits are 0 for an int
+    }
+    fn emit_ref_addr(c: &mut Compiler, v: Value) -> (Value, Value) {
+        // LowBit ref: tag `LB_REF` = 0b001 in the low 3 bits; objects are
+        // 8-aligned, so the address IS the payload — mask the tag bits off.
+        let tag = c.fb.ins().band_imm(v, 0b111);
+        let is_ref = c.fb.ins().icmp_imm(IntCC::Equal, tag, 0b001);
+        let addr = c.fb.ins().band_imm(v, !0b111i64);
+        (is_ref, addr)
+    }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        c.fb.ins().band_imm(v, !0b111i64)
+    }
+    fn emit_imm_cat(c: &mut Compiler, v: Value) -> Option<Value> {
+        // LowBit's tag values coincide with the RawTag discriminants for every
+        // non-ref category (INT=0, BOOL=2, NIL=3, SYM=4; no immediate float),
+        // so the low tag bits ARE the category.
+        Some(c.fb.ins().band_imm(v, 0b111))
+    }
+
+    const INLINE_OBJECTS: bool = true;
+    fn emit_enc_ref(c: &mut Compiler, addr: Value) -> Value {
+        c.fb.ins().bor_imm(addr, 0b001) // matches `LowBit::enc_ref`
+    }
+    fn emit_enc_sym(c: &mut Compiler, sym: Value) -> Value {
+        // matches `LowBit::enc_sym`: id << 3 | LB_SYM
+        let sh = c.fb.ins().ishl_imm(sym, 3);
+        c.fb.ins().bor_imm(sh, 0b100)
+    }
+}
+
+impl ModelArithJit for crate::model::HighBitModel {
+    fn emit_both_int(c: &mut Compiler, a: Value, b: Value) -> Value {
+        // both have top 3 bits clear  <=>  (a|b) >> 61 == 0
+        let or = c.fb.ins().bor(a, b);
+        let hi = c.fb.ins().ushr_imm(or, 61);
+        c.fb.ins().icmp_imm(IntCC::Equal, hi, 0)
+    }
+    fn emit_untag(c: &mut Compiler, v: Value) -> Value {
+        // sign-extend the low 61 bits: (v << 3) >>signed 3
+        let sh = c.fb.ins().ishl_imm(v, 3);
+        c.fb.ins().sshr_imm(sh, 3)
+    }
+    fn emit_tag(c: &mut Compiler, x: Value) -> Value {
+        // keep the low 61 bits (top 3 = tag 0), matching `enc_int`
+        c.fb.ins().band_imm(x, (1i64 << 61) - 1)
+    }
+    fn emit_ref_addr(c: &mut Compiler, _v: Value) -> (Value, Value) {
+        // Opt out of native fast calls under HighBit (always take the shim path).
+        let f = c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0);
+        let z = c.fb.ins().iconst(I64, 0);
+        (f, z)
+    }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        // HighBit ref: address in the low 61 bits (matches `HighBit::as_ref`).
+        c.fb.ins().band_imm(v, (1i64 << 61) - 1)
+    }
+}
+
+impl ModelArithJit for crate::model::NanBoxModel {
+    fn emit_both_int(c: &mut Compiler, _a: Value, _b: Value) -> Value {
+        // integers are boxed under NaN-boxing: never a fast path
+        c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0)
+    }
+    fn emit_untag(_c: &mut Compiler, v: Value) -> Value {
+        v // unreachable (guard is always false); kept well-typed
+    }
+    fn emit_tag(_c: &mut Compiler, x: Value) -> Value {
+        x
+    }
+    fn emit_ref_addr(c: &mut Compiler, _v: Value) -> (Value, Value) {
+        // Opt out of native fast calls under NaN-boxing (always take the shim path).
+        let f = c.fb.ins().iconst(cranelift_codegen::ir::types::I8, 0);
+        let z = c.fb.ins().iconst(I64, 0);
+        (f, z)
+    }
+    fn emit_ref_addr_unchecked(c: &mut Compiler, v: Value) -> Value {
+        // NaN-box ref: address in the 47-bit payload (matches `NanBox::as_ref`).
+        c.fb.ins().band_imm(v, (1i64 << 47) - 1)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The backend.
+// ─────────────────────────────────────────────────────────────────────────
+
+pub struct JitCranelift<M: ModelArithJit> {
+    module: RefCell<JITModule>,
+    fbctx: RefCell<FunctionBuilderContext>,
+    shims: Shims,
+    /// Compiled closure bodies, keyed by the `Arc<Ir>` identity (compile-once,
+    /// like the bytecode tier's chunk cache).
+    cache: RefCell<HashMap<*const Ir, Arc<Compiled>, PtrBuildHasher>>,
+    /// Compiled try arms, keyed by `Ir::Try`'s process-unique `site` (times 4,
+    /// plus the arm index) — NOT by the arm's address. An `Ir` tree is freed when
+    /// its form finishes and the allocator hands the same address to the next
+    /// tree, so an address-keyed entry silently answered for an unrelated try:
+    /// three distinct `(try N (finally nil))` in sequence returned 1, 2, 2, and
+    /// `(vector (try 1 (finally nil)))` after any other try returned [nil].
+    /// Site ids are never recycled, so a stale entry cannot be hit.
+    try_cache: RefCell<HashMap<u64, Arc<Compiled>, PtrBuildHasher>>,
+    counter: Cell<u32>,
+    /// A free list of `Arc<Frame>` whose call has returned without being captured
+    /// (`strong_count == 1`). Refilled via `Arc::get_mut` on the next call instead
+    /// of allocating — so deep recursion converges to ~depth frames and a tail
+    /// loop reuses one, cutting the per-call heap traffic that was the gap to a
+    /// production compiler. Bounded so it never holds unbounded memory.
+    frame_pool: RefCell<Vec<Arc<Frame>>>,
+    /// An 8-way direct-mapped inline cache of resolved callees, keyed on the
+    /// callee's bits. Call sites are overwhelmingly monomorphic, but the shim
+    /// path serves MANY sites (dispatch impls, variadic fns, trampoline
+    /// bounces), so a single entry thrashes; eight direct-mapped ways keep the
+    /// hot mix resident. A hit skips decode + heap lookup + compile-cache hash.
+    call_ic: RefCell<[Option<CallTarget>; CALL_IC_WAYS]>,
+    /// Per-TEMPLATE compiled-code map, indexed by the STABLE, GLOBAL template id
+    /// `Runtime::register_template` hands out (the same id `ObjView::Closure`
+    /// reports). A freshly-created closure of an already-compiled template is
+    /// stamped with its code word at creation (`shim_make_closure`); the object
+    /// itself is the fast-call table from then on (see
+    /// `docs/STAGE_D_MIGRATION.md`'s "Closure object ABI") — this map exists
+    /// only to seed THAT stamp, never consulted by emitted call sites directly.
+    /// `null` = not yet compiled. Reserved (`TEMPLATE_CODE_CAP`) so the buffer
+    /// NEVER reallocates: emitted `Ir::Lambda` sites bake a slot's address as
+    /// an immediate (the creation-time code stamp reads through it). Growth
+    /// past the cap panics loudly.
+    template_code: RefCell<Vec<*const u8>>,
+    /// Per-`Ir::Dispatch`-site inline caches for emitted code: 2 ways of
+    /// `(epoch, receiver type, impl)`, indexed by site id. Reserved
+    /// (`DISPATCH_SITE_CAP`) so emitted sites can bake their entry's address;
+    /// FILLED by `shim_dispatch` on the slow path (and only when the installed
+    /// strategy is `thread_cacheable` — an observing strategy must see every
+    /// repeat dispatch, exactly the runtime's own site-cache rule). The epoch
+    /// folds the relocation count and the dispatch version, so a moved impl or
+    /// a redefinition never false-hits.
+    dispatch_ic: RefCell<Vec<DispatchSiteIc>>,
+    /// Per instance-check site: a 4-way (epoch, type -> bool) cache probed
+    /// sequentially. A hit is at most four type compares; a miss calls the
+    /// real `-instance-val` and refills (see `INSTANCE_IC_WAYS`).
+    instance_ic: RefCell<Vec<InstanceSiteIc>>,
+    /// Per-TEMPLATE reoptimization state (the "Always Fast" adaptive tier),
+    /// indexed by the same stable template id as `template_code`. A body that
+    /// crosses its hotness threshold recompiles ONCE with feedback-driven
+    /// dispatch speculation (v2), and re-speculates only when its speculated
+    /// sites accumulate NEW deopts — both capped by `REOPT_CAP`. Per-thread-JIT
+    /// like `cache`/`template_code` (workers build their own); the shared
+    /// signal is the `FeedbackTable`, not this.
+    reopt: RefCell<Vec<ReoptState>>,
+    _pd: std::marker::PhantomData<fn() -> M>,
+}
+
+/// Per-template adaptive-tier state. `latest_code` is the newest compiled body
+/// for the template (null until the first reopt); a closure whose code word
+/// lags it is re-pointed cheaply. `deopt_snapshot` is the body's summed
+/// dispatch-site deopt count at the last recompile — re-speculation fires only
+/// when the live sum exceeds it (a speculated guard started failing).
+#[derive(Clone, Copy)]
+struct ReoptState {
+    recompiles: u32,
+    deopt_snapshot: u32,
+    latest_code: *const u8,
+    /// Decided NOT worth reopting (no dispatch site had a confident dominant
+    /// record type): keep the first-invoke compile and stop retriggering. This
+    /// is what keeps a value-inlined body (a transducer step, a reduce kernel)
+    /// on its already-good code instead of trading its arg/capture inlining for
+    /// a dispatch speculation that would never fire.
+    parked: bool,
+}
+impl Default for ReoptState {
+    fn default() -> Self {
+        ReoptState {
+            recompiles: 0,
+            deopt_snapshot: 0,
+            latest_code: std::ptr::null(),
+            parked: false,
+        }
+    }
+}
+
+/// Invocations (or weighted back-edge polls) a body accumulates before it is
+/// recompiled with type feedback. ~2000 keeps cold/one-shot code on the
+/// first-invoke compile while catching anything genuinely hot within a warmup
+/// window. Tuned on the bench corpus (a smaller value recompiled short-lived
+/// helpers for no gain; larger delayed the win on the hot bodies).
+const REOPT_THRESHOLD: u32 = 2000;
+/// One coarsened back-edge poll (every `BACKEDGE_POLL_INTERVAL` iterations) is
+/// worth this many invocations toward the hotness threshold, so a body that is
+/// hot through a LONG self-loop rather than many calls still reopts: ~20 polls
+/// (`REOPT_THRESHOLD / LOOP_POLL_WEIGHT`) arms it.
+const LOOP_POLL_WEIGHT: u32 = 100;
+/// Cap on recompiles per template — the first feedback compile plus a bounded
+/// number of deopt-driven re-speculations. Prevents thrash if a site oscillates.
+const REOPT_CAP: u32 = 3;
+/// Speculate a dispatch site only when one receiver type owns at least this
+/// fraction of the site's recorded dispatches: the emitted guard's deopt edge
+/// is the full generic path, so a low-confidence guess only adds a compare.
+const SPEC_MIN_FRACTION: f32 = 0.95;
+/// A speculated site that deopts this many times is blacklisted: the next
+/// recompile emits it generic and never re-speculates it (the `BlacklistAfter`
+/// policy from `speculation.rs`, applied at the emit tier).
+const SPEC_DEOPT_BLACKLIST: u32 = 8;
+
+/// Whole-feature kill switch: `MICROLANG_NO_ADAPTIVE=1` disables the adaptive
+/// tier (no hotness counters, no reopt, no feedback speculation) so a run uses
+/// only first-invoke compiles. A diagnostic escape hatch, evaluated once.
+fn adaptive_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MICROLANG_NO_ADAPTIVE").is_none())
+}
+
+/// One way of a dispatch-site IC: the folded epoch at fill time, the receiver
+/// type `Sym` (as u64; `u64::MAX` = empty, never a real sym), and the impl's
+/// bits. Layout is ABI: emitted code reads the three words at 0/8/16.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DispatchIcEntry {
+    epoch: u64,
+    ty: u64,
+    imp: u64,
+}
+
+const DISPATCH_IC_WAYS: usize = 2;
+type DispatchSiteIc = [DispatchIcEntry; DISPATCH_IC_WAYS];
+
+/// InstanceCheck sites are WIDER than dispatch sites: core.match's decision
+/// trees put one `(instance? ILookup x)` in front of heterogeneous data, so a
+/// single site legitimately sees record + vector + immediate receivers in
+/// rotation. A monomorphic entry thrashed (miss + `-instance-val` + refill per
+/// element); four sequentially-probed ways cover the shapes one match site
+/// realistically alternates through.
+const INSTANCE_IC_WAYS: usize = 4;
+type InstanceSiteIc = [DispatchIcEntry; INSTANCE_IC_WAYS];
+
+const DISPATCH_IC_EMPTY: DispatchIcEntry = DispatchIcEntry { epoch: 0, ty: u64::MAX, imp: 0 };
+
+/// Reserved capacities for the two JIT-owned, address-baked tables (see the
+/// field docs). Exceeding either is a loud panic, never a silent reallocation
+/// under baked pointers.
+const TEMPLATE_CODE_CAP: usize = 1 << 20;
+const DISPATCH_SITE_CAP: usize = 1 << 17;
+
+/// InstanceCheck cache key tag for a NON-record reference receiver. A record's
+/// key is its type Sym (a `u32`, so it occupies bits 0..31); a non-record ref's
+/// key is its header kind byte (bits 0..15) OR'd with this bit, keeping the two
+/// key-spaces provably disjoint (and both disjoint from the `u64::MAX` empty
+/// sentinel). The kind byte is injective on the built-in type, and `instance?`'s
+/// answer depends only on the receiver's type — so all values of one kind share
+/// one correct cached bool.
+const INSTANCE_NONREC_KEY_BIT: u64 = 1 << 40;
+
+/// InstanceCheck cache key tag for an IMMEDIATE receiver: the model's RawTag
+/// discriminant (bits 0..3) OR'd with this bit. Disjoint from record syms
+/// (u32), from `INSTANCE_NONREC_KEY_BIT` keys, and from the `u64::MAX` empty
+/// sentinel. Sound for the same reason the kind byte is: `instance?`'s answer
+/// depends only on the receiver's type, and every immediate of one category
+/// has the same type ('Long / 'Boolean / 'nil / 'Symbol — keywords are interned
+/// RECORDS, so they never reach this key space).
+const INSTANCE_IMM_KEY_BIT: u64 = 1 << 41;
+
+/// The dispatch-IC epoch: the same fold `Runtime::resolve_or_default` uses for
+/// its own per-site cache (relocation count mixed with the registry version).
+fn dispatch_epoch(reloc: u64, ver: u64) -> u64 {
+    reloc.wrapping_mul(DISPATCH_EPOCH_MIX) ^ ver
+}
+const DISPATCH_EPOCH_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage E: the native STACK-MAP registry + frame walker.
+//
+// Every compiled body registers its Cranelift user stack maps here (process-
+// global — JIT code is never freed, so the ranges stay valid for the process
+// lifetime, across every backend instance and worker thread). At park time
+// the walker runs on the CURRENT thread: it follows the frame-pointer chain
+// (preserve_frame_pointers is set; Rust keeps FP on the supported targets),
+// resolves each return address against the registry, and yields the address
+// of every live stack-map spill slot so the collector can rewrite the tagged
+// values in place — Cranelift's emitted code reloads them after its call
+// resumes, which is exactly the moving-GC contract of
+// `declare_value_needs_stack_map`.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One safepoint (= call site) of a compiled body: the return address as a
+/// code offset, the frame's active size (SP-to-FP distance in bytes at that
+/// PC), and the SP-relative byte offsets of the live root slots.
+struct SiteMap {
+    ret_off: u32,
+    active_size: u32,
+    slots: Box<[u32]>,
+}
+
+/// One compiled body's code range + its safepoint sites (sorted by `ret_off`,
+/// which Cranelift guarantees on emission).
+struct CodeMap {
+    start: usize,
+    end: usize,
+    sites: Vec<SiteMap>,
+}
+
+/// All compiled bodies, sorted by start address (disjoint ranges — the JIT
+/// memory is append-only).
+static CODE_MAPS: std::sync::RwLock<Vec<CodeMap>> = std::sync::RwLock::new(Vec::new());
+
+fn register_code_map(start: usize, size: usize, sites: Vec<SiteMap>) {
+    if sites.is_empty() {
+        return; // nothing to resolve at any PC in this body
+    }
+    let mut maps = CODE_MAPS.write().unwrap();
+    let at = maps.partition_point(|m| m.start < start);
+    maps.insert(at, CodeMap { start, end: start + size, sites });
+}
+
+/// The current frame pointer — the anchor of the walk. Supported targets keep
+/// the FP chain by ABI (aarch64) or rustc default (x86_64 frame pointers).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn current_fp() -> usize {
+    let fp: usize;
+    unsafe { core::arch::asm!("mov {}, x29", out(reg) fp, options(nostack, nomem)) };
+    fp
+}
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn current_fp() -> usize {
+    let fp: usize;
+    unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp, options(nostack, nomem)) };
+    fp
+}
+
+/// Walk the CURRENT thread's frame-pointer chain and collect the addresses of
+/// every live JIT stack-map slot (installed as `runtime::NATIVE_ROOT_WALKER`).
+///
+/// Chain shape (identical on aarch64 and x86_64): the FP register points at a
+/// saved `(caller_fp, return_address)` pair; the return address identifies the
+/// CALL SITE in the caller — precisely the key Cranelift's user stack maps are
+/// recorded under — and the caller's frame pointer value gives that frame's
+/// FP. A JIT frame's SP at the call is `fp - active_size` (pinned empirically:
+/// the aarch64 prologue is `stp fp, lr; mov fp, sp; sub sp, #active`, and
+/// `active_size == sp_to_fp` in Cranelift's FrameLayout), so each root slot
+/// lives at `fp - active_size + slot_off`. Rust frames in between simply fail
+/// to resolve and are skipped; the chain ends at the thread's base (fp 0) or
+/// on any non-ascending/misaligned link.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn walk_native_roots() -> Vec<usize> {
+    let maps = CODE_MAPS.read().unwrap();
+    if maps.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut fp = current_fp();
+    let mut hops = 0usize;
+    while fp != 0 && fp & 7 == 0 && hops < (1 << 20) {
+        let caller_fp = unsafe { *(fp as *const usize) };
+        let ra = unsafe { *((fp + 8) as *const usize) };
+        let i = maps.partition_point(|m| m.end <= ra);
+        if let Some(m) = maps.get(i) {
+            if ra >= m.start {
+                let off = (ra - m.start) as u32;
+                if let Ok(s) = m.sites.binary_search_by_key(&off, |s| s.ret_off) {
+                    let site = &m.sites[s];
+                    let sp = caller_fp.wrapping_sub(site.active_size as usize);
+                    for &slot in site.slots.iter() {
+                        out.push(sp + slot as usize);
+                    }
+                }
+            }
+        }
+        if caller_fp <= fp {
+            break; // the chain must ascend (stack grows down)
+        }
+        fp = caller_fp;
+        hops += 1;
+    }
+    out
+}
+
+/// Most args that ride in a register-arg entry signature. Bodies with more
+/// params (rare) use the ctx-entry + frame-loads prologue instead.
+const MAX_REG_ARGS: usize = 8;
+
+/// Speculative-inlining limits: a callee body inlines only when it is at most
+/// this many Ir nodes, and one compiled body stops inlining after this total
+/// (which is also what terminates recursive inlining — each nested inline
+/// strictly consumes budget).
+const INLINE_MAX_CALLEE_NODES: usize = 64;
+const INLINE_TOTAL_BUDGET: usize = 600;
+/// A caller body at or below this many Ir nodes is a thin forwarding wrapper;
+/// inlining ITS callee is what removes a call layer, so such callers get a
+/// larger per-callee cap (`INLINE_SMALL_CALLER_MAX_CALLEE`). Big callers keep
+/// the ordinary `INLINE_MAX_CALLEE_NODES` cap so they don't bloat.
+const INLINE_SMALL_CALLER_NODES: usize = 24;
+const INLINE_SMALL_CALLER_MAX_CALLEE: usize = 400;
+
+/// Count Ir nodes up to `limit`; `None` if the tree is bigger. (Not descending
+/// into nested `Lambda` bodies — they compile separately and only cost their
+/// closure-creation site here.)
+fn node_count_capped(ir: &Ir, limit: usize) -> Option<usize> {
+    fn walk(ir: &Ir, left: &mut isize) -> bool {
+        *left -= 1;
+        if *left < 0 {
+            return false;
+        }
+        match ir {
+            Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_)
+            | Ir::Lambda { .. } => true,
+            Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => walk(val, left),
+            Ir::If(a, b, c) => walk(a, left) && walk(b, left) && walk(c, left),
+            Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().all(|x| walk(x, left)),
+            Ir::Def { init, .. } => walk(init, left),
+            Ir::Call(f, args) => walk(f, left) && args.iter().all(|x| walk(x, left)),
+            Ir::DefMethod { imp, .. } => walk(imp, left),
+            Ir::Dispatch { args, .. } => args.iter().all(|x| walk(x, left)),
+            Ir::InstanceCheck { proto, arg, .. } => walk(proto, left) && walk(arg, left),
+            Ir::FieldGet { obj, .. } => walk(obj, left),
+            Ir::Try { body, catch, finally, .. } => {
+                walk(body, left)
+                    && catch.as_ref().is_none_or(|c| walk(c, left))
+                    && finally.as_ref().is_none_or(|f| walk(f, left))
+            }
+            Ir::Let(..) => false, // unflattened — never inline
+        }
+    }
+    let mut left = limit as isize;
+    if walk(ir, &mut left) {
+        Some((limit as isize - left) as usize)
+    } else {
+        None
+    }
+}
+
+/// What the speculative inliner needs to splice a known global callee into a
+/// call site: the guard bits and the callee's (capture-free) body + frame size.
+struct InlinePlan {
+    bits: u64,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+}
+
+/// Stage G2 — the VALUES a first compile observes: the triggering invoke's
+/// argument words plus the invoked closure's capture words. `(f …)` call
+/// sites whose callee is a parameter/capture read look the actual closure up
+/// here and specialize on its TEMPLATE (see `try_value_inline_plan`). Pure
+/// compile-time observation — the words are only used to pick a plan; the
+/// emitted guard re-checks the live value's meta word, so a stale
+/// observation can only mean a failed guard, never a wrong answer.
+struct SpecEnv {
+    args: Vec<u64>,
+    caps: Vec<u64>,
+}
+
+/// A value-observed inline plan (Stage G2): splice the observed callee's
+/// clause body inline behind a TEMPLATE guard — one header + one meta-word
+/// compare against the live value (plus the arity-clause load when the
+/// observed value was a MultiFn). Guarding on the meta word (template id,
+/// arity, nslots, non-variadic — all baked into one u64) instead of the
+/// value's bits makes the specialization survive GC moves AND apply to every
+/// closure of the template, and is immune to address reuse: a different
+/// object at the same address fails the meta compare. Captures are NOT baked
+/// — the inlined body reads them off the live guarded value.
+struct ValuePlan {
+    /// The clause's full meta word (`closure_meta(template, nparams, nslots,
+    /// variadic=false)`) — the guard constant.
+    meta: u64,
+    /// The observed value was a MultiFn: guard selects `fixed[argc]` first.
+    multifn: bool,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+    /// Snapshot of the CLAUSE closure's captures at plan time — used only to
+    /// plan nested specializations (each nested guard re-checks its own live
+    /// value), never emitted as constants.
+    caps: Vec<u64>,
+}
+
+/// A feedback-driven DISPATCH-site speculation (Phase 1): at a recompile, a
+/// dispatch site whose recorded receiver types are dominated by one RECORD type
+/// splices that type's resolved impl body inline behind a guard on the live
+/// receiver's type sym + the dispatch version. Both guard constants are
+/// GC-stable (a `Sym` and a version counter), and the inlined body is the
+/// impl's stable template `Ir` — nothing baked can dangle across a move. The
+/// deopt edge is the ordinary generic dispatch (IC probe + shim), so a wrong
+/// guess is only ever a compare + a counted `shim_deopt`, never a wrong answer.
+/// Restricted to CAPTURE-FREE impls this phase (a captured impl would need the
+/// live impl value in a register to read its captures — Phase 3).
+struct DispatchSpecPlan {
+    /// The dominant receiver type sym — the guard constant compared against the
+    /// record's own type sym (`type_tag(recv)`).
+    dom_ty: Sym,
+    /// The dispatch version baked at compile: a redefinition bumps it and the
+    /// guard deopts to a fresh resolution.
+    version: u64,
+    nparams: usize,
+    nslots: u16,
+    body: Arc<Ir>,
+}
+
+/// A resolved call target (the payload of the monomorphic inline cache).
+/// `epoch` is the collection count (`Runtime::relocated`) at fill time: a
+/// moving collection can relocate a closure AND recycle its old address for a
+/// different object (semi-space flip — unlike the old append-only heap ids,
+/// addresses DO get reused), so a hit also requires the epoch to match. Same
+/// invalidation discipline as the runtime's per-site dispatch IC.
+struct CallTarget {
+    callee: u64,
+    epoch: u64,
+    nparams: usize,
+    variadic: bool,
+    nslots: u16,
+    template: u32,
+    compiled: Arc<Compiled>,
+}
+
+/// Cap on pooled frames — plenty for realistic recursion depth, bounded memory.
+const FRAME_POOL_CAP: usize = 1024;
+
+/// Ways in the direct-mapped resolved-callee cache.
+const CALL_IC_WAYS: usize = 8;
+
+/// The cache way for a callee: refs are 8-aligned heap ADDRESSES (Stage D), so
+/// shift past the always-equal low tag/alignment bits and fold.
+fn call_ic_way(callee: u64) -> usize {
+    ((callee >> 3) as usize) & (CALL_IC_WAYS - 1)
+}
+
+impl<M: ModelArithJit> JitCranelift<M> {
+    pub fn new() -> Self {
+        // Stage E: install the native frame walker so the runtime can find
+        // JIT stack-map roots at every park/collection. Without it, a
+        // collection concurrent with native frames would corrupt them — on an
+        // unsupported target that is exactly what would happen, so refuse
+        // loudly instead.
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        crate::runtime::NATIVE_ROOT_WALKER
+            .store(walk_native_roots as *const () as usize as u64, std::sync::atomic::Ordering::Release);
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        panic!(
+            "JitCranelift: Stage E native-frame GC walking is implemented for \
+             aarch64/x86_64 only; this target has no walker, so JIT + moving GC \
+             would be unsound"
+        );
+
+        let mut flags = settings::builder();
+        flags.set("use_colocated_libcalls", "false").unwrap();
+        flags.set("is_pic", "false").unwrap();
+        // Speed of compilation matters more than of the code for a first tier.
+        // Bodies compile once and run many times, so optimize the emitted code
+        // (register allocation, redundancy elimination) — worth the compile cost.
+        flags.set("opt_level", "speed").unwrap();
+        // The IR verifier is a development aid; it showed up in profiles once the
+        // speculative inliner grew per-body code. The test suites are the
+        // correctness gate — skip verification in the built product.
+        flags.set("enable_verifier", "false").unwrap();
+        // Stage E: the native frame WALKER resolves live GC roots by walking
+        // the FP chain from a parked thread's Rust frames up through its JIT
+        // frames — every emitted function must keep the frame-pointer linkage.
+        flags.set("preserve_frame_pointers", "true").unwrap();
+        let isa = cranelift_native::builder()
+            .expect("host machine is not supported by Cranelift")
+            .finish(settings::Flags::new(flags))
+            .expect("failed to build Cranelift ISA");
+
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        // Register the monomorphised shim addresses under stable names. Casting
+        // each `extern "C"` fn pointer to a raw address is what lets the JIT link
+        // the emitted `call` to concrete host code.
+        let ll: extern "C" fn(*mut JitCtx<M>, u32, u32) -> u64 = shim_load_local::<M>;
+        let lg: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_load_global::<M>;
+        let dg: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_def_global::<M>;
+        let mk: extern "C" fn(*mut JitCtx<M>, u32, u32, u32, u32, *const u64, u32) -> u64 = shim_make_closure::<M>;
+        let ca: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_call::<M>;
+        let tc: extern "C" fn(*mut JitCtx<M>, u64, *const u64, u32) -> u64 = shim_tail_call::<M>;
+        let ft: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_finish_tail::<M>;
+        let pr: extern "C" fn(*mut JitCtx<M>, u32, *const u64, u32) -> u64 = shim_prim::<M>;
+        let sl: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_set_local::<M>;
+        let sg: extern "C" fn(*mut JitCtx<M>, u32, u64) -> u64 = shim_set_global::<M>;
+        let fget: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_field_get::<M>;
+        let disp: extern "C" fn(*mut JitCtx<M>, u32, u32, *const u64, u32) -> u64 = shim_dispatch::<M>;
+        let dmeth: extern "C" fn(*mut JitCtx<M>, u32, u32, u64) -> u64 = shim_def_method::<M>;
+        let apl: extern "C" fn(*mut JitCtx<M>, *const u64, u32) -> u64 = shim_apply::<M>;
+        let tryf: extern "C" fn(*mut JitCtx<M>, *const Ir, *const Ir, *const Ir, u32, u64) -> u64 =
+            shim_try::<M>;
+        let spwn: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_spawn::<M>;
+        let awt: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_await::<M>;
+        let gcf: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_gc::<M>;
+        let sfp: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_safepoint::<M>;
+        let tsg: extern "C" fn(*mut JitCtx<M>) -> u64 = shim_take_signal::<M>;
+        let ifl: extern "C" fn(*mut JitCtx<M>, u32, u64, u64) -> u64 = shim_instance_fill::<M>;
+        let pvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_conj::<M>;
+        let pvn: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_pv_nth::<M>;
+        let pva: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_pv_assoc::<M>;
+        let hma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_assoc::<M>;
+        let hml: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_hamt_lookup::<M>;
+        let amg: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_amap_get::<M>;
+        let apu: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_arr_push::<M>;
+        let cn2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_cons2::<M>;
+        let fs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_first1::<M>;
+        let rs1: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_rest1::<M>;
+        let eq2: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_eq2::<M>;
+        let tvc: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_tv_conj::<M>;
+        let tma: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_tam_assoc::<M>;
+        let tha: extern "C" fn(*mut JitCtx<M>, u64, u64, u64) -> u64 = shim_thm_assoc::<M>;
+        let sca: extern "C" fn(*mut JitCtx<M>, u64, u64) -> u64 = shim_str_char_at::<M>;
+        let cti: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_char_to_int::<M>;
+        let itc: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_int_to_char::<M>;
+        let rop: extern "C" fn(*mut JitCtx<M>, u64) -> u64 = shim_reopt::<M>;
+        let dop: extern "C" fn(*mut JitCtx<M>, u32) -> u64 = shim_deopt::<M>;
+        builder.symbol("ml_load_local", ll as *const u8);
+        builder.symbol("ml_load_global", lg as *const u8);
+        builder.symbol("ml_def_global", dg as *const u8);
+        builder.symbol("ml_make_closure", mk as *const u8);
+        builder.symbol("ml_call", ca as *const u8);
+        builder.symbol("ml_tail_call", tc as *const u8);
+        builder.symbol("ml_finish_tail", ft as *const u8);
+        builder.symbol("ml_prim", pr as *const u8);
+        builder.symbol("ml_set_local", sl as *const u8);
+        builder.symbol("ml_set_global", sg as *const u8);
+        builder.symbol("ml_field_get", fget as *const u8);
+        builder.symbol("ml_dispatch", disp as *const u8);
+        builder.symbol("ml_def_method", dmeth as *const u8);
+        builder.symbol("ml_apply", apl as *const u8);
+        builder.symbol("ml_try", tryf as *const u8);
+        builder.symbol("ml_spawn", spwn as *const u8);
+        builder.symbol("ml_await", awt as *const u8);
+        builder.symbol("ml_gc", gcf as *const u8);
+        builder.symbol("ml_safepoint", sfp as *const u8);
+        builder.symbol("ml_take_signal", tsg as *const u8);
+        builder.symbol("ml_instance_fill", ifl as *const u8);
+        builder.symbol("ml_pv_conj", pvc as *const u8);
+        builder.symbol("ml_pv_nth", pvn as *const u8);
+        builder.symbol("ml_pv_assoc", pva as *const u8);
+        builder.symbol("ml_hamt_assoc", hma as *const u8);
+        builder.symbol("ml_hamt_lookup", hml as *const u8);
+        builder.symbol("ml_amap_get", amg as *const u8);
+        builder.symbol("ml_arr_push", apu as *const u8);
+        builder.symbol("ml_cons2", cn2 as *const u8);
+        builder.symbol("ml_first1", fs1 as *const u8);
+        builder.symbol("ml_rest1", rs1 as *const u8);
+        builder.symbol("ml_eq2", eq2 as *const u8);
+        builder.symbol("ml_tv_conj", tvc as *const u8);
+        builder.symbol("ml_tam_assoc", tma as *const u8);
+        builder.symbol("ml_thm_assoc", tha as *const u8);
+        builder.symbol("ml_str_char_at", sca as *const u8);
+        builder.symbol("ml_char_to_int", cti as *const u8);
+        builder.symbol("ml_int_to_char", itc as *const u8);
+        builder.symbol("ml_reopt", rop as *const u8);
+        builder.symbol("ml_deopt", dop as *const u8);
+
+        let mut module = JITModule::new(builder);
+
+        // Declare each shim once as an imported function with its ABI signature.
+        let sig = |params: &[cranelift_codegen::ir::Type]| {
+            let mut s = module.make_signature();
+            for &p in params {
+                s.params.push(AbiParam::new(p));
+            }
+            s.returns.push(AbiParam::new(I64));
+            s
+        };
+        let ptr = module.target_config().pointer_type();
+        let i32t = cranelift_codegen::ir::types::I32;
+        let s_load_local = sig(&[ptr, i32t, i32t]);
+        let s_load_global = sig(&[ptr, i32t]);
+        let s_def_global = sig(&[ptr, i32t, I64]);
+        let s_make_closure = sig(&[ptr, i32t, i32t, i32t, i32t, ptr, i32t]);
+        let s_call = sig(&[ptr, I64, ptr, i32t]);
+        let s_prim = sig(&[ptr, i32t, ptr, i32t]);
+        let s_finish_tail = sig(&[ptr]);
+        let s_set_local = sig(&[ptr, i32t, i32t, I64]);
+        let s_set_global = sig(&[ptr, i32t, I64]);
+        let s_field_get = sig(&[ptr, i32t, i32t, I64]);
+        let s_dispatch = sig(&[ptr, i32t, i32t, ptr, i32t]);
+        let s_def_method = sig(&[ptr, i32t, i32t, I64]);
+        let s_apply = sig(&[ptr, ptr, i32t]);
+        // (ctx, body, catch, finally, cslot, site)
+        let s_try = sig(&[ptr, ptr, ptr, ptr, i32t, I64]);
+        let s_spawn = sig(&[ptr, I64]);
+        let s_await = sig(&[ptr, I64]);
+        let s_gc = sig(&[ptr]);
+        let s_instfill = sig(&[ptr, i32t, I64, I64]);
+        let s_v1 = sig(&[ptr, I64]);
+        let s_v2 = sig(&[ptr, I64, I64]);
+        let s_v3 = sig(&[ptr, I64, I64, I64]);
+        let s_reopt = sig(&[ptr, I64]);
+        let s_deopt = sig(&[ptr, i32t]);
+
+        let decl = |module: &mut JITModule, name: &str, sig: &cranelift_codegen::ir::Signature| {
+            module
+                .declare_function(name, Linkage::Import, sig)
+                .expect("declare shim import")
+        };
+        let shims = Shims {
+            load_local: decl(&mut module, "ml_load_local", &s_load_local),
+            load_global: decl(&mut module, "ml_load_global", &s_load_global),
+            def_global: decl(&mut module, "ml_def_global", &s_def_global),
+            make_closure: decl(&mut module, "ml_make_closure", &s_make_closure),
+            call: decl(&mut module, "ml_call", &s_call),
+            tail_call: decl(&mut module, "ml_tail_call", &s_call),
+            finish_tail: decl(&mut module, "ml_finish_tail", &s_finish_tail),
+            prim: decl(&mut module, "ml_prim", &s_prim),
+            set_local: decl(&mut module, "ml_set_local", &s_set_local),
+            set_global: decl(&mut module, "ml_set_global", &s_set_global),
+            field_get: decl(&mut module, "ml_field_get", &s_field_get),
+            dispatch: decl(&mut module, "ml_dispatch", &s_dispatch),
+            def_method: decl(&mut module, "ml_def_method", &s_def_method),
+            apply: decl(&mut module, "ml_apply", &s_apply),
+            try_: decl(&mut module, "ml_try", &s_try),
+            spawn: decl(&mut module, "ml_spawn", &s_spawn),
+            await_: decl(&mut module, "ml_await", &s_await),
+            gc: decl(&mut module, "ml_gc", &s_gc),
+            safepoint: decl(&mut module, "ml_safepoint", &s_gc),
+            take_signal: decl(&mut module, "ml_take_signal", &s_gc),
+            instance_fill: decl(&mut module, "ml_instance_fill", &s_instfill),
+            pv_conj: decl(&mut module, "ml_pv_conj", &s_v2),
+            pv_nth: decl(&mut module, "ml_pv_nth", &s_v2),
+            pv_assoc: decl(&mut module, "ml_pv_assoc", &s_v3),
+            hamt_assoc: decl(&mut module, "ml_hamt_assoc", &s_v3),
+            hamt_lookup: decl(&mut module, "ml_hamt_lookup", &s_v3),
+            amap_get: decl(&mut module, "ml_amap_get", &s_v3),
+            arr_push: decl(&mut module, "ml_arr_push", &s_v2),
+            cons2: decl(&mut module, "ml_cons2", &s_v2),
+            first1: decl(&mut module, "ml_first1", &s_v1),
+            rest1: decl(&mut module, "ml_rest1", &s_v1),
+            eq2: decl(&mut module, "ml_eq2", &s_v2),
+            tv_conj: decl(&mut module, "ml_tv_conj", &s_v2),
+            tam_assoc: decl(&mut module, "ml_tam_assoc", &s_v3),
+            thm_assoc: decl(&mut module, "ml_thm_assoc", &s_v3),
+            str_char_at: decl(&mut module, "ml_str_char_at", &s_v2),
+            char_to_int: decl(&mut module, "ml_char_to_int", &s_v1),
+            int_to_char: decl(&mut module, "ml_int_to_char", &s_v1),
+            reopt: decl(&mut module, "ml_reopt", &s_reopt),
+            deopt: decl(&mut module, "ml_deopt", &s_deopt),
+        };
+
+        JitCranelift {
+            module: RefCell::new(module),
+            fbctx: RefCell::new(FunctionBuilderContext::new()),
+            shims,
+            cache: RefCell::new(HashMap::default()),
+            try_cache: RefCell::new(HashMap::default()),
+            frame_pool: RefCell::new(Vec::new()),
+            call_ic: RefCell::new(std::array::from_fn(|_| None)),
+            template_code: RefCell::new(Vec::with_capacity(TEMPLATE_CODE_CAP)),
+            dispatch_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
+            // Pre-reserve to DISPATCH_SITE_CAP so `instance_ic_slot`'s `resize`
+            // NEVER reallocates: emitted InstanceCheck sites bake the address of
+            // their entry into the compiled code (like `dispatch_ic`), so a later
+            // reallocation would dangle every prior site's pointer — the compiled
+            // check would then read freed memory, miss forever (re-running
+            // `satisfies?` every call), and could even spuriously hit on garbage.
+            instance_ic: RefCell::new(Vec::with_capacity(DISPATCH_SITE_CAP)),
+            reopt: RefCell::new(Vec::new()),
+            counter: Cell::new(0),
+            _pd: std::marker::PhantomData,
+        }
+    }
+
+    /// How many distinct bodies have been compiled to native code (a compile-once
+    /// counter, like the bytecode tier's `compiled_bodies`).
+    ///
+    /// NB: this is `cache.len()` — DISTINCT bodies. It cannot see a body that is
+    /// compiled repeatedly without ever being cached, which is exactly what the
+    /// `try` arms used to do. Use `total_compiles` to catch that.
+    pub fn compiled_bodies(&self) -> usize {
+        self.cache.borrow().len()
+    }
+
+    /// How many times Cranelift has ACTUALLY been run — cached or not. The
+    /// number the `MICROLANG_JIT_TRACE` lines are stamped with.
+    ///
+    /// The honest counterpart to `compiled_bodies`: a re-compile of an
+    /// already-compiled body leaves that one unchanged and bumps this one. If
+    /// this grows with how often code RUNS rather than with how much code
+    /// EXISTS, something is recompiling per execution.
+    pub fn total_compiles(&self) -> u32 {
+        self.counter.get()
+    }
+
+    /// Human-readable Cranelift IR for one expression — evidence the emitted code
+    /// differs by value model, the native mirror of `BytecodeVm::disassemble`.
+    pub fn dump_ir(&self, ir: &Ir) -> String {
+        let mut module = self.module.borrow_mut();
+        let mut fbctx = self.fbctx.borrow_mut();
+        let mut ctx = module.make_context();
+        ctx.func.signature.params.push(AbiParam::new(module.target_config().pointer_type()));
+        ctx.func.signature.returns.push(AbiParam::new(I64));
+        {
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let shape = BodyShape { entry_arity: None, nparams: 0, variadic: false, nslots: 0, mem_mode: true, tail_root: true, feedback: false, hot_cell: std::ptr::null() };
+            build_body::<M>(&mut module, &mut fb, self.shims, None, self as *const Self as *const (), ir, shape, None);
+            fb.finalize();
+        }
+        let out = ctx.func.display().to_string();
+        module.clear_context(&mut ctx);
+        out
+    }
+
+    fn compile(&self, rt: Option<&Runtime<M>>, ir: &Ir, shape: BodyShape) -> Arc<Compiled> {
+        self.compile_spec(rt, ir, shape, None)
+    }
+
+    fn compile_spec(
+        &self,
+        rt: Option<&Runtime<M>>,
+        ir: &Ir,
+        shape: BodyShape,
+        spec: Option<SpecEnv>,
+    ) -> Arc<Compiled> {
+        let mut module = self.module.borrow_mut();
+        let mut fbctx = self.fbctx.borrow_mut();
+        let mut ctx = module.make_context();
+        let ptr = module.target_config().pointer_type();
+        ctx.func.signature.params.push(AbiParam::new(ptr));
+        for _ in 0..shape.entry_arity.unwrap_or(0) {
+            ctx.func.signature.params.push(AbiParam::new(I64));
+        }
+        ctx.func.signature.returns.push(AbiParam::new(I64));
+
+        {
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            build_body::<M>(&mut module, &mut fb, self.shims, rt, self as *const Self as *const (), ir, shape, spec);
+            fb.finalize();
+        }
+
+        let n = self.counter.get();
+        self.counter.set(n + 1);
+        crate::stats::JIT_COMPILES.fetch_add(1, Ordering::Relaxed);
+        if std::env::var_os("MICROLANG_JIT_TRACE").is_some() {
+            eprintln!("[jit-compile] #{n} arity={:?} mem={} nparams={} var={} ir_ptr={:p}", shape.entry_arity, shape.mem_mode, shape.nparams, shape.variadic, ir as *const Ir);
+        }
+        // The Cranelift IR actually handed to the backend, for reading what a
+        // body's hot loop really costs. `dump_ir` can only show a synthetic
+        // top-level shape; this shows the REAL compile, entry arity and all.
+        if std::env::var_os("MICROLANG_JIT_CLIF").is_some() {
+            eprintln!("[jit-clif] #{n} arity={:?} nparams={}\n{}", shape.entry_arity, shape.nparams, ctx.func.display());
+        }
+        if std::env::var_os("MICROLANG_DUMP_IR").is_some() {
+            fn cnt(ir: &Ir, add: &mut u32, lt: &mut u32, tot: &mut u32) {
+                *tot += 1;
+                if let Ir::Prim(p, _) = ir {
+                    match p { Prim::Add => *add += 1, Prim::Lt => *lt += 1, _ => {} }
+                }
+                for c in crate::optimize::ir_children(ir) { cnt(c, add, lt, tot); }
+            }
+            let (mut a, mut l, mut t) = (0, 0, 0);
+            cnt(ir, &mut a, &mut l, &mut t);
+            eprintln!("[jit-ir] #{n} arity={:?} nparams={} nslots={} tail_root={} nodes={t} add={a} lt={l}", shape.entry_arity, shape.nparams, shape.nslots, shape.tail_root);
+        }
+        let name = format!("ml_body_{n}");
+        let id = module
+            .declare_function(&name, Linkage::Local, &ctx.func.signature)
+            .expect("declare body");
+        // The MACHINE CODE, block by block. The CLIF above says what we asked
+        // for; this says what the loop actually costs — how many instructions
+        // and, decisively for a hot loop, how many TAKEN branches an iteration
+        // retires. Disassembly has to be requested before `define_function`.
+        let want_asm = std::env::var_os("MICROLANG_JIT_ASM").is_some();
+        if want_asm {
+            ctx.set_disasm(true);
+        }
+        module.define_function(id, &mut ctx).expect("define body");
+        if want_asm {
+            if let Some(vc) = ctx.compiled_code().and_then(|cc| cc.vcode.as_ref()) {
+                eprintln!("[jit-asm] #{n} arity={:?} nparams={}\n{vc}", shape.entry_arity, shape.nparams);
+            }
+        }
+        // Stage E: lift this body's user stack maps out of the compile context
+        // BEFORE it is cleared — (return-address offset, frame active size,
+        // SP-relative root slot offsets) per safepoint.
+        let (sites, code_size) = {
+            let cc = ctx.compiled_code().expect("compiled code available after define_function");
+            let sites: Vec<SiteMap> = cc
+                .buffer
+                .user_stack_maps()
+                .iter()
+                .map(|(ret_off, active, map)| SiteMap {
+                    ret_off: *ret_off,
+                    active_size: *active,
+                    slots: map.entries().map(|(_ty, off)| off).collect(),
+                })
+                .collect();
+            (sites, cc.buffer.data().len())
+        };
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().expect("finalize");
+        let code = module.get_finalized_function(id);
+        register_code_map(code as usize, code_size, sites);
+        Arc::new(Compiled { code, entry_arity: shape.entry_arity, mem_mode: shape.mem_mode })
+    }
+
+    /// The shape a Lambda body compiles to (see `Compiled`): register-arg SSA
+    /// entry when possible, ctx entry (+ frame-load prologue) otherwise, memory
+    /// mode when the body needs its locals visible outside compiled code.
+    fn body_shape(body: &Ir, nparams: usize, variadic: bool, nslots: u16) -> BodyShape {
+        let mem_mode = body_mem_mode(body);
+        let entry_arity = if !mem_mode && !variadic && nparams <= MAX_REG_ARGS {
+            Some(nparams)
+        } else {
+            None
+        };
+        // Defaults: a first-invoke compile with no counter. `compiled_body`
+        // arms the counter (`hot_cell`); `reoptimize` sets `feedback` + a fresh
+        // counter for the recompile.
+        BodyShape { entry_arity, nparams, variadic, nslots, mem_mode, tail_root: true, feedback: false, hot_cell: std::ptr::null() }
+    }
+
+    fn compiled_body(
+        &self,
+        rt: &Runtime<M>,
+        body: &Arc<Ir>,
+        nparams: usize,
+        variadic: bool,
+        nslots: u16,
+        spec: Option<SpecEnv>,
+    ) -> Arc<Compiled> {
+        let key = Arc::as_ptr(body);
+        if let Some(c) = self.cache.borrow().get(&key) {
+            return c.clone();
+        }
+        // Arm the hotness counter (the adaptive tier) ONLY for bodies that
+        // contain a dispatch site: feedback-driven speculation is the sole Phase
+        // 1 payoff, so a dispatch-free body (pure arithmetic, a `try` wrapper,
+        // string munging) has nothing to gain from a recompile and is left on
+        // its first-invoke code — no counter, no wasted recompile. Nested/
+        // top-level bodies never get one either.
+        let mut shape = Self::body_shape(body, nparams, variadic, nslots);
+        if adaptive_enabled() && body_has_dispatch(body) {
+            shape.hot_cell = leak_hot_cell();
+        }
+        let c = self.compile_spec(Some(rt), body, shape, spec);
+        self.cache.borrow_mut().insert(key, c.clone());
+        c
+    }
+
+    /// Compile-and-run a NESTED body whose `Ir` is owned by the enclosing
+    /// template — a `try`/`catch`/`finally` arm. Cached by `Ir` address, so the
+    /// body is Cranelift'd ONCE instead of on every execution.
+    ///
+    /// Why this exists, and why `eval_ir` cannot simply cache instead: `eval_ir`
+    /// is also the TOP-LEVEL entry (one fresh `Ir` per form, dropped after it
+    /// runs), and a pointer key there would be a use-after-free waiting to
+    /// happen — the allocator reuses the address and the next form silently
+    /// executes the previous form's code. Try arms are different, and the `Try`
+    /// emit site says so explicitly: their `Ir` OUTLIVES the compiled code.
+    ///
+    /// Without this, `shim_try` ran a FULL Cranelift compile (regalloc included)
+    /// every time a `try` executed: measured at 74.7µs per call against 24ns for
+    /// the same expression without the `try` — ~3000x. It made core.match, which
+    /// compiles pattern backtracking into try/catch, effectively unusable
+    /// (2.2ms per `match`, ~5900x JVM Clojure).
+    fn run_nested_body(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        ir: &Ir,
+        locals: &Locals,
+        try_site: u64,
+    ) -> u64 {
+        let shape = BodyShape {
+            entry_arity: None,
+            nparams: 0,
+            variadic: false,
+            nslots: 0,
+            mem_mode: true,
+            tail_root: false,
+            feedback: false,
+            hot_cell: std::ptr::null(),
+        };
+        // Keyed by the try's own site id. Keying by `ir as *const Ir` was
+        // UNSOUND: an Ir tree is freed when its form finishes and the next tree
+        // reuses the address, so the entry answered for an unrelated try — three
+        // distinct `(try N (finally nil))` in sequence gave 1, 2, 2, and
+        // `(vector (try 1 (finally nil)))` after any other try gave [nil].
+        let key = try_site;
+        // NB: bind the lookup to its own `let` so the shared borrow guard is
+        // dropped HERE. Written as `if let Some(c) = self.cache.borrow()…` the
+        // guard would live across the whole if/else and the `borrow_mut` below
+        // would panic (already-borrowed) on the first miss.
+        let hit = self.try_cache.borrow().get(&key).cloned();
+        let compiled = match hit {
+            Some(c) => c,
+            None => {
+                let c = self.compile(Some(rt), ir, shape);
+                self.try_cache.borrow_mut().insert(key, c.clone());
+                c
+            }
+        };
+        self.run_trampoline(top, rt, compiled, locals.clone(), 0, 0, false, 0, &[])
+    }
+
+    /// Resolve a callee through the monomorphic inline cache (the common repeat
+    /// case skips decode + heap read + cache lookups entirely). `args` — the
+    /// triggering invoke's argument values, when the caller has them — seeds
+    /// PARAM-VALUE SPECIALIZATION (Stage G2): a first compile observes the
+    /// actual closures sitting in the parameters and splices their bodies
+    /// inline behind template guards.
+    fn resolve_call(&self, rt: &mut Runtime<M>, callee: u64, args: Option<&[u64]>) -> (usize, bool, u16, u32, Arc<Compiled>) {
+        let way = call_ic_way(callee);
+        let epoch = rt.relocated();
+        if let Some(t) = self.call_ic.borrow()[way].as_ref() {
+            if t.callee == callee && t.epoch == epoch {
+                return (t.nparams, t.variadic, t.nslots, t.template, t.compiled.clone());
+            }
+        }
+        if M::R::tag_of(callee) != RawTag::Ref {
+            panic!("value not callable: {}", rt.print(callee));
+        }
+        let (nparams, variadic, nslots, template) = match rt.view(callee) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, template)
+            }
+            _ => panic!("value not callable: {}", rt.print(callee)),
+        };
+        let body = rt.template(template).clone();
+        // Spec env for a first compile: the invoke's arg values (only when the
+        // arity actually matches — a mismatch is thrown right after resolution)
+        // plus this closure's own capture values, so `(f …)` callees held in
+        // params OR captures can be observed.
+        let spec = args.filter(|a| !variadic && a.len() == nparams).map(|a| SpecEnv {
+            args: a.to_vec(),
+            caps: {
+                // The capture array lives inline in the closure (Stage D):
+                // aux = ncaps, values at CLOSURE_CAPS_OFF.
+                let g = M::R::as_ref(callee);
+                let n = unsafe { g.aux() } as usize;
+                (0..n)
+                    .map(|i| unsafe { *(g.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+                    .collect()
+            },
+        });
+        let compiled = self.compiled_body(rt, &body, nparams, variadic, nslots, spec);
+        // (MultiFn callees never reach here: `invoke`/the trampoline select the
+        // arity clause BEFORE resolution, so `callee` is always a closure.)
+        self.call_ic.borrow_mut()[way] = Some(CallTarget {
+            callee,
+            epoch,
+            nparams,
+            variadic,
+            nslots,
+            template,
+            compiled: compiled.clone(),
+        });
+        (nparams, variadic, nslots, template, compiled)
+    }
+
+    /// Build the per-run `JitCtx` for one body execution. `self_closure` is the
+    /// running closure's bits (0 = none / top-level); `caps_base` — the inline
+    /// capture array's address — is derived straight from it (captures live IN
+    /// the closure object, Stage D), no separate `Caps` array to carry.
+    #[allow(clippy::too_many_arguments)]
+    fn make_ctx<'a>(
+        &'a self,
+        top: &'a dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        frame: &Locals,
+        args_buf: &mut Vec<u64>,
+        self_closure: u64,
+        needs_cur: bool,
+    ) -> JitCtx<'a, M> {
+        let consts_base = rt.consts_ptr();
+        let global_base = rt.global_slots_ptr();
+        let global_len = rt.global_slots_len();
+        // Native fast calls bypass `top`, so only enable them when we ARE the top
+        // (no wrapper is observing calls).
+        let direct = std::ptr::eq(
+            top as *const dyn CodeSpace<M> as *const u8,
+            self as *const JitCranelift<M> as *const u8,
+        ) as u8;
+        let cur = if needs_cur { frame.clone() } else { None };
+        JitCtx {
+            rc: std::ptr::null(),
+            top,
+            rt: rt as *mut Runtime<M>,
+            cur_slots: Cell::new(slots_ptr(frame)),
+            consts_base: Cell::new(consts_base),
+            global_base: Cell::new(global_base),
+            global_len: Cell::new(global_len),
+            alloc_window: Cell::new(&rt.heap().window as *const crate::heap::AllocWindow as *const u8),
+            card_window: Cell::new(rt.heap().card_window()),
+            // AtomicU64 is repr(transparent) over u64; both counters are only
+            // written under STW / the registry lock, so plain loads in emitted
+            // code observe a coherent value.
+            reloc_ptr: Cell::new(&rt.shared.relocated as *const AtomicU64 as *const u64),
+            dispver_ptr: Cell::new(&rt.shared.dispatch_version as *const AtomicU64 as *const u64),
+            poll_ptr: Cell::new(&rt.heap().poll as *const std::sync::atomic::AtomicU8 as *const u8),
+            direct: Cell::new(direct),
+            self_closure: Cell::new(self_closure),
+            cur: RefCell::new(cur),
+            jit: self as *const JitCranelift<M> as *const (),
+            tail_pending: Cell::new(false),
+            tail_callee: Cell::new(0),
+            tail_args: args_buf as *mut Vec<u64>,
+            direct_depth: Cell::new(0),
+        }
+    }
+
+    /// Run one CTX-ENTRY body (`fn(*mut JitCtx) -> u64`): variadic / many-param /
+    /// memory-mode bodies, and top-level expressions. `Ok(value)` on a normal
+    /// return; `Err(callee)` on a tail call, args left in `args_buf`.
+    fn run_ctx_entry(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        compiled: &Compiled,
+        frame: &Locals,
+        args_buf: &mut Vec<u64>,
+        self_closure: u64,
+    ) -> Result<u64, u64> {
+        // Stage E: a collection triggered anywhere inside the body must trace
+        // this frame (its slots are the body's locals in memory mode, and the
+        // SSA prologue reads them at entry) — push it on the dynamic env
+        // chain exactly like the interpreter tiers do around invoke.
+        rt.env_stack.push(frame.clone());
+        let mut ctx =
+            self.make_ctx(top, rt, frame, args_buf, self_closure, compiled.mem_mode);
+        ctx.rc = &ctx as *const JitCtx<M>;
+        let f: extern "C" fn(*mut JitCtx<M>) -> u64 =
+            unsafe { std::mem::transmute::<*const u8, _>(compiled.code) };
+        let ret = f(&mut ctx as *mut JitCtx<M>);
+        rt.env_stack.pop();
+        if ctx.tail_pending.get() {
+            Err(ctx.tail_callee.get())
+        } else {
+            Ok(ret)
+        }
+    }
+
+    /// Run one REGISTER-ARG body: args in registers, NO activation frame at all.
+    fn run_reg_entry(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        compiled: &Compiled,
+        arity: usize,
+        args: &[u64; MAX_REG_ARGS],
+        args_buf: &mut Vec<u64>,
+        self_closure: u64,
+    ) -> Result<u64, u64> {
+        let none: Locals = None;
+        let mut ctx = self.make_ctx(top, rt, &none, args_buf, self_closure, false);
+        ctx.rc = &ctx as *const JitCtx<M>;
+        // Pass the context pointer as a plain word so the per-arity fn-pointer
+        // types need no lifetime parameters.
+        let cp = &mut ctx as *mut JitCtx<M> as u64;
+        let code = compiled.code;
+        let a = args;
+        let ret = unsafe {
+            match arity {
+                0 => std::mem::transmute::<*const u8, extern "C" fn(u64) -> u64>(code)(cp),
+                1 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64) -> u64>(code)(cp, a[0]),
+                2 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(code)(cp, a[0], a[1]),
+                3 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2]),
+                4 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3]),
+                5 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4]),
+                6 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5]),
+                7 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+                8 => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64>(code)(cp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+                _ => unreachable!("register entries are capped at MAX_REG_ARGS"),
+            }
+        };
+                if ctx.tail_pending.get() {
+            Err(ctx.tail_callee.get())
+        } else {
+            Ok(ret)
+        }
+    }
+
+    /// Build a callee frame for a CTX-ENTRY body, reusing a pooled `Arc<Frame>`
+    /// if one is free (no allocation) and otherwise falling back to
+    /// `Runtime::build_call_frame`. The pool only ever holds uniquely-owned
+    /// frames, so `Arc::get_mut` never fails.
+    fn alloc_frame(
+        &self,
+        rt: &mut Runtime<M>,
+        nparams: usize,
+        variadic: bool,
+        nslots: u16,
+        args: &[u64],
+        callee_bits: u64,
+    ) -> Locals {
+        let popped = self.frame_pool.borrow_mut().pop();
+        let mut rc = match popped {
+            Some(rc) => rc,
+            None => return rt.build_call_frame(nparams, variadic, nslots, args, callee_bits),
+        };
+        let f = Arc::get_mut(&mut rc).expect("pooled frame is uniquely owned");
+        f.slots.clear();
+        if variadic {
+            assert!(args.len() >= nparams, "arity: expected at least {nparams}, got {}", args.len());
+            f.slots.extend(args[..nparams].iter().map(|&a| AtomicU64::new(a)));
+            // Same rest-arg policy as `build_call_frame` — ONE definition, on
+            // the runtime. (This pooled-frame path is only a slot-allocation
+            // shortcut; it must not become a second set of call semantics.)
+            let rest = rt.mk_rest_seq(&args[nparams..]);
+            f.slots.push(AtomicU64::new(rest));
+        } else {
+            assert!(args.len() == nparams, "arity: expected {nparams}, got {}", args.len());
+            f.slots.extend(args.iter().map(|&a| AtomicU64::new(a)));
+        }
+        let nil = M::R::enc_nil();
+        while f.slots.len() < nslots as usize {
+            f.slots.push(AtomicU64::new(nil));
+        }
+        // `caps_src` is the traced GC root the collector rewrites on a move and
+        // `frame_cap`/other backends decode to reach this frame's captures — the
+        // Stage D replacement for the old per-frame `Caps` array (see `value.rs`).
+        f.caps_src.store(callee_bits, Ordering::Release);
+        Some(rc)
+    }
+
+    /// Return a frame to the pool IF its call did not capture it. With flat
+    /// closures nothing captures frames anymore, but a CEK continuation (via a
+    /// routed body) still can — `Arc::get_mut` succeeding is the exact, sound
+    /// test for "no other owner".
+    fn recycle(&self, frame: Locals) {
+        if let Some(mut rc) = frame {
+            if let Some(f) = Arc::get_mut(&mut rc) {
+                f.slots.clear();
+                f.caps_src.store(0, Ordering::Release); // don't pin a closure alive in the pool
+                let mut pool = self.frame_pool.borrow_mut();
+                if pool.len() < FRAME_POOL_CAP {
+                    pool.push(rc);
+                }
+            }
+        }
+    }
+
+    /// Publish a closure's native fast entry: seed the per-TEMPLATE compiled-
+    /// code map (so a LATER closure created from the same template is stamped
+    /// at creation by `shim_make_closure`) and, when `callee` is itself a
+    /// genuine CLOSURE object (a MultiFn's own bits reach here too — it has no
+    /// code word, so it is left alone and always takes the shim path, which
+    /// re-selects the arity clause anyway), stamp ITS code word — the object
+    /// IS the fast-call table from then on (see docs/STAGE_D_MIGRATION.md).
+    fn publish_fast_target(&self, callee: u64, template: u32, compiled: &Compiled) {
+        if compiled.entry_arity.is_none() {
+            return;
+        }
+        {
+            let mut tc = self.template_code.borrow_mut();
+            if tc.len() <= template as usize {
+                // The buffer must NEVER reallocate: emitted Lambda sites bake
+                // slot addresses (see `template_code_slot`).
+                assert!(
+                    (template as usize) < TEMPLATE_CODE_CAP,
+                    "template_code overflow: template id {template} exceeds TEMPLATE_CODE_CAP — raise it"
+                );
+                tc.resize(template as usize + 1, std::ptr::null());
+            }
+            if tc[template as usize].is_null() {
+                tc[template as usize] = compiled.code;
+            }
+        }
+        if M::R::tag_of(callee) == RawTag::Ref {
+            let g = M::R::as_ref(callee);
+            if unsafe { g.type_id() } == kind::CLOSURE {
+                unsafe {
+                    let code_slot = g.0.add(CLOSURE_CODE_OFF) as *mut u64;
+                    if *code_slot == 0 {
+                        *code_slot = compiled.code as u64;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Summed deopt count over a body's dispatch sites — how many times a
+    /// feedback-speculated guard in this body has failed. Re-speculation fires
+    /// only when this grows past the last recompile's snapshot.
+    fn body_deopt_sum(&self, rt: &Runtime<M>, body: &Ir) -> u32 {
+        let mut sum = 0u32;
+        walk_dispatch_sites(body, &mut |site| {
+            sum = sum.saturating_add(rt.shared.feedback.deopts(site));
+        });
+        sum
+    }
+
+    /// Would a recompile of `body` actually SPECULATE anywhere — i.e. does some
+    /// dispatch site have a confident, non-blacklisted, record-typed dominant
+    /// receiver? Mirrors `dispatch_spec_plan`'s confidence gate (minus the
+    /// impl-shape checks). A body with none gains nothing from a feedback
+    /// recompile — and would LOSE its first-invoke value inlining — so it is
+    /// parked instead.
+    fn body_has_speculatable_site(&self, rt: &Runtime<M>, body: &Ir) -> bool {
+        let fb = &rt.shared.feedback;
+        let mut ok = false;
+        walk_dispatch_sites(body, &mut |site| {
+            if ok {
+                return;
+            }
+            if let Some((dom_ty, frac)) = fb.dominant_type(site) {
+                if frac >= SPEC_MIN_FRACTION
+                    && fb.deopts(site) < SPEC_DEOPT_BLACKLIST
+                    && rt.is_record_type(dom_ty)
+                {
+                    ok = true;
+                }
+            }
+        });
+        ok
+    }
+
+    /// Adaptive-tier recompile of a hot closure body with type feedback. Called
+    /// from the emitted hotness trigger (`shim_reopt`). Idempotent and bounded:
+    ///
+    ///   * a STRAGGLER (a closure of a template already reopted, still carrying
+    ///     the old code word) is just re-pointed to the newest body — no compile;
+    ///   * the FIRST crossing compiles a feedback-speculating v2 and republishes;
+    ///   * a v2 that RE-crosses re-speculates only if its sites accumulated new
+    ///     deopts since the last compile — otherwise it is already optimal.
+    ///
+    /// Running frames keep executing the body they entered on (no on-stack
+    /// replacement); only the NEXT call sees the new one, via the closure's
+    /// code word and the per-template code map.
+    fn reoptimize(&self, rt: &mut Runtime<M>, self_closure: u64) {
+        if M::R::tag_of(self_closure) != RawTag::Ref {
+            return;
+        }
+        let g = M::R::as_ref(self_closure);
+        if unsafe { g.type_id() } != kind::CLOSURE {
+            return;
+        }
+        let (nparams, variadic, nslots, template) = match rt.view(self_closure) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => {
+                (nparams, variadic, nslots, template)
+            }
+            _ => return,
+        };
+        let cur_code = unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *const u64) } as *const u8;
+
+        // Phase 1: decide, under the reopt-state borrow (NOT held across the
+        // Cranelift compile below, which borrows `module`/`cache`).
+        let (do_compile, live_deopts) = {
+            let mut states = self.reopt.borrow_mut();
+            if states.len() <= template as usize {
+                states.resize(template as usize + 1, ReoptState::default());
+            }
+            let st = states[template as usize];
+            if !st.latest_code.is_null() && cur_code != st.latest_code {
+                // Straggler: adopt the newest body, no recompile.
+                unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = st.latest_code as u64 };
+                return;
+            }
+            if st.parked || st.recompiles >= REOPT_CAP {
+                return;
+            }
+            let live = self.body_deopt_sum(rt, rt.template(template));
+            if st.latest_code.is_null() {
+                // FIRST reopt: only worth it if some site will actually speculate.
+                // Otherwise park the template (keep the value-inlined first
+                // compile) so the trigger stops firing.
+                if !self.body_has_speculatable_site(rt, rt.template(template)) {
+                    states[template as usize].parked = true;
+                    return;
+                }
+                (true, live)
+            } else {
+                // A published v2 that re-crossed: re-speculate only if its
+                // speculated sites accumulated NEW deopts (a guard is failing).
+                (live > st.deopt_snapshot, live)
+            }
+        };
+        if !do_compile {
+            return;
+        }
+
+        // Value-inline at reopt uses the closure's LIVE captures only — safe to
+        // read here (Cranelift never reaches a GC safepoint) — never the stale
+        // first-invoke ARGS the original snapshot held. Dispatch speculation
+        // reads the shared `FeedbackTable` in the emit (`shape.feedback`).
+        let body = rt.template(template).clone();
+        let caps: Vec<u64> = {
+            let n = unsafe { g.aux() } as usize;
+            (0..n)
+                .map(|i| unsafe { *(g.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+                .collect()
+        };
+        let mut shape = Self::body_shape(&body, nparams, variadic, nslots);
+        shape.feedback = true;
+        shape.hot_cell = leak_hot_cell();
+        let compiled = self.compile_spec(Some(rt), &body, shape, Some(SpecEnv { args: Vec::new(), caps }));
+        crate::stats::bump(&crate::stats::REOPT_COMPILES);
+        let code = compiled.code;
+
+        // Publish: OVERWRITE the per-template code map (unlike `publish_fast_target`,
+        // which only sets-if-null so a straggler of this template picks up v2 at
+        // creation), the `Ir`-keyed cache (the Rust invoke path), and this hot
+        // closure's own code word. Drop the resolved-callee cache: entries may
+        // pin the superseded `Compiled`.
+        {
+            let mut tc = self.template_code.borrow_mut();
+            if tc.len() <= template as usize {
+                assert!(
+                    (template as usize) < TEMPLATE_CODE_CAP,
+                    "template_code overflow at reopt: template {template} exceeds TEMPLATE_CODE_CAP"
+                );
+                tc.resize(template as usize + 1, std::ptr::null());
+            }
+            tc[template as usize] = code;
+        }
+        self.cache.borrow_mut().insert(Arc::as_ptr(&body), compiled.clone());
+        if compiled.entry_arity.is_some() {
+            unsafe { *(g.0.add(CLOSURE_CODE_OFF) as *mut u64) = code as u64 };
+        }
+        for slot in self.call_ic.borrow_mut().iter_mut() {
+            *slot = None;
+        }
+
+        let mut states = self.reopt.borrow_mut();
+        let st = &mut states[template as usize];
+        st.recompiles += 1;
+        st.latest_code = code;
+        st.deopt_snapshot = live_deopts;
+    }
+
+    /// The proper-tail-call trampoline: run a body; if it tail-calls, resolve the
+    /// callee and loop — a bounded native stack for unbounded tail recursion.
+    /// Non-tail calls still recurse (through `top` or native fast calls), so
+    /// composition and macro-reentrancy hold, exactly like the tree-walker.
+    #[allow(clippy::too_many_arguments)]
+    fn run_trampoline(
+        &self,
+        top: &dyn CodeSpace<M>,
+        rt: &mut Runtime<M>,
+        mut compiled: Arc<Compiled>,
+        mut frame: Locals,
+        mut cur_callee: u64,
+        mut cur_nparams: usize,
+        mut cur_variadic: bool,
+        mut cur_nslots: u16,
+        first_args: &[u64],
+    ) -> u64 {
+        // The bounce buffer starts EMPTY (no allocation — `Vec::new` is
+        // malloc-free): the first iteration reads the caller's slice, and the
+        // buffer is only ever filled by a tail bounce (`shim_tail_call`). The
+        // per-invoke `to_vec` this replaces was a malloc/free pair on EVERY
+        // call through `invoke` — a top frame of the transduce/comp profile.
+        let mut args_buf: Vec<u64> = Vec::new();
+        let mut from_buf = false;
+        loop {
+            let outcome = if let Some(k) = compiled.entry_arity {
+                let mut regs = [0u64; MAX_REG_ARGS];
+                {
+                    let src: &[u64] = if from_buf { &args_buf } else { first_args };
+                    debug_assert_eq!(src.len(), k);
+                    regs[..k].copy_from_slice(&src[..k]);
+                }
+                self.run_reg_entry(top, rt, &compiled, k, &regs, &mut args_buf, cur_callee)
+            } else {
+                // Ctx entry: needs a real activation frame.
+                if frame.is_none() {
+                    let src: &[u64] = if from_buf { &args_buf } else { first_args };
+                    // (alloc_frame reads `src` before the entry runs; the
+                    // buffer is handed out mutably only after this borrow ends.)
+                    let built = self.alloc_frame(
+                        rt,
+                        cur_nparams,
+                        cur_variadic,
+                        cur_nslots,
+                        src,
+                        cur_callee,
+                    );
+                    frame = built;
+                }
+                self.run_ctx_entry(top, rt, &compiled, &frame, &mut args_buf, cur_callee)
+            };
+            match outcome {
+                Ok(v) => {
+                    self.recycle(frame);
+                    return v;
+                }
+                Err(callee) => {
+                    // The bounce wrote the next call's args into the buffer.
+                    from_buf = true;
+                    // A signal raised while evaluating the tail call's args: stop.
+                    if rt.pending() {
+                        self.recycle(frame);
+                        return M::R::enc_nil();
+                    }
+                    self.recycle(std::mem::take(&mut frame));
+                    // TRAMPOLINE SAFEPOINT (Stage E): this loop is the back-edge
+                    // of every non-self tail recursion (mutual loops, variadic /
+                    // memory-mode loops), so it must poll too. The in-flight
+                    // callee + args are bare bits — root them across the park /
+                    // collection and read the (possibly relocated) values back.
+                    let callee = if rt.heap().poll.load(Ordering::Acquire) != 0 {
+                        let base = rt.push_root(callee);
+                        for &a in args_buf.iter() {
+                            rt.push_root(a);
+                        }
+                        rt.safepoint(&None);
+                        let c = rt.root_get(base);
+                        for (i, a) in args_buf.iter_mut().enumerate() {
+                            *a = rt.root_get(base + 1 + i);
+                        }
+                        rt.truncate_roots(base);
+                        c
+                    } else {
+                        callee
+                    };
+                    // Callable-object hook in TAIL position too (keywords / maps /
+                    // callable deftype records — and SYMBOLS, IFn-as-lookup like
+                    // keywords): route `(obj args…)` to `(handler obj args…)`,
+                    // exactly as `invoke` does.
+                    let callee = if (is_record_ref::<M>(callee)
+                        || matches!(rt.decode(callee), Val::Sym(_)))
+                        && rt.apply_handler().is_some()
+                    {
+                        let h = rt.apply_handler().unwrap();
+                        args_buf.insert(0, callee);
+                        h
+                    } else {
+                        callee
+                    };
+                    let callee = match rt.multifn_select_raw(callee, args_buf.len()) {
+                        Some(sel) => {
+                            if rt.pending() {
+                                return M::R::enc_nil();
+                            }
+                            sel
+                        }
+                        None => callee,
+                    };
+                    let (nparams, variadic, nslots, template, comp) =
+                        self.resolve_call(rt, callee, Some(&args_buf));
+                    let arity_ok = if variadic {
+                        args_buf.len() >= nparams
+                    } else {
+                        args_buf.len() == nparams
+                    };
+                    if !arity_ok {
+                        let msg = if variadic {
+                            format!("arity: expected at least {}, got {}", nparams, args_buf.len())
+                        } else {
+                            format!("arity: expected {}, got {}", nparams, args_buf.len())
+                        };
+                        let sid = rt.alloc(Obj::Str(msg));
+                        rt.signal_throw(M::R::enc_ref(sid));
+                        return M::R::enc_nil();
+                    }
+                    self.publish_fast_target(callee, template, &comp);
+                    compiled = comp;
+                    cur_callee = callee;
+                    cur_nparams = nparams;
+                    cur_variadic = variadic;
+                    cur_nslots = nslots;
+                }
+            }
+        }
+    }
+}
+
+/// Does `bits` reference a user RECORD? The callable-object hook (keywords /
+/// maps / vectors / sets / multimethods, all frontend records with a
+/// registered apply handler) keys off exactly this check — read straight off
+/// the object's own header, no runtime handle needed.
+fn is_record_ref<M: ValueModel>(bits: u64) -> bool {
+    M::R::tag_of(bits) == RawTag::Ref && unsafe { M::R::as_ref(bits).type_id() } == kind::RECORD
+}
+
+/// A fresh, process-lifetime hotness counter for one compiled body. LEAKED on
+/// purpose: the emitted code bakes its address, and JIT code is never freed, so
+/// the cell must outlive any `Compiled` that might be replaced by a reopt.
+/// Bodies are bounded (one per compiled template + a capped number of
+/// recompiles), so this is a bounded leak, exactly like the code it counts.
+fn leak_hot_cell() -> *const u32 {
+    Box::into_raw(Box::new(0u32)) as *const u32
+}
+
+/// Does `ir` contain a dispatch site (not counting nested `Lambda` bodies)?
+/// Gates whether a compiled body arms a hotness counter — only dispatch-bearing
+/// bodies can profit from a feedback recompile.
+fn body_has_dispatch(ir: &Ir) -> bool {
+    let mut found = false;
+    walk_dispatch_sites(ir, &mut |_| found = true);
+    found
+}
+
+/// Visit every `Ir::Dispatch` site id reachable in `ir` WITHOUT descending into
+/// nested `Lambda` bodies (those compile — and reopt — separately). Used to sum
+/// a body's speculated-site deopts.
+fn walk_dispatch_sites(ir: &Ir, f: &mut impl FnMut(usize)) {
+    match ir {
+        Ir::Dispatch { site, args, .. } => {
+            f(*site);
+            for a in args {
+                walk_dispatch_sites(a, f);
+            }
+        }
+        Ir::Lambda { .. } => {} // separate body
+        Ir::Const(_) | Ir::Quote(_) | Ir::Global(_) | Ir::Local { .. } | Ir::Capture(_) => {}
+        Ir::If(a, b, c) => {
+            walk_dispatch_sites(a, f);
+            walk_dispatch_sites(b, f);
+            walk_dispatch_sites(c, f);
+        }
+        Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().for_each(|x| walk_dispatch_sites(x, f)),
+        Ir::Let(inits, body) => {
+            inits.iter().for_each(|x| walk_dispatch_sites(x, f));
+            walk_dispatch_sites(body, f);
+        }
+        Ir::Call(g, args) => {
+            walk_dispatch_sites(g, f);
+            args.iter().for_each(|a| walk_dispatch_sites(a, f));
+        }
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } | Ir::Def { init: val, .. } => {
+            walk_dispatch_sites(val, f)
+        }
+        Ir::DefMethod { imp, .. } => walk_dispatch_sites(imp, f),
+        Ir::FieldGet { obj, .. } => walk_dispatch_sites(obj, f),
+        Ir::InstanceCheck { proto, arg, .. } => {
+            walk_dispatch_sites(proto, f);
+            walk_dispatch_sites(arg, f);
+        }
+        Ir::Try { body, catch, finally, .. } => {
+            walk_dispatch_sites(body, f);
+            if let Some(c) = catch {
+                walk_dispatch_sites(c, f);
+            }
+            if let Some(fin) = finally {
+                walk_dispatch_sites(fin, f);
+            }
+        }
+    }
+}
+
+impl<M: ModelArithJit> CodeSpace<M> for JitCranelift<M> {
+    fn eval_ir(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, ir: &Ir, locals: &Locals) -> u64 {
+        // A top-level expression: compile it as a standalone ctx-entry body and
+        // run it. (Not cached — matches the bytecode tier's `eval_ir`.) NOT a
+        // tail root: the outermost call of a top-level form must flow through
+        // `top.invoke` so wrappers (Traced) observe it.
+        let shape = BodyShape {
+            entry_arity: None,
+            nparams: 0,
+            variadic: false,
+            nslots: 0,
+            mem_mode: true,
+            tail_root: false,
+            feedback: false,
+            hot_cell: std::ptr::null(),
+        };
+        let compiled = self.compile(Some(rt), ir, shape);
+        // A top-level expr is not a closure body: no current callee (0), so the
+        // self-tail-call fast path is inert here (it engages once inside a fn).
+        self.run_trampoline(top, rt, compiled, locals.clone(), 0, 0, false, 0, &[])
+    }
+
+    fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
+        // Callable-object hook (keywords / maps / vectors / sets / multimethods —
+        // and SYMBOLS, IFn-as-lookup like keywords): a non-closure callable with
+        // a registered apply handler routes to `(handler object args…)`, exactly
+        // like the TreeWalk `invoke`.
+        let routed;
+        let (callee, args) = if (is_record_ref::<M>(callee)
+            || matches!(rt.decode(callee), Val::Sym(_)))
+            && rt.apply_handler().is_some()
+        {
+            let h = rt.apply_handler().unwrap();
+            let mut v = Vec::with_capacity(args.len() + 1);
+            v.push(callee);
+            v.extend_from_slice(args);
+            routed = v;
+            (h, routed.as_slice())
+        } else {
+            (callee, args)
+        };
+        // Multi-arity fn: select the clause serving this arg count. Remember the
+        // MultiFn's own bits — emitted call sites see THOSE as the callee, but a
+        // MultiFn object has no code word (only genuine CLOSURE objects do), so
+        // `publish_fast_target` below only ever stamps the per-template map for
+        // this branch, never the MultiFn's own header.
+        let orig_callee = callee;
+        let callee = match rt.multifn_select_raw(callee, args.len()) {
+            Some(sel) => {
+                if rt.pending() {
+                    return M::R::enc_nil();
+                }
+                sel
+            }
+            None => callee,
+        };
+        // Resolve through the monomorphic inline cache (decode + heap + compiled
+        // all skipped on a repeat callee).
+        let (nparams, variadic, nslots, template, compiled) = self.resolve_call(rt, callee, Some(args));
+        // Publish the native fast entry so future call sites can jump to it
+        // directly — under the value call sites actually see (the MultiFn id
+        // when routing happened, the closure id otherwise). When routing DID
+        // happen, ALSO stamp the selected CLAUSE object: `shim_fast_invoke`
+        // re-selects per call and reads the clause's code word — leaving it
+        // null sent every multifn-routed call (the `(xf rf)` step fns, `+`,
+        // `conj`, `get`, …) down the resolve/trampoline slow path PER ELEMENT
+        // (the Stage G1 finding).
+        self.publish_fast_target(orig_callee, template, &compiled);
+        if callee != orig_callee {
+            self.publish_fast_target(callee, template, &compiled);
+        }
+        // Arity mismatch is a CATCHABLE throw (matching TreeWalk / Clojure), not an
+        // abort in this non-unwinding shim.
+        let arity_ok = if variadic { args.len() >= nparams } else { args.len() == nparams };
+        if !arity_ok {
+            let msg = if variadic {
+                format!("arity: expected at least {}, got {}", nparams, args.len())
+            } else {
+                format!("arity: expected {}, got {}", nparams, args.len())
+            };
+            let sid = rt.alloc(Obj::Str(msg));
+            rt.signal_throw(M::R::enc_ref(sid));
+            return M::R::enc_nil();
+        }
+        self.run_trampoline(top, rt, compiled, None, callee, nparams, variadic, nslots, args)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Lowering: `Ir` -> Cranelift IR.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The compile-time shape of one body: entry convention + frame layout.
+#[derive(Clone, Copy)]
+struct BodyShape {
+    /// `Some(k)`: register-arg entry `fn(ctx, a0..a{k-1})`. `None`: ctx entry.
+    entry_arity: Option<usize>,
+    nparams: usize,
+    variadic: bool,
+    /// Total activation slots (params + rest + let/catch), from `flatten`.
+    nslots: u16,
+    /// Locals in the heap frame (try/(gc)/%await) instead of SSA registers.
+    mem_mode: bool,
+    tail_root: bool,
+    /// Adaptive tier: `true` for a feedback-driven RECOMPILE — dispatch sites
+    /// consult the `FeedbackTable` and speculate on a dominant receiver type.
+    /// `false` for a first-invoke compile (nothing to speculate from yet).
+    feedback: bool,
+    /// Adaptive tier: address of this body's leaked hotness counter (a plain
+    /// `u32`). The prologue and back-edge bump it and trigger a recompile when
+    /// it crosses `REOPT_THRESHOLD`. `null` for bodies that are never reopted
+    /// (top-level forms, `try` arms, `dump_ir`).
+    hot_cell: *const u32,
+}
+
+/// Compile `ir` as a whole function body into an already-prepared builder.
+#[allow(clippy::too_many_arguments)]
+fn build_body<M: ModelArithJit>(
+    module: &mut JITModule,
+    fb: &mut FunctionBuilder,
+    shims: Shims,
+    rt: Option<&Runtime<M>>,
+    jit_ptr: *const (),
+    ir: &Ir,
+    shape: BodyShape,
+    spec: Option<SpecEnv>,
+) {
+    let entry = fb.create_block();
+    fb.append_block_params_for_function_params(entry);
+    fb.switch_to_block(entry);
+    fb.seal_block(entry);
+    let ctx_val = fb.block_params(entry)[0];
+    let param_vals: Vec<Value> = fb.block_params(entry)[1..].to_vec();
+    // Load the run-context pointer once; all shared-field reads go through it, and
+    // a native call copies just this pointer into the callee's context. `rc` and the
+    // fields reached through it are set before the body runs and never mutated
+    // during it, so the loads are `readonly` — Cranelift may dedup/hoist them.
+    let off_rc = core::mem::offset_of!(JitCtx<'static, M>, rc) as i32;
+    let rc_val = fb.ins().load(I64, MemFlagsData::trusted().with_readonly(), ctx_val, off_rc);
+
+    let refs = ShimRefs {
+        load_local: module.declare_func_in_func(shims.load_local, fb.func),
+        load_global: module.declare_func_in_func(shims.load_global, fb.func),
+        def_global: module.declare_func_in_func(shims.def_global, fb.func),
+        make_closure: module.declare_func_in_func(shims.make_closure, fb.func),
+        call: module.declare_func_in_func(shims.call, fb.func),
+        tail_call: module.declare_func_in_func(shims.tail_call, fb.func),
+        finish_tail: module.declare_func_in_func(shims.finish_tail, fb.func),
+        prim: module.declare_func_in_func(shims.prim, fb.func),
+        set_local: module.declare_func_in_func(shims.set_local, fb.func),
+        set_global: module.declare_func_in_func(shims.set_global, fb.func),
+        field_get: module.declare_func_in_func(shims.field_get, fb.func),
+        dispatch: module.declare_func_in_func(shims.dispatch, fb.func),
+        def_method: module.declare_func_in_func(shims.def_method, fb.func),
+        apply: module.declare_func_in_func(shims.apply, fb.func),
+        try_: module.declare_func_in_func(shims.try_, fb.func),
+        spawn: module.declare_func_in_func(shims.spawn, fb.func),
+        await_: module.declare_func_in_func(shims.await_, fb.func),
+        gc: module.declare_func_in_func(shims.gc, fb.func),
+        safepoint: module.declare_func_in_func(shims.safepoint, fb.func),
+        take_signal: module.declare_func_in_func(shims.take_signal, fb.func),
+        instance_fill: module.declare_func_in_func(shims.instance_fill, fb.func),
+        pv_conj: module.declare_func_in_func(shims.pv_conj, fb.func),
+        pv_nth: module.declare_func_in_func(shims.pv_nth, fb.func),
+        pv_assoc: module.declare_func_in_func(shims.pv_assoc, fb.func),
+        hamt_assoc: module.declare_func_in_func(shims.hamt_assoc, fb.func),
+        hamt_lookup: module.declare_func_in_func(shims.hamt_lookup, fb.func),
+        amap_get: module.declare_func_in_func(shims.amap_get, fb.func),
+        arr_push: module.declare_func_in_func(shims.arr_push, fb.func),
+        cons2: module.declare_func_in_func(shims.cons2, fb.func),
+        first1: module.declare_func_in_func(shims.first1, fb.func),
+        rest1: module.declare_func_in_func(shims.rest1, fb.func),
+        eq2: module.declare_func_in_func(shims.eq2, fb.func),
+        tv_conj: module.declare_func_in_func(shims.tv_conj, fb.func),
+        tam_assoc: module.declare_func_in_func(shims.tam_assoc, fb.func),
+        thm_assoc: module.declare_func_in_func(shims.thm_assoc, fb.func),
+        str_char_at: module.declare_func_in_func(shims.str_char_at, fb.func),
+        char_to_int: module.declare_func_in_func(shims.char_to_int, fb.func),
+        int_to_char: module.declare_func_in_func(shims.int_to_char, fb.func),
+        reopt: module.declare_func_in_func(shims.reopt, fb.func),
+        deopt: module.declare_func_in_func(shims.deopt, fb.func),
+    };
+
+    let mut c = Compiler {
+        fb,
+        refs,
+        ctx_val,
+        entry_sigs: HashMap::new(),
+        // Type-erased (the `Compiler` struct is not generic over M; the
+        // M-generic methods cast it back). Never outlives this call.
+        rt_ptr: rt.map_or(std::ptr::null(), |r| r as *const Runtime<M> as *const ()),
+        jit_ptr,
+        inline_budget: Cell::new(INLINE_TOTAL_BUDGET),
+        // A thin forwarding caller (small body) gets a larger per-callee cap so
+        // the single big callee it wraps folds in; big callers keep the default.
+        inline_max_callee: if node_count_capped(ir, INLINE_SMALL_CALLER_NODES).is_some() {
+            INLINE_SMALL_CALLER_MAX_CALLEE
+        } else {
+            INLINE_MAX_CALLEE_NODES
+        },
+        mem_mode: shape.mem_mode,
+        // Stable byte offsets of `JitCtx` fields (repr(C)) for inline reads and for
+        // building a callee context on the stack at a native call site.
+        off_cur_slots: core::mem::offset_of!(JitCtx<'static, M>, cur_slots) as i32,
+        off_consts_base: core::mem::offset_of!(JitCtx<'static, M>, consts_base) as i32,
+        off_global_base: core::mem::offset_of!(JitCtx<'static, M>, global_base) as i32,
+        off_alloc_window: core::mem::offset_of!(JitCtx<'static, M>, alloc_window) as i32,
+        off_card_window: core::mem::offset_of!(JitCtx<'static, M>, card_window) as i32,
+        off_reloc_ptr: core::mem::offset_of!(JitCtx<'static, M>, reloc_ptr) as i32,
+        off_dispver_ptr: core::mem::offset_of!(JitCtx<'static, M>, dispver_ptr) as i32,
+        off_direct: core::mem::offset_of!(JitCtx<'static, M>, direct) as i32,
+        off_self_closure: core::mem::offset_of!(JitCtx<'static, M>, self_closure) as i32,
+        off_poll_ptr: core::mem::offset_of!(JitCtx<'static, M>, poll_ptr) as i32,
+        off_tail_pending: core::mem::offset_of!(JitCtx<'static, M>, tail_pending) as i32,
+        off_tail_callee: core::mem::offset_of!(JitCtx<'static, M>, tail_callee) as i32,
+        off_direct_depth: core::mem::offset_of!(JitCtx<'static, M>, direct_depth) as i32,
+        off_rc,
+        off_rt: core::mem::offset_of!(JitCtx<'static, M>, rt) as i32,
+        signal_kind_off: Runtime::<M>::signal_kind_offset() as i32,
+        signal_value_off: Runtime::<M>::signal_value_offset() as i32,
+        ctx_size: core::mem::size_of::<JitCtx<'static, M>>() as u32,
+        loop_header: None,
+        loop_nparams: shape.nparams,
+        vars: Vec::new(),
+        fence_shims: false, // set below once the loop shape is known
+        catch_handlers: Vec::new(),
+        inline_outer_vars: Vec::new(),
+        inline_ctx: Vec::new(),
+        spec,
+        self_var: cranelift_frontend::Variable::from_u32(0), // placeholder; set right below
+        poll_counter: cranelift_frontend::Variable::from_u32(0), // placeholder; set with the loop header
+        rc_val,
+        feedback: shape.feedback,
+        hot_cell: shape.hot_cell,
+        unbox: None,
+        slot_type: Vec::new(),
+        guarded_version: None,
+    };
+
+    // The RUNNING CLOSURE's bits, read ONCE into a tracked variable (Stage
+    // E): its reads are stack-map-declared and the poll sites copy-spill it,
+    // so a collection at any safepoint rewrites the mapped slot and capture
+    // reads (which re-derive the capture base from this) always see the
+    // object's CURRENT address. Top-level bodies carry 0 (no closure — never
+    // a ref under any model, so the collector ignores it).
+    c.self_var = c.declare_root_var();
+    let sc0 = c.load_ctx_field(c.off_self_closure);
+    c.fb.def_var(c.self_var, sc0);
+
+    // SSA mode: every activation slot is a Cranelift variable (register-
+    // allocated). Locals hold tagged value bits and survive moving
+    // collections through TWO routes: any value READ across a real call is
+    // stack-map-declared (the blanket declare in `compile`), and the poll
+    // sites copy-spill every variable explicitly (`emit_poll`). Params come
+    // from the entry's register args (fast entries) or a frame-load prologue
+    // (ctx entries: variadic / >MAX_REG_ARGS); let/catch slots start nil.
+    // Memory mode leaves locals in the heap frame (traced via env
+    // publication).
+    if !shape.mem_mode {
+        for _ in 0..shape.nslots {
+            let var = c.declare_root_var();
+            c.vars.push(var);
+        }
+        let nfixed = shape.nparams + shape.variadic as usize;
+        match shape.entry_arity {
+            Some(k) => {
+                debug_assert_eq!(k, nfixed);
+                for i in 0..k {
+                    c.fb.def_var(c.vars[i], param_vals[i]);
+                }
+            }
+            None => {
+                let base = c.load_ctx_field(c.off_cur_slots);
+                for i in 0..nfixed.min(shape.nslots as usize) {
+                    let v = c.fb.ins().load(I64, MemFlagsData::trusted(), base, (i * 8) as i32);
+                    c.fb.def_var(c.vars[i], v);
+                }
+            }
+        }
+        if (shape.nslots as usize) > nfixed {
+            let nil = c.fb.ins().iconst(I64, M::R::enc_nil() as i64);
+            for i in nfixed..shape.nslots as usize {
+                c.fb.def_var(c.vars[i], nil);
+            }
+        }
+        // Phase 3: parallel type-fact vector. A top-level/first-invoke body knows
+        // nothing about its params' types (all `None`); facts arrive only when
+        // this body is spliced as an inlinee behind a type-pinning guard.
+        c.slot_type = vec![None; shape.nslots as usize];
+    }
+
+    // ENTRY SAFEPOINT POLL (Stage E): with the locals in place, check the poll
+    // word; a pending request/pressure takes the cold shim (a call — the live
+    // declared values get a stack map there). This is what bounds a native
+    // thread's time-to-park.
+    c.emit_poll();
+
+    // ADAPTIVE TIER: count this invocation. Once a body crosses `REOPT_THRESHOLD`
+    // it recompiles itself with type feedback (dispatch-site speculation). Placed
+    // in the entry block (before the loop header) so it fires once per CALL, not
+    // per loop iteration. `emit_hotness_bump` is a no-op unless a counter was
+    // armed (`compiled_body` / `reoptimize`).
+    c.emit_hotness_bump(1);
+
+    // UNTAGGED LOOP CARRY (Phase 2): a PURE-ARITHMETIC self-tail loop whose
+    // params are fixnums carries them in raw registers instead of tagged,
+    // stack-mapped words — killing the per-iteration untag/retag AND the spill
+    // that stack-mapping forces (the measured raw-loop cost). It compiles the
+    // body as a guarded pair of arms (see `build_unboxed_loop`), so it emits
+    // its own returns; nothing more to do here. `nslots == nparams` keeps the
+    // deopt simple (no let/catch slots to reconcile between the arms); the
+    // model must have immediate ints (NaN-boxing has none, so it never applies).
+    let unbox_mask = if !shape.mem_mode
+        && shape.tail_root
+        && !shape.variadic
+        && shape.nparams > 0
+        && shape.nslots as usize == shape.nparams
+        && has_tail_call(ir)
+        && M::R::is_immediate(crate::value::Cat::Int)
+        && std::env::var_os("MICROLANG_NO_UNBOX").is_none()
+    {
+        loop_unboxable(ir, shape.nparams)
+    } else {
+        vec![false; shape.nparams]
+    };
+    if unbox_mask.iter().any(|&b| b) {
+        c.build_unboxed_loop::<M>(ir, shape.nparams, shape.tail_root, unbox_mask);
+        return;
+    }
+
+    // A self-tail-recursive SSA body gets a loop header: a tail call to the same
+    // closure redefines the param variables in place and branches here (an
+    // O(1)-stack native loop in REGISTERS), with the shim/trampoline as the
+    // fallback for any other tail call. Its back-edge polls are COARSENED
+    // through a countdown (see `BACKEDGE_POLL_INTERVAL`), seeded here.
+    if !shape.mem_mode && shape.tail_root && !shape.variadic && has_tail_call(ir) {
+        c.fence_shims = body_pure_loop(ir, true);
+        c.poll_counter = c.fb.declare_var(I64); // untagged: NOT stack-mapped
+        let n = c.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        c.fb.def_var(c.poll_counter, n);
+        let header = c.fb.create_block();
+        c.fb.ins().jump(header, &[]);
+        c.fb.switch_to_block(header);
+        c.loop_header = Some(header);
+    }
+    // The whole body is in TAIL position: a tail call in it either loops (self) or
+    // trampolines (`shim_tail_call`). `compile` threads that through if / do.
+    let result = c.compile::<M>(ir, shape.tail_root);
+    c.fb.ins().return_(&[result]);
+    if let Some(h) = c.loop_header {
+        c.fb.seal_block(h);
+    }
+    // `finalize` consumes the owned `FunctionBuilder`; the caller does it after
+    // this returns, since we only hold a `&mut` here.
+}
+
+pub struct Compiler<'a, 'b> {
+    fb: &'a mut FunctionBuilder<'b>,
+    refs: ShimRefs,
+    ctx_val: Value,
+    /// Imported `fn(ctx, a0..a{k-1}) -> u64` signatures for native fast calls,
+    /// built lazily per arity.
+    entry_sigs: HashMap<usize, cranelift_codegen::ir::SigRef>,
+    /// The runtime at COMPILE time (type-erased; may be null when unavailable,
+    /// e.g. `dump_ir`) — the var-guarded speculative inliner resolves `Global`
+    /// callees through it.
+    rt_ptr: *const (),
+    /// The owning backend at COMPILE time (type-erased `*const JitCranelift<M>`,
+    /// never null) — `Ir::Lambda`/`Ir::Dispatch` sites size + bake addresses
+    /// into its reserved `template_code` / `dispatch_ic` tables.
+    jit_ptr: *const (),
+    /// Remaining inlined-node allowance for THIS body (bounds code growth and
+    /// terminates recursive inlining).
+    inline_budget: Cell<usize>,
+    /// Per-callee node cap for speculative inlining INTO this body. Normally
+    /// `INLINE_MAX_CALLEE_NODES`, but a SMALL caller body (a thin wrapper such
+    /// as a `reduce` rf `(fn [a x] (+ a (classify x)))`) raises it so the one
+    /// larger callee it forwards to (`classify`) folds in — killing a whole
+    /// per-element call layer — without letting big callers bloat. The total
+    /// budget still bounds growth.
+    inline_max_callee: usize,
+    /// Locals live in the heap frame (via `cur_slots`) instead of SSA variables.
+    mem_mode: bool,
+    off_cur_slots: i32,
+    off_consts_base: i32,
+    off_global_base: i32,
+    off_alloc_window: i32,
+    off_card_window: i32,
+    off_reloc_ptr: i32,
+    off_dispver_ptr: i32,
+    off_direct: i32,
+    off_self_closure: i32,
+    off_poll_ptr: i32,
+    off_tail_pending: i32,
+    off_tail_callee: i32,
+    off_direct_depth: i32,
+    off_rc: i32,
+    /// Offset of the `rt` pointer within `JitCtx`, and of the throw/escape flag
+    /// (`signal.kind`) within `Runtime` — for the per-call pending check.
+    off_rt: i32,
+    signal_kind_off: i32,
+    signal_value_off: i32,
+    ctx_size: u32,
+    /// The run-context pointer, loaded once at entry; shared-field reads use it.
+    rc_val: Value,
+    /// For a self-tail-recursive SSA body: the block to branch back to on a tail
+    /// call to the same closure (an in-place native register loop). `None`
+    /// disables the self-loop (tail calls then use the shim/trampoline).
+    loop_header: Option<cranelift_codegen::ir::Block>,
+    loop_nparams: usize,
+    /// SSA mode: one variable per activation slot (params first). Empty in
+    /// memory mode. Rooted via the blanket read-declares + poll copy-spills.
+    vars: Vec<cranelift_frontend::Variable>,
+    /// FENCE non-parking shim calls (`call_shim_fenced` actually fences only
+    /// when set): true for pure self-loop bodies, whose variables then never
+    /// cross an unfenced call and stay in registers. See `body_pure_loop`.
+    fence_shims: bool,
+    /// Innermost INLINED `try`'s handler block, if any. A pending signal inside
+    /// the body branches HERE instead of returning out of the compiled body —
+    /// which is what lets the try be straight-line code rather than a separate
+    /// body reached through a shim + trampoline.
+    catch_handlers: Vec<Block>,
+    /// The ENCLOSING frames' variables while a speculative inline is being
+    /// spliced (`emit_inlined_body` swaps `vars`): `spill_roots` must keep
+    /// copy-spilling the outer locals around calls inside the inlined region,
+    /// or a collection under an inlined deopt call would miss them.
+    inline_outer_vars: Vec<Vec<cranelift_frontend::Variable>>,
+    /// Stage G2 — one entry per active inline level: the guarded callee VALUE
+    /// (`Ir::Capture` inside the inlined body reads THROUGH it — a live,
+    /// stack-mapped SSA value, so capture reads always see the post-move
+    /// object) and the plan-time capture snapshot (drives NESTED value plans;
+    /// never emitted). The legacy capture-free global inliner pushes `None`s.
+    inline_ctx: Vec<(Option<Value>, Option<Vec<u64>>)>,
+    /// Stage G2 — the values the triggering invoke observed (args + the
+    /// invoked closure's captures), when this body's first compile happened
+    /// under a real call. `None` for top-level/eval bodies.
+    spec: Option<SpecEnv>,
+    /// The running closure's bits, loaded once at entry (stack-mapped): the
+    /// self-tail-call compare and every capture read go through this, so both
+    /// see the closure's CURRENT address after any safepoint (Stage E).
+    self_var: cranelift_frontend::Variable,
+    /// The back-edge poll COUNTDOWN (self-loop bodies only): the loop checks
+    /// the poll word every `BACKEDGE_POLL_INTERVAL` iterations instead of
+    /// every iteration — one register decrement + branch on the hot path.
+    /// An untagged integer: deliberately NOT stack-mapped.
+    poll_counter: cranelift_frontend::Variable,
+    /// Adaptive tier: `true` when compiling a feedback-driven RECOMPILE, so
+    /// dispatch sites consult the `FeedbackTable` and speculate on their
+    /// dominant receiver type. `false` on a first-invoke compile.
+    feedback: bool,
+    /// Adaptive tier: this body's leaked hotness counter address (baked into the
+    /// prologue + back-edge bumps), or `null` for a body that is never reopted.
+    hot_cell: *const u32,
+    /// UNTAGGED LOOP CARRY (Phase 2). While compiling the UNBOXED arm of a
+    /// self-tail loop, this is `Some`: the loop's params are carried in
+    /// `raw_vars` as bare signed i64s (NOT stack-mapped — an int is never a GC
+    /// root, which is the whole reason this is sound across the back-edge poll),
+    /// so a pure-arithmetic loop keeps its counters in registers with no
+    /// per-iteration untag/retag and no spill/reload. Reads that ESCAPE (return,
+    /// call/dispatch arg, heap store) retag on demand; arithmetic reads take the
+    /// raw value straight (`compile_int`). An overflow or a non-fixnum recur arg
+    /// DEOPTS to `unbox_deopt`'s generic (tagged, stack-mapped) loop, which
+    /// re-runs the iteration with the promoting numeric tower. `None` = the
+    /// ordinary tagged codegen (the generic arm, and every non-loop body).
+    unbox: Option<UnboxLoop>,
+    /// Phase 3 — SSA TYPE FACTS. `slot_type[i]` is the receiver TYPE SYM
+    /// (`type_tag`) PROVEN to inhabit activation slot `i` here, or `None`
+    /// (unknown). Facts are seeded when an inlined region's entry guard pins a
+    /// param's type (a dispatch-speculation guard proves the receiver is its
+    /// dominant type) and propagate through nested inlines (a proven-typed arg
+    /// seeds the callee param). They let `(type-of x)` / `(%num-eq (type-of x)
+    /// 'T)` fold to constants at compile time — collapsing the hand-written
+    /// type-dispatch `cond`s in core.clj into straight-line prim calls — and let
+    /// a nested `Dispatch` on a proven-typed value resolve at compile time (see
+    /// `guarded_version`). Parallel to `vars`; saved/restored across inline
+    /// levels. SSA mode only (memory-mode locals are frame slots, never facted).
+    slot_type: Vec<Option<Sym>>,
+    /// Phase 3 — while compiling INSIDE a dispatch-speculation guarded region,
+    /// the dispatch VERSION that region's entry guard baked. `Some(v)` means the
+    /// enclosing guard already proved `type_tag(recv) == dom_ty && version == v`,
+    /// so a nested `Dispatch` on a value of a compile-time-KNOWN type (via
+    /// `slot_type`) can be resolved NOW and spliced with NO guard of its own: the
+    /// enclosing version check deopts the ENTIRE region the instant ANY method is
+    /// (re)defined (`dispatch_version` is global and monotone), so the baked
+    /// resolution can never be stale while this region runs. `None` at top level
+    /// and in first-invoke compiles — where no such guard dominates, so a nested
+    /// dispatch must keep its runtime IC/guard.
+    guarded_version: Option<u64>,
+}
+
+/// The live state of the unboxed self-tail loop arm (see `Compiler::unbox`).
+struct UnboxLoop {
+    /// Per param slot: is this one carried UNTAGGED? A `loop` desugars to a
+    /// self-parameterized fn `(fn [g i acc] … (g g i' acc'))` — param 0 is the
+    /// loop fn `g` itself (a REF, the recur callee), never a fixnum — so only
+    /// the numeric params (used arithmetically, never as the callee) are
+    /// unboxed; `g` stays tagged in `gen_vars`. Getting this wrong (unboxing
+    /// `g`) makes the entry guard test a ref for fixnum-ness and the whole
+    /// unboxed arm becomes dead — the bug this mask exists to prevent.
+    unbox: Vec<bool>,
+    /// Per param slot: the raw (untagged, signed-i64, NOT stack-mapped)
+    /// Cranelift variable holding the counter — valid only where `unbox[i]`.
+    raw_vars: Vec<cranelift_frontend::Variable>,
+    /// The GENERIC arm's loop header and its tagged, stack-mapped param vars
+    /// (the same `Compiler::vars`, which also carry the non-unboxed params like
+    /// `g` in BOTH arms). A deopt retags every unboxed counter into `gen_vars`
+    /// and branches here, so the generic body restarts THIS iteration under the
+    /// full numeric tower.
+    deopt_header: cranelift_codegen::ir::Block,
+    gen_vars: Vec<cranelift_frontend::Variable>,
+}
+
+/// Self-tail back-edges poll every N iterations. Time-to-safepoint for a
+/// native loop is bounded by N iterations of straight-line arithmetic
+/// (microseconds); entry polls still fire on EVERY call, so recursion and
+/// call-heavy loops park immediately. 1024 makes the per-iteration cost one
+/// dec+brif (~amortized nothing) while keeping gc-stress collections dense.
+const BACKEDGE_POLL_INTERVAL: i64 = 1024;
+
+impl<'a, 'b> Compiler<'a, 'b> {
+    /// A PARKING shim call (invoke/dispatch/apply/try/await/gc/poll targets —
+    /// anywhere a collection can actually happen): plain. The variables'
+    /// values live across it are stack-mapped by Cranelift's own
+    /// declare-based spilling (`declare_root_var`), with precise liveness.
+    fn call_shim(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        let inst = self.fb.ins().call(f, args);
+        self.fb.inst_results(inst)[0]
+    }
+
+    /// A NON-PARKING shim call, FENCED (Stage E): `rt.prim` and the other
+    /// pure-runtime shims can never reach a safepoint (no `top`, no park), so
+    /// no value can move across them — but Cranelift cannot know that, and a
+    /// declared value live across ANY call is demoted to memory for its whole
+    /// life. The fence: copy every local + the self bits into fresh values
+    /// before the call and REDEFINE the variables after, so the hot values'
+    /// live ranges END here — a tight loop whose only in-body calls are
+    /// fenced (arithmetic slow paths, the safepoint poll's cold shim) keeps
+    /// its variables in registers. The copies are themselves var-bound (and
+    /// so mapped), which also makes fencing SOUND even at the one fenced
+    /// target that does park: the poll's `shim_safepoint`.
+    fn call_shim_fenced(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        if !self.fence_shims {
+            return self.call_shim(f, args);
+        }
+        let (roots, copies) = self.spill_roots();
+        let inst = self.fb.ins().call(f, args);
+        let r = self.fb.inst_results(inst)[0];
+        self.reload_roots(&roots, &copies);
+        r
+    }
+
+    /// Fenced + the pending-signal check (the fenced counterpart of
+    /// `call_shim_checked`).
+    fn call_shim_fenced_checked(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        let result = self.call_shim_fenced(f, args);
+        self.emit_pending_check(result)
+    }
+
+    /// The pre-call half of the root discipline: copy every variable-held
+    /// root into a fresh, declared SSA value (a real instruction, so the
+    /// safepoint pass can demote the copy in isolation).
+    fn spill_roots(&mut self) -> (Vec<cranelift_frontend::Variable>, Vec<Value>) {
+        // In the UNBOXED loop arm the UNBOXED counters live in `raw_vars` —
+        // untagged ints, never GC roots — so they need no spilling at a
+        // safepoint, which is what keeps them in registers. The NON-unboxed
+        // params (the self-ref `g`, any ref counter) DO carry heap refs and
+        // must still be rooted, so those `vars` stay in the set.
+        let mut roots: Vec<cranelift_frontend::Variable> = match &self.unbox {
+            Some(ub) => (0..self.vars.len())
+                .filter(|&i| i >= ub.unbox.len() || !ub.unbox[i])
+                .map(|i| self.vars[i])
+                .collect(),
+            None => self.vars.clone(),
+        };
+        for outer in &self.inline_outer_vars {
+            roots.extend_from_slice(outer);
+        }
+        roots.push(self.self_var);
+        let mut copies = Vec::with_capacity(roots.len());
+        for var in &roots {
+            let x = self.fb.use_var(*var);
+            let x2 = self.fb.ins().iadd_imm(x, 0);
+            self.fb.declare_value_needs_stack_map(x2);
+            copies.push(x2);
+        }
+        (roots, copies)
+    }
+
+    /// The post-call half: the variables take the (possibly relocated)
+    /// values back from the mapped copies.
+    fn reload_roots(&mut self, roots: &[cranelift_frontend::Variable], copies: &[Value]) {
+        for (var, x2) in roots.iter().zip(copies) {
+            self.fb.def_var(*var, *x2);
+        }
+    }
+
+    /// Declare an I64 variable whose bindings carry TAGGED VALUE BITS, marked
+    /// for the stack maps: any of its values live across a PARKING call (a
+    /// real invoke, where a collection can happen) is spilled with a map
+    /// entry, rewritten by a moving collection, and reloaded — with
+    /// Cranelift-precise liveness, so call-dense code pays only for what is
+    /// actually live. The demotion this implies is kept OFF the hot loops by
+    /// FENCING every non-parking call (`call_shim_fenced`): a value whose
+    /// only crossings are fenced never demotes.
+    fn declare_root_var(&mut self) -> cranelift_frontend::Variable {
+        let var = self.fb.declare_var(I64);
+        self.fb.declare_var_needs_stack_map(var);
+        var
+    }
+
+    /// Create a block already marked COLD — a guard's slow / deopt / re-box
+    /// target (type-guard miss, bounds-check fail, overflow→promote, dispatch
+    /// IC miss). Cranelift lays cold blocks out-of-line, so the fast path
+    /// stays straight-line fallthrough instead of paying an unconditional `b`
+    /// per hot block to jump OVER the inlined slow code. Measured: the raw-loop
+    /// body's slow paths were interleaved with its hot blocks (`bench.sh`
+    /// dump), forcing ~13 taken branches/iter where the layout needs far fewer.
+    /// (This is a pure LAYOUT hint — always correct regardless of which edge is
+    /// actually hot — so it can never change results, only code placement.)
+    fn cold_block(&mut self) -> Block {
+        let b = self.fb.create_block();
+        self.fb.set_cold_block(b);
+        b
+    }
+
+    /// The SAFEPOINT POLL (Stage E): one load of the heap's poll byte and a
+    /// branch to a cold `shim_safepoint` call when it is nonzero (a sibling
+    /// requested a collection, or allocation pressure crossed the threshold).
+    /// Emitted at body entry and (countdown-coarsened) at every self-tail
+    /// back-edge, which bounds a native loop's time-to-park. Rooting comes
+    /// from `call_shim`'s copy-spill discipline.
+    fn emit_poll(&mut self) {
+        let pp = self.load_rc_field(self.off_poll_ptr);
+        let b = self.fb.ins().load(I8, MemFlagsData::trusted(), pp, 0);
+        let cold = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(cold);
+        self.fb.ins().brif(b, cold, &[], cont, &[]);
+        self.fb.switch_to_block(cold);
+        self.fb.seal_block(cold);
+        let ctx = self.ctx_val;
+        self.call_shim_fenced(self.refs.safepoint, &[ctx]);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// The COARSENED self-loop back-edge poll: decrement the (untagged,
+    /// unmapped) countdown; only every `BACKEDGE_POLL_INTERVAL`-th iteration
+    /// checks the poll word (and reseeds the countdown). Hot path = one
+    /// dec + one branch — this is what keeps a tight arithmetic loop at
+    /// its pre-Stage-E speed while still bounding time-to-safepoint.
+    fn emit_backedge_poll(&mut self) {
+        let c = self.fb.use_var(self.poll_counter);
+        let c1 = self.fb.ins().iadd_imm(c, -1);
+        self.fb.def_var(self.poll_counter, c1);
+        let cold = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(cold);
+        // nonzero countdown → skip the poll entirely.
+        self.fb.ins().brif(c1, cont, &[], cold, &[]);
+        self.fb.switch_to_block(cold);
+        self.fb.seal_block(cold);
+        let n = self.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        self.fb.def_var(self.poll_counter, n);
+        self.emit_poll();
+        // Adaptive tier: a body hot through a LONG self-loop (rather than many
+        // calls) arms here too — each coarsened poll is worth `LOOP_POLL_WEIGHT`
+        // toward the hotness threshold. Costs nothing on the hot loop path (this
+        // is the already-cold once-per-`BACKEDGE_POLL_INTERVAL` block).
+        self.emit_hotness_bump(LOOP_POLL_WEIGHT);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// Adaptive tier: bump this body's hotness counter by `weight` and, when it
+    /// crosses `REOPT_THRESHOLD`, take the cold edge that recompiles it with
+    /// type feedback (`shim_reopt`, which also re-arms the counter). A plain
+    /// non-atomic load/add/store — cross-thread races only cost an approximate
+    /// count, never correctness, since ROUTING never depends on the exact value.
+    /// No-op for bodies with no counter (top-level forms / `try` arms / dump_ir).
+    fn emit_hotness_bump(&mut self, weight: u32) {
+        if self.hot_cell.is_null() {
+            return;
+        }
+        let flags = MemFlagsData::trusted();
+        let cellp = self.iconst(self.hot_cell as u64);
+        let cnt = self.fb.ins().load(cranelift_codegen::ir::types::I32, flags, cellp, 0);
+        let cnt1 = self.fb.ins().iadd_imm(cnt, weight as i64);
+        self.fb.ins().store(flags, cnt1, cellp, 0);
+        let hot = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.set_cold_block(hot);
+        let armed =
+            self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, cnt1, REOPT_THRESHOLD as i64);
+        self.fb.ins().brif(armed, hot, &[], cont, &[]);
+        self.fb.switch_to_block(hot);
+        self.fb.seal_block(hot);
+        // `shim_reopt` never allocates or reaches a safepoint (Cranelift compile
+        // only), so this call needs no stack map — nothing can move across it.
+        let ctx = self.ctx_val;
+        self.fb.ins().call(self.refs.reopt, &[ctx, cellp]);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// After an operation that can raise a `throw`/escape, check the runtime's
+    /// `signal.kind` flag and RETURN early (propagating the pending signal up) if
+    /// set. The dummy `result` flows out; whoever eventually checks `pending()` (a
+    /// `Try`, or the frontend top level) handles it. Same design as the TreeWalk
+    /// `if rt.pending() { return v }` after every sub-eval — a plain load + branch.
+    fn emit_pending_check(&mut self, result: Value) -> Value {
+        let rt_ptr = self.load_rc_field(self.off_rt);
+        let kind = self.fb.ins().load(
+            cranelift_codegen::ir::types::I8,
+            MemFlagsData::trusted(),
+            rt_ptr,
+            self.signal_kind_off,
+        );
+        let cont_b = self.fb.create_block();
+        // Inside an INLINED `try`, a pending signal is that try's business: branch
+        // to its handler rather than returning out of the whole body. Outside one,
+        // return early and let whoever checks `pending()` deal with it.
+        match self.catch_handlers.last().copied() {
+            Some(h) => {
+                self.fb.ins().brif(kind, h, &[], cont_b, &[]);
+            }
+            None => {
+                let ret_b = self.fb.create_block();
+                // `result` is computed in the current (dominating) block, so it is
+                // live in both successors — no block params needed.
+                self.fb.ins().brif(kind, ret_b, &[], cont_b, &[]);
+                self.fb.switch_to_block(ret_b);
+                self.fb.seal_block(ret_b);
+                self.fb.ins().return_(&[result]);
+            }
+        }
+        self.fb.switch_to_block(cont_b);
+        self.fb.seal_block(cont_b);
+        result
+    }
+
+    /// A shim call that can raise, with the pending check emitted after it.
+    fn call_shim_checked(&mut self, f: cranelift_codegen::ir::FuncRef, args: &[Value]) -> Value {
+        let result = self.call_shim(f, args);
+        self.emit_pending_check(result)
+    }
+
+    fn iconst(&mut self, v: u64) -> Value {
+        self.fb.ins().iconst(I64, v as i64)
+    }
+
+    fn i32const(&mut self, v: u32) -> Value {
+        self.fb.ins().iconst(cranelift_codegen::ir::types::I32, v as i64)
+    }
+
+    /// Load a pointer-sized field of the `JitCtx` at a stable offset.
+    fn load_ctx_field(&mut self, offset: i32) -> Value {
+        self.fb.ins().load(I64, MemFlagsData::trusted(), self.ctx_val, offset)
+    }
+
+    /// Load a SHARED field at `offset` through the run-context pointer (loaded once
+    /// at entry). Same cost as a direct ctx read, but the per-call context need not
+    /// carry the field. Marked `readonly`: these fields are fixed for the whole run,
+    /// so Cranelift can hoist them out of loops.
+    fn load_rc_field(&mut self, offset: i32) -> Value {
+        self.fb.ins().load(I64, MemFlagsData::trusted().with_readonly(), self.rc_val, offset)
+    }
+
+    /// Inline read of an innermost-frame (`up == 0`) local: the compiled analogue
+    /// of `frame_get(.., 0, idx)`, two loads and no call. The slot base is cached
+    /// in `JitCtx::cur_slots` (a `*const u64` over the frame's `Cell<u64>` array).
+    fn emit_local0_load(&mut self, idx: u16) -> Value {
+        let base = self.load_ctx_field(self.off_cur_slots);
+        self.fb.ins().load(I64, MemFlagsData::trusted(), base, (idx as i32) * 8)
+    }
+
+    fn emit_local0_store(&mut self, idx: u16, v: Value) {
+        let base = self.load_ctx_field(self.off_cur_slots);
+        self.fb.ins().store(MemFlagsData::trusted(), v, base, (idx as i32) * 8);
+    }
+
+    /// Read capture `idx` of the RUNNING closure: mask the stack-mapped self
+    /// bits to the object's current address, load the inline capture word
+    /// (Stage E — the derived pointer never crosses a safepoint; it is built
+    /// and consumed within this straight-line sequence).
+    ///
+    /// Inside a value-observed inline (Stage G2), "the running closure" is the
+    /// GUARDED CALLEE, not this function — read through the inline level's
+    /// self value instead (also live + stack-mapped, so also post-move-safe).
+    fn emit_capture<M: ModelArithJit>(&mut self, idx: u16) -> Value {
+        let sc = match self.inline_ctx.last() {
+            Some((Some(v), _)) => *v,
+            Some((None, _)) => panic!(
+                "emit_capture inside a capture-free inline: the global inliner \
+                 rejects capture-carrying callees, so this body cannot contain \
+                 Ir::Capture — planner bug"
+            ),
+            None => {
+                let sc = self.fb.use_var(self.self_var);
+                // Not a `compile()` result, so the blanket declare misses it:
+                // mark the self bits here so a read AFTER a real call is in
+                // that call's map.
+                self.fb.declare_value_needs_stack_map(sc);
+                sc
+            }
+        };
+        let base = M::emit_ref_addr_unchecked(self, sc);
+        let off = (CLOSURE_CAPS_OFF as i32) + (idx as i32) * 8;
+        self.fb.ins().load(I64, MemFlagsData::trusted(), base, off)
+    }
+
+    /// Inline bump allocation through the heap's `AllocWindow` (D5): claim
+    /// `size` bytes (a compile-time constant, 8-aligned) with one atomic
+    /// fetch_add on the active space's cursor and write the header word.
+    /// Branches to `slow` when the window is CLOSED (`limit == 0` — gc-stress
+    /// mode) or the claim exceeds the limit; the shim slow path owns the
+    /// loud-exhaustion panic, so falling through preserves it. An overshooting
+    /// claim is NOT undone: `heap.rs` clamps `used()` to the space, so the
+    /// dead partial claim is harmless (same discipline as the CAS-free plan in
+    /// the AllocWindow docs). Allocation NEVER collects (explicit-GC-only
+    /// runtime), so no safepoint is needed here. Returns the object's raw
+    /// ADDRESS in a fresh, sealed block; the claimed memory is zeroed (bump
+    /// spaces are re-zeroed on reset), so untouched fields read as zero.
+    fn emit_alloc(&mut self, size: i64, header: u64, slow: cranelift_codegen::ir::Block) -> Value {
+        debug_assert_eq!(size & 7, 0, "inline alloc size must be 8-aligned");
+        let flags = MemFlagsData::trusted();
+        let win = self.load_rc_field(self.off_alloc_window);
+        let limit = self.fb.ins().load(I64, flags, win, 16);
+        let openb = self.fb.create_block();
+        let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, limit, 0);
+        self.fb.ins().brif(nz, openb, &[], slow, &[]);
+        self.fb.switch_to_block(openb);
+        self.fb.seal_block(openb);
+        let cursor_ptr = self.fb.ins().load(I64, flags, win, 0);
+        let sz = self.fb.ins().iconst(I64, size);
+        let old = self.fb.ins().atomic_rmw(I64, flags, AtomicRmwOp::Add, cursor_ptr, sz);
+        let end = self.fb.ins().iadd_imm(old, size);
+        let fits = self.fb.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, limit);
+        let okb = self.fb.create_block();
+        self.fb.ins().brif(fits, okb, &[], slow, &[]);
+        self.fb.switch_to_block(okb);
+        self.fb.seal_block(okb);
+        let base = self.fb.ins().load(I64, flags, win, 8);
+        let addr = self.fb.ins().iadd(base, old);
+        let hv = self.iconst(header);
+        self.fb.ins().store(flags, hv, addr, 0);
+        addr
+    }
+
+    /// THE INLINE WRITE BARRIER (I3) — `CardTable::mark` emitted straight-line:
+    /// dirty the card holding `obj_addr`, an OBJECT BASE, if it is old at all.
+    ///
+    /// Call this on any emitted store of a heap word into an object that might
+    /// be OLD. NOT on a freshly allocated object's initializing stores: it is
+    /// nursery by construction, so those are young→anything, and keeping the
+    /// D5 inline `%cons`/closure sequences barrier-free is the entire point of
+    /// the generational design — do not "play it safe" and add one there.
+    ///
+    /// `obj_addr` must be the object BASE, not the field address. That is what
+    /// makes the dirty-card scan tractable: a dirty card then always has an
+    /// object starting in it, and `starts` needs one entry per card (heap.rs
+    /// panics on a dirty card with no start rather than skipping it).
+    ///
+    /// ONE unsigned compare does both bounds — a nursery address wraps
+    /// `addr - old_base` to a huge offset and fails `< old_size` — so there is
+    /// no generation test and no second branch. The three inputs are re-read
+    /// per mark because `base` follows the old gen's major flip; they are the
+    /// same `CardWindow` words the Rust barrier loads, so the two cannot drift.
+    fn emit_card_mark(&mut self, obj_addr: Value) {
+        let flags = MemFlagsData::trusted();
+        let cw = self.load_rc_field(self.off_card_window);
+        let base = self.fb.ins().load(I64, flags, cw, 0);
+        let size = self.fb.ins().load(I64, flags, cw, 8);
+        let cards = self.fb.ins().load(I64, flags, cw, 16);
+        let off = self.fb.ins().isub(obj_addr, base);
+        let is_old = self.fb.ins().icmp(IntCC::UnsignedLessThan, off, size);
+        let markb = self.fb.create_block();
+        let contb = self.fb.create_block();
+        self.fb.ins().brif(is_old, markb, &[], contb, &[]);
+        self.fb.switch_to_block(markb);
+        self.fb.seal_block(markb);
+        let ci = self.fb.ins().ushr_imm(off, crate::heap::CARD_SHIFT as i64);
+        let slot = self.fb.ins().iadd(cards, ci);
+        // ONE relaxed byte store, idempotent — concurrent same-value marks are
+        // benign and visibility comes from the STW safepoint, not from a fence
+        // here. (`Vec<AtomicU8>` has `Vec<u8>`'s layout, which is what makes a
+        // raw byte store into it valid; heap.rs pins that property.)
+        let dirty = self.fb.ins().iconst(I8, crate::heap::CARD_DIRTY as i64);
+        self.fb.ins().store(flags, dirty, slot, 0);
+        self.fb.ins().jump(contb, &[]);
+        self.fb.switch_to_block(contb);
+        self.fb.seal_block(contb);
+    }
+
+    /// Inline type guard (D5): `v` is a ref whose header `type_id == want`.
+    /// Branches to `slow` otherwise; returns `(addr, header)` in a fresh,
+    /// sealed continuation block. The header read doubles as the aux source
+    /// (array lengths, capture counts) for the caller.
+    fn emit_typed_addr<M: ModelArithJit>(
+        &mut self,
+        v: Value,
+        want: u16,
+        slow: cranelift_codegen::ir::Block,
+    ) -> (Value, Value) {
+        let (is_ref, addr) = M::emit_ref_addr(self, v);
+        let chk = self.fb.create_block();
+        self.fb.ins().brif(is_ref, chk, &[], slow, &[]);
+        self.fb.switch_to_block(chk);
+        self.fb.seal_block(chk);
+        let hdr = self.fb.ins().load(I64, MemFlagsData::trusted(), addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        let ok = self.fb.ins().icmp_imm(IntCC::Equal, tid, want as i64);
+        let okb = self.fb.create_block();
+        self.fb.ins().brif(ok, okb, &[], slow, &[]);
+        self.fb.switch_to_block(okb);
+        self.fb.seal_block(okb);
+        (addr, hdr)
+    }
+
+    /// The (stable) address of `template_code[tid]`, sizing the reserved table
+    /// so the slot exists. Baked as an immediate by `Ir::Lambda` sites — the
+    /// creation-time code stamp is one load through it.
+    fn template_code_slot<M: ModelArithJit>(&self, tid: u32) -> *const *const u8 {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut tc = jit.template_code.borrow_mut();
+        if tc.len() <= tid as usize {
+            assert!(
+                (tid as usize) < TEMPLATE_CODE_CAP,
+                "template_code overflow: template id {tid} exceeds TEMPLATE_CODE_CAP — raise it"
+            );
+            tc.resize(tid as usize + 1, std::ptr::null());
+        }
+        unsafe { tc.as_ptr().add(tid as usize) }
+    }
+
+    /// The (stable) address of dispatch site `site`'s 2-way IC, sizing the
+    /// reserved table so the slot exists. Baked as an immediate by
+    /// `Ir::Dispatch` sites; `shim_dispatch` fills the ways on the slow path.
+    fn instance_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut ics = jit.instance_ic.borrow_mut();
+        if ics.len() <= site {
+            assert!(site < DISPATCH_SITE_CAP, "instance_ic overflow at site {site}");
+            ics.resize(site + 1, [DISPATCH_IC_EMPTY; INSTANCE_IC_WAYS]);
+        }
+        ics[site].as_ptr()
+    }
+
+    fn dispatch_ic_slot<M: ModelArithJit>(&self, site: usize) -> *const DispatchIcEntry {
+        let jit = unsafe { &*(self.jit_ptr as *const JitCranelift<M>) };
+        let mut ics = jit.dispatch_ic.borrow_mut();
+        if ics.len() <= site {
+            assert!(
+                site < DISPATCH_SITE_CAP,
+                "dispatch_ic overflow: site {site} exceeds DISPATCH_SITE_CAP — raise it"
+            );
+            ics.resize(site + 1, [DISPATCH_IC_EMPTY; DISPATCH_IC_WAYS]);
+        }
+        ics[site].as_ptr()
+    }
+
+    /// Can `(s args…)` be speculatively inlined here? Requires: a compile-time
+    /// resolvable global bound to a NON-variadic, CAPTURE-FREE closure of
+    /// matching arity whose body is SSA-eligible and small, in an SSA-mode
+    /// caller, within budget. Consumes budget on success.
+    fn try_inline_plan<M: ModelArithJit>(&self, s: Sym, argc: usize) -> Option<InlinePlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let bits = rt.global(s)?;
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
+        // See through a multi-arity fn: this call site's arg count statically
+        // selects one fixed clause. The guard still compares the GLOBAL's bits
+        // (the MultiFn), so redefinition deopts as usual.
+        let target = if unsafe { g.type_id() } == kind::MULTIFN {
+            let ObjView::MultiFn { fixed, .. } = rt.view_gc(g) else { unreachable!() };
+            let f = fixed.get(argc).copied().unwrap_or(0);
+            if f == 0 {
+                return None; // variadic / no such arity: not inlinable
+            }
+            f
+        } else {
+            bits
+        };
+        if M::R::tag_of(target) != RawTag::Ref {
+            return None;
+        }
+        let tg = M::R::as_ref(target);
+        if unsafe { tg.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        let (nparams, variadic, nslots, template) = match rt.view_gc(tg) {
+            ObjView::Closure { nparams, variadic, nslots, template, .. } => (nparams, variadic, nslots, template),
+            _ => unreachable!(),
+        };
+        // Capture-free (aux == ncaps == 0), non-variadic, matching arity.
+        if variadic || nparams != argc || unsafe { tg.aux() } != 0 {
+            return None;
+        }
+        let body = rt.template(template).clone();
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        Some(InlinePlan { bits, nparams, nslots, body })
+    }
+
+    /// Stage G2 — the compile-time-OBSERVED value of a callee expression, when
+    /// there is one: a parameter read resolves through the triggering invoke's
+    /// args, a capture read through the invoked closure's captures; inside a
+    /// value-observed inline level, through that level's capture snapshot.
+    /// Observation only — the emitted guard re-validates against the live value.
+    fn spec_value_of(&self, f: &Ir) -> Option<u64> {
+        if self.mem_mode {
+            return None;
+        }
+        match self.inline_ctx.last() {
+            Some((_, caps)) => match f {
+                Ir::Capture(j) => caps.as_ref()?.get(*j as usize).copied(),
+                _ => None, // an inlinee's params/locals: values not observed
+            },
+            None => match f {
+                Ir::Capture(j) => self.spec.as_ref()?.caps.get(*j as usize).copied(),
+                // `args.len() == nparams` (resolve_call only builds the env on an
+                // arity match), so an in-range idx IS a parameter slot.
+                Ir::Local { up: 0, idx } => self.spec.as_ref()?.args.get(*idx as usize).copied(),
+                _ => None,
+            },
+        }
+    }
+
+    /// Stage G2 — can a call of OBSERVED value `bits` at an `argc`-arg site be
+    /// spliced inline? Like `try_inline_plan` but value-driven: multi-arity
+    /// values select their fixed clause, CAPTURE-CARRYING closures are allowed
+    /// (reads go through the guarded live value), and the guard is the clause's
+    /// meta word rather than the value's bits. Consumes budget on success.
+    fn try_value_inline_plan<M: ModelArithJit>(&self, bits: u64, argc: usize) -> Option<ValuePlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        if M::R::tag_of(bits) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(bits);
+        let (target, multifn) = if unsafe { g.type_id() } == kind::MULTIFN {
+            let nfixed = unsafe { g.aux() } as usize;
+            if argc >= nfixed {
+                return None;
+            }
+            let f = unsafe { *(g.0.add(MULTIFN_FIXED_OFF + argc * 8) as *const u64) };
+            if f == 0 {
+                return None; // variadic-only at this arity: not inlinable
+            }
+            (f, true)
+        } else {
+            (bits, false)
+        };
+        if M::R::tag_of(target) != RawTag::Ref {
+            return None;
+        }
+        let tg = M::R::as_ref(target);
+        if unsafe { tg.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        let meta = unsafe { *(tg.0.add(CLOSURE_META_OFF) as *const u64) };
+        if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != argc {
+            return None;
+        }
+        let nslots = crate::heap::meta_nslots(meta);
+        let body = rt.template(crate::heap::meta_template(meta)).clone();
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        let ncaps = unsafe { tg.aux() } as usize;
+        let caps = (0..ncaps)
+            .map(|i| unsafe { *(tg.0.add(CLOSURE_CAPS_OFF + i * 8) as *const u64) })
+            .collect();
+        Some(ValuePlan { meta, multifn, nparams: argc, nslots, body, caps })
+    }
+
+    /// Phase 1 — plan a feedback-driven dispatch-site speculation for a RECOMPILE
+    /// (see `DispatchSpecPlan`). Consults the shared `FeedbackTable`: only when a
+    /// single RECORD receiver type owns >= `SPEC_MIN_FRACTION` of the site's
+    /// recorded dispatches, the site is not blacklisted (too many deopts), and
+    /// the resolved impl is a capture-free, non-variadic, arity-`argc` closure
+    /// whose body fits the inline budget. Consumes budget on success, exactly
+    /// like the value inliner. This is the ONLY new planning SOURCE — the splice
+    /// mechanism (`emit_inlined_body` behind a guard) is the existing one.
+    fn dispatch_spec_plan<M: ModelArithJit>(
+        &self,
+        site: usize,
+        method: Sym,
+        argc: usize,
+    ) -> Option<DispatchSpecPlan> {
+        if !self.feedback || self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let fb = &rt.shared.feedback;
+        let (dom_ty, frac) = fb.dominant_type(site)?;
+        if frac < SPEC_MIN_FRACTION || fb.deopts(site) >= SPEC_DEOPT_BLACKLIST {
+            return None;
+        }
+        // The emitted guard compares the receiver's `type_tag` (`ty`, the probeb
+        // block param) to `dom_ty`. Phase 3 lifts the old RECORD-only restriction
+        // to ANY type the guard's `ty` edge actually produces — records (raw type
+        // word), the host String/Char kinds, and the immediate categories — since
+        // those are precisely the receivers that reach `probeb` with `ty` set.
+        // (A native container kind — Vector/List/… — never reaches `probeb`, so
+        // its guard could only ever deopt; leave those sites generic.)
+        if !self.probeb_guardable::<M>(rt, dom_ty) {
+            return None;
+        }
+        let imp = rt.resolve_or_default(site, method, dom_ty)?;
+        let version = rt.shared.dispatch_version.load(Ordering::Relaxed);
+        self.impl_to_plan::<M>(rt, imp, argc, dom_ty, version)
+    }
+
+    /// Phase 3 — is `ty` a type whose `type_tag` sym the `Ir::Dispatch` guard's
+    /// `ty` block param actually computes (records, host String/Char, and the
+    /// immediate categories)? Only these can be speculated on with the emitted
+    /// `icmp(ty, dom_ty)` guard; anything else never reaches `probeb`.
+    fn probeb_guardable<M: ModelArithJit>(&self, rt: &Runtime<M>, ty: Sym) -> bool {
+        if rt.is_record_type(ty) {
+            return true;
+        }
+        ["String", "Char", "Long", "Double", "Boolean", "nil", "Symbol"]
+            .iter()
+            .any(|n| rt.intern(n) == ty)
+    }
+
+    /// Phase 3 — turn a RESOLVED impl value into an inline plan (capture-free,
+    /// non-variadic, matching arity, SSA-eligible body within budget), consuming
+    /// budget on success. Shared by the feedback speculation (`dispatch_spec_plan`)
+    /// and the compile-time nested resolution (`static_dispatch_plan`) so the
+    /// eligibility rules live in ONE place.
+    fn impl_to_plan<M: ModelArithJit>(
+        &self,
+        rt: &Runtime<M>,
+        imp: u64,
+        argc: usize,
+        dom_ty: Sym,
+        version: u64,
+    ) -> Option<DispatchSpecPlan> {
+        if M::R::tag_of(imp) != RawTag::Ref {
+            return None;
+        }
+        let g = M::R::as_ref(imp);
+        if unsafe { g.type_id() } != kind::CLOSURE {
+            return None;
+        }
+        // Capture-free only: the inlined body reads no captures, so it needs the
+        // live impl value in no register. (A captured impl would need the impl
+        // value threaded in — the enclosing guard doesn't hand it to us.)
+        if unsafe { g.aux() } != 0 {
+            return None;
+        }
+        let meta = unsafe { *(g.0.add(CLOSURE_META_OFF) as *const u64) };
+        if crate::heap::meta_variadic(meta) || crate::heap::meta_nparams(meta) != argc {
+            return None;
+        }
+        let nslots = crate::heap::meta_nslots(meta);
+        let body = rt.template(crate::heap::meta_template(meta)).clone();
+        if body_mem_mode(&body) {
+            return None;
+        }
+        let cost = node_count_capped(&body, self.inline_max_callee)?;
+        let budget = self.inline_budget.get();
+        if budget < cost {
+            return None;
+        }
+        self.inline_budget.set(budget - cost);
+        Some(DispatchSpecPlan { dom_ty, version, nparams: crate::heap::meta_nparams(meta), nslots, body })
+    }
+
+    /// Phase 3 — resolve a nested dispatch AT COMPILE TIME. The caller has PROVEN
+    /// (via `guarded_version` + a `slot_type` fact) that the receiver is `ty` and
+    /// that no method has been redefined since the enclosing region's version
+    /// guard, so `(method, ty)` resolves to a fixed impl that can be spliced with
+    /// NO guard of its own. Unlike `dispatch_spec_plan` this consults NO feedback
+    /// and emits NO guard — the invariant is already established.
+    fn static_dispatch_plan<M: ModelArithJit>(
+        &self,
+        site: usize,
+        method: Sym,
+        ty: Sym,
+        argc: usize,
+    ) -> Option<DispatchSpecPlan> {
+        if self.mem_mode || self.rt_ptr.is_null() {
+            return None;
+        }
+        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+        let imp = rt.resolve_or_default(site, method, ty)?;
+        let version = self.guarded_version?;
+        self.impl_to_plan::<M>(rt, imp, argc, ty, version)
+    }
+
+    /// Splice an inlined callee body into the current function: fresh SSA vars
+    /// for its activation slots (params seeded from the evaluated args, the
+    /// rest nil), compiled in NON-tail position with no self-loop — its own
+    /// tail calls become ordinary calls, which preserves semantics (and one
+    /// inlined level never grows the stack unboundedly).
+    ///
+    /// `self_val`/`caps` (Stage G2): for a value-observed inlinee, the guarded
+    /// callee VALUE its capture reads go through, and the plan-time capture
+    /// snapshot for nested planning. The capture-free global inliner passes
+    /// `None`s.
+    fn emit_inlined_body<M: ModelArithJit>(
+        &mut self,
+        nparams: usize,
+        nslots: u16,
+        body: &Ir,
+        argvals: &[Value],
+        self_val: Option<Value>,
+        caps: Option<Vec<u64>>,
+        arg_types: &[Option<Sym>],
+    ) -> Value {
+        let saved_vars = std::mem::take(&mut self.vars);
+        self.inline_outer_vars.push(saved_vars.clone());
+        self.inline_ctx.push((self_val, caps));
+        let saved_header = self.loop_header.take();
+        let saved_nparams = self.loop_nparams;
+        // Phase 3: swap in a fresh fact vector for the inlinee's own slots,
+        // seeded from any types PROVEN for its actual arguments (a proven-typed
+        // arg carries its fact into the callee param — this is how a receiver
+        // type pinned by a dispatch guard propagates down the inlined call
+        // chain). `guarded_version` is deliberately NOT touched: a nested inline
+        // stays inside whatever version-guarded region encloses this call.
+        let saved_slot_type = std::mem::take(&mut self.slot_type);
+        self.slot_type = vec![None; nslots as usize];
+        for i in 0..nparams {
+            if let Some(t) = arg_types.get(i).copied().flatten() {
+                self.slot_type[i] = Some(t);
+            }
+        }
+        for i in 0..nslots as usize {
+            let var = self.declare_root_var();
+            if i < nparams {
+                self.fb.def_var(var, argvals[i]);
+            } else {
+                let nil = self.fb.ins().iconst(I64, M::R::enc_nil() as i64);
+                self.fb.def_var(var, nil);
+            }
+            self.vars.push(var);
+        }
+        self.loop_nparams = nparams;
+        let v = self.compile::<M>(body, false);
+        self.inline_ctx.pop();
+        self.inline_outer_vars.pop();
+        self.vars = saved_vars;
+        self.slot_type = saved_slot_type;
+        self.loop_header = saved_header;
+        self.loop_nparams = saved_nparams;
+        v
+    }
+
+    /// Phase 3 — the compile-time-PROVEN `type_tag` of expression `ir` at this
+    /// point, or `None`. Currently: a slot read whose fact is set (SSA mode).
+    /// The fact is only ever set behind a guard that established it, so a `Some`
+    /// answer is a genuine invariant, never a guess.
+    fn static_type_of(&self, ir: &Ir) -> Option<Sym> {
+        if self.mem_mode {
+            return None;
+        }
+        match ir {
+            Ir::Local { up: 0, idx } => self.slot_type.get(*idx as usize).copied().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Phase 3 — expression `ir`'s compile-time-known SYMBOL value, if any: a
+    /// `(type-of x)` on a proven-typed `x` folds to that type sym; a quoted /
+    /// constant symbol is itself. Used to constant-fold `(%num-eq (type-of x)
+    /// 'T)` — the exact shape of core.clj's hand-written type-dispatch `cond`s.
+    fn static_sym<M: ModelArithJit>(&self, ir: &Ir) -> Option<Sym> {
+        match ir {
+            Ir::Prim(Prim::TypeOf, args) if args.len() == 1 => self.static_type_of(&args[0]),
+            Ir::Quote(id) | Ir::Const(id) if !self.rt_ptr.is_null() => {
+                let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                let bits = rt.const_bits(*id);
+                if M::R::tag_of(bits) == RawTag::Sym {
+                    Some(M::R::as_sym(bits))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Stage G2 — emit a value-specialized call: the plan's clause body spliced
+    /// inline behind a TEMPLATE guard on the live callee value (`fval`). Guard
+    /// chain (each failure exits to the generic `emit_call` path — never a
+    /// wrong answer): direct + ref, then either header == CLOSURE and meta ==
+    /// plan.meta, or (multifn shape) header == MULTIFN, `fixed[argc]` present,
+    /// and the CLAUSE's meta == plan.meta. Captures inside the inlined body
+    /// read through the guarded value (declared for the stack maps), so a
+    /// collection mid-body is safe.
+    fn emit_value_specialized<M: ModelArithJit>(
+        &mut self,
+        fval: Value,
+        argvals: &[Value],
+        plan: &ValuePlan,
+        arg_types: &[Option<Sym>],
+    ) -> Value {
+        let flags = MemFlagsData::trusted();
+        let ro = MemFlagsData::trusted().with_readonly();
+        let result = self.declare_root_var();
+        let inlb = self.fb.create_block();
+        // The inlined body's capture reads go through the guarded CLAUSE value.
+        self.fb.append_block_param(inlb, I64);
+        let slowb = self.cold_block();
+        let merge = self.fb.create_block();
+
+        let (is_ref, addr) = M::emit_ref_addr(self, fval);
+        let rc = self.rc_val;
+        let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+        let g1 = self.fb.ins().band(is_ref, direct);
+        let hdrb = self.fb.create_block();
+        self.fb.ins().brif(g1, hdrb, &[], slowb, &[]);
+
+        self.fb.switch_to_block(hdrb);
+        self.fb.seal_block(hdrb);
+        let hdr = self.fb.ins().load(I64, flags, addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        if plan.multifn {
+            let mfl = self.fb.create_block();
+            let metab = self.fb.create_block();
+            let is_mf = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::MULTIFN as i64);
+            let aux = self.fb.ins().ushr_imm(hdr, 32);
+            let in_range =
+                self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, aux, plan.nparams as i64);
+            let mf_ok = self.fb.ins().band(is_mf, in_range);
+            self.fb.ins().brif(mf_ok, mfl, &[], slowb, &[]);
+            self.fb.switch_to_block(mfl);
+            self.fb.seal_block(mfl);
+            let clause = self.fb.ins().load(
+                I64,
+                flags,
+                addr,
+                MULTIFN_FIXED_OFF as i32 + (plan.nparams as i32) * 8,
+            );
+            // The clause value feeds capture reads across safepoints inside the
+            // inlined body: declare it so it is spilled + rewritten on a move.
+            self.fb.declare_value_needs_stack_map(clause);
+            let has_clause = self.fb.ins().icmp_imm(IntCC::NotEqual, clause, 0);
+            self.fb.ins().brif(has_clause, metab, &[], slowb, &[]);
+            self.fb.switch_to_block(metab);
+            self.fb.seal_block(metab);
+            let caddr = M::emit_ref_addr_unchecked(self, clause);
+            let cmeta = self.fb.ins().load(I64, flags, caddr, CLOSURE_META_OFF as i32);
+            let want = self.iconst(plan.meta);
+            let meta_ok = self.fb.ins().icmp(IntCC::Equal, cmeta, want);
+            self.fb.ins().brif(meta_ok, inlb, &[clause.into()], slowb, &[]);
+        } else {
+            let metab = self.fb.create_block();
+            let is_cl = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CLOSURE as i64);
+            self.fb.ins().brif(is_cl, metab, &[], slowb, &[]);
+            self.fb.switch_to_block(metab);
+            self.fb.seal_block(metab);
+            let meta = self.fb.ins().load(I64, flags, addr, CLOSURE_META_OFF as i32);
+            let want = self.iconst(plan.meta);
+            let meta_ok = self.fb.ins().icmp(IntCC::Equal, meta, want);
+            self.fb.ins().brif(meta_ok, inlb, &[fval.into()], slowb, &[]);
+        }
+
+        self.fb.switch_to_block(inlb);
+        self.fb.seal_block(inlb);
+        let target = self.fb.block_params(inlb)[0];
+        // A block param is not a `compile()` result: declare it so capture
+        // reads after an inner safepoint see the post-move bits.
+        self.fb.declare_value_needs_stack_map(target);
+        let iv = self.emit_inlined_body::<M>(
+            plan.nparams,
+            plan.nslots,
+            &plan.body,
+            argvals,
+            Some(target),
+            Some(plan.caps.clone()),
+            arg_types,
+        );
+        self.fb.def_var(result, iv);
+        self.fb.ins().jump(merge, &[]);
+
+        // Deopt: the ordinary call path on the SAME live value.
+        self.fb.switch_to_block(slowb);
+        self.fb.seal_block(slowb);
+        let sv = self.emit_call::<M>(fval, argvals);
+        self.fb.def_var(result, sv);
+        self.fb.ins().jump(merge, &[]);
+
+        self.fb.switch_to_block(merge);
+        self.fb.seal_block(merge);
+        self.fb.use_var(result)
+    }
+
+    /// The imported signature for a native fast entry of arity `k`:
+    /// `fn(ctx, a0..a{k-1}) -> u64`.
+    fn entry_sig(&mut self, k: usize) -> cranelift_codegen::ir::SigRef {
+        if let Some(&sig) = self.entry_sigs.get(&k) {
+            return sig;
+        }
+        let mut s = cranelift_codegen::ir::Signature::new(
+            cranelift_codegen::isa::CallConv::SystemV,
+        );
+        s.params.push(AbiParam::new(I64));
+        for _ in 0..k {
+            s.params.push(AbiParam::new(I64));
+        }
+        s.returns.push(AbiParam::new(I64));
+        let sig = self.fb.import_signature(s);
+        self.entry_sigs.insert(k, sig);
+        sig
+    }
+
+    /// A non-tail call. Try the NATIVE fast path — the callee bits ARE its heap
+    /// address (Stage D), so the call site reads the CLOSURE OBJECT directly: a
+    /// tag test, the header's type_id, the meta word's arity + variadic bit, and
+    /// the code word — no side table at all (the object IS the fast-call table;
+    /// see `docs/STAGE_D_MIGRATION.md`'s "Closure object ABI"). On a hit, build a
+    /// minimal 4-store context ON THIS STACK and `call_indirect` with the args in
+    /// registers (no FFI, no `invoke`, no frame). Fall back to the shim path
+    /// (`top.invoke`) for anything ineligible, which is what preserves
+    /// composition: the guard requires `direct` (so a wrapped backend never
+    /// fast-paths) and a compiled, matching-arity, non-variadic closure (so
+    /// continuation / variadic / memory-mode / not-yet-compiled callees, whose
+    /// code word stays 0, go through `top`).
+    fn emit_call<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value]) -> Value {
+        self.emit_call_kind::<M>(callee, argvals, false)
+    }
+
+    /// Emit a NON-self tail call. With Phase 4 enabled this is a guarded DIRECT
+    /// native call (`emit_call_kind(tail=true)`) — skipping the sentinel round
+    /// trip + trampoline callee re-resolution that dominated the real-library
+    /// parser profile (data.json's `-read` dispatch tail-calls). The kill switch
+    /// restores the plain sentinel-token path (Phases 1-3): stash callee+args and
+    /// return, letting the bounce owner resolve and continue.
+    fn emit_nonself_tail<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value]) -> Value {
+        if direct_tail_enabled() {
+            return self.emit_call_kind::<M>(callee, argvals, true);
+        }
+        let ctx = self.ctx_val;
+        let (addr, count) = self.spill_args(argvals);
+        self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count])
+    }
+
+    /// Emit a call, either NON-tail (`tail=false`, the result flows on into the
+    /// body) or as a Phase 4 DIRECT tail call (`tail=true`): the same guarded
+    /// fast path, but the callee is invoked as the body's tail — its value is
+    /// returned, and if the callee itself left a pending tail (`tail_pending`)
+    /// it is PROPAGATED to this frame's ctx rather than bounced here, so the
+    /// chain unwinds to the nearest bounce owner (a non-tail caller or the
+    /// trampoline). Bounded by `direct_depth` (see the field): at the cap the
+    /// fast guard fails and the sentinel slow path takes over, so an unbounded
+    /// mutual tail loop still runs in O(1) native stack.
+    fn emit_call_kind<M: ModelArithJit>(&mut self, callee: Value, argvals: &[Value], tail: bool) -> Value {
+        let n = argvals.len();
+        let ctx = self.ctx_val;
+        let flags = MemFlagsData::trusted();
+        if n > MAX_REG_ARGS {
+            // No register entry exists at this arity — always the shim path. In
+            // tail position that is the sentinel (TCO-preserving) bounce.
+            let (addr, count) = self.spill_args(argvals);
+            if tail {
+                return self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, addr, count]);
+            }
+            let sr = self.call_shim(self.refs.call, &[ctx, callee, addr, count]);
+            return self.emit_pending_check(sr);
+        }
+
+        // guard1 = value is a ref AND direct calls enabled (AND, for a tail
+        // call, the direct-chain depth is under the cap — else fall back to the
+        // sentinel path so the stack stays bounded).
+        let (is_ref, addr) = M::emit_ref_addr(self, callee);
+        let rc = self.rc_val;
+        let ro = MemFlagsData::trusted().with_readonly();
+        let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+        let mut guard1 = self.fb.ins().band(is_ref, direct);
+        // The depth is loaded here (entry block, dominates `fastb`) so the
+        // increment/restore around the direct call can reuse it.
+        let depth = if tail {
+            let d = self.fb.ins().load(cranelift_codegen::ir::types::I32, ro, rc, self.off_direct_depth);
+            let under = self.fb.ins().icmp_imm(IntCC::UnsignedLessThan, d, DIRECT_TAIL_MAX_DEPTH as i64);
+            let underx = self.fb.ins().uextend(I8, under);
+            guard1 = self.fb.ins().band(guard1, underx);
+            Some(d)
+        } else {
+            None
+        };
+
+        let result = self.declare_root_var();
+        let checkb = self.fb.create_block();
+        // `closb` re-runs the closure checks over EITHER the original callee or
+        // an inline-selected multifn clause: params are (callee bits, address).
+        let closb = self.fb.create_block();
+        self.fb.append_block_param(closb, I64);
+        self.fb.append_block_param(closb, I64);
+        let mfb = self.fb.create_block();
+        let mfload = self.fb.create_block();
+        let clprep = self.fb.create_block();
+        let fastb = self.fb.create_block();
+        let slowb = self.cold_block();
+        let merge = self.fb.create_block();
+        self.fb.ins().brif(guard1, checkb, &[], slowb, &[]);
+
+        // ── a ref: closure? straight to the checks. MultiFn? select the fixed
+        // clause for this arity INLINE (one bounds check + one load — Stage G1:
+        // value-called multi-arity fns like `+`, `conj`, transducer step fns
+        // took the shim per element) and run the same checks on the clause. ──
+        self.fb.switch_to_block(checkb);
+        self.fb.seal_block(checkb);
+        let hdr = self.fb.ins().load(I64, flags, addr, 0);
+        let tid = self.fb.ins().band_imm(hdr, 0xffff);
+        let is_closure = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CLOSURE as i64);
+        self.fb.ins().brif(is_closure, closb, &[callee.into(), addr.into()], mfb, &[]);
+
+        self.fb.switch_to_block(mfb);
+        self.fb.seal_block(mfb);
+        let is_mf = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::MULTIFN as i64);
+        let aux = self.fb.ins().ushr_imm(hdr, 32); // fixed-clause table length
+        let in_range = self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, aux, n as i64);
+        let mf_ok = self.fb.ins().band(is_mf, in_range);
+        self.fb.ins().brif(mf_ok, mfload, &[], slowb, &[]);
+
+        // fixed[n] lives in the varlen tail: [hdr | variadic closure | raw8 vmin | clauses…].
+        self.fb.switch_to_block(mfload);
+        self.fb.seal_block(mfload);
+        let clause = self.fb.ins().load(I64, flags, addr, MULTIFN_FIXED_OFF as i32 + (n as i32) * 8);
+        let has_clause = self.fb.ins().icmp_imm(IntCC::NotEqual, clause, 0);
+        self.fb.ins().brif(has_clause, clprep, &[], slowb, &[]);
+        self.fb.switch_to_block(clprep);
+        self.fb.seal_block(clprep);
+        let caddr = M::emit_ref_addr_unchecked(self, clause);
+        self.fb.ins().jump(closb, &[clause.into(), caddr.into()]);
+
+        // ── the closure checks: meta arity matches + !variadic, code present ──
+        // (`target`/`taddr` — NOT the original `callee`, which the slow path
+        // below still needs: the fast path invokes the CLAUSE when routing
+        // happened, and its bits become the callee's stack-mapped self.)
+        self.fb.switch_to_block(closb);
+        self.fb.seal_block(closb);
+        let target = self.fb.block_params(closb)[0];
+        let taddr = self.fb.block_params(closb)[1];
+        let meta = self.fb.ins().load(I64, flags, taddr, CLOSURE_META_OFF as i32);
+        let nparams_raw = self.fb.ins().ushr_imm(meta, 32);
+        let nparams = self.fb.ins().band_imm(nparams_raw, 0xffff);
+        let arity_ok = self.fb.ins().icmp_imm(IntCC::Equal, nparams, n as i64);
+        let variadic_bit = self.fb.ins().band_imm(meta, crate::heap::META_VARIADIC_BIT as i64);
+        let not_variadic = self.fb.ins().icmp_imm(IntCC::Equal, variadic_bit, 0);
+        let meta_ok = self.fb.ins().band(arity_ok, not_variadic);
+        let code = self.fb.ins().load(I64, flags, taddr, CLOSURE_CODE_OFF as i32);
+        let has_code = self.fb.ins().icmp_imm(IntCC::NotEqual, code, 0);
+        let guard2 = self.fb.ins().band(meta_ok, has_code);
+        self.fb.ins().brif(guard2, fastb, &[], slowb, &[]);
+
+        // ── native fast path: 3-store context, args in registers ──
+        self.fb.switch_to_block(fastb);
+        self.fb.seal_block(fastb);
+        let words = self.ctx_size.div_ceil(8) as i32;
+        let ctx_ss = self.fb.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (words * 8) as u32,
+            3,
+        ));
+        // Three stores: the shared run-context pointer, the callee's own bits
+        // (the callee loads them into its stack-mapped self variable — its
+        // self-tail loop AND its capture reads derive from that, Stage E), and
+        // a clear tail-pending flag. The callee reads everything else through
+        // `rc`.
+        self.fb.ins().stack_store(rc, ctx_ss, self.off_rc);
+        self.fb.ins().stack_store(target, ctx_ss, self.off_self_closure);
+        let zero8 = self.fb.ins().iconst(I8, 0);
+        self.fb.ins().stack_store(zero8, ctx_ss, self.off_tail_pending);
+        let new_ctx = self.fb.ins().stack_addr(I64, ctx_ss, 0);
+        // Direct tail chain: bump the shared depth so an unbounded mutual loop
+        // hits the cap and unwinds. Restored right after the call returns (the
+        // chain is strictly nested, so inc-before / dec-after = save / restore).
+        if let Some(d) = depth {
+            let d1 = self.fb.ins().iadd_imm(d, 1);
+            self.fb.ins().store(flags, d1, rc, self.off_direct_depth);
+        }
+        let sig = self.entry_sig(n);
+        let mut call_args = Vec::with_capacity(n + 1);
+        call_args.push(new_ctx);
+        call_args.extend_from_slice(argvals);
+        let inst = self.fb.ins().call_indirect(sig, code, &call_args);
+        let r0 = self.fb.inst_results(inst)[0];
+        if let Some(d) = depth {
+            self.fb.ins().store(flags, d, rc, self.off_direct_depth);
+        }
+        // If the callee ended in a NON-self tail call, `tail_pending` is set and
+        // its frame is gone.
+        let tp = self.fb.ins().load(I8, flags, new_ctx, self.off_tail_pending);
+        let finb = self.fb.create_block();
+        let doneb = self.fb.create_block();
+        self.fb.ins().brif(tp, finb, &[], doneb, &[]);
+        self.fb.switch_to_block(finb);
+        self.fb.seal_block(finb);
+        if tail {
+            // TAIL: we are ourselves a tail call, so do NOT bounce here (that
+            // would grow the stack at the top of a deep direct chain). PROPAGATE
+            // the pending tail up to this frame's ctx — the callee's args are
+            // already in the shared `tail_args` buffer; only the callee and the
+            // flag ride on the per-frame ctx (as `shim_tail_call` sets them).
+            // The nearest bounce owner up the chain finishes it in O(1) stack.
+            let tc = self.fb.ins().load(I64, flags, new_ctx, self.off_tail_callee);
+            self.fb.ins().store(flags, tc, ctx, self.off_tail_callee);
+            let one8 = self.fb.ins().iconst(I8, 1);
+            self.fb.ins().store(flags, one8, ctx, self.off_tail_pending);
+            self.fb.def_var(result, r0);
+        } else {
+            // NON-tail: finish the callee's tail through `top` (bounded, composable).
+            let fr = self.call_shim(self.refs.finish_tail, &[new_ctx]);
+            self.fb.def_var(result, fr);
+        }
+        self.fb.ins().jump(merge, &[]);
+        self.fb.switch_to_block(doneb);
+        self.fb.seal_block(doneb);
+        self.fb.def_var(result, r0);
+        self.fb.ins().jump(merge, &[]);
+
+        // ── shim fallback: through `top`, preserving CEK routing / Traced / etc.
+        // In tail position this is the sentinel (`tail_call`) so TCO is kept when
+        // the fast guard fails (non-closure/arity/observed wrapper/depth cap). ──
+        self.fb.switch_to_block(slowb);
+        self.fb.seal_block(slowb);
+        let (saddr, count) = self.spill_args(argvals);
+        if tail {
+            let tr = self.call_shim_fenced(self.refs.tail_call, &[ctx, callee, saddr, count]);
+            self.fb.def_var(result, tr);
+            self.fb.ins().jump(merge, &[]);
+            self.fb.switch_to_block(merge);
+            self.fb.seal_block(merge);
+            // No pending check on the tail path: the value (real, propagated
+            // token, or sentinel dummy) is the body's return; the bounce owner /
+            // trampoline observes any raised signal.
+            return self.fb.use_var(result);
+        }
+        let sr = self.call_shim(self.refs.call, &[ctx, callee, saddr, count]);
+        self.fb.def_var(result, sr);
+        self.fb.ins().jump(merge, &[]);
+
+        self.fb.switch_to_block(merge);
+        self.fb.seal_block(merge);
+        // The callee may have raised a throw/escape (on either path); propagate.
+        let r = self.fb.use_var(result);
+        self.emit_pending_check(r)
+    }
+
+    /// Spill a run of computed values into a fresh stack slot and return
+    /// `(base_addr, count)` for a shim that takes `*const u64, u32`.
+    fn spill_args(&mut self, args: &[Value]) -> (Value, Value) {
+        let n = args.len();
+        if n == 0 {
+            let z = self.iconst(0);
+            let c = self.i32const(0);
+            return (z, c);
+        }
+        let slot = self.fb.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (n * 8) as u32,
+            3, // 2^3 = 8-byte alignment
+        ));
+        for (i, &a) in args.iter().enumerate() {
+            self.fb.ins().stack_store(a, slot, (i * 8) as i32);
+        }
+        let addr = self.fb.ins().stack_addr(I64, slot, 0);
+        let count = self.i32const(n as u32);
+        (addr, count)
+    }
+
+    /// Compile one node and DECLARE its value for the stack maps (Stage E):
+    /// every expression yields TAGGED VALUE BITS, so anything live across a
+    /// safepoint (= any call — a later argument's nested call, a shim, a poll)
+    /// is spilled with a map entry, rewritten by a moving collection, and
+    /// reloaded. Untagged arithmetic intermediates and derived addresses stay
+    /// inside their emitting arm and are never declared — exactly the
+    /// tagged-bits-only contract.
+    fn compile<M: ModelArithJit>(&mut self, ir: &Ir, tail: bool) -> Value {
+        let v = self.compile_node::<M>(ir, tail);
+        self.fb.declare_value_needs_stack_map(v);
+        v
+    }
+
+    fn compile_node<M: ModelArithJit>(&mut self, ir: &Ir, tail: bool) -> Value {
+        match ir {
+            // Inline load from the constant-pool base — no shim call.
+            Ir::Const(id) | Ir::Quote(id) => {
+                // An IMMEDIATE constant is baked in as a literal. Immediates are not
+                // heap values — a collection can never rewrite them — so the pool
+                // read has nothing to tell us that the word itself does not.
+                //
+                // This matters more than it looks: the pool read is TWO dependent
+                // loads (the ctx's consts_base, then the slot), and the base load is
+                // not readonly, so nothing downstream hoists — the disassembly of
+                // `(loop [i 0 a 0] (if (< i n) (recur (inc i) (+ a 1)) a))` reloaded
+                // the literal `1` from memory on EVERY iteration.
+                if !self.rt_ptr.is_null() {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    let bits = rt.const_bits(*id);
+                    if M::R::tag_of(bits) != RawTag::Ref {
+                        return self.iconst(bits);
+                    }
+                }
+                let base = self.load_rc_field(self.off_consts_base);
+                // The constant pool is fixed during a run: readonly. (A REF constant
+                // still reads the slot — a moving collection rewrites it in place.)
+                let ro = MemFlagsData::trusted().with_readonly();
+                self.fb.ins().load(I64, ro, base, (*id as i32) * 8)
+            }
+            // Flat model: every local is a slot of THIS activation. SSA mode
+            // reads the register variable; memory mode loads the frame slot.
+            Ir::Local { up, idx } => {
+                assert_eq!(*up, 0, "unflattened Ir reached the JIT: Local up={up}");
+                if let Some(ub) = &self.unbox {
+                    if ub.unbox[*idx as usize] {
+                        // Unboxed slot: an ESCAPING read (return value, or a
+                        // call/heap arg) retags the counter's register to a
+                        // tagged fixnum. Arithmetic reads never land here — they
+                        // go through `compile_int` and take the raw value.
+                        let raw = self.fb.use_var(ub.raw_vars[*idx as usize]);
+                        M::emit_tag(self, raw)
+                    } else {
+                        // A non-unboxed param (`g`, refs): ordinary tagged read.
+                        self.fb.use_var(self.vars[*idx as usize])
+                    }
+                } else if self.mem_mode {
+                    self.emit_local0_load(*idx)
+                } else {
+                    self.fb.use_var(self.vars[*idx as usize])
+                }
+            }
+            // A captured value: RE-DERIVE the capture base from the running
+            // closure's (stack-mapped) bits on every read, then one load off
+            // the object (Stage E). A safepoint anywhere reloads `self_var`
+            // with the closure's post-move address, so this can never read
+            // through a stale derived pointer — the carried caps_base gap is
+            // gone. (Loop-hoisting the derivation can return later behind a
+            // "no safepoint in loop body" analysis.)
+            Ir::Capture(idx) => self.emit_capture::<M>(*idx),
+            // Inline global read: load the value straight from the dense mirror
+            // (the symbol was interned, so its slot exists — no bounds check). If
+            // the slot is still `GLOBAL_UNBOUND` (a forward reference not yet
+            // defined), fall back to the slow late-binding lookup, which errors or
+            // resolves per the runtime's contract.
+            Ir::Global(s) => {
+                let base = self.load_rc_field(self.off_global_base);
+                let raw = self.fb.ins().load(I64, MemFlagsData::trusted(), base, (*s as i32) * 8);
+                let unbound = self.iconst(crate::runtime::GLOBAL_UNBOUND);
+                let is_unbound = self.fb.ins().icmp(IntCC::Equal, raw, unbound);
+
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let ok = self.fb.create_block();
+                let merge = self.fb.create_block();
+                self.fb.ins().brif(is_unbound, slow, &[], ok, &[]);
+
+                self.fb.switch_to_block(ok);
+                self.fb.seal_block(ok);
+                self.fb.def_var(result, raw);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sv = self.i32const(*s);
+                let ctx = self.ctx_val;
+                let v = self.call_shim_fenced(self.refs.load_global, &[ctx, sv]);
+                self.fb.def_var(result, v);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // Tail-transparent: only the LAST expression is in tail position.
+            Ir::Do(xs) => {
+                if xs.is_empty() {
+                    return self.iconst(M::R::enc_nil());
+                }
+                let last_i = xs.len() - 1;
+                let mut last = self.iconst(M::R::enc_nil());
+                for (i, x) in xs.iter().enumerate() {
+                    last = self.compile::<M>(x, tail && i == last_i);
+                }
+                last
+            }
+            // Tail-transparent: the condition is not in tail position, but both
+            // arms inherit it, so a tail call in either arm trampolines.
+            Ir::If(cnd, then, els) => {
+                let result = self.declare_root_var();
+                let then_b = self.fb.create_block();
+                let else_b = self.fb.create_block();
+                let merge = self.fb.create_block();
+
+                // Branch straight to the arms (see `emit_if_branch`). Both blocks
+                // can have SEVERAL predecessors now, so seal only once it is done.
+                self.emit_if_branch::<M>(cnd, then_b, else_b);
+                self.fb.seal_block(then_b);
+                self.fb.seal_block(else_b);
+
+                self.fb.switch_to_block(then_b);
+                let tv = self.compile::<M>(then, tail);
+                self.fb.def_var(result, tv);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(else_b);
+                let ev = self.compile::<M>(els, tail);
+                self.fb.def_var(result, ev);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            Ir::Def { name, init } => {
+                let v = self.compile::<M>(init, false);
+                let namev = self.i32const(*name);
+                let ctx = self.ctx_val;
+                self.call_shim_fenced(self.refs.def_global, &[ctx, namev, v])
+            }
+            Ir::Lambda { nparams, variadic, nslots, captures, body } => {
+                // Register this Lambda's BODY once (compile time) in the runtime's
+                // GLOBAL, stable template registry (dedup by `Arc<Ir>` pointer —
+                // the SAME id `ObjView::Closure::template` reports and `alloc`
+                // uses for `Obj::Closure`), then emit: resolve each capture VALUE
+                // here (registers / frame slots / own caps), spill them in order,
+                // and let the shim copy + allocate. `nparams`/`variadic`/`nslots`
+                // are this Lambda node's own compile-time-constant arity — baked
+                // in as immediates, no per-template metadata table needed.
+                let tid = if self.rt_ptr.is_null() {
+                    0 // dump_ir only: this body is never executed.
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    rt.register_template(body)
+                };
+                let vals: Vec<Value> = captures
+                    .iter()
+                    .map(|c| match c {
+                        CapSrc::Slot(i) => {
+                            if self.mem_mode {
+                                self.emit_local0_load(*i)
+                            } else {
+                                self.fb.use_var(self.vars[*i as usize])
+                            }
+                        }
+                        // Transitive capture: read our OWN capture, deriving
+                        // the base from the stack-mapped self bits (Stage E).
+                        CapSrc::Cap(j) => self.emit_capture::<M>(*j),
+                    })
+                    .collect();
+                if M::INLINE_OBJECTS {
+                    // Inline the whole closure allocation (D5): header, meta,
+                    // the creation-time code stamp (one load through the baked
+                    // `template_code` slot — 0 until the body compiles, exactly
+                    // like the shim), and the capture values, all straight-line
+                    // stores. Window closed/exhausted → the shim.
+                    let flags = MemFlagsData::trusted();
+                    let ncaps = vals.len();
+                    let result = self.declare_root_var();
+                    let slow = self.cold_block();
+                    let merge = self.fb.create_block();
+                    let size = (CLOSURE_CAPS_OFF + ncaps * 8) as i64;
+                    let header = crate::heap::make_header(kind::CLOSURE, 0, ncaps as u32);
+                    let addr = self.emit_alloc(size, header, slow);
+                    let meta =
+                        crate::heap::closure_meta(tid, *nparams as u16, *nslots, *variadic);
+                    let metav = self.iconst(meta);
+                    self.fb.ins().store(flags, metav, addr, CLOSURE_META_OFF as i32);
+                    let slotp = self.template_code_slot::<M>(tid) as u64;
+                    let sp = self.iconst(slotp);
+                    // NOT readonly: the slot is stamped when the body compiles.
+                    let code = self.fb.ins().load(I64, flags, sp, 0);
+                    self.fb.ins().store(flags, code, addr, CLOSURE_CODE_OFF as i32);
+                    for (i, &v) in vals.iter().enumerate() {
+                        self.fb.ins().store(flags, v, addr, (CLOSURE_CAPS_OFF + i * 8) as i32);
+                    }
+                    let r = M::emit_enc_ref(self, addr);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+
+                    self.fb.switch_to_block(slow);
+                    self.fb.seal_block(slow);
+                    let (caddr, _count) = self.spill_args(&vals);
+                    let tidv = self.i32const(tid);
+                    let npv = self.i32const(*nparams as u32);
+                    let varv = self.i32const(*variadic as u32);
+                    let nsv = self.i32const(*nslots as u32);
+                    let ncapsv = self.i32const(ncaps as u32);
+                    let ctx = self.ctx_val;
+                    let sv = self.call_shim_fenced(
+                        self.refs.make_closure,
+                        &[ctx, tidv, npv, varv, nsv, caddr, ncapsv],
+                    );
+                    self.fb.def_var(result, sv);
+                    self.fb.ins().jump(merge, &[]);
+
+                    self.fb.switch_to_block(merge);
+                    self.fb.seal_block(merge);
+                    self.fb.use_var(result)
+                } else {
+                    let (addr, _count) = self.spill_args(&vals);
+                    let tidv = self.i32const(tid);
+                    let npv = self.i32const(*nparams as u32);
+                    let varv = self.i32const(*variadic as u32);
+                    let nsv = self.i32const(*nslots as u32);
+                    let ncapsv = self.i32const(captures.len() as u32);
+                    let ctx = self.ctx_val;
+                    self.call_shim_fenced(self.refs.make_closure, &[ctx, tidv, npv, varv, nsv, addr, ncapsv])
+                }
+            }
+            Ir::Call(f, args) => {
+                // Var-guarded speculative inlining: a non-tail call of a global
+                // bound (NOW, at compile time) to a small capture-free closure
+                // splices the callee body inline behind a one-compare guard on
+                // the global slot. Redefinition (or a GC move) fails the guard
+                // and takes the general path — never a wrong answer.
+                if !tail {
+                    if let Ir::Global(gsym) = f.as_ref() {
+                        if let Some(plan) = self.try_inline_plan::<M>(*gsym, args.len()) {
+                            let arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
+                            let argvals: Vec<Value> =
+                                args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                            let base = self.load_rc_field(self.off_global_base);
+                            let raw = self.fb.ins().load(
+                                I64,
+                                MemFlagsData::trusted(),
+                                base,
+                                (*gsym as i32) * 8,
+                            );
+                            let want = self.iconst(plan.bits);
+                            let bits_ok = self.fb.ins().icmp(IntCC::Equal, raw, want);
+                            // Composition: an inlined call is invisible to `top`,
+                            // so it is only legal when no wrapper is observing
+                            // calls — the same `direct` rule as the fast-call path.
+                            let ro = MemFlagsData::trusted().with_readonly();
+                            let rc = self.rc_val;
+                            let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                            let same = self.fb.ins().band(bits_ok, direct);
+                            let result = self.declare_root_var();
+                            let inlb = self.fb.create_block();
+                            let slowb = self.cold_block();
+                            let merge = self.fb.create_block();
+                            self.fb.ins().brif(same, inlb, &[], slowb, &[]);
+
+                            self.fb.switch_to_block(inlb);
+                            self.fb.seal_block(inlb);
+                            let iv = self.emit_inlined_body::<M>(
+                                plan.nparams,
+                                plan.nslots,
+                                &plan.body,
+                                &argvals,
+                                None,
+                                None,
+                                &arg_types,
+                            );
+                            self.fb.def_var(result, iv);
+                            self.fb.ins().jump(merge, &[]);
+
+                            // Deopt: the general callee compile (handles unbound
+                            // too) + the ordinary call path.
+                            self.fb.switch_to_block(slowb);
+                            self.fb.seal_block(slowb);
+                            let callee = self.compile::<M>(f, false);
+                            let sv = self.emit_call::<M>(callee, &argvals);
+                            self.fb.def_var(result, sv);
+                            self.fb.ins().jump(merge, &[]);
+
+                            self.fb.switch_to_block(merge);
+                            self.fb.seal_block(merge);
+                            return self.fb.use_var(result);
+                        }
+                    }
+                    // Stage G2 — param-value specialization: a non-tail call
+                    // through a PARAMETER or CAPTURE whose actual value this
+                    // compile observed (the triggering invoke's args / the
+                    // invoked closure's captures) splices the observed clause
+                    // body inline behind a template guard on the live value.
+                    // This is the per-element `(f acc x)` / `(rf a (inc x))`
+                    // shape of every reduce/transducer step.
+                    if let Some(vbits) = self.spec_value_of(f) {
+                        if let Some(plan) = self.try_value_inline_plan::<M>(vbits, args.len()) {
+                            let fval = self.compile::<M>(f, false);
+                            let arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
+                            let argvals: Vec<Value> =
+                                args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                            return self.emit_value_specialized::<M>(fval, &argvals, &plan, &arg_types);
+                        }
+                    }
+                }
+                let callee = self.compile::<M>(f, false);
+                // Phase 2 — UNTAGGED self-tail recur: redefine the raw counter
+                // registers directly with bare `compile_int` args (no tagged
+                // intermediates, no untag/retag). Placed before the tagged
+                // `argvals` so the unboxed arm never emits the tagged arithmetic
+                // at all. The self-check + notself trampoline bounce mirror the
+                // tagged path below (a `loop` recur is always self, so the
+                // bounce is cold; it retags for the generic trampoline).
+                if tail {
+                    if let Some(header) = self.loop_header {
+                        if self.unbox.is_some() && args.len() == self.loop_nparams {
+                            // Each recur arg lands in an unboxed slot as a RAW
+                            // int (`compile_int`) or in a tagged slot (`g`, refs)
+                            // as ordinary bits. Both arg forms are computed once,
+                            // before the self-check, so the notself trampoline
+                            // bounce can reuse them (retagging the raw ones).
+                            let mask = self.unbox.as_ref().unwrap().unbox.clone();
+                            let mut raw_args: Vec<Option<Value>> = Vec::with_capacity(args.len());
+                            let mut tagged_args: Vec<Value> = Vec::with_capacity(args.len());
+                            for (i, a) in args.iter().enumerate() {
+                                if mask[i] {
+                                    let r = self.compile_int::<M>(a);
+                                    raw_args.push(Some(r));
+                                    tagged_args.push(M::emit_tag(self, r));
+                                } else {
+                                    let t = self.compile::<M>(a, false);
+                                    raw_args.push(None);
+                                    tagged_args.push(t);
+                                }
+                            }
+                            let sc = self.fb.use_var(self.self_var);
+                            self.fb.declare_value_needs_stack_map(sc);
+                            let is_self = self.fb.ins().icmp(IntCC::Equal, callee, sc);
+                            let selfloop = self.fb.create_block();
+                            let notself = self.cold_block();
+                            self.fb.ins().brif(is_self, selfloop, &[], notself, &[]);
+
+                            self.fb.switch_to_block(selfloop);
+                            self.fb.seal_block(selfloop);
+                            let (raw_vars, gen_vars) = {
+                                let ub = self.unbox.as_ref().unwrap();
+                                (ub.raw_vars.clone(), ub.gen_vars.clone())
+                            };
+                            for (i, r) in raw_args.iter().enumerate() {
+                                match r {
+                                    Some(rv) => self.fb.def_var(raw_vars[i], *rv),
+                                    None => self.fb.def_var(gen_vars[i], tagged_args[i]),
+                                }
+                            }
+                            self.emit_backedge_poll();
+                            self.fb.ins().jump(header, &[]);
+
+                            self.fb.switch_to_block(notself);
+                            self.fb.seal_block(notself);
+                            return self.emit_nonself_tail::<M>(callee, &tagged_args);
+                        }
+                    }
+                }
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                if tail {
+                    // Self-tail-call becomes a native REGISTER loop: if the callee
+                    // is THIS closure, redefine the param variables and branch to
+                    // the header (no FFI, O(1) stack). Arity must match statically
+                    // (same closure ⇒ same nparams); otherwise it is an arity
+                    // error the shim path raises. Anything else falls back to the
+                    // shim + trampoline, keeping full mutual-recursion TCO.
+                    match self.loop_header {
+                        Some(header) if argvals.len() == self.loop_nparams => {
+                            // Compare against the tracked self bits, so a
+                            // collection mid-body (which moved this closure —
+                            // and rewrote both copies) still recognizes itself.
+                            let sc = self.fb.use_var(self.self_var);
+                            self.fb.declare_value_needs_stack_map(sc); // not a compile() result
+                            let is_self = self.fb.ins().icmp(IntCC::Equal, callee, sc);
+                            let selfloop = self.fb.create_block();
+                            let notself = self.fb.create_block();
+                            self.fb.ins().brif(is_self, selfloop, &[], notself, &[]);
+
+                            self.fb.switch_to_block(selfloop);
+                            self.fb.seal_block(selfloop);
+                            // Redefine the SSA vars (args were already computed
+                            // from the OLD values, so no clobber hazard).
+                            for (i, &a) in argvals.iter().enumerate() {
+                                self.fb.def_var(self.vars[i], a);
+                            }
+                            // BACK-EDGE SAFEPOINT POLL (Stage E): a native
+                            // self-loop must come to a safepoint in bounded
+                            // time — this is what lets another thread's
+                            // collection (or our own allocation pressure)
+                            // interrupt a pure-arithmetic loop. Coarsened to
+                            // every `BACKEDGE_POLL_INTERVAL` iterations.
+                            self.emit_backedge_poll();
+                            self.fb.ins().jump(header, &[]);
+
+                            // Non-self: the shim tail-call, whose result flows to
+                            // the function return (the trampoline reads
+                            // `tail_pending`).
+                            self.fb.switch_to_block(notself);
+                            self.fb.seal_block(notself);
+                            self.emit_nonself_tail::<M>(callee, &argvals)
+                        }
+                        _ => self.emit_nonself_tail::<M>(callee, &argvals),
+                    }
+                } else {
+                    self.emit_call::<M>(callee, &argvals)
+                }
+            }
+            // Model-emitted arithmetic with a guarded fast path. The fast path
+            // untags per the model's tag layout (the same per-model split the
+            // `ModelEmit` recipe encodes: LowBit shifts, HighBit masks, NanBox has
+            // no immediate-int fast path), computes natively, and — unlike the
+            // wrapping bytecode recipe — checks the fixnum range, falling back to
+            // the runtime's promoting arithmetic on overflow / non-fixnum operands.
+            // That gives the JIT the full numeric tower (bignum promotion, floats,
+            // mixed) the tree-walker has. This is the emit half of codegen axis #2.
+            // `(nil? x)` is a compare against ONE constant. It was reaching the
+            // generic prim shim (~45ns) — 101 MILLION times in a predicate-heavy
+            // benchmark, because every `cond`/`if-let`/seq walk tests it.
+            Ir::Prim(Prim::IsNil, args) => {
+                let v = self.compile::<M>(&args[0], false);
+                let nil = self.iconst(M::R::enc_nil());
+                let c = self.fb.ins().icmp(IntCC::Equal, v, nil);
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                self.fb.ins().select(cw, t, f)
+            }
+            // `%eq` — object identity — is a bare word compare: no guard, no
+            // fast/slow split, nothing to promote. It only reached the generic
+            // prim shim (~45ns for `icmp eq`) because nobody had emitted it.
+            // `=` short-circuits on it (see `-eq2`), so it is now on the hot
+            // path of every equality in the language.
+            Ir::Prim(Prim::Identical, args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let c = self.fb.ins().icmp(IntCC::Equal, a, b);
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                self.fb.ins().select(cw, t, f)
+            }
+            // `%wrap64` of an immediate fixnum is the IDENTITY — a fixnum is
+            // already well inside a long — and it sits on `even?`/`odd?`'s
+            // unchecked-cast path, a per-element predicate in any filtered
+            // pipeline (as a shim call it cost transduce ~25%). Only the boxed
+            // tail (i128 wraparound, HugeInt truncation, double pass-through)
+            // takes the shim.
+            Ir::Prim(Prim::Wrap64, args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let is_fix = self.emit_all_fixnum_raw::<M>(&[v]);
+                let result = self.declare_root_var();
+                self.fb.def_var(result, v);
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                self.fb.ins().brif(is_fix, merge, &[], slow, &[]);
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Wrap64, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // BitAnd/Or/Xor ride the same guard: `even?`/`odd?` are
+            // `(zero? (bit-and n 1))` (as in clojure.core), so a bitwise op is a
+            // PER-ELEMENT predicate in any filtered pipeline. Through the slow
+            // prim shim it measured ~10ns; the arithmetic ops beside it were
+            // already inlined and it was not.
+            // Phase 3 — CONSTANT-FOLD a type-dispatch test. `(%num-eq (type-of x)
+            // 'T)` where `x`'s type is PROVEN (`static_type_of`) collapses to a
+            // compile-time boolean: this is exactly the shape of every hand-written
+            // `cond` gate in core.clj (`get`'s array-map check, the `map?`/`vector?`
+            // predicate chains). Folding it to a constant lets Cranelift's optimizer
+            // drop the dead `cond` arms, turning the type dispatch into the one
+            // straight-line prim call the taken arm holds — the whole point of
+            // inlining down to a proven-typed receiver. Both operands must resolve
+            // to compile-time syms (a folded `type-of` or a quoted sym); anything
+            // numeric or unknown falls through to the guarded arithmetic below.
+            Ir::Prim(Prim::Eq, args)
+                if args.len() == 2
+                    && self.static_sym::<M>(&args[0]).is_some()
+                    && self.static_sym::<M>(&args[1]).is_some() =>
+            {
+                let sa = self.static_sym::<M>(&args[0]).unwrap();
+                let sb = self.static_sym::<M>(&args[1]).unwrap();
+                self.iconst(M::R::enc_bool(sa == sb))
+            }
+            Ir::Prim(
+                p @ (Prim::Add
+                | Prim::Sub
+                | Prim::Mul
+                | Prim::Lt
+                | Prim::Eq
+                | Prim::BitAnd
+                | Prim::BitOr
+                | Prim::BitXor
+                // `quot`/`rem` had NO inline path at all: every one was a full
+                // shim call. Measured, a loop of `(+ a (rem i 128))` ran 4.9x
+                // faster once they were inlined — the single `rem` had been
+                // costing more than the whole rest of the iteration. They guard
+                // and promote exactly like the others.
+                | Prim::Quot
+                | Prim::Rem),
+                args,
+            ) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                self.emit_guarded_arith::<M>(*p, a, b)
+            }
+            // Fixnum-specialized ops (from the optimizer): the operands were
+            // PROVEN immediate fixnums by a dominating `AllFixnum` guard, so we
+            // skip the per-op tag check. Add/Sub/Mul keep the overflow → promote
+            // path (two fixnums can still overflow to a bignum); Lt/Eq need
+            // nothing but the compare.
+            Ir::Prim(p @ (Prim::FxAdd | Prim::FxSub | Prim::FxMul | Prim::FxLt | Prim::FxEq), args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                self.emit_unguarded_arith::<M>(p.dechecked(), a, b)
+            }
+            // The specializer's entry guard: true iff every operand is an
+            // immediate fixnum, as ONE combined tag test.
+            Ir::Prim(Prim::AllFixnum, args) => {
+                let vs: Vec<Value> = args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                self.emit_all_fixnum::<M>(&vs)
+            }
+            // `(%spawn thunk)` — spawn a native-JIT worker thread; `(%await fut)`
+            // — join it, parking during the wait. Both via shims that reach the
+            // runtime + build a worker JIT, so threads run WHOLLY on the JIT.
+            Ir::Prim(Prim::Spawn, args) => {
+                let thunk = self.compile::<M>(&args[0], false);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.spawn, &[ctx, thunk])
+            }
+            Ir::Prim(Prim::Await, args) => {
+                let fut = self.compile::<M>(&args[0], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.await_, &[ctx, fut])
+            }
+            Ir::Prim(Prim::Gc, _) => {
+                // Modeled safepoint: collect with `ctx.cur` (the live frame chain)
+                // as the root, so JIT locals survive the move (see `shim_gc`).
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.gc, &[ctx])
+            }
+            Ir::Prim(Prim::CallEc | Prim::CallCc | Prim::Reset | Prim::Shift, _) => panic!(
+                "JIT tier: continuations not supported; run on the tree-walker / CEK"
+            ),
+            // `(apply f a … lst)` — flatten + invoke through `top` in the shim.
+            Ir::Prim(Prim::Apply, args) => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let (addr, count) = self.spill_args(&argvals);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.apply, &[ctx, addr, count])
+            }
+            // `(type-of x)` — inline the two shapes every dispatch predicate
+            // hits per element (Stage G1: `reduced?` is `(%num-eq (type-of x)
+            // 'Reduced)` inside every reduce loop): an immediate fixnum is
+            // 'Long (a compile-time constant sym), a RECORD ref's type sym is
+            // one load off the object. Everything else (bignum refs, builtin
+            // containers, bools, nil, …) keeps the runtime's `type_tag`.
+            // Phase 3 — `(type-of x)` on a PROVEN-typed `x` is a compile-time
+            // constant sym: no object read, no chain, no shim. Feeds the `%num-eq`
+            // fold above and any other consumer of the type sym.
+            Ir::Prim(Prim::TypeOf, args)
+                if args.len() == 1 && self.static_type_of(&args[0]).is_some() =>
+            {
+                let t = self.static_type_of(&args[0]).unwrap();
+                self.iconst(M::R::enc_sym(t))
+            }
+            Ir::Prim(Prim::TypeOf, args) if M::INLINE_OBJECTS && !self.rt_ptr.is_null() => {
+                let v = self.compile::<M>(&args[0], false);
+                let long_bits = {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    M::R::enc_sym(rt.intern("Long"))
+                };
+                let flags = MemFlagsData::trusted();
+                let result = self.declare_root_var();
+                let intb = self.fb.create_block();
+                let refchk = self.fb.create_block();
+                let hdrb = self.fb.create_block();
+                let recb = self.fb.create_block();
+                let kindb = self.fb.create_block();
+                let slowb = self.cold_block();
+                let merge = self.fb.create_block();
+                // immediate fixnum → 'Long (exactly `type_tag`'s Val::Int arm;
+                // promoted bignums are refs and take the slow path).
+                let is_int = M::emit_both_int(self, v, v);
+                self.fb.ins().brif(is_int, intb, &[], refchk, &[]);
+                self.fb.switch_to_block(intb);
+                self.fb.seal_block(intb);
+                let lc = self.iconst(long_bits);
+                self.fb.def_var(result, lc);
+                self.fb.ins().jump(merge, &[]);
+                // ref → RECORD? its type sym is the raw word right after the
+                // header (RECORD layout: [hdr | raw8 sym | fields…]).
+                self.fb.switch_to_block(refchk);
+                self.fb.seal_block(refchk);
+                let (is_ref, addr) = M::emit_ref_addr(self, v);
+                self.fb.ins().brif(is_ref, hdrb, &[], slowb, &[]);
+                self.fb.switch_to_block(hdrb);
+                self.fb.seal_block(hdrb);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                self.fb.ins().brif(is_rec, recb, &[], kindb, &[]);
+                self.fb.switch_to_block(recb);
+                self.fb.seal_block(recb);
+                let sym_w = self.fb.ins().load(I64, flags, addr, HEADER_SIZE as i32);
+                let enc = M::emit_enc_sym(self, sym_w);
+                self.fb.def_var(result, enc);
+                self.fb.ins().jump(merge, &[]);
+                // NOT a record, but still a reference: the header's kind IS the
+                // answer, and it is a compile-time constant sym. Only RECORD
+                // needs the object read, so this chain costs the common case
+                // nothing — it is reached only by the shapes that used to take
+                // the 45ns prim shim. `type-of` is the single most-called prim
+                // in predicate-heavy code (every `map?`/`seq?`/`vector?`), and
+                // it was hitting that shim 292 MILLION times in one benchmark
+                // run: every list and every string went the slow way.
+                //
+                // Kept to the hot kinds deliberately — each is one compare, and
+                // the rarities (ratio/atom/future/bigint/closure) are better off
+                // in the shim than lengthening this chain.
+                let konst = |c: &mut Self, name: &str| {
+                    let rt = unsafe { &*(c.rt_ptr as *const Runtime<M>) };
+                    let bits = M::R::enc_sym(rt.intern(name));
+                    c.iconst(bits)
+                };
+                // ATOM is first on purpose. It looks like it could never be hot
+                // — but `record?` derefs the `-record-types` registry atom, and
+                // `map?`/`vector?`/`seq?` all call `record?`, so `(atom? x)`
+                // runs `type-of` on an ATOM several times per element of any
+                // predicate-heavy loop. It measured 480 MILLION slow calls in a
+                // benchmark that does not mention atoms.
+                let mut next = kindb;
+                for (tid_k, name) in [
+                    (kind::ATOM, "Atom"),
+                    (kind::CONS, "List"),
+                    (kind::STR, "String"),
+                    (kind::EMPTY_LIST, "EmptyList"),
+                    (kind::CLOSURE, "Fn"),
+                ] {
+                    self.fb.switch_to_block(next);
+                    self.fb.seal_block(next);
+                    let hit = self.fb.create_block();
+                    let miss = self.fb.create_block();
+                    let is_k = self.fb.ins().icmp_imm(IntCC::Equal, tid, tid_k as i64);
+                    self.fb.ins().brif(is_k, hit, &[], miss, &[]);
+                    self.fb.switch_to_block(hit);
+                    self.fb.seal_block(hit);
+                    let c = konst(self, name);
+                    self.fb.def_var(result, c);
+                    self.fb.ins().jump(merge, &[]);
+                    next = miss;
+                }
+                self.fb.switch_to_block(next);
+                self.fb.seal_block(next);
+                self.fb.ins().jump(slowb, &[]);
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let sp = self.slow_prim(Prim::TypeOf, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(throw v)` — set the signal in line and jump straight to the
+            // innermost catch handler (or return out of the body). `throw` is a
+            // FLAG store, not an unwind, so the generic prim shim's arg-spill +
+            // tag-dispatch was pure overhead — and core.match THROWS on every
+            // failed clause (1.7M `throw`s in the benchmark, its single hottest
+            // prim). Pairs with the inlined `try`: a backtrack is now two stores
+            // and a jump.
+            Ir::Prim(Prim::Throw, args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let rtp = self.load_rc_field(self.off_rt);
+                let flags = MemFlagsData::trusted();
+                self.fb.ins().store(flags, v, rtp, self.signal_value_off);
+                let one = self.fb.ins().iconst(I8, 1); // Signal::kind = 1 (throw)
+                self.fb.ins().store(flags, one, rtp, self.signal_kind_off);
+                match self.catch_handlers.last().copied() {
+                    Some(h) => {
+                        self.fb.ins().jump(h, &[]);
+                    }
+                    None => {
+                        let nil = self.iconst(M::R::enc_nil());
+                        self.fb.ins().return_(&[nil]);
+                    }
+                }
+                // `throw` never falls through — but the compiler expects a value
+                // for the current block. A fresh unreachable block supplies one.
+                let dead = self.fb.create_block();
+                self.fb.switch_to_block(dead);
+                self.fb.seal_block(dead);
+                self.iconst(M::R::enc_nil())
+            }
+            // `(record 'Tag f…)` — inline allocation. Records are THE allocation of
+            // this runtime: every lazy-seq step is a `(record 'LazySeq thunk false)`,
+            // every vector conj a PVec, plus Volatile/Reduced/ChunkedCons/Map/Set.
+            // Every one of them was a shim call with its args spilled to a buffer —
+            // only closures and cons cells allocated inline. Layout is
+            // `[hdr | raw8 type sym | fields…]` (RECORD_FIELDS_OFF, pinned by
+            // `record_fields_off_matches_type_info`).
+            //
+            // The tag must be a compile-time-known symbol, which every site in
+            // practice is (`(record 'LazySeq …)`); anything else takes the shim.
+            // No write barrier: the object is fresh, so it is in the nursery and
+            // nothing old can point into it yet — the same reason the cons arm
+            // below stores head/tail bare.
+            Ir::Prim(Prim::Record, args) if M::INLINE_OBJECTS && !args.is_empty() => {
+                let tag = if self.rt_ptr.is_null() {
+                    None
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    match args[0] {
+                        Ir::Const(id) | Ir::Quote(id) => match rt.decode(rt.const_bits(id)) {
+                            Val::Sym(sy) => Some(sy),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                let Some(tag) = tag else {
+                    let vals: Vec<Value> =
+                        args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                    return self.slow_prim(Prim::Record, &vals);
+                };
+                let tagv = self.compile::<M>(&args[0], false);
+                let vals: Vec<Value> =
+                    args[1..].iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let nfields = vals.len();
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let header = crate::heap::make_header(kind::RECORD, 0, nfields as u32);
+                let size = (crate::heap::RECORD_FIELDS_OFF + nfields * 8) as i64;
+                let addr = self.emit_alloc(size, header, slow);
+                // The type sym is stored RAW (`alloc_record`'s set_raw_word), not
+                // as a tagged word.
+                let symv = self.iconst(tag as u64);
+                self.fb.ins().store(flags, symv, addr, 8);
+                for (i, v) in vals.iter().enumerate() {
+                    let off = (crate::heap::RECORD_FIELDS_OFF + i * 8) as i32;
+                    self.fb.ins().store(flags, *v, addr, off);
+                }
+                let r = M::emit_enc_ref(self, addr);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let mut all = Vec::with_capacity(nfields + 1);
+                all.push(tagv);
+                all.extend_from_slice(&vals);
+                let sp = self.slow_prim(Prim::Record, &all);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%cons h t)` — inline allocation (D5): normalize a `()` tail to
+            // nil (exactly `Runtime::cons`), bump-allocate 24 bytes through the
+            // AllocWindow, store head/tail, encode. Window closed/exhausted →
+            // the prim shim (which also owns the loud-exhaustion panic).
+            Ir::Prim(Prim::Cons, args) if M::INLINE_OBJECTS => {
+                let head = self.compile::<M>(&args[0], false);
+                let tail = self.compile::<M>(&args[1], false);
+                let flags = MemFlagsData::trusted();
+                // tail2 = tail, unless tail is the `()` object → nil.
+                let tailv = self.declare_root_var();
+                self.fb.def_var(tailv, tail);
+                let (t_is_ref, t_addr) = M::emit_ref_addr(self, tail);
+                let chk = self.fb.create_block();
+                let cont = self.fb.create_block();
+                self.fb.ins().brif(t_is_ref, chk, &[], cont, &[]);
+                self.fb.switch_to_block(chk);
+                self.fb.seal_block(chk);
+                let thdr = self.fb.ins().load(I64, flags, t_addr, 0);
+                let ttid = self.fb.ins().band_imm(thdr, 0xffff);
+                let is_empty =
+                    self.fb.ins().icmp_imm(IntCC::Equal, ttid, kind::EMPTY_LIST as i64);
+                let nil = self.iconst(M::R::enc_nil());
+                let norm = self.fb.ins().select(is_empty, nil, tail);
+                self.fb.def_var(tailv, norm);
+                self.fb.ins().jump(cont, &[]);
+                self.fb.switch_to_block(cont);
+                self.fb.seal_block(cont);
+                let tail2 = self.fb.use_var(tailv);
+
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let header = crate::heap::make_header(kind::CONS, 0, 0);
+                let addr = self.emit_alloc(24, header, slow);
+                self.fb.ins().store(flags, head, addr, 8);
+                self.fb.ins().store(flags, tail2, addr, 16);
+                let r = M::emit_enc_ref(self, addr);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Cons, &[head, tail]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%first x)` / `(%rest x)` — for a genuine CONS, one type guard +
+            // one field load (D5). Anything else (chunked seqs, nil, `()`, the
+            // use-after-move panic) keeps the shim's exact semantics.
+            Ir::Prim(p @ (Prim::First | Prim::Rest), args) if M::INLINE_OBJECTS => {
+                let v = self.compile::<M>(&args[0], false);
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let (addr, _hdr) = self.emit_typed_addr::<M>(v, kind::CONS, slow);
+                let off = if matches!(p, Prim::First) { 8 } else { 16 };
+                let r = self.fb.ins().load(I64, MemFlagsData::trusted(), addr, off);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(*p, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(field r i)` — a RECORD guard, an immediate-int index guard, an
+            // unsigned bounds check against the record's field count (its header
+            // aux — a negative index untags huge and fails it), then one indexed
+            // load off the varlen tail. Stage H: every deftype method body opens
+            // with `(let [f0 (field this 0) …] …)`, so this prim ran through the
+            // generic shim several times per PROTOCOL CALL — the top frame of
+            // both the vecbuild and group-by profiles. Any failed guard takes the
+            // shim, which owns the loud non-record/bad-index panic.
+            Ir::Prim(Prim::Field, args) if M::INLINE_OBJECTS => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::RECORD, slow);
+                let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
+                let okb = self.fb.create_block();
+                self.fb.ins().brif(is_int, okb, &[], slow, &[]);
+                self.fb.switch_to_block(okb);
+                self.fb.seal_block(okb);
+                let i = M::emit_untag(self, argvals[1]);
+                // RECORD's varlen count IS its field count (header aux; bit 63
+                // is the forwarding bit and is clear on any live object).
+                let n = self.fb.ins().ushr_imm(hdr, 32);
+                let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, i, n);
+                let okb2 = self.fb.create_block();
+                self.fb.ins().brif(inb, okb2, &[], slow, &[]);
+                self.fb.switch_to_block(okb2);
+                self.fb.seal_block(okb2);
+                // RECORD layout = [hdr | raw8 type sym | fields…]: the varlen
+                // tail starts at `RECORD_FIELDS_OFF`.
+                let byteoff = self.fb.ins().ishl_imm(i, 3);
+                let slot = self.fb.ins().iadd(addr, byteoff);
+                let r = self.fb.ins().load(I64, flags, slot, RECORD_FIELDS_OFF as i32);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::Field, &argvals);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%alength v)` — the logical length rides the ARRAY handle's
+            // header aux: one type guard + a shift + retag (D5).
+            Ir::Prim(Prim::VectorLen, args) if M::INLINE_OBJECTS => {
+                let v = self.compile::<M>(&args[0], false);
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let (_addr, hdr) = self.emit_typed_addr::<M>(v, kind::ARRAY, slow);
+                let len = self.fb.ins().ushr_imm(hdr, 32);
+                let r = M::emit_tag(self, len);
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(Prim::VectorLen, &[v]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // `(%aget v i)` / `(%aset v i x)` — ARRAY handle guard, immediate-
+            // int index guard, unsigned bounds check against the handle's
+            // logical length (a negative index untags huge and fails it), then
+            // a direct indexed load/store through the data blob (D5). Any
+            // failed guard — including out-of-bounds — takes the shim, which
+            // owns the loud range panic.
+            //
+            // `%aset` is BARRIERED (I3): its store puts a possibly-young value
+            // into a possibly-promoted blob, and an unbarriered one would not
+            // be a slow `%aset` but a LOST old→young edge — silent until the
+            // heap corrupts arbitrarily later. The mark names `blob_addr`, not
+            // the handle: the words live in the DATA BLOB, so the blob is the
+            // object holding the young pointer and the only base whose card
+            // names it. (This is exactly what the `arr_slice_mut` choke point
+            // marks on the shim path — the two agree by construction.)
+            Ir::Prim(p @ (Prim::VectorRef | Prim::VectorSet), args) if M::INLINE_OBJECTS => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let flags = MemFlagsData::trusted();
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let (addr, hdr) = self.emit_typed_addr::<M>(argvals[0], kind::ARRAY, slow);
+                let is_int = M::emit_both_int(self, argvals[1], argvals[1]);
+                let okb = self.fb.create_block();
+                self.fb.ins().brif(is_int, okb, &[], slow, &[]);
+                self.fb.switch_to_block(okb);
+                self.fb.seal_block(okb);
+                let i = M::emit_untag(self, argvals[1]);
+                let len = self.fb.ins().ushr_imm(hdr, 32);
+                let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let okb2 = self.fb.create_block();
+                self.fb.ins().brif(inb, okb2, &[], slow, &[]);
+                self.fb.switch_to_block(okb2);
+                self.fb.seal_block(okb2);
+                // handle field 0 = the encoded DATA blob ref; its varlen tail
+                // starts right after the blob header (ARRAY_DATA has no fields).
+                let blob_bits = self.fb.ins().load(I64, flags, addr, 8);
+                let (_ir, blob_addr) = M::emit_ref_addr(self, blob_bits);
+                let byteoff = self.fb.ins().ishl_imm(i, 3);
+                let slot = self.fb.ins().iadd(blob_addr, byteoff);
+                let r = if matches!(p, Prim::VectorRef) {
+                    self.fb.ins().load(I64, flags, slot, 8)
+                } else {
+                    self.emit_card_mark(blob_addr);
+                    self.fb.ins().store(flags, argvals[2], slot, 8);
+                    self.iconst(M::R::enc_nil())
+                };
+                self.fb.def_var(result, r);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(*p, &argvals);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // Stage F2: the hot COLLECTION prims get monomorphic register-arg
+            // shims — no arg spill, no prim tag, no giant match. PARKING-
+            // classified (plain call): their live-across values ride the maps.
+            // (Cons/First/Rest here serve the models without inline object
+            // paths and any site the inline guards reject — the arms above
+            // take precedence under LowBit.)
+            Ir::Prim(p @ (Prim::PvConj | Prim::PvNth | Prim::ArrPush | Prim::Cons | Prim::TvConj), args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let f = match p {
+                    Prim::PvConj => self.refs.pv_conj,
+                    Prim::PvNth => self.refs.pv_nth,
+                    Prim::ArrPush => self.refs.arr_push,
+                    Prim::Cons => self.refs.cons2,
+                    Prim::TvConj => self.refs.tv_conj,
+                    _ => unreachable!(),
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, a, b])
+            }
+            Ir::Prim(
+                p @ (Prim::PvAssoc | Prim::HamtAssoc | Prim::HamtLookup | Prim::TamAssoc
+                | Prim::ThmAssoc | Prim::AmapGet),
+                args,
+            ) if args.len() == 3 => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let c = self.compile::<M>(&args[2], false);
+                let f = match p {
+                    Prim::PvAssoc => self.refs.pv_assoc,
+                    Prim::HamtAssoc => self.refs.hamt_assoc,
+                    Prim::HamtLookup => self.refs.hamt_lookup,
+                    Prim::TamAssoc => self.refs.tam_assoc,
+                    Prim::ThmAssoc => self.refs.thm_assoc,
+                    Prim::AmapGet => self.refs.amap_get,
+                    _ => unreachable!(),
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, a, b, c])
+            }
+            Ir::Prim(p @ (Prim::First | Prim::Rest), args) => {
+                let v = self.compile::<M>(&args[0], false);
+                let f = if matches!(p, Prim::First) { self.refs.first1 } else { self.refs.rest1 };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, v])
+            }
+            // `=` (2-arg) via a monomorphic, register-arg, non-fenced shim.
+            // Eq2 is the single hottest op in predicate-heavy code (core.match):
+            // ~12M calls in the match bench, every one taking the general prim
+            // path (spill args to a stack slot + prim-tag + a GC-fenced call).
+            // Eq2 never allocates and never reaches a safepoint (the scalar
+            // branch compares in place; the collection / nil branches return
+            // `nil` BEFORE `equal`), so — exactly like First/Rest — it rides the
+            // non-fenced path with its two operands in registers. `shim_eq2`
+            // delegates to `rt.prim(Prim::Eq2, ..)`, so the answer is identical;
+            // only the calling convention changes. (A fuller inline fast-path
+            // was tried and REVERTED: its extra branches per site regressed the
+            // bench median even though the per-op min improved.)
+            Ir::Prim(Prim::Eq2, args) => {
+                let a = self.compile::<M>(&args[0], false);
+                let b = self.compile::<M>(&args[1], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.eq2, &[ctx, a, b])
+            }
+            // Char-at-a-time text I/O (see the shim comments): register-arg
+            // shims for the per-character prims. StrCharAt/IntToChar allocate
+            // and are PARKING-classified; CharToInt is non-fenced like Eq2.
+            Ir::Prim(Prim::StrCharAt, args) if args.len() == 2 => {
+                let s = self.compile::<M>(&args[0], false);
+                let i = self.compile::<M>(&args[1], false);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.str_char_at, &[ctx, s, i])
+            }
+            Ir::Prim(p @ (Prim::CharToInt | Prim::IntToChar), args) if args.len() == 1 => {
+                let v = self.compile::<M>(&args[0], false);
+                let f = if matches!(p, Prim::CharToInt) {
+                    self.refs.char_to_int
+                } else {
+                    self.refs.int_to_char
+                };
+                let ctx = self.ctx_val;
+                self.call_shim_checked(f, &[ctx, v])
+            }
+            // Every other prim: compute args, escape to the runtime (the native
+            // analogue of the bytecode tier's `Slow`).
+            Ir::Prim(p, args) => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let (addr, count) = self.spill_args(&argvals);
+                let tagv = self.i32const(prim_tag(*p));
+                let ctx = self.ctx_val;
+                self.call_shim_fenced_checked(self.refs.prim, &[ctx, tagv, addr, count])
+            }
+            Ir::Let(..) => {
+                panic!("unflattened Ir reached the JIT: Let survives only before flatten::flatten")
+            }
+            Ir::SetLocal { up, idx, val } => {
+                assert_eq!(*up, 0, "unflattened Ir reached the JIT: SetLocal up={up}");
+                // Phase 3: the slot's value changes, so any type FACT about it is
+                // stale unless the new value is itself proven — re-establish from
+                // the RHS (a `(set! s (type-of …))`-shaped rebind keeps the fact),
+                // otherwise clear it.
+                let new_fact = self.static_type_of(val);
+                let v = self.compile::<M>(val, false);
+                if self.mem_mode {
+                    self.emit_local0_store(*idx, v);
+                } else {
+                    self.fb.def_var(self.vars[*idx as usize], v);
+                    if let Some(slot) = self.slot_type.get_mut(*idx as usize) {
+                        *slot = new_fact;
+                    }
+                }
+                v // `set!` evaluates to the assigned value
+            }
+            Ir::SetGlobal { name, val } => {
+                let v = self.compile::<M>(val, false);
+                let namev = self.i32const(*name);
+                let ctx = self.ctx_val;
+                self.call_shim_fenced(self.refs.set_global, &[ctx, namev, v])
+            }
+            // `(.-field obj)` — inline-cached field read via the shim.
+            Ir::FieldGet { site, field, obj } => {
+                let o = self.compile::<M>(obj, false);
+                let sitev = self.i32const(*site as u32);
+                let fieldv = self.i32const(*field);
+                let ctx = self.ctx_val;
+                self.call_shim_fenced(self.refs.field_get, &[ctx, sitev, fieldv, o])
+            }
+            // Protocol/method dispatch. D5 fast path: when unwrapped (`direct`)
+            // and the receiver is a RECORD, read its type sym straight off the
+            // object and probe this site's baked 2-way inline cache (filled by
+            // the shim; epoch = relocation count ⊕ dispatch version, so a moved
+            // impl or a redefinition never false-hits). A hit calls the impl
+            // `(instance? <proto> x)` — inline per-site (type -> bool) cache. A
+            // MISS or non-record receiver calls the real `-instance-val`, so the
+            // answer is always exactly the function's; the cache only avoids
+            // recomputing for a type already seen. (First cut: just the call.)
+            Ir::InstanceCheck { site, iv, proto, arg } => {
+                let pv = self.compile::<M>(proto, false);
+                let xv = self.compile::<M>(arg, false);
+                let flags = MemFlagsData::trusted();
+                let ro = MemFlagsData::trusted().with_readonly();
+                let result = self.declare_root_var();
+                let merge = self.fb.create_block();
+                // The authoritative slow path: call the real `-instance-val`.
+                // Reached on a non-ref (immediate) receiver, a cache miss, or a
+                // wrapped backend — so the answer is ALWAYS the function's.
+                let slowb = self.cold_block();
+
+                // ANY reference receiver uses the cache: a record keys on its
+                // type Sym (+8), every other kind keys on its header kind byte
+                // (see `INSTANCE_NONREC_KEY_BIT`). An IMMEDIATE receiver keys
+                // on its RawTag category (`INSTANCE_IMM_KEY_BIT`) when the
+                // model can emit it — measured 51ns/call through the slow
+                // `-instance-val` vs 5ns cached, and core.match's map-pattern
+                // rows run this per element on ints/symbols. Only wrapped
+                // backends (and opted-out models' immediates) take the shim.
+                let (is_ref, addr) = M::emit_ref_addr(self, xv);
+                let rc = self.rc_val;
+                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                // `cacheb` takes the cache key `ty` as a block param, filled by
+                // the record / non-record / immediate edges below so it never
+                // reads +8 on an object that may be header-only.
+                let cacheb = self.fb.create_block();
+                let ty = self.fb.append_block_param(cacheb, I64);
+                let recb = self.fb.create_block();
+                let dirb = self.fb.create_block();
+                self.fb.ins().brif(direct, dirb, &[], slowb, &[]);
+                self.fb.switch_to_block(dirb);
+                self.fb.seal_block(dirb);
+                let immb = self.fb.create_block();
+                self.fb.ins().brif(is_ref, recb, &[], immb, &[]);
+
+                // ── immediate: category key, or the slow path if the model
+                //    cannot classify immediates inline ──
+                self.fb.switch_to_block(immb);
+                self.fb.seal_block(immb);
+                match M::emit_imm_cat(self, xv) {
+                    Some(cat) => {
+                        let key = self.fb.ins().bor_imm(cat, INSTANCE_IMM_KEY_BIT as i64);
+                        self.fb.ins().jump(cacheb, &[key.into()]);
+                    }
+                    None => {
+                        self.fb.ins().jump(slowb, &[]);
+                    }
+                }
+
+                self.fb.switch_to_block(recb);
+                self.fb.seal_block(recb);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                let recty = self.fb.create_block();
+                let nonrecty = self.fb.create_block();
+                self.fb.ins().brif(is_rec, recty, &[], nonrecty, &[]);
+
+                // ── record: the type sym IS its raw word at +8 ──
+                self.fb.switch_to_block(recty);
+                self.fb.seal_block(recty);
+                let tyr = self.fb.ins().load(I64, flags, addr, 8);
+                self.fb.ins().jump(cacheb, &[tyr.into()]);
+
+                // ── other ref kind: key on the header kind byte, tagged ──
+                self.fb.switch_to_block(nonrecty);
+                self.fb.seal_block(nonrecty);
+                let tyn = self.fb.ins().bor_imm(tid, INSTANCE_NONREC_KEY_BIT as i64);
+                self.fb.ins().jump(cacheb, &[tyn.into()]);
+
+                self.fb.switch_to_block(cacheb);
+                self.fb.seal_block(cacheb);
+                // The cached bool depends only on the receiver type (`ty`) and the
+                // dispatch VERSION — never on GC relocation (see `instance_epoch` /
+                // `shim_instance_fill`). So the epoch is the dispatch version alone;
+                // omitting `relocated()` lets the cache survive the GC churn that an
+                // allocating caller (e.g. core.match) produces, so a repeated
+                // receiver type actually hits instead of re-running `satisfies?`.
+                let vp = self.load_rc_field(self.off_dispver_ptr);
+                let epoch = self.fb.ins().load(I64, flags, vp, 0);
+                let sitep = self.iconst(self.instance_ic_slot::<M>(*site) as u64);
+                // Probe the ways in sequence; every way's miss edge chains to
+                // the next, the last to the true miss. Worst case (all ways
+                // miss) is INSTANCE_IC_WAYS compare-pairs — still far under one
+                // `-instance-val` call.
+                let missb = self.cold_block(); // IC all-ways miss: resolve shim
+                for way in 0..INSTANCE_IC_WAYS as i32 {
+                    let base = way * 24;
+                    let ce = self.fb.ins().load(I64, flags, sitep, base); // way.epoch
+                    let ct = self.fb.ins().load(I64, flags, sitep, base + 8); // way.ty
+                    let e_ok = self.fb.ins().icmp(IntCC::Equal, ce, epoch);
+                    let t_ok = self.fb.ins().icmp(IntCC::Equal, ct, ty);
+                    let hit = self.fb.ins().band(e_ok, t_ok);
+                    let hitb = self.fb.create_block();
+                    let nextb = if way + 1 == INSTANCE_IC_WAYS as i32 {
+                        missb
+                    } else {
+                        self.fb.create_block()
+                    };
+                    self.fb.ins().brif(hit, hitb, &[], nextb, &[]);
+                    // ── hit: the cached bool ──
+                    self.fb.switch_to_block(hitb);
+                    self.fb.seal_block(hitb);
+                    let cached = self.fb.ins().load(I64, flags, sitep, base + 16);
+                    self.fb.def_var(result, cached);
+                    self.fb.ins().jump(merge, &[]);
+                    if way + 1 != INSTANCE_IC_WAYS as i32 {
+                        self.fb.switch_to_block(nextb);
+                        self.fb.seal_block(nextb);
+                    }
+                }
+
+                // ── miss: compute via -instance-val, then refill {epoch, ty, r} ──
+                self.fb.switch_to_block(missb);
+                self.fb.seal_block(missb);
+                let base = self.load_rc_field(self.off_global_base);
+                let f0 = self.fb.ins().load(I64, flags, base, (*iv as i32) * 8);
+                let r0 = self.emit_call::<M>(f0, &[pv, xv]);
+                let sv = self.i32const(*site as u32);
+                let ctx = self.ctx_val;
+                self.call_shim(self.refs.instance_fill, &[ctx, sv, ty, r0]);
+                self.fb.def_var(result, r0);
+                self.fb.ins().jump(merge, &[]);
+
+                // ── slow: immediate receiver / non-direct — call -instance-val ──
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let base2 = self.load_rc_field(self.off_global_base);
+                let f1 = self.fb.ins().load(I64, flags, base2, (*iv as i32) * 8);
+                let r1 = self.emit_call::<M>(f1, &[pv, xv]);
+                self.fb.def_var(result, r1);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            // through the ordinary native call sequence; every miss — non-record
+            // receivers (built-in categories), wrapped backends, cold/invalidated
+            // sites — takes the shim, which resolves AND refills.
+            Ir::Dispatch { site, method, args } => {
+                let argvals: Vec<Value> =
+                    args.iter().map(|a| self.compile::<M>(a, false)).collect();
+                if !M::INLINE_OBJECTS || argvals.is_empty() {
+                    let (addr, count) = self.spill_args(&argvals);
+                    let sitev = self.i32const(*site as u32);
+                    let methodv = self.i32const(*method);
+                    let ctx = self.ctx_val;
+                    return self
+                        .call_shim_checked(self.refs.dispatch, &[ctx, sitev, methodv, addr, count]);
+                }
+                // Phase 3 — COMPILE-TIME NESTED DISPATCH. Inside a
+                // dispatch-speculation guarded region (`guarded_version`), the
+                // enclosing guard already proved the receiver's type AND pinned
+                // the dispatch version. If this nested dispatch's receiver has a
+                // compile-time-KNOWN type (a fact propagated down the inlined
+                // chain), resolve (method, type) NOW and splice the impl with NO
+                // guard of its own — the region's version guard is what makes the
+                // baked resolution safe (any redefinition deopts the whole
+                // region). This is the kill shot for the call glue an IC hit
+                // still paid: the nested dispatch's guard, IC probe, and impl
+                // CALL all vanish into straight-line code. Not gated on feedback
+                // — the type is a proven invariant here, not a warmup guess.
+                if let Some(_v) = self.guarded_version {
+                    if let Some(recv_ty) = self.static_type_of(&args[0]) {
+                        if let Some(plan) =
+                            self.static_dispatch_plan::<M>(*site, *method, recv_ty, argvals.len())
+                        {
+                            crate::stats::bump(&crate::stats::SPEC_DISPATCH_SITES);
+                            let mut arg_types: Vec<Option<Sym>> =
+                                args.iter().map(|a| self.static_type_of(a)).collect();
+                            arg_types[0] = Some(recv_ty);
+                            let iv = self.emit_inlined_body::<M>(
+                                plan.nparams,
+                                plan.nslots,
+                                &plan.body,
+                                &argvals,
+                                None,
+                                None,
+                                &arg_types,
+                            );
+                            // A dispatch may itself raise inside the impl body;
+                            // the impl's own prim/call emissions already divert on
+                            // a pending signal, so `iv` is the normal-completion
+                            // value. The final `emit_pending_check` is a no-op when
+                            // nothing is pending — kept to match the shim-only and
+                            // guarded-splice emissions exactly (propagate identically).
+                            return self.emit_pending_check(iv);
+                        }
+                    }
+                }
+                // Plan the speculation BEFORE emitting: the impl this site was
+                // observed resolving to while interpreted, if its body is small
+                // enough to fit the inline budget (the same size policy the
+                // value inliner uses — no per-method special-casing anywhere).
+                let inline_plan: Option<ValuePlan> = if self.rt_ptr.is_null() {
+                    None
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    rt.observed_dispatch_impl(*site)
+                        .and_then(|imp| self.try_value_inline_plan::<M>(imp, argvals.len()))
+                };
+                let flags = MemFlagsData::trusted();
+                let ro = MemFlagsData::trusted().with_readonly();
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+
+                let recv = argvals[0];
+                let (is_ref, addr) = M::emit_ref_addr(self, recv);
+                let rc = self.rc_val;
+                let direct = self.fb.ins().load(I8, ro, rc, self.off_direct);
+                // `probeb` runs the IC probes over a cache key delivered as a
+                // block param, so the record edge (raw type-sym word) and the
+                // immediate edge (the category's constant type-tag sym) share
+                // one probe emission.
+                let probeb = self.fb.create_block();
+                let ty = self.fb.append_block_param(probeb, I64);
+                let chk = self.fb.create_block();
+                let dirb = self.fb.create_block();
+                let immb = self.fb.create_block();
+                self.fb.ins().brif(direct, dirb, &[], slow, &[]);
+                self.fb.switch_to_block(dirb);
+                self.fb.seal_block(dirb);
+                self.fb.ins().brif(is_ref, chk, &[], immb, &[]);
+
+                // ── immediate receiver: `type_tag` is a per-category constant
+                //    sym, so compute it inline and probe the same IC the shim
+                //    refills (`entry.ty = type_tag(recv)`). core.match's
+                //    `val-at*` dispatches on Long/Symbol receivers per element;
+                //    these always missed to `shim_dispatch` before. Models that
+                //    can't classify immediates (and compiles with no runtime,
+                //    e.g. `dump_ir`) keep the slow path.
+                self.fb.switch_to_block(immb);
+                self.fb.seal_block(immb);
+                match (M::emit_imm_cat(self, recv), self.rt_ptr.is_null()) {
+                    (Some(cat), false) => {
+                        let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                        // The names must match `type_tag`'s immediate arm
+                        // exactly (interning is idempotent, so these are the
+                        // same syms `shim_dispatch` stores).
+                        let s_long = self.iconst(rt.intern("Long") as u64);
+                        let s_dbl = self.iconst(rt.intern("Double") as u64);
+                        let s_bool = self.iconst(rt.intern("Boolean") as u64);
+                        let s_nil = self.iconst(rt.intern("nil") as u64);
+                        let s_sym = self.iconst(rt.intern("Symbol") as u64);
+                        let c0 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 0);
+                        let c1 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 1);
+                        let c2 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 2);
+                        let c3 = self.fb.ins().icmp_imm(IntCC::Equal, cat, 3);
+                        let t3 = self.fb.ins().select(c3, s_nil, s_sym);
+                        let t2 = self.fb.ins().select(c2, s_bool, t3);
+                        let t1 = self.fb.ins().select(c1, s_dbl, t2);
+                        let tyi = self.fb.ins().select(c0, s_long, t1);
+                        self.fb.ins().jump(probeb, &[tyi.into()]);
+                    }
+                    _ => {
+                        self.fb.ins().jump(slow, &[]);
+                    }
+                }
+
+                self.fb.switch_to_block(chk);
+                self.fb.seal_block(chk);
+                let hdr = self.fb.ins().load(I64, flags, addr, 0);
+                let tid = self.fb.ins().band_imm(hdr, 0xffff);
+                // `ty` = `type_tag(recv)` for ANY reference shape, not just a
+                // RECORD. This used to be `brif(is_rec, …, slow)` — so a
+                // dispatch on a list, a string, or anything else that is not a
+                // record could NEVER hit the inline cache and took the shim
+                // forever. Measured: 80 MILLION shim_dispatch calls in one run
+                // of a predicate benchmark, on a 2-way IC that was doing
+                // nothing for 3/5 of the data. (Not GC epoch invalidation — the
+                // count is identical with a nursery big enough never to
+                // collect.)
+                //
+                // A record still costs exactly what it did (one load); the other
+                // kinds each add one compare against a compile-time constant
+                // sym, which is what `type_tag` would have computed anyway.
+                // NB: RECORD plus the STRING/CHAR kinds. Widening to EVERY
+                // reference kind was measured on a predicate workload and
+                // changed nothing there (shim_dispatch count identical), so the
+                // full kind chain is not emitted; but a char-at-a-time text
+                // reader (data.json's `.charAt`/`.subSequence` on a String
+                // receiver) dispatches on a STRING once per character, and
+                // those sites missed to the shim forever. String/Char cost two
+                // compares against constant syms — exactly what `type_tag`
+                // would have computed.
+                let chk2 = self.fb.create_block();
+                let nonrecb = self.fb.create_block();
+                let is_rec = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::RECORD as i64);
+                self.fb.ins().brif(is_rec, chk2, &[], nonrecb, &[]);
+                self.fb.switch_to_block(chk2);
+                self.fb.seal_block(chk2);
+                // The record's type sym (its raw word) IS `type_tag(recv)`.
+                let tyr = self.fb.ins().load(I64, flags, addr, 8);
+                self.fb.ins().jump(probeb, &[tyr.into()]);
+
+                self.fb.switch_to_block(nonrecb);
+                self.fb.seal_block(nonrecb);
+                if self.rt_ptr.is_null() {
+                    self.fb.ins().jump(slow, &[]);
+                } else {
+                    let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                    // Must match `type_tag`'s kind arms exactly (interning is
+                    // idempotent — same syms `shim_dispatch` stores).
+                    let s_str = self.iconst(rt.intern("String") as u64);
+                    let s_char = self.iconst(rt.intern("Char") as u64);
+                    let is_str = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::STR as i64);
+                    let is_char = self.fb.ins().icmp_imm(IntCC::Equal, tid, kind::CHAR as i64);
+                    let known = self.fb.ins().bor(is_str, is_char);
+                    let tyn = self.fb.ins().select(is_str, s_str, s_char);
+                    let strb = self.fb.create_block();
+                    self.fb.ins().brif(known, strb, &[], slow, &[]);
+                    self.fb.switch_to_block(strb);
+                    self.fb.seal_block(strb);
+                    self.fb.ins().jump(probeb, &[tyn.into()]);
+                }
+
+                self.fb.switch_to_block(probeb);
+                self.fb.seal_block(probeb);
+                let rp = self.load_rc_field(self.off_reloc_ptr);
+                let reloc = self.fb.ins().load(I64, flags, rp, 0);
+                let vp = self.load_rc_field(self.off_dispver_ptr);
+                let ver = self.fb.ins().load(I64, flags, vp, 0);
+                let mixed = self.fb.ins().imul_imm(reloc, DISPATCH_EPOCH_MIX as i64);
+                let epoch = self.fb.ins().bxor(mixed, ver);
+                let sitep = self.iconst(self.dispatch_ic_slot::<M>(*site) as u64);
+                // ADAPTIVE TIER (feedback-driven speculation, recompiles only):
+                // when this site's warmup histogram is dominated by ONE record
+                // type, splice that type's resolved impl body inline behind a
+                // guard on the live receiver type sym + the dispatch version.
+                // The guard's deopt edge is the ordinary IC probe + shim below
+                // (never a wrong answer), with the deopt COUNTED so a site that
+                // turns polymorphic is blacklisted at the next recompile. Only
+                // the PLANNING source is new (the `FeedbackTable`); the splice is
+                // the existing `emit_inlined_body`.
+                if let Some(plan) = self.dispatch_spec_plan::<M>(*site, *method, argvals.len()) {
+                    crate::stats::bump(&crate::stats::SPEC_DISPATCH_SITES);
+                    let dom = self.iconst(plan.dom_ty as u64);
+                    let ty_ok = self.fb.ins().icmp(IntCC::Equal, ty, dom);
+                    let verc = self.iconst(plan.version);
+                    let ver_ok = self.fb.ins().icmp(IntCC::Equal, ver, verc);
+                    let spec_ok = self.fb.ins().band(ty_ok, ver_ok);
+                    let specb = self.fb.create_block();
+                    let despec = self.cold_block(); // deopt edge: counted + generic
+                    self.fb.ins().brif(spec_ok, specb, &[], despec, &[]);
+                    // FAST: inline the impl body (capture-free — no live-value reads).
+                    self.fb.switch_to_block(specb);
+                    self.fb.seal_block(specb);
+                    // Phase 3: this block runs only when `ty == dom_ty && ver ==
+                    // plan.version`, so the receiver's type IS `dom_ty` and no
+                    // method has been redefined since — establish BOTH facts for
+                    // the inlined impl so its own `type-of` checks fold and its
+                    // nested dispatches resolve at compile time (`guarded_version`).
+                    let mut arg_types: Vec<Option<Sym>> =
+                        args.iter().map(|a| self.static_type_of(a)).collect();
+                    arg_types[0] = Some(plan.dom_ty);
+                    let saved_gv = self.guarded_version.replace(plan.version);
+                    let iv = self.emit_inlined_body::<M>(
+                        plan.nparams,
+                        plan.nslots,
+                        &plan.body,
+                        &argvals,
+                        None,
+                        None,
+                        &arg_types,
+                    );
+                    self.guarded_version = saved_gv;
+                    self.fb.def_var(result, iv);
+                    self.fb.ins().jump(merge, &[]);
+                    // DEOPT: count it, then fall into the generic IC probes (this
+                    // block becomes the current one, so the probe sequence below
+                    // emits here).
+                    self.fb.switch_to_block(despec);
+                    self.fb.seal_block(despec);
+                    let sitev_d = self.i32const(*site as u32);
+                    let ctx_d = self.ctx_val;
+                    self.fb.ins().call(self.refs.deopt, &[ctx_d, sitev_d]);
+                }
+                let probe = |c: &mut Self, way: i32, miss: cranelift_codegen::ir::Block| {
+                    let base = way * 24;
+                    let e = c.fb.ins().load(I64, flags, sitep, base);
+                    let t = c.fb.ins().load(I64, flags, sitep, base + 8);
+                    let imp = c.fb.ins().load(I64, flags, sitep, base + 16);
+                    let e_ok = c.fb.ins().icmp(IntCC::Equal, e, epoch);
+                    let t_ok = c.fb.ins().icmp(IntCC::Equal, t, ty);
+                    let hit = c.fb.ins().band(e_ok, t_ok);
+                    let hitb = c.fb.create_block();
+                    c.fb.ins().brif(hit, hitb, &[], miss, &[]);
+                    c.fb.switch_to_block(hitb);
+                    c.fb.seal_block(hitb);
+                    (imp, hitb)
+                };
+                let way1b = self.fb.create_block();
+                let (imp0, _b0) = probe(self, 0, way1b);
+                // SPECULATIVE INLINING THROUGH THE DISPATCH SITE. An IC hit
+                // still paid a full call — and for the small bodies that host
+                // methods and protocol impls actually have (`.charAt` is one
+                // prim; `-write` a handful of nodes), that call IS the cost:
+                // measured 28x JVM on a `.charAt` loop where the JVM inlines the
+                // accessor outright. `dispatch_plan` reads the impl this site was
+                // observed resolving to while interpreted and splices its body in
+                // behind the same meta-word guard the value inliner uses, with
+                // the ordinary call as the deopt edge.
+                //
+                // Way 0 ONLY: a site we speculate on is monomorphic by
+                // construction (that is what made a plan), so way 0 is where it
+                // hits; inlining way 1 as well would double the emitted body to
+                // serve the case the speculation says does not happen.
+                let r0 = match &inline_plan {
+                    Some(p) => {
+                        let at: Vec<Option<Sym>> =
+                            args.iter().map(|a| self.static_type_of(a)).collect();
+                        self.emit_value_specialized::<M>(imp0, &argvals, p, &at)
+                    }
+                    None => self.emit_call::<M>(imp0, &argvals),
+                };
+                self.fb.def_var(result, r0);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(way1b);
+                self.fb.seal_block(way1b);
+                let (imp1, _b1) = probe(self, 1, slow);
+                let r1 = self.emit_call::<M>(imp1, &argvals);
+                self.fb.def_var(result, r1);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let (aaddr, count) = self.spill_args(&argvals);
+                let sitev = self.i32const(*site as u32);
+                let methodv = self.i32const(*method);
+                let ctx = self.ctx_val;
+                let sr = self.call_shim(self.refs.dispatch, &[ctx, sitev, methodv, aaddr, count]);
+                self.fb.def_var(result, sr);
+                self.fb.ins().jump(merge, &[]);
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                // Either path may have raised (a hit's impl, a miss's resolve
+                // failure); propagate exactly as the shim-only emission did.
+                let r = self.fb.use_var(result);
+                self.emit_pending_check(r)
+            }
+            // Register a deftype/protocol method impl.
+            Ir::DefMethod { name, ty, imp } => {
+                let impv = self.compile::<M>(imp, false);
+                let namev = self.i32const(*name);
+                let tyv = self.i32const(*ty);
+                let ctx = self.ctx_val;
+                self.call_shim_fenced(self.refs.def_method, &[ctx, namev, tyv, impv])
+            }
+            // try/catch/finally: pass the body/catch/finally Ir by pointer (they
+            // outlive the compiled code) and let the shim run them via `top` under
+            // a catch_unwind — so the whole construct is one shim call.
+            // `(try body (catch e h))` with NO finally — emitted INLINE.
+            //
+            // `throw` is a signal FLAG, not an unwind, so a try needs no machinery:
+            // run the body, and if a throw is pending, bind it and run the handler.
+            // The only thing that forced the old shape — each arm compiled as its
+            // own body, reached through a shim + trampoline + frame — was that a
+            // pending check RETURNS out of the compiled body. `catch_handlers`
+            // redirects those to the handler block instead, so the whole construct
+            // is straight-line code plus a branch.
+            //
+            // It measured 65ns for a try that never throws (the JVM: free — its
+            // exception tables cost nothing until something throws). core.match
+            // wraps EVERY clause in one.
+            //
+            // `finally` keeps the shim: it has to run on both edges while carrying
+            // a suspended signal across arbitrary code, which is real work and not
+            // what the hot path needs. A wrapped backend (Traced/Tiered) also keeps
+            // the shim — an inlined arm is invisible to `top`, the same rule the
+            // other inliners follow via `direct`.
+            // Always inline — no `direct` gate. An inlined try is CONTROL FLOW, not
+            // a call: every call inside it still routes through `top`, so a wrapper
+            // observes exactly what it did before. (The other inliners gate on
+            // `direct` because they splice a CALLEE, which really would vanish from
+            // `top`'s view.) Not gating is what lets the body drop `mem_mode`.
+            Ir::Try { body, catch: Some(catch), finally: None, cslot, .. } => {
+                let result = self.declare_root_var();
+                let handler = self.fb.create_block();
+                let merge = self.fb.create_block();
+                self.catch_handlers.push(handler);
+                let bv = self.compile::<M>(body, false);
+                self.catch_handlers.pop();
+                self.fb.def_var(result, bv);
+                self.fb.ins().jump(merge, &[]);
+
+                // ── a signal is pending: catch a THROW, propagate anything else ──
+                self.fb.switch_to_block(handler);
+                self.fb.seal_block(handler);
+                let rtp = self.load_rc_field(self.off_rt);
+                let kind = self.fb.ins().load(
+                    I8,
+                    MemFlagsData::trusted(),
+                    rtp,
+                    self.signal_kind_off,
+                );
+                // kind 1 = throw; 2 = escape continuation, which a `catch` must NOT
+                // intercept.
+                let is_throw = self.fb.ins().icmp_imm(IntCC::Equal, kind, 1);
+                let do_catch = self.fb.create_block();
+                let propagate = self.fb.create_block();
+                self.fb.ins().brif(is_throw, do_catch, &[], propagate, &[]);
+
+                self.fb.switch_to_block(do_catch);
+                self.fb.seal_block(do_catch);
+                let ctxv = self.ctx_val;
+                let thrown = self.call_shim(self.refs.take_signal, &[ctxv]);
+                // `flatten` re-homed the catch binding to a slot of THIS activation.
+                // In memory mode that slot is a frame word; in SSA mode it is just
+                // one of this body's variables.
+                if self.mem_mode {
+                    self.emit_local0_store(*cslot, thrown);
+                } else {
+                    let v = self.vars[*cslot as usize];
+                    self.fb.def_var(v, thrown);
+                }
+                let cv = self.compile::<M>(catch, false);
+                self.fb.def_var(result, cv);
+                self.fb.ins().jump(merge, &[]);
+
+                // Not ours: leave it pending and unwind as a pending check would.
+                self.fb.switch_to_block(propagate);
+                self.fb.seal_block(propagate);
+                match self.catch_handlers.last().copied() {
+                    Some(outer) => {
+                        self.fb.ins().jump(outer, &[]);
+                    }
+                    None => {
+                        let nilv = self.iconst(M::R::enc_nil());
+                        self.fb.ins().return_(&[nilv]);
+                    }
+                }
+
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            Ir::Try { body, catch, finally, cslot, site } => {
+                let bp = (&**body as *const Ir) as i64;
+                let cp = catch.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
+                let fp = finally.as_deref().map_or(std::ptr::null::<Ir>(), |c| c as *const Ir) as i64;
+                let bpv = self.fb.ins().iconst(I64, bp);
+                let cpv = self.fb.ins().iconst(I64, cp);
+                let fpv = self.fb.ins().iconst(I64, fp);
+                let csv = self.i32const(*cslot as u32);
+                // The arm cache is keyed by this, not by the Ir pointers above.
+                let sitev = self.fb.ins().iconst(I64, *site as i64);
+                let ctx = self.ctx_val;
+                self.call_shim_checked(self.refs.try_, &[ctx, bpv, cpv, fpv, csv, sitev])
+            }
+        }
+    }
+
+    /// Call the runtime's `prim` (the checked, promoting arithmetic / any prim) —
+    /// the native `Slow` escape, shared by the arithmetic fallback and non-fast prims.
+    fn slow_prim(&mut self, op: Prim, args: &[Value]) -> Value {
+        let (addr, count) = self.spill_args(args);
+        let tagv = self.i32const(prim_tag(op));
+        let ctx = self.ctx_val;
+        self.call_shim_fenced_checked(self.refs.prim, &[ctx, tagv, addr, count])
+    }
+
+    /// Emit guarded arithmetic: the per-model fixnum fast path when both operands
+    /// are immediate integers and the result fits fixnum range, else a call to the
+    /// runtime's promoting `prim` (bignum / float / mixed). The emit half of the
+    /// numeric-overflow axis — what makes the JIT match the tree-walker's tower.
+    /// Emit an `if`'s test as a BRANCH to its arms, without ever building a
+    /// boolean value.
+    ///
+    /// `(if (< i n) …)` used to compile the comparison through the ordinary
+    /// arithmetic path, whose fast path materializes a TAGGED true/false with a
+    /// `select`, and then decoded that word back into a branch — `cmp #3; cset;
+    /// cmp #2; cset; and; tst; b.ne`. The disassembly of the hot loop in
+    /// `(loop [i 0] (if (< i n) (recur (inc i)) i))` is nine instructions where
+    /// the machine needs two, and it is the whole reason a three-operation loop
+    /// ran at ~0.4 IPC. Comparisons are the overwhelmingly common `if` test, so
+    /// they get the same treatment the fixnum guard already had.
+    ///
+    /// The slow path still goes through the runtime prim and decodes truthiness —
+    /// `<` on non-fixnums (bignums, ratios, floats) means what it always did.
+    fn emit_if_branch<M: ModelArithJit>(&mut self, cnd: &Ir, then_b: Block, else_b: Block) {
+        match cnd {
+            // An optimizer-inserted fixnum guard: one raw combined tag test.
+            Ir::Prim(Prim::AllFixnum, gargs) => {
+                let vs: Vec<Value> =
+                    gargs.iter().map(|a| self.compile::<M>(a, false)).collect();
+                let t = self.emit_all_fixnum_raw::<M>(&vs);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+            // Fixnum-specialized comparisons (a dominating `AllFixnum` proved
+            // the operands immediate): branch on the raw compare — no guard,
+            // no boolean. Without this arm the specializer made loop tests
+            // SLOWER than unspecialized ones (`FxLt` fell to the generic path,
+            // which materializes a tagged bool and re-decodes it).
+            Ir::Prim(op @ (Prim::FxLt | Prim::FxEq), cargs) if cargs.len() == 2 => {
+                let a = self.compile::<M>(&cargs[0], false);
+                let b = self.compile::<M>(&cargs[1], false);
+                let c = if let Prim::FxEq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+            }
+            // Phase 2 — inside the UNBOXED loop arm, `(< i n)` / `(= i n)` is a
+            // BARE untagged compare: both operands come from `compile_int`
+            // (raw registers / raw consts), so there is no fixnum guard, no
+            // untag, and no boolean — one `cmp` + branch, the theoretical
+            // minimum. A non-fixnum operand would already have deopted the loop.
+            Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs)
+                if cargs.len() == 2 && self.unbox.is_some() =>
+            {
+                let x = self.compile_int::<M>(&cargs[0]);
+                let y = self.compile_int::<M>(&cargs[1]);
+                let cc = if matches!(op, Prim::Eq) { IntCC::Equal } else { IntCC::SignedLessThan };
+                let c = self.fb.ins().icmp(cc, x, y);
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+            }
+            // `(if (< a b) …)` / `(if (= a b) …)`: branch on the COMPARISON.
+            Ir::Prim(op @ (Prim::Lt | Prim::Eq), cargs) if cargs.len() == 2 => {
+                let a = self.compile::<M>(&cargs[0], false);
+                let b = self.compile::<M>(&cargs[1], false);
+                let both = if let Prim::Eq = op {
+                    M::emit_eq_immediates(self, a, b)
+                } else {
+                    M::emit_both_int(self, a, b)
+                };
+                let fastb = self.fb.create_block();
+                let slowb = self.cold_block();
+                self.fb.ins().brif(both, fastb, &[], slowb, &[]);
+
+                // fast: both immediates — compare and branch, nothing built.
+                self.fb.switch_to_block(fastb);
+                self.fb.seal_block(fastb);
+                let c = if let Prim::Eq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
+                self.fb.ins().brif(c, then_b, &[], else_b, &[]);
+
+                // slow: the promoting runtime prim, then ordinary truthiness.
+                self.fb.switch_to_block(slowb);
+                self.fb.seal_block(slowb);
+                let v = self.slow_prim(*op, &[a, b]);
+                let t = self.emit_truthy::<M>(v);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+            _ => {
+                let cv = self.compile::<M>(cnd, false);
+                let t = self.emit_truthy::<M>(cv);
+                self.fb.ins().brif(t, then_b, &[], else_b, &[]);
+            }
+        }
+    }
+
+    /// Inline truthiness: only `nil` and `false` are falsey, and each is a single
+    /// value word, so `cv != nil && cv != false` — two compares, no shim call.
+    /// (Refs / ints / syms / floats / true are truthy.)
+    fn emit_truthy<M: ModelArithJit>(&mut self, cv: Value) -> Value {
+        let nil = self.iconst(M::R::enc_nil());
+        let fal = self.iconst(M::R::enc_bool(false));
+        let not_nil = self.fb.ins().icmp(IntCC::NotEqual, cv, nil);
+        let not_fal = self.fb.ins().icmp(IntCC::NotEqual, cv, fal);
+        self.fb.ins().band(not_nil, not_fal)
+    }
+
+    fn emit_guarded_arith<M: ModelArithJit>(&mut self, op: Prim, a: Value, b: Value) -> Value {
+        // `=`'s guard is wider than the arithmetic ops': ANY two non-ref
+        // immediates compare by bits (Stage G1 — `(%num-eq (type-of x) 'Reduced)`
+        // runs per element in every reduce, and syms took the shim).
+        let both = if let Prim::Eq = op {
+            M::emit_eq_immediates(self, a, b)
+        } else {
+            M::emit_both_int(self, a, b)
+        };
+
+        let result = self.declare_root_var();
+        let fast = self.fb.create_block();
+        // The promote/non-fixnum path is the rare one on hot arithmetic (a loop
+        // of fixnums never reaches it) — `cold_block` lays it out-of-line.
+        let slow = self.cold_block();
+        let merge = self.fb.create_block();
+        self.fb.ins().brif(both, fast, &[], slow, &[]);
+
+        // ── fast path: both operands are immediate fixnums (Eq: any immediates) ──
+        self.fb.switch_to_block(fast);
+        self.fb.seal_block(fast);
+        match op {
+            Prim::Lt | Prim::Eq => {
+                // `<` / `=` don't overflow. `=` on two immediates is bit-equality
+                // of the WORDS (canonical encodings; the slow `equal?` path is
+                // only needed for refs, which the guard already routed away).
+                let c = if let Prim::Eq = op {
+                    self.fb.ins().icmp(IntCC::Equal, a, b)
+                } else {
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    self.fb.ins().icmp(IntCC::SignedLessThan, x, y)
+                };
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                let res = self.fb.ins().select(cw, t, f);
+                self.fb.def_var(result, res);
+                self.fb.ins().jump(merge, &[]);
+            }
+            Prim::Add | Prim::Sub => {
+                let is_sub = matches!(op, Prim::Sub);
+                if let Some((r, ovf)) = M::emit_tagged_addsub_checked(self, a, b, is_sub) {
+                    // Tagged add + one overflow test: no untag, no retag, no
+                    // two-sided range compare. (See emit_tagged_addsub_checked —
+                    // the disassembly of `(loop [i 0] (if (< i n) (recur (inc i)) i))`
+                    // spent more on the range check than on the loop.)
+                    let ok = self.fb.create_block();
+                    self.fb.ins().brif(ovf, slow, &[], ok, &[]);
+                    self.fb.switch_to_block(ok);
+                    self.fb.seal_block(ok);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+                } else {
+                    // Both operands are < 2^60, so the i64 op can't overflow i64; it
+                    // only needs a fixnum-range check.
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    let r = if let Prim::Add = op {
+                        self.fb.ins().iadd(x, y)
+                    } else {
+                        self.fb.ins().isub(x, y)
+                    };
+                    self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                }
+            }
+            Prim::Mul => {
+                // The product of two 61-bit values can exceed i64; widen to i128,
+                // range-check, then narrow.
+                let x = M::emit_untag(self, a);
+                let y = M::emit_untag(self, b);
+                let x128 = self.fb.ins().sextend(I128, x);
+                let y128 = self.fb.ins().sextend(I128, y);
+                let r128 = self.fb.ins().imul(x128, y128);
+                let min64 = self.iconst_signed(FIXNUM_MIN);
+                let max64 = self.iconst_signed(FIXNUM_MAX);
+                let min = self.fb.ins().sextend(I128, min64);
+                let max = self.fb.ins().sextend(I128, max64);
+                let ge = self.fb.ins().icmp(IntCC::SignedGreaterThanOrEqual, r128, min);
+                let le = self.fb.ins().icmp(IntCC::SignedLessThanOrEqual, r128, max);
+                let fits = self.fb.ins().band(ge, le);
+                let ok = self.fb.create_block();
+                self.fb.ins().brif(fits, ok, &[], slow, &[]);
+                self.fb.switch_to_block(ok);
+                self.fb.seal_block(ok);
+                let r64 = self.fb.ins().ireduce(I64, r128);
+                let tagged = M::emit_tag(self, r64);
+                self.fb.def_var(result, tagged);
+                self.fb.ins().jump(merge, &[]);
+            }
+            Prim::BitAnd | Prim::BitOr | Prim::BitXor => {
+                // No range check: the fixnum range is symmetric about 0 and
+                // closed under and/or/xor, so a bitwise op on two in-range
+                // values is always in range. (Sign bits included — the
+                // encoding is two's complement, so `(bit-and -3 1)` is 1.)
+                let x = M::emit_untag(self, a);
+                let y = M::emit_untag(self, b);
+                let r = match op {
+                    Prim::BitAnd => self.fb.ins().band(x, y),
+                    Prim::BitOr => self.fb.ins().bor(x, y),
+                    _ => self.fb.ins().bxor(x, y),
+                };
+                let tagged = M::emit_tag(self, r);
+                self.fb.def_var(result, tagged);
+                self.fb.ins().jump(merge, &[]);
+            }
+            Prim::Quot | Prim::Rem => {
+                // Both operands are fixnums here. A ZERO divisor keeps the slow
+                // path: the runtime raises `quot/rem: divide by zero` with the
+                // right message, and it also keeps Cranelift's trapping `sdiv`/
+                // `srem` off a zero it would fault on.
+                let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, b, 0);
+                let ok = self.fb.create_block();
+                self.fb.ins().brif(nz, ok, &[], slow, &[]);
+                self.fb.switch_to_block(ok);
+                self.fb.seal_block(ok);
+                if let Prim::Rem = op {
+                    // `rem` needs NO untag/retag under a scaled encoding: the
+                    // tag is a constant left-shift, and `(x*k) % (y*k)` is
+                    // `(x % y)*k`. The remainder's magnitude is below the
+                    // divisor's, so the result is always in fixnum range.
+                    let r = M::emit_srem_tagged(self, a, b);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+                } else {
+                    // `quot` divides the scale out, so the quotient comes back
+                    // untagged and is retagged. It has exactly ONE out-of-range
+                    // case — `FIXNUM_MIN / -1` is `2^60`, one past FIXNUM_MAX —
+                    // so it range-checks like add/sub and promotes on overflow.
+                    let x = M::emit_untag(self, a);
+                    let y = M::emit_untag(self, b);
+                    let q = self.fb.ins().sdiv(x, y);
+                    self.emit_range_check_and_retag::<M>(q, result, slow, merge);
+                }
+            }
+            _ => unreachable!("emit_guarded_arith only handles +,-,*,quot,rem,<,=,and/or/xor"),
+        }
+
+        // ── slow path: promote / handle non-fixnum operands in the runtime ──
+        // (Reached both when operands aren't fixnums and when the fast result
+        // overflowed fixnum range; all predecessor edges are emitted above.)
+        self.fb.switch_to_block(slow);
+        self.fb.seal_block(slow);
+        let sp = self.slow_prim(op, &[a, b]);
+        self.fb.def_var(result, sp);
+        self.fb.ins().jump(merge, &[]);
+
+        self.fb.switch_to_block(merge);
+        self.fb.seal_block(merge);
+        self.fb.use_var(result)
+    }
+
+    /// Fixnum-range-check an i64 fast result `r`: if it fits, retag and jump to
+    /// `merge`; otherwise fall through to `slow`. Shared by add/sub.
+    fn emit_range_check_and_retag<M: ModelArithJit>(
+        &mut self,
+        r: Value,
+        result: cranelift_frontend::Variable,
+        slow: cranelift_codegen::ir::Block,
+        merge: cranelift_codegen::ir::Block,
+    ) {
+        let ge = self.fb.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, r, FIXNUM_MIN);
+        let le = self.fb.ins().icmp_imm(IntCC::SignedLessThanOrEqual, r, FIXNUM_MAX);
+        let fits = self.fb.ins().band(ge, le);
+        let ok = self.fb.create_block();
+        self.fb.ins().brif(fits, ok, &[], slow, &[]);
+        self.fb.switch_to_block(ok);
+        self.fb.seal_block(ok);
+        let tagged = M::emit_tag(self, r);
+        self.fb.def_var(result, tagged);
+        self.fb.ins().jump(merge, &[]);
+    }
+
+    // ── Untagged loop carry (Phase 2) ────────────────────────────────────
+    // These run only inside the UNBOXED arm of a self-tail loop (`self.unbox`
+    // is `Some`); see the `UnboxLoop` doc and `build_body`'s loop orchestration.
+
+    /// Compile `ir` to a BARE untagged signed-i64 value (the dual of `compile`,
+    /// which yields tagged bits). Arithmetic stays in the raw domain end to
+    /// end, so a carried counter never untags/retags per op and never leaves a
+    /// register. Overflow past fixnum range, or a value that isn't a fixnum,
+    /// DEOPTS to the tagged generic arm (`emit_unbox_deopt`), which re-runs the
+    /// iteration under the promoting numeric tower. Sound because the loop was
+    /// gated `pure_arith_loop`, so re-running the iteration is side-effect-free.
+    fn compile_int<M: ModelArithJit>(&mut self, ir: &Ir) -> Value {
+        match ir {
+            // A carried param: if it is one of the UNBOXED slots its register
+            // already holds the untagged value; a non-unboxed param (the
+            // self-ref `g`, or any ref counter) takes the tagged fallback,
+            // which deopts unless it happens to be a fixnum.
+            Ir::Local { up: 0, idx } => {
+                let ub = self.unbox.as_ref().expect("compile_int outside unboxed loop");
+                if ub.unbox[*idx as usize] {
+                    let v = ub.raw_vars[*idx as usize];
+                    self.fb.use_var(v)
+                } else {
+                    self.compile_int_fallback::<M>(ir)
+                }
+            }
+            // A fixnum literal: bake its untagged value. (A non-fixnum constant
+            // falls through to the tagged fallback, which deopts — but the
+            // `pure_arith_loop` gate means that only happens for a numeric
+            // tower value the fast path genuinely cannot hold.)
+            Ir::Const(id) | Ir::Quote(id) if !self.rt_ptr.is_null() => {
+                let rt = unsafe { &*(self.rt_ptr as *const Runtime<M>) };
+                match rt.decode(rt.const_bits(*id)) {
+                    crate::value::Val::Int(v)
+                        if (FIXNUM_MIN as i128..=FIXNUM_MAX as i128).contains(&v) =>
+                    {
+                        self.iconst_signed(v as i64)
+                    }
+                    _ => self.compile_int_fallback::<M>(ir),
+                }
+            }
+            Ir::Prim(op @ (Prim::Add | Prim::Sub), args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // Operands are in fixnum range (≤ 2^60), so the i64 op cannot
+                // wrap i64; only the fixnum-range check can fail → deopt.
+                let r = if matches!(op, Prim::Add) {
+                    self.fb.ins().iadd(x, y)
+                } else {
+                    self.fb.ins().isub(x, y)
+                };
+                self.emit_int_range_or_deopt::<M>(r)
+            }
+            Ir::Prim(Prim::Mul, args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // The product of two 61-bit values can exceed i64 — widen, check
+                // fixnum range in i128, narrow (mirrors `emit_guarded_arith`).
+                let x128 = self.fb.ins().sextend(I128, x);
+                let y128 = self.fb.ins().sextend(I128, y);
+                let r128 = self.fb.ins().imul(x128, y128);
+                // Build the i128 range bounds by SIGN-EXTENDING i64 consts — a
+                // direct `iconst(I128, …)` trips Cranelift's egraph (`ty_smin`
+                // "unimplemented for > 64 bits"), which is why `emit_guarded_arith`
+                // uses this same shape.
+                let min64 = self.iconst_signed(FIXNUM_MIN);
+                let max64 = self.iconst_signed(FIXNUM_MAX);
+                let min = self.fb.ins().sextend(I128, min64);
+                let max = self.fb.ins().sextend(I128, max64);
+                let ge = self.fb.ins().icmp(IntCC::SignedGreaterThanOrEqual, r128, min);
+                let le = self.fb.ins().icmp(IntCC::SignedLessThanOrEqual, r128, max);
+                let fits = self.fb.ins().band(ge, le);
+                self.deopt_unless::<M>(fits);
+                self.fb.ins().ireduce(I64, r128)
+            }
+            Ir::Prim(op @ (Prim::BitAnd | Prim::BitOr | Prim::BitXor), args) if args.len() == 2 => {
+                // Fixnum range is closed under and/or/xor — no range check.
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                match op {
+                    Prim::BitAnd => self.fb.ins().band(x, y),
+                    Prim::BitOr => self.fb.ins().bor(x, y),
+                    _ => self.fb.ins().bxor(x, y),
+                }
+            }
+            Ir::Prim(op @ (Prim::Quot | Prim::Rem), args) if args.len() == 2 => {
+                let x = self.compile_int::<M>(&args[0]);
+                let y = self.compile_int::<M>(&args[1]);
+                // A zero divisor deopts (the generic arm raises the divide-by-
+                // zero); it also keeps a trapping sdiv/srem off a zero. `quot`'s
+                // only out-of-range case (`FIXNUM_MIN / -1`) range-checks.
+                let nz = self.fb.ins().icmp_imm(IntCC::NotEqual, y, 0);
+                self.deopt_unless::<M>(nz);
+                if matches!(op, Prim::Rem) {
+                    self.fb.ins().srem(x, y)
+                } else {
+                    let q = self.fb.ins().sdiv(x, y);
+                    self.emit_int_range_or_deopt::<M>(q)
+                }
+            }
+            // Anything else in an int position: compile it tagged, prove it is a
+            // fixnum (else deopt), untag. Reachable only for pure values under
+            // the `pure_arith_loop` gate, so the deopt is re-execution-safe.
+            _ => self.compile_int_fallback::<M>(ir),
+        }
+    }
+
+    fn compile_int_fallback<M: ModelArithJit>(&mut self, ir: &Ir) -> Value {
+        let v = self.compile::<M>(ir, false);
+        let is_fix = self.emit_all_fixnum_raw::<M>(&[v]);
+        self.deopt_unless::<M>(is_fix);
+        M::emit_untag(self, v)
+    }
+
+    /// `r` (a raw i64) must be in fixnum range; if not, DEOPT. Returns `r`
+    /// unchanged on the in-range (fallthrough) path.
+    fn emit_int_range_or_deopt<M: ModelArithJit>(&mut self, r: Value) -> Value {
+        let ge = self.fb.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, r, FIXNUM_MIN);
+        let le = self.fb.ins().icmp_imm(IntCC::SignedLessThanOrEqual, r, FIXNUM_MAX);
+        let fits = self.fb.ins().band(ge, le);
+        self.deopt_unless::<M>(fits);
+        r
+    }
+
+    /// Branch to a COLD deopt block when `cond` (an i8 bool) is false; continue
+    /// straight-line when true. The deopt retags every carried counter into the
+    /// generic arm's tagged vars and restarts the iteration there.
+    fn deopt_unless<M: ModelArithJit>(&mut self, cond: Value) {
+        let ok = self.fb.create_block();
+        let deopt = self.cold_block();
+        self.fb.ins().brif(cond, ok, &[], deopt, &[]);
+        self.fb.switch_to_block(deopt);
+        self.fb.seal_block(deopt);
+        self.emit_unbox_deopt::<M>();
+        self.fb.switch_to_block(ok);
+        self.fb.seal_block(ok);
+    }
+
+    /// Emit the deopt transfer: retag each carried counter (still holding this
+    /// iteration's START value — the recur redefines the raw vars only after
+    /// every arg is computed) into the generic arm's tagged var, then branch to
+    /// the generic loop header. The generic body re-runs the iteration with the
+    /// promoting tower. Terminates the current block.
+    fn emit_unbox_deopt<M: ModelArithJit>(&mut self) {
+        let (header, mask, raw, gen): (Block, Vec<bool>, Vec<_>, Vec<_>) = {
+            let ub = self.unbox.as_ref().expect("emit_unbox_deopt outside unboxed loop");
+            (ub.deopt_header, ub.unbox.clone(), ub.raw_vars.clone(), ub.gen_vars.clone())
+        };
+        // Retag each UNBOXED counter into the generic var; the non-unboxed
+        // params already live tagged in `gen_vars` (same variables), so they
+        // need no transfer — they carry their current value into the generic
+        // header unchanged.
+        for i in 0..mask.len() {
+            if mask[i] {
+                let x = self.fb.use_var(raw[i]);
+                let tagged = M::emit_tag(self, x);
+                self.fb.def_var(gen[i], tagged);
+            }
+        }
+        self.fb.ins().jump(header, &[]);
+    }
+
+    /// Emit a self-tail loop as an entry-guarded PAIR of arms (Phase 2). The
+    /// UNBOXED arm carries the fixnum params in raw registers (`compile_int` +
+    /// the unboxed `Local`/recur/compare paths); the GENERIC arm is the
+    /// ordinary tagged codegen and doubles as the overflow / non-fixnum DEOPT
+    /// landing. `ir` is compiled once per arm — safe because `pure_arith_loop`
+    /// admits no `Lambda`/`Dispatch` sites to double-register. Emits both
+    /// `return`s and seals both headers; the caller must emit neither.
+    ///
+    /// The entry guard tests the params' ENTRY values; a non-fixnum there takes
+    /// the generic arm from the start. The generic header is sealed LAST,
+    /// because the unboxed arm's deopts add predecessors to it.
+    fn build_unboxed_loop<M: ModelArithJit>(
+        &mut self,
+        ir: &Ir,
+        nparams: usize,
+        tail: bool,
+        mask: Vec<bool>,
+    ) {
+        self.fence_shims = true; // a pure loop ⇒ fence the arithmetic slow shims
+
+        // One shared back-edge poll countdown, seeded in the ENTRY block so it
+        // dominates BOTH headers — including the deopt edge into the generic
+        // header, which skips that arm's own setup block.
+        self.poll_counter = self.fb.declare_var(I64); // untagged: NOT stack-mapped
+        let interval = self.fb.ins().iconst(I64, BACKEDGE_POLL_INTERVAL);
+        self.fb.def_var(self.poll_counter, interval);
+
+        // ENTRY GUARD: are the params we intend to unbox immediate fixnums?
+        // (The non-unboxed params — the self-ref `g` — are excluded; testing
+        // that ref for fixnum-ness would fail the guard and kill the arm.)
+        // Snapshot the entry values (they dominate both arms).
+        let tagged_params: Vec<Value> =
+            (0..nparams).map(|i| self.fb.use_var(self.vars[i])).collect();
+        let guard_vals: Vec<Value> =
+            (0..nparams).filter(|&i| mask[i]).map(|i| tagged_params[i]).collect();
+        let guard = self.emit_all_fixnum_raw::<M>(&guard_vals);
+        let ub_arm = self.fb.create_block();
+        let gen_arm = self.fb.create_block();
+        self.fb.ins().brif(guard, ub_arm, &[], gen_arm, &[]);
+
+        // ── GENERIC arm (tagged) — also the deopt landing ──
+        self.fb.switch_to_block(gen_arm);
+        self.fb.seal_block(gen_arm);
+        let gen_header = self.fb.create_block();
+        self.fb.ins().jump(gen_header, &[]);
+        self.fb.switch_to_block(gen_header);
+        self.loop_header = Some(gen_header);
+        self.unbox = None;
+        let gres = self.compile::<M>(ir, tail);
+        self.fb.ins().return_(&[gres]);
+        // NB: gen_header is NOT sealed here — the unboxed arm's deopts below add
+        // more predecessors to it.
+
+        // ── UNBOXED arm ──
+        self.fb.switch_to_block(ub_arm);
+        self.fb.seal_block(ub_arm);
+        // A raw register per unboxed param (untagged at entry); non-unboxed
+        // slots keep their tagged `vars` entry and get a placeholder here (the
+        // `unbox` mask gates every raw access, so the placeholder is inert).
+        let mut raw_vars = Vec::with_capacity(nparams);
+        for (i, tp) in tagged_params.iter().enumerate().take(nparams) {
+            if mask[i] {
+                let rv = self.fb.declare_var(I64); // untagged int: deliberately NOT stack-mapped
+                let raw = M::emit_untag(self, *tp);
+                self.fb.def_var(rv, raw);
+                raw_vars.push(rv);
+            } else {
+                raw_vars.push(self.vars[i]); // inert: never read via the raw path
+            }
+        }
+        self.unbox = Some(UnboxLoop {
+            unbox: mask,
+            raw_vars,
+            deopt_header: gen_header,
+            gen_vars: self.vars.clone(),
+        });
+        let ub_header = self.fb.create_block();
+        self.fb.ins().jump(ub_header, &[]);
+        self.fb.switch_to_block(ub_header);
+        self.loop_header = Some(ub_header);
+        let ures = self.compile::<M>(ir, tail);
+        self.fb.ins().return_(&[ures]);
+        self.fb.seal_block(ub_header);
+        self.unbox = None;
+
+        // All predecessors of the generic header (its own back-edge + every
+        // unboxed-arm deopt) are now emitted — safe to seal.
+        self.fb.seal_block(gen_header);
+    }
+
+    /// Arithmetic on operands the optimizer PROVED are immediate fixnums: the
+    /// guarded path minus the entry tag check. Add/Sub/Mul still range-check and
+    /// fall back to the runtime's promoting op on overflow (fixnum → bignum);
+    /// Lt/Eq are a bare compare (they cannot overflow and, given fixnum
+    /// operands, `=` is bit-equality of the untagged values).
+    fn emit_unguarded_arith<M: ModelArithJit>(&mut self, op: Prim, a: Value, b: Value) -> Value {
+        let x = M::emit_untag(self, a);
+        let y = M::emit_untag(self, b);
+        match op {
+            Prim::Lt | Prim::Eq => {
+                let cc = if let Prim::Eq = op { IntCC::Equal } else { IntCC::SignedLessThan };
+                let c = self.fb.ins().icmp(cc, x, y);
+                let cw = self.fb.ins().uextend(I64, c);
+                let t = self.iconst(M::R::enc_bool(true));
+                let f = self.iconst(M::R::enc_bool(false));
+                self.fb.ins().select(cw, t, f)
+            }
+            Prim::Add | Prim::Sub => {
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                // Prefer the model's tagged add + ONE overflow-flag test (the
+                // same recipe the guarded fast path uses): the untag/add/
+                // two-sided-range-compare spelling materialized two 64-bit
+                // range constants per op and made specialized (`Fx*`) loops
+                // SLOWER than unspecialized ones.
+                if let Some((r, ovf)) =
+                    M::emit_tagged_addsub_checked(self, a, b, matches!(op, Prim::Sub))
+                {
+                    let ok = self.fb.create_block();
+                    self.fb.ins().brif(ovf, slow, &[], ok, &[]);
+                    self.fb.switch_to_block(ok);
+                    self.fb.seal_block(ok);
+                    self.fb.def_var(result, r);
+                    self.fb.ins().jump(merge, &[]);
+                } else {
+                    let r = if let Prim::Add = op {
+                        self.fb.ins().iadd(x, y)
+                    } else {
+                        self.fb.ins().isub(x, y)
+                    };
+                    self.emit_range_check_and_retag::<M>(r, result, slow, merge);
+                }
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(op, &[a, b]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            Prim::Mul => {
+                let result = self.declare_root_var();
+                let slow = self.cold_block();
+                let merge = self.fb.create_block();
+                let x128 = self.fb.ins().sextend(I128, x);
+                let y128 = self.fb.ins().sextend(I128, y);
+                let r128 = self.fb.ins().imul(x128, y128);
+                let min64 = self.iconst_signed(FIXNUM_MIN);
+                let max64 = self.iconst_signed(FIXNUM_MAX);
+                let min = self.fb.ins().sextend(I128, min64);
+                let max = self.fb.ins().sextend(I128, max64);
+                let ge = self.fb.ins().icmp(IntCC::SignedGreaterThanOrEqual, r128, min);
+                let le = self.fb.ins().icmp(IntCC::SignedLessThanOrEqual, r128, max);
+                let fits = self.fb.ins().band(ge, le);
+                let ok = self.fb.create_block();
+                self.fb.ins().brif(fits, ok, &[], slow, &[]);
+                self.fb.switch_to_block(ok);
+                self.fb.seal_block(ok);
+                let r64 = self.fb.ins().ireduce(I64, r128);
+                let tagged = M::emit_tag(self, r64);
+                self.fb.def_var(result, tagged);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(slow);
+                self.fb.seal_block(slow);
+                let sp = self.slow_prim(op, &[a, b]);
+                self.fb.def_var(result, sp);
+                self.fb.ins().jump(merge, &[]);
+                self.fb.switch_to_block(merge);
+                self.fb.seal_block(merge);
+                self.fb.use_var(result)
+            }
+            _ => unreachable!("emit_unguarded_arith only handles +,-,*,<,="),
+        }
+    }
+
+    /// `AllFixnum`: true iff every value is an immediate fixnum. "All have their
+    /// tag bits clear" ⟺ "the OR of all of them has its tag bits clear", so this
+    /// is one bor-reduction plus the model's single tag test (const-false for a
+    /// model with no immediate ints — NaN-boxing — which correctly forces the
+    /// slow body). Returns an encoded boolean.
+    fn emit_all_fixnum<M: ModelArithJit>(&mut self, vs: &[Value]) -> Value {
+        let test = self.emit_all_fixnum_raw::<M>(vs);
+        let tw = self.fb.ins().uextend(I64, test);
+        let t = self.iconst(M::R::enc_bool(true));
+        let f = self.iconst(M::R::enc_bool(false));
+        self.fb.ins().select(tw, t, f)
+    }
+
+    /// The raw `i8` predicate behind `AllFixnum` (before boolean
+    /// materialization), so an `If` guard can branch on it directly.
+    fn emit_all_fixnum_raw<M: ModelArithJit>(&mut self, vs: &[Value]) -> Value {
+        match vs.iter().copied().reduce(|a, b| self.fb.ins().bor(a, b)) {
+            Some(v) => M::emit_both_int(self, v, v),
+            // No args ⇒ vacuously true.
+            None => self.fb.ins().iconst(cranelift_codegen::ir::types::I8, 1),
+        }
+    }
+
+    fn iconst_signed(&mut self, v: i64) -> Value {
+        self.fb.ins().iconst(I64, v)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tiered: the native JIT with an automatic CEK fallback.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Can the JIT compile this node directly? True unless the *directly-compiled*
+/// tree (NOT descending into `Lambda` bodies — those are compiled lazily at their
+/// own invoke, and re-classified then) contains a construct the native tier does
+/// not model: the continuation / `apply` / `gc` prims, or record dispatch.
+pub fn jit_can_compile(ir: &Ir) -> bool {
+    match ir {
+        Ir::Prim(Prim::CallCc | Prim::Reset | Prim::Shift | Prim::CallEc | Prim::Gc, _) => false,
+        Ir::Dispatch { args, .. } => args.iter().all(jit_can_compile),
+        Ir::InstanceCheck { proto, arg, .. } => jit_can_compile(proto) && jit_can_compile(arg),
+        Ir::DefMethod { imp, .. } => jit_can_compile(imp),
+        Ir::FieldGet { obj, .. } => jit_can_compile(obj),
+        // try/catch is a shim call; the body/handlers run via `top`, so their
+        // compilability is decided when the shim evaluates them (not here).
+        Ir::Try { .. } => true,
+        // A `Lambda` only makes a closure here; its body's compilability is
+        // decided when that closure is invoked. So do NOT descend.
+        Ir::Lambda { .. } => true,
+        Ir::Const(_) | Ir::Quote(_) | Ir::Local { .. } | Ir::Capture(_) | Ir::Global(_) => true,
+        Ir::If(a, b, c) => jit_can_compile(a) && jit_can_compile(b) && jit_can_compile(c),
+        Ir::Do(xs) | Ir::Prim(_, xs) => xs.iter().all(jit_can_compile),
+        Ir::Let(inits, body) => inits.iter().all(jit_can_compile) && jit_can_compile(body),
+        Ir::Call(f, args) => jit_can_compile(f) && args.iter().all(jit_can_compile),
+        Ir::Def { init, .. } => jit_can_compile(init),
+        Ir::SetLocal { val, .. } | Ir::SetGlobal { val, .. } => jit_can_compile(val),
+    }
+}
+
+/// A composed backend: run each body on the native JIT when it can be compiled,
+/// and on the stackless `CekMachine` otherwise. This is the tiering the whole
+/// `CodeSpace` design was built for — two real strategies behind one seam, chosen
+/// per body, with `top` threaded so the choice re-applies to every nested call.
+///
+/// ## Contract (what "otherwise" safely covers)
+///
+/// The JIT is a host-stack tier: intermediate values live in native registers /
+/// stack frames the CEK cannot see. So this fallback is correct for CEK-only
+/// operations that do NOT capture a continuation across a JIT frame — namely
+/// `apply` and `values`/`call-with-values`, which the JIT routes to the CEK
+/// transparently. It is NOT correct to interleave JIT frames *inside* a
+/// `call/cc` capture (a `reset` on the CEK with a `shift` reached through a JIT
+/// frame would capture an incomplete continuation). A program using first-class
+/// continuations must therefore run WHOLLY on the CEK — the same all-or-nothing
+/// rule any host-stack tier faces. The Scheme harness enforces that by running
+/// `call/cc` programs directly on `CekMachine`; everything else goes here and
+/// runs native wherever possible.
+pub struct Tiered<M: ModelArithJit> {
+    jit: JitCranelift<M>,
+    cek: crate::cek::CekMachine,
+}
+
+impl<M: ModelArithJit> Tiered<M> {
+    pub fn new() -> Self {
+        Tiered {
+            jit: JitCranelift::new(),
+            cek: crate::cek::CekMachine,
+        }
+    }
+
+    /// How many bodies were compiled to native code (JIT compile-once counter).
+    pub fn native_bodies(&self) -> usize {
+        self.jit.compiled_bodies()
+    }
+}
+
+impl<M: ModelArithJit> CodeSpace<M> for Tiered<M> {
+    fn eval_ir(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, ir: &Ir, locals: &Locals) -> u64 {
+        if jit_can_compile(ir) {
+            self.jit.eval_ir(top, rt, ir, locals)
+        } else {
+            self.cek.eval_ir(top, rt, ir, locals)
+        }
+    }
+
+    fn invoke(&self, top: &dyn CodeSpace<M>, rt: &mut Runtime<M>, callee: u64, args: &[u64]) -> u64 {
+        // Route on the callee's own body: native if it compiles, CEK if not.
+        let native = if M::R::tag_of(callee) == RawTag::Ref {
+            match rt.view(callee) {
+                ObjView::Closure { template, .. } => jit_can_compile(rt.template(template)),
+                // Route a multi-arity fn on the clause this call selects.
+                ObjView::MultiFn { .. } => match rt.multifn_select(callee, args.len()) {
+                    Some(sel) if !rt.pending() => {
+                        if M::R::tag_of(sel) == RawTag::Ref {
+                            match rt.view(sel) {
+                                ObjView::Closure { template, .. } => jit_can_compile(rt.template(template)),
+                                _ => true,
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    _ => true,
+                },
+                _ => true, // non-closure callables (escape conts) are the JIT's error path
+            }
+        } else {
+            true
+        };
+        if native {
+            crate::stats::NATIVE_INVOKES.fetch_add(1, Ordering::Relaxed);
+            self.jit.invoke(top, rt, callee, args)
+        } else {
+            crate::stats::INTERP_INVOKES.fetch_add(1, Ordering::Relaxed);
+            self.cek.invoke(top, rt, callee, args)
+        }
+    }
+}
+
+#[cfg(test)]
+mod prim_tag_tests {
+    use super::{prim_from_tag, prim_tag};
+    use crate::ir::Prim;
+
+    /// Every `Prim` must round-trip through its emitted tag.
+    ///
+    /// `prim_tag`/`prim_from_tag` are two hand-maintained tables, and nothing
+    /// checks they agree: give two prims the SAME tag and `prim_from_tag`
+    /// silently returns whichever arm is written first, so one prim quietly
+    /// executes as another. That is not hypothetical — `Pow` was added with
+    /// `MethodHasType`'s tag, and every `satisfies?` in the language started
+    /// running as `%pow` ("not a number"). The compiler cannot catch it:
+    /// `prim_tag`'s match is exhaustive over Prim, but its VALUES are free.
+    ///
+    /// The list is exhaustive by construction — `prim_tag` will not compile if
+    /// a variant is missing from it, and this test will not compile if a
+    /// variant is missing from here.
+    #[test]
+    fn every_prim_round_trips_through_its_tag() {
+        std::panic::set_hook(Box::new(|_| {})); // the by-design panics below are expected
+        let all = [
+        Prim::Add,
+        Prim::Sub,
+        Prim::Mul,
+        Prim::Lt,
+        Prim::Eq,
+        Prim::Quot,
+        Prim::Rem,
+        Prim::Mod,
+        Prim::Div,
+        Prim::StrCat,
+        Prim::StrOf,
+        Prim::MakeArray,
+        Prim::AClone,
+        Prim::ArrPush,
+        Prim::ArrShift,
+        Prim::ArrClear,
+        Prim::BitAnd,
+        Prim::BitOr,
+        Prim::BitXor,
+        Prim::BitShl,
+        Prim::BitShr,
+        Prim::BitCount,
+        Prim::Wrap64,
+        Prim::WallMillis,
+        Prim::ThreadId,
+        Prim::Floor,
+        Prim::Ceil,
+        Prim::Log,
+        Prim::Exp,
+        Prim::DoubleBits,
+        Prim::BitReverse,
+        Prim::Stats,
+        Prim::Subs,
+        Prim::Sleep,
+        Prim::DynFrameGet,
+        Prim::DynFrameSet,
+        Prim::RegisterFields,
+        Prim::FieldByName,
+        Prim::FieldNames,
+        Prim::MakeRecord,
+        Prim::Hash,
+        Prim::List,
+        Prim::Cons,
+        Prim::First,
+        Prim::Rest,
+        Prim::IsNil,
+        Prim::Println,
+        Prim::Print,
+        Prim::Gc,
+        Prim::TypeOf,
+        Prim::Record,
+        Prim::NFields,
+        Prim::Throw,
+        Prim::Spawn,
+        Prim::Await,
+        Prim::AtomNew,
+        Prim::AtomGet,
+        Prim::AtomSet,
+        Prim::AtomCas,
+        Prim::Field,
+        Prim::CallEc,
+        Prim::StrLen,
+        Prim::StrCharAt,
+        Prim::StrGetChars,
+        Prim::StrToLong,
+        Prim::StrToDouble,
+        Prim::CharsToStr,
+        Prim::CharToInt,
+        Prim::IntToChar,
+        Prim::Vector,
+        Prim::VectorRef,
+        Prim::VectorSet,
+        Prim::VectorLen,
+        Prim::Values,
+        Prim::ValuesToList,
+        Prim::Apply,
+        Prim::Identical,
+        Prim::Keyword,
+        Prim::CallCc,
+        Prim::Reset,
+        Prim::Shift,
+        Prim::DynGet,
+        Prim::DynSet,
+        Prim::DynMark,
+        Prim::DynBind,
+        Prim::DynUnwind,
+        Prim::GlobalGet,
+        Prim::GlobalSet,
+        Prim::GlobalBound,
+        Prim::SymName,
+        Prim::SymNs,
+        Prim::VarFlags,
+        Prim::NsInterns,
+        Prim::NsAliases,
+        Prim::ResolveInNs,
+        Prim::Rand,
+        Prim::CpuCount,
+        Prim::AmapGet,
+        Prim::ProtoHasType,
+        Prim::ScalarType,
+        Prim::Eq2,
+        Prim::AllNs,
+        Prim::MethodTypes,
+        Prim::MethodHasType,
+        Prim::ReadString,
+        Prim::Eval,
+        Prim::MacroExpand1,
+        Prim::Numerator,
+        Prim::Denominator,
+        Prim::BigIntP,
+        Prim::ToLong,
+        Prim::SymbolOf,
+        Prim::VarArglists,
+        Prim::StrChars,
+        Prim::StrToBytes,
+        Prim::BytesToStr,
+        Prim::TcpListen,
+        Prim::TcpAccept,
+        Prim::TcpRead,
+        Prim::TcpWrite,
+        Prim::TcpClose,
+        Prim::TcpLocalPort,
+        Prim::ErrPrint,
+        Prim::CurrentNs,
+        Prim::Nanos,
+        Prim::Pow,
+        Prim::FxAdd,
+        Prim::FxSub,
+        Prim::FxMul,
+        Prim::FxLt,
+        Prim::FxEq,
+        Prim::PvConj,
+        Prim::PvNth,
+        Prim::PvAssoc,
+        Prim::LazyRealize,
+        Prim::RangeFill,
+        Prim::HamtAssoc,
+        Prim::HamtLookup,
+        Prim::HamtWithout,
+        Prim::StrJoinArr,
+        Prim::StrCmp,
+        Prim::PvConjChunk,
+        Prim::PvFromArray,
+        Prim::ApushChunk,
+        Prim::TvNew,
+        Prim::TvConj,
+        Prim::TvAssoc,
+        Prim::TvNth,
+        Prim::TvPop,
+        Prim::TvPersistent,
+        Prim::TamNew,
+        Prim::TamAssoc,
+        Prim::TamDissoc,
+        Prim::TamPersistent,
+        Prim::ThmNew,
+        Prim::ThmAssoc,
+        Prim::ThmDissoc,
+        Prim::ThmPersistent,
+        Prim::SortArr,
+        Prim::MultiFnNew,
+        Prim::AllFixnum
+        ];
+        let mut seen: std::collections::HashMap<u32, Prim> = std::collections::HashMap::new();
+        let mut tagged = 0;
+        for p in all {
+            // Some prims are BACKEND-handled and deliberately have no tag (Gc,
+            // Apply, the continuations): `prim_tag` panics for those by design.
+            // They are not part of the tag space, so skip them — but count what
+            // is checked, so this cannot silently degrade to testing nothing.
+            let Ok(t) = std::panic::catch_unwind(|| prim_tag(p)) else { continue };
+            tagged += 1;
+            if let Some(other) = seen.insert(t, p) {
+                panic!("prim tag {t} is used by BOTH {other:?} and {p:?} — one of them will silently execute as the other");
+            }
+            let back = prim_from_tag(t);
+            assert_eq!(
+                back, p,
+                "{p:?} has tag {t}, but prim_from_tag({t}) is {back:?}"
+            );
+        }
+        assert!(tagged > 100, "only {tagged} prims carry a tag — is the list stale?");
+    }
+}

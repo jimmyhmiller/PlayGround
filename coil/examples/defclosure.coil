@@ -1,0 +1,20 @@
+; `defclosure` — closures as a LIBRARY, written in macros (lib/closure.coil). One
+; form generates the env struct, the code function, the closure struct, and
+; new/call/free helpers. Nothing in the compiler knows about closures.
+;   coil run examples/defclosure.coil; echo $?   => 42
+
+(module app)
+(import "lib/closure.coil" :use *)
+
+; ---- usage: two closures from two one-liners ----
+(defclosure adder  [(n :i64)] [(x :i64)] :i64 (iadd n x))
+(defclosure scaler [(k :i64)] [(x :i64)] :i64 (imul k x))
+
+(defn main [] (-> :i64)
+  (let [a (adder-new 5)
+        s (scaler-new 3)]
+    (let [r (iadd (adder-call a 37)                 ; 5 + 37 = 42
+                  (isub (scaler-call s 14) 42))]    ; 3*14 - 42 = 0
+      (adder-free a)
+      (scaler-free s)
+      r)))                                           ; => 42

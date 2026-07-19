@@ -23,6 +23,45 @@ pub struct Manifest {
     pub entry: PathBuf,
     /// The directory the manifest lives in.
     pub dir: PathBuf,
+    /// Native link configuration (the `[link]` section). Empty by default.
+    pub link: LinkConfig,
+}
+
+/// The `[link]` section of `gcr.toml` — how to link native libraries into the
+/// final executable, so `gcr build`/`gcr run` need no `--link-arg` on the CLI.
+///
+/// ```toml
+/// [link]
+/// libs = ["raylib"]                       # -l<name>
+/// lib-paths = ["/opt/homebrew/lib"]        # -L<path>
+/// frameworks = ["Cocoa", "OpenGL"]         # macOS: -framework <name>
+/// args = ["-Wl,-rpath,/opt/homebrew/lib"]  # raw, passed through verbatim
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct LinkConfig {
+    pub libs: Vec<String>,
+    pub lib_paths: Vec<String>,
+    pub frameworks: Vec<String>,
+    pub args: Vec<String>,
+}
+
+impl LinkConfig {
+    /// Flatten into the linker-argument list `build_executable` expects.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.lib_paths {
+            out.push(format!("-L{}", p));
+        }
+        for l in &self.libs {
+            out.push(format!("-l{}", l));
+        }
+        for f in &self.frameworks {
+            out.push("-framework".into());
+            out.push(f.clone());
+        }
+        out.extend(self.args.iter().cloned());
+        out
+    }
 }
 
 #[derive(Debug)]
@@ -32,6 +71,11 @@ impl Manifest {
     /// The absolute path to the entry source file.
     pub fn entry_path(&self) -> PathBuf {
         self.dir.join(&self.entry)
+    }
+
+    /// Native linker arguments from the `[link]` section.
+    pub fn link_args(&self) -> Vec<String> {
+        self.link.to_args()
     }
 
     /// Load `gcr.toml` from `dir`. Errors if the file is missing or malformed.
@@ -60,7 +104,8 @@ impl Manifest {
         let mut name: Option<String> = None;
         let mut version: Option<String> = None;
         let mut entry: Option<String> = None;
-        let mut in_package = false;
+        let mut link = LinkConfig::default();
+        let mut section = "";
 
         for (lineno, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap().trim();
@@ -68,22 +113,40 @@ impl Manifest {
                 continue;
             }
             if line.starts_with('[') {
-                in_package = line == "[package]";
-                continue;
-            }
-            if !in_package {
+                section = match line {
+                    "[package]" => "package",
+                    "[link]" => "link",
+                    other => {
+                        return Err(ManifestError(format!(
+                            "gcr.toml:{}: unknown section `{}`",
+                            lineno + 1,
+                            other
+                        )))
+                    }
+                };
                 continue;
             }
             let Some((key, val)) = line.split_once('=') else {
                 return Err(ManifestError(format!("gcr.toml:{}: expected `key = value`", lineno + 1)));
             };
             let key = key.trim();
-            let val = val.trim().trim_matches('"').to_string();
-            match key {
-                "name" => name = Some(val),
-                "version" => version = Some(val),
-                "entry" => entry = Some(val),
-                other => return Err(ManifestError(format!("gcr.toml:{}: unknown key `{}`", lineno + 1, other))),
+            let val = val.trim();
+            match (section, key) {
+                ("package", "name") => name = Some(unquote(val)),
+                ("package", "version") => version = Some(unquote(val)),
+                ("package", "entry") => entry = Some(unquote(val)),
+                ("link", "libs") => link.libs = parse_array(val),
+                ("link", "lib-paths") => link.lib_paths = parse_array(val),
+                ("link", "frameworks") => link.frameworks = parse_array(val),
+                ("link", "args") => link.args = parse_array(val),
+                (sec, other) => {
+                    return Err(ManifestError(format!(
+                        "gcr.toml:{}: unknown key `{}` in [{}]",
+                        lineno + 1,
+                        other,
+                        if sec.is_empty() { "<top-level>" } else { sec }
+                    )))
+                }
             }
         }
 
@@ -93,8 +156,43 @@ impl Manifest {
             version: version.unwrap_or_else(|| "0.0.0".into()),
             entry: PathBuf::from(entry.unwrap_or_else(|| "src/main.gcr".into())),
             dir: dir.to_path_buf(),
+            link,
         })
     }
+}
+
+/// Strip surrounding double quotes (and whitespace) from a scalar TOML value.
+fn unquote(val: &str) -> String {
+    val.trim().trim_matches('"').to_string()
+}
+
+/// Parse a TOML string array `["a", "b"]` into its elements. Splits on commas
+/// OUTSIDE double quotes, so an element may itself contain commas (e.g. a raw
+/// linker arg `"-Wl,-rpath,/x"`). Lenient about trailing commas + whitespace.
+/// (Single-line arrays only — enough for link config.)
+fn parse_array(val: &str) -> Vec<String> {
+    let inner = val.trim().trim_start_matches('[').trim_end_matches(']');
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for c in inner.chars() {
+        match c {
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                let e = cur.trim().to_string();
+                if !e.is_empty() {
+                    out.push(e);
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    let e = cur.trim().to_string();
+    if !e.is_empty() {
+        out.push(e);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -123,6 +221,35 @@ mod tests {
         let src = "# a project\n\n[package]   # the package table\nname = \"c\"  # its name\n";
         let m = Manifest::parse(src, Path::new("/p")).unwrap();
         assert_eq!(m.name, "c");
+    }
+
+    #[test]
+    fn parses_link_section_into_linker_args() {
+        let src = "[package]\nname = \"game\"\n\n[link]\n\
+                   libs = [\"raylib\"]\n\
+                   lib-paths = [\"/opt/homebrew/lib\"]\n\
+                   frameworks = [\"Cocoa\", \"OpenGL\"]\n\
+                   args = [\"-Wl,-rpath,/x\"]\n";
+        let m = Manifest::parse(src, Path::new("/p")).unwrap();
+        assert_eq!(m.link.libs, ["raylib"]);
+        assert_eq!(
+            m.link_args(),
+            [
+                "-L/opt/homebrew/lib",
+                "-lraylib",
+                "-framework",
+                "Cocoa",
+                "-framework",
+                "OpenGL",
+                "-Wl,-rpath,/x",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_link_section_means_no_args() {
+        let m = Manifest::parse("[package]\nname = \"x\"\n", Path::new("/p")).unwrap();
+        assert!(m.link_args().is_empty());
     }
 
     #[test]

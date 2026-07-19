@@ -1,0 +1,13 @@
+// Two modules each declare `class Shell` and fully coexist (07-modules.md §2/§4).
+// `Shell` here is bare-resolved to modpkg_a's own Shell (own module wins); modpkg_b's
+// Shell is reached with NO import at all, via a fully-qualified type + constructor
+// reference (07-modules.md §6) — modpkg_b.shell was loaded transitively through
+// modpkg_a's own import, proving the whole-program closure, not just this file's scope.
+import modpkg_a.shell.{Shell}
+
+fn main() {
+  let a: Shell = Shell(label: "one")
+  let b: modpkg_b.shell.Shell = modpkg_b.shell.Shell(label: "two")
+  print(a.describe())
+  print(b.describe())
+}

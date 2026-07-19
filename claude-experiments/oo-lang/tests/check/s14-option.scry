@@ -1,0 +1,11 @@
+fn first(xs: List<Int>) -> Option<Int> {
+  if xs.len() == 0 { None } else { Some(xs.get(0)) }
+}
+fn main() {
+  let xs = List<Int>()
+  xs.push(9)
+  match first(xs) {
+    Some(v) -> print(v)
+    None -> print(0)
+  }
+}

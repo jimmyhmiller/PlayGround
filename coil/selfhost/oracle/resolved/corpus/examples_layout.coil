@@ -1,0 +1,20 @@
+(defstruct Header :layout packed [(magic :u16) (version :u8) (flags :u8) (length :u32)])
+
+(static-assert (icmp-eq (sizeof Header) 8) "header must be 8 bytes")
+
+(static-assert (icmp-eq (offsetof Header length) 4) "length at offset 4")
+
+(defstruct HeaderC [(magic :u16) (version :u8) (flags :u8) (length :u32)])
+
+(static-assert (icmp-eq (sizeof HeaderC) 8) "this one happens to also be 8")
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [h (alloc-stack Header)]
+    (store! (field h length) (cast :u32 40))
+    (store! (field h version) (cast :u8 2))
+    (iadd (cast :i64 (load (field h length))) (cast :i64 (load (field h version))))))
+

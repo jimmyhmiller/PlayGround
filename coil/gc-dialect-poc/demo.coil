@@ -1,0 +1,24 @@
+(module app)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "arena.coil" :use *)          ; ← the ONLY line that picks the dialect
+
+(defstruct Point [(x :i64) (y :i64)])
+
+; `build` allocates Points but takes NO Allocator. Allocation is implicit.
+(defn build [(n :i64)] (-> :i64)
+  (let [(mut i) 0 (mut acc) 0]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break (load acc))
+          (do
+            (let [p (new Point)]
+              (fset p x (load i))
+              (fset p y (imul (load i) 2))
+              (store! acc (iadd (load acc) (iadd (fget p x) (fget p y)))))
+            (store! i (iadd (load i) 1)))))))
+
+(defn main [] (-> :i64)
+  (let [s (build 5)]
+    (fmt (stdout) "sum={d}  objects_allocated={d}\n" s (live-objs))
+    0))

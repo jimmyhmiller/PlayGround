@@ -1,0 +1,1384 @@
+; server.coil — the embedded eval server (Phase 4). ONE wire operation: POST /eval with
+; {id, source} -> {id, value|error} (04-viewer.md §4). A second OS thread (Coil pthread)
+; does socket transport + a minimal HTTP/1.1 parse and hands each request to the mutator
+; thread through a single-slot mailbox guarded by atomics; the mutator services it at a
+; safepoint (safepoint.coil), running parse -> typecheck -> compile -> VM -> serialize in
+; the live context. N=1 mutator here — Phase 5 generalizes the mailbox to a real queue and
+; the drain to a dedicated eval VMThread under request-global-stop (02-runtime.md §7).
+(module server)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "types.coil" :use *)
+(import "typecheck.coil" :use *)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "vm.coil" :use *)
+(import "compile.coil" :use *)
+(import "json.coil" :use *)
+(import "serialize.coil" :use *)
+(import "reflect.coil" :use *)
+(import "evalrt.coil" :use *)
+(import "safepoint.coil" :use *)
+(import "thread.coil" :use *)
+(import "atomic.coil" :use *)
+(import "portalclient.coil" :use *)
+(import "trace.coil" :use *)
+
+; pthread_detach(pthread_t): reap a connection thread's resources at exit without a join.
+; Declared here (not in lib/thread.coil) because thread-per-connection is a server concern;
+; it is the only new pthread extern and is declared exactly once.
+(extern pthread_detach :cc c [(ptr i8)] (-> i32))
+
+; ============================ globals ============================
+(defn srv-program [] (-> (ptr (ptr Program))) (alloc-static (ptr Program)))
+; a dedicated coordinator parked-word for the reflection self-coordinator path (server-eval-reflect
+; when NO eval is in flight): distinct from every language thread's parked word and from the eval
+; coordinator's (vm-eval-parked), so safepoint bookkeeping stays unambiguous.
+(defn refl-coord-word [] (-> (ptr i64)) (alloc-static i64))
+(defn srv-listen-fd [] (-> (ptr i64)) (alloc-static i64))
+(defn srv-viewer-dir [] (-> (ptr (ptr i8))) (alloc-static (ptr i8)))
+(defn srv-readonly [] (-> (ptr i64)) (alloc-static i64))
+
+; eval outcome (set on the coordinator thread inside eval-core)
+(defn ev-outcome [] (-> (ptr i64)) (alloc-static i64))   ; 0 = value, 1 = error
+(defn ev-valbuf [] (-> (ptr (ptr JBuf))) (alloc-static (ptr JBuf)))
+
+; ============================ tiny JSON request parse ============================
+; decode a JSON string value for `key` into a fresh buffer; returns len, out via out-ptr.
+(defn json-find-key [(body (ptr u8)) (blen i64) (key (ptr i8)) (klen i64)] (-> i64)  ; index just after the ':' or -1
+  (let [(mut i) 0 (mut r) -1]
+    (loop
+      (if (and (< (load r) 0) (< (load i) (- blen (+ klen 2))))
+        (do
+          (if (and (= (cast i64 (load (index body (load i)))) \") (match-at body (load i) key klen))
+            (let [(mut j) (+ (load i) (+ klen 1))]
+              ; skip to ':'
+              (loop (if (and (< (load j) blen) (!= (cast i64 (load (index body (load j)))) \:)) (do (store! j (+ (load j) 1)) 0) (break)))
+              (store! r (+ (load j) 1)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load r)))
+(defn match-at [(body (ptr u8)) (i i64) (key (ptr i8)) (klen i64)] (-> bool)   ; body[i]=='"'; key matches body[i+1..i+1+klen] and body[i+1+klen]=='"'
+  (let [(mut k) 0 (mut ok) true]
+    (loop (if (and (load ok) (< (load k) klen))
+            (do (if (!= (cast i64 (load (index body (+ i (+ 1 (load k)))))) (cast i64 (load (index (cast (ptr u8) key) (load k))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0)
+            (break)))
+    (if (load ok) (= (cast i64 (load (index body (+ i (+ 1 klen))))) \") false)))
+
+; decode a JSON string starting at `pos` (which should point at or before the opening ").
+(defn json-decode-string [(body (ptr u8)) (blen i64) (pos i64) (out (ptr u8)) (outlen (ptr i64))] (-> i64)
+  (let [(mut i) pos]
+    (loop (if (and (< (load i) blen) (!= (cast i64 (load (index body (load i)))) \")) (do (store! i (+ (load i) 1)) 0) (break)))
+    (store! i (+ (load i) 1))   ; past opening quote
+    (let [(mut n) 0]
+      (loop
+        (if (>= (load i) blen) (break)
+          (let [ch (cast i64 (load (index body (load i))))]
+            (cond
+              (= ch \") (break)
+              (= ch \\)
+                (do (store! i (+ (load i) 1))
+                    (let [e (cast i64 (load (index body (load i))))]
+                      (cond
+                        (= e \n) (do (store! (index out (load n)) (cast u8 \newline)) 0)
+                        (= e \t) (do (store! (index out (load n)) (cast u8 \tab)) 0)
+                        (= e \r) (do (store! (index out (load n)) (cast u8 \return)) 0)
+                        (= e \u) (do (store! (index out (load n)) (cast u8 \?)) (store! i (+ (load i) 4)) 0)
+                        (do (store! (index out (load n)) (cast u8 e)) 0))
+                      (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0))
+              (do (store! (index out (load n)) (cast u8 ch)) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0)))))
+      (store! outlen (load n)) 0)))
+
+; capture the raw id token (string incl. quotes, or a bare number) at pos.
+(defn json-raw-id [(body (ptr u8)) (blen i64) (pos i64) (out (ptr u8)) (outlen (ptr i64))] (-> i64)
+  (let [(mut i) pos]
+    (loop (if (and (< (load i) blen) (let [c (cast i64 (load (index body (load i))))] (or (= c \space) (= c \tab)))) (do (store! i (+ (load i) 1)) 0) (break)))
+    (let [start (load i) (mut n) 0]
+      (if (= (cast i64 (load (index body (load i)))) \")
+        (do (store! (index out 0) (cast u8 \")) (store! n 1) (store! i (+ (load i) 1))
+            (loop (if (and (< (load i) blen) (!= (cast i64 (load (index body (load i)))) \")) (do (store! (index out (load n)) (load (index body (load i)))) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0) (break)))
+            (store! (index out (load n)) (cast u8 \")) (store! n (+ (load n) 1)) 0)
+        (loop (if (< (load i) blen) (let [c (cast i64 (load (index body (load i))))] (if (or (= c \,) (or (= c \}) (or (= c \space) (= c \newline)))) (break) (do (store! (index out (load n)) (cast u8 c)) (store! n (+ (load n) 1)) (store! i (+ (load i) 1)) 0))) (break))))
+      (store! outlen (load n)) 0)))
+
+; ============================ eval executor (mutator thread) ============================
+(defn kind-str [(k i64)] (-> (ptr i8))
+  (cond (= k EK_SYNTAX) c"SyntaxError" (= k EK_TYPE) c"TypeError" (= k EK_RUNTIME) c"RuntimeError"
+        (= k EK_STALE) c"StaleReference" (= k EK_NOTIMPL) c"NotImplemented" (= k EK_READONLY) c"ReadOnly"
+        c"BadRequest"))
+(defn ev-fail [(kind i64) (msg (ptr i8)) (line i64) (col i64)] (-> i64)
+  (store! (ev-outcome) 1) (store! (ev-kind) kind) (store! (ev-line) line) (store! (ev-col) col) (ev-set-msg msg) 0)
+
+; is the leading token a top-level definition (live code change -> Phase 6)? NOTE:
+; TK_MODULE is deliberately absent — eval-exec strips a leading `module a.b.c` header
+; (if present) BEFORE this check ever runs (07-modules.md §6 Phase 2), so by the time
+; is-def-token looks at the current token it is always the real definition/expression
+; that followed the header, never TK_MODULE itself.
+(defn is-def-token [(k i64)] (-> bool)
+  (or (= k TK_CLASS) (or (= k TK_INTERFACE) (or (= k TK_ENUM) (or (= k TK_OBJECT) (or (= k TK_FN) (or (= k TK_MIGRATE) (= k TK_IMPORT))))))))
+
+; parse the eval source into a single BLOCK node (statements, last is the value).
+(defn parse-eval-block [] (-> (ptr Node))
+  (if (= (cur-kind) TK_LBRACE)
+    (parse-block)
+    (let [blk (mk-node NK_BLOCK (cur-line) (cur-col))]
+      (loop (if (check TK_EOF) (break) (do (add-kid! blk (parse-stmt)) 0)))
+      blk)))
+
+; detect a bare reflection call: types() / fields("X") / methods("X").
+; returns 1 if handled (valbuf filled), 0 otherwise.
+; gc() — snapshot per-type live counts, force a full major collection (the world is already
+; stopped: we run inside the eval coordinator), then report before/after. Payload (the eval value):
+;   { "type":"GC","kind":"major","liveBefore":B,"liveAfter":A,"freed":B-A,
+;     "byType":[{"name":"Point","before":1000,"after":1,"freed":999}, ...] }   // only types touched
+; entity live-count for type index i, or -1 for non-entity slots.
+(defn gc-type-live [(p (ptr Program)) (i i64)] (-> i64)
+  (let [ti (load (index (load (field p types)) i))]
+    (if (and (!= (cast i64 ti) 0) (load (field ti is-entity))) (arena-live-count (load (field ti arena))) -1)))
+
+; emit one {"name","before","after","freed"} object for type i if it had any live instances.
+; `already` is how many were emitted so far (for the leading comma). Returns 1 if it emitted.
+(defn gc-emit-type [(b (ptr JBuf)) (p (ptr Program)) (i i64) (bef i64) (already i64)] (-> i64)
+  (let [ti (load (index (load (field p types)) i)) aft (gc-type-live p i)]
+    (if (or (> bef 0) (> aft 0))
+      (do
+        (if (> already 0) (jb-byte b \,) 0)
+        (jb-cstr b c"{\"name\":\"") (jb-bytes b (load (field ti name)) (load (field ti name-len)))
+        (jb-cstr b c"\",\"before\":") (jb-int b bef) (jb-cstr b c",\"after\":") (jb-int b aft)
+        (jb-cstr b c",\"freed\":") (jb-int b (- bef aft)) (jb-byte b \}) 1)
+      0)))
+
+; `major` = 1 forces a full major collection, 0 forces a young-only minor. Same report either way.
+(defn reflect-gc [(b (ptr JBuf)) (p (ptr Program)) (major i64)] (-> i64)
+  (let [n (load (field p type-count))
+        before (cast (ptr i64) (xalloc (* 8 (if (= n 0) 1 n))))
+        (mut i) 0 (mut tb) 0 (mut ta) 0 (mut emitted) 0]
+    ; snapshot per-type live counts before the collection
+    (loop (if (< (load i) n)
+            (let [lc (gc-type-live p (load i))]
+              (store! (index before (load i)) lc)
+              (if (> lc 0) (store! tb (+ (load tb) lc)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    ; force the collection (the world is already stopped: we run inside the eval coordinator)
+    (if (= major 1) (vm-gc-major) (vm-gc-minor))
+    ; sum after + write the report
+    (store! i 0)
+    (loop (if (< (load i) n)
+            (let [lc (gc-type-live p (load i))]
+              (if (> lc 0) (store! ta (+ (load ta) lc)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (jb-cstr b c"{\"type\":\"GC\",\"kind\":\"") (jb-cstr b (if (= major 1) c"major" c"minor")) (jb-cstr b c"\",\"liveBefore\":") (jb-int b (load tb))
+    (jb-cstr b c",\"liveAfter\":") (jb-int b (load ta))
+    (jb-cstr b c",\"freed\":") (jb-int b (- (load tb) (load ta)))
+    (jb-cstr b c",\"byType\":[")
+    (store! i 0)
+    (loop (if (< (load i) n)
+            (do (if (= (gc-emit-type b p (load i) (load (index before (load i))) (load emitted)) 1) (store! emitted (+ (load emitted) 1)) 0)
+                (store! i (+ (load i) 1)) 0)
+            (break)))
+    (jb-cstr b c"]}")
+    (free (cast (ptr i8) before)) 0))
+
+(defn try-reflection [(blk (ptr Node))] (-> i64)
+  (if (!= (kid-count blk) 1) 0
+    (let [st (kid-at blk 0)]
+      (if (!= (load (field st kind)) NK_EXPRSTMT) 0
+        (let [e (load (field st a))]
+          (if (!= (load (field e kind)) NK_CALL) 0
+            (let [callee (load (field e a))]
+              (if (!= (load (field callee kind)) NK_IDENT) 0
+                (cond
+                  (and (node-name-eq callee c"types") (= (arg-count e) 0))
+                    (do (reflect-types (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"schema") (= (arg-count e) 0))
+                    (do (reflect-schema (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"graph") (= (arg-count e) 0))
+                    (do (reflect-graph (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"views") (= (arg-count e) 0))
+                    (do (reflect-views (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"actions") (= (arg-count e) 0))
+                    (do (reflect-actions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"functions") (= (arg-count e) 0))
+                    (do (reflect-functions (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  ; 07-modules.md §6/§7 Phase 2: the module tree with per-module aggregates.
+                  (and (node-name-eq callee c"modules") (= (arg-count e) 0))
+                    (do (reflect-modules (load (ev-valbuf)) (load (srv-program))) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"generation") (= (arg-count e) 0))
+                    (do (jb-cstr (load (ev-valbuf)) c"{\"type\":\"Int\",\"value\":") (jb-int (load (ev-valbuf)) (current-generation)) (jb-byte (load (ev-valbuf)) \}) (store! (ev-outcome) 0) 1)
+                  ; gc() / minorGc() — force a full major / young-only minor collection and report
+                  ; what it reclaimed. NOT in classify-reflection, so they run on the full-STW eval
+                  ; path (they mutate the heap).
+                  (and (node-name-eq callee c"gc") (= (arg-count e) 0))
+                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 1) (store! (ev-outcome) 0) 1)
+                  (and (node-name-eq callee c"minorGc") (= (arg-count e) 0))
+                    (do (reflect-gc (load (ev-valbuf)) (load (srv-program)) 0) (store! (ev-outcome) 0) 1)
+                  ; 07-modules.md §6 Phase 2 item 4: the name arg is bare-or-qualified —
+                  ; resolve-entity-lookup does entry-module-first / unique-across-program /
+                  ; ambiguous-is-an-error resolution (serialize.coil resolve-entity-mono-named).
+                  (and (node-name-eq callee c"fields") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-fields (load (field s s-name)) (load (field s s-len)))))
+                  (and (node-name-eq callee c"source") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-source (load (field s s-name)) (load (field s s-len)))))
+                  (and (node-name-eq callee c"methods") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-methods (load (field s s-name)) (load (field s s-len)))))
+                  ; F1: trace(<expr>) — compile+run the argument expression with the call recorder ON
+                  (and (node-name-eq callee c"trace") (= (arg-count e) 1))
+                    (do (eval-trace (arg-val (arg-at e 0))) 1)
+                  0)))))))))
+; extract a STRCHUNK payload from a string-literal argument, or null
+(defn str-arg [(call (ptr Node)) (i i64)] (-> (ptr Node))
+  (let [v (arg-val (arg-at call i))]
+    (if (and (= (load (field v kind)) NK_STRING) (= (kid-count v) 1))
+      (let [c (kid-at v 0)] (if (= (load (field c kind)) NK_STRCHUNK) c (cast (ptr Node) 0)))
+      (if (= (load (field v kind)) NK_STRCHUNK) v (cast (ptr Node) 0)))))
+
+; ---- fields()/methods() name-arg resolution (07-modules.md §6 Phase 2 item 4) ----
+; ambiguous bare name: fail cleanly through the eval error channel — NEVER silently
+; pick one. `cand` already holds the comma-joined qualified candidates from
+; resolve-entity-mono-named/write-ambiguous-candidates.
+(defn fail-ambiguous-entity [(nm0 (ptr u8)) (len i64) (cand (ptr StrBuf))] (-> i64)
+  (sb-byte cand 0)
+  (let [buf (defbuf)]
+    (snprintf buf 512 c"ambiguous type name '%.*s' — declared in more than one module; use a fully-qualified name (candidates: %s)"
+      (cast i32 len) (cast (ptr i8) nm0) (cast (ptr i8) (load (field cand data))))
+    (ev-fail EK_NOTIMPL buf 0 0)) 0)
+(defn resolve-entity-lookup-fields [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-fields (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
+(defn resolve-entity-lookup-source [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-source (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
+(defn resolve-entity-lookup-methods [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-methods (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
+
+; ============================ F1: trace(<expr>) — function EXECUTION visualization ============================
+; The compute analogue of graph()/instances(): run one expression with the call recorder ON and
+; serialize the resulting CALL TREE. Payload (the eval "value"):
+;   { "type":"Trace",
+;     "value": <serialize-value of the expression's result>,
+;     "stats": { "totalCalls":N, "maxDepth":D, "nodeCount":M, "truncated":bool, "elapsedMs":T,
+;                "perFn":[{"fn":"fib","calls":25}, ...] },
+;     "nodes": [ {"i":0,"parent":-1,"depth":0,"fn":"fib","args":[<val>...],
+;                 "result":<val>,"hasResult":true}, ... ] }   // DFS pre-order; client builds the tree by parent
+; Arg/return values are typed from the callee MethodInfo's source fn node (src-node/src-ctxt); the
+; receiver (self, arg0 of a method call) is rendered as a collapsed entity ref. Ints/Strings/Bools/
+; Floats/enums/entities all render through serialize-value; a callee with no source node (only the
+; synthetic <eval> root, which is never a traced callee) would fall back to an honest raw slot.
+
+; serialize arg i of a trace node, using the callee's signature to type it.
+(defn trace-node-arg [(b (ptr JBuf)) (nd (ptr TraceNode)) (i i64)] (-> i64)
+  (let [mi (load (field nd mi))
+        snode (cast (ptr Node) (load (field mi src-node)))
+        sctxt (cast (ptr Decl) (load (field mi src-ctxt)))
+        v (load (index (field nd args) i))]
+    (if (= (cast i64 snode) 0)
+      (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+      (let [np (fn-param-count snode) arity (load (field mi arity)) start-slot (- arity np)]
+        (if (and (> start-slot 0) (= i 0))
+          (serialize-entity b v 1)                              ; the receiver (self)
+          (let [pi (- i start-slot)]
+            (if (or (< pi 0) (>= pi np))
+              (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+              (serialize-value b v (resolve-type (param-type-node (fn-param-at snode pi)) sctxt) 1)))))))
+  0)
+
+(defn trace-node-result [(b (ptr JBuf)) (nd (ptr TraceNode))] (-> i64)
+  (if (= (load (field nd has-ret)) 0) (jb-cstr b c"null")
+    (let [mi (load (field nd mi)) snode (cast (ptr Node) (load (field mi src-node)))
+          sctxt (cast (ptr Decl) (load (field mi src-ctxt))) v (load (field nd retval))]
+      (if (load (field mi is-void)) (jb-cstr b c"{\"type\":\"Void\"}")
+        (if (= (cast i64 snode) 0)
+          (do (jb-cstr b c"{\"type\":\"raw\",\"value\":") (jb-int b v) (jb-byte b \}))
+          (serialize-value b v (resolve-type (fn-ret-node snode) sctxt) 1)))))
+  0)
+
+(defn serialize-trace [(b (ptr JBuf)) (resval i64) (vty (ptr Type))] (-> i64)
+  (let [r (trace-rec)]
+    (jb-cstr b c"{\"type\":\"Trace\",\"value\":")
+    (serialize-value b resval vty 0)
+    (jb-cstr b c",\"stats\":{\"totalCalls\":") (jb-int b (load (field r total-calls)))
+    (jb-cstr b c",\"maxDepth\":") (jb-int b (load (field r max-depth)))
+    (jb-cstr b c",\"nodeCount\":") (jb-int b (load (field r node-count)))
+    (jb-cstr b c",\"truncated\":") (jb-bool b (load (field r truncated)))
+    (jb-cstr b c",\"elapsedMs\":") (jb-int b (- (load (field r t-end)) (load (field r t-start))))
+    (jb-cstr b c",\"perFn\":[")
+    (let [n (load (field r fn-count)) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [mi (cast (ptr MethodInfo) (load (index (load (field r fn-mis)) (load i))))]
+                (if (> (load i) 0) (jb-byte b \,) 0)
+                (jb-cstr b c"{\"fn\":") (jb-str b (load (field mi name)) (load (field mi name-len)))
+                (jb-cstr b c",\"calls\":") (jb-int b (load (index (load (field r fn-counts)) (load i))))
+                (jb-byte b \})
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}")
+    (jb-cstr b c",\"nodes\":[")
+    (let [n (load (field r node-count)) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [nd (index (load (field r nodes)) (load i))]
+                (if (> (load i) 0) (jb-byte b \,) 0)
+                (jb-cstr b c"{\"i\":") (jb-int b (load i))
+                (jb-cstr b c",\"parent\":") (jb-int b (load (field nd parent)))
+                (jb-cstr b c",\"depth\":") (jb-int b (load (field nd depth)))
+                (jb-cstr b c",\"fn\":") (jb-str b (load (field nd name)) (load (field nd name-len)))
+                (jb-cstr b c",\"args\":[")
+                (let [na (load (field nd argc)) (mut k) 0]
+                  (loop (if (< (load k) na)
+                          (do (if (> (load k) 0) (jb-byte b \,) 0) (trace-node-arg b nd (load k)) (store! k (+ (load k) 1)) 0)
+                          (break))))
+                (jb-cstr b c"],\"result\":") (trace-node-result b nd)
+                (jb-cstr b c",\"hasResult\":") (jb-bool b (load (field nd has-ret)))
+                (jb-byte b \})
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}"))
+  0)
+
+; the trace() handler: wrap the argument expression in a one-statement block, typecheck + compile it
+; exactly like a normal eval, then run it with the recorder armed and serialize the tree. Any type
+; error is a clean rejection; a runtime error longjmps to eval-core (which always disarms the recorder).
+(defn eval-trace [(argexpr (ptr Node))] (-> i64)
+  (let [st (mk-node NK_EXPRSTMT 0 0) blk (mk-node NK_BLOCK 0 0)]
+    (store! (field st a) argexpr)
+    (add-kid! blk st)
+    (set-cur-file c"<eval>")
+    (let [tbase (err-count)
+          env (env-new (null-ty) (cast (ptr Decl) 0) (ty-void) false)
+          vty (block-value blk env (null-ty) true)]
+      (if (> (err-count) tbase) (ev-fail EK_TYPE c"type error" 0 0)
+        (let [mi (compile-eval-method blk vty)]
+          (trace-enable)
+          (let [resval (vm-eval-invoke mi 0)]
+            (trace-finish)
+            (store! (trace-flag) 0)          ; stop recording before serializing (serialize runs no VM code, but be explicit)
+            (serialize-trace (load (ev-valbuf)) resval vty)
+            (store! (ev-outcome) 0) 0))))))
+
+; ============================ live code change (Phase 6, M4) ============================
+; A definition-eval (class / standalone fn / interface) is live redefinition. This runs on
+; the eval coordinator thread AFTER request-global-stop has parked every language thread
+; (server-eval-stw), so the heap is quiescent: the whole thing is one 03-live-semantics
+; generation swap. Method dispatch is index-based, so a swap repoints Program.methods[] at
+; the same indices — every existing call site reaches the new code, no call-site patching.
+; The cut is exactly 05-milestones M4: method-BODY swap (same signature), whole-class body
+; swap, and ADDITIVE fields with a static default; everything else is a loud rejection.
+
+(defn defbuf [] (-> (ptr i8)) (cast (ptr i8) (alloc-static (array u8 512))))
+(defn shape-offender [] (-> (ptr (ptr Node))) (cast (ptr (ptr Node)) (alloc-static (ptr Node))))
+
+; ---- node/decl field iteration ----
+(defn node-field-count [(node (ptr Node))] (-> i64)
+  (let [n (kid-count node) (mut i) 0 (mut c) 0]
+    (loop (if (< (load i) n) (do (if (= (nkind (kid-at node (load i))) NK_FIELD) (do (store! c (+ (load c) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load c)))
+(defn nth-field-of-node [(node (ptr Node)) (idx i64)] (-> (ptr Node))
+  (let [n (kid-count node) (mut i) 0 (mut c) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FIELD) (do (if (= (load c) idx) (do (store! r k) 0) 0) (store! c (+ (load c) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn nth-field-of-decl [(d (ptr Decl)) (idx i64)] (-> (ptr Node))
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut c) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (= (nkind m) NK_FIELD) (do (if (= (load c) idx) (do (store! r m) 0) 0) (store! c (+ (load c) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn node-fn-by-name [(node (ptr Node)) (name (ptr u8)) (len i64)] (-> (ptr Node))
+  (let [n (kid-count node) (mut i) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [k (kid-at node (load i))]
+              (if (and (= (nkind k) NK_FN) (name-eq (nm k) (nlen k) name len)) (do (store! r k) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn node-members-list [(node (ptr Node))] (-> (ArrayList (ptr Node)))
+  (let [(mut lst) (al-new [(ptr Node)] (alc-global)) (mut i) 0 (mut n) (kid-count node)]
+    (loop (if (< (load i) (load n)) (do (al-push! (mut lst) (kid-at node (load i))) (store! i (+ (load i) 1)) 0) (break)))
+    (load lst)))
+
+; total live instances across every mono whose base is d
+(defn class-live-count [(d (ptr Decl))] (-> i64)
+  (let [p (load (srv-program)) ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut total) 0]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                (let [ti (load (index (load (field p types)) (load (field m id))))]
+                  (if (!= (cast i64 ti) 0) (do (store! total (+ (load total) (arena-live-count (load (field ti arena))))) 0) 0)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load total)))
+
+; if d implements an interface declaring method `mname`, return that interface Decl (for a
+; conformance-flavored rejection message); else null. Reads the CACHE (types.coil
+; class-implements comment), never re-resolves implements-clause names from ambient scope.
+(defn method-required-iface [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> (ptr Decl))
+  (let [implids (load (field d impl-decls)) ni (al-len implids) (mut i) 0 (mut r) (cast (ptr Decl) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) ni))
+            (let [id (al-get implids (load i))
+                  mm (decl-member id mname mlen)]
+              (if (and (!= (cast i64 mm) 0) (= (nkind mm) NK_FN)) (do (store! r id) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; ---- rejection helpers (each leaves the running program untouched) ----
+(defn rej-unknown [(node (ptr Node)) (what (ptr i8))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot redefine %s '%.*s': no such %s exists in the running program" what (cast i32 (nlen node)) (cast (ptr i8) (nm node)) what)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-notkind [(node (ptr Node)) (what (ptr i8))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot redefine '%.*s' as a %s: it is declared as something else" (cast i32 (nlen node)) (cast (ptr i8) (nm node)) what)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-shape [(d (ptr Decl)) (fname (ptr u8)) (flen i64) (what (ptr i8)) (live i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: field '%.*s' %s while %lld live instance(s) exist — not supported in this build, restart the process to apply this change."
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname) what live)
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-nodefault [(d (ptr Decl)) (fname (ptr u8)) (flen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: added field '%.*s' has no static default — an additive live field must carry a `= <default>` (05-milestones M4)"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-headroom [(d (ptr Decl)) (fname (ptr u8)) (flen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: adding field '%.*s' exceeds the arena's reserved per-slot field headroom — too many live additive fields; restart the process to apply this change."
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 flen) (cast (ptr i8) fname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-sig [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"cannot change the signature of %.*s.%.*s while live (a parameter or the return type differs) — signature changes are not supported in this build (M4); a caller would need re-checking against the new signature"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-addmethod [(d (ptr Decl)) (mname (ptr u8)) (mlen i64)] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"redefine %.*s: cannot add method '%.*s' while live — only method-body swaps and additive fields are supported in this build (M4)"
+      (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn rej-rmmethod [(d (ptr Decl)) (mname (ptr u8)) (mlen i64) (iface (ptr Decl))] (-> i64)
+  (let [b (defbuf)]
+    (if (= (cast i64 iface) 0)
+      (snprintf b 512 c"redefine %.*s: method '%.*s' was removed while live — not supported in this build (M4)"
+        (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname))
+      (snprintf b 512 c"redefine %.*s: it would no longer implement method '%.*s' required by interface %.*s — interface conformance would break, change rejected"
+        (cast i32 (load (field d name-len))) (cast (ptr i8) (load (field d name))) (cast i32 mlen) (cast (ptr i8) mname) (cast i32 (load (field iface name-len))) (cast (ptr i8) (load (field iface name)))))
+    (ev-fail EK_TYPE b 0 0)) 0)
+
+; classify the shape delta: 0 = SAME, 1 = ADDITIVE (new trailing fields), 2 = incompatible
+; (a field removed/renamed/retyped/reordered). On 2, shape-offender names the field.
+(defn classify-shape [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (let [oldfc (field-count-of d) newfc (node-field-count node)
+        minfc (if (< oldfc newfc) oldfc newfc) (mut i) 0 (mut bad) false]
+    (loop (if (and (not (load bad)) (< (load i) minfc))
+            (let [of (nth-field-of-decl d (load i)) nf (nth-field-of-node node (load i))]
+              (if (or (not (name-eq (nm of) (nlen of) (nm nf) (nlen nf)))
+                      (not (type-eq (resolve-type (load (field of a)) d) (resolve-type (load (field nf a)) d))))
+                (do (store! (shape-offender) of) (store! bad true) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (cond
+      (load bad) 2
+      (< newfc oldfc) (do (store! (shape-offender) (nth-field-of-decl d minfc)) 2)
+      (> newfc oldfc) 1
+      0)))
+
+; `action "L" for T { … }` is desugared by inject-actions into a hidden `__action_<i>` method
+; ON T, so the class as RUNNING has members no source file contains. Editing T's source and
+; re-applying it would therefore look like those methods were REMOVED and be rejected (M4) —
+; and an eval cannot parse `action` blocks, so the editor can't carry them either. Instead we
+; carry the live synthetic members over onto the incoming node: the actions are generated from
+; `action` decls that the class edit did not touch, they keep their names/indices (so the
+; viewer's `T.at(…).__action_<i>()` invoke still resolves), and their bodies are unchanged.
+(defn carry-over-actions [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (= (nkind m) NK_FN) (is-action-method-name (nm m) (nlen m)))
+                (if (= (cast i64 (node-fn-by-name node (nm m) (nlen m))) 0)
+                  (do (add-kid! node m) 0) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+
+; method-set validation (returns 1 = ok, 0 = rejected). Uses the OLD (still-live) members.
+(defn check-methods-match [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (carry-over-actions d node)
+  (block :m
+    ; every NEW method must exist in OLD with a matching signature (no adds, no sig changes)
+    (let [n (kid-count node) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [k (kid-at node (load i))]
+                (if (= (nkind k) NK_FN)
+                  (let [om (decl-member d (nm k) (nlen k))]
+                    (cond
+                      (or (= (cast i64 om) 0) (!= (nkind om) NK_FN)) (do (rej-addmethod d (nm k) (nlen k)) (return-from :m 0))
+                      (not (sigs-match d om d k)) (do (rej-sig d (nm k) (nlen k)) (return-from :m 0))
+                      0)) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    ; every OLD method must still be present in NEW (no removals)
+    (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (= (nkind m) NK_FN)
+                  (if (= (cast i64 (node-fn-by-name node (nm m) (nlen m))) 0)
+                    (do (rej-rmmethod d (nm m) (nlen m) (method-required-iface d (nm m) (nlen m))) (return-from :m 0)) 0) 0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    1))
+
+; headroom pre-check for ADDITIVE: every entity mono of d must fit newfc fields in its slot.
+(defn check-headroom [(d (ptr Decl)) (newfc i64) (node (ptr Node)) (oldfc i64)] (-> i64)
+  (let [p (load (srv-program)) ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut ok) 1]
+    (loop (if (and (= (load ok) 1) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                (let [ti (load (index (load (field p types)) (load (field m id))))
+                      a (load (field ti arena))
+                      need (+ (sizeof InstanceHeader) (* newfc 8))]
+                  (if (> need (load (field a slot-size)))
+                    (do (rej-headroom d (nm (nth-field-of-node node oldfc)) (nlen (nth-field-of-node node oldfc))) (store! ok 0) 0) 0)) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load ok)))
+
+; typecheck all of the new class's method bodies against d (whose members are now the NEW set)
+(defn typecheck-class-bodies [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (set-cur-file c"<eval>")
+  (let [self-ty (mk-named d (self-args d)) n (kid-count node) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FN) (do (check-fn-body d k self-ty) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+
+; typecheck the static default of each added field (no self in scope: a static default)
+(defn typecheck-added-defaults [(d (ptr Decl)) (node (ptr Node)) (oldfc i64) (newfc i64)] (-> i64)
+  (set-cur-file c"<eval>")
+  (let [(mut j) oldfc]
+    (loop (if (< (load j) newfc)
+            (let [nf (nth-field-of-node node (load j)) fty (resolve-type (load (field nf a)) d)
+                  expr (load (field nf b))
+                  env (env-new (null-ty) (cast (ptr Decl) 0) fty false)
+                  vt (infer expr env fty)]
+              (if (or (is-err vt) (assignable vt fty)) 0
+                (do (err-head-n expr) (w-cstr 2 c"default value for field '") (w-bytes 2 (nm nf) (nlen nf))
+                    (w-cstr 2 c"' has type ") (type-write 2 vt) (w-cstr 2 c", expected ") (type-write 2 fty) (err-end) 0))
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  0)
+
+; compile a field's static default into a nullary method and run it -> raw slot value
+(defn run-default [(nf (ptr Node)) (fty (ptr Type))] (-> i64)
+  (let [expr (load (field nf b))
+        chunk (chunk-new)
+        env (env-new (null-ty) (cast (ptr Decl) 0) fty false)
+        cs (make-cstate chunk env (cast (ptr Decl) 0) 0)
+        mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) (cast (ptr u8) c"<default>")) (store! (field mi name-len) 9)
+    (store! (field mi src-node) (cast (ptr i8) 0)) (store! (field mi src-ctxt) (cast (ptr i8) 0))
+    (store! (field mi chunk) chunk) (store! (field mi is-void) false) (store! (field mi arity) 0)
+    (compile-expr cs expr)
+    (chunk-byte chunk OP_RETURN)
+    (store! (field mi local-count) (load (field cs max-slot)))
+    (vm-eval-invoke mi 0)))
+
+; commit: repoint every method node old->new, then recompile each at its (unchanged) index
+(defn repoint-class-methods [(old-members (ArrayList (ptr Node))) (node (ptr Node))] (-> i64)
+  (let [n (al-len old-members) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [om (al-get old-members (load i))]
+              (if (= (nkind om) NK_FN) (do (repoint-method-node! om (node-fn-by-name node (nm om) (nlen om))) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+(defn recompile-class-methods [(p (ptr Program)) (d (ptr Decl)) (node (ptr Node)) (self-ty (ptr Type))] (-> i64)
+  (let [n (kid-count node) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [k (kid-at node (load i))]
+              (if (= (nkind k) NK_FN) (do (recompile-method-at! p (method-index-of k) k d self-ty) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+(defn commit-added-fields [(p (ptr Program)) (d (ptr Decl)) (node (ptr Node)) (oldfc i64) (newfc i64)] (-> i64)
+  (let [(mut j) oldfc]
+    (loop (if (< (load j) newfc)
+            (let [nf (nth-field-of-node node (load j)) fty (resolve-type (load (field nf a)) d)
+                  defval (run-default nf fty)
+                  ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+              (loop (if (< (load i) n)
+                      (let [m (al-get ms (load i))]
+                        (if (and (= (cast i64 (load (field m base))) (cast i64 d)) (load (field m is-entity)))
+                          (do (add-field-live! p m (nm nf) (nlen nf) fty defval) 0) 0)
+                        (store! i (+ (load i) 1)) 0)
+                      (break)))
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  0)
+
+; emit the accepted-change value: {defined, gen, message}
+(defn ev-defined [(name (ptr u8)) (nln i64) (gen i64)] (-> i64)
+  (let [b (load (ev-valbuf)) mb (defbuf)]
+    (snprintf mb 512 c"%.*s redefined at generation %lld — next call uses the new code" (cast i32 nln) (cast (ptr i8) name) gen)
+    (jb-cstr b c"{\"type\":\"defined\",\"defined\":") (jb-str b name nln)
+    (jb-cstr b c",\"gen\":") (jb-int b gen)
+    (jb-cstr b c",\"message\":") (jb-str b (cast (ptr u8) mb) (s-len mb))
+    (jb-byte b \}))
+  (store! (ev-outcome) 0) 0)
+
+; ---- the three redefinition entries ----
+; live-eval redefinition addressing (07-modules.md §6, Phase 2): looks up the target
+; name in the CURRENT eval's module context — eval-fallback-file, which is the entry
+; module by default or the module named by this eval source's `module a.b.c` header
+; (eval-module-header, set before eval-definition ever runs). own-module -> that
+; module's imports -> builtins, exactly find-decl's normal order — so redefining a
+; method of a class declared in a non-entry module works once the eval source is
+; prefixed with that module's header.
+(defn redefine-class [(errbase i64)] (-> i64)
+  (block :done
+    (set-cur-file (eval-fallback-file))
+    (let [node (parse-class) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"class") (return-from :done 0)) 0)
+      (if (!= (load (field d kind)) DK_CLASS) (do (rej-notkind node c"class") (return-from :done 0)) 0)
+      (let [oldfc (field-count-of d) newfc (node-field-count node) sc (classify-shape d node)]
+        (if (= sc 2)
+          (let [off (load (shape-offender))]
+            (rej-shape d (nm off) (nlen off) c"was removed, renamed, retyped, or reordered" (class-live-count d))
+            (return-from :done 0)) 0)
+        (if (= sc 1)
+          (let [(mut j) oldfc]
+            (loop (if (< (load j) newfc)
+                    (let [nf (nth-field-of-node node (load j))]
+                      (if (= (cast i64 (load (field nf b))) 0) (do (rej-nodefault d (nm nf) (nlen nf)) (return-from :done 0)) 0)
+                      (store! j (+ (load j) 1)) 0)
+                    (break)))) 0)
+        (if (= (check-methods-match d node) 0) (return-from :done 0) 0)
+        (if (= sc 1) (if (= (check-headroom d newfc node oldfc) 0) (return-from :done 0) 0) 0)
+        ; swap members, typecheck bodies + defaults; rollback on any type error
+        (let [old-members (load (field d members)) tbase (err-count)]
+          (store! (field d members) (node-members-list node))
+          (typecheck-class-bodies d node)
+          (if (= sc 1) (typecheck-added-defaults d node oldfc newfc) 0)
+          (if (> (err-count) tbase)
+            (do (store! (field d members) old-members) (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0)
+          ; COMMIT — every language thread is parked (server-eval-stw); this is the generation swap
+          (let [p (load (srv-program)) self-ty (mk-named d (self-args d))]
+            (repoint-class-methods old-members node)
+            (recompile-class-methods p d node self-ty)
+            (if (= sc 1) (commit-added-fields p d node oldfc newfc) 0)
+            (ev-defined (nm node) (nlen node) (bump-generation))))))))
+
+(defn redefine-fn [(errbase i64)] (-> i64)
+  (block :done
+    (set-cur-file (eval-fallback-file))
+    (let [node (parse-fn true) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"function") (return-from :done 0)) 0)
+      (if (!= (load (field d kind)) DK_FN) (do (rej-notkind node c"function") (return-from :done 0)) 0)
+      (let [old (load (field d node))]
+        (if (not (sigs-match d old d node)) (do (rej-sig d (nm node) (nlen node)) (return-from :done 0)) 0)
+        (set-cur-file c"<eval>")
+        (let [tbase (err-count)]
+          (check-fn-body d node (null-ty))
+          (if (> (err-count) tbase) (do (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0))
+        (store! (field d node) node)
+        (let [oi (repoint-method-node! old node)]
+          (recompile-method-at! (load (srv-program)) oi node d (null-ty)))
+        (ev-defined (nm node) (nlen node) (bump-generation))))))
+
+(defn redefine-interface [(errbase i64)] (-> i64)
+  (block :done
+    (set-cur-file (eval-fallback-file))
+    (let [node (parse-interface) d (find-decl (nm node) (nlen node))]
+      (if (= (cast i64 d) 0) (do (rej-unknown node c"interface") (return-from :done 0)) 0)
+      (if (and (!= (load (field d kind)) DK_INTERFACE) (!= (load (field d kind)) DK_BUILTIN_IFACE))
+        (do (rej-notkind node c"interface") (return-from :done 0)) 0)
+      ; temp-install the new interface members, re-check every implementor's conformance,
+      ; then restore — an interface change is never committed in M4 (only rejections matter).
+      (let [old-members (load (field d members)) tbase (err-count)]
+        (store! (field d members) (node-members-list node))
+        (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+          (set-cur-file c"<eval>")
+          (loop (if (< (load i) n)
+                  (let [d2 (al-get ds (load i))]
+                    (if (= (load (field d2 kind)) DK_CLASS) (do (check-conformance d2) 0) 0)
+                    (store! i (+ (load i) 1)) 0)
+                  (break))))
+        (store! (field d members) old-members)
+        (if (> (err-count) tbase)
+          (ev-fail EK_TYPE c"type error" 0 0)
+          (ev-fail EK_NOTIMPL c"interface redefinition is not supported in this build (M4); only method-body swaps and additive class fields are live-editable" 0 0))))))
+
+; classify + dispatch a definition-eval (parser is positioned at the leading keyword)
+(defn eval-definition [(errbase i64)] (-> i64)
+  (let [k (cur-kind)]
+    (cond
+      (= k TK_CLASS) (redefine-class errbase)
+      (= k TK_FN) (redefine-fn errbase)
+      (= k TK_INTERFACE) (redefine-interface errbase)
+      (= k TK_MIGRATE) (ev-fail EK_NOTIMPL c"migrate blocks are not supported in this build" 0 0)
+      (= k TK_ENUM) (ev-fail EK_NOTIMPL c"live enum redefinition is not supported in this build (M4)" 0 0)
+      (= k TK_OBJECT) (ev-fail EK_NOTIMPL c"live object redefinition is not supported in this build (M4)" 0 0)
+      (= k TK_IMPORT) (ev-fail EK_NOTIMPL c"import is not allowed in a live eval" 0 0)
+      (ev-fail EK_NOTIMPL c"unsupported definition in a live eval" 0 0))))
+
+; ---- eval module-header context (07-modules.md §6 Phase 2) ----
+; An eval source may open with `module a.b.c` to set the resolution/redefinition
+; context for THIS eval only: bare names resolve as if the rest of the source were
+; appended to a.b.c's file (own decls -> that file's imports -> builtins, via
+; eval-fallback-file/effective-import-file), and a redefinition targets (a.b.c, name).
+; Consumes the header from the parser; on success points eval-mod-file at the target
+; module's file and returns 1. On an unknown module it calls ev-fail (a clean eval
+; error naming the module — never a crash) and returns 0; the caller must stop.
+(defn rej-unknown-module [(node (ptr Node))] (-> i64)
+  (let [b (defbuf)]
+    (snprintf b 512 c"unknown module '%.*s' in eval header — no loaded file declares it"
+      (cast i32 (nlen node)) (cast (ptr i8) (nm node)))
+    (ev-fail EK_NOTIMPL b 0 0)) 0)
+(defn eval-module-header [] (-> i64)
+  (let [node (parse-module)]
+    (if (is-known-module (nm node) (nlen node))
+      (do (set-eval-mod-file (find-file-for-module (nm node) (nlen node))) 1)
+      (do (rej-unknown-module node) 0))))
+
+; compile a typechecked eval block into a standalone nullary MethodInfo.
+(defn compile-eval-method [(blk (ptr Node)) (vty (ptr Type))] (-> (ptr MethodInfo))
+  (let [chunk (chunk-new)
+        env (env-new (null-ty) (cast (ptr Decl) 0) vty false)
+        cs (make-cstate chunk env (cast (ptr Decl) 0) 0)
+        mi (cast (ptr MethodInfo) (xalloc (sizeof MethodInfo)))]
+    (store! (field mi name) (cast (ptr u8) c"<eval>")) (store! (field mi name-len) 6)
+    (store! (field mi src-node) (cast (ptr i8) 0)) (store! (field mi src-ctxt) (cast (ptr i8) 0))
+    (store! (field mi chunk) chunk) (store! (field mi is-void) false) (store! (field mi arity) 0)
+    (compile-block cs blk true)
+    (chunk-byte chunk OP_RETURN)
+    (store! (field mi local-count) (load (field cs max-slot)))
+    mi))
+
+; ---- readonly mutation analysis over compiled bytecode ----
+; op-instr-len now lives in bytecode.coil (shared with the GC stack-map builder).
+(defn chunk-u16-at [(c (ptr Chunk)) (off i64)] (-> i64)
+  (+ (* (cast i64 (load (index (load (field c code)) off))) 256) (cast i64 (load (index (load (field c code)) (+ off 1))))))
+(defstruct VisitSet [(arr (ptr i64)) (count i64) (cap i64)])
+(defn vs-new [] (-> (ptr VisitSet))
+  (let [v (cast (ptr VisitSet) (xalloc (sizeof VisitSet)))] (store! (field v arr) (cast (ptr i64) (xalloc (* 8 1024)))) (store! (field v count) 0) (store! (field v cap) 1024) v))
+(defn vs-has [(v (ptr VisitSet)) (x i64)] (-> bool)
+  (let [n (load (field v count)) (mut i) 0 (mut ok) false]
+    (loop (if (and (not (load ok)) (< (load i) n)) (do (if (= (load (index (load (field v arr)) (load i))) x) (do (store! ok true) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load ok)))
+(defn vs-add [(v (ptr VisitSet)) (x i64)] (-> i64)
+  (if (< (load (field v count)) (load (field v cap))) (do (store! (index (load (field v arr)) (load (field v count))) x) (store! (field v count) (+ (load (field v count)) 1)) 0) 0))
+(defn chunk-mutates [(c (ptr Chunk)) (p (ptr Program)) (visited (ptr VisitSet))] (-> bool)
+  (let [n (load (field c count)) (mut off) 0 (mut mut?) false]
+    (loop
+      (if (and (not (load mut?)) (< (load off) n))
+        (let [op (cast i64 (load (index (load (field c code)) (load off))))]
+          (cond
+            (or (= op OP_STORE_FIELD_I64) (or (= op OP_STORE_FIELD_F64) (= op OP_STORE_FIELD_REF))) (do (store! mut? true) 0)
+            (= op OP_NEW) (do (store! mut? true) 0)
+            (= op OP_CALL_VIRTUAL) (do (store! mut? true) 0)
+            (or (= op OP_THREAD_SPAWN) (= op OP_THREAD_JOIN)) (do (store! mut? true) 0)
+            (= op OP_CALL_BUILTIN)
+              (let [blt (cast i64 (load (index (load (field c code)) (+ (load off) 1))))]
+                (if (or (= blt BLT_LIST_PUSH) (or (= blt BLT_MAP_SET) (or (= blt BLT_MUTEX_SET) (or (= blt BLT_MUTEX_LOCK) (or (= blt BLT_MUTEX_UNLOCK)
+                        ; real-world side effects: a subprocess or a file write can change the world.
+                        (or (= blt BLT_PROC_RUN) (or (= blt BLT_FILE_WRITE) (= blt BLT_FILE_APPEND)))))))) (do (store! mut? true) 0) 0))
+            (= op OP_CALL_STATIC)
+              (let [midx (chunk-u16-at c (+ (load off) 1))]
+                (if (not (vs-has visited midx))
+                  (do (vs-add visited midx)
+                      (if (chunk-mutates (load (field (load (index (load (field p methods)) midx)) chunk)) p visited) (do (store! mut? true) 0) 0))
+                  0))
+            0)
+          (store! off (+ (load off) (op-instr-len op))) 0)
+        (break)))
+    (load mut?)))
+
+; the guarded work: sets ev-outcome/valbuf on success, ev-outcome=1 + EvalError on failure.
+(defn eval-exec [(src (ptr u8)) (len i64) (readonly i64) (errbase i64)] (-> i64)
+  (block :done
+    (if (= (lex-file src c"<eval>") 1) (do (ev-fail EK_SYNTAX c"syntax error in eval source" 0 0) (return-from :done 0)) 0)
+    (parser-init (lexer-tokens) c"<eval>")
+    ; 07-modules.md §6 Phase 2: reset to the entry module for THIS eval, then let a
+    ; leading `module a.b.c` header override it — before anything else looks at
+    ; eval-fallback-file (is-def-token/eval-definition, and the plain-expression path
+    ; below both read it via set-cur-file/effective-import-file).
+    (reset-eval-mod-file)
+    (if (= (cur-kind) TK_MODULE)
+      (if (= (eval-module-header) 0) (return-from :done 0) 0)
+      0)
+    (if (is-def-token (cur-kind))
+      (do (eval-definition errbase) (return-from :done 0)) 0)
+    (let [blk (parse-eval-block)]
+      (if (= (try-reflection blk) 1) (return-from :done 0) 0)
+      (set-cur-file c"<eval>")
+      (let [env (env-new (null-ty) (cast (ptr Decl) 0) (ty-void) false)
+            vty (block-value blk env (null-ty) true)]
+        (if (> (err-count) errbase) (do (ev-fail EK_TYPE c"type error" 0 0) (return-from :done 0)) 0)
+        (let [mi (compile-eval-method blk vty)]
+          (if (and (= readonly 1) (chunk-mutates (load (field mi chunk)) (load (srv-program)) (vs-new)))
+            (do (ev-fail EK_READONLY c"eval rejected: this expression would mutate program state (--readonly)" 0 0) (return-from :done 0)) 0)
+          (let [resval (vm-eval-invoke mi 0)]
+            (serialize-value (load (ev-valbuf)) resval vty 0)
+            (store! (ev-outcome) 0) 0))))))
+
+; write `"value":...` / `"error":{...}` into b.  Never longjmps (all risky work is guarded).
+(defn eval-core [(b (ptr JBuf)) (src (ptr u8)) (len i64) (readonly i64)] (-> i64)
+  (store! (ev-valbuf) (jb-new))
+  (store! (ev-outcome) 1) (store! (ev-kind) EK_RUNTIME) (store! (ev-line) 0) (store! (ev-col) 0) (store! (ev-msglen) 0)
+  (eval-set-active 1)
+  (let [errbase (err-count)]
+    (diag-capture-begin)
+    (if (= (cast i64 (setjmp (ev-jmpbuf))) 0)
+      (eval-exec src len readonly errbase)
+      (store! (ev-outcome) 1))     ; longjmp'd: EvalError already recorded by eval-panic
+    (diag-capture-end))
+  (eval-set-active 0)
+  (trace-disable)   ; F1: always disarm the recorder — even if a traced expr longjmp'd past its handler
+
+  (if (= (load (ev-outcome)) 0)
+    (do (jb-cstr b c"\"value\":") (jb-bytes b (load (field (load (ev-valbuf)) data)) (load (field (load (ev-valbuf)) len))))
+    (write-error-inner b))
+  0)
+
+(defn write-error-inner [(b (ptr JBuf))] (-> i64)
+  (jb-cstr b c"\"error\":{\"kind\":") (jb-cstr-quoted b (kind-str (load (ev-kind))))
+  (jb-cstr b c",\"message\":")
+  ; prefer the real captured compiler diagnostic when present
+  (if (and (> (load (ev-caplen)) 0) (or (= (load (ev-kind)) EK_TYPE) (= (load (ev-kind)) EK_SYNTAX)))
+    (jb-str b (ev-capbuf) (trim-len (ev-capbuf) (load (ev-caplen))))
+    (jb-str b (ev-msgbuf) (load (ev-msglen))))
+  (if (> (load (ev-line)) 0)
+    (do (jb-cstr b c",\"line\":") (jb-int b (load (ev-line))) (jb-cstr b c",\"col\":") (jb-int b (load (ev-col)))) 0)
+  (jb-byte b \}) 0)
+(defn trim-len [(p (ptr u8)) (n i64)] (-> i64)
+  (let [(mut m) n] (loop (if (and (> (load m) 0) (let [c (cast i64 (load (index p (- (load m) 1))))] (or (= c \newline) (or (= c \return) (= c \space))))) (do (store! m (- (load m) 1)) 0) (break))) (load m)))
+
+; ============================ eval under a full stop-the-world (Phase 5) ============================
+; The server thread is the eval COORDINATOR: it parks every language thread with
+; request-global-stop, runs the whole eval (parse -> typecheck -> compile -> VM ->
+; serialize) directly on the eval VMThread with the heap quiescent, then releases. Every
+; eval is full-STW for now — the conservative choice (05 M1 builds only full STW; partial
+; read-only safepoints are a documented future optimization, 02 §7). Because there is one
+; server thread accepting one connection at a time and request-global-stop CAS-serializes
+; coordinators, evals never overlap, so eval-core's global scratch state is safe.
+(defn server-eval-stw [(b (ptr JBuf)) (src (ptr u8)) (srclen i64) (readonly i64)] (-> i64)
+  (request-global-stop (vm-eval-parked))
+  (eval-core b src srclen readonly)
+  (release-global-stop)
+  0)
+
+; ============================ concurrent read-only reflection (Phase 5b) ============================
+; A viewer poll is one of a fixed set of bare, read-only reflection calls (types()/graph()/…).
+; These run NO bytecode, allocate nothing, and cannot panic — they just walk the (quiescent)
+; heap and serialize it. That makes them safe to overlap a long expression eval: the eval yields
+; the parked heap for the poll's brief read at its next safepoint (safepoint.coil's handoff),
+; then resumes. Because this path touches NONE of eval-core's singletons (ev-valbuf/ev-outcome/
+; ev-jmpbuf/the eval VMThread) — it writes only into the caller's per-request JBuf — a suspended
+; eval's in-flight state is untouched. Expression/mutating evals stay on server-eval-stw and are
+; fully serialized (the coordinator only ever hands off to these read-only readers).
+;
+; classify-reflection: is the trimmed source EXACTLY one of the zero-arg reflection calls the
+; viewer polls? Returns an index 0..6, or -1. Exact-match by design: a false negative merely
+; routes to the (correct, serialized) eval path, so this is sound in the safe direction.
+(defn refl-name [(idx i64)] (-> (ptr i8))
+  (cond (= idx 0) c"types()" (= idx 1) c"schema()" (= idx 2) c"graph()"
+        (= idx 3) c"views()" (= idx 4) c"actions()" (= idx 5) c"functions()"
+        (= idx 6) c"generation()" (= idx 7) c"modules()" c""))
+(defn src-eq-trimmed [(src (ptr u8)) (len i64) (lit (ptr i8))] (-> bool)
+  (let [(mut s) 0 (mut e) len]
+    (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (load s))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! s (+ (load s) 1)) 0) (break)))
+    (loop (if (and (< (load s) (load e)) (let [c (cast i64 (load (index src (- (load e) 1))))] (or (= c \space) (or (= c \tab) (or (= c \newline) (= c \return)))))) (do (store! e (- (load e) 1)) 0) (break)))
+    (let [tl (- (load e) (load s)) ll (s-len lit)]
+      (if (!= tl ll) false
+        (let [(mut i) 0 (mut ok) true]
+          (loop (if (and (load ok) (< (load i) tl)) (do (if (!= (cast i64 (load (index src (+ (load s) (load i))))) (cast i64 (load (index (cast (ptr u8) lit) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+          (load ok))))))
+(defn classify-reflection [(src (ptr u8)) (len i64)] (-> i64)
+  (let [(mut r) -1 (mut i) 0]
+    (loop (if (and (< (load r) 0) (< (load i) 8))
+            (do (if (src-eq-trimmed src len (refl-name (load i))) (do (store! r (load i)) 0) 0) (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+
+; write the reflection value for `idx` into `b`. Pure reads; each writes a complete value object.
+(defn refl-emit [(b (ptr JBuf)) (idx i64)] (-> i64)
+  (let [p (load (srv-program))]
+    (cond
+      (= idx 0) (reflect-types b p)
+      (= idx 1) (reflect-schema b p)
+      (= idx 2) (reflect-graph b p)
+      (= idx 3) (reflect-views b p)
+      (= idx 4) (reflect-actions b p)
+      (= idx 5) (reflect-functions b p)
+      (= idx 7) (reflect-modules b p)
+      (= idx 6) (do (jb-cstr b c"{\"type\":\"Int\",\"value\":") (jb-int b (current-generation)) (jb-byte b \}))
+      0)))
+
+; run a read-only reflection with the heap held quiescent. Acquire the parked heap one of two
+; ways, then emit into `resp`:
+;   HANDOFF  (mode 1): an eval already holds the stop → announce in sp-waiting, wait for the
+;                      coordinator to offer (sp-granted 1), claim it (CAS 1->2), read, release (->0).
+;   SELF-STOP(mode 2): no eval holds the stop → win the flag ourselves and park the language
+;                      threads, exactly like a normal coordinator, then release when done.
+; The two are mutually exclusive by construction: an offer can exist only while the flag is held
+; (by the eval coordinator), and we can only win the flag when it is free — so at most ONE reader
+; ever reads at a time (globally serialized), which also makes any internal reflect-* scratch safe.
+(defn server-eval-reflect [(resp (ptr JBuf)) (idx i64)] (-> i64)
+  (jb-cstr resp c"\"value\":")
+  (atomic-add (sp-waiting) 1)
+  (let [(mut mode) 0]
+    (loop
+      (if (and (= (atomic-load (sp-granted)) 1) (= (atomic-cas (sp-granted) 1 2) 1))
+        (do (store! mode 1) (break))
+        (if (and (= (atomic-load (sp-flag)) 0) (= (atomic-cas (sp-flag) 0 1) 0))
+          (do (store! mode 2) (break))
+          (do (usleep (cast i32 20)) (continue)))))
+    (if (= (load mode) 2)
+      (do (atomic-sub (sp-waiting) 1)
+          (store! (sp-coord) (cast i64 (refl-coord-word)))
+          (sp-park-wait (refl-coord-word))) 0)
+    ; heap is parked + quiescent here — read it
+    (refl-emit resp idx)
+    (if (= (load mode) 1)
+      ; drop out of the waiting set BEFORE clearing the offer, so the coordinator, once it sees
+      ; sp-granted==0 and resumes, reads an already-decremented count (no spurious re-offer).
+      (do (atomic-sub (sp-waiting) 1) (atomic-store (sp-granted) 0))
+      (release-global-stop)))
+  0)
+
+; ============================ HTTP (server thread) ============================
+(defn ends-with [(name (ptr i8)) (suf (ptr i8))] (-> bool)
+  (let [nl (s-len name) sl (s-len suf)]
+    (if (< nl sl) false
+      (let [(mut i) 0 (mut ok) true]
+        (loop (if (and (load ok) (< (load i) sl)) (do (if (!= (cast i64 (load (index (cast (ptr u8) name) (+ (- nl sl) (load i))))) (cast i64 (load (index (cast (ptr u8) suf) (load i))))) (do (store! ok false) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+        (load ok)))))
+(defn content-type-for [(name (ptr i8))] (-> (ptr i8))
+  (cond (ends-with name c".html") c"text/html; charset=utf-8"
+        (ends-with name c".js") c"application/javascript; charset=utf-8"
+        (ends-with name c".css") c"text/css; charset=utf-8"
+        c"text/plain; charset=utf-8"))
+(defn srv-read-file [(path (ptr i8)) (out-len (ptr i64))] (-> (ptr u8))
+  (let [f (fopen path c"rb")]
+    (if (= (cast i64 f) 0) (do (store! out-len 0) (cast (ptr u8) 0))
+      (do (fseek f 0 (cast i32 2))
+          (let [sz (ftell f)] (rewind f)
+            (let [buf (xalloc (+ sz 1))] (fread (cast (ptr i8) buf) 1 sz f) (fclose f) (store! out-len sz) buf))))))
+
+; join viewer-dir + name into a fresh path buffer
+(defn join-path [(dir (ptr i8)) (name (ptr i8))] (-> (ptr i8))
+  (let [dl (s-len dir) nl (s-len name) buf (cast (ptr i8) (xalloc (+ (+ dl nl) 2))) (mut k) 0]
+    (let [(mut i) 0] (loop (if (< (load i) dl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) dir) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (let [(mut i) 0] (loop (if (< (load i) nl) (do (store! (index (cast (ptr u8) buf) (load k)) (load (index (cast (ptr u8) name) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break))))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
+
+(defn write-all [(fd i64) (p (ptr u8)) (n i64)] (-> i64)
+  (let [(mut off) 0]
+    (loop (if (< (load off) n) (let [w (cast i64 (write (cast i32 fd) (cast (ptr i8) (index p (load off))) (cast isize (- n (load off)))))] (if (<= w 0) (break) (do (store! off (+ (load off) w)) 0))) (break))))
+  0)
+; Coil's c"…" lexer decodes only \n \t \\ \" — NOT \r or \xHH — so HTTP CRLFs are
+; written as explicit bytes (\return=13, \newline=10) rather than via an escape.
+(defn sr-str [(buf (ptr u8)) (k (ptr i64)) (s (ptr i8))] (-> i64)
+  (let [n (s-len s) (mut i) 0]
+    (loop (if (< (load i) n) (do (store! (index buf (load k)) (load (index (cast (ptr u8) s) (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break)))) 0)
+(defn sr-crlf [(buf (ptr u8)) (k (ptr i64))] (-> i64)
+  (store! (index buf (load k)) (cast u8 \return)) (store! (index buf (+ (load k) 1)) (cast u8 \newline)) (store! k (+ (load k) 2)) 0)
+(defn send-response [(fd i64) (status (ptr i8)) (ctype (ptr i8)) (body (ptr u8)) (blen i64)] (-> i64)
+  (let [hdr (xalloc 512) k (cast (ptr i64) (xalloc 8)) clbuf (cast (ptr i8) (xalloc 32))]
+    (store! k 0)
+    (sr-str hdr k c"HTTP/1.1 ") (sr-str hdr k status) (sr-crlf hdr k)
+    (sr-str hdr k c"Content-Type: ") (sr-str hdr k ctype) (sr-crlf hdr k)
+    (snprintf clbuf 32 c"Content-Length: %lld" blen) (sr-str hdr k clbuf) (sr-crlf hdr k)
+    (sr-str hdr k c"Connection: close") (sr-crlf hdr k)
+    (sr-str hdr k c"Access-Control-Allow-Origin: *") (sr-crlf hdr k)
+    ; never cache: the viewer JS/CSS change often and eval responses are live — a stale browser
+    ; cache is why "restart the portal, nothing changes" happened. Always serve fresh.
+    (sr-str hdr k c"Cache-Control: no-store, must-revalidate") (sr-crlf hdr k)
+    (sr-crlf hdr k)
+    (write-all fd hdr (load k))
+    (write-all fd body blen) 0))
+
+; find the request path (after "METHOD ") into out; returns method: 0 GET, 1 POST, -1 other
+(defn parse-req [(buf (ptr u8)) (n i64) (pathout (ptr u8))] (-> i64)
+  (let [meth (if (= (cast i64 (load (index buf 0))) \P) 1 (if (= (cast i64 (load (index buf 0))) \G) 0 -1))
+        (mut i) 0]
+    ; skip method to first space
+    (loop (if (and (< (load i) n) (!= (cast i64 (load (index buf (load i)))) \space)) (do (store! i (+ (load i) 1)) 0) (break)))
+    (store! i (+ (load i) 1))
+    (let [(mut k) 0]
+      (loop (if (and (< (load i) n) (!= (cast i64 (load (index buf (load i)))) \space)) (do (store! (index pathout (load k)) (load (index buf (load i)))) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0) (break)))
+      (store! (index pathout (load k)) (cast u8 0)))
+    meth))
+
+; find Content-Length header value; -1 if none
+(defn header-content-length [(buf (ptr u8)) (n i64)] (-> i64)
+  (let [(mut i) 0 (mut r) -1]
+    (loop
+      (if (and (< (load r) 0) (< (load i) (- n 15)))
+        (do
+          (if (or (ci-match buf (load i) c"Content-Length:" 15) (ci-match buf (load i) c"content-length:" 15))
+            (let [(mut j) (+ (load i) 15) (mut v) 0]
+              (loop (if (and (< (load j) n) (let [c (cast i64 (load (index buf (load j))))] (or (= c \space) (= c \tab)))) (do (store! j (+ (load j) 1)) 0) (break)))
+              (loop (if (< (load j) n) (let [c (cast i64 (load (index buf (load j))))] (if (and (>= c \0) (<= c \9)) (do (store! v (+ (* (load v) 10) (- c \0))) (store! j (+ (load j) 1)) 0) (break))) (break)))
+              (store! r (load v)) 0)
+            0)
+          (store! i (+ (load i) 1)) 0)
+        (break)))
+    (load r)))
+(defn ci-match [(buf (ptr u8)) (i i64) (s (ptr i8)) (sl i64)] (-> bool)
+  (let [(mut k) 0 (mut ok) true]
+    (loop (if (and (load ok) (< (load k) sl)) (do (if (!= (cast i64 (load (index buf (+ i (load k))))) (cast i64 (load (index (cast (ptr u8) s) (load k))))) (do (store! ok false) 0) 0) (store! k (+ (load k) 1)) 0) (break)))
+    (load ok)))
+(defn find-body-start [(buf (ptr u8)) (n i64)] (-> i64)   ; index after \r\n\r\n, or -1
+  (let [(mut i) 0 (mut r) -1]
+    (loop (if (and (< (load r) 0) (< (load i) (- n 3)))
+            (do (if (and (= (cast i64 (load (index buf (load i)))) \return) (and (= (cast i64 (load (index buf (+ (load i) 1)))) \newline) (and (= (cast i64 (load (index buf (+ (load i) 2)))) \return) (= (cast i64 (load (index buf (+ (load i) 3)))) \newline)))) (do (store! r (+ (load i) 4)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (load r)))
+
+(defn handle-conn [(cfd i64)] (-> i64)
+  (let [cap 262144 buf (xalloc cap) (mut total) 0]
+    ; read until we have full headers, then full body
+    (let [(mut done) false]
+      (loop
+        (if (load done) (break)
+          (let [r (cast i64 (read (cast i32 cfd) (cast (ptr i8) (index buf (load total))) (cast isize (- cap (load total)))))]
+            (if (<= r 0) (break)
+              (do (store! total (+ (load total) r))
+                  (let [bs (find-body-start buf (load total))]
+                    (if (< bs 0)
+                      (if (>= (load total) cap) (do (store! done true) 0) 0)   ; headers too big; bail
+                      (let [cl (header-content-length buf (load total))]
+                        (if (or (< cl 0) (>= (- (load total) bs) cl)) (do (store! done true) 0)
+                          (if (>= (load total) cap) (do (store! done true) 0) 0)))) 0)))))))
+    (let [pathbuf (xalloc 2048) meth (parse-req buf (load total) pathbuf)]
+      (cond
+        (= meth 1) (handle-eval cfd buf (load total))
+        (= meth 0) (serve-static cfd (cast (ptr i8) pathbuf))
+        (send-response cfd c"400 Bad Request" c"text/plain" (cast (ptr u8) c"bad request") 11))
+      (free (cast (ptr i8) pathbuf)))
+    ; reclaim the 256 KiB read buffer — nothing retains it past the request (source/id were
+    ; copied out). With thread-per-connection this keeps a thousands-of-polls hammer bounded.
+    (free (cast (ptr i8) buf))
+    0))
+
+(defn handle-eval [(cfd i64) (buf (ptr u8)) (n i64)] (-> i64)
+  (let [bs (find-body-start buf n)]
+    (if (< bs 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"no body\"}}")]
+                   (send-response cfd c"400 Bad Request" c"application/json" m (s-len (cast (ptr i8) m))))
+      (let [srcbuf (xalloc 65537) srclen (cast (ptr i64) (xalloc 8))
+            idbuf (xalloc 256) idlen (cast (ptr i64) (xalloc 8))
+            spos (json-find-key (index buf bs) (- n bs) c"source" 6)
+            ipos (json-find-key (index buf bs) (- n bs) c"id" 2)]
+        (if (< spos 0) (let [m (cast (ptr u8) c"{\"error\":{\"kind\":\"BadRequest\",\"message\":\"missing source\"}}")]
+                         (send-response cfd c"400 Bad Request" c"application/json" m (s-len (cast (ptr i8) m))))
+          (do
+            (json-decode-string (index buf bs) (- n bs) spos srcbuf srclen)
+            ; NUL-terminate: lex-file scans srcbuf as a C string. The decoder writes only the
+            ; source bytes, so without this the lexer runs past them into whatever the malloc'd
+            ; block held. (Latent since Phase 4 — masked because buffers were never freed, so
+            ; every request got fresh zeroed mmap memory. Freeing recycles dirty blocks, which
+            ; exposed it: a poll's freed srcbuf, reused by the next eval, fed the lexer garbage.)
+            (store! (index srcbuf (load srclen)) (cast u8 0))
+            (if (< ipos 0) (do (store! (index idbuf 0) (cast u8 \")) (store! (index idbuf 1) (cast u8 \")) (store! idlen 2) 0)
+              (json-raw-id (index buf bs) (- n bs) ipos idbuf idlen))
+            ; run the eval. A bare read-only reflection poll (types()/graph()/…) takes the
+            ; concurrent handoff path so it never blocks behind a long eval; everything else runs
+            ; under a full stop-the-world with this thread as the (serialized) coordinator.
+            (let [resp (jb-new) ridx (classify-reflection srcbuf (load srclen))]
+              (jb-cstr resp c"{\"id\":") (jb-bytes resp idbuf (load idlen)) (jb-byte resp \,)
+              (if (>= ridx 0)
+                (do (server-eval-reflect resp ridx)
+                    ; the reflection path never lexes srcbuf, so it is safe to reclaim here (a
+                    ; definition-eval keeps srcbuf alive via the installed AST, so only free on
+                    ; this branch). Frees the dominant per-poll allocation under a hammer load.
+                    (free (cast (ptr i8) srcbuf)))
+                (server-eval-stw resp srcbuf (load srclen) (load (srv-readonly))))
+              (jb-byte resp \})
+              (send-response cfd c"200 OK" c"application/json" (load (field resp data)) (load (field resp len))))
+            0))))))
+
+(defn serve-static [(cfd i64) (path (ptr i8))] (-> i64)
+  (let [name (if (or (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) true)
+               (if (= (cast i64 (load (index (cast (ptr u8) path) 1))) 0) c"index.html"
+                 (path-basename path)) c"index.html")
+        full (join-path (load (srv-viewer-dir)) name) outlen (cast (ptr i64) (xalloc 8))
+        body (srv-read-file full outlen)]
+    (if (= (cast i64 body) 0)
+      (send-response cfd c"404 Not Found" c"text/plain" (cast (ptr u8) c"not found") 9)
+      (send-response cfd c"200 OK" (content-type-for full) body (load outlen)))))
+; strip leading '/' and any query string
+(defn path-basename [(path (ptr i8))] (-> (ptr i8))
+  (let [n (s-len path) buf (cast (ptr i8) (xalloc (+ n 1))) (mut i) (if (= (cast i64 (load (index (cast (ptr u8) path) 0))) \/) 1 0) (mut k) 0]
+    (loop (if (< (load i) n) (let [c (cast i64 (load (index (cast (ptr u8) path) (load i))))] (if (= c \?) (break) (do (store! (index (cast (ptr u8) buf) (load k)) (cast u8 c)) (store! k (+ (load k) 1)) (store! i (+ (load i) 1)) 0))) (break)))
+    (store! (index (cast (ptr u8) buf) (load k)) (cast u8 0)) buf))
+
+; one connection served on its OWN OS thread: read+parse+serve, then close. Detached by the
+; accept loop, so a finished connection reaps its own resources with no join. Because eval
+; EXECUTION is serialized (server-eval-stw's coordinator holds the global stop; reflection
+; reads globally serialize on the stop too), these threads never run two evals at once — the
+; concurrency they add is exactly: accept the next connection, and let a read-only poll overlap
+; a long eval via the safepoint handoff.
+(defn conn-thread-main [(arg (ptr i8))] (-> (ptr i8))
+  (let [cfd (cast i64 arg)]
+    (handle-conn cfd)
+    (close (cast i32 cfd)))
+  (cast (ptr i8) 0))
+
+; the server thread's entry: accept forever, dispatching each connection to its own thread so a
+; long eval on one connection can never stall accepting/serving the next (the freeze fix, part 1).
+(defn server-accept-loop [(arg (ptr i8))] (-> (ptr i8))
+  (let [fd (cast i64 arg)]
+    (loop
+      (let [c (accept (cast i32 fd) (cast (ptr i8) 0) (cast (ptr i8) 0))]
+        (if (< (cast i64 c) 0) (do (usleep (cast i32 1000)) 0)
+          (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+            (thread-spawn th (fnptr-of conn-thread-main) (cast (ptr i8) (cast i64 c)))
+            (pthread_detach (load (field th handle)))
+            (free (cast (ptr i8) th))
+            0)))))
+  (cast (ptr i8) 0))
+
+; ---- socket setup: bind on `port`, fall back to next free up to +20. returns bound port or -1. ----
+(defn make-sockaddr [(port i64)] (-> (ptr u8))
+  (let [sa (cast (ptr u8) (xalloc 16)) (mut i) 0]
+    (loop (if (< (load i) 16) (do (store! (index sa (load i)) (cast u8 0)) (store! i (+ (load i) 1)) 0) (break)))
+    (store! (index sa 0) (cast u8 16))
+    (store! (index sa 1) (cast u8 2))
+    (store! (index sa 2) (cast u8 (iand (ishr port 8) 255)))
+    (store! (index sa 3) (cast u8 (iand port 255)))
+    sa))
+(defn bind-server [(start-port i64)] (-> i64)   ; returns bound port or -1
+  (let [fd (socket (cast i32 2) (cast i32 1) (cast i32 0))]
+    (if (< (cast i64 fd) 0) -1
+      (do
+        (let [one (cast (ptr i8) (xalloc 4))] (store! (cast (ptr i32) one) (cast i32 1)) (setsockopt fd (cast i32 65535) (cast i32 4) one (cast i32 4)))
+        (let [(mut p) start-port (mut bound) -1]
+          (loop (if (and (< (load bound) 0) (< (load p) (+ start-port 21)))
+                  (if (>= (cast i64 (bind fd (cast (ptr i8) (make-sockaddr (load p))) (cast i32 16))) 0)
+                    (do (store! bound (load p)) 0)
+                    (do (store! p (+ (load p) 1)) 0))
+                  (break)))
+          (if (< (load bound) 0) (do (close fd) -1)
+            (do (listen fd 32) (store! (srv-listen-fd) (cast i64 fd)) (load bound))))))))
+
+; ============================ Phase 10: best-effort portal registration ============================
+; the last '/'-separated component of a path (the display name shown on the portal card).
+(defn srv-basename [(path (ptr i8))] (-> (ptr i8))
+  (let [n (s-len path) (mut i) (- n 1) (mut start) 0]
+    (loop (if (>= (load i) 0) (if (= (cast i64 (load (index (cast (ptr u8) path) (load i)))) \/) (do (store! start (+ (load i) 1)) (store! i -1) 0) (do (store! i (- (load i) 1)) 0)) (break)))
+    (cast (ptr i8) (index (cast (ptr u8) path) (load start)))))
+; Register {name,pid,port,mode} with the portal on 127.0.0.1:7357. Best-effort: if the portal
+; is not running the POST fails and we SILENTLY continue (the program still serves its own
+; viewer on `port`). On success, print the portal URL so either entry point works. mode: 0 run,
+; 1 inspect. Returns the portal-assigned id (or -1).
+(defn srv-register [(path (ptr i8)) (port i64) (mode i64)] (-> i64)
+  ; resolve to an absolute path so the portal can remember + statically inspect this project
+  ; later (its cwd may differ). realpath failure => fall back to the path as given.
+  (let [abuf (cast (ptr i8) (xalloc 4096))
+        ap (let [r (realpath path abuf)] (if (= (cast i64 r) 0) path abuf))
+        id (portal-register (srv-basename path) ap (cast i64 (getpid)) port mode)]
+    (if (>= id 0) (w-cstr 1 c"portal: http://localhost:7357\n") 0)
+    id))
+
+; ============================ public entries ============================
+; scry run: build, start server, run main, then keep serving evals until Ctrl-C.
+(defn scry-serve [(path (ptr i8)) (viewer-dir (ptr i8)) (no-viewer bool) (readonly bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry run: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (if (< (load (field p entry)) 0) (do (w-cstr 2 c"scry run: no main() function\n") 70)
+          (do
+            (store! (srv-program) p)
+            (store! (srv-viewer-dir) viewer-dir)
+            (store! (srv-readonly) (if readonly 1 0))
+            (if no-viewer 0
+              (let [port (bind-server 7400)]
+                (if (< port 0) (do (w-cstr 2 c"scry run: could not bind a server port; continuing without viewer\n") 0)
+                  (do
+                    (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+                      (thread-spawn th (fnptr-of server-accept-loop) (cast (ptr i8) (load (srv-listen-fd)))))
+                    (w-cstr 1 c"viewer: http://localhost:") (w-int 1 port) (w-cstr 1 c"\n")
+                    (if readonly (w-cstr 1 c"  (--readonly: mutating evals are rejected)\n") 0)
+                    (srv-register path port 0)   ; best-effort: register with the portal (mode: run)
+                    0))))
+            (vm-run p)
+            (if no-viewer 0
+              (do (w-cstr 1 c"\nmain() finished — the heap is still live and browsable. Serving evals; press Ctrl-C to exit.\n")
+                  ; keep polling the main VMThread's safepoint so a coordinator eval can still
+                  ; park it (request-global-stop waits on every registered thread, this one too).
+                  (loop (do (safepoint-poll (vm-main-parked)) (usleep (cast i32 3000)) (continue)))))
+            0))))))
+
+; scry inspect: build the program (arenas + type table exist, but EMPTY — main() is never
+; run) and serve the eval channel so the static schema is browsable BEFORE the code runs.
+; This is `scry-serve` MINUS `vm-run p` and MINUS the main-thread safepoint loop: no language
+; thread is ever registered, so request-global-stop acquires instantly (nothing to park) and
+; reflection (types/schema/fields/methods) answers against the empty heap with liveCount 0.
+(defn scry-inspect [(path (ptr i8)) (viewer-dir (ptr i8)) (no-viewer bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry inspect: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (do
+          (store! (srv-program) p)
+          ; NOT vm-run: main() must never execute in inspect mode. But the VM's shared
+          ; program handle still has to be bound (+ singletons allocated) — every eval that
+          ; compiles to a Program-touching opcode (e.g. `Agent.instances()` -> OP_ARENA_INSTANCES)
+          ; runs on the VM and reads `(vm).program` directly, independent of whether main ran.
+          (vm-bind-program p)
+          (store! (srv-viewer-dir) viewer-dir)
+          (store! (srv-readonly) 0)
+          (if no-viewer 0
+            (let [port (bind-server 7400)]
+              (if (< port 0) (do (w-cstr 2 c"scry inspect: could not bind a server port\n") 0)
+                (do
+                  (let [th (cast (ptr Thread) (xalloc (sizeof Thread)))]
+                    (thread-spawn th (fnptr-of server-accept-loop) (cast (ptr i8) (load (srv-listen-fd)))))
+                  (w-cstr 1 c"viewer: http://localhost:") (w-int 1 port) (w-cstr 1 c"\n")
+                  (w-cstr 1 c"  (inspect: schema only, program not running — press Ctrl-C to exit)\n")
+                  (srv-register path port 1)   ; best-effort: register with the portal (mode: inspect)
+                  ; no language threads to park; just keep the process alive serving evals.
+                  (loop (do (usleep (cast i32 3000)) (continue)))))))
+          0)))))
+
+; scry schema-json <file>: the STATIC reflection dump (DECISIONS #16). Typecheck + build the
+; program (arenas/types exist, EMPTY, main() never runs) and emit one JSON object
+;   {"schema":<reflect-schema>,"views":<reflect-views>,"actions":<reflect-actions>}
+; to stdout, then exit. NO server, NO lingering process — static inspection is a pure function
+; of the source, so the portal shells this transiently and caches the result (keyed by path+mtime).
+; Typecheck failure => diagnostics already went to stderr; return 65 (nonzero) and print nothing.
+(defn scry-schema-json [(path (ptr i8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry schema-json: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program) b (jb-new)]
+        (jb-cstr b c"{\"schema\":") (reflect-schema b p)
+        (jb-cstr b c",\"views\":") (reflect-views b p)
+        (jb-cstr b c",\"actions\":") (reflect-actions b p)
+        (jb-cstr b c",\"functions\":") (reflect-functions b p)
+        ; types() drives the browse-mode type rail; dump it too (arenas empty here -> liveCount 0)
+        ; so a static portal project's List view populates without a running process.
+        (jb-cstr b c",\"types\":") (reflect-types b p)
+        ; modules() — the module tree + aggregates; same "works with zero process" reasoning
+        ; (07-modules.md §6/§7 Phase 2), so a static project gets a focus-tree-ready dump too.
+        (jb-cstr b c",\"modules\":") (reflect-modules b p)
+        (jb-byte b \})
+        (write-all 1 (load (field b data)) (load (field b len)))
+        (w-cstr 1 c"\n")
+        0))))
+
+; scry eval <file> -e <expr> [-e <expr> ...]: run main() to completion, then evaluate each
+; expr in sequence against the SAME live process, printing one JSON result line each, exit.
+; A definition-eval (live code change) here does NOT need request-global-stop — main() has
+; already returned, so there are no other language threads running.
+(defn scry-eval-cli [(path (ptr i8)) (exprs (ArrayList (ptr i8))) (readonly bool)] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (if (not (can-open path))
+    (do (w-cstr 2 c"scry eval: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n") 74)
+    (if (> (typecheck-quiet path) 0) 65
+      (let [p (build-program)]
+        (if (< (load (field p entry)) 0) (do (w-cstr 2 c"scry eval: no main() function\n") 70)
+          (do
+            (store! (srv-program) p) (store! (srv-readonly) (if readonly 1 0))
+            (vm-run p)
+            (let [ne (al-len exprs) (mut i) 0]
+              (loop (if (< (load i) ne)
+                      (let [expr (al-get exprs (load i)) b (jb-new)]
+                        (jb-byte b \{)
+                        (eval-core b (cast (ptr u8) expr) (s-len expr) (if readonly 1 0))
+                        (jb-byte b \})
+                        (write-all 1 (load (field b data)) (load (field b len)))
+                        (w-cstr 1 c"\n")
+                        (store! i (+ (load i) 1)) 0)
+                      (break))))
+            0))))))
+
+; ---- wasm browser entry (export-c: called from JS; harmless extra exports on native) ----
+; The whole native loader is reused: file reads (fopen/fread/…) resolve to host `env.*`
+; imports on wasm, backed by an in-memory filesystem the JS bridge seeds with the program
+; source. No sockets, no threads on this path — a single-threaded browser eval channel.
+
+; scry_boot: load + typecheck + compile the program at `path` (in the host VFS), run its
+; main(), and install it as the live program. 0 = ok; 74 can't-open, 65 typecheck failed,
+; 70 no main().
+(export-c [scry-boot :as "scry_boot"])
+(defn scry-boot [(path (ptr u8))] (-> i64)
+  (ctx-init) (loaded-init) (register-builtins)
+  (let [p (cast (ptr i8) path)]
+    (if (not (can-open p)) 74
+      (if (> (typecheck-quiet p) 0) 65
+        (let [prog (build-program)]
+          (if (< (load (field prog entry)) 0) 70
+            (do (store! (srv-program) prog) (store! (srv-readonly) 0)
+                (vm-run prog) 0)))))))
+
+; scry_tick: advance the wasm green-thread scheduler by one pass — give every spawned,
+; unfinished language thread a slice. Returns the number still runnable, so the host knows
+; whether to keep ticking (it drives this from a timer/rAF). On native this is unused: real
+; OS threads run themselves.
+(export-c [scry-tick :as "scry_tick"])
+(defn scry-tick [] (-> i64) (sched-tick))
+
+; scry_eval_recover: the wasm half of the uncrashable-eval invariant.
+;
+; Native uses setjmp/longjmp: eval-panic records the error into alloc-static globals and
+; longjmps back into eval-core's landing pad, which finishes the response. wasm32 has no
+; setjmp/longjmp, so the host does the unwinding instead: the `longjmp` import throws a JS
+; exception (which unwinds the wasm frames), the host restores the shadow-stack pointer,
+; and then calls THIS to finish the eval exactly as eval-core's error branch would —
+; same globals, same write-error-inner, same JSON. An eval can therefore never kill the
+; instance on wasm either; it comes back as {"error":{kind,message,…}}.
+(export-c [scry-eval-recover :as "scry_eval_recover"])
+(defn scry-eval-recover [] (-> (ptr u8))
+  (store! (ev-outcome) 1)      ; longjmp'd: the EvalError is already recorded by eval-panic
+  (diag-capture-end)
+  (eval-set-active 0)
+  (trace-disable)              ; F1: disarm the recorder even if a traced expr panicked
+  (let [b (jb-new)]
+    (jb-byte b \{)
+    (write-error-inner b)
+    (jb-byte b \})
+    (jb-byte b 0)              ; NUL-terminate for the JS reader
+    (load (field b data))))
+
+; scry_eval: evaluate one expression/definition against the live program; returns a pointer
+; to NUL-terminated {…} JSON ({"value":…} or {"error":{…}}) — the ONE viewer wire op
+; (DECISIONS #8). Buffer is freshly allocated per call (host allocator reclaims it).
+(export-c [scry-eval :as "scry_eval"])
+(defn scry-eval [(src (ptr u8)) (len i64)] (-> (ptr u8))
+  (let [b (jb-new)]
+    (jb-byte b \{)
+    (eval-core b src len 0)
+    (jb-byte b \})
+    (jb-byte b 0)                 ; NUL-terminate for the JS reader
+    (load (field b data))))

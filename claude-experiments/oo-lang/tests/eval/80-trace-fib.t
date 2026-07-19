@@ -1,0 +1,10 @@
+file: examples/functions.scry
+expr: trace(fib(6))
+contains: "type":"Trace"
+contains: "value":{"type":"Int","value":8}
+contains: "totalCalls":25
+contains: "maxDepth":5
+contains: "truncated":false
+contains: {"fn":"fib","calls":25}
+contains: {"i":0,"parent":-1,"depth":0,"fn":"fib","args":[{"type":"Int","value":6}],"result":{"type":"Int","value":8},"hasResult":true}
+contains: "parent":0,"depth":1,"fn":"fib","args":[{"type":"Int","value":5}]

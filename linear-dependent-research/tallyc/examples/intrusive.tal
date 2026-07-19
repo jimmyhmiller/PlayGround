@@ -1,0 +1,58 @@
+// AN INTRUSIVE LINKED LIST, IN THE LANGUAGE — C's layout, C's allocations,
+// compile-time memory safety.
+//
+//   tally build examples/intrusive.tal -o /tmp/intr -O2 ; /tmp/intr
+//   → 8000006000000        (4,000,000 nodes built, summed, freed)
+//
+// "Intrusive" = the links live INSIDE the node, next to the payload — one
+// allocation per element, no separate list cells:
+//
+//     C:      struct node { long long x, y; struct node *next; };   // 24 bytes
+//     tallyc: struct Node { p : Point, next : Opt (Own Node) }      // 24 bytes
+//
+// The `Point` payload is embedded FLAT (Phase B2), and `Opt (Own Node)` is the
+// NULL-POINTER NICHE: one slot — `None` IS 0, `Some p` IS the pointer — so a
+// Node is a 3-slot, 24-byte cell, byte-identical to the C struct. Every one of
+// the 4,000,000 mallocs below is the `alloc(...)` in `cons`; every free is the
+// `unbox(...)` in `sum`. The compiler inserted none. Measured at -O2: tallyc
+// and bench/intrusive.c run in the same wall time (0.08s warm, this machine).
+//
+// Memory safety is the linear type system, not a runtime:
+//   - drop the list without walking it        → compile error (leak, 0 ⋢ 1)
+//   - unbox the same node twice               → compile error (ω ⋢ 1)
+//   - use a node after unboxing it            → compile error (ω ⋢ 1)
+// `bench/intrusive.c` is the raw-pointer twin; both run at parity.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+enum Opt (a : Type) { None : Opt a, Some : a -> Opt a }
+struct Point { x : Nat, y : Nat }
+struct Node { p : Point, next : Opt (Own Node) }
+
+// ONE explicit alloc per node, payload embedded flat beside the link.
+cons : (p : Point) -> (1 t : Opt (Own Node)) -> Opt (Own Node)
+fn cons(p, t) { Some(alloc(Node(p, t))) }
+
+// prepend n nodes.
+build : (n : Nat) -> (1 acc : Opt (Own Node)) -> Opt (Own Node)
+%partial fn build(n, acc) {
+    match n {
+        Zero    => acc,
+        Succ(k) => build(k, cons(Point(k, 2), acc)),
+    }
+}
+
+// consuming traversal: each unbox frees its node as the walk passes it.
+sum : (acc : Nat) -> (1 o : Opt (Own Node)) -> Nat
+%partial fn sum(acc, o) {
+    match o {
+        None => acc,
+        Some(h) =>
+            let n = unbox(h);
+            match n { Node(Point(x, y), t) => sum(acc + x + y, t) },
+    }
+}
+
+main : Nat
+fn main() { let l = build(4000000, None); sum(0, l) }

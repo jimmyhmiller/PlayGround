@@ -16,3 +16,21 @@ To add, close, or list bugs, use:
 
 This file tracks bugs discovered during development.
 
+## residual: unclosed opener followed by SAME-indent sibling defers close to next dedent boundary [upbeat-skeletal-thrush]
+
+**ID:** upbeat-skeletal-thrush
+**Timestamp:** 2026-07-14 00:41:31
+**Severity:** medium
+**Location:** src/parinfer_simple.rs (balance() auto-close trigger: gated on next_indent < line_indent; same-indent sibling (0,0) never fires)
+**Tags:** balance, parinfer, corruption, non-local, follow-up
+
+### Description
+
+Follow-up to attached-bitter-orca after the EOF fix (verified fixed: closer no longer lands at EOF; valid files idempotent; original 9-line repro now correct). Remaining case of the same class: the close trigger requires a DEDENT (next_indent < line_indent), but an unclosed column-0 opener followed by another column-0 line has no dedent (0 < 0), so the opener stays open across every single-line sibling form and the closer lands at the end of the NEXT MULTI-LINE form's dedent boundary — still nesting dozens of untouched forms. Fuzz over a real 1400-line file: 5/132 single-paren-drop perturbations still produce non-local structural changes (was: every drop corrupted to EOF). Rule needed: a following line at indent <= the OPENER's indent (not the current line's) that is not a closer-led line is a sibling boundary and must close the opener — same-indent siblings count, dedent is not required. Repro: test_sibling_same_indent_close.lisp — expected '(module compile)' closed on line 1; actual closer lands after '[(x i64)])' nesting import/const/defstruct inside module.
+
+### Minimal Reproducing Case
+
+paredit-like balance test_sibling_same_indent_close.lisp --in-place  # closer lands after [(x i64)]) instead of line 1
+
+---
+

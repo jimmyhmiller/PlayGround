@@ -1,0 +1,13 @@
+// Shared source for an `at`-over-HTTP node, compiled identically by BOTH
+// sides: the client (which calls `call_remote`, shipping the `|| work(x)`
+// thunk) and the Vercel function (`ai-lang at-handle app.ail`, which
+// resolves that same thunk by content hash and runs it). Node/Channel/
+// Failure/http_node/at all come from the stdlib prelude.
+
+def work(x: Int) -> Int = x * 10 + 3
+
+// The thunk `|| work(x)` lives here, so its code hash is identical on both
+// ends. The Vercel node receives it via the HTTP request body and invokes
+// it; the client gets back `Result::Ok(work(x))`.
+def call_remote(node: Node, x: Int) -> Result<Int, Failure> =
+    at(node, || work(x))

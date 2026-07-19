@@ -1,0 +1,30 @@
+// BYTE-BUFFER BENCHMARK — Arr U8 at C's `unsigned char[]` density and speed.
+//
+//   tally build examples/bytes_bench.tal -o /tmp/bb -O2 && /tmp/bb   → 100000041
+//
+// Fill a 100,000,000-BYTE buffer, overwrite one slot, sum every byte, free. The
+// twin is bench/bytes.c (`unsigned char buf[N]`). The point of Phase Scalars S1:
+// `Arr U8 n` is a dense `malloc(n)` — 100 MB here, byte-identical to C — NOT the
+// 800 MB the old i64-per-element layout would have used. Same memory sweep, same
+// wall time, full safety (linear buffer, every access bounds-decided by an erased
+// `Lt` proof).
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+sum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 buf : Arr U8 (b + m)) -> Nat
+%partial fn sum(m, b, acc, buf) {
+    match b {
+        Zero => let u = afree(buf); acc,
+        Succ(k) =>
+            let (x, buf2) = aget(m, lt(m, Succ(k) + m), buf);
+            sum(Succ(m), k, acc + nat_u8(x), buf2),
+    }
+}
+
+main : Nat
+fn main() {
+    let b0 = anew(100000000, u8(1));               // 100 MB, every byte = 1
+    let b1 = aset(1234567, lt(1234567, 100000000), u8(42), b0);
+    sum(0, 100000000, 0, b1)                        // 100000000 + 41 = 100000041
+}

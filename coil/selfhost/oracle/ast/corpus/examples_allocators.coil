@@ -1,0 +1,17 @@
+(defn
+  boxed-add
+  [(a (ptr Allocator)) (x :i64) (y :i64)]
+  (-> :i64)
+  (match
+    (create [i64] a)
+    (None [] 0)
+    (Some [p] (do (store! p (iadd x y)) (let [v (load p)] (destroy a p) v)))))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [gpa (malloc-allocator) arena (arena-allocator 1024)]
+    (iadd (boxed-add gpa 30 5) (boxed-add arena 5 2))))
+

@@ -1,0 +1,18 @@
+; A convention LLVM's calling-convention enum cannot express: integer args are
+; pinned to rax/rdx (not the SysV rdi/rsi), and `:lower shim` makes Coil realize
+; it with a naked trampoline + register-constrained call sites.
+;   coil examples/shim.coil            =>  42
+;   coil --emit-ir examples/shim.coil  =>  see the trampoline + inline asm
+
+(defcc reg2
+  :params [rax rdx]
+  :ret rax
+  :clobber [rax rdx rcx rsi rdi r8 r9 r10 r11]
+  :lower shim)
+
+(defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64)
+  (isub a b))
+
+(defn main [] (-> :i64)
+  (let [x (iadd 40 10)]   ; 50, computed so register placement is real
+    (sub2 x 8)))          ; 50 - 8 = 42  (swap rax/rdx and you'd get -42)

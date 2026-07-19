@@ -1,0 +1,15 @@
+enum St { Idle Busy }
+class Worker implements Runnable {
+  state: Mutex<St>
+  fn init() { self.state = Mutex<St>(St.Idle) }
+  fn run() -> Void {
+    self.state.lock()
+    self.state.set(St.Busy)
+    self.state.unlock()
+  }
+}
+fn main() {
+  let w = Worker()
+  let h = Thread.spawn(w)
+  h.join()
+}

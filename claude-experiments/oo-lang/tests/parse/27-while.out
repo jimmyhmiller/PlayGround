@@ -1,0 +1,20 @@
+(program
+  (fn main
+    (params)
+    (block
+      (var i
+        (int 0))
+      (while
+        (binary <
+          (id i)
+          (int 10))
+        (block
+          (call
+            (id print)
+            (arg
+              (id i)))
+          (assign
+            (id i)
+            (binary +
+              (id i)
+              (int 1))))))))

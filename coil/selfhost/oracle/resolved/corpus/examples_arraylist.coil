@@ -1,0 +1,23 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a (malloc-allocator) (mut xs) (al-new [i64] a)]
+    (let
+      [(mut $g0) (isub 0 1)]
+      (loop
+        (store! $g0 (iadd (load $g0) 1))
+        (if (icmp-lt (load $g0) 10) (let [i (load $g0)] (al-push! (mut xs) i)) (break))))
+    (let
+      [(mut acc) 0]
+      (let
+        [(mut $g1) (iter xs)]
+        (loop
+          (match
+            (next (mut $g1))
+            (None [] (break))
+            (Some [v] (store! acc (iadd (load acc) v))))))
+      (al-free! (mut xs))
+      (load acc))))
+

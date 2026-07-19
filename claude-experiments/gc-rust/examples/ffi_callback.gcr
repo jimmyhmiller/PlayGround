@@ -28,5 +28,5 @@ fn main() -> i64 {
     qsort(as_c_bytes(arr), 5, 8, cmp);
 
     // After sorting: [10,20,30,40,50]. Return arr[0]*100 + arr[4] = 1050.
-    array_get(arr, 0) * 100 + array_get(arr, 4)
+    array_get_unchecked(arr, 0) * 100 + array_get_unchecked(arr, 4)
 }

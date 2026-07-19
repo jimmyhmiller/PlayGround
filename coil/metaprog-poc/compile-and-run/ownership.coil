@@ -1,0 +1,55 @@
+(module ownership)
+; A LINEAR-OWNERSHIP (borrow) checker, written as a metaprogram. A value is an
+; owned resource; `(release X)` consumes it. The checker enforces the linear
+; discipline and vetoes, with located errors:
+;   • use-after-release  — any reference to a released binding
+;   • double-release     — releasing an already-released binding
+; Every reference is keyed on `(binding-of NODE)`, so a SHADOWED name is a
+; DISTINCT resource — the correctness a name-matching checker cannot achieve.
+; This is the shape of a real borrow checker: whole program, post-typecheck,
+; dataflow over binding identity, multi-error located reporting, veto.
+(import "lib/alloc.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+(import "lib/control.coil" :use *)
+
+; released: bid -> 1 once a binding has been released
+(defn own-scan [(form Code) (released (ptr (HashMap i64 i64)))] (-> i64)
+  (if (not (code-list? form)) 0
+    (let [n (code-count form) head (if (> n 0) (code-nth form 0) form)]
+      (if (and (= n 2) (and (code-sym? head) (and (code-eq head `release) (code-sym? (code-nth form 1)))))
+          ; (release X): double-release if already released, else mark released
+          (let [bid (binding-of (code-nth form 1))]
+            (if (<= bid 0) 0
+              (match (hm-get [i64 i64] (load released) bid)
+                (Some [s] (do (report (code-nth form 1) "double release (value already released)") 0))
+                (None [] (do (hm-put! released bid 1) 0)))))
+        ; otherwise: any reference to a released binding is a use-after-release
+        (do
+          (for [i 0 n]
+            (let [c (code-nth form i)]
+              (if (and (> i 0) (code-sym? c))
+                  (let [bid (binding-of c)]
+                    (if (> bid 0)
+                        (match (hm-get [i64 i64] (load released) bid)
+                          (Some [s] (do (report c "use after release") 0))
+                          (None [] 0))
+                      0))
+                (own-scan c released))))
+          0)))))
+
+(defn own-body [(f Code)] (-> Code)
+  (if (and (code-list? f) (and (>= (code-count f) 5) (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn))))
+      (let [(mut released) (hm-new-scalar [i64 i64] (malloc-allocator)) n (code-count f)]
+        (for [i 4 n] (own-scan (code-nth f i) (mut released)))
+        `0)
+    `0))
+
+(defn own-check [(mods Code)] (-> Code)
+  (let [nm (code-count mods)]
+    (for [i 0 nm]
+      (let [m (code-nth mods i) nf (code-count m)]
+        (if (code-from-user? (code-nth m 1))
+            (for [j 1 nf] (own-body (code-nth m j)))
+          0))))
+  `0)
+(checker own-check)

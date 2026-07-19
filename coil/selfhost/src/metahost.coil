@@ -1,0 +1,241 @@
+; selfhost/src/metahost.coil — the HOST side of the compiled-metaprogram boundary.
+;
+; metashim.coil (compiled INTO each metaprogram dylib) declares coil_meta_* externs;
+; this module implements and export-c's them, so they bind at dlopen against the
+; compiler process (linked with -Wl,-export_dynamic). Parity with the interpreter
+; is by CONSTRUCTION: every code op crossing the boundary is rebuilt as real CtVals
+; and dispatched to comptime.coil's own `code-op` with the same CtCtx the
+; interpreter would have used — including its runtime errors, verbatim.
+;
+; A failing op (the interpreter's Err) records the Diag in MetaHostBox and
+; terminates the METAPROGRAM THREAD via pthread_exit — never the pipeline thread.
+; The engine (metaengine in expander.coil) always runs a compiled metaprogram on
+; its own thread, joins it, and turns a recorded Diag into the ordinary
+; expand-macro Err, so `(error ...)`/bad-op behavior is byte-identical to the
+; interpreter's from the pipeline's point of view.
+(module metahost)
+
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "result.coil" :use *)
+(import "match.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "reader.coil" :use *)
+(import "parser.coil" :use *)
+(import "ast.coil" :use *)
+(import "ctval.coil" :use *)   ; CtVal / EnvBind / CtCtx (was reached via comptime.coil)
+(import "resolve.coil" :use *)
+(import "comptime.coil" :use *)
+(import "diag.coil" :use *)
+(import "ffi.coil" :use *)
+
+(extern pthread_exit :cc c [(ptr i8)] (-> i64))
+
+; ---- per-call context ---------------------------------------------------------
+; Set by the engine immediately before invoking a compiled metaprogram entry, read
+; by every callback below (the callbacks run on the metaprogram thread while the
+; engine blocks in pthread_join, so the stack-allocated CtCtx stays alive).
+(defstruct MetaHostBox
+  [(cx (ptr CtCtx))
+   (registry (ptr (ArrayList (ptr Sexp))))
+   (errset i64)
+   (err Diag)
+   (onmain i64)])
+(defn meta-host-box [] (-> (ptr MetaHostBox)) (alloc-static MetaHostBox))
+(defn meta-host-set! [(cx (ptr CtCtx)) (registry (ptr (ArrayList (ptr Sexp))))] (-> i64)
+  (let [b (meta-host-box)]
+    (store! (field b cx) cx) (store! (field b registry) registry)
+    (store! (field b errset) 0) 0))
+(defn meta-host-onmain! [(v i64)] (-> i64)
+  (store! (field (meta-host-box) onmain) v) 0)
+(defn meta-host-err [] (-> (Option Diag))
+  (let [b (meta-host-box)]
+    (if (icmp-eq (load (field b errset)) 0) (None [Diag]) (Some (load (field b err))))))
+
+; A compiler bug in the boundary itself (unset context, impossible shapes) must be
+; LOUD and immediate — never a metaprogram-level diagnostic.
+(defn mh-bug [(msg (slice u8))] (-> i64)
+  (fmt (stderr) "metahost: {s} (compiler bug)\n" msg)
+  (abort))
+
+; A metaprogram-level failure: exactly what the interpreter would have returned as
+; Err. Record it and end the metaprogram thread; the engine reports it identically.
+; Under COIL_META_MAIN=1 the metaprogram runs on the process MAIN thread — there is
+; no thread to end, so print the diagnostic and fail the build directly.
+(defn mh-halt [(d Diag)] (-> i64)
+  (let [b (meta-host-box)]
+    (if (icmp-ne (load (field b onmain)) 0)
+        (do (fmt (stderr) "error: {s}\n" (load (field d msg)))
+            (exit 1) 0)
+      (do (store! (field b err) d) (store! (field b errset) 1)
+          (pthread_exit (cast (ptr i8) 1))))))
+
+(defn mh-cx [] (-> (ptr CtCtx))
+  (let [b (meta-host-box) cx (load (field b cx))]
+    (if (icmp-eq (cast i64 cx) 0) (do (mh-bug "code-op callback with no metaprogram context") (cast (ptr CtCtx) 0)) cx)))
+
+(defn mh-box-sexp [(s Sexp)] (-> (ptr i8))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] (malloc-allocator)))]
+    (store! p s) (cast (ptr i8) p)))
+(defn mh-handle-sexp [(c (ptr i8))] (-> Sexp)
+  (if (icmp-eq (cast i64 c) 0) (do (mh-bug "null Code handle") (zeroed Sexp)) (load (cast (ptr Sexp) c))))
+
+; String results cross as a host-owned {ptr,len} — layout mirrored in metashim.coil.
+(defstruct MetaBuf [(p (ptr u8)) (n i64)])
+(defn mh-buf [(s (slice u8))] (-> (ptr i8))
+  (let [b (unwrap-ptr [MetaBuf] (create [MetaBuf] (malloc-allocator)))]
+    (store! (field b p) (slice-data s)) (store! (field b n) (slice-len s))
+    (cast (ptr i8) b)))
+
+; ---- code-op argument builder (a boxed ArrayList CtVal) ------------------------
+(defn mh-arg-new [] (-> (ptr i8))
+  (let [a (malloc-allocator)] (cast (ptr i8) (box-al [CtVal] a (al-new [CtVal] a)))))
+(defn mh-arg-push [(b (ptr i8)) (v CtVal)] (-> (ptr i8))
+  (do (al-push! [CtVal] (cast (ptr (ArrayList CtVal)) b) v) b))
+(defn mh-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh-arg-push b (CCode (mh-handle-sexp c))))
+(defn mh-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8)) (mh-arg-push b (CInt v)))
+(defn mh-arg-s [(b (ptr i8)) (p (ptr u8)) (n i64)] (-> (ptr i8)) (mh-arg-push b (CStr (slice-new p n))))
+(defn mh-arg-b [(b (ptr i8)) (v i64)] (-> (ptr i8)) (mh-arg-push b (CBool (icmp-ne v 0))))
+(defn mh-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8)) (mh-arg-push b (CFloat x)))
+
+; ---- run an op through the interpreter's own dispatch --------------------------
+(defn mh-run [(op i64) (b (ptr i8))] (-> CtVal)
+  (match (code-op op (cast (ptr (ArrayList CtVal)) b) (mh-cx))
+    (Err [d] (do (mh-halt d) (CInt 0)))
+    (Ok [v] v)))
+(defn mh-op-i [(op i64) (b (ptr i8))] (-> i64)
+  (match-else (mh-run op b)
+    (CInt [n] n)
+    (CBool [x] (if x 1 0))
+    (_ (do (mh-bug "code-op result is not an int/bool") 0))))
+(defn mh-op-h [(op i64) (b (ptr i8))] (-> (ptr i8))
+  ; Some ops are TYPED Code but the interpreter returns a scalar (report/warn
+  ; yield CInt 0). Coerce exactly as the interpreter would: ctval->sexp — its
+  ; own value->code conversion, including its own error on aggregates.
+  (let [v (mh-run op b)]
+    (match-else v
+      (CCode [c] (mh-box-sexp c))
+      (_ (match (ctval->sexp v)
+           (Ok [sx] (mh-box-sexp sx))
+           (Err [d] (do (mh-halt d) (cast (ptr i8) 0))))))))
+(defn mh-op-s [(op i64) (b (ptr i8))] (-> (ptr i8))
+  (match-else (mh-run op b)
+    (CStr [s] (mh-buf s))
+    (_ (do (mh-bug "code-op result is not a string") (cast (ptr i8) 0)))))
+
+; ---- quote registry -------------------------------------------------------------
+; metalower collects every EQuote/QLit form (in lowering order) into a registry of
+; stable (ptr Sexp); index k is baked into the dylib as (mp-quoted k). The handle
+; aliases the AST's own node — same sharing the interpreter's (CCode (load form)).
+(defn mh-quoted [(k i64)] (-> (ptr i8))
+  (let [b (meta-host-box) reg (load (field b registry))]
+    (if (icmp-eq (cast i64 reg) 0) (do (mh-bug "quote registry unset") (cast (ptr i8) 0))
+      (if (or (icmp-lt k 0) (icmp-ge k (al-len [(ptr Sexp)] (load reg))))
+          (do (mh-bug "quote registry index out of range") (cast (ptr i8) 0))
+        (cast (ptr i8) (al-get [(ptr Sexp)] (load reg) k))))))
+
+; ---- quasiquote builder (a boxed ArrayList Sexp) --------------------------------
+(defn mh-qq-new [] (-> (ptr i8))
+  (let [a (malloc-allocator)] (cast (ptr i8) (box-al [Sexp] a (al-new [Sexp] a)))))
+(defn mh-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
+  (do (al-push! [Sexp] (cast (ptr (ArrayList Sexp)) b) (mh-handle-sexp c)) b))
+(defn mh-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
+  (let [s (mh-handle-sexp c) tg (sx-tag s)]
+    (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))
+        (do (mh-halt (derr "comptime: ~@ splice expects a Code list")) b)
+      (let [items (sx-items s) n (sx-len items) (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (al-push! [Sexp] (cast (ptr (ArrayList Sexp)) b) (sx-at items (load i)))
+              (store! i (iadd (load i) 1)))))
+        b))))
+; The head-qualification half of the interpreter's qualify-head. The "head is a
+; LITERAL symbol in the template" guard is decided at LOWER time (metalower emits
+; qq_listq only then), so only the resolution half lives here — same tables, same
+; rewrite, via the CtCtx the interpreter would have consulted.
+(defn mh-qualify-head! [(items (ptr (ArrayList Sexp)))] (-> i64)
+  (let [cx (mh-cx)]
+    (if (icmp-eq (al-len [Sexp] (load items)) 0) 0
+      (match (load (field cx qmodule))
+        (None [] 0)
+        (Some [m]
+          (if (icmp-eq (cast i64 (load (field cx module_fns))) 0) 0
+            (let [hp (al-elem [Sexp] items 0)]
+              (if (icmp-ne (sx-tag (load hp)) 2) 0
+                (let [name (sx-sval (load hp))]
+                  (if (or (has-dot name) (icmp-ge (find-slash name) 0)) 0
+                    (match (resolve-in-module cx name m)
+                      (None [] 0)
+                      (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
+(defn mh-qq-list [(b (ptr i8))] (-> (ptr i8))
+  (mh-box-sexp (sx-mklist (cast (ptr (ArrayList Sexp)) b))))
+(defn mh-qq-listq [(b (ptr i8))] (-> (ptr i8))
+  (do (mh-qualify-head! (cast (ptr (ArrayList Sexp)) b))
+      (mh-box-sexp (sx-mklist (cast (ptr (ArrayList Sexp)) b)))))
+(defn mh-qq-vec [(b (ptr i8))] (-> (ptr i8))
+  (mh-box-sexp (mk-sexp (KVec (cast (ptr (ArrayList Sexp)) b)) -1 -1)))
+
+; ---- unquote conversions: EXACTLY ctval->sexp's scalar arms ---------------------
+(defn mh-unq-int [(v i64)] (-> (ptr i8)) (mh-box-sexp (sx-mkint v)))
+(defn mh-unq-bool [(v i64)] (-> (ptr i8)) (mh-box-sexp (sx-sym (if (icmp-ne v 0) "true" "false"))))
+(defn mh-unq-float [(x f64)] (-> (ptr i8)) (mh-box-sexp (mk-sexp (KFloat (f64-bits x)) -1 -1)))
+(defn mh-unq-str [(p (ptr u8)) (n i64)] (-> (ptr i8)) (mh-box-sexp (sx-mkstr (slice-new p n))))
+
+; ---- interpreter-parity runtime failures ----------------------------------------
+; Sites the interpreter rejects only WHEN EVALUATED; metalower emits a call here so
+; the compiled engine fails at the same moment with the same message.
+(defn mh-fail [(code i64)] (-> i64)
+  (if (icmp-eq code 1) (mh-halt (derr "comptime: can't unquote an aggregate value into code"))
+  (if (icmp-eq code 2) (mh-halt (derr "comptime: ~@ splice expects a Code list"))
+  (if (icmp-eq code 3) (mh-halt (derr "comptime: ~@ (splice) is only valid inside a list/vector"))
+      (mh-bug "unknown failure code")))))
+
+; ---- the vtable handed to the dylib (see metashim.coil MetaVt — FIELD ORDER IS ABI)
+(defstruct MetaVt
+  [(arg_new   (fnptr c [] (ptr i8)))
+   (arg_c     (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (arg_i     (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_s     (fnptr c [(ptr i8) (ptr u8) i64] (ptr i8)))
+   (arg_b     (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_f     (fnptr c [(ptr i8) f64] (ptr i8)))
+   (op_i      (fnptr c [i64 (ptr i8)] i64))
+   (op_h      (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (op_s      (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (quoted    (fnptr c [i64] (ptr i8)))
+   (qq_new    (fnptr c [] (ptr i8)))
+   (qq_push   (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (qq_splice (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (qq_list   (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_listq  (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_vec    (fnptr c [(ptr i8)] (ptr i8)))
+   (unq_int   (fnptr c [i64] (ptr i8)))
+   (unq_bool  (fnptr c [i64] (ptr i8)))
+   (unq_float (fnptr c [f64] (ptr i8)))
+   (unq_str   (fnptr c [(ptr u8) i64] (ptr i8)))
+   (fail      (fnptr c [i64] i64))])
+(defn meta-vtable [] (-> (ptr i8))
+  (let [v (alloc-static MetaVt)]
+    (store! (field v arg_new) (fnptr-of mh-arg-new))
+    (store! (field v arg_c) (fnptr-of mh-arg-c))
+    (store! (field v arg_i) (fnptr-of mh-arg-i))
+    (store! (field v arg_s) (fnptr-of mh-arg-s))
+    (store! (field v arg_b) (fnptr-of mh-arg-b))
+    (store! (field v arg_f) (fnptr-of mh-arg-f))
+    (store! (field v op_i) (fnptr-of mh-op-i))
+    (store! (field v op_h) (fnptr-of mh-op-h))
+    (store! (field v op_s) (fnptr-of mh-op-s))
+    (store! (field v quoted) (fnptr-of mh-quoted))
+    (store! (field v qq_new) (fnptr-of mh-qq-new))
+    (store! (field v qq_push) (fnptr-of mh-qq-push))
+    (store! (field v qq_splice) (fnptr-of mh-qq-splice))
+    (store! (field v qq_list) (fnptr-of mh-qq-list))
+    (store! (field v qq_listq) (fnptr-of mh-qq-listq))
+    (store! (field v qq_vec) (fnptr-of mh-qq-vec))
+    (store! (field v unq_int) (fnptr-of mh-unq-int))
+    (store! (field v unq_bool) (fnptr-of mh-unq-bool))
+    (store! (field v unq_float) (fnptr-of mh-unq-float))
+    (store! (field v unq_str) (fnptr-of mh-unq-str))
+    (store! (field v fail) (fnptr-of mh-fail))
+    (cast (ptr i8) v)))

@@ -1,0 +1,12 @@
+// 07-modules.md §6/§7 Phase 2: a generic instantiation across modules — Box<T> (declared in
+// modgen_a.box) instantiated with Item (declared in modgen_b.item). Used to assert that
+// schema()/types() report the correct qualified generic identity for BOTH the base and the
+// argument (tests/eval/*modgen* goldens).
+import modgen_a.box.{Box}
+import modgen_b.item.{Item}
+
+fn main() {
+  let b: Box<Item> = Box<Item>(items: List<Item>())
+  b.items.push(Item(label: "one"))
+  print(b.items.len())
+}

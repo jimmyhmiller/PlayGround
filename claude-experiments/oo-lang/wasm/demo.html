@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scry — agent demo (all WebAssembly)</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="../viewer/style.css">
+<style>
+  html, body { height: 100%; margin: 0; background: #0b0d10; color: #e6e9ef; }
+  #split { display: flex; height: 100vh; }
+  #termPane { width: 46%; min-width: 380px; display: flex; flex-direction: column;
+              border-right: 1px solid #222833; background: #0b0d10; }
+  #termHead { padding: 8px 12px; font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+              letter-spacing: .08em; text-transform: uppercase; color: #8b93a7;
+              border-bottom: 1px solid #222833; display: flex; justify-content: space-between; }
+  #term { flex: 1; min-height: 0; padding: 6px 8px; }
+  #viewPane { flex: 1; min-width: 0; overflow: auto; }
+  #status { color: #8b93a7; }
+  .dot { color: #4ade80; }
+</style>
+</head>
+<body>
+<div id="split">
+  <div id="termPane">
+    <div id="termHead"><span>examples/assistant.scry — wasm</span><span id="status">booting…</span></div>
+    <div id="term"></div>
+  </div>
+  <div id="viewPane"><div id="app"></div></div>
+</div>
+
+<script src="vendor/xterm.js"></script>
+<script src="../viewer/vendor/react.production.min.js"></script>
+<script src="../viewer/vendor/react-dom.production.min.js"></script>
+<script src="../viewer/vendor/htm.js"></script>
+
+<script type="module">
+  import { ScryWasm } from "./scry-wasm.js";
+
+  const statusEl = document.getElementById("status");
+  const setStatus = (t, live) => { statusEl.textContent = t; statusEl.className = live ? "dot" : ""; };
+
+  // ---- terminal ----
+  const term = new Terminal({
+    fontSize: 13, cursorBlink: true, convertEol: true,
+    theme: { background: "#0b0d10", foreground: "#e6e9ef", cursor: "#4ade80" },
+  });
+  term.open(document.getElementById("term"));
+  const write = (s) => term.write(s.replace(/\n/g, "\r\n"));
+
+  // ---- boot the VM: the program, the agent core, and std.json all live in the VFS ----
+  setStatus("loading VM…");
+  const files = ["../examples/assistant.scry", "../agent/core.scry", "../std/json.scry"];
+  const [wasmBytes, demoSrc, coreSrc, jsonSrc] = await Promise.all([
+    fetch("./scry.wasm").then((r) => r.arrayBuffer()),
+    ...files.map((f) => fetch(f).then((r) => r.text())),
+  ]);
+
+  const scry = await ScryWasm.instantiate(wasmBytes, {
+    onStdout: write,
+    // boot-time diagnostics go to the console, not the terminal, so the demo stays clean
+    onStderr: (t) => console.warn("[scry]", t),
+    // A fake API key makes chooseBrain() pick the REAL AnthropicModel path, so the agent
+    // builds a request body, "sends" it, and parses the reply with std.json. host_http (in
+    // scry-wasm.js) is the server: it parses that request and answers with Anthropic-shaped
+    // JSON. Entirely offline — the base URL says so.
+    env: { DEEPSEEK_API_KEY: "in-page-demo",
+           ANTHROPIC_BASE_URL: "http://fake-api.in-page/v1",
+           SCRY_MODEL: "fake-1 (in-page)" },
+    vfs: { "/assistant.scry": demoSrc, "/agent/core.scry": coreSrc, "/std/json.scry": jsonSrc },
+  });
+
+  setStatus("booting program…");
+  const rc = scry.boot("/assistant.scry");
+  if (rc !== 0) { setStatus(`boot failed (rc=${rc})`); write(`\nboot failed: rc=${rc}\n`); throw new Error("boot failed"); }
+
+  // The viewer's transport — same wire op, no server.
+  globalThis.__scryWasm = scry;
+  globalThis.scry = scry;
+  setStatus("live", true);
+
+  // Background workers (Thread.spawn) have no OS thread on wasm — they advance only when we
+  // tick the green-thread scheduler. Pump it, and nudge the viewer whenever work landed so
+  // instances visibly climb while you keep typing.
+  scry.startScheduler(30, () => globalThis.__scryRefresh?.());
+
+  // ---- REPL ----
+  // The program is examples/assistant.scry, UNMODIFIED: its main() is a blocking
+  // `while running { Console.readLine() … }` loop, exactly as on native. Console.readLine()
+  // suspends the green thread when no line is buffered, so the terminal just feeds lines and
+  // lets the scheduler resume it. The program prints its own prompt — we only echo keystrokes.
+  let line = "";
+  term.onData((d) => {
+    for (const ch of d) {
+      if (ch === "\r") { term.write("\r\n"); scry.feedLine(line); line = ""; }
+      else if (ch === "\x7f" || ch === "\b") { if (line) { line = line.slice(0, -1); term.write("\b \b"); } }
+      else if (ch === "\x03") { line = ""; term.write("^C\r\n"); }
+      else if (ch >= " ") { line += ch; term.write(ch); }
+    }
+  });
+  term.focus();
+
+  // ---- load the unmodified viewer alongside ----
+  const s = document.createElement("script");
+  s.src = "../viewer/app.js";
+  document.body.appendChild(s);
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+fn main() -> i64 {
+    let mut v = vec_new();
+    v = vec_push(v, 10); v = vec_push(v, 20); v = vec_push(v, 12);
+    let mut s = 0;
+    for x in v { s = s + x; }          // 42
+    let mut found = 0;
+    for x in v { if x == 20 { found = x; break; } }   // 20
+    s + found - 20                      // 42
+}

@@ -1,0 +1,14 @@
+(extern puts :cc c [(ptr i8)] (-> :i32))
+
+(defn
+  each
+  [(i :i64) (argc :i64) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (if (icmp-ge i argc) 0 (do (puts (load (index argv i))) (each (iadd i 1) argc argv))))
+
+(defn
+  main
+  [(argc :i32) (argv (ptr (ptr i8)))]
+  (-> :i64)
+  (do (each 0 (cast :i64 argc) argv) 0))
+

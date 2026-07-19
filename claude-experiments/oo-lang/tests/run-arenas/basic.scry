@@ -1,0 +1,21 @@
+class Cat {
+  name: String
+}
+class Dog {
+  name: String
+  age: Int
+}
+class Box<T> {
+  item: T
+}
+fn main() {
+  let c1 = Cat(name: "a")
+  let c2 = Cat(name: "b")
+  let d1 = Dog(name: "rex", age: 3)
+  let b1 = Box<Int>(item: 1)
+  let b2 = Box<Int>(item: 2)
+  let b3 = Box<Cat>(item: c1)
+  print(c1.name)
+  print(d1.age)
+  print(b3.item.name)
+}

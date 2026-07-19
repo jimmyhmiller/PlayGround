@@ -1,0 +1,81 @@
+; fmt/fmt.coil — the Coil formatter CLI.
+;
+;   coil run fmt/fmt.coil -- <file.coil>            print the formatted source
+;   coil run fmt/fmt.coil -- --check <file.coil>    exit 1 if not already formatted
+;   coil run fmt/fmt.coil -- --write <file.coil>    reformat the file in place
+;
+; Prettier-style layout at width 120, Clojure indentation conventions. Comments,
+; blank lines, and every atom/string are preserved verbatim; only whitespace and
+; line breaks change.
+(module app)
+(import "alloc.coil"     :use *)
+(import "slice.coil"     :use *)
+(import "str.coil"       :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil"        :use *)
+(import "fmt/cst.coil"   :use *)
+(import "fmt/doc.coil"   :use *)
+(import "fmt/rules.coil" :use *)
+
+(extern open   :cc c [(ptr i8) i32] (-> i32))
+(extern close  :cc c [i32] (-> i32))
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
+
+(defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
+    (loop
+      (let [n (read (cast i64 fd) buf 65536)]
+        (if (icmp-le n 0) (break)
+          (let [(mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+                (do (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
+                    (store! i (iadd (load i) 1)))))))))
+    (close fd)
+    (al-slice [u8] (load bytes))))
+
+(defn s->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s) buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index buf (load i)) (cast i8 (slice-get s (load i)))) (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast i8 0))
+    buf))
+
+(defn cstr->slice [(p (ptr i8))] (-> (slice u8))
+  (let [(mut n) 0]
+    (loop (if (icmp-eq (cast i64 (load (index p (load n)))) 0) (break) (store! n (iadd (load n) 1))))
+    (slice-new [u8] (cast (ptr u8) p) (load n))))
+
+; overwrite `path` (truncating) with `data`; returns 0, or -1 on open failure.
+(defn write-file [(a (ptr Allocator)) (path (ptr i8)) (data (slice u8))] (-> i64)
+  (let [f (fopen path (s->cstr a "w"))]
+    (if (icmp-eq (cast i64 f) 0) -1
+      (do (fwrite (cast (ptr i8) (slice-data data)) 1 (slice-len data) f)
+          (fclose f) 0))))
+
+(defn format-src [(a (ptr Allocator)) (src (slice u8)) (width i64)] (-> (slice u8))
+  (render-doc a (doc->doc a (read-doc a src)) width))
+
+; NOTE: io.coil's (stdout)/(stderr) share ONE static Writer, so we must never
+; hold both live — fetch the one we need right before writing to it.
+(defn main [(argc :i32) (argv (ptr (ptr i8)))] (-> :i64)
+  (let [a (malloc-allocator) n (cast i64 argc)]
+    (if (icmp-lt n 2)
+        (do (print-str (stderr) "usage: fmt [--check|--write] <file.coil>\n") 1)
+      (let [arg1 (cstr->slice (load (index argv 1)))
+            check (str-eq arg1 "--check")
+            write (str-eq arg1 "--write")]
+        (if (and (or check write) (icmp-lt n 3))
+            (do (print-str (stderr) "usage: fmt [--check|--write] <file.coil>\n") 1)
+          (let [path (if (or check write) (load (index argv 2)) (load (index argv 1)))
+                src  (read-file a path)
+                out  (format-src a src 120)
+                same (str-eq src out)]
+            (if check
+                (if same 0
+                    (do (print-str (stderr) "not formatted: ") (print-cstr (stderr) path)
+                        (print-str (stderr) "\n") 1))
+              (if write
+                  (if same 0 (do (write-file a path out) 0))
+                (do (print-str (stdout) out) 0)))))))))

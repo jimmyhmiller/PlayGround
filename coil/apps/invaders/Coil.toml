@@ -1,0 +1,10 @@
+[package]
+name  = "invaders"
+entry = "main.coil"
+
+[link]
+frameworks = ["AppKit", "CoreGraphics"]
+libs       = ["objc"]
+
+[run]
+args = ["../../roms/invaders.rom"]   # default ROM for `coil run`

@@ -28,12 +28,19 @@ root binding to be `mut`. See [`docs/mutability.md`](docs/mutability.md).
 > traits; `Option`/`Result` + **`?`**; **closures** (captures + indirect call);
 > **complete `match`** (enum variants, integer/string/bool/char literals,
 > scalar matching, named bindings, **guards**, and guards combined with variant
-> patterns), exhaustiveness-checked; **`String`s** with a string stdlib;
-> **`Vec<T>`**, a **`MapStr<V>` hash map**, and **functional iterators**
-> (`vec_map`/`filter`/`fold`/…), all written in gc-rust itself; a **module
-> system** (`mod`/`use`/`pub`, multi-file projects); **wrapping integer
-> overflow** + opt-in checked arithmetic; and **immutable-by-default** mutability
-> enforced through the access path. See `docs/tour.md` for a guided tour.
+> patterns), exhaustiveness-checked; **UTF-8 `String`s** with a string stdlib
+> (`split`/`index_of`/`pad`/`repeat`/`reverse`/…) plus a **Unicode code-point
+> API** (`str_chars`/`char_to_str`/`str_len_chars`/`char_at`/`str_sub_chars` —
+> character-aware length, indexing, and boundary-safe slicing over the byte
+> storage); **`Vec<T>`** with a broad API
+> (`first`/`get_opt`/`concat`/`slice`/`take`/`drop`/`swap`/`find`/`position`),
+> a generic **`HashMap<K, V>`** (any `K: Eq + Hash`) plus the string-keyed
+> **`MapStr<V>`**, and **functional iterators** (`vec_map`/`filter`/`fold`/…),
+> all written in gc-rust itself; a **`Display` trait** with generic `print`/
+> `print_line`/`str_of` and newline-free `print`; a **module system**
+> (`mod`/`use`/`pub`, multi-file projects); **wrapping integer overflow** +
+> opt-in checked arithmetic; and **immutable-by-default** mutability enforced
+> through the access path. See `docs/tour.md` for a guided tour.
 >
 > **Benchmarks vs Rust** — both compiled to native code in **release / `-O3`**;
 > every benchmark produces a **bit-identical checksum** to its Rust twin
@@ -68,6 +75,13 @@ cargo run --bin gcr -- run examples/match.gcr         # literals, guards, enum p
 cargo run --bin gcr -- run examples/project           # a gcr.toml project (multi-file)
 cargo run --bin gcr -- run examples/binary_trees.gcr --gc-stress  # collect every alloc
 cargo run --bin gcr -- check examples/types.gcr       # full typecheck + diagnostics
+cargo run --bin gcr -- emit mono examples/stdlib.gcr  # monomorphization table (JSON)
+cargo run --bin gcr -- emit layout examples/stdlib.gcr # GC heap object shapes (JSON)
+cargo run --bin gcr -- emit reflect examples/shapes.gcr # runtime reflection metadata (JSON)
+GCR_HEAP_DUMP=1 cargo run --bin gcr -- run examples/shapes.gcr # render the live heap graph (docs/reflection.md)
+# emit stages: tokens | ast | core | layout | reflect | mono | llvm — structured IR for tooling/agents
+cargo run --bin gcr -- eval examples/fib.gcr          # scratchpad: run + report {value,type} JSON
+printf '1 + 2 * 3\n' > /tmp/x.gcr && cargo run --bin gcr -- eval /tmp/x.gcr  # bare expr → main synthesized
 cargo test                                             # frontend + codegen + GC
 ./scripts/run_examples.sh                              # every example, normal + --gc-stress
 ```

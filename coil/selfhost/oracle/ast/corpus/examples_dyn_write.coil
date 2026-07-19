@@ -1,0 +1,65 @@
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
+
+(extern memcpy :cc c [(ptr i8) (ptr i8) :i64] (-> (ptr i8)))
+
+(deftrait Write [Self] (emit [(self (ptr Self)) (bytes (slice u8))] (-> i64)))
+
+(defstruct Write-vtable [(emit (fnptr c [(ptr i8) (slice u8)] i64))])
+
+(defstruct Write-dyn [(data (ptr i8)) (vtable (ptr Write-vtable))])
+
+(defstruct File [(fd i64)])
+
+(impl
+  Write
+  File
+  (emit
+    [(self (ptr File)) (bytes (slice u8))]
+    (-> i64)
+    (write
+      (cast i32 (load (field self fd)))
+      (cast (ptr i8) (slice-data bytes))
+      (cast isize (slice-len bytes)))))
+
+(defstruct MemBuf [(data (ptr u8)) (len i64) (cap i64)])
+
+(impl
+  Write
+  MemBuf
+  (emit
+    [(self (ptr MemBuf)) (bytes (slice u8))]
+    (-> i64)
+    (let
+      [n
+        (slice-len bytes)
+        len
+        (load (field self len))
+        end
+        (index (load (field self data)) len)]
+      (memcpy (cast (ptr i8) end) (cast (ptr i8) (slice-data bytes)) n)
+      (store! (field self len) (iadd len n))
+      n)))
+
+(defn
+  greet
+  [(w (dyn Write)) (name (slice u8))]
+  (-> i64)
+  (emit w "Hello, ")
+  (emit w name)
+  (emit w "!
+"))
+
+(defn
+  main
+  []
+  (-> i64)
+  (let [f (alloc-stack File)] (store! (field f fd) 1) (greet f "world"))
+  (let
+    [buf (alloc-stack (array u8 256)) mb (alloc-stack MemBuf)]
+    (store! (field mb data) (index buf 0))
+    (store! (field mb len) 0)
+    (store! (field mb cap) 256)
+    (greet mb "memory")
+    (write 1 (cast (ptr i8) (index buf 0)) (load (field mb len))))
+  0)
+

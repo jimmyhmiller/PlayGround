@@ -1,0 +1,17 @@
+// EXPECTED: REJECTED — this file demonstrates the safety net, so it does NOT
+// type-check by design:
+//
+//   $ tally check examples/bad_deref.tal
+//   fn dbl: the variable bound at multiplicity 1 is used ω time(s) (ω ⋢ 1)
+//
+// `free` consumes its owning capability. Freeing `o` and then using it again is
+// a use-after-free (equivalently, a double-free) — the owned value is used `ω`
+// times where the type demands exactly `1`. There is no pointer left to dangle:
+// the capability to touch the memory is linear, so the misuse is a TYPE ERROR.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+enum Pair (a : Type) (b : Type) { MkPair : a -> b -> Pair a b }
+
+// frees `o`, then uses the already-consumed `o` a second time.
+dbl : (1 o : Own Nat) -> Pair Unit Unit
+fn dbl(o) { MkPair(free(o), free(o)) }

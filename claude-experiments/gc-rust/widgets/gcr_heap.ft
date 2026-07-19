@@ -1,0 +1,553 @@
+// gcr_heap.ft — the gc-rust HEAP EXPLORER (Instrument 2 of the dev-tooling set).
+//
+// Runs a gc-rust program via `gcr heap <file> --out <tmp>`, which emits a JSON
+// heap snapshot (type histogram, retained-size dominator tree, real GC roots,
+// per-object reflected render + outgoing refs), and renders it interactively:
+//
+//   • a type histogram (live count + bytes, with a retained-bytes bar),
+//   • the top retainers (who actually holds memory — dominator subtree size),
+//   • the GC root set,
+//   • an object inspector: click any object to see its reflected fields, follow
+//     its outgoing refs, and jump to the objects that retain it (incoming refs).
+//
+// The snapshot prefers a mid-execution `heap_snapshot()` call (live stack roots)
+// and falls back to the program-end dump. See docs/HEAP_EXPLORER_DESIGN.md.
+//
+// params: { gcr: "<abs gcr binary>", file: "<abs .gcr program to run>" }
+import "host"
+import { col_text, col_muted, col_accent, col_panel, col_axis, col_err, series_color, trunc } from "df"
+
+fn param(k, d) = if typeof(params) == "Record" { unwrap_or(get(params, k), d) } else { d }
+fn gcr_bin()  = param("gcr",  "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/target/release/gcr")
+fn prog_file() = param("file", "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/gc-rust/examples/heap_demo.gcr")
+fn out_path() = "/tmp/gcr_heap_" + str(my_id()) + ".json"
+
+fn c_ok()  = "#a6df99"
+fn c_warn() = "#e0b066"
+
+// Shorthand: a defaulted record/field read (get returns an Option here).
+fn gv(rec, key, d) = unwrap_or(get(rec, key), d)
+
+fn base(path) {
+    let i = unwrap_or(index_of(path, "/"), -1)
+    if i < 0 { return path }
+    // last segment
+    let mut p = path
+    let mut j = unwrap_or(index_of(p, "/"), -1)
+    while j >= 0 {
+        p = slice(p, j + 1, len(p) - j - 1)
+        j = unwrap_or(index_of(p, "/"), -1)
+    }
+    p
+}
+
+fn init_state() = {
+    status: "press  ↻ Run  to snapshot the heap",
+    busy: false, proc: -1, acc: [],
+    loaded: false,
+    series: [], cur: 0,
+    summary: {}, by_type: [], objects: [], roots: [], retainers: [],
+    sel: "", tab: "types",
+}
+let state = atom(init_state())
+
+// Derive the five "current snapshot" view fields from series[idx], clamped.
+fn select_into(s, idx) {
+    let n = len(s.series)
+    if n == 0 { return s }
+    let i = if idx < 0 { 0 } else if idx >= n { n - 1 } else { idx }
+    let snap = s.series[i]
+    let summary = gv(snap, "summary", {})
+    { ..s, cur: i, sel: "",
+        summary: summary,
+        objects:   gv(snap, "objects", []),
+        by_type:   gv(summary, "by_type", []),
+        roots:     gv(summary, "roots", []),
+        retainers: gv(summary, "top_retainers", []) }
+}
+
+// ---- driving `gcr heap` ----------------------------------------------------
+
+fn run_now() {
+    let s = @state
+    if s.busy { return }
+    let h = proc_spawn(gcr_bin(), ["heap", prog_file(), "--series", out_path()])
+    if h == -1 {
+        reset!(state, { ..s, status: "spawn failed — check the `gcr` param" })
+        request_render()
+        return
+    }
+    reset!(state, { ..s, proc: h, acc: [], busy: true,
+                    status: "running  " + base(prog_file()) + "  …" })
+    request_render()
+}
+
+fn on_proc_output(handle, line) {
+    let s = @state
+    if handle == s.proc { reset!(state, { ..s, acc: push(s.acc, line) }) }
+}
+
+fn on_proc_exit(handle, code) {
+    let s = @state
+    if handle != s.proc { return }
+    if code != 0 {
+        reset!(state, { ..s, proc: -1, busy: false,
+            status: "run failed (exit " + str(code) + "): " + trunc(join(s.acc, "  "), 120) })
+        request_render()
+        return
+    }
+    let r = read_file(out_path())
+    if typeof(r) != "Record" or not gv(r, "ok", false) {
+        reset!(state, { ..s, proc: -1, busy: false, status: "could not read snapshot file" })
+        request_render()
+        return
+    }
+    let parsed = unwrap_or(json_parse(gv(r, "text", "")), {})
+    if typeof(parsed) != "Record" {
+        reset!(state, { ..s, proc: -1, busy: false, status: "snapshot JSON parse failed" })
+        request_render()
+        return
+    }
+    let series = gv(parsed, "snapshots", [])
+    if len(series) == 0 {
+        reset!(state, { ..s, proc: -1, busy: false, status: "snapshot series was empty" })
+        request_render()
+        return
+    }
+    // Default to the LAST snapshot (the fullest heap); the growth tab + scrubber
+    // expose the rest.
+    let base = { ..s, proc: -1, busy: false, loaded: true, series: series }
+    let picked = select_into(base, len(series) - 1)
+    reset!(state, { ..picked, status: summ_line(picked.summary, len(series), picked.cur) })
+    request_render()
+}
+
+fn summ_line(summary, n_snaps, cur) {
+    let objs = gv(summary, "objects", 0)
+    let bytes = gv(summary, "bytes", 0)
+    let pause = gv(summary, "snapshot_pause_ns", 0)
+    let roots = len(gv(summary, "roots", []))
+    let kind = if roots == 0 { "program-end (no live roots)" } else { "mid-execution · " + str(roots) + " roots" }
+    let snaps = if n_snaps > 1 { "snap " + str(cur + 1) + "/" + str(n_snaps) + " · " } else { "" }
+    snaps + str(objs) + " objects · " + fmt_bytes(bytes) + " · pause " + fmt_us(pause) + " · " + kind
+}
+
+// ---- formatting ------------------------------------------------------------
+
+// Render `tenths` (a count of tenths-of-a-unit) as "W.F unit".
+fn fmt_tenths(tenths, unit) = str(tenths / 10) + "." + str(tenths % 10) + " " + unit
+
+fn fmt_bytes(n) {
+    if n >= 1048576 { fmt_tenths(to_int(floor(n * 10.0 / 1048576.0)), "MB") }
+    else if n >= 1024 { fmt_tenths(to_int(floor(n * 10.0 / 1024.0)), "KB") }
+    else { str(n) + " B" }
+}
+
+fn fmt_us(ns) {
+    if ns >= 1000 { fmt_tenths(to_int(floor(ns / 100.0)), "µs") }
+    else { str(ns) + " ns" }
+}
+
+fn pad_right(s, n) {
+    let mut r = s
+    while len(r) < n { r = r + " " }
+    r
+}
+
+// A stable color for a type, by its index in the histogram.
+fn type_color(i) = series_color(i)
+
+fn type_index(by_type, name) {
+    let mut i = 0
+    let mut found = -1
+    for t in by_type {
+        if gv(t, "name", "") == name and found < 0 { found = i }
+        i = i + 1
+    }
+    found
+}
+
+fn max_bytes(by_type) {
+    let mut m = 1
+    for t in by_type {
+        let b = gv(t, "bytes", 0)
+        if b > m { m = b }
+    }
+    m
+}
+
+// ---- growth / leak analysis over a snapshot series -------------------------
+
+fn spark_chars() = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+
+// Render a list of values as a unicode sparkline (scaled to the series' own max).
+fn sparkline(vals) {
+    let blocks = spark_chars()
+    let mut mx = 1
+    for v in vals { if v > mx { mx = v } }
+    let mut out = ""
+    for v in vals {
+        let idx = to_int(floor(v * 7.0 / mx))
+        let clamped = if idx < 0 { 0 } else if idx > 7 { 7 } else { idx }
+        out = out + blocks[clamped]
+    }
+    out
+}
+
+// Every type name seen across the whole series (union, first-seen order).
+fn all_type_names(series) {
+    let mut names = []
+    for snap in series {
+        for t in gv(gv(snap, "summary", {}), "by_type", []) {
+            let nm = gv(t, "name", "?")
+            if not contains(names, nm) { names = push(names, nm) }
+        }
+    }
+    names
+}
+
+// The per-snapshot bytes series for one type (0 where the type is absent).
+fn type_bytes_series(series, name) {
+    let mut out = []
+    for snap in series {
+        let mut b = 0
+        for t in gv(gv(snap, "summary", {}), "by_type", []) {
+            if gv(t, "name", "") == name { b = gv(t, "bytes", 0) }
+        }
+        out = push(out, b)
+    }
+    out
+}
+
+fn last_of(vals) = if len(vals) == 0 { 0 } else { vals[len(vals) - 1] }
+
+// Monotonic non-decreasing AND net growth = the classic leak signature.
+fn is_growing(vals) {
+    if len(vals) < 2 { return false }
+    let mut mono = true
+    let mut i = 1
+    while i < len(vals) {
+        if vals[i] < vals[i - 1] { mono = false }
+        i = i + 1
+    }
+    mono and vals[len(vals) - 1] > vals[0]
+}
+
+// The total-objects series (header sparkline for the growth tab).
+fn objects_series(series) {
+    let mut out = []
+    for snap in series { out = push(out, gv(gv(snap, "summary", {}), "objects", 0)) }
+    out
+}
+
+// ---- object lookups --------------------------------------------------------
+
+fn find_obj(objects, idstr) {
+    for o in objects {
+        if str(gv(o, "id", -1)) == idstr { return o }
+    }
+    {}
+}
+
+// Ids that reference `idnum` (the retainers / incoming edges of the selection).
+fn incoming(objects, idnum) {
+    let mut res = []
+    for o in objects {
+        if contains(gv(o, "refs", []), idnum) { res = push(res, gv(o, "id", -1)) }
+    }
+    res
+}
+
+// ---- interaction -----------------------------------------------------------
+
+fn scrub(delta) {
+    let s = @state
+    if len(s.series) < 2 { return }
+    let picked = select_into(s, s.cur + delta)
+    reset!(state, { ..picked, status: summ_line(picked.summary, len(s.series), picked.cur) })
+    request_render()
+}
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "" { return }
+    if id == "run" { run_now(); return }
+    if id == "snap_prev" { scrub(-1); return }
+    if id == "snap_next" { scrub(1); return }
+    if starts_with(id, "obj:") {
+        let idstr = slice(id, 4, len(id) - 4)
+        reset!(state, { ..(@state), sel: idstr })
+        request_render()
+    }
+}
+
+fn on_tab_select(id, tab) {
+    reset!(state, { ..(@state), tab: tab })
+    request_render()
+}
+
+// ---- rendering -------------------------------------------------------------
+
+fn tab_items() = [
+    { id: "types", label: "types" },
+    { id: "retainers", label: "retainers" },
+    { id: "roots", label: "roots" },
+    { id: "objects", label: "objects" },
+    { id: "growth", label: "growth" },
+]
+
+fn row_type(t, i, mx) {
+    let name = gv(t, "name", "?")
+    let count = gv(t, "count", 0)
+    let bytes = gv(t, "bytes", 0)
+    { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "text", value: pad_right(trunc(name, 16), 16), family: "mono", size: 12.0,
+          color: type_color(i), wrap: false },
+        { kind: "text", value: pad_right(str(count) + "×", 6), family: "mono", size: 11.0,
+          color: col_muted(), wrap: false },
+        { kind: "bar", value: bytes * 1.0, max: mx * 1.0, width: 130.0, height: 9.0,
+          color: type_color(i), track: col_panel() },
+        { kind: "text", value: fmt_bytes(bytes), family: "mono", size: 11.0,
+          color: col_text(), wrap: false },
+    ]}
+}
+
+// A clickable object chip: "#id  Type  render…"
+fn obj_chip(objects, by_type, idnum) {
+    let o = find_obj(objects, str(idnum))
+    let ty = gv(o, "type", "?")
+    let ci = type_index(by_type, ty)
+    let render = gv(o, "render", "")
+    let label = "#" + str(idnum) + "  " + ty + "  " + trunc(render, 30)
+    { kind: "button", id: "obj:" + str(idnum), label: label }
+}
+
+fn nav_types(s) {
+    let mx = max_bytes(s.by_type)
+    let mut rows = []
+    let mut i = 0
+    for t in s.by_type {
+        rows = push(rows, row_type(t, i, mx))
+        i = i + 1
+    }
+    if len(rows) == 0 { rows = [ { kind: "text", value: "no objects", size: 12.0, color: col_muted() } ] }
+    { kind: "vstack", gap: 5.0, children: rows }
+}
+
+// Wrap a built row list with an overflow note + empty fallback.
+fn nav_wrap(rows, total, empty) {
+    let mut r = rows
+    if total > 300 {
+        r = push(r, { kind: "text", value: "… " + str(total - 300) + " more",
+                      size: 11.0, color: col_muted() })
+    }
+    if len(r) == 0 { r = [ { kind: "text", value: empty, size: 12.0, color: col_muted() } ] }
+    { kind: "vstack", gap: 4.0, children: r }
+}
+
+fn nav_retainers(s) {
+    let mut rows = []
+    let mut n = 0
+    for rt in s.retainers {
+        if n < 300 {
+            let idnum = gv(rt, "id", -1)
+            let o = find_obj(s.objects, str(idnum))
+            rows = push(rows, { kind: "button", id: "obj:" + str(idnum),
+                label: "#" + str(idnum) + "  " + gv(o, "type", "?") +
+                       "   retains " + fmt_bytes(gv(rt, "retained_bytes", 0)) })
+        }
+        n = n + 1
+    }
+    nav_wrap(rows, n, "no retainers")
+}
+
+fn nav_roots(s) {
+    let mut rows = []
+    let mut n = 0
+    for rt in s.roots {
+        if n < 300 {
+            let idnum = gv(rt, "id", -1)
+            let o = find_obj(s.objects, str(idnum))
+            rows = push(rows, { kind: "button", id: "obj:" + str(idnum),
+                label: "root  #" + str(idnum) + "  " + gv(o, "type", "?") +
+                       "   reaches " + fmt_bytes(gv(rt, "reachable_bytes", 0)) })
+        }
+        n = n + 1
+    }
+    nav_wrap(rows, n, "no live roots — this is a program-end snapshot")
+}
+
+fn nav_objects(s) {
+    let mut rows = []
+    let mut n = 0
+    for o in s.objects {
+        if n < 300 {
+            let idnum = gv(o, "id", -1)
+            rows = push(rows, { kind: "button", id: "obj:" + str(idnum),
+                label: "#" + str(idnum) + "  " + gv(o, "type", "?") + "  " + trunc(gv(o, "render", ""), 28) })
+        }
+        n = n + 1
+    }
+    nav_wrap(rows, n, "no objects")
+}
+
+// The growth tab: per-type retained-bytes sparklines across the whole series,
+// with a LEAK flag on monotonic growers — the leak-hunting view (design §5).
+fn nav_growth(s) {
+    if len(s.series) < 2 {
+        return { kind: "vstack", gap: 6.0, children: [
+            { kind: "text", value: "growth", size: 12.0, weight: "bold", color: col_accent() },
+            { kind: "text", value: "only one snapshot — call heap_snapshot() at several points\n" +
+                "(e.g. in a loop) to see growth over time. See examples/heap_growth.gcr.",
+              size: 12.0, color: col_muted(), wrap: true },
+        ]}
+    }
+    let mut rows = []
+    rows = push(rows, { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "text", value: pad_right("objects", 16), family: "mono", size: 12.0, color: col_text(), wrap: false },
+        { kind: "text", value: sparkline(objects_series(s.series)), family: "mono", size: 13.0, color: col_accent(), wrap: false },
+        { kind: "text", value: "→ " + str(last_of(objects_series(s.series))), family: "mono", size: 11.0, color: col_muted(), wrap: false },
+    ]})
+    rows = push(rows, { kind: "divider" })
+    let names = all_type_names(s.series)
+    let mut i = 0
+    for nm in names {
+        let vals = type_bytes_series(s.series, nm)
+        let leak = is_growing(vals)
+        rows = push(rows, { kind: "hstack", gap: 8.0, align: "center", children: [
+            { kind: "text", value: pad_right(trunc(nm, 16), 16), family: "mono", size: 12.0,
+              color: type_color(type_index(s.by_type, nm)), wrap: false },
+            { kind: "text", value: sparkline(vals), family: "mono", size: 13.0,
+              color: if leak { c_warn() } else { col_text() }, wrap: false },
+            { kind: "text", value: "→ " + fmt_bytes(last_of(vals)), family: "mono", size: 11.0,
+              color: col_muted(), wrap: false },
+            { kind: "text", value: if leak { "  ▲ LEAK?" } else { "" }, family: "mono", size: 11.0,
+              weight: "bold", color: c_warn(), wrap: false },
+        ]})
+        i = i + 1
+    }
+    { kind: "vstack", gap: 5.0, children: rows }
+}
+
+fn nav_col(s) {
+    if s.tab == "types" { return nav_types(s) }
+    if s.tab == "retainers" { return nav_retainers(s) }
+    if s.tab == "roots" { return nav_roots(s) }
+    if s.tab == "growth" { return nav_growth(s) }
+    nav_objects(s)
+}
+
+fn inspector(s) {
+    if s.sel == "" {
+        return { kind: "vstack", gap: 6.0, children: [
+            { kind: "text", value: "inspector", size: 12.0, weight: "bold", color: col_accent() },
+            { kind: "text", value: "click an object to inspect its fields and follow its refs",
+              size: 12.0, color: col_muted(), wrap: true },
+        ]}
+    }
+    let o = find_obj(s.objects, s.sel)
+    if typeof(o) != "Record" or typeof(get(o, "id")) != "Variant(Some)" {
+        return { kind: "text", value: "object #" + s.sel + " not in snapshot", size: 12.0, color: col_err() }
+    }
+    let idnum = gv(o, "id", -1)
+    let ty = gv(o, "type", "?")
+    let ci = type_index(s.by_type, ty)
+    let refs = gv(o, "refs", [])
+    let inc = incoming(s.objects, idnum)
+
+    let mut kids = []
+    kids = push(kids, { kind: "hstack", gap: 8.0, align: "center", children: [
+        { kind: "text", value: "#" + str(idnum), family: "mono", size: 14.0, weight: "bold", color: col_text() },
+        { kind: "text", value: ty, family: "mono", size: 14.0, weight: "bold", color: type_color(ci) },
+    ]})
+    kids = push(kids, { kind: "text", value: gv(o, "render", ""), family: "mono", size: 12.0,
+                        color: c_ok(), selectable: true, wrap: true })
+    kids = push(kids, { kind: "text",
+        value: fmt_bytes(gv(o, "bytes", 0)) + " · retains " + fmt_bytes(gv(o, "retained_bytes", 0)) +
+               (if gv(o, "reachable", true) { "" } else { " · UNREACHABLE" }),
+        family: "mono", size: 11.0, color: col_muted() })
+    kids = push(kids, { kind: "divider" })
+
+    // Outgoing references — click to walk the graph.
+    kids = push(kids, { kind: "text", value: "→ references (" + str(len(refs)) + ")",
+                        size: 12.0, weight: "bold", color: col_accent() })
+    if len(refs) == 0 {
+        kids = push(kids, { kind: "text", value: "  (none — a leaf object)", size: 11.0, color: col_muted() })
+    } else {
+        let mut rrows = []
+        let mut n = 0
+        for r in refs {
+            if n < 64 { rrows = push(rrows, obj_chip(s.objects, s.by_type, r)) }
+            n = n + 1
+        }
+        if n > 64 { rrows = push(rrows, { kind: "text", value: "… " + str(n - 64) + " more", size: 11.0, color: col_muted() }) }
+        kids = push(kids, { kind: "vstack", gap: 4.0, children: rrows })
+    }
+    kids = push(kids, { kind: "divider" })
+
+    // Incoming references — who retains this object.
+    kids = push(kids, { kind: "text", value: "← retained by (" + str(len(inc)) + ")",
+                        size: 12.0, weight: "bold", color: c_warn() })
+    if len(inc) == 0 {
+        kids = push(kids, { kind: "text", value: "  (a root, or only the in-program frame held it)",
+                            size: 11.0, color: col_muted() })
+    } else {
+        let mut irows = []
+        let mut n2 = 0
+        for r in inc {
+            if n2 < 64 { irows = push(irows, obj_chip(s.objects, s.by_type, r)) }
+            n2 = n2 + 1
+        }
+        if n2 > 64 { irows = push(irows, { kind: "text", value: "… " + str(n2 - 64) + " more", size: 11.0, color: col_muted() }) }
+        kids = push(kids, { kind: "vstack", gap: 4.0, children: irows })
+    }
+
+    { kind: "vstack", gap: 6.0, children: kids }
+}
+
+fn render(w, h) {
+    let s = @state
+    let mut kids = []
+    kids = push(kids, { kind: "hstack", gap: 10.0, align: "center", children: [
+        { kind: "text", value: "◆ gcr heap", size: 13.0, weight: "bold", color: col_accent() },
+        { kind: "button", id: "run", label: "↻ Run" },
+        { kind: "text", value: base(prog_file()), size: 11.0, family: "mono", color: col_muted() },
+    ]})
+    kids = push(kids, { kind: "text", value: s.status, size: 11.0, family: "mono",
+                        color: if s.busy { c_warn() } else { col_text() }, selectable: true })
+
+    if s.loaded {
+        kids = push(kids, { kind: "tabs", id: "htab", selected: s.tab, items: tab_items() })
+        // Snapshot scrubber — only when the series has more than one snapshot.
+        if len(s.series) > 1 {
+            kids = push(kids, { kind: "hstack", gap: 8.0, align: "center", children: [
+                { kind: "button", id: "snap_prev", label: "◀" },
+                { kind: "text", value: "snapshot " + str(s.cur + 1) + " / " + str(len(s.series)),
+                  size: 11.0, family: "mono", color: col_text(), wrap: false },
+                { kind: "button", id: "snap_next", label: "▶" },
+                { kind: "text", value: "(scrub time · growth tab shows the whole series)",
+                  size: 10.0, color: col_muted(), wrap: false },
+            ]})
+        }
+        kids = push(kids, { kind: "hstack", gap: 14.0, align: "start", children: [
+            { kind: "vstack", gap: 6.0, style: { flex_grow: 1.0, width: "50%" }, children: [ nav_col(s) ] },
+            { kind: "vstack", gap: 6.0, style: { flex_grow: 1.0, width: "50%" }, children: [ inspector(s) ] },
+        ]})
+    } else {
+        kids = push(kids, { kind: "text",
+            value: "This explores the live GC heap of a gc-rust program. Run it, then click\n" +
+                 "objects to walk the object graph by their reflected fields and refs.",
+            size: 12.0, color: col_muted(), wrap: true })
+    }
+
+    { kind: "vstack", gap: 8.0, pad: 10.0, style: { height: "100%" }, children: kids }
+}
+
+fn on_start() {
+    // Normalize to the current state shape (hot-reload may rehydrate an older
+    // shape); rebuild all fields, preserving a loaded snapshot if present.
+    let s = @state
+    if not gv(s, "loaded", false) {
+        reset!(state, init_state())
+    }
+    request_render()
+}

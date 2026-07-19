@@ -1,0 +1,55 @@
+(module borrowlike)
+; A use-after-free / move checker keyed on BINDING IDENTITY, not names. The
+; dataflow state is a real HashMap from binding-id -> killed?, threaded through a
+; recursive walk of the CHECKED program. `(binding-of NODE)` gives each reference
+; the id of the exact let-binding/parameter it resolves to, so a SHADOWED local is
+; a DIFFERENT binding than its outer namesake — which name-matching cannot tell
+; apart. `(my-free X)` kills X's binding; any later reference to that same binding
+; is reported. Runs as a compiled checker (arbitrary code + collections + the
+; binding oracle) — the shape a real borrow checker takes.
+(import "lib/alloc.coil" :use *)
+(import "lib/hashmap.coil" :use *)
+(import "lib/control.coil" :use *)
+
+; walk a form; `killed` maps binding-id -> 1 for freed locals
+(defn bc-scan [(form Code) (killed (ptr (HashMap i64 i64)))] (-> i64)
+  (if (not (code-list? form)) 0
+    (let [n (code-count form)]
+      (if (and (= n 2)
+           (and (code-sym? (code-nth form 0))
+            (and (code-eq (code-nth form 0) `my-free) (code-sym? (code-nth form 1)))))
+          ; (my-free X): kill X's BINDING (0 = not a local -> ignore)
+          (let [bid (binding-of (code-nth form 1))]
+            (if (> bid 0) (do (hm-put! killed bid 1) 0) 0))
+        ; otherwise: flag any argument referencing a killed binding, then recurse
+        (do
+          (for [i 0 n]
+            (let [c (code-nth form i)]
+              (if (and (> i 0) (code-sym? c))
+                  (let [bid (binding-of c)]
+                    (if (> bid 0)
+                        (match (hm-get [i64 i64] (load killed) bid)
+                          (Some [v] (do (report c "use after my-free") 0))
+                          (None [] 0))
+                      0))
+                (bc-scan c killed))))
+          0)))))
+
+(defn bc-body [(f Code)] (-> Code)
+  (if (and (code-list? f) (>= (code-count f) 5))
+      (if (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn))
+          (let [(mut killed) (hm-new-scalar [i64 i64] (malloc-allocator)) n (code-count f)]
+            (for [i 4 n] (bc-scan (code-nth f i) (mut killed)))
+            `0)
+        `0)
+    `0))
+
+(defn bc-check [(mods Code)] (-> Code)
+  (let [nm (code-count mods)]
+    (for [i 0 nm]
+      (let [m (code-nth mods i) nf (code-count m)]
+        (if (code-from-user? (code-nth m 1))
+            (for [j 1 nf] (bc-body (code-nth m j)))
+          0))))
+  `0)
+(checker bc-check)

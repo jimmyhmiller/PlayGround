@@ -1,0 +1,99 @@
+(module stacklint)
+; A bundled `--debug-checks` lint (mem-8): warn when a function returns a POINTER to a
+; STACK local — an `alloc-stack` slot, which dangles the moment the frame is popped.
+; clang warns on the identical C by default; Coil was silent. The driver auto-applies
+; this checker under --debug-checks (cli-use-add); with the flag off it is never loaded,
+; so it costs nothing. It is a WARNING (not a hard error) — it matches clang and never
+; breaks a build on a heuristic — and it looks ONLY at user code (`code-from-user?`).
+;
+; It is a `(checker …)` metaprogram — Coil over Coil, the macro-power thesis — not a
+; compiler pass: the syntactic "returns a just-alloc-stack'd local" case needs no
+; analysis the checker API doesn't already give.
+
+; the form `(alloc-stack …)`?
+(defn sl-is-alloc-stack? [(e Code)] (-> bool)
+  (and (code-list? e)
+       (and (icmp-gt (code-count e) 0)
+            (and (code-sym? (code-nth e 0)) (code-eq (code-nth e 0) `alloc-stack)))))
+
+; head symbol of a list form equals `name`?
+(defn sl-head-is? [(e Code) (name Code)] (-> bool)
+  (and (code-list? e)
+       (and (icmp-gt (code-count e) 0)
+            (and (code-sym? (code-nth e 0)) (code-eq (code-nth e 0) name)))))
+
+; the value a body ultimately RETURNS: peel `let`/`do` down to their last (tail) form.
+; `if` is left as-is (a value from either branch — not the clear syntactic case).
+(defn sl-peel-tail [(e Code)] (-> Code)
+  (if (or (sl-head-is? e `let) (sl-head-is? e `do))
+      (sl-peel-tail (code-nth e (isub (code-count e) 1)))
+    e))
+
+; walk a `let` binding vector [k0 v0 k1 v1 …] pairwise: is `sym` bound to (alloc-stack …)?
+(defn sl-binds-loop [(sym Code) (binds Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge (iadd i 1) n) false
+    (if (and (code-eq (code-nth binds i) sym) (sl-is-alloc-stack? (code-nth binds (iadd i 1)))) true
+      (sl-binds-loop sym binds (iadd i 2) n))))
+
+; does THIS form directly bind `sym` to (alloc-stack …) as a `let`? (kept in a plain
+; `if` so the closure walk seeds sl-binds-loop — see sl-check-defn's note on and/or.)
+(defn sl-let-here? [(sym Code) (scope Code)] (-> bool)
+  (if (sl-head-is? scope `let)
+      (if (icmp-gt (code-count scope) 1)
+          (sl-binds-loop sym (code-nth scope 1) 0 (code-count (code-nth scope 1)))
+        false)
+    false))
+
+; anywhere in `scope`, is `sym` bound to (alloc-stack …) by a `let`? (a syntactic search)
+(defn sl-binds-stack? [(sym Code) (scope Code)] (-> bool)
+  (if (code-list? scope)
+      (if (sl-let-here? sym scope)
+          true
+        (sl-scan-kids sym scope 0 (code-count scope)))
+    false))
+(defn sl-scan-kids [(sym Code) (scope Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (sl-binds-stack? sym (code-nth scope i)) true (sl-scan-kids sym scope (iadd i 1) n))))
+
+; index of the (-> RET) element in a defn form, or -1.
+(defn sl-arrow-idx [(f Code) (i i64) (n i64)] (-> i64)
+  (if (icmp-ge i n) -1
+    (if (sl-head-is? (code-nth f i) `->) i (sl-arrow-idx f (iadd i 1) n))))
+
+; RET is a (ptr …) / (mut …) — a reference the returned value borrows from the frame.
+(defn sl-ret-is-ptr? [(ret Code)] (-> bool)
+  (or (sl-head-is? ret `ptr) (sl-head-is? ret `mut)))
+
+; check one (defn …) form: does it return a stack-local pointer? warn if so.
+(defn sl-check-defn [(f Code)] (-> i64)
+  (let [n (code-count f) ai (sl-arrow-idx f 0 n)]
+    (if (icmp-lt ai 0) 0
+      (let [arrow (code-nth f ai)]
+        (if (icmp-lt (code-count arrow) 2) 0
+          (if (not (sl-ret-is-ptr? (code-nth arrow 1))) 0
+            ; nested `if` (not and/or): the closure walk that builds the metaprogram
+            ; dylib does not follow a user-function call nested inside an expanded
+            ; and/or, so `sl-binds-stack?` must sit in a plain branch to ride along.
+            (let [tail (sl-peel-tail (code-nth f (isub n 1)))]
+              (if (sl-is-alloc-stack? tail)
+                  (do (sl-warn-dangling tail) 0)
+                (if (code-sym? tail)
+                    (if (sl-binds-stack? tail f) (do (sl-warn-dangling tail) 0) 0)
+                  0)))))))))
+
+(defn sl-warn-dangling [(node Code)] (-> i64)
+  (warn node "returns a pointer to a stack local; it dangles once this function returns (--debug-checks)") 0)
+
+; a top-level form: lint only USER `defn`s (skip the bundled stdlib and this module).
+(defn sl-check-form [(f Code)] (-> i64)
+  (if (and (sl-head-is? f `defn) (code-from-user? f)) (sl-check-defn f) 0))
+(defn sl-check-mod-forms [(m Code) (i i64) (n i64)] (-> i64)
+  (if (icmp-ge i n) 0 (do (sl-check-form (code-nth m i)) (sl-check-mod-forms m (iadd i 1) n))))
+(defn sl-check-mod [(m Code)] (-> i64) (sl-check-mod-forms m 1 (code-count m)))  ; 0 = module name
+(defn sl-check-mods [(ms Code) (i i64) (n i64)] (-> i64)
+  (if (icmp-ge i n) 0 (do (sl-check-mod (code-nth ms i)) (sl-check-mods ms (iadd i 1) n))))
+
+(defn sl-check [(modules Code)] (-> Code)
+  (do (sl-check-mods modules 0 (code-count modules)) `0))
+
+(checker sl-check)

@@ -1,0 +1,73 @@
+// plusCommutative — a NON-TRIVIAL proof ported from Idris 2, essentially
+// line-for-line.
+//
+//   tally check examples/plus_commutative.tal
+//
+// The canonical Idris/Coq induction proof: `plus n m = plus m n` for a user
+// `plus` (recursing on its first argument, so neither side reduces on a
+// variable). It needs two lemmas plus induction with cong/rewrite. Idris 2:
+//
+//     plusZeroRightNeutral : (n : Nat) -> plus n Z = n
+//     plusZeroRightNeutral Z     = Refl
+//     plusZeroRightNeutral (S k) = cong S (plusZeroRightNeutral k)
+//
+//     plusSuccRightSucc : (n, m : Nat) -> S (plus n m) = plus n (S m)
+//     plusSuccRightSucc Z     m = Refl
+//     plusSuccRightSucc (S k) m = cong S (plusSuccRightSucc k m)
+//
+//     plusCommutative : (n, m : Nat) -> plus n m = plus m n
+//     plusCommutative Z     m = sym (plusZeroRightNeutral m)
+//     plusCommutative (S k) m = rewrite plusSuccRightSucc m k in
+//                               cong S (plusCommutative k m)
+//
+// The tallyc version below matches it clause for clause. `cong`/`sym` have
+// IMPLICIT endpoints (inferred from the equality argument, exactly like Idris),
+// and `rewrite … in …` is the same construct. The one cosmetic difference:
+// tallyc's `cong` takes a function VALUE, so we pass the named `succF` where
+// Idris passes the constructor `S` directly. All proofs are erased (multiplicity
+// 0) — zero runtime cost. The kernel re-checks every step, so this is sound.
+
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// ── the equality toolkit, derived from J (endpoints inferred) ───────────────
+cong : {0 a : Type} -> {0 b : Type} -> (f : a -> b) -> {0 x : a} -> {0 y : a}
+     -> Eq a x y -> Eq b (f x) (f y)
+fn cong(f, p) { J(\z e => Eq(b, f(x), f(z)), refl(f(x)), p) }
+
+sym : {0 a : Type} -> {0 x : a} -> {0 y : a} -> Eq a x y -> Eq a y x
+fn sym(p) { J(\z e => Eq(a, z, x), refl(x), p) }
+
+plus : Nat -> Nat -> Nat
+fn plus(m, n) { match m { Zero => n, Succ(k) => Succ(plus(k, n)) } }
+succF : Nat -> Nat
+fn succF(n) { Succ(n) }
+
+// ── plusZeroRightNeutral : plus n Zero = n ──────────────────────────────────
+plusZeroR : (n : Nat) -> Eq Nat (plus n Zero) n
+fn plusZeroR(n) {
+  match n {
+    Zero    => refl(Zero),
+    Succ(k) => cong(succF, plusZeroR(k)),
+  }
+}
+
+// ── plusSuccRightSucc : Succ (plus n m) = plus n (Succ m) ────────────────────
+plusSuccR : (n : Nat) -> (m : Nat) -> Eq Nat (Succ (plus n m)) (plus n (Succ m))
+fn plusSuccR(n, m) {
+  match n {
+    Zero    => refl(Succ(m)),
+    Succ(k) => cong(succF, plusSuccR(k, m)),
+  }
+}
+
+// ── plusCommutative : plus n m = plus m n ───────────────────────────────────
+plusComm : (n : Nat) -> (m : Nat) -> Eq Nat (plus n m) (plus m n)
+fn plusComm(n, m) {
+  match n {
+    Zero    => sym(plusZeroR(m)),
+    Succ(k) => rewrite plusSuccR(m, k) in cong(succF, plusComm(k, m)),
+  }
+}
+
+main : Nat
+fn main() { Zero }

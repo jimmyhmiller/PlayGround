@@ -8,7 +8,9 @@ use crate::gc::type_info::{TypeInfo, VarLenKind};
 ///
 /// Visits:
 /// 1. All fixed Value fields (indices 0..value_field_count)
-/// 2. All varlen Value elements (if varlen == VarLenKind::Values)
+/// 2. All interior pointers — GC refs embedded in flattened `#[value]` fields in
+///    the raw region (`info.interior_ptrs`, absolute byte offsets)
+/// 3. All varlen Value elements (if varlen == VarLenKind::Values)
 ///
 /// # Safety
 /// - `obj` must point to a valid heap object described by `info`.
@@ -19,6 +21,12 @@ pub unsafe fn scan_object(obj: *mut u8, info: &TypeInfo, mut visitor: impl FnMut
     let field_base = info.header_size as usize;
     for i in 0..info.value_field_count as usize {
         let slot = unsafe { obj.add(field_base + i * 8) as *mut u64 };
+        visitor(slot);
+    }
+
+    // Visit interior pointers (refs embedded in flattened value fields).
+    for &off in info.interior_ptrs {
+        let slot = unsafe { obj.add(off as usize) as *mut u64 };
         visitor(slot);
     }
 

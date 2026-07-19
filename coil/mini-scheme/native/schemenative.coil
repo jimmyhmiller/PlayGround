@@ -1,0 +1,90 @@
+(module scheme)
+; The SAME metacircular Scheme evaluator as meta/evalcore.scm, but HAND-WRITTEN in
+; native Coil (over the Val runtime, with the transparent-GC transform). Mirrors
+; evalcore.scm function-for-function. Embeds the same fib target and runs it, so we
+; can compare hand-written native Coil against the transpiled-from-Scheme version.
+(import "../sval.coil" :use *)
+(import "../gcauto2.coil" :use *)     ; the GC metaprogram
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "result.coil" :use *)
+(import "../../selfhost/src/reader.coil" :use *)
+(import "../../selfhost/src/parser.coil" :use *)
+
+(defn defvar! [(name Val) (val Val)] (-> Val)
+  (do (set-genv! (cons (cons name val) (genv))) name))
+(defn cadr2   [(x Val)] (-> Val) (car (cdr x)))
+(defn caddr2  [(x Val)] (-> Val) (car (cdr (cdr x))))
+(defn cadddr2 [(x Val)] (-> Val) (car (cdr (cdr (cdr x)))))
+(defn cdddr2  [(x Val)] (-> Val) (cdr (cdr (cdr x))))
+
+(defn glookup [(s Val) (g Val)] (-> Val)
+  (if (truthy (s-null g)) s
+    (if (truthy (s-eq (car (car g)) s)) (cdr (car g)) (glookup s (cdr g)))))
+(defn lookup [(s Val) (env Val)] (-> Val)
+  (if (truthy (s-null env)) (glookup s (genv))
+    (if (truthy (s-eq (car (car env)) s)) (cdr (car env)) (lookup s (cdr env)))))
+(defn bind [(ps Val) (as Val) (env Val)] (-> Val)
+  (if (truthy (s-null ps)) env
+    (bind (cdr ps) (cdr as) (cons (cons (car ps) (car as)) env))))
+(defn evlist [(es Val) (env Val)] (-> Val)
+  (if (truthy (s-null es)) (snil) (cons (seval (car es) env) (evlist (cdr es) env))))
+
+(defn seval [(e Val) (env Val)] (-> Val)
+  (if (truthy (s-num e)) e
+  (if (truthy (s-symp e)) (lookup e env)
+  (if (truthy (s-eq (car e) (mk-sym (intern "quote")))) (cadr2 e)
+  (if (truthy (s-eq (car e) (mk-sym (intern "if"))))
+      (if (truthy (seval (cadr2 e) env)) (seval (caddr2 e) env) (seval (cadddr2 e) env))
+  (if (truthy (s-eq (car e) (mk-sym (intern "lambda"))))
+      (cons (mk-sym (intern "closure")) (cons (cadr2 e) (cons (caddr2 e) env)))
+  (if (truthy (s-eq (car e) (mk-sym (intern "define"))))
+      (defvar! (cadr2 e) (seval (caddr2 e) env))
+      (sapply (seval (car e) env) (evlist (cdr e) env)))))))))
+(defn doprim [(op Val) (as Val)] (-> Val)
+  (if (truthy (s-eq op (mk-sym (intern "+")))) (s-add (car as) (cadr2 as))
+  (if (truthy (s-eq op (mk-sym (intern "-")))) (s-sub (car as) (cadr2 as))
+  (if (truthy (s-eq op (mk-sym (intern "*")))) (s-mul (car as) (cadr2 as))
+  (if (truthy (s-eq op (mk-sym (intern "<")))) (s-lt (car as) (cadr2 as))
+  (if (truthy (s-eq op (mk-sym (intern "=")))) (s-eqn (car as) (cadr2 as)) (mk-int 0)))))))
+(defn sapply [(f Val) (as Val)] (-> Val)
+  (if (truthy (s-eq (car f) (mk-sym (intern "prim")))) (doprim (cadr2 f) as)
+    (seval (caddr2 f) (bind (cadr2 f) as (cdddr2 f)))))
+
+(defn mkprim [(name (slice u8))] (-> Val)
+  (cons (mk-sym (intern "prim")) (cons (mk-sym (intern name)) (snil))))
+(defn setup [] (-> Val)
+  (do (defvar! (mk-sym (intern "+")) (mkprim "+"))
+      (defvar! (mk-sym (intern "-")) (mkprim "-"))
+      (defvar! (mk-sym (intern "*")) (mkprim "*"))
+      (defvar! (mk-sym (intern "<")) (mkprim "<"))
+      (defvar! (mk-sym (intern "=")) (mkprim "="))))
+
+; the target program (fib 30) built as data — mirrors evalcore.scm's `target`.
+; parse it once from text with the compiler's own reader (no giant hand-cons).
+(defn build-target [] (-> Val)
+  (match (read-all (malloc-allocator)
+                   "(begin (define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 30))" 0)
+    (Err [d] (snil))
+    (Ok [fs] (sexp->val (forms-nth fs 0)))))
+; Sexp -> Val (same as scheme.coil)
+(defn sexp->val [(x Sexp)] (-> Val)
+  (let [tg (sx-tag x)]
+    (if (icmp-eq tg 0) (mk-int (sx-ival x))
+    (if (icmp-eq tg 2) (mk-sym (intern (sx-sval x)))
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
+        (mk-int 0))))))
+(defn sexp-list->val [(items (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
+  (if (icmp-ge i n) (snil) (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
+
+(defn main [] (-> :i64)
+  (set-genv! (snil))
+  (setup)
+  (let [tgt (build-target)]
+    (seval (cadr2 tgt) (snil))              ; (define fib ...)
+    (print-val (seval (caddr2 tgt) (snil))) ; (fib 30)
+    (fmt (stdout) "\n")
+    (fmt (stderr) "[gc] peak_live={d} collections={d} total_alloc={d}\n" (gc-peak) (gc-collections) (gc-total))
+    0))

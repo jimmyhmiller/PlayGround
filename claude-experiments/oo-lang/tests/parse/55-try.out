@@ -1,0 +1,18 @@
+(program
+  (fn parsePriority
+    (params
+      (param s
+        (type String)))
+    (type Result (type Int) (type ParseError))
+    (block
+      (let n
+        (try
+          (call
+            (dot parse
+              (id Int))
+            (arg
+              (id s)))))
+      (call
+        (id Ok)
+        (arg
+          (id n))))))

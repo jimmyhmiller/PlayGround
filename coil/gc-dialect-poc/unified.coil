@@ -1,0 +1,45 @@
+(module app)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+
+;; ┌─────────────────────────────────────────────────────────────────────┐
+;; │  THE DIALECT LINE — swap between these two and nothing else changes:  │
+;; │    (import "arena.coil" :use *)   ; never frees                       │
+;; │    (import "gc.coil"    :use *)   ; mark-sweep, bounded memory        │
+;; └─────────────────────────────────────────────────────────────────────┘
+(import "DIALECT.coil" :use *)
+
+(defstruct Node [(val :i64) (next (ptr Node))])
+(gctype Node)
+
+(defn build-list [(k :i64) (i :i64)] (-> (ptr Node))
+  (if (icmp-ge i k)
+      (cast (ptr Node) 0)
+      (gc-let rest (build-list k (iadd i 1))
+        (let [node (new Node)]
+          (fset node val i)
+          (store! (field node next) rest)
+          node))))
+
+(defn sum-list [(h (ptr Node))] (-> :i64)
+  (let [(mut cur) h (mut acc) 0]
+    (loop
+      (if (icmp-eq (cast i64 (load cur)) 0)
+          (break (load acc))
+          (do
+            (store! acc (iadd (load acc) (load (field (load cur) val))))
+            (store! cur (load (field (load cur) next))))))))
+
+(defn once [(k :i64)] (-> :i64)
+  (gc-let head (build-list k 0)
+    (sum-list head)))
+
+(defn main [] (-> :i64)
+  (let [(mut total) 0 (mut m) 0]
+    (loop
+      (if (icmp-ge (load m) 100) (break 0)
+          (do (store! total (iadd (load total) (once 50)))
+              (store! m (iadd (load m) 1)))))
+    (fmt (stdout) "total_sum={d}  objects_ever={d}  peak_live={d}  collections={d}\n"
+         (load total) (objects-ever) (peak-live) (num-collections))
+    0))

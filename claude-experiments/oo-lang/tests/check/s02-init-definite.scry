@@ -1,0 +1,14 @@
+class Message {
+  role: String
+  content: String
+  createdAt: Int
+  fn init(role: String, content: String) {
+    self.role = role
+    self.content = content
+    self.createdAt = 0
+  }
+}
+fn main() {
+  let m = Message(role: "user", content: "hi")
+  print(m.content)
+}

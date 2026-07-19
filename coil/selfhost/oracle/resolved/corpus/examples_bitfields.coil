@@ -1,0 +1,17 @@
+(defstruct Rgb565 :layout bits :backing :i16 [(b :bits 5) (g :bits 6) (r :bits 5)])
+
+(static-assert (icmp-eq (sizeof Rgb565) 2) "RGB565 is exactly 16 bits")
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [c (alloc-stack Rgb565)]
+    (bit-set! c r (cast :u5 20))
+    (bit-set! c g (cast :u6 10))
+    (bit-set! c b (cast :u5 12))
+    (iadd
+      (imul (cast :i64 (bit-get c r)) 1)
+      (iadd (cast :i64 (bit-get c g)) (cast :i64 (bit-get c b))))))
+

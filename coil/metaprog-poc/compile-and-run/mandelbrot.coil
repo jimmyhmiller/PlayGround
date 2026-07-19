@@ -1,0 +1,212 @@
+; ============================================================================
+; A GUI AT COMPILE TIME — the "run a GUI at comptime" milestone from the
+; compile-and-run design, made real.
+;
+; `(mandel-pick)` is a MACRO. When the compiler expands it, it opens a real
+; Cocoa window on the process main thread and renders the Mandelbrot set,
+; live: WASD pans, Z/X zooms, I/O changes the iteration budget, Q or RETURN
+; accepts the current view. The macro then expands to a call carrying the
+; coordinates you chose — the compiled program is parameterized by a
+; compile-time GUI session. Under COIL_MANDEL_AUTO=1 the viewer drives itself
+; (a scripted zoom, no focus steal) so builds are reproducible/CI-able.
+;
+; Build (the metaprogram dylib links the same flags as the program):
+;   COIL_META_MAIN=1 coil run metaprog-poc/compile-and-run/mandel_test.coil \
+;     --link-flag -framework --link-flag AppKit --link-flag -lobjc
+;
+; COIL_META_MAIN=1 routes metaprogram calls to the REAL main thread (AppKit
+; requires it); the driver's main thread services them while the pipeline runs.
+;
+; Everything here is ordinary Coil: malloc'd framebuffers, f64 math, CoreGraphics
+; and the Objective-C runtime over plain C FFI, `while`/`when`/`fmt` macros used
+; INSIDE the macro's own body (the tower). None of it is special-cased — the
+; metaprogram is just a program.
+; ============================================================================
+(module mandelbrot)
+(import "lib/alloc.coil" :use *)
+(import "lib/slice.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/control.coil" :use *)
+
+; ---- Objective-C runtime + CoreGraphics, plain C ----------------------------
+(extern objc_getClass    :cc c [(ptr i8)] (-> (ptr i8)))
+(extern sel_registerName :cc c [(ptr i8)] (-> (ptr i8)))
+(extern objc_msgSend     :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern CGColorSpaceCreateDeviceRGB :cc c [] (-> (ptr i8)))
+(extern CGBitmapContextCreate       :cc c [(ptr i8) i64 i64 i64 i64 (ptr i8) i64] (-> (ptr i8)))
+(extern CGBitmapContextCreateImage  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern CGContextRelease            :cc c [(ptr i8)] (-> i64))
+(extern CGColorSpaceRelease         :cc c [(ptr i8)] (-> i64))
+(extern CGImageRelease              :cc c [(ptr i8)] (-> i64))
+(extern usleep                      :cc c [i64] (-> i32))
+(extern getenv                      :cc c [(ptr i8)] (-> (ptr i8)))
+
+(defstruct CGRect [(x f64) (y f64) (w f64) (h f64)])
+
+; the CLASSIC objc `msg` macro (apps/chip8/objc.coil), used INSIDE a metaprogram
+; body: its type-syntax arguments ((ptr i8) returns, [CGRect i64 …] argtype
+; vectors) make the raw call unparseable as an expression, which is exactly the
+; tower's syntactic trigger — it expands here at definition time like anywhere else
+(defn mcls [(n (ptr i8))] (-> (ptr i8)) (objc_getClass n))
+(defn msel [(n (ptr i8))] (-> (ptr i8)) (sel_registerName n))
+(defn msg [(ret Code) (recv Code) (selector Code) (argtypes Code) & (args Code)] (-> Code)
+  `(call-ptr
+     (cast (fnptr c [(ptr i8) (ptr i8) ~@argtypes] ~ret) (fnptr-of objc_msgSend))
+     ~recv ~selector ~@args))
+
+; ---- the view ----------------------------------------------------------------
+(defstruct MView [(cx f64) (cy f64) (scale f64) (iters i64) (done i64)])
+
+(const MW 480)
+(const MH 320)
+
+; escape-time iteration count for one point (iters = the budget)
+(defn mandel-iter [(re f64) (im f64) (iters i64)] (-> i64)
+  (let [(mut zr) 0.0 (mut zi) 0.0 (mut k) 0]
+    (loop
+      (if (icmp-ge (load k) iters) (break (load k))
+        (let [zr2 (fmul (load zr) (load zr)) zi2 (fmul (load zi) (load zi))]
+          (if (fcmp-gt (fadd zr2 zi2) 4.0) (break (load k))
+            (let [nzr (fadd (fsub zr2 zi2) re)
+                  nzi (fadd (fmul 2.0 (fmul (load zr) (load zi))) im)]
+              (do (store! zr nzr) (store! zi nzi)
+                  (store! k (iadd (load k) 1))))))))))
+
+; render the current view into an RGBA framebuffer (malloc'd, MW*MH*4 bytes)
+(defn mandel-render [(v (ptr MView)) (buf (ptr u8))] (-> i64)
+  (let [scale (load (field v scale))
+        left (fsub (load (field v cx)) (fdiv scale 2.0))
+        aspect (fdiv (cast f64 MH) (cast f64 MW))
+        top  (fsub (load (field v cy)) (fdiv (fmul scale aspect) 2.0))
+        step (fdiv scale (cast f64 MW))
+        iters (load (field v iters))
+        (mut y) 0]
+    (loop (if (icmp-ge (load y) MH) (break)
+      (do (let [im (fadd top (fmul (cast f64 (load y)) step)) (mut x) 0]
+            (loop (if (icmp-ge (load x) MW) (break)
+              (do (let [re (fadd left (fmul (cast f64 (load x)) step))
+                        k (mandel-iter re im iters)
+                        o (imul (iadd (imul (load y) MW) (load x)) 4)]
+                    (if (icmp-ge k iters)
+                        (do (store! (index buf o) (cast u8 0))
+                            (store! (index buf (iadd o 1)) (cast u8 0))
+                            (store! (index buf (iadd o 2)) (cast u8 0)) 0)
+                      (let [t (udiv (imul k 255) iters)
+                            r (let [rr (imul t 3)] (if (icmp-gt rr 255) 255 rr))
+                            g t
+                            b (isub 255 t)]
+                        (do (store! (index buf o) (cast u8 r))
+                            (store! (index buf (iadd o 1)) (cast u8 g))
+                            (store! (index buf (iadd o 2)) (cast u8 b)) 0))))
+                  (store! (index buf (iadd (imul (iadd (imul (load y) MW) (load x)) 4) 3)) (cast u8 255))
+                  (store! x (iadd (load x) 1))))))
+          (store! y (iadd (load y) 1)))))
+    0))
+
+(defn mandel-blit [(layer (ptr i8)) (buf (ptr u8))] (-> i64)
+  (let [space (CGColorSpaceCreateDeviceRGB)
+        ctx (CGBitmapContextCreate (cast (ptr i8) buf) MW MH 8 (imul MW 4) space 1)
+        img (CGBitmapContextCreateImage ctx)]
+    (msg (ptr i8) layer (msel c"setContents:") [(ptr i8)] img)
+    (CGImageRelease img) (CGContextRelease ctx) (CGColorSpaceRelease space)
+    0))
+
+; keyDown handling: WASD pan, Z/X zoom, I/O iteration budget, Q or RETURN done
+(defn mandel-key [(v (ptr MView)) (ev (ptr i8))] (-> i64)
+  (let [chars (msg (ptr i8) ev (msel c"characters") [])]
+    (if (icmp-eq (cast i64 chars) 0) 0
+      (let [utf (msg (ptr i8) chars (msel c"UTF8String") [])
+            ch (cast i64 (load (cast (ptr u8) utf)))
+            pan (fdiv (load (field v scale)) 8.0)]
+        (cond
+          (icmp-eq ch 97)  (do (store! (field v cx) (fsub (load (field v cx)) pan)) 0)   ; a
+          (icmp-eq ch 100) (do (store! (field v cx) (fadd (load (field v cx)) pan)) 0)   ; d
+          (icmp-eq ch 119) (do (store! (field v cy) (fsub (load (field v cy)) pan)) 0)   ; w
+          (icmp-eq ch 115) (do (store! (field v cy) (fadd (load (field v cy)) pan)) 0)   ; s
+          (icmp-eq ch 122) (do (store! (field v scale) (fmul (load (field v scale)) 0.7)) 0) ; z
+          (icmp-eq ch 120) (do (store! (field v scale) (fmul (load (field v scale)) 1.4)) 0) ; x
+          (icmp-eq ch 105) (do (store! (field v iters) (iadd (load (field v iters)) 32)) 0)  ; i
+          (icmp-eq ch 111) (if (icmp-gt (load (field v iters)) 48)
+                               (do (store! (field v iters) (isub (load (field v iters)) 32)) 0) 0) ; o
+          (icmp-eq ch 113) (do (store! (field v done) 1) 0)   ; q
+          (icmp-eq ch 13)  (do (store! (field v done) 1) 0)   ; return
+          0)))))
+
+(defn mandel-pump [(app (ptr i8)) (v (ptr MView)) (mode (ptr i8))] (-> i64)
+  (while 1
+    (let [ev (msg (ptr i8) app (msel c"nextEventMatchingMask:untilDate:inMode:dequeue:")
+                  [i64 (ptr i8) (ptr i8) i64] -1 (cast (ptr i8) 0) mode 1)]
+      (if (icmp-eq (cast i64 ev) 0) (break 0)
+        (do (when (icmp-eq (msg i64 ev (msel c"type") []) 10) (mandel-key v ev))
+            (msg (ptr i8) app (msel c"sendEvent:") [(ptr i8)] ev)
+            0)))))
+
+; ---- THE METAPROGRAM: a GUI session at expansion time -------------------------
+(defn mandel-pick [] (-> Code)
+  (let [a (malloc-allocator)
+        auto (icmp-ne (cast i64 (getenv c"COIL_MANDEL_AUTO")) 0)
+        v (unwrap-ptr [MView] (create [MView] a))
+        buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a (imul (imul MW MH) 4) 1)))
+        app (msg (ptr i8) (mcls c"NSApplication") (msel c"sharedApplication") [])
+        rect (alloc-stack CGRect)]
+    (store! (field v cx) -0.6) (store! (field v cy) 0.0)
+    (store! (field v scale) 3.2) (store! (field v iters) 96) (store! (field v done) 0)
+    (store! (field rect x) 240.0) (store! (field rect y) 240.0)
+    (store! (field rect w) (cast f64 MW)) (store! (field rect h) (cast f64 MH))
+    (fmt (stderr) "[mandelbrot] compile-time viewer{s}: WASD pan, Z/X zoom, I/O iters, Q/RETURN accept\n"
+         (if auto " (auto)" ""))
+    (let [win (msg (ptr i8) (msg (ptr i8) (mcls c"NSWindow") (msel c"alloc") [])
+                     (msel c"initWithContentRect:styleMask:backing:defer:")
+                     [CGRect i64 i64 i64] (load rect) 15 2 0)
+          mode (msg (ptr i8) (mcls c"NSString") (msel c"stringWithUTF8String:") [(ptr i8)] c"kCFRunLoopDefaultMode")]
+      ; auto mode: accessory policy, no focus steal; interactive: regular + activate
+      (msg (ptr i8) app (msel c"setActivationPolicy:") [i64] (if auto 1 0))
+      (msg (ptr i8) (msg (ptr i8) win (msel c"contentView") []) (msel c"setWantsLayer:") [i64] 1)
+      (msg (ptr i8) win (msel c"makeKeyAndOrderFront:") [(ptr i8)] (cast (ptr i8) 0))
+      (when (not auto) (do (msg (ptr i8) app (msel c"activateIgnoringOtherApps:") [i64] 1) 0))
+      (msg (ptr i8) app (msel c"finishLaunching") [])
+      (let [layer (msg (ptr i8) (msg (ptr i8) win (msel c"contentView") []) (msel c"layer") [])
+            (mut frame) 0]
+        (while (icmp-eq (load (field v done)) 0)
+          (mandel-render v buf)
+          (mandel-blit layer buf)
+          (mandel-pump app v mode)
+          (when auto
+            ; a scripted dive toward the seahorse valley, then accept
+            (do (store! (field v cx) (fadd (load (field v cx)) (fmul (fsub -0.7436 (load (field v cx))) 0.18)))
+                (store! (field v cy) (fadd (load (field v cy)) (fmul (fsub 0.1318 (load (field v cy))) 0.18)))
+                (store! (field v scale) (fmul (load (field v scale)) 0.86))
+                (when (icmp-ge (load frame) 40) (store! (field v done) 1))))
+          (store! frame (iadd (load frame) 1))
+          (usleep 16000))
+        (msg (ptr i8) win (msel c"close") [])
+        (fmt (stderr) "[mandelbrot] accepted view: center=({f}, {f}) scale={f} iters={d} after {d} frames\n"
+             (load (field v cx)) (load (field v cy)) (load (field v scale)) (load (field v iters)) (load frame))
+        `(mandel-chosen ~(load (field v cx)) ~(load (field v cy)) ~(load (field v scale)) ~(load (field v iters)))))))
+
+; ---- the RUNTIME half: what the chosen constants compile into ------------------
+; ASCII-render the compile-time-chosen view, so the built program carries the
+; GUI session's result visibly.
+(defn mandel-chosen [(cx f64) (cy f64) (scale f64) (iters i64)] (-> i64)
+  (let [w 78 h 24
+        left (fsub cx (fdiv scale 2.0))
+        top (fsub cy (fdiv (fmul scale 0.66) 2.0))
+        xstep (fdiv scale (cast f64 w))
+        ystep (fdiv (fmul scale 0.66) (cast f64 h))
+        ramp " .:-=+*#%@"
+        (mut y) 0]
+    (fmt (stdout) "view chosen in the COMPILE-TIME GUI: center=({f}, {f}) scale={f} iters={d}\n"
+         cx cy scale iters)
+    (loop (if (icmp-ge (load y) h) (break)
+      (do (let [(mut x) 0]
+            (loop (if (icmp-ge (load x) w) (break)
+              (do (let [re (fadd left (fmul (cast f64 (load x)) xstep))
+                        im (fadd top (fmul (cast f64 (load y)) ystep))
+                        k (mandel-iter re im iters)
+                        ci (if (icmp-ge k iters) 9 (udiv (imul k 9) iters))]
+                    (write-byte (stdout) (slice-get ramp ci)))
+                  (store! x (iadd (load x) 1))))))
+          (write-byte (stdout) (cast u8 10))
+          (store! y (iadd (load y) 1)))))
+    0))

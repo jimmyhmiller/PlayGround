@@ -1,0 +1,41 @@
+; ── DIALECT: arena ────────────────────────────────────────────────────────
+; Implicit allocation as a metaprogram. There is NO Allocator value threaded
+; through user code — `new` injects an ambient bump heap that lives in a global
+; cell. Swapping which prelude you import swaps the memory model of the same
+; source. (Increment 1: allocation is implicit; reclamation comes next.)
+(module arena)
+
+; A 256KB static bump heap + a bump offset + an object counter, each a global
+; singleton via alloc-static (returns the same cell on every call).
+(defn heap [] (-> (ptr (array u8 262144))) (alloc-static (array u8 262144)))
+(defn off  [] (-> (ptr :i64)) (alloc-static :i64))
+(defn objs [] (-> (ptr :i64)) (alloc-static :i64))
+
+; Bump `n` bytes off the heap; bump the object counter; return a raw pointer.
+(defn bump [(n :i64)] (-> (ptr u8))
+  (let [o (load (off))]
+    (store! (off) (iadd o n))
+    (store! (objs) (iadd (load (objs)) 1))
+    (cast (ptr u8) (iadd (cast i64 (heap)) o))))
+
+(defn live-objs [] (-> :i64) (load (objs)))
+
+; ── the dialect vocabulary (macros) — same surface as gc.coil ──
+; `new` — implicit heap allocation of a T. No allocator argument.
+(defn new [(t Code)] (-> Code) `(cast (ptr ~t) (bump (sizeof ~t))))
+; field access sugar
+(defn fset [(p Code) (f Code) (v Code)] (-> Code) `(store! (field ~p ~f) ~v))
+(defn fget [(p Code) (f Code)]          (-> Code) `(load  (field ~p ~f)))
+
+; arena never collects, so rooting and tracers are no-ops — but the vocabulary
+; must match gc.coil so the SAME program compiles under either dialect.
+(defn gc-let [(name Code) (init Code) & (body Code)] (-> Code)
+  `(let [~name ~init] (do ~@body)))
+(defn gctype [(tname Code)] (-> Code)
+  `(defn ~(code-symbol tname "-trace") [(pp (ptr u8))] (-> :i64) 0))
+
+; observability (matches gc.coil): every allocation stays live; never collects.
+(defn peak-live       [] (-> :i64) (load (objs)))
+(defn num-collections [] (-> :i64) 0)
+(defn live-now        [] (-> :i64) (load (objs)))
+(defn objects-ever    [] (-> :i64) (load (objs)))

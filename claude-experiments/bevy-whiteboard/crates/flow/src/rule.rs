@@ -157,10 +157,16 @@ pub enum Effect {
     /// signal domain-level violations (color mismatch, bad
     /// preconditions, etc.) that should surface on the error panel.
     RecordError { kind: String, detail: Expr },
-    /// Instantiate a registered template. The firing node becomes the
-    /// new instance's parent. If `into_var` is set, the new node's
-    /// `NodeRef` is bound for subsequent effects in this rule firing.
-    Spawn { template: String, into_var: Option<String> },
+    /// Instantiate a registered class. The firing node becomes the new
+    /// instance's parent. If `into_var` is set, the new node's `NodeRef`
+    /// is bound for subsequent effects in this rule firing.
+    ///
+    /// `template` evaluates to a `Str` class name — usually a literal,
+    /// but a slot read makes the spawn target configurable at runtime
+    /// (an autoscaler spawning whatever its `template` slot names). The
+    /// named class may be a leaf or a compound; compounds are auto-wired
+    /// to the spawner via their input port.
+    Spawn { template: Expr, into_var: Option<String> },
     /// Despawn a node. Its edges are removed. In-flight packets
     /// targeting or originating from this node are dropped on
     /// delivery.

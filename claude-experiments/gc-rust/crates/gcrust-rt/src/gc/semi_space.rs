@@ -255,6 +255,19 @@ impl SemiSpace {
 
         // Read type info to determine object size (type_info slot is valid here)
         let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        // PRECISE-LAYOUT DETECTOR (see heap::gc_verify_armed): a traced slot
+        // pointing into from-space always targets a real object. An out-of-range
+        // type_id means a scalar leaked into a traced slot — panic loudly rather
+        // than index past the table. Never a silent conservative skip.
+        if crate::gc::heap::gc_verify_armed() {
+            assert!(
+                (type_id as usize) < self.type_table().len(),
+                "GC precise-layout violation (semi-space): traced slot points at \
+                 {old:p} whose header type_id={type_id} is out of range \
+                 (type_table len {}). A non-pointer reached a traced slot.",
+                self.type_table().len(),
+            );
+        }
         let info = &self.type_table()[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,

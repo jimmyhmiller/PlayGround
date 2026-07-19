@@ -1,0 +1,156 @@
+; selfhost/src/main.coil — self-host Coil compiler ENTRY, FULL build (LLVM +
+; native arm64 backends). The CLI dispatch / pipeline orchestration lives in the
+; shared, backend-agnostic selfhost/src/driver.coil; this file adds the LLVM
+; backend entry points (dump-ir-program / build-object / build-ir-program /
+; do-normalize) and injects them into driver-main as function pointers. The
+; LLVM-free build is selfhost/src/main_a64.coil (arm64 backend only).
+; Imports are FILE-RELATIVE (tool-1): sibling compiler modules resolve against
+; THIS file's directory (selfhost/src), so the compiler builds from any CWD; bare
+; stdlib names (alloc.coil, …) resolve to the bundled library from anywhere.
+(module main)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ffi.coil" :use *)
+(import "reader.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "parser.coil" :use *)
+(import "loader.coil" :use *)
+(import "resolve.coil" :use *)
+(import "check.coil" :use *)
+(import "mono.coil" :use *)
+(import "codegen.coil" :use *)
+(import "normalize.coil" :use *)
+(import "diag.coil" :use *)
+(import "comptime.coil" :use *)
+(import "metaengine.coil" :use *)
+(import "expander.coil" :use *)
+(import "comptime_eval.coil" :use *)   ; compiled comptime/const fold (interp deletion step 1)
+(import "codegen_a64.coil" :use *)
+(import "macho.coil" :use *)     ; MObj — for the in-memory comptime builder below
+(import "driver.coil" :use *)
+(import "cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
+
+; ---- LLVM backend entry points (the only libLLVM-dependent code) ----
+
+; Returns 1 if the pipeline succeeded (IR printed), 0 if a diagnostic was reported.
+(defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stdout)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (emit-ir-normalized a w mp triple) 1))
+      (None []   0))))
+
+; mono'd Program -> native object file. Mirrors src/lib.rs::compile_to_object_dbg
+; (the release/`src_path = None` path): build the module (codegen-module already
+; sets target + datalayout), create a host target machine (cpu "generic", no
+; features, opt Aggressive=3, reloc PIC=2, codemodel Default=0), run the
+; `default<O3>` pipeline through the new pass manager, then EmitToFile as an object.
+(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8)) (sanitize bool)] (-> i64)
+  (let [m         (codegen-module a mp triple-override)
+        triple    (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
+        targetout (alloc-stack (ptr i8))
+        errout    (alloc-stack (ptr i8))]
+    ; AsmPrinter init (targets themselves were initialized inside codegen-module).
+    (LLVMInitializeAArch64AsmPrinter) (LLVMInitializeX86AsmPrinter) (LLVMInitializeWebAssemblyAsmPrinter)
+    ; AsmParser init: `:lower shim` conventions emit inline asm, which LLVM cannot
+    ; stream without a parser for the target — it hard-errors and aborts the process.
+    (LLVMInitializeAArch64AsmParser) (LLVMInitializeX86AsmParser)
+    ; see codegen-module: the status and errout are load-bearing, not decoration.
+    (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
+        (let [w (stderr)]
+          (ps w "error: unsupported --target '") (ps w (cstr->slice triple)) (ps w "': ")
+          (ps w (cstr->slice (load errout))) (wb w 10)
+          (exit 1) 0)
+      0)
+    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
+          pbo (LLVMCreatePassBuilderOptions)
+          ; --sanitize=address (mem-7): append LLVM's AddressSanitizer module pass to
+          ; the O3 pipeline so the emitted object is instrumented. Only the PROGRAM
+          ; object takes this path — the metaprogram dylib passes sanitize=false, so
+          ; the compiler never dlopen's an ASan-instrumented object.
+          rp  (if sanitize (LLVMRunPasses m c"default<O3>,asan" tm pbo)
+                           (LLVMRunPasses m c"default<O3>" tm pbo))]
+      (if (not (icmp-eq (cast i64 rp) 0))
+          (do (ps (stderr) "codegen: LLVMRunPasses failed: ")
+              (ps (stderr) (cstr->slice (LLVMGetErrorMessage rp)))
+              (wb (stderr) 10) (abort) 0)
+        0)
+      (let [emiterr (alloc-stack (ptr i8))
+            rc      (LLVMTargetMachineEmitToFile tm m obj-cstr 1 emiterr)]
+        ; A non-writable object destination (e.g. a read-only dir, or `-o /dev/null`
+        ; whose `.o` lands in unwritable `/dev`) used to SIGABRT here with a bare
+        ; `Operation not permitted`, naming neither the path nor a remedy. Report a clear
+        ; located error and exit 1 — a usage mistake, not a compiler panic. `-o /dev/null`
+        ; itself is intercepted earlier and routed to `check` (diag-12).
+        (if (icmp-ne rc 0)
+            (let [w (stderr)]
+              (ps w "error: could not write object file '") (ps w (cstr->slice obj-cstr)) (ps w "': ")
+              (ps w (cstr->slice (load emiterr))) (wb w 10)
+              (ps w "  the output path is not writable — give `-o` a writable path, or use `coil check <file>` to typecheck without emitting an object\n")
+              (exit 1) 0)
+          0))
+      0)))
+
+; Returns 1 if the pipeline succeeded (object emitted), 0 if a diagnostic was
+; reported. build-cmd checks this and HALTS before linking on failure (mirroring
+; Rust: `compile_to_object_dbg(...)?` returns Err before `cc` is ever invoked).
+(defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (build-object a mp obj-cstr triple (sanitize-address?)) 1))
+      (None []   0))))
+
+; `__normalize` debug subcommand: print normalized textual LLVM IR of `src`.
+(defn do-normalize [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)] (ps w (normalize-ir a src)) 0))
+
+; Inject the LLVM backend entry points into the shared driver as function pointers.
+; default-backend = 1 (LLVM) — a bare `build` uses the LLVM backend, `--backend arm64`
+; switches to the native backend.
+(defn do-cimport [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (ci/cimport-cli a argc argv 2))
+
+; the compiled-metaprogram engine's object builder (metaengine.coil): a mono'd
+; metaprogram Program -> object file, via the LLVM backend (host triple).
+(defn meta-build-obj-llvm [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
+  ; NEVER sanitize the metaprogram dylib: it is dlopen'd into the compiler, and an
+  ; ASan-instrumented dylib loaded that late aborts the process (mem-7).
+  (build-object a mp obj (cast (ptr i8) 0) false))
+
+; The comptime object, handed back IN MEMORY so comptime_eval can load it straight
+; into executable pages (jit.coil) instead of forking `cc -dynamiclib` per site.
+;
+; This uses the ARM64 backend even in the LLVM build, for two reasons. A comptime
+; thunk always runs in THIS process on THIS machine, and the self-host always lowers
+; for the arm64 host regardless of --target, so host code is arm64 either way.
+; And the readback (comptime_eval.coil::cte-ty-size) walks the natural C layout that
+; codegen_a64's g-natural-layout! emits — so building the object with the arm64
+; backend puts the writer and the reader on the same layout, which the LLVM path
+; was not guaranteed to be (see the type-bytes / g-type-bytes divergence in
+; docs/INTERP_DELETION.md).
+(defn meta-build-mobj-llvm [(a (ptr Allocator)) (mp (ptr Program))] (-> MObj)
+  (cga64-build-mobj a mp "" ""
+                    (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                    (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                    false))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))
+  (set-meta-build-mobj! (fnptr-of meta-build-mobj-llvm))
+  (register-comptime-fold!)   ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
+  (driver-main argc argv
+               (fnptr-of build-ir-program)
+               (fnptr-of dump-ir-program)
+               (fnptr-of do-normalize)
+               (fnptr-of do-cimport)
+               1))

@@ -1,0 +1,17 @@
+// small_alloc — allocation of many SMALL, SHORT-LIVED heap objects. The opposite
+// of binary_trees: each Pair dies immediately (dead after the next line), so the
+// 1MB nursery fills and is reclaimed by cheap minor GCs — the case generational
+// GC is built for. Brackets the alloc-perf range against binary_trees (large,
+// promoted, never-reclaimed objects). Result = sum of (2i+1) for i in 0..5M = 5M².
+struct Pair { a: i64, b: i64 }
+
+fn main() -> i64 {
+    let mut i = 0;
+    let mut acc = 0;
+    while i < 5000000 {
+        let p = Pair { a: i, b: i + 1 };
+        acc = acc + p.a + p.b;
+        i = i + 1;
+    }
+    acc
+}

@@ -1578,7 +1578,12 @@ impl Renderer {
                 // slice in that column — that way deep rows still show content
                 // at zoom-out, but we don't push millions of overlapping
                 // instances. Wide slices (>= 1px) emit normally.
-                let mut pending_col: Option<(u32, i32, u64, [f32; 4])> = None;
+                //
+                // Color is *not* computed here — only when a slice actually
+                // becomes an instance (see `slice_color`). pending_col tracks the
+                // winning slice index and its duration; the color is hashed once,
+                // at flush, from that winner.
+                let mut pending_col: Option<(u32, i32, u64)> = None;
 
                 for i in row.start..row.end {
                     let idx = i as usize;
@@ -1586,24 +1591,11 @@ impl Renderer {
                     let d = active_slices.dur_ns[idx];
                     let x = self.viewport.ns_to_x(s);
                     let w_px = (d as f64 / self.viewport.ns_per_pixel) as f32;
-                    let name_id = active_slices.name[idx];
-                    let name = profile.strings.get(name_id);
-                    let cat_id = active_slices.category[idx];
-                    let cat_name_id = profile.categories[cat_id.0 as usize].name;
-                    let cat_name = profile.strings.get(cat_name_id);
-                    // Formats that don't carry meaningful categories fall back
-                    // to the bland built-in "default" — for those we use the
-                    // classic name-based warm palette so each function still
-                    // varies visually.
-                    let color = if cat_name == "default" {
-                        palette::color_for(name)
-                    } else {
-                        palette::color_for_blend(cat_name, name)
-                    };
 
                     if w_px >= 1.0 {
                         // Flush pending sub-pixel bucket first.
-                        if let Some((bidx, col, _, bcolor)) = pending_col.take() {
+                        if let Some((bidx, col, _)) = pending_col.take() {
+                            let bcolor = slice_color(&profile, active_slices, bidx as usize);
                             push_subpx_instance(
                                 &mut self.instances,
                                 &mut self.slice_indices,
@@ -1615,6 +1607,10 @@ impl Renderer {
                                 self.selected_slice == Some(bidx),
                             );
                         }
+                        // Formats that don't carry meaningful categories fall
+                        // back to the bland built-in "default" — for those the
+                        // classic name-based warm palette varies each function.
+                        let color = slice_color(&profile, active_slices, idx);
                         let x_clamped = x.max(-2.0);
                         let w_clamped = (w_px - (x_clamped - x)).min(max_x - x_clamped);
                         if w_clamped <= 0.0 {
@@ -1636,14 +1632,15 @@ impl Renderer {
                     } else {
                         let col = x.floor().max(0.0).min(max_x - 1.0) as i32;
                         match pending_col {
-                            Some((bidx, bcol, bdur, bcolor)) if bcol == col => {
+                            Some((_, bcol, bdur)) if bcol == col => {
+                                // Same pixel column: keep whichever slice is longer.
                                 if d > bdur {
-                                    pending_col = Some((i, col, d, color));
-                                } else {
-                                    pending_col = Some((bidx, bcol, bdur, bcolor));
+                                    pending_col = Some((i, col, d));
                                 }
                             }
-                            Some((bidx, bcol, _bdur, bcolor)) => {
+                            Some((bidx, bcol, _bdur)) => {
+                                let bcolor =
+                                    slice_color(&profile, active_slices, bidx as usize);
                                 push_subpx_instance(
                                     &mut self.instances,
                                     &mut self.slice_indices,
@@ -1654,15 +1651,16 @@ impl Renderer {
                                     bcolor,
                                     self.selected_slice == Some(bidx),
                                 );
-                                pending_col = Some((i, col, d, color));
+                                pending_col = Some((i, col, d));
                             }
                             None => {
-                                pending_col = Some((i, col, d, color));
+                                pending_col = Some((i, col, d));
                             }
                         }
                     }
                 }
-                if let Some((bidx, col, _, bcolor)) = pending_col.take() {
+                if let Some((bidx, col, _)) = pending_col.take() {
+                    let bcolor = slice_color(&profile, active_slices, bidx as usize);
                     push_subpx_instance(
                         &mut self.instances,
                         &mut self.slice_indices,
@@ -3412,6 +3410,22 @@ fn build_call_tree(profile: &Profile, self_dur: &[u64]) -> CallTree {
 /// Push a 1-pixel-wide bucket instance representing one or more sub-pixel
 /// slices that all share a pixel column. Indexed back to a real SoA slice so
 /// hover/click still work (the largest-duration slice in the bucket wins).
+/// Color for one slice. Pulled out of the per-slice cull loop so it runs only
+/// for slices that actually become instances — at zoom-out a deep row holds
+/// hundreds of thousands of sub-pixel slices that all collapse to one instance
+/// per pixel column, and hashing a color for every loser was the dominant cost.
+#[inline]
+fn slice_color(profile: &Profile, slices: &flame_core::SliceTable, idx: usize) -> [f32; 4] {
+    let name = profile.strings.get(slices.name[idx]);
+    let cat_id = slices.category[idx];
+    let cat_name = profile.strings.get(profile.categories[cat_id.0 as usize].name);
+    if cat_name == "default" {
+        palette::color_for(name)
+    } else {
+        palette::color_for_blend(cat_name, name)
+    }
+}
+
 fn push_subpx_instance(
     instances: &mut Vec<SliceInstance>,
     slice_indices: &mut Vec<u32>,

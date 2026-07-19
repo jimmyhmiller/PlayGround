@@ -1,0 +1,70 @@
+; Control-flow edges: labeled break/continue across nesting, break carrying
+; aggregate values, divergent match arms, if with one/both diverging branches.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+(import "lib/control.coil" :use *)
+(import "lib/result.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defstruct Pair [(x i64) (y i64)])
+
+; labeled break out of a nested loop with a value
+(defn find-pair [(target i64)] (-> Pair)
+  (let [(mut i) 0]
+    (loop :outer
+      (if (icmp-ge (load i) 20) (break :outer (let [p (alloc-stack Pair)]
+                                                (store! (field p x) -1) (store! (field p y) -1) (load p)))
+        (do (let [(mut j) 0]
+              (loop (if (icmp-ge (load j) 20) (break)
+                (do (if (icmp-eq (iadd (imul (load i) 10) (load j)) target)
+                        (break :outer (let [p (alloc-stack Pair)]
+                                        (store! (field p x) (load i)) (store! (field p y) (load j)) (load p)))
+                      0)
+                    (store! j (iadd (load j) 1))))))
+            (store! i (iadd (load i) 1)))))))
+
+; continue skips odd numbers
+(defn sum-evens [(n i64)] (-> i64)
+  (let [(mut i) 0 (mut tot) 0]
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (store! i (iadd (load i) 1))
+            (if (icmp-eq (irem (load i) 2) 1) (continue) 0)
+            (store! tot (iadd (load tot) (load i))))))
+    (load tot)))
+
+; a diverging match arm (break out of the enclosing loop from inside a match)
+(defn until-err [(n i64)] (-> i64)
+  (let [(mut i) 0 (mut acc) 0]
+    (loop
+      (do (let [r (if (icmp-gt (load i) n) (Err [i64 i64] (load acc)) (Ok [i64 i64] (load i)))]
+            (match r
+              (Err [v] (break v))
+              (Ok [v] (store! acc (iadd (load acc) v)))))
+          (store! i (iadd (load i) 1))))))
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    (let [p (find-pair 137) pp (alloc-stack Pair)]
+      (store! pp p)
+      (out w "fx" (load (field pp x)))
+      (out w "fy" (load (field pp y))))
+    (let [p (find-pair 999) pp (alloc-stack Pair)]
+      (store! pp p)
+      (out w "nx" (load (field pp x))))
+    (out w "evens" (sum-evens 10))
+    (out w "untilerr" (until-err 6))
+    ; if with a diverging then-branch inside a loop
+    (let [(mut k) 0 (mut steps) 0]
+      (loop
+        (if (icmp-gt (load k) 100)
+            (break)
+          (do (store! k (iadd (imul (load k) 2) 1))
+              (store! steps (iadd (load steps) 1)))))
+      (out w "steps" (load steps))
+      (out w "k" (load k)))
+    0))

@@ -15,7 +15,7 @@ fn main() -> i64 {
     let mut buf: Array<u8> = array_new(5);
     memset(as_c_bytes(buf), 7, 5);
     // The write-back means buf now holds [7,7,7,7,7].
-    let sum = (array_get(buf, 0) as i64) + (array_get(buf, 4) as i64); // 7 + 7 = 14
+    let sum = (array_get_unchecked(buf, 0) as i64) + (array_get_unchecked(buf, 4) as i64); // 7 + 7 = 14
 
     // Read-only: compare two equal byte arrays -> memcmp returns 0.
     let mut a: Array<u8> = array_new(3);

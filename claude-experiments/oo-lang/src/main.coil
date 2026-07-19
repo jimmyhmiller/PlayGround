@@ -1,0 +1,163 @@
+; main.coil — the `scry` CLI (Phase 1: front end only).
+;   scry parse-dump <file.scry>   parse and print the AST (stable golden format)
+;   scry run <file.scry>          hard-errors: not implemented until Phase 3
+(module app)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "types.coil" :use *)
+(import "typecheck.coil" :use *)
+(import "compile.coil" :use *)
+(import "server.coil" :use *)
+(import "portal.coil" :use *)
+(import "arraylist.coil" :use *)
+
+(defn read-file [(path (ptr i8))] (-> (ptr u8))
+  (let [file (fopen path c"rb")]
+    (if (= (cast i64 file) 0)
+      (do (w-cstr 2 c"scry: could not open file: ") (w-cstr 2 path) (w-cstr 2 c"\n")
+          (exit (cast i32 74)) (cast (ptr u8) 0))
+      (do
+        (fseek file 0 (cast i32 2))
+        (let [file-size (ftell file)]
+          (rewind file)
+          (let [buffer (xalloc (+ file-size 1))]
+            (let [bytes-read (fread (cast (ptr i8) buffer) 1 file-size file)]
+              (store! (index buffer bytes-read) (cast u8 0))
+              (fclose file)
+              buffer)))))))
+
+(defn cstr-eq [(a (ptr i8)) (b (ptr i8))] (-> bool) (= (cast i64 (strcmp a b)) 0))
+
+(defn usage [] (-> i64)
+  (w-cstr 2 c"scry — the Scry compiler (Phase 2: front end + typechecker)\n")
+  (w-cstr 2 c"usage:\n")
+  (w-cstr 2 c"  scry parse-dump <file.scry>   parse and print the AST\n")
+  (w-cstr 2 c"  scry check <file.scry>        typecheck (follows imports)\n")
+  (w-cstr 2 c"  scry run <file.scry>          build, run main(), serve the live viewer\n")
+  (w-cstr 2 c"  scry inspect <file.scry>      serve the static schema WITHOUT running main()\n")
+  (w-cstr 2 c"  scry schema-json <file.scry>  dump {schema,views,actions} JSON and exit (no server)\n")
+  (w-cstr 2 c"  scry portal                  run the persistent hub (localhost:7357) programs pop up in\n")
+  0)
+
+; scry portal — the persistent reverse-proxy hub (DECISIONS #13). Binds :7357, serves the viewer
+; shell, and proxies /p/<id>/eval to whichever program registered under <id>. Runs until Ctrl-C.
+(defn cmd-portal [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  ; resolve argv0 to an absolute path so the portal can shell `<scry> schema-json <file>` for
+  ; transient static inspection of discovered projects (DECISIONS #16), regardless of its cwd.
+  (let [abuf (cast (ptr i8) (xalloc 4096))
+        scry-path (let [r (realpath (load (index argv 0)) abuf)] (if (= (cast i64 r) 0) (load (index argv 0)) abuf))]
+    (scry-portal (resolve-viewer-dir (load (index argv 0))) scry-path)))
+
+(defn cmd-check [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry check: expected a file argument\n") 64)
+    (run-check (load (index argv 2)))))
+
+(defn cmd-dump-types [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry dump-types: expected a file argument\n") 64)
+    (run-dump-types (load (index argv 2)))))
+
+(defn cmd-parse-dump [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry parse-dump: expected a file argument\n") 64)
+    (let [path (load (index argv 2))
+          src (read-file path)]
+      (if (= (lex-file src path) 1)
+        1
+        (do
+          (parser-init (lexer-tokens) path)
+          (dump-program (parse-program))
+          0)))))
+
+; resolve the viewer/ asset directory: next to argv[0], else CWD.
+(defn resolve-viewer-dir [(argv0 (ptr i8))] (-> (ptr i8))
+  (let [cand (join-path (dirname argv0) c"viewer/")
+        idx (join-path cand c"index.html")]
+    (if (can-open idx) cand (cast (ptr i8) c"viewer/"))))
+
+; scry run [--dump-arenas | --no-viewer | --readonly] <file.scry>
+(defn cmd-run [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut file) (cast (ptr i8) 0) (mut dump) false (mut noview) false (mut ro) false (mut i) 2]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"--dump-arenas") (do (store! dump true) 0)
+                (cstr-eq a c"--no-viewer") (do (store! noview true) 0)
+                (cstr-eq a c"--readonly") (do (store! ro true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (= (cast i64 (load file)) 0) (do (w-cstr 2 c"scry run: expected a file argument\n") 64)
+      (if (load dump)
+        (scry-run (load file) true)
+        (scry-serve (load file) (resolve-viewer-dir (load (index argv 0))) (load noview) (load ro))))))
+
+; scry inspect [--no-viewer] <file.scry>
+; Typecheck + build the program (arenas/types exist, EMPTY) and serve the eval channel, but
+; never run main(). "See the code before it runs": types()/schema()/fields()/methods() all
+; answer the static schema with liveCount 0. The same graph view becomes the live view once
+; you `scry run` the file.
+(defn cmd-inspect [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut file) (cast (ptr i8) 0) (mut noview) false (mut i) 2]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"--no-viewer") (do (store! noview true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (= (cast i64 (load file)) 0) (do (w-cstr 2 c"scry inspect: expected a file argument\n") 64)
+      (scry-inspect (load file) (resolve-viewer-dir (load (index argv 0))) (load noview)))))
+
+; scry eval <file.scry> -e "<expr>" [-e "<expr>" ...] [--readonly]
+; Multiple -e run in sequence against ONE live process (main() runs to completion first),
+; each printing its own JSON result line — this is the browser-free path for live-change
+; golden tests (define, then call, in the same process).
+(defn cmd-eval [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut file) (cast (ptr i8) 0) (mut ro) false (mut i) 2
+        (mut exprs) (al-new [(ptr i8)] (alc-global))]
+    (loop (if (< (load i) argc)
+            (let [a (load (index argv (load i)))]
+              (cond
+                (cstr-eq a c"-e") (do (store! i (+ (load i) 1)) (if (< (load i) argc) (do (al-push! (mut exprs) (load (index argv (load i)))) 0) 0) 0)
+                (cstr-eq a c"--readonly") (do (store! ro true) 0)
+                (do (store! file a) 0))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (or (= (cast i64 (load file)) 0) (= (al-len (load exprs)) 0))
+      (do (w-cstr 2 c"usage: scry eval <file.scry> -e \"<expr>\" [-e ...] [--readonly]\n") 64)
+      (scry-eval-cli (load file) (load exprs) (load ro)))))
+
+; scry schema-json <file> — static reflection dump {schema,views,actions} to stdout, then exit.
+; No server (DECISIONS #16). The portal shells this transiently to inspect a project statically.
+(defn cmd-schema-json [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry schema-json: expected a file argument\n") 64)
+    (scry-schema-json (load (index argv 2)))))
+
+(defn cmd-dump-bytecode [(argc i64) (argv (ptr (ptr i8)))] (-> i64)
+  (if (< argc 3)
+    (do (w-cstr 2 c"scry dump-bytecode: expected a file argument\n") 64)
+    (scry-dump-bytecode (load (index argv 2)))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (ctx-init)
+  (set-argv0 (load (index argv 0)))   ; 07-modules.md §3: std root defaults to dir(argv0)+"std/"
+  (let [n (cast i64 argc)]
+    (if (< n 2)
+      (do (usage) 64)
+      (let [sub (load (index argv 1))]
+        (cond
+          (cstr-eq sub c"parse-dump") (cmd-parse-dump n argv)
+          (cstr-eq sub c"check") (cmd-check n argv)
+          (cstr-eq sub c"dump-types") (cmd-dump-types n argv)
+          (cstr-eq sub c"dump-bytecode") (cmd-dump-bytecode n argv)
+          (cstr-eq sub c"run") (cmd-run n argv)
+          (cstr-eq sub c"inspect") (cmd-inspect n argv)
+          (cstr-eq sub c"schema-json") (cmd-schema-json n argv)
+          (cstr-eq sub c"portal") (cmd-portal n argv)
+          (cstr-eq sub c"eval") (cmd-eval n argv)
+          (do (w-cstr 2 c"scry: unknown command\n") (usage) 64))))))

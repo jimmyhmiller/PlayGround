@@ -1,0 +1,31 @@
+(defstruct Point [(x i64) (y i64)])
+
+(defstruct Rect [(lo Point) (hi Point)])
+
+(defn
+  area
+  [(r Rect)]
+  (-> i64)
+  (imul
+    (isub (load (field (field r hi) x)) (load (field (field r lo) x)))
+    (isub (load (field (field r hi) y)) (load (field (field r lo) y)))))
+
+(defn
+  translate
+  [(p (mut Point)) (dx i64) (dy i64)]
+  (-> i64)
+  (store! (field p x) (iadd (load (field p x)) dx))
+  (store! (field p y) (iadd (load (field p y)) dy))
+  0)
+
+(defn
+  main
+  []
+  (-> i64)
+  (let
+    [(mut r) (zeroed Rect)]
+    (store! (field (field r hi) x) 5)
+    (store! (field (field r hi) y) 5)
+    (translate (mut (field r hi)) 1 2)
+    (area r)))
+

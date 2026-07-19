@@ -1,0 +1,175 @@
+; ioutil.coil — libc externs + small write helpers, declared ONCE here and
+; :use *-imported everywhere (the guide warns externs are NOT deduped across
+; modules, so every libc binding lives in exactly this module).
+(module ioutil)
+
+; fd is i32 (POSIX `int fd`), matching coil's prelude declaration (lib/slice.coil). One C
+; symbol, one signature — a wider fd here is rejected outright (it silently built calls
+; against the prelude's type before, which is invisible on arm64 but invalid wasm). The
+; w-* helpers still take an i64 fd for their call sites and narrow it at the boundary.
+(extern write    :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+(extern snprintf :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern strlen   :cc c [(ptr i8)] (-> isize))              ; size_t strlen(const char*)
+(extern strcmp   :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
+(extern malloc   :cc c [isize] (-> (ptr i8)))            ; void* malloc(size_t)
+(extern exit     :cc c [i32] (-> void))
+(extern fopen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fseek    :cc c [(ptr i8) i64 i32] (-> i32))
+(extern ftell    :cc c [(ptr i8)] (-> i64))
+(extern rewind   :cc c [(ptr i8)] (-> void))
+(extern fread    :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fwrite   :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose   :cc c [(ptr i8)] (-> i32))
+; Phase 3 runtime: memory + time (declared here, the one extern home)
+(extern realloc  :cc c [(ptr i8) isize] (-> (ptr i8)))   ; void* realloc(void*, size_t)
+(extern free     :cc c [(ptr i8)] (-> void))
+(extern memcpy   :cc c [(ptr i8) (ptr i8) isize] (-> (ptr i8)))  ; void* memcpy(void*, const void*, size_t)
+(extern memset   :cc c [(ptr i8) :i64 isize]     (-> (ptr i8)))  ; void* memset(void*, int, size_t)
+(extern gettimeofday :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern nanosleep    :cc c [(ptr i8) (ptr i8)] (-> i32))
+; Phase 4 server: BSD sockets, non-local exit (setjmp/longjmp), and fd redirection
+; (for capturing compiler diagnostics into an eval response). Declared here — the one
+; extern home — and :use *-imported by the server / eval-runtime modules.
+(extern socket     :cc c [i32 i32 i32] (-> i32))
+(extern bind       :cc c [i32 (ptr i8) i32] (-> i32))
+(extern listen     :cc c [i32 i32] (-> i32))
+(extern accept     :cc c [i32 (ptr i8) (ptr i8)] (-> i32))
+(extern setsockopt :cc c [i32 i32 i32 (ptr i8) i32] (-> i32))
+; MUST match coil's prelude declaration (lib/io.coil) EXACTLY — a module holds ONE function
+; per C symbol, and a disagreeing redeclaration is rejected. Note `isize`/`i32`, not i64:
+; ssize_t/size_t are target-width (32-bit on wasm32, 64-bit on arm64) and fd is `int`.
+; Declaring these as fixed i64 is invisible on arm64 but emits an invalid wasm module.
+(extern read       :cc c [i32 (ptr i8) isize] (-> isize))  ; ssize_t read(int, void*, size_t)
+(extern poll       :cc c [(ptr i8) i32 i32] (-> i32))   ; struct pollfd*, nfds, timeout-ms
+(extern close      :cc c [i32] (-> i32))
+(extern usleep     :cc c [i32] (-> i32))
+(extern setjmp     :cc c [(ptr i8)] (-> i32))
+(extern longjmp    :cc c [(ptr i8) i32] (-> void))
+(extern open       :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
+(extern lseek      :cc c [i32 i64 i32] (-> i64))
+(extern unlink     :cc c [(ptr i8)] (-> i32))
+(extern dup        :cc c [i32] (-> i32))
+(extern dup2       :cc c [i32 i32] (-> i32))
+(extern getpid     :cc c [] (-> i32))
+; Phase 8b Env builtin: read a process environment variable. Declared here (the one extern home).
+(extern getenv     :cc c [(ptr i8)] (-> (ptr i8)))
+(extern atoi       :cc c [(ptr i8)] (-> i32))
+; Phase V5 portal static discovery (DECISIONS #16): directory scan, file mtime, absolute paths,
+; and a transient subprocess (popen -> read its stdout -> pclose) to shell `scry schema-json`.
+; Declared here — the one extern home — and :use *-imported by portal.coil. On arm64 macOS the
+; bare `stat` symbol IS the 64-bit-inode variant (no $INODE64 suffix), so `struct stat` is 144
+; bytes with st_mtimespec.tv_sec at offset 48 (verified via offsetof); we read that i64.
+(extern opendir  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern readdir  :cc c [(ptr i8)] (-> (ptr i8)))   ; -> struct dirent* (d_type@20 u8, d_name@21)
+(extern closedir :cc c [(ptr i8)] (-> i32))
+(extern stat     :cc c [(ptr i8) (ptr i8)] (-> i32))   ; (path, struct stat[144]) -> 0 ok
+(extern realpath :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern popen    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))   ; -> FILE*
+(extern pclose   :cc c [(ptr i8)] (-> i32))
+(extern fileno   :cc c [(ptr i8)] (-> i32))   ; FILE* -> raw fd (so a popen pipe can be poll'd cooperatively)
+; Phase 8a HTTP client: libcurl (system /usr/lib/libcurl.4.dylib). Declared here — the one
+; extern home — and :use *-imported by http.coil. curl's ABI is stable; the option/info
+; integers used by http.coil are baked with `; curl.h:` comments there. setopt/getinfo are
+; variadic in C (the option int selects the vararg's type); we always pass an 8-byte value.
+(extern curl_global_init      :cc c [i64] (-> i32))
+(extern curl_easy_init        :cc c [] (-> (ptr i8)))
+; Phase 10 portal: a plain BLOCKING curl_easy_perform is used by the reverse-proxy hub and by
+; best-effort program->portal registration (neither runs a VM, so no cooperative multi loop is
+; needed). Declared here — the one extern home.
+(extern curl_easy_perform     :cc c [(ptr i8)] (-> i32))
+(extern curl_easy_setopt      :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_getinfo     :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_cleanup     :cc c [(ptr i8)] (-> void))
+(extern curl_easy_strerror    :cc c [i32] (-> (ptr i8)))
+(extern curl_slist_append     :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern curl_slist_free_all   :cc c [(ptr i8)] (-> void))
+(extern curl_multi_init       :cc c [] (-> (ptr i8)))
+(extern curl_multi_add_handle :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern curl_multi_remove_handle :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern curl_multi_perform    :cc c [(ptr i8) (ptr i8)] (-> i32))   ; (multi, int* running_handles)
+(extern curl_multi_poll       :cc c [(ptr i8) (ptr i8) i32 i32 (ptr i8)] (-> i32)) ; (multi, extra_fds, extra_nfds, timeout_ms, int* numfds)
+(extern curl_multi_info_read  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))  ; (multi, int* msgs_in_queue) -> CURLMsg*
+(extern curl_multi_cleanup    :cc c [(ptr i8)] (-> i32))
+(extern curl_multi_strerror   :cc c [i32] (-> (ptr i8)))
+
+; ---- i64-facing wrappers over the isize-typed libc calls ----
+; The prelude declares strlen/realloc/memcpy/memset with target-width `isize` (32-bit on
+; wasm32, 64-bit on arm64) and one C symbol admits one signature, so those externs must
+; match it exactly. Scry's own code speaks i64 throughout; these wrappers are the single
+; boundary where the width is converted, instead of casting at ~90 call sites.
+(defn s-len   [(s (ptr i8))] (-> i64) (cast i64 (strlen s)))
+(defn xrealloc [(p (ptr i8)) (n i64)] (-> (ptr i8)) (realloc p (cast isize n)))
+(defn xmemcpy  [(d (ptr i8)) (s (ptr i8)) (n i64)] (-> (ptr i8)) (memcpy d s (cast isize n)))
+(defn xmemset  [(d (ptr i8)) (c i64) (n i64)] (-> (ptr i8)) (memset d c (cast isize n)))
+
+; ---- wasm host HTTP ----
+; On wasm there is no libcurl. The host serves the request instead: it gets method/url/body
+; as (ptr,len) pairs, writes the status through `out-status`, and returns a malloc'd
+; NUL-terminated response body. The browser demo answers with a real Anthropic-shaped JSON
+; body, so the agent's normal buildBody -> HTTP -> parseAnthropic path (and std.json with it)
+; runs for real instead of being short-circuited. Undefined on native — never referenced there.
+(extern host_http :cc c [(ptr u8) i64 (ptr u8) i64 (ptr u8) i64 (ptr i64)] (-> (ptr u8)))
+
+; Process.run on wasm: there is no fork/exec in a browser, so the host runs the command
+; against its in-memory filesystem (a small mock shell) and returns the combined output as a
+; malloc'd NUL-terminated string — the same contract Process.run has natively (stdout+stderr).
+(extern host_proc_run :cc c [(ptr u8) i64] (-> (ptr u8)))
+
+; ---- compile-time target branch ----
+; `(when-wasm A B)` compiles to A on wasm32 and to B everywhere else — the branch not taken
+; is never emitted, so a wasm-only code path costs the native build NOTHING (not even a
+; predictable test). This is how the green-thread scheduler hooks the dispatch loop without
+; putting a per-instruction check in the native VM. Requires a coil new enough that
+; (target-arch) reflects --target at macro-expansion time (commit d85202678).
+(defn when-wasm [(a Code) (b Code)] (-> Code)
+  (if (code-eq (target-arch) `wasm32) a b))
+
+; ---- diagnostic capture sink ----
+; When capture is active, writes to fd 2 (stderr) append into this buffer instead of hitting
+; the real stderr — so an eval can recover the typechecker's message with NO /tmp temp file and
+; NO dup2/fd redirection. This is the choke point that makes diagnostic capture work identically
+; on native and on wasm (where there is no fd 2, no open/dup2/lseek). Toggled by evalrt's
+; diag-capture-begin/end; the captured bytes are read back via diag-sink-buf/diag-sink-len.
+(defn diag-sink-on  [] (-> (ptr i64)) (alloc-static i64))
+(defn diag-sink-buf [] (-> (ptr u8)) (cast (ptr u8) (alloc-static (array u8 4096))))
+(defn diag-sink-len [] (-> (ptr i64)) (alloc-static i64))
+
+(defn diag-sink-append [(p (ptr i8)) (n i64)] (-> i64)
+  (let [cur (load (diag-sink-len)) room (- 4095 cur)
+        m (if (< n room) n room) (mut i) 0]
+    (if (> m 0)
+      (loop (if (< (load i) m)
+              (do (store! (index (diag-sink-buf) (+ cur (load i)))
+                          (load (index (cast (ptr u8) p) (load i))))
+                  (store! i (+ (load i) 1)) 0)
+              (break)))
+      0)
+    (store! (diag-sink-len) (+ cur (if (> m 0) m 0)))
+    (store! (index (diag-sink-buf) (load (diag-sink-len))) (cast u8 0))
+    0))
+
+; the single fd-write choke point: a capturable fd 2, everything else straight to write().
+(defn emit [(fd i64) (p (ptr i8)) (n i64)] (-> i64)
+  (if (and (= fd 2) (= (load (diag-sink-on)) 1))
+    (diag-sink-append p n)
+    (do (write (cast i32 fd) p (cast isize n)) 0))
+  0)
+
+; fd 1 = stdout, fd 2 = stderr
+(defn w-bytes [(fd i64) (p (ptr u8)) (n i64)] (-> i64) (emit fd (cast (ptr i8) p) n) 0)
+(defn w-cstr  [(fd i64) (s (ptr i8))] (-> i64) (emit fd s (cast i64 (s-len s))) 0)
+
+(defn w-int [(fd i64) (v i64)] (-> i64)
+  (let [buf (alloc-stack (array u8 32))
+        n (snprintf (cast (ptr i8) (index buf 0)) 32 c"%lld" v)]
+    (emit fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    0))
+
+(defn w-num [(fd i64) (x f64)] (-> i64)
+  (let [buf (alloc-stack (array u8 64))
+        n (snprintf (cast (ptr i8) (index buf 0)) 64 c"%g" x)]
+    (emit fd (cast (ptr i8) (index buf 0)) (cast i64 n))
+    0))
+
+(defn xalloc [(n i64)] (-> (ptr u8)) (cast (ptr u8) (malloc (cast isize n))))

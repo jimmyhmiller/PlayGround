@@ -1,0 +1,24 @@
+(defn
+  half
+  [(n i64)]
+  (-> (Result i64 i64))
+  (if (icmp-eq (irem n 2) 0) (Ok (idiv n 2)) (Err n)))
+
+(defn
+  sum-halves
+  [(n i64)]
+  (-> (Result i64 i64))
+  (loop
+    :try
+    (break
+      :try
+      (do
+        (let
+          [a
+            (match (half n) (Ok [$g0] $g0) (Err [$g1] (break :try (Err $g1))))
+            b
+            (match (half a) (Ok [$g2] $g2) (Err [$g3] (break :try (Err $g3))))]
+          (Ok (iadd a b)))))))
+
+(defn main [] (-> :i64) (match (sum-halves 8) (Ok [v] v) (Err [e] e)))
+

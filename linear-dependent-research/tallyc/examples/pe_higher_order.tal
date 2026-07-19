@@ -1,0 +1,77 @@
+// HIGHER-ORDER interpreter (defunctionalized) specialised by PARTIAL EVALUATION.
+//
+//   tally run examples/pe_higher_order.tal    → 52
+//
+// A lambda-calculus interpreter — with first-class functions — written in a
+// language that HAS NO LAMBDAS. Closures are DEFUNCTIONalized: a runtime `Val`
+// is either an int or a closure `CloV(body, env)` (a first-order record of the
+// function's body and captured environment); `eval` and `apply` are ordinary
+// mutually-recursive top-level functions. The environment is a runtime list.
+//
+// PE specialises this to a FIXED object program `prog2` — the mutual recursion
+// unfolds against the program structure, the closures are built and applied at
+// compile time, and the environment lookups reduce (PE sees through a list
+// spine like `ECons(IntV(x), ENil)` even though the value `x` is dynamic). What
+// remains is straight-line arithmetic on the dynamic input:
+//
+//   prog2 = (\f. f (f env0)) (\y. y + y)      interpreted with env0 = x
+//         = ((x + x) + (x + x)) = 4*x
+//   runD(x)  specialises to  4*x   (runD 0 + runD 3 + runD 10 = 0 + 12 + 40 = 52)
+//
+// The interpretive CONTROL overhead (recursion, AST + closure dispatch) is
+// fully removed; a little value-boxing at the boundary remains (the untyped
+// `Val` union) — removable with a dependently-typed tagless interpreter.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+boxed enum Expr {
+  EVar : Nat -> Expr,          // de Bruijn index
+  ELit : Nat -> Expr,
+  ELam : Expr -> Expr,         // body (binds var 0)
+  EApp : Expr -> Expr -> Expr,
+  EAdd : Expr -> Expr -> Expr,
+}
+boxed enum Val { IntV : Nat -> Val, CloV : Expr -> Env -> Val }   // defunctionalized closure
+boxed enum Env { ENil : Env, ECons : Val -> Env -> Env }
+
+lookup : Env -> Nat -> Val
+%partial
+fn lookup(env, i) {
+  match env {
+    ENil => IntV(Zero),
+    ECons(v, rest) => match i { Zero => v, Succ(k) => lookup(rest, k) },
+  }
+}
+toInt : Val -> Nat
+fn toInt(v) { match v { IntV(n) => n, CloV(b, e) => Zero } }
+
+eval : Expr -> Env -> Val
+%partial
+fn eval(e, env) {
+  match e {
+    EVar(i)    => lookup(env, i),
+    ELit(n)    => IntV(n),
+    ELam(body) => CloV(body, env),
+    EApp(f, a) => apply(eval(f, env), eval(a, env)),
+    EAdd(x, y) => IntV(toInt(eval(x, env)) + toInt(eval(y, env))),
+  }
+}
+apply : Val -> Val -> Val
+%partial
+fn apply(f, a) {
+  match f {
+    IntV(n)         => IntV(n),
+    CloV(body, env) => eval(body, ECons(a, env)),
+  }
+}
+
+// (\f. f (f env0)) (\y. y + y)   — env0 is the dynamic input (env index 1)
+prog2 : Expr
+fn prog2() { EApp(ELam(EApp(EVar(Zero), EApp(EVar(Zero), EVar(Succ(Zero))))),
+                  ELam(EAdd(EVar(Zero), EVar(Zero)))) }
+runD : Nat -> Nat
+fn runD(x) { toInt(eval(prog2(), ECons(IntV(x), ENil))) }
+
+main : Nat
+fn main() { runD(0) + runD(3) + runD(10) }

@@ -1,0 +1,46 @@
+[package]
+name = "livetype"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The LLVM-free runtime core (IR, verifier, interpreter, thread-safe tier).
+livetype-core = { path = "crates/livetype-core" }
+# LLVM backend (JIT) via Inkwell. Same fork/feature the gc-rust reference uses.
+# LLVM 21 accelerates execution without owning continuation semantics: the Rust
+# runtime still owns frame push/pop, migration barriers, conditions, and GC.
+inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
+
+[[bin]]
+name = "livetype-demo"
+path = "src/main.rs"
+
+[[bin]]
+name = "livetype-poc"
+path = "src/poc.rs"
+
+[[bin]]
+name = "livetype-repl"
+path = "src/repl.rs"
+
+[[bin]]
+name = "livetype-liveloop"
+path = "src/live_loop.rs"
+
+[[bin]]
+name = "livetype-ffi-gui"
+path = "src/ffi_gui.rs"
+
+[[bin]]
+name = "livetype-bench"
+path = "src/bench.rs"
+
+[workspace]
+# `livetype-wasm` is a member but is never built for the host: it targets
+# wasm32-unknown-unknown (see wasm/build.sh) and depends only on the LLVM-free
+# core, so a host `cargo test --workspace` neither needs nor builds it.
+members = ["crates/livetype-core", "crates/livetype-wasm"]
+

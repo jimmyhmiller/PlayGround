@@ -1,0 +1,6 @@
+(program
+  (class Depot
+    (field stock
+      (type Inventory (type List (type Tool))))
+    (field lookup
+      (type Map (type String) (type List (type Int))))))

@@ -1,0 +1,18 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let a
+        (binary ||
+          (binary &&
+            (id p)
+            (id q))
+          (id r)))
+      (let b
+        (binary ||
+          (binary <
+            (id n)
+            (int 0))
+          (binary >
+            (id n)
+            (int 5)))))))

@@ -1,0 +1,4 @@
+interface Tool {
+  fn name() -> String
+  fn call(args: Map<String, String>) -> Result<String, ToolError>
+}

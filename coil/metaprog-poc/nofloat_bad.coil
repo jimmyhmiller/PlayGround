@@ -1,0 +1,7 @@
+(module app)
+(import "nofloat.coil" :use *)
+(checker check-nofloat)
+; getf returns f64 — the CALL (getf) has inferred type f64, flagged though no float
+; literal appears at the call site. Program is type-correct (cast to i64).
+(defn getf [] (-> f64) 1.5)
+(defn main [] (-> i64) (cast i64 (getf)))

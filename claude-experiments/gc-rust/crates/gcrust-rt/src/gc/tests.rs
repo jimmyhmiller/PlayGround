@@ -853,6 +853,128 @@ fn semi_space_pointer_fixup() {
     assert_ne!(new_child, child, "child should have moved too");
 }
 
+/// ADVERSARIAL precise-layout proof for the int/pointer-discrimination P0.
+///
+/// Models a monomorphized mixed enum like `Either { L(ref), R(i64) }`: one
+/// TRACED pointer slot (`with_fields(1)`) followed by an UNTRACED raw i64
+/// (`with_raw_bytes(8)` — the `R(i64)` payload region). Into that raw region we
+/// store the *bit pattern of a real, live, in-from-space heap address* — the
+/// maximally adversarial integer: it IS a valid 8-aligned from-space pointer, so
+/// the ONLY thing stopping the collector from relocating it is that the raw
+/// region is never scanned. (A small int like 42 proves nothing — it is not in
+/// from-space, so `from.contains` is false and it could never trip the bug even
+/// if it leaked into a traced slot.)
+///
+/// If the layout is genuinely precise, this adversarial int is UNTOUCHED across
+/// a collection (it keeps the stale pre-move address) even though the object it
+/// numerically points at moves. If a scalar could ever reach a traced slot,
+/// THIS is the value that would be silently mis-moved — the documented bug.
+#[test]
+fn semi_space_adversarial_int_payload_in_raw_region_not_relocated() {
+    // slot 0: traced (the `L` ref); raw i64: the `R(i64)` payload — UNTRACED.
+    static MIXED: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1)
+        .with_raw_bytes(8);
+    let type_table = vec![MIXED];
+
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    // `referee` is a real object kept live via the traced slot (so it survives
+    // and is relocated). `mixed` carries the adversarial int in its raw region.
+    let referee = gc.alloc_obj::<Compact>(&MIXED, 0);
+    let mixed = gc.alloc_obj::<Compact>(&MIXED, 0);
+
+    unsafe { write_u64_field(mixed, &MIXED, 0, referee as u64) }; // traced -> referee
+    let raw_off = MIXED.raw_data_offset();
+    let adversarial = referee as u64; // a REAL 8-aligned from-space address
+    assert_eq!(adversarial & 0b111, 0, "from-space objects are 8-aligned");
+    assert!(gc.contains(adversarial as *const u8), "addr is in from-space");
+    unsafe { core::ptr::write(mixed.add(raw_off) as *mut u64, adversarial) };
+
+    let root = SingleRoot(Cell::new(mixed as u64));
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+
+    // After GC both `mixed` and `referee` have moved.
+    let new_mixed = IdentityPtrPolicy::try_decode_ptr(root.0.get()).unwrap();
+    let new_referee = unsafe { read_u64_field(new_mixed, &MIXED, 0) };
+    assert!(gc.contains(new_referee as *const u8));
+    assert_ne!(new_referee, referee as u64, "traced slot must follow the move");
+
+    // THE PROOF: the raw-region int is UNCHANGED. The collector never scanned
+    // it, so even an int whose bits are a valid from-space address is never
+    // relocated. (It is now a stale/dangling address — correct: a scalar is
+    // opaque to the GC.) If this fires, a scalar reached a traced slot.
+    let raw_after = unsafe { core::ptr::read(new_mixed.add(raw_off) as *const u64) };
+    assert_eq!(
+        raw_after, adversarial,
+        "raw-region scalar was relocated — a non-pointer leaked into a traced \
+         slot (precise-layout violation)"
+    );
+}
+
+/// NEGATIVE CONTROL for the proof above: the collector itself does NOT and
+/// cannot distinguish an integer from a pointer — a real from-space address in
+/// a TRACED slot is unconditionally relocated. This is the counterfactual: if
+/// the front end ever placed a scalar in a traced slot, this is the silent
+/// mis-move that would result. Soundness rests ENTIRELY on precise layout
+/// (scalars in the raw region), never on the collector guessing — which is why
+/// the conservative `type_id`-range silent-skip was removed in favour of a
+/// layout invariant + a panicking detector.
+#[test]
+fn semi_space_traced_slot_relocated_regardless_of_value_negative_control() {
+    static TWO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    let type_table = vec![TWO];
+    let mut gc = SemiSpace::new::<Compact>(4096);
+    let referee = gc.alloc_obj::<Compact>(&TWO, 0);
+    let holder = gc.alloc_obj::<Compact>(&TWO, 0);
+    unsafe {
+        write_u64_field(holder, &TWO, 0, referee as u64);
+        write_u64_field(holder, &TWO, 1, referee as u64); // same bits in a 2nd traced slot
+    }
+    let root = SingleRoot(Cell::new(holder as u64));
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+    let new_holder = IdentityPtrPolicy::try_decode_ptr(root.0.get()).unwrap();
+    let s0 = unsafe { read_u64_field(new_holder, &TWO, 0) };
+    let s1 = unsafe { read_u64_field(new_holder, &TWO, 1) };
+    assert_ne!(s0, referee as u64, "traced slot 0 must be relocated");
+    assert_eq!(s0, s1, "both traced slots followed the same object to its new home");
+}
+
+/// PROVE THE DETECTOR TRIPS. A detector that never demonstrably fires is
+/// indistinguishable from a no-op. Here we deliberately simulate the failure the
+/// precise-layout invariant forbids — a traced slot pointing at bits whose
+/// header `type_id` is out of range (what a leaked scalar, or a corrupted
+/// reference, looks like) — and assert the collector PANICS loudly rather than
+/// following garbage or silently skipping. Armed unconditionally in debug; the
+/// same panic occurs in release under `GCR_GC_VERIFY=1` (gated off here because
+/// release-default would instead fault with a generic bounds-check message).
+#[test]
+#[should_panic(expected = "precise-layout violation")]
+#[cfg_attr(not(debug_assertions), ignore = "detector armed via GCR_GC_VERIFY in release")]
+fn semi_space_detector_panics_on_bad_header_in_traced_slot() {
+    static ONE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let type_table = vec![ONE]; // table len 1 → only type_id 0 is valid
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    // A from-space object whose header we corrupt to an out-of-range type_id —
+    // standing in for a non-pointer (or corrupted ref) reached via a traced slot.
+    let bad_target = gc.alloc_obj::<Compact>(&ONE, 0);
+    unsafe { core::ptr::write(bad_target as *mut u64, 9999u64) }; // type_id 9999 ≫ len 1
+
+    let holder = gc.alloc_obj::<Compact>(&ONE, 0);
+    unsafe { write_u64_field(holder, &ONE, 0, bad_target as u64) }; // traced slot → bad bits
+
+    let root = SingleRoot(Cell::new(holder as u64));
+    // Following the traced slot, copy_or_forward reads the out-of-range type_id
+    // and the armed detector panics — NOT a silent `return old`.
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&root]) };
+}
+
 #[test]
 fn semi_space_chain() {
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
@@ -1052,6 +1174,54 @@ fn semi_space_with_root_set() {
     assert!(gc.contains(new_g2));
 }
 
+#[test]
+fn semi_space_traces_and_relocates_interior_pointer() {
+    // HOLDER: a 16-byte raw region holding a scalar at raw offset 0 and a GC ref
+    // at raw offset 8 (absolute offset header+8) — an *interior* pointer (a ref
+    // embedded in a flattened value field), not a leading value slot. It is only
+    // reachable to the collector via `interior_ptrs`.
+    static INTERIOR: [u16; 1] = [Compact::SIZE as u16 + 8];
+    static HOLDER: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_raw_bytes(16)
+        .with_interior_ptrs(&INTERIOR);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+
+    let type_table = vec![HOLDER, LEAF];
+    let mut gc = SemiSpace::new::<Compact>(4096);
+
+    let child = gc.alloc_obj::<Compact>(&LEAF, 0);
+    let holder = gc.alloc_obj::<Compact>(&HOLDER, 0);
+    let scalar_off = Compact::SIZE; // raw offset 0 — NOT a pointer
+    let ref_off = Compact::SIZE + 8; // raw offset 8 — the interior pointer
+    unsafe {
+        (holder.add(scalar_off) as *mut u64).write(42);
+        (holder.add(ref_off) as *mut u64).write(child as u64);
+    }
+
+    // Root ONLY the holder. The child survives solely via the interior pointer —
+    // if `scan_object` doesn't trace `interior_ptrs`, it is collected (dangling).
+    let chain = FrameChain::new();
+    let frame = RootFrame::<1>::new();
+    frame.slots[0].set(holder as u64);
+    let _guard = chain.push(&frame);
+
+    unsafe { gc.collect::<IdentityPtrPolicy>(&type_table, &mut [&chain]) };
+
+    let new_holder = IdentityPtrPolicy::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(gc.contains(new_holder));
+    // The raw scalar at offset 0 is untraced and preserved verbatim.
+    let scalar = unsafe { (new_holder.add(scalar_off) as *const u64).read() };
+    assert_eq!(scalar, 42);
+    // The interior ref was traced, the child relocated, and the slot fixed in place.
+    let raw = unsafe { (new_holder.add(ref_off) as *const u64).read() };
+    let new_child = IdentityPtrPolicy::try_decode_ptr(raw).unwrap();
+    assert!(
+        gc.contains(new_child),
+        "interior pointer not traced → child collected (dangling)"
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Mutator
 // ────────────────────────────────────────────────────────────────────
@@ -1163,6 +1333,295 @@ fn mutator_thread_basic_alloc() {
 
     let obj = mt.alloc_obj::<Compact>(&INFO, 0);
     assert!(!obj.is_null());
+}
+
+#[test]
+fn alloc_site_profile_merges_threads_and_salvages_retired() {
+    use crate::gc::reflect::{AllocSite, TypeKind, TypeMeta};
+
+    static INFO0: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(1);
+    static INFO1: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(1).with_fields(2);
+
+    let heap = Heap::new::<Full>(64 * 1024, vec![INFO0, INFO1]);
+    heap.set_type_meta(vec![
+        TypeMeta { type_id: 0, name: "Point".into(), kind: TypeKind::Opaque },
+        TypeMeta { type_id: 1, name: "Pair".into(), kind: TypeKind::Opaque },
+    ]);
+    // Three distinct sites: same type (Point) in two different functions is two
+    // sites — the honest function+type granularity.
+    heap.set_alloc_sites(vec![
+        AllocSite { function: "main".into(), type_id: 0, location: String::new() },   // site 0
+        AllocSite { function: "worker".into(), type_id: 1, location: String::new() }, // site 1
+        AllocSite { function: "worker".into(), type_id: 0, location: String::new() }, // site 2
+    ]);
+
+    let (main_ts, _) = heap.register_thread();
+    let (worker_ts, _) = heap.register_thread();
+
+    // Non-atomic per-thread counters, written by the owning thread.
+    unsafe {
+        for _ in 0..3 {
+            main_ts.record_alloc(0, 100);
+        }
+        for _ in 0..2 {
+            worker_ts.record_alloc(1, 40);
+        }
+        for _ in 0..5 {
+            worker_ts.record_alloc(2, 24);
+        }
+    }
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 3);
+    // Sorted by bytes desc: site0=300, site2=120, site1=80.
+    assert_eq!(prof[0].site_id, 0);
+    assert_eq!(prof[0].function, "main");
+    assert_eq!(prof[0].type_name, "Point");
+    assert_eq!(prof[0].count, 3);
+    assert_eq!(prof[0].bytes, 300);
+
+    assert_eq!(prof[1].site_id, 2);
+    assert_eq!(prof[1].function, "worker");
+    assert_eq!(prof[1].type_name, "Point");
+    assert_eq!(prof[1].count, 5);
+    assert_eq!(prof[1].bytes, 120);
+
+    assert_eq!(prof[2].site_id, 1);
+    assert_eq!(prof[2].type_name, "Pair");
+    assert_eq!(prof[2].count, 2);
+    assert_eq!(prof[2].bytes, 80);
+
+    // Deregister the worker: its allocations must survive via the retired
+    // accumulator (no silent loss when a thread joins before the profile).
+    heap.deregister_thread(&worker_ts);
+    drop(worker_ts);
+
+    let prof2 = heap.alloc_site_profile();
+    assert_eq!(prof2.len(), 3, "deregistered worker's sites must persist");
+    let site1 = prof2.iter().find(|s| s.site_id == 1).unwrap();
+    assert_eq!((site1.count, site1.bytes), (2, 80));
+    let site2 = prof2.iter().find(|s| s.site_id == 2).unwrap();
+    assert_eq!((site2.count, site2.bytes), (5, 120));
+    // main's live counters still summed in too.
+    let site0 = prof2.iter().find(|s| s.site_id == 0).unwrap();
+    assert_eq!((site0.count, site0.bytes), (3, 300));
+}
+
+#[test]
+fn alloc_site_profile_real_threads_join_then_profile() {
+    use crate::gc::reflect::AllocSite;
+    use std::sync::Arc;
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0, location: String::new() }]);
+
+    let n_threads = 4u64;
+    let per_thread = 1000u64;
+    let bytes_each = 16u64;
+
+    // Real OS threads (distinct thread ids), each records into its OWN non-atomic
+    // counter, then drops its MutatorThread → deregisters → folds into the retired
+    // accumulator. After join, the profile must sum them with no loss and no
+    // double-count.
+    let handles: Vec<_> = (0..n_threads)
+        .map(|_| {
+            let h = heap.clone();
+            std::thread::spawn(move || {
+                let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+                for _ in 0..per_thread {
+                    // Safety: each thread writes only its own counter.
+                    unsafe { mt.state().record_alloc(0, bytes_each) };
+                }
+                // mt drops here → deregister → fold into retired.
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].function, "worker");
+    assert_eq!(prof[0].count, n_threads * per_thread);
+    assert_eq!(prof[0].bytes, n_threads * per_thread * bytes_each);
+}
+
+#[test]
+fn alloc_site_profile_dump_concurrent_with_live_worker_no_hang() {
+    // Proves the dump-race fix: the main thread hammers alloc_site_profile (which
+    // STW-pauses every other mutator via pause_world) WHILE a worker is a live,
+    // registered, actively-allocating mutator. The pause must (a) never hang —
+    // the worker polls a safepoint each iteration so it parks promptly, same
+    // discipline as a collection — and (b) never observe a torn/garbage count
+    // (monotonic, bounded by the total), because the worker is parked during the
+    // read. Finally, after the worker joins, its counts survive via the retired
+    // fold and the total is exact.
+    use crate::gc::reflect::AllocSite;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+    heap.set_alloc_sites(vec![AllocSite { function: "worker".into(), type_id: 0, location: String::new() }]);
+
+    let n_allocs = 5000u64;
+    let bytes_each = 16u64;
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+
+    let worker = {
+        let h = heap.clone();
+        let stop = stop.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+            for _ in 0..n_allocs {
+                unsafe { mt.state().record_alloc(0, bytes_each) };
+                done.fetch_add(1, Ordering::Relaxed);
+                mt.safepoint(); // park here if a dump is pausing the world
+            }
+            // Stay a live, safepoint-responsive mutator (no more allocs) so the
+            // main thread can dump while we're still registered.
+            while !stop.load(Ordering::Relaxed) {
+                mt.safepoint();
+                std::thread::yield_now();
+            }
+            // mt drops -> deregister -> fold counts into retired.
+        })
+    };
+
+    // Hammer the dump while the worker is live + allocating.
+    let mut last = 0u64;
+    for _ in 0..200 {
+        let prof = heap.alloc_site_profile();
+        let c = prof.iter().find(|s| s.site_id == 0).map(|s| s.count).unwrap_or(0);
+        assert!(c <= n_allocs, "torn/garbage read: count {c} > total {n_allocs}");
+        assert!(c >= last, "count went backwards {last} -> {c}");
+        last = c;
+    }
+
+    // Let the worker finish, then stop + join (no pause active during join).
+    while done.load(Ordering::Relaxed) < n_allocs {
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].count, n_allocs);
+    assert_eq!(prof[0].bytes, n_allocs * bytes_each);
+}
+
+#[test]
+fn alloc_site_profile_dump_concurrent_resize_stress_asan() {
+    // ASan-oriented variant: the worker records at STRICTLY INCREASING site ids,
+    // so its per-thread counter Vec keeps GROWING (Vec::resize → realloc → frees
+    // the old buffer) while the main thread repeatedly dumps (alloc_site_profile
+    // clones that Vec). This is EXACTLY the heap-use-after-free the pre-fix
+    // reviewer reproduced under AddressSanitizer: a read of a buffer the writer
+    // just realloc'd away. With the STW fix the worker is parked during every
+    // read, so there is no concurrent realloc and ASan stays clean; WITHOUT the
+    // fix this surfaces as an ASan UAF. Run in CI under
+    // `RUSTFLAGS=-Zsanitizer=address cargo +nightly test --target <host>`.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Arc::new(Heap::new::<Full>(64 * 1024, vec![INFO]));
+
+    let n_allocs = 2000u64;
+    let bytes_each = 16u64;
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+
+    let worker = {
+        let h = heap.clone();
+        let stop = stop.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mt: MutatorThread<IdentityPtrPolicy> = MutatorThread::register(h);
+            for i in 0..n_allocs {
+                // Increasing site id → the counter Vec grows (reallocs).
+                unsafe { mt.state().record_alloc(i as u32, bytes_each) };
+                done.fetch_add(1, Ordering::Relaxed);
+                mt.safepoint();
+            }
+            while !stop.load(Ordering::Relaxed) {
+                mt.safepoint();
+                std::thread::yield_now();
+            }
+        })
+    };
+
+    // Dump hard while the worker is growing its Vec. A residual race = ASan UAF.
+    for _ in 0..200 {
+        let prof = heap.alloc_site_profile();
+        let total: u64 = prof.iter().map(|s| s.count).sum();
+        assert!(total <= n_allocs, "torn/garbage read: total {total} > {n_allocs}");
+    }
+
+    while done.load(Ordering::Relaxed) < n_allocs {
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+
+    let prof = heap.alloc_site_profile();
+    let total_count: u64 = prof.iter().map(|s| s.count).sum();
+    let total_bytes: u64 = prof.iter().map(|s| s.bytes).sum();
+    assert_eq!(total_count, n_allocs);
+    assert_eq!(total_bytes, n_allocs * bytes_each);
+}
+
+#[test]
+fn alloc_site_profile_unlabelled_sites_not_dropped() {
+    // Counters with no matching site-table entry (e.g. table not installed) are
+    // surfaced under a synthetic label, never silently dropped.
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Heap::new::<Full>(4096, vec![INFO]);
+    let (ts, _) = heap.register_thread();
+    unsafe {
+        ts.record_alloc(7, 16);
+    }
+    let prof = heap.alloc_site_profile();
+    assert_eq!(prof.len(), 1);
+    assert_eq!(prof[0].site_id, 7);
+    assert_eq!(prof[0].count, 1);
+    assert_eq!(prof[0].bytes, 16);
+    assert!(prof[0].function.contains("site 7"));
+    assert_eq!(prof[0].type_id, None);
+}
+
+#[test]
+fn visit_roots_reports_real_roots_only() {
+    // Heap-explorer P1 primitive: visit_roots reports the REAL GC root set, not
+    // the in-degree-0 proxy. A rooted object is visited; an unrooted (orphan)
+    // object is not — even though both are live in the heap.
+    static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(0).with_fields(0);
+    let heap = Heap::new::<Full>(4096, vec![INFO]);
+
+    let rooted = heap.alloc_obj::<Full>(&INFO, 0);
+    let orphan = heap.alloc_obj::<Full>(&INFO, 0);
+    assert!(!rooted.is_null() && !orphan.is_null());
+
+    // Root only `rooted` via a permanent extra.
+    let root = SingleRoot(Cell::new(rooted as u64));
+    unsafe { heap.register_permanent_extra(&root as *const dyn RootSource) };
+
+    let mut seen: Vec<*mut u8> = Vec::new();
+    {
+        // Honor the STW contract (no other mutators here → parks nobody).
+        let _pause = heap.pause_world();
+        unsafe { heap.visit_roots(&mut |obj| seen.push(obj)) };
+    }
+    assert!(seen.contains(&rooted), "visit_roots must report the rooted object");
+    assert!(
+        !seen.contains(&orphan),
+        "visit_roots must NOT report the unrooted (orphan) object"
+    );
 }
 
 #[test]

@@ -1,0 +1,13 @@
+file: examples/assistant.scry
+stdin: exit\n
+expr: views()
+contains: "type":"Views"
+contains: {"name":"AgentBoard","target":"Agent","clauses":[
+contains: {"kind":"clause","key":"title","path":"name","representation":null,"args":[]}
+contains: {"kind":"clause","key":"size","path":"byCount","representation":null,"args":[]}
+contains: {"kind":"clause","key":"badge","path":"status","representation":null,"args":[]}
+contains: {"kind":"section","label":"conversation","path":"conversation.messages","representation":"timeline","args":[]}
+contains: {"kind":"section","label":"tools","path":"tools","representation":"chips","args":[]}
+contains: {"name":"Pulse","target":"Message","clauses":[
+contains: {"kind":"clause","key":"stream","path":"all","representation":"heat","args":[{"name":"by","value":"role"}]}
+contains: {"kind":"clause","key":"key","path":"role","representation":null,"args":[]}

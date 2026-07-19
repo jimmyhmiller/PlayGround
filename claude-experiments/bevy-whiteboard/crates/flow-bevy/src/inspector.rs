@@ -63,6 +63,7 @@ impl Plugin for InspectorPlugin {
                 sync_generic_readout,
                 handle_generic_bool_toggle_clicks,
                 sync_generic_bool_toggle_visual,
+                handle_nudge_button_clicks,
                 push_compound_param_slider,
             ),
         );
@@ -200,10 +201,16 @@ fn rebuild_inspector_on_selection_change(
 
     let Some(entity) = selection.entity else { return };
 
-    // Compound bodies don't carry NodeKind — they get their own
-    // inspector layout (display name + read-only construction params).
-    // Editing + rebuild is the natural follow-up; for now seeing the
-    // params at all is the progress we wanted.
+    // Stock gadget compounds (Generator, Worker, …) carry BOTH a
+    // `NodeKind` and a `CompoundBodyMarker`. They want their
+    // kind-specific controls (rate / service sliders, ASG controls),
+    // which read & write *resolved* into their inner nodes — NOT the
+    // raw compound-param panel (which is empty for a stock instance the
+    // whiteboard never declared as a `compound`). So only take the
+    // compound-param branch for compounds that have NO recognized gadget
+    // kind (e.g. a Game-of-Life grid). Everything with a NodeKind falls
+    // through to the kind-specific path below.
+    if kind_q.get(entity).is_err() {
     if let Ok(marker) = compound_q.get(entity) {
         let nid = marker.0;
         let Some(node) = snapshot.0.nodes.get(&nid) else { return };
@@ -221,6 +228,7 @@ fn rebuild_inspector_on_selection_change(
         });
         return;
     }
+    }
 
     let Ok((kind, node_ref)) = kind_q.get(entity) else { return };
     let nid = node_ref.0;
@@ -232,7 +240,13 @@ fn rebuild_inspector_on_selection_change(
 
         match kind.0 {
             Kind::Generator | Kind::Client | Kind::BackoffClient => {
-                let rate = period_ns_to_rate(read_int_slot(node, "period_ns"));
+                // Resolve into the compound: `period_ns` lives on the
+                // inner Tick, not the gadget shim.
+                let period = match snapshot.0.resolve_slot(nid, "period_ns") {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                };
+                let rate = period_ns_to_rate(period);
                 spawn_slider(
                     body, &theme,
                     "Rate",
@@ -242,7 +256,11 @@ fn rebuild_inspector_on_selection_change(
                 );
             }
             Kind::Worker => {
-                let ms = (read_int_slot(node, "service_ns") / 1_000_000) as f32;
+                let service_ns = match snapshot.0.resolve_slot(nid, "service_ns") {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                };
+                let ms = (service_ns / 1_000_000) as f32;
                 spawn_slider(
                     body, &theme,
                     "Service",
@@ -261,6 +279,9 @@ fn rebuild_inspector_on_selection_change(
                 let mode = read_int_slot(node, "mode");
                 spawn_router_mode_toggle(body, &theme, nid, mode);
             }
+            Kind::AutoScalingGroup => {
+                spawn_asg_controls(body, &theme, nid, node);
+            }
         }
 
         // Every gadget carries an `up` slot; surface a toggle for it
@@ -274,8 +295,11 @@ fn rebuild_inspector_on_selection_change(
         // Generic per-slot state section. Anything not already covered
         // by a bespoke widget above shows up here as a slider / toggle /
         // readout depending on type. Hidden if the node has no
-        // generic-eligible slots.
-        spawn_generic_state_section(body, &theme, nid, node);
+        // generic-eligible slots. The ASG renders a curated control block
+        // above instead (its raw counters would be noisy as sliders).
+        if !matches!(kind.0, Kind::AutoScalingGroup) {
+            spawn_generic_state_section(body, &theme, nid, node);
+        }
 
         // Per-node error breakdown. Always spawned (even when the
         // node has no errors yet) so `sync_error_breakdown` can fill
@@ -1011,6 +1035,121 @@ struct GenericReadout {
 struct GenericBoolToggle {
     node: NodeId,
     slot: String,
+}
+
+/// Button that adds `delta` to the ASG's `nudge` slot — the manual
+/// "+ / − one worker" controls. The Scaler consumes the nudge on its
+/// next tick.
+#[derive(Component, Debug, Clone)]
+struct NudgeButton {
+    node: NodeId,
+    delta: i64,
+}
+
+/// Curated control block for an [`AutoScalingGroup`]. Reuses the generic
+/// int-slider + bool-toggle plumbing (so the push/sync systems already
+/// wire them) and adds the manual nudge buttons. Deliberately omits the
+/// raw bookkeeping slots (`inflight`, `count`, …) that the generic
+/// section would otherwise render as meaningless editable sliders.
+fn spawn_asg_controls(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    node: &NodeView,
+) {
+    // The pluggable target class.
+    if let Some(Value::Str(s)) = node.slots.get("worker_class") {
+        simple_readout(parent, theme, "scales", s, GenericReadout { node: nid, slot: "worker_class".into() });
+    }
+
+    // Tunable scaling parameters as int sliders (ms for `tick_ns`).
+    // (name, min, max, step, unit, scale)
+    let rows: &[(&str, f32, f32, f32, &str, f32)] = &[
+        ("min_workers", 0.0, 16.0, 1.0, "", 1.0),
+        ("max_workers", 1.0, 32.0, 1.0, "", 1.0),
+        ("scale_up", 1.0, 50.0, 1.0, "", 1.0),
+        ("scale_down", 0.0, 50.0, 1.0, "", 1.0),
+        ("tick_ns", 20.0, 2000.0, 10.0, "ms", 1_000_000.0),
+    ];
+    for (name, min, max, step, unit, scale) in rows {
+        let cur = read_int_slot(node, name) as f32 / scale;
+        spawn_slider_with_step(
+            parent, theme, name, *min, *max, *step,
+            cur.clamp(*min, *max), unit,
+            GenericIntSlider { node: nid, slot: (*name).to_string(), scale: *scale },
+        );
+    }
+
+    // Pause toggle (freezes auto-scaling; manual nudges still apply).
+    let paused = matches!(node.slots.get("paused"), Some(Value::Bool(true)));
+    spawn_generic_bool_toggle_row(parent, theme, nid, "paused", paused);
+
+    // Manual + / − one worker.
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            padding: UiRect::vertical(Val::Px(5.0)),
+            column_gap: Val::Px(8.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(caps_spaced("workers")),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+            for (label, delta) in [("− 1", -1i64), ("+ 1", 1i64)] {
+                row.spawn((
+                    Button,
+                    Node {
+                        flex_grow: 1.0,
+                        padding: UiRect::vertical(Val::Px(5.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor::all(theme.ink_soft),
+                    NudgeButton { node: nid, delta },
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new(label),
+                        TextFont { font_size: 12.0, ..default() },
+                        TextColor(theme.ink),
+                        poster_ui::Bold,
+                    ));
+                });
+            }
+        });
+}
+
+/// Click → add `delta` to the ASG's `nudge` slot (accumulates so rapid
+/// clicks queue up; the Scaler drains one per tick).
+fn handle_nudge_button_clicks(
+    q: Query<(&Interaction, &NudgeButton), (Changed<Interaction>, With<Button>)>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
+) {
+    for (interaction, btn) in q.iter() {
+        if *interaction != Interaction::Pressed { continue; }
+        let cur = snapshot
+            .0
+            .nodes
+            .get(&btn.node)
+            .and_then(|n| n.slots.get("nudge"))
+            .and_then(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+            .unwrap_or(0);
+        let nid = btn.node;
+        let next = cur + btn.delta;
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, "nudge".to_string(), Value::Int(next));
+        }));
+    }
 }
 
 fn spawn_generic_state_section(

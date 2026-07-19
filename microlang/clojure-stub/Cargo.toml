@@ -1,0 +1,29 @@
+[package]
+name = "clojure-stub"
+version = "0.0.1"
+edition = "2021"
+description = "A mini-Clojure frontend with its OWN procedural macro expander, built on the toolkit's public API (which has no macro system of its own)."
+
+[dependencies]
+microlang = { path = ".." }
+ureq = "3.3.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[features]
+# Run the clojure frontend on the native JIT tier (for tests/jit.rs).
+jit = ["microlang/jit"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "microclj"
+path = "src/main.rs"
+
+[[example]]
+name = "coresuite"
+required-features = ["jit"]
+
+[[example]]
+name = "jitone"
+required-features = ["jit"]

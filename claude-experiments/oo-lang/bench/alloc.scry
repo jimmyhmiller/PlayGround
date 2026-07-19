@@ -1,0 +1,23 @@
+class Point {
+  x: Int
+  y: Int
+  fn init(x: Int, y: Int) { self.x = x  self.y = y }
+}
+fn main() {
+  let t0 = Clock.now()
+  let pts = List<Point>()
+  var i = 0
+  while i < 90000 {
+    pts.push(Point(x: i, y: i * 2))
+    i = i + 1
+  }
+  var sum = 0
+  var j = 0
+  while j < pts.len() {
+    let p = pts.get(j)
+    sum = sum + p.x + p.y
+    j = j + 1
+  }
+  let t1 = Clock.now()
+  Console.log("alloc sum = ${sum}  [${t1 - t0} ms]")
+}

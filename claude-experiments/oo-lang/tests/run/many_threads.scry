@@ -1,0 +1,24 @@
+// Spawn 8 threads, each adds 1 under a mutex; join all; total is exactly 8.
+class One implements Runnable {
+  box: Mutex<Int>
+  fn run() -> Void {
+    self.box.lock()
+    self.box.set(self.box.get() + 1)
+    self.box.unlock()
+  }
+}
+fn main() {
+  let box = Mutex<Int>(0)
+  let hs = List<ThreadHandle>()
+  var t = 0
+  while t < 8 {
+    hs.push(Thread.spawn(One(box: box)))
+    t = t + 1
+  }
+  var j = 0
+  while j < 8 {
+    hs.get(j).join()
+    j = j + 1
+  }
+  print(box.get())
+}

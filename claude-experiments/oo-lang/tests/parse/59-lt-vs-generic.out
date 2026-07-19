@@ -1,0 +1,14 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let b
+        (binary <
+          (id a)
+          (id c)))
+      (let d
+        (binary &&
+          (binary <
+            (id count)
+            (id limit))
+          (id ready))))))

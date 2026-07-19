@@ -1,0 +1,132 @@
+// IN-PLACE QUICKSORT, CERTIFIED %total — Phase B1 / E3 (well-founded recursion).
+//
+//   tally build examples/qsort_total.tal -o /tmp/qst -O2 ; /tmp/qst
+//   → 500172243296      (same LCG, same Lomuto partition, same answer as
+//                        examples/qsort.tal — which stays %partial as the twin)
+//
+// WHAT CHANGED vs the %partial twin: every recursive function carries an
+// explicit Nat MEASURE it matches on, and every recursive call is guarded by
+// `dlt(new, m)` — the ONE machine compare whose `DYes` arm is a RUNTIME
+// WITNESS that the measure strictly decreased. `<` on the packed machine Nat
+// is well-founded (a u64 cannot decrease forever), so the recursion
+// TERMINATES whenever it runs — certified `%total` by the checker, lowered
+// to the same `Fix` machine code as the %partial twin. The arithmetically-
+// unreachable `DNo` arms return their linear array unchanged (dead code the
+// type system still forces to be well-typed and leak-free).
+//
+// For loops that walk DOWN a fuel `m = Succ(k)`, the guard `dlt(k, m)` is
+// `m-1 < m`, which LLVM folds away at -O2 (in the Succ branch `m > 0` is a
+// known branch fact) — so the certified loops emit the SAME hot code.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+geti : (n : Nat) -> (i : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n
+fn geti(n, i, nz, arr) {
+    match dlt(i, n) { DYes(p) => aget(i, p, arr), DNo => aget(0, nz, arr) }
+}
+
+seti : (n : Nat) -> (i : Nat) -> (x : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+fn seti(n, i, x, nz, arr) {
+    match dlt(i, n) { DYes(p) => aset(i, p, x, arr), DNo => arr }
+}
+
+swap : (n : Nat) -> (i : Nat) -> (j : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+fn swap(n, i, j, nz, arr) {
+    let (x, a1) = geti(n, i, nz, arr);
+    let (y, a2) = geti(n, j, nz, a1);
+    let a3 = seti(n, i, y, nz, a2);
+    seti(n, j, x, nz, a3)
+}
+
+// LCG fill, fuel m = elements remaining; dlt(k, m) is the erased-by-O2 witness.
+fill : (n : Nat) -> (m : Nat) -> (i : Nat) -> (x : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+%total
+fn fill(n, m, i, x, nz, arr) {
+    match m {
+        Zero => arr,
+        Succ(k) =>
+            let xm = mul(x, 6364136223846793005);
+            let x2 = xm + 1442695040888963407;
+            let a1 = seti(n, i, mod(x2, 1000000), nz, arr);
+            match dlt(k, m) {
+                DYes(q) => fill(n, k, i + 1, x2, nz, a1),
+                DNo => a1,
+            },
+    }
+}
+
+// Lomuto partition of [lo, hi]: fuel m = hi - i remaining scan steps.
+part : (n : Nat) -> (m : Nat) -> (hi : Nat) -> (i : Nat) -> (j : Nat) -> (pv : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> ARead Nat n
+%total
+fn part(n, m, hi, i, j, pv, nz, arr) {
+    match m {
+        Zero => let a1 = swap(n, j, hi, nz, arr); MkARead(j, a1),
+        Succ(k) =>
+            let (xi, a1) = geti(n, i, nz, arr);
+            match ltb(xi, pv) {
+                Succ(z) =>
+                    let a2 = swap(n, i, j, nz, a1);
+                    match dlt(k, m) {
+                        DYes(q) => part(n, k, hi, i + 1, j + 1, pv, nz, a2),
+                        DNo => MkARead(j, a2),
+                    },
+                Zero =>
+                    match dlt(k, m) {
+                        DYes(q) => part(n, k, hi, i + 1, j, pv, nz, a1),
+                        DNo => MkARead(j, a1),
+                    },
+            },
+    }
+}
+
+// the divide-and-conquer driver: measure m bounds the RANGE WIDTH. The two
+// sub-ranges are strictly narrower, witnessed at runtime by `dlt(width, m)`.
+qsort : (n : Nat) -> (m : Nat) -> (lo : Nat) -> (hi : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Arr Nat n
+%total
+fn qsort(n, m, lo, hi, nz, arr) {
+    match m {
+        Zero => arr,
+        Succ(k) =>
+            match ltb(lo, hi) {
+                Zero => arr,
+                Succ(z) =>
+                    let (pv, a1) = geti(n, hi, nz, arr);
+                    match part(n, sub(hi, lo), hi, lo, lo, pv, nz, a1) {
+                        MkARead(p, a2) =>
+                            match dlt(sub(p, lo), m) {
+                                DYes(ql) =>
+                                    let a3 = qsort(n, sub(p, lo), lo, sub(p, 1), nz, a2);
+                                    match dlt(sub(hi, p), m) {
+                                        DYes(qr) => qsort(n, sub(hi, p), p + 1, hi, nz, a3),
+                                        DNo => a3,
+                                    },
+                                DNo => a2,
+                            },
+                    },
+            },
+    }
+}
+
+// sorted check (leb chain) + checksum, fuel m = elements remaining.
+chk : (n : Nat) -> (m : Nat) -> (i : Nat) -> (prev : Nat) -> (ok : Nat) -> (acc : Nat) -> (0 nz : Lt Zero n) -> (1 arr : Arr Nat n) -> Nat
+%total
+fn chk(n, m, i, prev, ok, acc, nz, arr) {
+    match m {
+        Zero => let u = afree(arr); mul(ok, acc),
+        Succ(k) =>
+            let (x, a1) = geti(n, i, nz, arr);
+            match dlt(k, m) {
+                DYes(q) => chk(n, k, i + 1, x, band(ok, leb(prev, x)), acc + x, nz, a1),
+                DNo => let u = afree(a1); 0,
+            },
+    }
+}
+
+main : Nat
+fn main() {
+    let a0 = anew(1000000, 0);
+    let a1 = fill(1000000, 1000000, 0, 88172645463325252, lt(0, 1000000), a0);
+    let a2 = qsort(1000000, 1000000, 0, sub(1000000, 1), lt(0, 1000000), a1);
+    chk(1000000, 1000000, 0, 0, 1, 0, lt(0, 1000000), a2)
+}

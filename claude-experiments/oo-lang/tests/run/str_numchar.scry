@@ -1,0 +1,15 @@
+// Phase 8b: String.charCode / .toInt / .toFloat builtins + Str.fromCharCode.
+fn main() {
+  let s = "ABC"
+  Console.log("charCode0=${s.charCode(0)}")
+  Console.log("charCode2=${s.charCode(2)}")
+  Console.log("oob=${s.charCode(9)}")
+  match "42".toInt() { Some(n) -> Console.log("toInt42=${n}") None -> Console.log("bad") }
+  match "-7".toInt() { Some(n) -> Console.log("toIntNeg=${n}") None -> Console.log("bad") }
+  match "nope".toInt() { Some(n) -> Console.log("bad") None -> Console.log("toIntBad=None") }
+  match "".toInt() { Some(n) -> Console.log("bad") None -> Console.log("toIntEmpty=None") }
+  match "3.5".toFloat() { Some(x) -> Console.log("toFloat=${x}") None -> Console.log("bad") }
+  match "x".toFloat() { Some(x) -> Console.log("bad") None -> Console.log("toFloatBad=None") }
+  let ab = Str.fromCharCode(65) + Str.fromCharCode(66)
+  Console.log("fromCharCode=${ab}")
+}

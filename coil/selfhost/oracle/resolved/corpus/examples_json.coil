@@ -1,0 +1,212 @@
+(defsum
+  Json
+  (JNull [])
+  (JBool [(b i64)])
+  (JNum [(n i64)])
+  (JStr [(s (slice u8))])
+  (JArr [(a (ptr (ArrayList Json)))])
+  (JObj [(o (ptr (HashMap (slice u8) Json)))]))
+
+(defstruct P [(src (slice u8)) (pos i64) (alc (ptr Allocator))])
+
+(defn
+  p-peek
+  [(p (ptr P))]
+  (-> i64)
+  (if
+    (icmp-ge (load (field p pos)) (slice-len (load (field p src))))
+    -1
+    (cast i64 (slice-get (load (field p src)) (load (field p pos))))))
+
+(defn p-adv [(p (ptr P))] (-> i64) (store! (field p pos) (iadd (load (field p pos)) 1)) 0)
+
+(defn
+  ws?
+  [(c i64)]
+  (-> bool)
+  (or (icmp-eq c 32) (or (icmp-eq c 10) (or (icmp-eq c 9) (icmp-eq c 13)))))
+
+(defn skip-ws [(p (ptr P))] (-> i64) (loop (if (ws? (p-peek p)) (p-adv p) (break))) 0)
+
+(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+
+(defn
+  eat
+  [(p (ptr P)) (len i64)]
+  (-> i64)
+  (let
+    [(mut $g0) (isub 0 1)]
+    (loop
+      (store! $g0 (iadd (load $g0) 1))
+      (if (icmp-lt (load $g0) len) (let [i (load $g0)] (p-adv p)) (break))))
+  0)
+
+(defn
+  parse-number
+  [(p (ptr P))]
+  (-> Json)
+  (let
+    [(mut neg) 0 (mut v) 0]
+    (if (icmp-eq (p-peek p) 45) (do (store! neg 1) (p-adv p)) 0)
+    (loop
+      (let
+        [c (p-peek p)]
+        (if
+          (digit? c)
+          (do (store! v (iadd (imul (load v) 10) (isub c 48))) (p-adv p))
+          (break))))
+    (JNum (if (icmp-eq (load neg) 1) (isub 0 (load v)) (load v)))))
+
+(defn
+  parse-str-slice
+  [(p (ptr P))]
+  (-> (slice u8))
+  (p-adv p)
+  (let
+    [start (load (field p pos))]
+    (loop (if (icmp-eq (p-peek p) 34) (break) (p-adv p)))
+    (let [s (subslice (load (field p src)) start (load (field p pos)))] (p-adv p) s)))
+
+(defn
+  parse-value
+  [(p (ptr P))]
+  (-> Json)
+  (skip-ws p)
+  (let
+    [c (p-peek p)]
+    (if
+      (icmp-eq c 110)
+      (do (eat p 4) (JNull))
+      (if
+        (icmp-eq c 116)
+        (do (eat p 4) (JBool 1))
+        (if
+          (icmp-eq c 102)
+          (do (eat p 5) (JBool 0))
+          (if
+            (icmp-eq c 34)
+            (JStr (parse-str-slice p))
+            (if
+              (icmp-eq c 91)
+              (parse-array p)
+              (if (icmp-eq c 123) (parse-object p) (parse-number p)))))))))
+
+(defn
+  parse-array
+  [(p (ptr P))]
+  (-> Json)
+  (p-adv p)
+  (let
+    [arr
+      (let
+        [$g1
+          (alloc.unwrap-ptr
+            [(ArrayList Json)]
+            (alloc.create [(ArrayList Json)] (load (field p alc))))]
+        (store! $g1 (al-new [Json] (load (field p alc))))
+        $g1)]
+    (skip-ws p)
+    (if
+      (icmp-eq (p-peek p) 93)
+      (p-adv p)
+      (loop
+        (al-push! arr (parse-value p))
+        (skip-ws p)
+        (if (icmp-eq (p-peek p) 44) (p-adv p) (do (p-adv p) (break)))))
+    (JArr arr)))
+
+(defn
+  parse-object
+  [(p (ptr P))]
+  (-> Json)
+  (p-adv p)
+  (let
+    [obj
+      (let
+        [$g2
+          (alloc.unwrap-ptr
+            [(HashMap (slice u8) Json)]
+            (alloc.create [(HashMap (slice u8) Json)] (load (field p alc))))]
+        (store! $g2 (hm-new [(slice u8) Json] (load (field p alc)) (str-keyops)))
+        $g2)]
+    (skip-ws p)
+    (if
+      (icmp-eq (p-peek p) 125)
+      (p-adv p)
+      (loop
+        (skip-ws p)
+        (let
+          [key (parse-str-slice p)]
+          (skip-ws p)
+          (p-adv p)
+          (hm-put! obj key (parse-value p)))
+        (skip-ws p)
+        (if (icmp-eq (p-peek p) 44) (p-adv p) (do (p-adv p) (break)))))
+    (JObj obj)))
+
+(defn
+  parse
+  [(a (ptr Allocator)) (src (slice u8))]
+  (-> Json)
+  (let
+    [p (alloc-stack P)]
+    (store! (field p src) src)
+    (store! (field p pos) 0)
+    (store! (field p alc) a)
+    (parse-value p)))
+
+(defn
+  as-num
+  [(j Json)]
+  (-> i64)
+  (match
+    j
+    (JNum [n] n)
+    (JBool [b] b)
+    (JNull [] 0)
+    (JStr [$g3] 0)
+    (JArr [$g4] 0)
+    (JObj [$g5] 0)))
+
+(defn
+  arr-get
+  [(j Json) (i i64)]
+  (-> Json)
+  (match
+    j
+    (JArr [a] (al-get (load a) i))
+    (JNull [] (JNull))
+    (JBool [$g6] (JNull))
+    (JNum [$g7] (JNull))
+    (JStr [$g8] (JNull))
+    (JObj [$g9] (JNull))))
+
+(defn
+  obj-get
+  [(j Json) (key (slice u8))]
+  (-> Json)
+  (match
+    j
+    (JObj
+      [o]
+      (match (hm-get [(slice u8) Json] (load o) key) (None [] (JNull)) (Some [v] v)))
+    (JNull [] (JNull))
+    (JBool [$g10] (JNull))
+    (JNum [$g11] (JNull))
+    (JStr [$g12] (JNull))
+    (JArr [$g13] (JNull))))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a (malloc-allocator) doc (parse a "{"nums": [10, 20, 12], "meta": {"k": 40}}")]
+    (let
+      [nums (obj-get doc "nums") meta (obj-get doc "meta")]
+      (isub
+        (iadd
+          (iadd (as-num (arr-get nums 0)) (as-num (arr-get nums 2)))
+          (as-num (obj-get meta "k")))
+        (as-num (arr-get nums 1))))))
+

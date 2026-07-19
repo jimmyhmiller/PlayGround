@@ -1,0 +1,28 @@
+// file: ui/tui.scry — a minimal text render of the live agents (module `ui.tui`).
+module ui.tui
+
+import agents.core.{Agent, AgentStatus}
+
+fn statusLabel(s: AgentStatus) -> String {
+  match s {
+    Waiting -> "waiting"
+    Running -> "running"
+    Paused  -> "paused"
+    Done    -> "done"
+  }
+}
+
+object Tui {
+  // Reads each agent's Mutex-guarded status (§5.2) — the one place this render crosses threads.
+  fn render(agents: List<Agent>) -> Void {
+    var i = 0
+    while i < agents.len() {
+      let a = agents.get(i)
+      a.status.lock()
+      let s = a.status.get()
+      a.status.unlock()
+      Console.log(a.name + ": " + statusLabel(s))
+      i = i + 1
+    }
+  }
+}

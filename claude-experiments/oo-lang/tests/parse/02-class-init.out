@@ -1,0 +1,56 @@
+(program
+  (class Message
+    (field role
+      (type String))
+    (field content
+      (type String))
+    (field createdAt
+      (type Int))
+    (fn init
+      (params
+        (param role
+          (type String))
+        (param content
+          (type String)))
+      (block
+        (assign
+          (dot role
+            self)
+          (id role))
+        (assign
+          (dot content
+            self)
+          (id content))
+        (assign
+          (dot createdAt
+            self)
+          (call
+            (dot now
+              (id Clock))))))
+    (fn preview
+      (params
+        (param n
+          (type Int)))
+      (type String)
+      (block
+        (if
+          (binary <=
+            (call
+              (dot len
+                (dot content
+                  self)))
+            (id n))
+          (block
+            (dot content
+              self))
+          (block
+            (binary +
+              (call
+                (dot slice
+                  (dot content
+                    self))
+                (arg
+                  (int 0))
+                (arg
+                  (id n)))
+              (str "..."))))))))

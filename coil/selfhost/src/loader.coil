@@ -1,0 +1,710 @@
+; selfhost/src/loader.coil — self-host Coil compiler, loader module.
+(module loader)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+(import "ffi.coil" :use *)
+(import "embedded_stdlib.coil" :use *)   ; embedded prelude + bundled libs -> runs outside the repo
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "reader.coil" :use *)
+(import "resolve.coil" :use *)
+(import "cimport.coil" :as ci)   ; the (cimport "h.h") source form generates bindings at load time
+
+(defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (let [fd (open path 0) buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
+    (loop
+      (let [n (read (cast i32 fd) buf 65536)]
+        (if (icmp-le n 0) (break)
+          (let [(mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+                (do (al-push! (mut bytes) (cast u8 (load (index buf (load i))))) (store! i (iadd (load i) 1)))))))))
+    (close fd)
+    (al-slice [u8] (load bytes))))
+
+; Like `read-file`, but distinguishes "could not open" (None) from an empty file
+; (Some ""). `read-file` returns an empty slice for both, which is fine for the
+; loader's disk-first / embedded-fallback probing but WRONG for `include-str`,
+; where a missing file at compile time is a hard build error, not an empty embed.
+(defn read-file-opt [(a (ptr Allocator)) (path (ptr i8))] (-> (Option (slice u8)))
+  (let [fd (open path 0)]
+    (if (icmp-lt (cast i64 fd) 0) (None [(slice u8)])
+      (let [buf (unwrap-ptr [i8] (raw-alloc a 65536 1)) (mut bytes) (al-new [u8] a)]
+        (loop
+          (let [n (read (cast i32 fd) buf 65536)]
+            (if (icmp-le n 0) (break)
+              (let [(mut i) 0]
+                (loop (if (icmp-ge (load i) n) (break)
+                    (do (al-push! (mut bytes) (cast u8 (load (index buf (load i))))) (store! i (iadd (load i) 1)))))))))
+        (close fd)
+        (Some (al-slice [u8] (load bytes)))))))
+
+; A hand-built Program smoke test (no spans → byte-exact against `coil dump-ast`
+; of the equivalent source). Validates the dumper before the parser is filled.
+(defstruct TaggedForm [(form Sexp) (module (Option (slice u8)))])
+
+(defstruct Alias [(alias (slice u8)) (target (slice u8))])
+(defsum UseSpec
+  (UAll   [])
+  (UNames [(names (ptr (ArrayList (slice u8))))]))
+(defstruct Use [(target (slice u8)) (spec UseSpec)])
+
+(defstruct ModImports
+  [(aliases   (ArrayList Alias))
+   (uses      (ArrayList Use))
+   (reexports (ArrayList (slice u8)))])
+
+(defstruct ImpEntry [(name (slice u8)) (imp ModImports)])
+(defstruct ExpEntry [(name (slice u8)) (names (ArrayList (slice u8)))])
+
+; One registered source (mirrors src/span.rs Source): a display name + full text.
+(defstruct Source [(name (slice u8)) (text (slice u8))])
+; A macro-expansion record (src/span.rs Expansion): the macro name, its call site
+; and def site (spans), and the enclosing expansion context (parent ctxt).
+(defstruct Expansion
+  [(macro_name (slice u8))
+   (call_source i64) (call_lo i64) (call_hi i64) (call_ctxt i64)
+   (def_source i64)  (def_lo i64)  (def_hi i64)  (def_ctxt i64)
+   (parent i64)])
+
+(defstruct LS
+  [(a       (ptr Allocator))
+   (out     (ArrayList TaggedForm))
+   (loaded  (ArrayList (slice u8)))
+   (imports (ArrayList ImpEntry))
+   (exports (ArrayList ExpEntry))
+   (srccount i64)
+   ; The SourceMap: sources[id] = the file at that id (main=0, prelude=1, imports
+   ; 2..). expansions[ctxt-1] = the macro provenance for ctxt (>=1). Both grow in
+   ; the exact order src/span.rs registers them, so ids/ctxts match the reference.
+   (sources    (ArrayList Source))
+   (expansions (ArrayList Expansion))
+   ; All type-check body errors (build path renders every one; the dump-checked
+   ; oracle still reports [0]). A heap-boxed list so the checker can push through it.
+   (check_diags (ptr (ArrayList Diag)))
+   ; All RESOLVE body errors, same treatment: resolve collects per function and
+   ; continues instead of aborting the pipeline on the first, so a batch of mistakes
+   ; is reported in one pass (the checker already did this; resolve did not). The
+   ; qualified names of functions whose BODY failed to resolve — the checker skips
+   ; their bodies but keeps their SIGNATURES in the table, so callers don't cascade.
+   (resolve_diags    (ptr (ArrayList Diag)))
+   (resolve_poisoned (ptr (ArrayList (slice u8))))
+   ; The loader's first error, as a framed Diag (src/macros.rs returns Result<_,
+   ; Diag>). Threaded via a slot (not a Result return) so the loop-heavy loader
+   ; keeps its i64 signatures; set once, then process-forms/-import bail early and
+   ; run-pipeline reports it through the SAME render path as every other diagnostic.
+   (loaderr Diag)
+   (loaderr_set bool)])
+
+(defstruct Resolved [(text (slice u8)) (incdir (slice u8)) (disp (slice u8))])
+
+; Register a source (name+text) into the SourceMap, in id order (sources[id]).
+(defn register-source! [(s (mut LS)) (name (slice u8)) (text (slice u8))] (-> i64)
+  (let [sp (alloc-stack Source)] (store! (field sp name) name) (store! (field sp text) text)
+    (al-push! (mut (field s sources)) (load sp))) 0)
+; Register an expansion; return its ctxt id (1-based; 0 = root).
+(defn add-expansion! [(s (mut LS)) (e Expansion)] (-> i64)
+  (al-push! (mut (field s expansions)) e)
+  (al-len [Expansion] (load (field s expansions))))
+
+; ============================ loader helpers (copied) ======================
+(defn mk-tagged [(form Sexp) (module (Option (slice u8)))] (-> TaggedForm)
+  (let [p (alloc-stack TaggedForm)]
+    (store! (field p form) form) (store! (field p module) module)
+    (load p)))
+
+(defn loader-abort [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "loader error: ") (ps w msg) (wb w 10))
+  (abort)
+  0)
+
+; A framed loader diagnostic anchored at `f`'s span (src/macros.rs Diag::at(form.span, …)).
+(defn diag-at-form [(f (ptr Sexp)) (msg (slice u8))] (-> Diag)
+  (let [d (alloc-stack Diag)]
+    (store! (field d lo) (load (field f lo)))
+    (store! (field d hi) (load (field f hi)))
+    (store! (field d msg) msg)
+    (store! (field d source) (load (field f source)))
+    (store! (field d ctxt) (load (field f ctxt)))
+    (load d)))
+; Record the loader's first error and mark the run failed (idempotent: keep the first).
+(defn ls-set-err! [(s (mut LS)) (d Diag)] (-> i64)
+  (if (load (field s loaderr_set)) 0
+      (do (store! (field s loaderr) d) (store! (field s loaderr_set) true) 0)))
+(defn ls-err? [(s (mut LS))] (-> bool) (load (field s loaderr_set)))
+
+(defn cstr-len [(p (ptr i8))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-eq (cast i64 (load (index p (load i)))) 0) (break)
+            (store! i (iadd (load i) 1))))
+    (load i)))
+(defn cstr->slice [(p (ptr i8))] (-> (slice u8))
+  (slice-new [u8] (cast (ptr u8) p) (cstr-len p)))
+
+(defn cwd-slice [(a (ptr Allocator))] (-> (slice u8))
+  (let [buf (unwrap-ptr [i8] (raw-alloc a 4096 1))
+        r (getcwd buf 4096)]
+    (if (icmp-eq (cast i64 r) 0)
+        (do (loader-abort "getcwd failed") "")
+        (cstr->slice buf))))
+
+(defn path-join [(a (ptr Allocator)) (base (slice u8)) (path (slice u8))] (-> (slice u8))
+  (if (and (icmp-gt (slice-len path) 0) (icmp-eq (cast i64 (slice-get path 0)) 47))
+      path
+      (let [m1 (match (str-concat a base "/") (Some [v] v) (None [] ""))]
+        (match (str-concat a m1 path) (Some [v] v) (None [] "")))))
+
+(defn dirname [(p (slice u8))] (-> (slice u8))
+  (let [n (slice-len p) (mut idx) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-lt (load idx) 0) "." (subslice p 0 (load idx)))))
+
+(defn basename [(p (slice u8))] (-> (slice u8))
+  (let [n (slice-len p) (mut idx) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-lt (load idx) 0) p (subslice p (iadd (load idx) 1) n))))
+
+; The embedded table IS the single manifest of bundled modules: a name is bundled
+; iff we carry its text (embedded-lib returns "" for anything not bundled). This is
+; the one source of truth — the old hand-maintained duplicate list is gone, and the
+; snapshot corpus derives its lib set from `lib/*.coil` directly.
+(defn bundled? [(name (slice u8))] (-> bool)
+  (icmp-gt (slice-len (embedded-lib name)) 0))
+
+; The import base for BUNDLED stdlib files (and the prelude): a sentinel that is NOT
+; a real directory, so a bundled lib's OWN relative imports (`(import "slice.coil")`)
+; resolve to the bundled sibling — never to a same-named file that happens to sit in
+; the entry file's directory. With file-relative imports (tool-1), compiling
+; `examples/foo.coil` resolves the entry's imports against `examples/`, where a demo
+; like `examples/io.coil` shadows the io LIBRARY; the bundled stdlib is a
+; self-contained unit and must keep resolving its own siblings from the bundle.
+(defn bundled-base [] (-> (slice u8)) "<bundled>")
+
+; The explicit stdlib source root (`COIL_STDLIB_DIR`), or None. When set, the loader
+; prefers live source files under it over the embedded copies — for developing the
+; compiler (edit a lib, rebuild a program, no compiler rebuild). When UNSET the
+; embedded copies are authoritative and NO disk path is consulted, so a portable
+; binary can never be shadowed by a stray lib/*.coil in whatever directory it runs
+; in. (The self-build stays correct either way: each stage's embedded copies equal
+; the disk sources it was built from.)
+(defn stdlib-dir [(a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [p (getenv (slice->cstr a "COIL_STDLIB_DIR"))]
+    (if (icmp-eq (cast i64 p) 0) (None [(slice u8)]) (Some (cstr->slice p)))))
+
+; Text of a bundled lib: the file under $COIL_STDLIB_DIR/lib if that override is set
+; and the file exists, otherwise the embedded copy.
+(defn bundled-text [(a (ptr Allocator)) (bn (slice u8))] (-> (slice u8))
+  (match (stdlib-dir a)
+    (None []    (embedded-lib bn))
+    (Some [dir] (let [lc (slice->cstr a (path-join a (path-join a dir "lib") bn))
+                      d  (read-file a lc)]
+                  (if (icmp-eq (slice-len d) 0) (embedded-lib bn) d)))))
+
+(defn resolve-source [(a (ptr Allocator)) (s (mut LS)) (form (ptr Sexp)) (base (slice u8)) (path (slice u8))] (-> Resolved)
+  (let [joined (path-join a base path)
+        jc (slice->cstr a joined)
+        buf (unwrap-ptr [i8] (raw-alloc a 4096 1))
+        r (realpath jc buf)]
+    (if (icmp-ne (cast i64 r) 0)
+        (let [canon (cstr->slice buf)
+              text (read-file a buf)
+              incdir (dirname canon)
+              rp (alloc-stack Resolved)]
+          (store! (field rp text) text) (store! (field rp incdir) incdir) (store! (field rp disp) canon)
+          (load rp))
+        (let [bn (basename path)]
+          (if (bundled? bn)
+              (let [text (bundled-text a bn)
+                    rp (alloc-stack Resolved)]
+                ; incdir = the bundled sentinel, NOT `base`: a bundled lib's nested
+                ; imports must resolve to bundled siblings, not to files in whatever
+                ; directory pulled it in (tool-1: file-relative bases are real dirs).
+                (store! (field rp text) text) (store! (field rp incdir) (bundled-base))
+                (store! (field rp disp) (sconcat3 a "<bundled " bn ">"))
+                (load rp))
+              (do (ls-set-err! (mut s) (diag-at-form form (sconcat a (sconcat3 a "import '" path "': not found (no such file, and not a bundled stdlib module)") "")))
+                  (zeroed Resolved)))))))
+
+(defn l-as-list [(f (ptr Sexp))] (-> (ptr (ArrayList Sexp)))
+  (match (load (field f kind))
+    (KList [items] items)
+    (KInt   [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KFloat [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KSym   [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KKw    [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KStr   [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KCStr  [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))
+    (KVec   [_] (do (loader-abort "expected a list") (box-items (malloc-allocator) (al-new [Sexp] (malloc-allocator)))))))
+
+(defn l-sym-name [(f (ptr Sexp))] (-> (Option (slice u8)))
+  (match (load (field f kind))
+    (KSym   [s] (Some s))
+    (KInt   [_] (None [(slice u8)]))
+    (KFloat [_] (None [(slice u8)]))
+    (KKw    [_] (None [(slice u8)]))
+    (KStr   [_] (None [(slice u8)]))
+    (KCStr  [_] (None [(slice u8)]))
+    (KList  [_] (None [(slice u8)]))
+    (KVec   [_] (None [(slice u8)]))))
+
+(defn l-list-head [(f (ptr Sexp))] (-> (Option (slice u8)))
+  (match (load (field f kind))
+    (KList [items]
+      (if (icmp-gt (al-len [Sexp] (load items)) 0)
+          (let [h (alloc-stack Sexp)] (store! h (al-get [Sexp] (load items) 0)) (l-sym-name h))
+          (None [(slice u8)])))
+    (KInt   [_] (None [(slice u8)]))
+    (KFloat [_] (None [(slice u8)]))
+    (KSym   [_] (None [(slice u8)]))
+    (KKw    [_] (None [(slice u8)]))
+    (KStr   [_] (None [(slice u8)]))
+    (KCStr  [_] (None [(slice u8)]))
+    (KVec   [_] (None [(slice u8)]))))
+
+(defn l-as-str [(f (ptr Sexp))] (-> (Option (slice u8)))
+  (match (load (field f kind))
+    (KStr   [s] (Some s))
+    (KInt   [_] (None [(slice u8)]))
+    (KFloat [_] (None [(slice u8)]))
+    (KSym   [_] (None [(slice u8)]))
+    (KKw    [_] (None [(slice u8)]))
+    (KCStr  [_] (None [(slice u8)]))
+    (KList  [_] (None [(slice u8)]))
+    (KVec   [_] (None [(slice u8)]))))
+
+(defn module-name [(f (ptr Sexp))] (-> (slice u8))
+  (let [items (l-as-list f) n (al-len [Sexp] (load items))]
+    (if (icmp-lt n 2)
+        (do (loader-abort "module: expected a name") "")
+        (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) 1))
+          (match (l-sym-name it)
+            (Some [x] x)
+            (None []  (do (loader-abort "module: expected a name") "")))))))
+
+(defn declared-module [(forms (ptr (ArrayList Sexp)))] (-> (Option (slice u8)))
+  (let [n (al-len [Sexp] (load forms)) (mut res) (None [(slice u8)]) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (alloc-stack Sexp)] (store! f (al-get [Sexp] (load forms) (load i)))
+            (match (l-list-head f)
+              (Some [h] (if (str-eq h "module") (do (store! res (Some (module-name f))) (break)) 0))
+              (None []  0)))
+          (store! i (iadd (load i) 1)))))
+    (load res)))
+
+(defn collect-syms [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [Sexp] (load items)) (mut out) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+            (match (l-sym-name it) (Some [nm] (al-push! (mut out) nm)) (None [] 0)))
+          (store! i (iadd (load i) 1)))))
+    (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! bp (load out)) bp)))
+
+(defn imp-elem [(s (mut LS)) (i i64)] (-> (ptr ImpEntry))
+  (let [hdr (alloc-stack (ArrayList ImpEntry))]
+    (store! hdr (load (field s imports)))
+    (index (load (field hdr data)) i)))
+(defn exp-elem [(s (mut LS)) (i i64)] (-> (ptr ExpEntry))
+  (let [hdr (alloc-stack (ArrayList ExpEntry))]
+    (store! hdr (load (field s exports)))
+    (index (load (field hdr data)) i)))
+
+(defn imp-entry [(s (mut LS)) (name (slice u8))] (-> (ptr ImpEntry))
+  (let [n (al-len [ImpEntry] (load (field s imports))) (mut idx) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (imp-elem (mut s) (load i)) name)) name)
+              (do (store! idx (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load idx) 0)
+        (imp-elem (mut s) (load idx))
+        (let [e (alloc-stack ImpEntry) a (load (field s a))]
+          (store! (field e name) name)
+          (store! (field (field e imp) aliases)   (al-new [Alias] a))
+          (store! (field (field e imp) uses)      (al-new [Use] a))
+          (store! (field (field e imp) reexports) (al-new [(slice u8)] a))
+          (al-push! (mut (field s imports)) (load e))
+          (imp-elem (mut s) n)))))
+
+(defn exp-entry [(s (mut LS)) (name (slice u8))] (-> (ptr ExpEntry))
+  (let [n (al-len [ExpEntry] (load (field s exports))) (mut idx) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (exp-elem (mut s) (load i)) name)) name)
+              (do (store! idx (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load idx) 0)
+        (exp-elem (mut s) (load idx))
+        (let [e (alloc-stack ExpEntry) a (load (field s a))]
+          (store! (field e name) name)
+          (store! (field e names) (al-new [(slice u8)] a))
+          (al-push! (mut (field s exports)) (load e))
+          (exp-elem (mut s) n)))))
+
+(defn ee-add-name! [(e (ptr ExpEntry)) (name (slice u8))] (-> i64)
+  (let [n (al-len [(slice u8)] (load (field e names))) (mut found) false (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load (field e names)) (load i)) name) (do (store! found true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (load found) 0 (al-push! (mut (field e names)) name))))
+
+(defn mi-add-alias! [(e (ptr ImpEntry)) (alias (slice u8)) (target (slice u8))] (-> i64)
+  (let [n (al-len [Alias] (load (field (field e imp) aliases))) (mut idx) -1 (mut i) 0
+        v (let [ap (alloc-stack Alias)] (store! (field ap alias) alias) (store! (field ap target) target) (load ap))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (let [ep (alloc-stack Alias)] (store! ep (al-get [Alias] (load (field (field e imp) aliases)) (load i))) (load (field ep alias))) alias)
+              (do (store! idx (load i)) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load idx) 0)
+        (al-set! [Alias] (mut (field (field e imp) aliases)) (load idx) v)
+        (al-push! (mut (field (field e imp) aliases)) v))))
+
+(defn mi-add-use! [(e (ptr ImpEntry)) (target (slice u8)) (spec UseSpec)] (-> i64)
+  (let [u (alloc-stack Use)] (store! (field u target) target) (store! (field u spec) spec)
+    (al-push! (mut (field (field e imp) uses)) (load u))))
+
+(defn mi-add-reexport! [(e (ptr ImpEntry)) (target (slice u8))] (-> i64)
+  (al-push! (mut (field (field e imp) reexports)) target))
+
+(defn loaded-insert! [(s (mut LS)) (name (slice u8))] (-> bool)
+  (let [n (al-len [(slice u8)] (load (field s loaded))) (mut found) false (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load (field s loaded)) (load i)) name) (do (store! found true) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (load found) false (do (al-push! (mut (field s loaded)) name) true))))
+
+(defn handle-export [(s (mut LS)) (f (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
+  (match cur
+    (Some [m]
+      (let [items (l-as-list f) n (al-len [Sexp] (load items)) ep (exp-entry (mut s) m) (mut i) 1]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+                (match (l-sym-name it)
+                  (Some [nm] (ee-add-name! ep nm))
+                  (None []   (do (loader-abort "export: names must be symbols") 0))))
+              (store! i (iadd (load i) 1)))))
+        0))
+    (None [] (do (loader-abort "export: only valid inside a (module …)") 0))))
+
+(defn process-import [(s (mut LS)) (form (ptr Sexp)) (base (slice u8)) (cur (Option (slice u8)))] (-> i64)
+  (let [a (load (field s a))
+        items (l-as-list form) nit (al-len [Sexp] (load items))
+        path (if (icmp-lt nit 2)
+                 (do (loader-abort "import: expected (import \"path\" [:as alias])") "")
+                 (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) 1))
+                   (match (l-as-str it)
+                     (Some [p] p)
+                     (None []  (do (loader-abort "import: expected (import \"path\" [:as alias])") "")))))
+        (mut alias)    (None [(slice u8)])
+        (mut use-spec) (None [UseSpec])
+        (mut reexport) false
+        (mut i) 2]
+    (loop (if (icmp-ge (load i) nit) (break)
+      (let [it (alloc-stack Sexp)] (store! it (al-get [Sexp] (load items) (load i)))
+        (match (load (field it kind))
+          (KKw [k]
+            (if (str-eq k "as")
+                (let [a2 (alloc-stack Sexp)] (store! a2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                  (match (l-sym-name a2)
+                    (Some [al] (do (store! alias (Some al)) (store! i (iadd (load i) 2))))
+                    (None []   (do (loader-abort "import: :as expects an alias symbol") (store! i (iadd (load i) 2))))))
+              (if (str-eq k "reexport")
+                  (do (store! reexport true) (store! i (iadd (load i) 1)))
+                (if (str-eq k "use")
+                    (let [v2 (alloc-stack Sexp)] (store! v2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                      (match (load (field v2 kind))
+                        (KSym [sm] (if (str-eq sm "*")
+                                       (do (store! use-spec (Some (UAll))) (store! i (iadd (load i) 2)))
+                                       (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2)))))
+                        (KVec [vit] (do (store! use-spec (Some (UNames (collect-syms a vit)))) (store! i (iadd (load i) 2))))
+                        (KInt   [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KFloat [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KKw    [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KStr   [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KCStr  [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))
+                        (KList  [_] (do (loader-abort "import: :use expects * or [names]") (store! i (iadd (load i) 2))))))
+                  (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1)))))))
+          (KInt   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KFloat [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KSym   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KStr   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KCStr  [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KList  [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))
+          (KVec   [_] (do (loader-abort "import: expected :as alias, :use *|[names], or :reexport") (store! i (iadd (load i) 1))))))))
+    (let [rr (resolve-source a (mut s) form base path)
+          rp (alloc-stack Resolved)]
+      (store! rp rr)
+      (if (ls-err? (mut s)) 0
+      (let [text (load (field rp text)) incdir (load (field rp incdir))
+            inc-id (load (field s srccount))
+            _ignore (store! (field s srccount) (iadd inc-id 1))
+            _reg (register-source! (mut s) (load (field rp disp)) text)]
+        (match (read-all a text inc-id)
+          ; `d` is already anchored in the imported file (read-all stamped inc-id),
+          ; so hand it to the driver verbatim — it points at the unclosed form. A
+          ; generic abort here would drop the one span that locates the mistake.
+          (Err [d] (do (ls-set-err! (mut s) d) 0))
+          (Ok [inc-forms]
+            (let [modname (match (declared-module inc-forms)
+                            (Some [m] m)
+                            ; the one fact the user needs is WHICH file, and it was the one
+                            ; fact omitted — while the process killed itself with SIGABRT, so
+                            ; build tools saw a crashed compiler rather than a failed compile.
+                            ; `rp disp` is the imported file's path and `form` is the import
+                            ; that pulled it in: the same pair behind the excellent
+                            ; "import 'X': not found" error a few hundred lines up.
+                            (None []  (do (ls-set-err! (mut s)
+                                            (diag-at-form form
+                                              (sconcat3 a "import '" (load (field rp disp))
+                                                "': file has no (module …) declaration — add (module <name>) as its first form")))
+                                          "")))
+                  importer (match cur (Some [m] m) (None [] ""))
+                  imp (imp-entry (mut s) importer)
+                  alias-name (match (load alias) (Some [al] al) (None [] modname))]
+              (mi-add-alias! imp alias-name modname)
+              (match (load use-spec)
+                (Some [spec] (mi-add-use! imp modname spec))
+                (None []     0))
+              (if (load reexport) (mi-add-reexport! imp modname) 0)
+              (if (loaded-insert! (mut s) modname)
+                  (process-forms (mut s) inc-forms incdir (None [(slice u8)]))
+                  0)
+              0))))))))
+
+; Join the string elements of a `:flags ["-I…" "-D…"]` option into one clang
+; flags string (each space-prefixed), or "" if absent. Forwarded to clang so
+; headers that need include paths / feature defines can be parsed correctly.
+(defn cimport-kwstr [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64) (kw (slice u8))] (-> (slice u8))
+  (let [(mut out) (sb-new a) (mut j) 2]
+    (loop (if (icmp-ge (load j) nit) (break)
+      (let [kwt (alloc-stack Sexp)] (store! kwt (al-get [Sexp] (load items) (load j)))
+        (match-else (load (field kwt kind))
+          (KKw [k]
+            (if (and (str-eq k kw) (icmp-lt (iadd (load j) 1) nit))
+                (do (let [vec (alloc-stack Sexp)] (store! vec (al-get [Sexp] (load items) (iadd (load j) 1)))
+                      (match-else (load (field vec kind))
+                        (KVec [vit]
+                          (let [(mut vi) 0 vn (al-len [Sexp] (load vit))]
+                            (loop (if (icmp-ge (load vi) vn) (break)
+                              (do (let [el (alloc-stack Sexp)] (store! el (al-get [Sexp] (load vit) (load vi)))
+                                    (match (l-as-str el) (Some [fs] (do (sb-push-str! (mut out) " ") (sb-push-str! (mut out) fs) 0)) (None [] 0)))
+                                  (store! vi (iadd (load vi) 1)))))))
+                        (_ 0)))
+                    (store! j (iadd (load j) 2)))
+              (store! j (iadd (load j) 1))))
+          (_ (store! j (iadd (load j) 1)))))))
+    (sb-str (load out))))
+
+; parse one `:probe` entry: `(name "C-expr")` (tier 0) or `(name :bits "struct X" "f")`
+; (tier 1) → push a Probe. Malformed entries are ignored.
+(defn parse-probe-entry [(a (ptr Allocator)) (plist (ptr (ArrayList ci/Probe))) (entry (ptr Sexp))] (-> i64)
+  (let [it (l-as-list entry) n (al-len [Sexp] (load it))]
+    (if (icmp-lt n 2) 0
+      (let [e0 (alloc-stack Sexp)]
+        (store! e0 (al-get [Sexp] (load it) 0))
+        (match (l-sym-name e0) (None [] 0)
+          (Some [name]
+            (let [e1 (alloc-stack Sexp)]
+              (store! e1 (al-get [Sexp] (load it) 1))
+              (match-else (load (field e1 kind))
+                (KStr  [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                (KCStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                (KKw   [k]
+                  (if (and (str-eq k "bits") (icmp-ge n 4))
+                      (let [e2 (alloc-stack Sexp) e3 (alloc-stack Sexp)]
+                        (store! e2 (al-get [Sexp] (load it) 2)) (store! e3 (al-get [Sexp] (load it) 3))
+                        (match (l-as-str e2) (None [] 0)
+                          (Some [sn] (match (l-as-str e3) (None [] 0) (Some [fnm] (ci/probe-push! a plist name 1 "" sn fnm))))))
+                    0))
+                (_ 0)))))))))
+
+; is a bare keyword `:kw` present anywhere in the form's tail?
+(defn has-kw? [(items (ptr (ArrayList Sexp))) (nit i64) (kw (slice u8))] (-> bool)
+  (let [(mut j) 2 (mut r) false]
+    (loop (if (or (icmp-ge (load j) nit) (load r)) (break)
+      (do (let [k (alloc-stack Sexp)] (store! k (al-get [Sexp] (load items) (load j)))
+            (match-else (load (field k kind)) (KKw [n] (if (str-eq n kw) (do (store! r true) 0) 0)) (_ 0)))
+          (store! j (iadd (load j) 1)))))
+    (load r)))
+
+; collect the `:probe [ … ]` entries into a Probe list.
+(defn cimport-probes [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (nit i64)] (-> (ptr (ArrayList ci/Probe)))
+  (let [plist (ci/probe-list-new a) (mut j) 2]
+    (loop (if (icmp-ge (load j) nit) (break)
+      (let [kwt (alloc-stack Sexp)] (store! kwt (al-get [Sexp] (load items) (load j)))
+        (match-else (load (field kwt kind))
+          (KKw [k]
+            (if (and (str-eq k "probe") (icmp-lt (iadd (load j) 1) nit))
+                (do (let [vec (alloc-stack Sexp)] (store! vec (al-get [Sexp] (load items) (iadd (load j) 1)))
+                      (match-else (load (field vec kind))
+                        (KVec [vit]
+                          (let [(mut vi) 0 vn (al-len [Sexp] (load vit))]
+                            (loop (if (icmp-ge (load vi) vn) (break)
+                              (do (let [el (alloc-stack Sexp)] (store! el (al-get [Sexp] (load vit) (load vi)))
+                                    (parse-probe-entry a plist el))
+                                  (store! vi (iadd (load vi) 1)))))))
+                        (_ 0)))
+                    (store! j (iadd (load j) 2)))
+              (store! j (iadd (load j) 1))))
+          (_ (store! j (iadd (load j) 1)))))))
+    plist))
+
+; `(cimport "header.h" [:flags […]] [:probe […]] [:link […]])` — generate C bindings
+; via clang AT LOAD TIME and splice the externs/defstructs/consts + probe consts
+; into the CURRENT module (dropping the generated `(module cbindings)` header).
+(defn process-cimport [(s (mut LS)) (form (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
+  (let [a (load (field s a))
+        items (l-as-list form) nit (al-len [Sexp] (load items))]
+    (if (icmp-lt nit 2)
+        (ls-set-err! (mut s) (diag-at-form form "cimport: expected (cimport \"header.h\")"))
+      (let [it (alloc-stack Sexp)]
+        (store! it (al-get [Sexp] (load items) 1))
+        (match (l-as-str it)
+          (None [] (ls-set-err! (mut s) (diag-at-form form "cimport: expected a string header path")))
+          (Some [path]
+            (let [flags (cimport-kwstr a items nit "flags")
+                  probe-out (ci/cimport-probe a path flags (cimport-probes a items nit) (cimport-kwstr a items nit "link"))
+                  ; :probe-only skips the whole header dump (structs/externs/#defines)
+                  ; and emits ONLY the probe consts — the ABI-extraction workflow.
+                  rtext (if (has-kw? items nit "probe-only")
+                            (Ok [(slice u8) (slice u8)] (sconcat a "(module cbindings)\n" probe-out))
+                          (match (ci/cimport-header a path flags)
+                            (Err [e] (Err [(slice u8) (slice u8)] e))
+                            (Ok [hdr] (Ok [(slice u8) (slice u8)] (sconcat a hdr probe-out)))))]
+              (match rtext
+                (Err [e] (ls-set-err! (mut s) (diag-at-form form e)))
+                (Ok [text]
+                  (let [sid (load (field s srccount))
+                        _1 (store! (field s srccount) (iadd sid 1))
+                        _2 (register-source! (mut s) (sconcat a "<cimport " path) text)]
+                    (match (read-all a text sid)
+                      (Err [d] (ls-set-err! (mut s) (diag-at-form form "cimport: generated bindings failed to parse")))
+                      (Ok [gforms]
+                        (let [(mut k) 0 gn (al-len [Sexp] (load gforms))]
+                          (loop (if (icmp-ge (load k) gn) (break)
+                            (do (let [gf (alloc-stack Sexp)]
+                                  (store! gf (al-get [Sexp] (load gforms) (load k)))
+                                  (match (l-list-head gf)
+                                    (Some [gh] (if (str-eq gh "module") 0 (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
+                                    (None []    (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
+                                (store! k (iadd (load k) 1)))))
+                          0)))))))))))))
+
+; ── include-str: compile-time file embed, resolved at LOAD time ───────────────
+; Each file's forms are walked as it is loaded (EVERY file, always — no dependence
+; on the macro-expansion pass), and each `(include-str "rel")` is replaced by a
+; string literal of the file's bytes. `rel` resolves relative to the INCLUDING
+; file's own directory (Rust's `include_str!` semantics). A missing file or a
+; non-literal path is a hard load error — never a silent empty embed.
+(defn incl-is-include-str [(items (ptr (ArrayList Sexp)))] (-> bool)
+  (and (icmp-ge (sx-len items) 1)
+       (and (icmp-eq (sx-tag (sx-at items 0)) 2)
+            (str-eq (sx-sval (sx-at items 0)) "include-str"))))
+(defn incl-read [(a (ptr Allocator)) (dir (slice u8)) (rel (slice u8))] (-> (Option (slice u8)))
+  (read-file-opt a (slice->cstr a (path-join a dir rel))))
+(defn do-include-str [(s (mut LS)) (f (ptr Sexp)) (dir (slice u8))] (-> Sexp)
+  (let [a (load (field s a)) items (sx-items (load f))]
+    (if (icmp-ne (sx-len items) 2)
+        (do (ls-set-err! (mut s) (diag-at-form f "include-str: expects exactly one string-literal path argument")) (load f))
+      (let [arg (sx-at items 1)]
+        (if (icmp-ne (sx-tag arg) 4)
+            (do (ls-set-err! (mut s) (diag-at-form f "include-str: path must be a string literal")) (load f))
+          (let [rel (sx-sval arg)]
+            (match (incl-read a dir rel)
+              (Some [text] (mk-sexp-src (KStr text) f))
+              (None []     (do (ls-set-err! (mut s) (diag-at-form f (sconcat3 a "include-str: cannot read file '" rel "' (relative to the including file)"))) (load f))))))))))
+(defn form-has-include-str [(f (ptr Sexp))] (-> bool)
+  (let [tg (sx-tag (load f))]
+    (if (and (icmp-eq tg 6) (incl-is-include-str (sx-items (load f)))) true
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load f)) n (sx-len items) (mut i) 0 (mut r) false]
+            (loop (if (or (load r) (icmp-ge (load i) n)) (break)
+              (do (if (form-has-include-str (al-elem [Sexp] items (load i))) (do (store! r true) 0) 0)
+                  (store! i (iadd (load i) 1)))))
+            (load r))
+        false))))
+(defn expand-includes-in-form [(s (mut LS)) (f (ptr Sexp)) (dir (slice u8))] (-> Sexp)
+  (let [a (load (field s a)) tg (sx-tag (load f))]
+    (if (and (icmp-eq tg 6) (incl-is-include-str (sx-items (load f))))
+        (do-include-str (mut s) f dir)
+      (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load f)) n (sx-len items) (mut out) (al-new [Sexp] a) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (al-push! (mut out) (expand-includes-in-form (mut s) (al-elem [Sexp] items (load i)) dir))
+                  (store! i (iadd (load i) 1)))))
+            (if (icmp-eq tg 6) (mk-sexp-src (KList (box-al [Sexp] a (load out))) f)
+                               (mk-sexp-src (KVec  (box-al [Sexp] a (load out))) f)))
+        (load f)))))
+
+(defn process-forms [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8)) (cur0 (Option (slice u8)))] (-> i64)
+  (let [n (al-len [Sexp] (load forms)) (mut cur) (None [(slice u8)]) (mut i) 0]
+    (store! cur cur0)
+    ; Bail the moment the loader records an error (this file's import failed, or a
+    ; nested imported file's did): stop processing further forms so the first
+    ; diagnostic is the one reported (src/macros.rs short-circuits via `?`).
+    (loop (if (or (icmp-ge (load i) n) (ls-err? (mut s))) (break)
+      (do (let [f (alloc-stack Sexp)] (store! f (al-get [Sexp] (load forms) (load i)))
+            (match (l-list-head f)
+              (Some [h]
+                (if (str-eq h "module")
+                    (let [name (module-name f)] (imp-entry (mut s) name) (store! cur (Some name)) 0)
+                  (if (str-eq h "export")
+                      (handle-export (mut s) f (load cur))
+                    (if (str-eq h "import")
+                        (match (load cur)
+                          (Some [m] (process-import (mut s) f base (load cur)))
+                          (None []  (ls-set-err! (mut s) (diag-at-form f "import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved"))))
+                      (if (str-eq h "cimport")
+                          (process-cimport (mut s) f (load cur))
+                        (if (form-has-include-str f)
+                            (al-push! (mut (field s out)) (mk-tagged (expand-includes-in-form (mut s) f base) (load cur)))
+                          (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))))))
+              (None []
+                (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))
+          (store! i (iadd (load i) 1)))))
+    0))
+
+(defn load-program [(s (mut LS)) (forms (ptr (ArrayList Sexp))) (base (slice u8))] (-> i64)
+  (let [a (load (field s a))
+        ; $COIL_STDLIB_DIR/selfhost/src/prelude.coil if that override is set and the
+        ; file exists (so dev edits take effect without a compiler rebuild), else the
+        ; embedded copy. Unset => embedded only, never an ambient disk read.
+        prelude-text (match (stdlib-dir a)
+                       (None []    (embedded-prelude))
+                       (Some [dir] (let [d (read-file a (slice->cstr a (path-join a dir "selfhost/src/prelude.coil")))]
+                                     (if (icmp-eq (slice-len d) 0) (embedded-prelude) d))))
+        prelude-id (load (field s srccount))
+        _ignore (store! (field s srccount) (iadd prelude-id 1))
+        _reg (register-source! (mut s) "<prelude>" prelude-text)]
+    ; Pre-register the MAIN file's module as loaded (src/macros.rs): compiling a
+    ; stdlib file directly must not ALSO pull the bundled copy of the same
+    ; module in through the prelude's import chain (the module would collect
+    ; twice — "duplicate impl", silent last-wins for functions).
+    (match (declared-module forms)
+      (Some [main-mod] (do (loaded-insert! (mut s) main-mod) 0))
+      (None [] 0))
+    ; The prelude is bundled stdlib: resolve ITS imports (control.coil, print.coil,
+    ; …) against the bundled sentinel, not the entry file's directory — otherwise a
+    ; demo like examples/io.coil would shadow the io library (tool-1). The MAIN file's
+    ; imports use `base` = its own directory (file-relative).
+    (match (read-all a prelude-text prelude-id)
+      (Err [d] (do (loader-abort "read error in prelude") 0))
+      (Ok [pf]  (process-forms (mut s) pf (bundled-base) (None [(slice u8)]))))
+    (process-forms (mut s) forms base (None [(slice u8)]))
+    0))
+
+; ============================ resolve representation =======================
+; Mirrors src/resolve.rs. `Defs` = a module's definition names split by namespace
+; (HashSets become ArrayLists, membership = linear str-eq scan). `DefTable` =
+; per-module Defs (ArrayList of DefEntry). `ParsedForm` = one tagged form parsed
+; into its own Program, retaining its module identity.
+; `Defs` sets are BY-VALUE ArrayLists so names can be pushed via (field …).

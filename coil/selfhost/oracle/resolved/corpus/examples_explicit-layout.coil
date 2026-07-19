@@ -1,0 +1,24 @@
+(defstruct
+  Reg
+  :layout
+  explicit
+  :size
+  16
+  :align
+  8
+  [(status :u32 :at 0) (sbytes (array u8 4) :at 0) (data :i64 :at 8)])
+
+(static-assert (icmp-eq (sizeof Reg) 16) "Reg must be 16 bytes")
+
+(static-assert (icmp-eq (offsetof Reg data) 8) "data at offset 8")
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [r (alloc-stack Reg)]
+    (store! (field r status) (cast :u32 2))
+    (store! (field r data) 40)
+    (iadd (cast :i64 (load (index (field r sbytes) 0))) (load (field r data)))))
+

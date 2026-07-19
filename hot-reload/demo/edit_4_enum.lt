@@ -1,0 +1,19 @@
+// SCENARIO 4 — introduce an enum and dispatch on it.
+//
+// Particles on the right half become rings. `radius` now matches on `Kind`,
+// which sets up the scenario that follows: what happens to this match when
+// the enum grows a variant underneath it.
+
+enum Kind { Dot, Ring }
+
+fn kind_of(p: Particle) -> Kind {
+    if p.x > 320 { return Kind::Ring; }
+    Kind::Dot
+}
+
+fn radius(p: Particle) -> i64 {
+    match kind_of(p) {
+        Dot => 10,
+        Ring => 24,
+    }
+}

@@ -1,0 +1,4 @@
+(module app)
+(import "safe_dialect.coil" :use *)    ; ← ONE import = the whole dialect
+(defn f [(x :i64)] (-> :i64) (inc (inc x)))   ; inc desugared by the dialect
+(defn main [] (-> :i64) (f 40))               ; → 42

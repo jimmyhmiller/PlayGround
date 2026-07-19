@@ -1,0 +1,19 @@
+# SwiftPM
+.build/
+Package.resolved
+
+# Xcode — the project is generated from App/project.yml by xcodegen, so it is not committed.
+*.xcodeproj/
+*.xcworkspace/
+build/
+build-device/
+DerivedData/
+App/Generated-Info.plist
+*.xcuserstate
+xcuserdata/
+
+# Secrets — real API keys live here, never committed.
+App/Config.local.xcconfig
+
+# macOS
+.DS_Store

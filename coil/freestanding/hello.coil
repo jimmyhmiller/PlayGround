@@ -1,0 +1,74 @@
+; Freestanding bare-metal aarch64 dogfood (§7) — Coil running where C/Zig run: NO
+; libc, NO OS, NO crt0. The purest "as low as Zig/C" test, and the ULTIMATE test of
+; the explicit alloc/IO design: with no ambient runtime there is NO libc malloc and
+; NO libc IO, so a self-provided allocator + Writer are MANDATORY — the
+; capability-as-a-VALUE pattern is FORCED, exactly where it shines.
+;
+; Build+run (see run.sh): emit-obj --target aarch64-unknown-none → ld.lld + virt.ld
+; → qemu-system-aarch64 -M virt. Prints "hi\nfrom coil (bare metal)\n" over the PL011
+; UART, then PSCI-poweroffs (clean qemu exit). Entry is `start` (ld.lld -e bare.start)
+; — no main, no crt0. NOTHING from the libc-coupled stdlib is imported (it would drag
+; abort/malloc — see README): every capability here is self-provided.
+(module bare)
+
+; ---- raw machine access (the only `llvm-ir` escape hatches) -----------------
+; Volatile byte store to the qemu virt PL011 UART data register (MMIO 0x09000000).
+(defn uart-byte [(c i64)] (-> i64)
+  (llvm-ir i64 [c]
+"%p = inttoptr i64 150994944 to ptr
+%b = trunc i64 $0 to i8
+store volatile i8 %b, ptr %p
+ret i64 0"))
+; PSCI SYSTEM_OFF (function id 0x84000008) via `hvc` — qemu virt's conduit. Halts.
+(defn poweroff [] (-> i64)
+  (llvm-ir i64 []
+"call void asm sideeffect \"movz x0, #0x8400, lsl #16 ; movk x0, #8 ; hvc #0\", \"~{x0}\"()
+ret i64 0"))
+
+; ---- capability #1: a Writer (a VALUE: fn-pointer + context) ----------------
+; Identical shape to lib/io.coil's Writer — but self-contained, with a UART backend.
+(defstruct Writer [(write-fn (fnptr c [(ptr i8) (ptr i8) i64] i64)) (ctx (ptr i8))])
+(defn w-write [(w (ptr Writer)) (buf (ptr i8)) (n i64)] (-> i64)
+  (call-ptr (load (field w write-fn)) (load (field w ctx)) buf n))
+(defn w-str [(w (ptr Writer)) (s (ptr i8)) (n i64)] (-> i64) (w-write w s n))
+
+; the UART backend: a write-fn that bytes-out to the UART (ctx unused)
+(defn uart-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (uart-byte (cast i64 (load (index buf (load i)))))
+                  (store! i (iadd (load i) 1))))))
+  n)
+(defn uart-writer [(w (ptr Writer))] (-> i64)
+  (store! (field w write-fn) (fnptr-of uart-write))
+  (store! (field w ctx) (cast (ptr i8) 0))
+  0)
+
+; ---- capability #2: a bump allocator (a VALUE) over a STATIC buffer ----------
+; No malloc: the backing store is a static array; alloc bumps an offset. Same idea
+; as lib/alloc.coil's Arena — but the convenience `arena-allocator` mallocs its
+; buffer (not freestanding), so here the buffer is `alloc-static` (lives in .bss).
+(defstruct Arena [(base (ptr i8)) (off i64) (cap i64)])
+(defn ar-alloc [(ar (ptr Arena)) (size i64)] (-> (ptr i8))
+  (let [p (cast (ptr i8) (iadd (cast i64 (load (field ar base))) (load (field ar off))))]
+    (store! (field ar off) (iadd (load (field ar off)) size))
+    p))
+
+(defn start [] (-> i64)               ; the ELF entry (ld.lld -e bare.start)
+  (let [buf      (alloc-static (array u8 256))
+        (mut ar) (zeroed Arena)
+        (mut w)  (zeroed Writer)]
+    (store! (field ar base) (cast (ptr i8) (index buf 0)))
+    (store! (field ar cap) 256)
+    (uart-writer (mut w))             ; wire the Writer to the UART backend
+    ; allocate scratch FROM THE ARENA, fill it, and write it THROUGH THE WRITER —
+    ; the explicit allocator + IO capabilities composing, with no runtime at all.
+    (let [scratch (ar-alloc (mut ar) 16)]
+      (store! (index scratch 0) (cast i8 104))   ; 'h'
+      (store! (index scratch 1) (cast i8 105))   ; 'i'
+      (store! (index scratch 2) (cast i8 10))    ; '\n'
+      (w-write (mut w) scratch 3))               ; "hi\n" — from arena memory, via the Writer
+    (w-str (mut w) c"from coil (bare metal)\n" 23)
+    (poweroff)
+    (loop 0)))

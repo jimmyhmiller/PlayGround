@@ -1,0 +1,33 @@
+(program
+  (class Inventory
+    (typeparams
+      (typeparam T))
+    (field items
+      (type List (type T)))
+    (fn init
+      (params)
+      (block
+        (assign
+          (dot items
+            self)
+          (call
+            (type List (type T))))))
+    (fn add
+      (params
+        (param item
+          (type T)))
+      (block
+        (call
+          (dot push
+            (dot items
+              self))
+          (arg
+            (id item)))))
+    (fn count
+      (params)
+      (type Int)
+      (block
+        (call
+          (dot len
+            (dot items
+              self)))))))

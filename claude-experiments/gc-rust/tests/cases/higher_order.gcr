@@ -1,0 +1,6 @@
+fn main() -> i64 {
+    let mut v = vec_new(); v = vec_push(v, 1); v = vec_push(v, 2); v = vec_push(v, 3); v = vec_push(v, 4);
+    let d = vec_map(v, |x: i64| x * 2);
+    let e = vec_filter(d, |x: i64| x % 4 == 0);
+    vec_fold(e, 0, |a: i64, x: i64| a + x) + 30
+}

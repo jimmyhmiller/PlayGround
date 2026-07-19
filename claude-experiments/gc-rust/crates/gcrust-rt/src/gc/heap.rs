@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::gc::field::{read_type_id, read_varlen_count};
 use crate::gc::header::ObjHeader;
+use crate::gc::reflect::{AllocSite, TypeMeta, ValueMeta};
 use crate::gc::roots::{AtomicRootSet, RootSource};
 use crate::gc::scan::scan_object;
 use crate::gc::type_info::{TypeInfo, VarLenKind};
@@ -13,9 +14,39 @@ use crate::gc::card_table::CardTable;
 use crate::gc::semi_space::FORWARDING_BIT;
 use crate::gc::semi_space::PtrPolicy;
 use crate::gc::statemap::{StatemapTracer, TraceState};
-use crate::gc::thread::ThreadState;
+use crate::gc::thread::{SiteCounter, ThreadState};
 
 // ─── Heap ───────────────────────────────────────────────────────────
+
+/// Whether the precise-layout DETECTOR is armed: always in debug builds, and in
+/// release when `GCR_GC_VERIFY` is set (to anything but empty/`0`). When armed,
+/// the forward/promote loop asserts that every traced slot pointing into a
+/// collected space targets a real object (in-range `type_id`) and panics with a
+/// clear diagnostic otherwise — surfacing a scalar that leaked into a traced
+/// slot (a layout/rooting bug). This is a DETECTOR, never a silent skip: a
+/// moving collector must trust precise layout, not heuristically re-identify
+/// pointers (a false-positive int whose bits look like a header would be
+/// relocated). Release-default trusts the layout on the hot path (the bounds
+/// index still faults loudly if the invariant is ever violated); the env flag
+/// lets a corruption be diagnosed in the field without a debug rebuild.
+#[inline]
+pub(crate) fn gc_verify_armed() -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    static STATE: AtomicU8 = AtomicU8::new(2); // 2 = uninitialised
+    match STATE.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let on = std::env::var_os("GCR_GC_VERIFY")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false);
+            STATE.store(on as u8, Ordering::Relaxed);
+            on
+        }
+    }
+}
 
 /// Thread-safe heap with stop-the-world semi-space collection.
 ///
@@ -31,6 +62,48 @@ pub enum GcPhase {
     Idle = 0,
     /// Concurrent copying in progress. Write barriers are active.
     Copying = 1,
+}
+
+/// The kind of a collection, for the GC log / pause summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcKind {
+    /// Young-generation scavenge (generational minor GC).
+    Minor,
+    /// Stop-the-world copy of the old generation (semi-space major GC).
+    Major,
+    /// Concurrent major collection.
+    Concurrent,
+}
+
+impl GcKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GcKind::Minor => "minor",
+            GcKind::Major => "major",
+            GcKind::Concurrent => "concurrent",
+        }
+    }
+}
+
+/// One garbage-collection event, recorded once per collection for the GC log and
+/// pause-time summary (`GCR_GC_LOG` / `GCR_GC_STATS`). This is COLD-PATH
+/// observability: an event is pushed once per collection (collections are
+/// infrequent and already serialize on the gc lock), never on the allocation
+/// hot path. `before_bytes`/`after_bytes` are the collected space's occupancy
+/// around the collection; `reclaimed = before - after - promoted`.
+#[derive(Debug, Clone, Copy)]
+pub struct GcEvent {
+    pub kind: GcKind,
+    /// 0-based sequence number across all collections in this heap.
+    pub seq: u64,
+    /// Stop-the-world pause duration in nanoseconds (the copy/scan work).
+    pub pause_ns: u64,
+    /// Collected space's occupancy (bytes) before the collection.
+    pub before_bytes: u64,
+    /// Collected space's occupancy (bytes) after the collection.
+    pub after_bytes: u64,
+    /// Bytes promoted to the old generation (minor GC; 0 for major).
+    pub promoted_bytes: u64,
 }
 
 /// State for the generational nursery (young generation).
@@ -87,7 +160,46 @@ pub struct Heap {
 
     type_id_offset: usize,
     type_table: Vec<TypeInfo>,
+    /// Cold, optional reflection metadata (type/field names + field types),
+    /// parallel to `type_table` by `type_id`. Set once at startup via
+    /// [`Heap::set_type_meta`]; empty when the embedder supplies none (tests,
+    /// non-reflective clients). Reads are lock-free after the one-time set.
+    type_meta: OnceLock<Vec<TypeMeta>>,
+    /// Cold reflection metadata for inline `#[value]` aggregates, indexed by
+    /// `value_id`. Set alongside `type_meta`; used to recursively render
+    /// flattened value fields in a heap dump.
+    value_meta: OnceLock<Vec<ValueMeta>>,
+    /// Cold allocation-site table (Target-1b), indexed by the `site_id` passed
+    /// to `ai_gc_alloc_*`. Each entry names the `(function, type_id)` that the
+    /// site allocates. Set once at startup via [`Heap::set_alloc_sites`]; empty
+    /// when the embedder supplies none (the per-thread counters still
+    /// accumulate, just unlabelled). Reads are lock-free after the one-time set.
+    alloc_sites: OnceLock<Vec<AllocSite>>,
+    /// Allocation-site counters salvaged from threads that have deregistered
+    /// (joined) before a profile is taken. Without this, a worker thread's
+    /// allocations would silently vanish from the profile when it exits. Folded
+    /// in at [`deregister_thread`](Self::deregister_thread) /
+    /// [`safe_deregister_thread`](Self::safe_deregister_thread) (under the
+    /// threads lock, on the departing thread itself — no concurrent
+    /// `record_alloc`), summed alongside the live threads in
+    /// [`alloc_site_profile`](Self::alloc_site_profile). Indexed by `site_id`.
+    retired_alloc_counters: Mutex<Vec<SiteCounter>>,
+    /// Set if any collection was ever passed a non-empty per-call `extra_roots`.
+    /// `visit_roots` (the snapshot root scan) covers only the PERSISTENT root
+    /// sources (globals + thread frames + permanent extras), NOT transient
+    /// per-call extra_roots — so if an embedder ever supplies roots ONLY via
+    /// `collect(extra_roots)` (not `register_permanent_extra`), a heap snapshot
+    /// would under-report reachability (a false leak). No production caller does
+    /// this today, but we record it and WARN at snapshot time so the footgun
+    /// fails loud instead of silently-wrong.
+    saw_extra_roots: AtomicBool,
     collections: AtomicUsize,
+
+    /// Cold-path GC event log: one [`GcEvent`] per collection, for the
+    /// pause-time summary and `GCR_GC_LOG`. Pushed under the gc lock at the end
+    /// of each collection (never on the allocation hot path). Read at program
+    /// end to format the summary / JSON-lines log.
+    gc_events: Mutex<Vec<GcEvent>>,
 
     /// Current GC phase. Mutators check this to know if write barriers
     /// should be active.
@@ -124,6 +236,29 @@ pub struct Heap {
 unsafe impl Sync for Heap {}
 unsafe impl Send for Heap {}
 
+/// One row of the allocation-site profile (Target-1b): a `(function, type)`
+/// site with its cumulative allocation count and byte total, summed across all
+/// threads. Produced by [`Heap::alloc_site_profile`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllocSiteStat {
+    /// The compile-time site id (index into the alloc-site table).
+    pub site_id: u32,
+    /// The function containing the site (compiled symbol name), or a synthetic
+    /// `<site N>` if no site table was installed.
+    pub function: String,
+    /// The allocated object's `type_id`, if known from the site table.
+    pub type_id: Option<u16>,
+    /// The source type name (from reflection metadata), or a synthetic fallback.
+    pub type_name: String,
+    /// Source location `file:line:col` from the site table (span-threading), or
+    /// empty if unavailable.
+    pub location: String,
+    /// Objects allocated at this site, summed across all threads.
+    pub count: u64,
+    /// Bytes allocated at this site, summed across all threads.
+    pub bytes: u64,
+}
+
 impl Heap {
     /// Create a new heap with two spaces of `space_size` bytes each.
     pub fn new<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
@@ -142,7 +277,13 @@ impl Heap {
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
             type_table,
+            type_meta: OnceLock::new(),
+            value_meta: OnceLock::new(),
+            alloc_sites: OnceLock::new(),
+            retired_alloc_counters: Mutex::new(Vec::new()),
+            saw_extra_roots: AtomicBool::new(false),
             collections: AtomicUsize::new(0),
+            gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
             tracer: None,
@@ -181,7 +322,13 @@ impl Heap {
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
             type_table,
+            type_meta: OnceLock::new(),
+            value_meta: OnceLock::new(),
+            alloc_sites: OnceLock::new(),
+            retired_alloc_counters: Mutex::new(Vec::new()),
+            saw_extra_roots: AtomicBool::new(false),
             collections: AtomicUsize::new(0),
+            gc_events: Mutex::new(Vec::new()),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
             tracer: None,
@@ -231,6 +378,64 @@ impl Heap {
         let walker: unsafe fn(*const u8, &mut dyn FnMut(*mut u64)) =
             unsafe { std::mem::transmute(walker as *const ()) };
         unsafe { walker(jit_fp, visitor) };
+    }
+
+    /// Visit every GC root — exactly the set the collector scans in
+    /// `collect_inner` Phase 1 (the global root set, each registered thread's
+    /// host roots + its parked JIT frame, and the permanent extras) — calling
+    /// `visit(obj)` with each non-null object a root slot points at. READ-ONLY:
+    /// it reads root slots and reports the pointed-at objects; it never relocates
+    /// (unlike the collector's `process_slot`).
+    ///
+    /// This is the *real* GC root set — the correct basis for snapshot
+    /// reachability / dominators. (The heap dump's in-degree-0 "roots" are a
+    /// structural proxy, not the true roots.) At a mid-execution snapshot the
+    /// parked threads' frames are rich live roots; at program end (threads
+    /// deregistered, the entry frame returned) the roots are just the globals +
+    /// permanent extras — which honestly reflects that most of the heap is, by
+    /// then, uncollected garbage.
+    ///
+    /// # Safety
+    /// Must be called with the world quiescent — under a [`pause_world`] STW
+    /// pause — because it reads each thread's frame chain and `parked_jit_fp`,
+    /// stable only while that thread is parked. Objects must be valid (as for the
+    /// heap dump). Do not call while holding `gc_lock` other than via the pause.
+    pub unsafe fn visit_roots(&self, visit: &mut dyn FnMut(*mut u8)) {
+        let mut do_slot = |slot: *mut u64| {
+            let p = unsafe { (slot as *const *mut u8).read() };
+            if !p.is_null() {
+                visit(p);
+            }
+        };
+        // Global root set.
+        self.globals.scan_roots(&mut do_slot);
+        // Per-thread host roots + parked JIT frame roots (threads parked → stable).
+        {
+            let threads = self.threads.lock().unwrap();
+            for ts in threads.iter() {
+                ts.scan_roots(&mut do_slot);
+                let jit_fp = ts.parked_jit_fp();
+                if !jit_fp.is_null() {
+                    self.walk_jit_frame(jit_fp, &mut do_slot);
+                }
+            }
+        }
+        // Permanent extras (heap-lifetime RootSource registrations).
+        let perm = self.permanent_extras.lock().unwrap();
+        for &ptr in perm.iter() {
+            let src: &dyn RootSource = unsafe { &*ptr };
+            src.scan_roots(&mut do_slot);
+        }
+    }
+
+    /// Whether any collection was ever passed non-empty per-call `extra_roots`.
+    /// A heap snapshot uses [`visit_roots`](Self::visit_roots), which covers only
+    /// the PERSISTENT root sources — so if this is true the snapshot may
+    /// under-report reachability for objects held only via transient extra_roots.
+    /// `dump_heap_json` warns on it. (No production caller supplies extra_roots
+    /// today; this guards a future embedder footgun.)
+    pub fn saw_extra_roots(&self) -> bool {
+        self.saw_extra_roots.load(Ordering::Relaxed)
     }
 
     /// Enable or disable GC-on-every-allocation (stress testing mode).
@@ -304,6 +509,237 @@ impl Heap {
     /// walk an object's fields by shape.
     pub fn type_info_by_id(&self, type_id: u16) -> &TypeInfo {
         &self.type_table[type_id as usize]
+    }
+
+    /// Install the reflection metadata table (type/field names + field types).
+    /// Called once at startup, before any mutator runs. The full table is
+    /// supplied at once; a partial or absent table simply means reflection
+    /// queries return `None`. A second call is ignored (the table is immutable
+    /// once set).
+    pub fn set_type_meta(&self, meta: Vec<TypeMeta>) {
+        let _ = self.type_meta.set(meta);
+    }
+
+    /// Reflection metadata for a `type_id`, or `None` if no metadata was
+    /// installed or the id is out of range. Pairs with [`obj_type_id`] to render
+    /// an object with its source names.
+    pub fn type_meta_by_id(&self, type_id: u16) -> Option<&TypeMeta> {
+        self.type_meta.get()?.get(type_id as usize)
+    }
+
+    /// The full reflection metadata table (empty slice if none installed).
+    pub fn type_meta_all(&self) -> &[TypeMeta] {
+        self.type_meta.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Install the value-aggregate reflection metadata (indexed by `value_id`).
+    /// Set once at startup alongside [`set_type_meta`](Self::set_type_meta).
+    pub fn set_value_meta(&self, meta: Vec<ValueMeta>) {
+        let _ = self.value_meta.set(meta);
+    }
+
+    /// Reflection metadata for an inline `#[value]` aggregate by `value_id`, or
+    /// `None` if none was installed or the id is out of range.
+    pub fn value_meta_by_id(&self, value_id: u16) -> Option<&ValueMeta> {
+        self.value_meta.get()?.get(value_id as usize)
+    }
+
+    /// Install the allocation-site table (Target-1b), indexed by `site_id`.
+    /// Called once at startup, before any mutator runs. Mirrors
+    /// [`set_type_meta`](Self::set_type_meta); a second call is ignored.
+    pub fn set_alloc_sites(&self, sites: Vec<AllocSite>) {
+        let _ = self.alloc_sites.set(sites);
+    }
+
+    /// The installed allocation-site table (empty slice if none installed).
+    pub fn alloc_sites_all(&self) -> &[AllocSite] {
+        self.alloc_sites.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Fold one (about-to-deregister) thread's per-site counters into the
+    /// heap-level retired accumulator. Called under the threads lock, on the
+    /// departing thread, so there is no concurrent `record_alloc`.
+    fn fold_retired_alloc_counters(&self, state: &Arc<ThreadState>) {
+        // Safety: the owning thread is deregistering (not allocating), and we
+        // hold the threads lock, so no `record_alloc` runs concurrently.
+        let counters = unsafe { state.alloc_site_counters() };
+        if counters.is_empty() {
+            return;
+        }
+        let mut retired = self.retired_alloc_counters.lock().unwrap();
+        if counters.len() > retired.len() {
+            retired.resize(counters.len(), SiteCounter::default());
+        }
+        for (i, c) in counters.iter().enumerate() {
+            retired[i].count += c.count;
+            retired[i].bytes += c.bytes;
+        }
+    }
+
+    /// Build the allocation-site profile (Target-1b): sum each site's
+    /// `(count, bytes)` across every live thread plus the retired accumulator,
+    /// join with the site table (function + type id) and reflection metadata
+    /// (type name), and return the sites sorted by bytes descending.
+    ///
+    /// Sites with zero allocations are omitted. Counters with no matching site
+    /// entry (e.g. profiling table not installed) are reported under a synthetic
+    /// `<site N>` / `<unknown>` label rather than dropped — no silent loss.
+    ///
+    /// NOTE: this covers allocations made through the compiled-code allocation
+    /// path (`ai_gc_alloc_*`). Runtime-internal allocations — `ai_str_concat`,
+    /// `ai_str_substring`, the `ai_str_from_*` conversions, file/IO buffers, and
+    /// any other runtime fn that allocates via the heap directly rather than
+    /// through `ai_gc_alloc_*` — are **not** attributed to a site in v1.
+    ///
+    /// Data-race safety: the live per-thread counters are plain (non-atomic)
+    /// integers written by their owning thread on the allocation path. We read
+    /// them under a [`pause_world`](Self::pause_world) stop-the-world pause, so
+    /// every *other* mutator is parked at a safepoint — not mid-`record_alloc`
+    /// and not mid-`Vec` grow — while we read. This is the same discipline the
+    /// collector uses to read parked threads' non-atomic state (`frame_chain`,
+    /// `satb_buffer`); the park establishes the happens-before that makes the
+    /// non-atomic reads sound. The pause is cheap on the common path (no other
+    /// thread to park) and this is a cold (program-end / tooling) call. Keeping
+    /// the read at STW is what lets the hot path stay a plain, uncontended
+    /// increment rather than an atomic. Because the live-thread snapshot and the
+    /// retired accumulator are cloned together under the threads lock (inside the
+    /// pause), a thread can never be observed in both — no double counting.
+    pub fn alloc_site_profile(&self) -> Vec<AllocSiteStat> {
+        // Sum the live per-thread counters under a stop-the-world pause, plus the
+        // retired accumulator. The pause guard holds `gc_lock` and parks every
+        // other mutator; we must not allocate on the GC heap or trigger a GC
+        // inside it (we don't — only counter reads + host-heap Vec ops). Drop the
+        // pause before building the report so the resumed world overlaps the
+        // (race-free, owned-data) formatting below.
+        let totals: Vec<SiteCounter> = {
+            let _pause = self.pause_world();
+            // Observe the {live, retired} partition ATOMICALLY: clone the live
+            // thread set and the retired accumulator under the same threads-lock
+            // critical section. A thread folds into `retired` only while holding
+            // the threads lock (deregister), so it cannot appear in both the
+            // snapshot and the retired clone — closing the double-count window.
+            // Lock order gc_lock(pause) → threads → retired matches every other
+            // path (pause_world: gc→threads; deregister: threads→retired).
+            let (snapshot, mut totals): (Vec<Arc<ThreadState>>, Vec<SiteCounter>) = {
+                let threads = self.threads.lock().unwrap();
+                let retired = self.retired_alloc_counters.lock().unwrap().clone();
+                (threads.clone(), retired)
+            };
+            for ts in &snapshot {
+                // Safety: every other mutator is parked at a safepoint (so not
+                // writing its counters), and the requesting thread is here (not
+                // allocating); the park establishes happens-before for the read.
+                let counters = unsafe { ts.alloc_site_counters() };
+                if counters.len() > totals.len() {
+                    totals.resize(counters.len(), SiteCounter::default());
+                }
+                for (i, c) in counters.iter().enumerate() {
+                    totals[i].count += c.count;
+                    totals[i].bytes += c.bytes;
+                }
+            }
+            totals
+        };
+
+        let sites = self.alloc_sites_all();
+        let mut out = Vec::new();
+        for (id, c) in totals.iter().enumerate() {
+            if c.count == 0 {
+                continue;
+            }
+            let (function, type_id, location) = match sites.get(id) {
+                Some(s) => (s.function.clone(), Some(s.type_id), s.location.clone()),
+                None => (format!("<site {id}>"), None, String::new()),
+            };
+            let type_name = match type_id {
+                Some(tid) => self
+                    .type_meta_by_id(tid)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| format!("<type {tid}>")),
+                None => "<unknown>".to_string(),
+            };
+            out.push(AllocSiteStat {
+                site_id: id as u32,
+                function,
+                type_id,
+                type_name,
+                location,
+                count: c.count,
+                bytes: c.bytes,
+            });
+        }
+        out.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| b.count.cmp(&a.count))
+                .then_with(|| a.function.cmp(&b.function))
+        });
+        out
+    }
+
+    /// Render the allocation-site profile as a human-readable table (used by
+    /// `GCR_ALLOC_PROFILE=1`). Empty string if nothing was allocated through a
+    /// profiled site. See [`alloc_site_profile`](Self::alloc_site_profile) for
+    /// the v1 coverage caveat (compiled-code sites only).
+    pub fn alloc_site_profile_report(&self) -> String {
+        use std::fmt::Write;
+        let stats = self.alloc_site_profile();
+        if stats.is_empty() {
+            return String::new();
+        }
+        let total_bytes: u64 = stats.iter().map(|s| s.bytes).sum();
+        let total_count: u64 = stats.iter().map(|s| s.count).sum();
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "gc-rust allocation-site profile (compiled-code sites only; runtime-internal allocations \
+             — string/substring/concat, str-from-*, file/IO buffers — are NOT attributed to a site)"
+        );
+        let _ = writeln!(
+            out,
+            "  {:>14}  {:>10}  {:<22}  {:<22}  {}",
+            "bytes", "count", "type", "function", "location"
+        );
+        for s in &stats {
+            let loc = if s.location.is_empty() { "-" } else { s.location.as_str() };
+            let _ = writeln!(
+                out,
+                "  {:>14}  {:>10}  {:<22}  {:<22}  {}",
+                s.bytes, s.count, s.type_name, s.function, loc
+            );
+        }
+        let _ = writeln!(
+            out,
+            "  {:>14}  {:>10}  (total over {} sites)",
+            total_bytes,
+            total_count,
+            stats.len()
+        );
+        out
+    }
+
+    /// Walk every object currently allocated in the live spaces — the tenured
+    /// from-space plus the nursery (if generational) — calling `visitor(obj,
+    /// type_info)` for each. This is the engine for heap-exploration tooling:
+    /// paired with [`type_meta_by_id`](Self::type_meta_by_id) it can render the
+    /// whole object graph with source names.
+    ///
+    /// Note: this visits all *allocated* objects in those spaces, which between
+    /// collections may include not-yet-reclaimed garbage in the nursery. For a
+    /// strictly-live snapshot, trigger a collection first. Must not run
+    /// concurrently with a collection (call at a safepoint or program end).
+    ///
+    /// # Safety
+    /// All objects in the live spaces must be valid (headers initialized, varlen
+    /// counts written) — true for any object the mutator has finished
+    /// allocating.
+    pub unsafe fn walk_live_objects(&self, visitor: &mut dyn FnMut(*mut u8, &TypeInfo)) {
+        unsafe {
+            self.from_space().walk(&self.type_table, visitor);
+            if let Some(ns) = &self.nursery_state {
+                ns.nursery.walk(&self.type_table, visitor);
+            }
+        }
     }
 
     /// Check if GC should be triggered on every allocation.
@@ -435,6 +871,9 @@ impl Heap {
         let mut threads = self.threads.lock().unwrap();
         let ptr = Arc::as_ptr(state);
         if let Some(pos) = threads.iter().position(|t| Arc::as_ptr(t) == ptr) {
+            // Salvage this thread's alloc-site counters before it's dropped, so
+            // its allocations still appear in a later profile.
+            self.fold_retired_alloc_counters(&threads[pos]);
             threads.swap_remove(pos);
         }
     }
@@ -467,6 +906,8 @@ impl Heap {
             }
             let ptr = Arc::as_ptr(state);
             if let Some(pos) = threads.iter().position(|t| Arc::as_ptr(t) == ptr) {
+                // Salvage alloc-site counters before drop (see deregister_thread).
+                self.fold_retired_alloc_counters(&threads[pos]);
                 threads.swap_remove(pos);
             }
             break;
@@ -657,6 +1098,148 @@ impl Heap {
         self.collections.load(Ordering::Relaxed)
     }
 
+    /// Record a collection event (cold path). `t0` is the [`std::time::Instant`]
+    /// captured at the start of the stop-the-world copy/scan work; the pause is
+    /// its elapsed time. Pushed under the events lock once per collection — never
+    /// on the allocation hot path.
+    pub(crate) fn record_gc_event(
+        &self,
+        kind: GcKind,
+        t0: std::time::Instant,
+        before_bytes: u64,
+        after_bytes: u64,
+        promoted_bytes: u64,
+    ) {
+        let pause_ns = t0.elapsed().as_nanos() as u64;
+        if let Ok(mut ev) = self.gc_events.lock() {
+            let seq = ev.len() as u64;
+            ev.push(GcEvent { kind, seq, pause_ns, before_bytes, after_bytes, promoted_bytes });
+        }
+    }
+
+    /// Snapshot of all recorded GC events, for the log / summary.
+    pub fn gc_events(&self) -> Vec<GcEvent> {
+        self.gc_events.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// JSON-lines GC log: one object per collection (the `GCR_GC_LOG` format).
+    /// Stable schema for offline analysis.
+    pub fn gc_log_jsonl(&self) -> String {
+        let mut s = String::new();
+        for e in self.gc_events() {
+            s.push_str(&format!(
+                "{{\"seq\":{},\"kind\":\"{}\",\"pause_ns\":{},\"before_bytes\":{},\
+                 \"after_bytes\":{},\"reclaimed_bytes\":{},\"promoted_bytes\":{}}}\n",
+                e.seq,
+                e.kind.as_str(),
+                e.pause_ns,
+                e.before_bytes,
+                e.after_bytes,
+                e.before_bytes.saturating_sub(e.after_bytes).saturating_sub(e.promoted_bytes),
+                e.promoted_bytes,
+            ));
+        }
+        s
+    }
+
+    /// Human-readable GC stats summary: per-kind collection count, total bytes
+    /// reclaimed/promoted, and pause-time percentiles (p50/p99/max, ms). Used by
+    /// both the JIT (`GCR_GC_STATS`) and AOT exit paths so the two agree.
+    pub fn gc_stats_summary(&self) -> String {
+        let events = self.gc_events();
+        let mut out = String::new();
+        for kind in [GcKind::Minor, GcKind::Major, GcKind::Concurrent] {
+            let mut pauses: Vec<u64> =
+                events.iter().filter(|e| e.kind == kind).map(|e| e.pause_ns).collect();
+            if pauses.is_empty() {
+                continue;
+            }
+            pauses.sort_unstable();
+            let n = pauses.len();
+            let pct = |p: f64| pauses[((n as f64 * p) as usize).min(n - 1)];
+            let ms = |ns: u64| ns as f64 / 1.0e6;
+            let reclaimed: u64 = events
+                .iter()
+                .filter(|e| e.kind == kind)
+                .map(|e| e.before_bytes.saturating_sub(e.after_bytes).saturating_sub(e.promoted_bytes))
+                .sum();
+            let promoted: u64 =
+                events.iter().filter(|e| e.kind == kind).map(|e| e.promoted_bytes).sum();
+            out.push_str(&format!(
+                "gc-rust: {} {} collections | pause p50 {:.3}ms p99 {:.3}ms max {:.3}ms | \
+                 reclaimed {} B | promoted {} B\n",
+                n,
+                kind.as_str(),
+                ms(pct(0.50)),
+                ms(pct(0.99)),
+                ms(pauses[n - 1]),
+                reclaimed,
+                promoted,
+            ));
+        }
+        out
+    }
+
+    /// Machine-readable per-run metrics for `gcr bench` (written when
+    /// `GCR_METRICS_FILE` is set). A flat JSON object of scalar metrics
+    /// aggregated from the GC log + allocation-site table — the rich,
+    /// runtime-only numbers (GC cycles, pause distribution, allocation churn,
+    /// peak heap) that you cannot get out of a native Rust/Go binary. Serde-free,
+    /// to keep the minimal runtime LLVM/serde-free.
+    pub fn metrics_json(&self) -> String {
+        let events = self.gc_events();
+        let (mut minor, mut major) = (0u64, 0u64);
+        let (mut pause_total, mut pause_max) = (0u64, 0u64);
+        let (mut reclaimed, mut promoted, mut peak) = (0u64, 0u64, 0u64);
+        let mut pauses: Vec<u64> = Vec::with_capacity(events.len());
+        for e in events.iter() {
+            match e.kind {
+                GcKind::Minor => minor += 1,
+                GcKind::Major | GcKind::Concurrent => major += 1,
+            }
+            pause_total += e.pause_ns;
+            pause_max = pause_max.max(e.pause_ns);
+            reclaimed += e
+                .before_bytes
+                .saturating_sub(e.after_bytes)
+                .saturating_sub(e.promoted_bytes);
+            promoted += e.promoted_bytes;
+            peak = peak.max(e.before_bytes); // high-water at collection time
+            pauses.push(e.pause_ns);
+        }
+        pauses.sort_unstable();
+        let pct = |q: f64| -> u64 {
+            if pauses.is_empty() {
+                0
+            } else {
+                pauses[((pauses.len() as f64 * q) as usize).min(pauses.len() - 1)]
+            }
+        };
+        let ms = |ns: u64| ns as f64 / 1.0e6;
+        let (mut alloc_objects, mut alloc_bytes) = (0u64, 0u64);
+        for s in self.alloc_site_profile() {
+            alloc_objects += s.count;
+            alloc_bytes += s.bytes;
+        }
+        format!(
+            "{{\"gc_minor\":{},\"gc_major\":{},\"gc_pause_total_ms\":{:.4},\
+             \"gc_pause_max_ms\":{:.4},\"gc_pause_p50_ms\":{:.4},\"gc_pause_p99_ms\":{:.4},\
+             \"gc_reclaimed_bytes\":{},\"gc_promoted_bytes\":{},\"peak_heap_bytes\":{},\
+             \"alloc_objects\":{},\"alloc_bytes\":{}}}",
+            minor,
+            major,
+            ms(pause_total),
+            ms(pause_max),
+            ms(pct(0.50)),
+            ms(pct(0.99)),
+            reclaimed,
+            promoted,
+            peak,
+            alloc_objects,
+            alloc_bytes,
+        )
+    }
+
     /// Run a stop-the-world collection.
     ///
     /// This is designed to be called by one thread (the triggering thread)
@@ -733,6 +1316,12 @@ impl Heap {
                 n += 1;
             }
         }
+        // GC-log timing (cold path): pause = the copy/scan work below; `before`
+        // is from-space occupancy now, `after` is occupancy after the swap.
+        // Started after the opt-in checks above so their cost isn't charged to
+        // the measured pause.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
         // Phase 1: scan all roots → copy/forward targets into to-space
 
         self.globals.scan_roots(&mut |slot| {
@@ -755,7 +1344,11 @@ impl Heap {
             }
         }
 
-        // Extra roots (caller-provided)
+        // Extra roots (caller-provided). Record their use so a later snapshot can
+        // warn it doesn't cover transient per-call roots (see `saw_extra_roots`).
+        if !extra_roots.is_empty() {
+            self.saw_extra_roots.store(true, Ordering::Relaxed);
+        }
         for source in extra_roots.iter() {
             source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };
@@ -863,10 +1456,13 @@ impl Heap {
         if std::env::var_os("GCRUST_POISON").is_some() {
             let sp = self.to_space();
             unsafe {
-                std::ptr::write_bytes(sp.base(), 0xBF, sp.space_size());
+                std::ptr::write_bytes(sp.base(), 0xBF, sp.size());
             }
         }
         self.collections.fetch_add(1, Ordering::Relaxed);
+        // GC-log: after the swap, from-space holds the survivors (post-collect
+        // occupancy). Major collection promotes nothing here.
+        self.record_gc_event(GcKind::Major, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap
         if let Some(ns) = &self.nursery_state {
@@ -1027,6 +1623,9 @@ impl Heap {
         };
 
         // We won the race — we're the GC thread now.
+        // GC-log timing (cold path): the pause spans parking + copy/scan below.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
 
         // Snapshot thread refs and set gc_requested atomically (under threads lock).
         // This prevents a thread from deregistering between gc_requested being set
@@ -1088,6 +1687,9 @@ impl Heap {
 
         // Caller-provided extra roots (e.g. JIT-frame stack-map roots,
         // module-level literal pools, host-side scoped frame chains).
+        if !extra_roots.is_empty() {
+            self.saw_extra_roots.store(true, Ordering::Relaxed);
+        }
         for source in extra_roots.iter() {
             source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };
@@ -1143,6 +1745,7 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+        self.record_gc_event(GcKind::Major, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap (all tenured pointers updated)
         if let Some(ns) = &self.nursery_state {
@@ -1281,6 +1884,10 @@ impl Heap {
     /// Same as `collect`. The calling thread must NOT be a registered mutator.
     pub unsafe fn concurrent_collect<P: PtrPolicy>(&self) {
         let _gc_guard = self.gc_lock.lock().unwrap();
+        // GC-log timing (cold path). For a concurrent collection this spans the
+        // whole cycle, not just an STW pause; still a useful per-collection cost.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before = self.from_used() as u64;
 
         // ── STW Pause #1: Snapshot roots ─────────────────────────
 
@@ -1488,6 +2095,7 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+        self.record_gc_event(GcKind::Concurrent, gc_t0, gc_before, self.from_used() as u64, 0);
 
         // Clear card table for new from-space after swap
         if let Some(ns) = &self.nursery_state {
@@ -1661,6 +2269,29 @@ impl Heap {
         }
 
         let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        // PRECISE-LAYOUT INVARIANT (no conservative pointer identification):
+        // the monomorphizing front end places every scalar in the untraced raw
+        // region and zeroes unused enum pointer-slots, so a TRACED slot only
+        // ever holds a pointer-or-null. A slot pointing into from-space
+        // therefore ALWAYS targets a real object with an in-range type_id. An
+        // out-of-range type_id means a non-pointer (scalar) leaked into a
+        // traced slot — a layout/rooting bug. We must NOT silently `return old`
+        // (that is conservative-GC pointer identification: unsound in a moving
+        // collector — a false-positive int whose bits look like a valid header
+        // would still be relocated — and it masks the real bug). Under
+        // debug/stress (or release with GCR_GC_VERIFY=1) we panic loudly as a
+        // DETECTOR; release-default trusts the layout and the bounds index
+        // below faults loudly if the invariant is ever broken. Never silent.
+        if gc_verify_armed() {
+            assert!(
+                (type_id as usize) < self.type_table.len(),
+                "GC precise-layout violation: traced slot points at {old:p} whose \
+                 header type_id={type_id} is out of range (type_table len {}). A \
+                 non-pointer reached a traced slot — fix the layout/rooting; do not \
+                 mask it.",
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
@@ -1707,6 +2338,21 @@ impl Heap {
             return (type_info_word & !FORWARDING_BIT) as *mut u8;
         }
 
+        // PRECISE-LAYOUT INVARIANT (see copy_or_forward): a traced slot pointing
+        // into from-space always targets a real object. Out-of-range type_id =
+        // a scalar leaked into a traced slot — a layout/rooting bug we surface
+        // loudly (detector under debug/stress; bounds fault in release), never a
+        // silent conservative skip.
+        if gc_verify_armed() {
+            assert!(
+                ((type_info_word as u16) as usize) < self.type_table.len(),
+                "GC precise-layout violation (concurrent): traced slot points at \
+                 {old:p} whose header type_id={} is out of range (type_table len \
+                 {}). A non-pointer reached a traced slot.",
+                type_info_word as u16,
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_info_word as u16 as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
@@ -1748,6 +2394,19 @@ impl Heap {
         }
 
         let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        // PRECISE-LAYOUT INVARIANT (see copy_or_forward): a nursery slot that is
+        // traced always targets a real object; an out-of-range type_id means a
+        // scalar leaked into a traced slot. Detector under debug/stress (or
+        // release+GCR_GC_VERIFY), never a silent skip.
+        if gc_verify_armed() {
+            assert!(
+                (type_id as usize) < self.type_table.len(),
+                "GC precise-layout violation (promote): traced slot points at \
+                 {old:p} whose header type_id={type_id} is out of range \
+                 (type_table len {}). A non-pointer reached a traced slot.",
+                self.type_table.len(),
+            );
+        }
         let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
@@ -1854,6 +2513,14 @@ impl Heap {
                 ts.resume();
             }
         }
+
+        // GC-log timing (cold path): captured here, AFTER any major-first above,
+        // so `promoted` reflects only this minor scavenge. `before` is the
+        // nursery occupancy being scavenged; tenured growth over the scavenge is
+        // the promoted volume.
+        let gc_t0 = std::time::Instant::now();
+        let gc_before_nursery = ns.nursery.used() as u64;
+        let gc_before_tenured = self.from_used() as u64;
 
         // Snapshot threads and set gc_requested
         let trigger_ptr = triggering_thread as *const ThreadState as usize;
@@ -1965,6 +2632,15 @@ impl Heap {
         ns.nursery.reset();
         ns.card_tables[from_idx].clear_all();
         ns.minor_collections.fetch_add(1, Ordering::Relaxed);
+        // GC-log: nursery is reset (after ≈ 0); tenured growth = promoted volume.
+        let promoted = (self.from_used() as u64).saturating_sub(gc_before_tenured);
+        self.record_gc_event(
+            GcKind::Minor,
+            gc_t0,
+            gc_before_nursery,
+            ns.nursery.used() as u64,
+            promoted,
+        );
 
         // Resume threads
         self.gc_requested.store(false, Ordering::Release);

@@ -1,0 +1,14 @@
+(defstruct Pixel [(r :u8) (g :u8) (b :u8) (a :u8)])
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [px (alloc-stack Pixel)]
+    (store! (field px r) (cast :u8 200))
+    (store! (field px g) (cast :u8 50))
+    (let
+      [ratio (idiv (load (field px r)) (load (field px g)))]
+      (iadd (imul (cast :i64 ratio) 10) (cast :i64 (cast :u2 6))))))
+

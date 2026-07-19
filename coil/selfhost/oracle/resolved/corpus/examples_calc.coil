@@ -1,0 +1,256 @@
+(defsum
+  Tok
+  (TNum [(v i64)])
+  (TVar [(nm i64)])
+  (TOp [(op i64)])
+  (TLP)
+  (TRP)
+  (TEq)
+  (TSemi)
+  (TEnd))
+
+(defn digit? [(c i64)] (-> bool) (and (icmp-ge c 48) (icmp-le c 57)))
+
+(defn alpha? [(c i64)] (-> bool) (and (icmp-ge c 97) (icmp-le c 122)))
+
+(defn
+  lex
+  [(a (ptr Allocator)) (s (slice u8))]
+  (-> (ArrayList Tok))
+  (let
+    [(mut toks) (al-new [Tok] a) (mut i) 0 n (slice-len s)]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (do (al-push! (mut toks) (TEnd)) (break))
+        (let
+          [c (cast :i64 (slice-get s (load i)))]
+          (if
+            (icmp-eq c 32)
+            (store! i (iadd (load i) 1))
+            (if
+              (digit? c)
+              (let
+                [(mut v) 0]
+                (loop
+                  (if
+                    (icmp-ge (load i) n)
+                    (break)
+                    (let
+                      [d (cast :i64 (slice-get s (load i)))]
+                      (if
+                        (digit? d)
+                        (do
+                          (store! v (iadd (imul (load v) 10) (isub d 48)))
+                          (store! i (iadd (load i) 1)))
+                        (break)))))
+                (al-push! (mut toks) (TNum (load v))))
+              (if
+                (alpha? c)
+                (do (al-push! (mut toks) (TVar c)) (store! i (iadd (load i) 1)))
+                (do
+                  (al-push!
+                    (mut toks)
+                    (if
+                      (icmp-eq c 40)
+                      (TLP)
+                      (if
+                        (icmp-eq c 41)
+                        (TRP)
+                        (if (icmp-eq c 61) (TEq) (if (icmp-eq c 59) (TSemi) (TOp c))))))
+                  (store! i (iadd (load i) 1)))))))))
+    (load toks)))
+
+(defsum
+  Ast
+  (Num [(v i64)])
+  (Var [(nm i64)])
+  (Bin [(op i64) (l (ptr Ast)) (r (ptr Ast))])
+  (Set [(nm i64) (e (ptr Ast))]))
+
+(defn
+  ast
+  [(a (ptr Allocator)) (x Ast)]
+  (-> (ptr Ast))
+  (let [p (unwrap-ptr [Ast] (create [Ast] a))] (store! p x) p))
+
+(defstruct P [(t (ptr Tok)) (pos i64) (a (ptr Allocator))])
+
+(defn peek [(p (ptr P))] (-> Tok) (load (index (load (field p t)) (load (field p pos)))))
+
+(defn adv [(p (ptr P))] (-> i64) (store! (field p pos) (iadd (load (field p pos)) 1)) 0)
+
+(defn
+  parse-primary
+  [(p (ptr P))]
+  (-> (ptr Ast))
+  (match
+    (peek p)
+    (TNum [v] (do (adv p) (ast (load (field p a)) (Num v))))
+    (TVar [nm] (do (adv p) (ast (load (field p a)) (Var nm))))
+    (TLP [] (do (adv p) (let [e (parse-expr p)] (adv p) e)))
+    (TOp [_] (ast (load (field p a)) (Num 0)))
+    (TRP [] (ast (load (field p a)) (Num 0)))
+    (TEq [] (ast (load (field p a)) (Num 0)))
+    (TSemi [] (ast (load (field p a)) (Num 0)))
+    (TEnd [] (ast (load (field p a)) (Num 0)))))
+
+(defn
+  parse-term
+  [(p (ptr P))]
+  (-> (ptr Ast))
+  (let
+    [(mut acc) (parse-primary p)]
+    (loop
+      (match
+        (peek p)
+        (TOp
+          [op]
+          (if
+            (or (icmp-eq op 42) (icmp-eq op 47))
+            (do
+              (adv p)
+              (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-primary p)))))
+            (break)))
+        (TNum [_] (break))
+        (TVar [_] (break))
+        (TLP [] (break))
+        (TRP [] (break))
+        (TEq [] (break))
+        (TSemi [] (break))
+        (TEnd [] (break))))
+    (load acc)))
+
+(defn
+  parse-expr
+  [(p (ptr P))]
+  (-> (ptr Ast))
+  (let
+    [(mut acc) (parse-term p)]
+    (loop
+      (match
+        (peek p)
+        (TOp
+          [op]
+          (if
+            (or (icmp-eq op 43) (icmp-eq op 45))
+            (do
+              (adv p)
+              (store! acc (ast (load (field p a)) (Bin op (load acc) (parse-term p)))))
+            (break)))
+        (TNum [_] (break))
+        (TVar [_] (break))
+        (TLP [] (break))
+        (TRP [] (break))
+        (TEq [] (break))
+        (TSemi [] (break))
+        (TEnd [] (break))))
+    (load acc)))
+
+(defn
+  parse-stmt
+  [(p (ptr P))]
+  (-> (ptr Ast))
+  (match
+    (peek p)
+    (TVar
+      [nm]
+      (if
+        (is-eq (load (index (load (field p t)) (iadd (load (field p pos)) 1))))
+        (do (adv p) (adv p) (ast (load (field p a)) (Set nm (parse-expr p))))
+        (parse-expr p)))
+    (TNum [_] (parse-expr p))
+    (TOp [_] (parse-expr p))
+    (TLP [] (parse-expr p))
+    (TRP [] (parse-expr p))
+    (TEq [] (parse-expr p))
+    (TSemi [] (parse-expr p))
+    (TEnd [] (parse-expr p))))
+
+(defn
+  is-eq
+  [(t Tok)]
+  (-> bool)
+  (match
+    t
+    (TEq [] true)
+    (TNum [_] false)
+    (TVar [_] false)
+    (TOp [_] false)
+    (TLP [] false)
+    (TRP [] false)
+    (TSemi [] false)
+    (TEnd [] false)))
+
+(defn
+  ev
+  [(n (ptr Ast)) (env (mut (HashMap i64 i64)))]
+  (-> i64)
+  (match
+    (load n)
+    (Num [v] v)
+    (Var [nm] (match (hm-get [i64 i64] env nm) (None [] 0) (Some [v] v)))
+    (Bin
+      [op l r]
+      (let
+        [x (ev l (mut env)) y (ev r (mut env))]
+        (if
+          (icmp-eq op 43)
+          (iadd x y)
+          (if (icmp-eq op 45) (isub x y) (if (icmp-eq op 42) (imul x y) (idiv x y))))))
+    (Set [nm e] (let [v (ev e (mut env))] (hm-put! (mut env) nm v) v))))
+
+(defn
+  at-end
+  [(p (ptr P))]
+  (-> bool)
+  (match
+    (peek p)
+    (TEnd [] true)
+    (TNum [_] false)
+    (TVar [_] false)
+    (TOp [_] false)
+    (TLP [] false)
+    (TRP [] false)
+    (TEq [] false)
+    (TSemi [] false)))
+
+(defn
+  run
+  [(a (ptr Allocator)) (w (ptr Writer)) (src (slice u8))]
+  (-> i64)
+  (let
+    [(mut toks) (lex a src) pstate (alloc-stack P)]
+    (store! (field pstate t) (al-slice-data (mut toks)))
+    (store! (field pstate pos) 0)
+    (store! (field pstate a) a)
+    (let
+      [(mut env) (hm-new-scalar [i64 i64] a) (mut last) 0]
+      (loop
+        (if
+          (at-end pstate)
+          (break)
+          (do
+            (store! last (ev (parse-stmt pstate) (mut env)))
+            (do (fmt.print-i w (load last)) (io.print-str w "
+"))
+            (match
+              (peek pstate)
+              (TSemi [] (adv pstate))
+              (TNum [_] 0)
+              (TVar [_] 0)
+              (TOp [_] 0)
+              (TLP [] 0)
+              (TRP [] 0)
+              (TEq [] 0)
+              (TEnd [] 0)))))
+      (load last))))
+
+(defn al-slice-data [(l (mut (ArrayList Tok)))] (-> (ptr Tok)) (load (field l data)))
+
+(defn
+  main
+  []
+  (-> i64)
+  (let [a (malloc-allocator) w (stdout)] (run a w "1+2; 3+2*5; (3+10)*2; x=27; x") 0))
+

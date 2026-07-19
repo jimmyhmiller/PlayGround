@@ -1,0 +1,2009 @@
+; selfhost/src/driver.coil — self-host Coil compiler DRIVER (CLI dispatch +
+; pipeline orchestration + object emit/link), shared by both compiler builds:
+;   * selfhost/src/main.coil      — full compiler (LLVM + native arm64 backends)
+;   * selfhost/src/main_a64.coil  — LLVM-free build (native arm64 backend only)
+; This module is backend-AGNOSTIC: it never imports codegen.coil / normalize.coil
+; (the LLVM backend). The two LLVM entry points (`build` via LLVM, `emit-ir`) and
+; `__normalize` are injected as function pointers by the top file (see driver-main),
+; so a build that omits the LLVM backend simply passes hard-error stubs and never
+; references libLLVM. The native arm64 backend (build-arm64-program) is always here.
+; Imports resolve relative to CWD = repo root; ALWAYS build from repo root.
+(module driver)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "match.coil" :use *)
+; sibling selfhost modules import by bare name (resolved relative to this file's
+; dir), matching the convention in codegen.coil/check.coil/etc. Only the top-level
+; entry files (main.coil / main_a64.coil) use CWD-relative "selfhost/src/…" paths.
+(import "ffi.coil" :use *)
+(import "guide.coil" :use *)   ; `coil guide` — the language reference (generated from docs/LANGUAGE_GUIDE.md)
+(import "reader.coil" :use *)
+(import "ast.coil" :use *)
+(import "astdump.coil" :use *)
+(import "parser.coil" :use *)
+(import "loader.coil" :use *)
+(import "resolve.coil" :use *)
+(import "check.coil" :use *)
+(import "mono.coil" :use *)
+(import "diag.coil" :use *)
+(import "comptime.coil" :use *)
+(import "metaengine.coil" :use *)
+(import "expander.coil" :use *)
+(import "codegen_a64.coil" :use *)
+(import "wasm.coil" :use *)
+(import "../../fmt/rules.coil" :as fmtr)      ; the `coil fmt` formatter (qualified to avoid name clashes)
+
+(defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (match (parse-program a forms)
+          (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+          (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp a)))))))
+  0)
+
+; ============================ file IO + entry ===============================
+(defn dump-mono-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true false)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Ok [cp]
+                    (do (drop-code-funcs a cp)
+                        (match (monomorphize a cp)
+                          (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                          (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a))))))))))))))
+  0)
+
+; dump-checked: read -> load -> resolve -> check -> checked Program dump (NO mono).
+(defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true false)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+                  (Ok [cp] (d-program w cp a))))))))))
+  0)
+
+; dump-resolved: read -> load -> resolve -> resolved Program dump.
+(defn dump-resolved-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
+            (match (resolve-program a (mut s) true false)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+              (Ok [prog] (d-program w prog a))))))))
+  0)
+
+; dump-read: raw read -> canonical Sexp forms (reader oracle). sx-node's
+; @source:lo:hi:ctxt is byte-identical to the standalone reader dumper for raw
+; single-file input (source=0, ctxt=0, no dummy spans).
+(defn dump-read-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (let [(mut i) 0 n (al-len [Sexp] (load forms))]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (if (icmp-gt (load i) 0) (wb w 10) 0)
+                (let [child (alloc-stack Sexp)]
+                  (store! child (al-get [Sexp] (load forms) (load i)))
+                  (sx-node w child))
+                (store! i (iadd (load i) 1)))))))))
+  0)
+
+; ---- loader-dump helpers ported verbatim from selfhost/loader.coil ----
+; (imp-elem/exp-elem/d-strs/d-opt-str/dstr already defined above.)
+(defn alias-key [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p alias))))
+(defn alias-tgt [(x Alias)] (-> (slice u8)) (let [p (alloc-stack Alias)] (store! p x) (load (field p target))))
+(defn use-tgt  [(x Use)]   (-> (slice u8)) (let [p (alloc-stack Use)]   (store! p x) (load (field p target))))
+(defn use-spec [(x Use)]   (-> UseSpec)    (let [p (alloc-stack Use)]   (store! p x) (load (field p spec))))
+
+; selection-sort a COPY of a slice list ascending by str-cmp.
+(defn sorted-strs [(a (ptr Allocator)) (l (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
+  (let [n (al-len [(slice u8)] (load l)) (mut c) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut c) (al-get [(slice u8)] (load l) (load i)))
+          (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load c) (load q))
+                                (al-get [(slice u8)] (load c) (load m)))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [(slice u8)] (load c) (load p))
+                    tm (al-get [(slice u8)] (load c) (load m))]
+                (al-set! (mut c) (load p) tm)
+                (al-set! (mut c) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! bp (load c)) bp)))
+
+; sorted index permutation of 0..n by the parallel key strings (selection sort).
+(defn sort-idx [(a (ptr Allocator)) (keys (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList i64)))
+  (let [n (al-len [(slice u8)] (load keys)) (mut idx) (al-new [i64] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut idx) (load i)) (store! i (iadd (load i) 1)))))
+    (let [(mut p) 0]
+      (loop (if (icmp-ge (load p) n) (break)
+        (do (let [(mut m) (load p) (mut q) (iadd (load p) 1)]
+              (loop (if (icmp-ge (load q) n) (break)
+                (do (if (str-lt (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load q)))
+                                (al-get [(slice u8)] (load keys) (al-get [i64] (load idx) (load m))))
+                        (store! m (load q)) 0)
+                    (store! q (iadd (load q) 1)))))
+              (let [tp (al-get [i64] (load idx) (load p))
+                    tm (al-get [i64] (load idx) (load m))]
+                (al-set! (mut idx) (load p) tm)
+                (al-set! (mut idx) (load m) tp)))
+            (store! p (iadd (load p) 1))))))
+    (let [bp (unwrap-ptr [(ArrayList i64)] (create [(ArrayList i64)] a))]
+      (store! bp (load idx)) bp)))
+
+; `(aliases [(al "k" "v") …]) (uses [(use "t" SPEC) …]) (reexports [...])`.
+(defn d-modimports [(w (ptr Writer)) (a (ptr Allocator)) (m (mut ModImports))] (-> i64)
+  (ps w "(aliases [")
+  (let [na (al-len [Alias] (load (field m aliases)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) na) (break)
+      (do (al-push! (mut keys) (alias-key (al-get [Alias] (load (field m aliases)) (load i))))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) na) (break)
+          (do (if (icmp-gt (load j) 0) (wb w 32) 0)
+              (let [e (al-get [Alias] (load (field m aliases)) (al-get [i64] (load idx) (load j)))]
+                (ps w "(al ") (dstr w (alias-key e)) (wb w 32)
+                (dstr w (alias-tgt e)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (ps w "]) (uses [")
+  (let [nu (al-len [Use] (load (field m uses))) (mut i) 0]
+    (loop (if (icmp-ge (load i) nu) (break)
+      (do (if (icmp-gt (load i) 0) (wb w 32) 0)
+          (let [u (al-get [Use] (load (field m uses)) (load i))]
+            (ps w "(use ") (dstr w (use-tgt u)) (wb w 32)
+            (match (use-spec u)
+              (UAll   []      (ps w "(all)"))
+              (UNames [names] (do (ps w "(names ") (d-strs w names) (wb w 41))))
+            (wb w 41))
+          (store! i (iadd (load i) 1))))))
+  (ps w "]) (reexports ")
+  (let [rp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+    (store! rp (load (field m reexports)))
+    (d-strs w rp))
+  (wb w 41))
+
+; dump-load: read -> load -> canonical loaded-forms/imports/exports dump.
+(defn dump-loaded [(w (ptr Writer)) (a (ptr Allocator)) (s (mut LS))] (-> i64)
+  (ps w "(forms")
+  (let [n (al-len [TaggedForm] (load (field s out))) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (ps w " (tf ")
+          (let [tf (alloc-stack TaggedForm)]
+            (store! tf (al-get [TaggedForm] (load (field s out)) (load i)))
+            (d-opt-str w (load (field tf module)))
+            (wb w 32)
+            (let [fp (alloc-stack Sexp)] (store! fp (load (field tf form))) (sx-node w fp)))
+          (wb w 41)
+          (store! i (iadd (load i) 1))))))
+  (wb w 41)
+  (wb w 10) (ps w "(imports")
+  (let [n (al-len [ImpEntry] (load (field s imports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (imp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (imp-elem (mut s) (al-get [i64] (load idx) (load j)))]
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-modimports w a (mut (field e imp))) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  (wb w 10) (ps w "(exports")
+  (let [n (al-len [ExpEntry] (load (field s exports)))
+        (mut keys) (al-new [(slice u8)] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (exp-elem (mut s) (load i)) name)))
+          (store! i (iadd (load i) 1)))))
+    (let [kp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+      (store! kp (load keys))
+      (let [idx (sort-idx a kp) (mut j) 0]
+        (loop (if (icmp-ge (load j) n) (break)
+          (do (let [e (exp-elem (mut s) (al-get [i64] (load idx) (load j)))
+                    namesp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
+                (store! namesp (load (field e names)))
+                (ps w " (mod ") (dstr w (load (field e name))) (wb w 32)
+                (d-strs w (sorted-strs a namesp)) (wb w 41))
+              (store! j (iadd (load j) 1))))))))
+  (wb w 41)
+  0)
+
+(defn dump-load-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
+  (let [w (stdout) s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+            (dump-loaded w a (mut s))))))
+  0)
+
+; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).
+; Each line must match exactly what src/dump_ast.rs would emit for the same node.
+(defn smoke [(a (ptr Allocator))] (-> i64)
+  (let [w (stdout)]
+    ; (staticref@1:2 "foo")
+    (let [e (alloc-stack Expr)] (store! e (mk-expr (EStaticRef "foo") 1 2 0 0)) (d-expr w e)) (wb w 10)
+    ; (spillref@5:6 (eint@3:4 7))
+    (let [inner (box-expr a (mk-expr (EInt 7) 3 4 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (ESpillRef inner) 5 6 0 0)) (d-expr w e)) (wb w 10)
+    ; (construct@9:10 "Opt" "Some" [(eint@7:8 9)])
+    (let [(mut xs) (al-new [Expr] a)]
+      (al-push! (mut xs) (mk-expr (EInt 9) 7 8 0 0))
+      (let [args (box-al [Expr] a (load xs)) e (alloc-stack Expr)]
+        (store! e (mk-expr (EConstruct "Opt" "Some" args) 9 10 0 0)) (d-expr w e))) (wb w 10)
+    ; (traitcall@11:12 "Eq" "eq" "T" [])
+    (let [args (box-al [Expr] a (al-new [Expr] a)) e (alloc-stack Expr)]
+      (store! e (mk-expr (ETraitCall "Eq" "eq" "T" args) 11 12 0 0)) (d-expr w e)) (wb w 10)
+    ; (makedyn@13:14 "Dyn" "VT" ["m0" "m1"] (var@15:16 "x"))
+    (let [(mut ms) (al-new [(slice u8)] a)]
+      (al-push! (mut ms) "m0") (al-push! (mut ms) "m1")
+      (let [methods (box-al [(slice u8)] a (load ms))
+            inner (box-expr a (mk-expr (EVar "x") 15 16 0 0)) e (alloc-stack Expr)]
+        (store! e (mk-expr (EMakeDyn "Dyn" "VT" methods inner) 13 14 0 0)) (d-expr w e))) (wb w 10)
+    ; (dyndispatch@17:18 "Dyn" "VT" 2 "c" [] void (var@19:20 "r") [])
+    (let [params (box-al [Type] a (al-new [Type] a))
+          args (box-al [Expr] a (al-new [Expr] a))
+          recv (box-expr a (mk-expr (EVar "r") 19 20 0 0)) e (alloc-stack Expr)]
+      (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18 0 0)) (d-expr w e)) (wb w 10)
+    ; ---- ty-str byte-exact checks (vs src/check.rs::ty_str) ----
+    (let [t (alloc-stack Type)] (store! t (TInt 64 true))  (ps w (ty-str a t))) (wb w 10)  ; i64
+    (let [t (alloc-stack Type)] (store! t (TInt 8 false))  (ps w (ty-str a t))) (wb w 10)  ; u8
+    (let [t (alloc-stack Type)] (store! t (TPtr (box-type a (TInt 8 false)))) (ps w (ty-str a t))) (wb w 10)  ; (ptr u8)
+    (let [t (alloc-stack Type)] (store! t (TRef true (box-type a (TStruct "Foo")))) (ps w (ty-str a t))) (wb w 10)  ; (mut Foo)
+    (let [(mut ps2) (al-new [Type] a)]
+      (al-push! (mut ps2) (TInt 64 true)) (al-push! (mut ps2) (TInt 64 true))
+      (let [t (alloc-stack Type)] (store! t (TApp "Pair" (box-al [Type] a (load ps2)))) (ps w (ty-str a t)))) (wb w 10)  ; (Pair i64 i64)
+    (let [(mut ps3) (al-new [Type] a)]
+      (al-push! (mut ps3) (TPtr (box-type a (TInt 8 true))))
+      (let [t (alloc-stack Type)] (store! t (TFn "c" (box-al [Type] a (load ps3)) (box-type a (TInt 64 true)))) (ps w (ty-str a t)))) (wb w 10)  ; (fnptr c [(ptr i8)] i64)
+    0))
+
+; ============================ codegen (the frontier) =========================
+; src/codegen.rs (3496 lines): monomorphized Program -> LLVM module, built via the
+; LLVM-C FFI surface above. FAITHFUL, call-for-call port of `compile_for_dbg` with
+; dbg=None (every debug-info path skipped). The corpus has no shims / no struct-by-
+; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
+
+; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
+; ── CLI-applied metaprograms: `--use PATH` imports a module (which self-registers
+; its (checker …)/(transform …)) WITHOUT editing the source — so you can run a linter
+; optionally: `coil run app.coil --use lint.coil`.
+(defstruct UsesBox [(init i64) (lst (ptr (ArrayList (slice u8))))])
+(defn uses-box [] (-> (ptr UsesBox)) (alloc-static UsesBox))
+(defn cli-uses [] (-> (ptr (ArrayList (slice u8))))
+  (let [b (uses-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do (store! (field b lst) (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator))))
+            (store! (load (field b lst)) (al-new [(slice u8)] (malloc-allocator)))
+            (store! (field b init) 1) 0)
+      0)
+    (load (field b lst))))
+(defn cli-use-add [(p (slice u8))] (-> i64) (al-push! (cli-uses) p) 0)
+(defn is-module-form [(s (ptr Sexp))] (-> bool)
+  (and (icmp-eq (sx-tag (load s)) 6)
+       (let [it (sx-items (load s))] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "module"))))))
+; prepend `(import "PATH" :use *)` forms (one per --use) ahead of the entry forms,
+; read as their own synthetic source so entry-file diagnostics keep exact spans.
+(defn prepend-uses [(a (ptr Allocator)) (s (mut LS)) (forms (ptr (ArrayList Sexp)))] (-> (ptr (ArrayList Sexp)))
+  (let [uses (cli-uses) nu (al-len [(slice u8)] (load uses))]
+    (if (icmp-eq nu 0) forms
+      (let [(mut src) "" (mut k) 0]
+        (loop (if (icmp-ge (load k) nu) (break)
+          (do (store! src (sconcat a (load src) (sconcat3 a "(import \"" (al-get [(slice u8)] (load uses) (load k)) "\" :use *)")))
+              (store! k (iadd (load k) 1)))))
+        (let [sid (load (field s srccount))
+              _b (store! (field s srccount) (iadd sid 1))
+              _r (register-source! (mut s) "<cli-use>" (load src))]
+          (match (read-all a (load src) sid)
+            (Err [d] forms)
+            (Ok [ifs]
+              (let [(mut out) (al-new [Sexp] a) ni (al-len [Sexp] (load ifs)) nf (al-len [Sexp] (load forms))
+                    hasmod (if (icmp-gt nf 0) (is-module-form (al-elem [Sexp] forms 0)) false)
+                    (mut j) 0 (mut m) 0]
+                ; keep a leading (module …) first, then the CLI imports, then the rest
+                (if hasmod (do (al-push! (mut out) (al-get [Sexp] (load forms) 0)) (store! j 1)) 0)
+                (loop (if (icmp-ge (load m) ni) (break) (do (al-push! (mut out) (al-get [Sexp] (load ifs) (load m))) (store! m (iadd (load m) 1)))))
+                (loop (if (icmp-ge (load j) nf) (break) (do (al-push! (mut out) (al-get [Sexp] (load forms) (load j))) (store! j (iadd (load j) 1)))))
+                (box-al [Sexp] a (load out))))))))))
+(defn run-pipeline [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (w (ptr Writer)) (path (slice u8))
+                    (srcpaths (ptr (ArrayList (slice u8)))) (srctexts (ptr (ArrayList (slice u8))))] (-> (Option (ptr Program)))
+  (let [s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) path src)
+    (match (read-all a src 0)
+      (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+      (Ok [forms]
+        ; file-relative imports (tool-1): the entry file's own relative imports
+        ; resolve against ITS directory, not the process CWD (nested imports already
+        ; use each imported file's incdir). `cwd` stays for DWARF comp_dir only.
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) (dirname path))
+          (if (ls-err? (mut s))
+              (do (report-diag w (mut s) (load (field s loaderr))) (None [(ptr Program)]))
+            (match (expand-stage3 (mut s))
+              (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+              (Ok [_]
+                ; transforms (fixpoint) + authoritative resolve + typecheck, one step
+                (match (run-transforms-and-check a (mut s))
+                  (Err [d] (do (report-check-diags w (mut s) d) (None [(ptr Program)])))
+                  (Ok [cp]
+                    (match (run-registered-checkers a (mut s) cp)  ; semantic checkers: read the authoritative checked program
+                      (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                      (Ok [_]
+                        (do (drop-code-funcs a cp)
+                            (match (monomorphize a cp)
+                              (Err [d] (do (report-diag w (mut s) d) (None [(ptr Program)])))
+                              (Ok [mp]
+                                (do (sort-mono-program a mp)
+                                    ; export the source registry (for DWARF)
+                                    (let [ns (al-len [Source] (load (field s sources))) (mut i) 0]
+                                      (loop (if (icmp-ge (load i) ns) (break)
+                                        (do (let [sp (al-elem [Source] (field s sources) (load i))]
+                                              (al-push! (mut srcpaths) (load (field sp name)))
+                                              (al-push! (mut srctexts) (load (field sp text))))
+                                            (store! i (iadd (load i) 1))))))
+                                    (Some mp)))))))))))))))))
+
+; `check` / `build -o /dev/null`: run the SAME front-end `build` runs before codegen
+; (read -> load -> expand -> transforms -> typecheck -> monomorphize) but emit NO object.
+; Returns 1 when the program compiles cleanly through mono, 0 (with a located diagnostic
+; already reported to stderr) otherwise. Because this reuses run-pipeline verbatim, a
+; program that `check`s clean is one `build` would only ever fail to LINK, never to
+; compile. Signature is the mode-3 dump-fn shape so it runs on the big stack. (diag-12)
+(defn check-src-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [_] 1)
+      (None []   0))))
+
+; The LLVM entry points (dump-ir-program / build-object / build-ir-program) live in
+; selfhost/src/main.coil and are injected here as function pointers (see driver-main /
+; DumpCtx), so this module carries no LLVM dependency.
+
+; arm64 native backend: mono Program -> Mach-O object, no LLVM anywhere.
+(defn build-arm64-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (cga64-build-object a mp obj-cstr path cwd
+                                         (box-al [(slice u8)] a (load sp0))
+                                         (box-al [(slice u8)] a (load st0))
+                                         true)
+                     1))
+      (None []   0))))
+
+; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
+; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
+; `triple` = the `--target` override cstr (null = host default) for cross-compiling.
+; `ok` is the pipeline result the thread writes back so the caller (main / build-cmd)
+; can HALT and exit nonzero on a compile error — mirroring Rust, where a failed
+; `build_executable_*` / `emit_ir` returns Err and `main` prints + exits FAILURE
+; BEFORE any link step. 1 = pipeline succeeded, 0 = a diagnostic was reported.
+;
+; `build-fn` / `emitir-fn` are the LLVM-backend entry points, injected by the top
+; file (main.coil supplies the real ones; main_a64.coil supplies hard-error stubs).
+; dump-thread-entry calls through them for modes 1/0, so the LLVM backend is fully
+; decoupled from this module. Their signatures mirror the (removed) build-ir-program
+; and dump-ir-program.
+(defstruct DumpCtx [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (mode i64) (obj (ptr i8)) (triple (ptr i8)) (path (slice u8)) (ok i64)
+                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                    ; mode 3 (a debug dump: dump-read/ast/load/expand/resolved/checked/mono).
+                    ; The dump functions differ in arity, so each is adapted to this one
+                    ; (a src cwd path) -> i64 shape by a `-w` wrapper (see below); the thread
+                    ; calls whichever wrapper was stored. Dumps run the SAME recursive passes
+                    ; as build, so they must share the big stack, not overflow the 8 MiB main.
+                    (dump-fn   (fnptr c [(ptr Allocator) (slice u8) (slice u8) (slice u8)] i64))])
+
+; pthread start_routine: unpack the context and run the real pipeline on the
+; big-stack thread so the recursive passes (parser/checker/codegen/comptime) don't
+; overflow the default ~8MB stack.
+(defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
+  (let [ctx (cast (ptr DumpCtx) arg)
+        r   (if (icmp-eq (load (field ctx mode)) 3)
+                (call-ptr (load (field ctx dump-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 2)
+                (build-arm64-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 1)
+                (call-ptr (load (field ctx build-fn))  (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
+              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path))))))]
+    (store! (field ctx ok) r)
+    ; release the main thread if it is servicing metaprogram calls (COIL_META_MAIN=1)
+    (main-svc-finish!)
+    (cast (ptr i8) 0)))
+
+; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
+; DumpCtx. Shared by the `emit-ir` and `build` subcommands.
+(defn run-on-big-stack [(ctx (ptr DumpCtx))] (-> i64)
+  (let [attr (alloc-stack (array i8 64))
+        tid  (alloc-stack (ptr i8))]
+    (pthread_attr_init (cast (ptr i8) attr))
+    ; 512 MiB. The 2 MiB floor that justified 32 MiB was measured on HAND-WRITTEN
+    ; source, where nesting is shallow because a human wrote it. Macro-generated code
+    ; is the case that measurement missed: `cond` expands to nested ifs, so an
+    ; 800-clause dispatch table is 800 levels deep, and the pipeline recurses per level
+    ; at ~75 KB a level (entry-block allocas — see cg-entry-alloca). At 32 MiB that
+    ; ran out at ~450 levels and died with a bare signal and zero output.
+    ; This is virtual reservation, not committed memory: pages fault in on use, so the
+    ; ceiling costs nothing until a deep program actually needs it. parse-depth-limit
+    ; (parser.coil) sits well under the cliff this buys, so a too-deep program gets a
+    ; located diagnostic rather than a crash.
+    (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB
+    ; COIL_META_MAIN=1: this (the MAIN) thread services metaprogram calls while
+    ; the pipeline runs — AppKit metaprograms need the real main thread. The loop
+    ; is a no-op when the service was never initialized.
+    (if (meta-main?) (main-svc-init!) 0)
+    (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr)
+                    (fnptr-of dump-thread-entry) (cast (ptr i8) ctx))
+    (main-svc-loop)
+    (pthread_join (load tid) (cast (ptr i8) 0))
+    ; the thread wrote its pipeline result (1 ok / 0 failed) into ctx.ok.
+    (load (field ctx ok))))
+
+; ---- debug dumps on the big stack -------------------------------------------
+; `coil expand` / the `dump-*` debug commands run the SAME recursive front-end
+; (reader/parser/loader/resolve/check/mono/expand) as `build`, so they overflow the
+; default ~8 MiB MAIN thread on deeply-nested (macro-generated) input that `build`
+; compiles fine on the big stack. Route them through the identical run-on-big-stack /
+; DumpCtx mechanism. The dump functions differ in arity; each `-w` wrapper adapts one
+; to the uniform (a src cwd path) -> i64 shape the thread invokes (mode 3). Every dump
+; returns 0 and prints its own diagnostics, so this exit code is 0 on success.
+(defn dump-read-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-read-program a src))
+(defn dump-ast-w      [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-ast-program a src))
+; file-relative imports (tool-1): the base for the entry file's own relative
+; imports is ITS directory (dirname path), not the process CWD.
+(defn dump-load-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-load-program a src (dirname path)))
+(defn expand-src-w    [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (expand-src-program a src (dirname path) path))
+(defn dump-expand-w   [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-expand-program a src (dirname path)))
+(defn dump-resolved-w [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-resolved-program a src (dirname path)))
+(defn dump-checked-w  [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-checked-program a src (dirname path)))
+(defn dump-mono-w     [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64) (dump-mono-program a src (dirname path)))
+
+; Populate a mode-3 DumpCtx and run the chosen dump wrapper on the big-stack pthread.
+(defn run-dump-on-big-stack [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))
+                             (dfn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (slice u8)] i64))] (-> i64)
+  (let [ctx (alloc-stack DumpCtx)]
+    (store! (field ctx a)       a)
+    (store! (field ctx src)     src)
+    (store! (field ctx cwd)     cwd)
+    (store! (field ctx path)    path)
+    (store! (field ctx mode)    3)
+    (store! (field ctx obj)     (cast (ptr i8) 0))
+    (store! (field ctx triple)  (cast (ptr i8) 0))
+    (store! (field ctx ok)      0)
+    (store! (field ctx dump-fn) dfn)
+    (run-on-big-stack ctx)))
+
+; The intermediate object path for output `out`, mirroring Rust's
+; `out_path.with_extension("o")`: REPLACE the final path-component extension with
+; `o` (`a.out` -> `a.o`, `foo.coil` -> `foo.o`), or APPEND `.o` when the basename
+; has none (`foo` -> `foo.o`). A `.` in a parent directory doesn't count; a leading
+; dot (`.foo`) is not an extension. This keeps the `.o` name — hence any linker
+; diagnostic that prints it — byte-identical to the Rust reference for ANY `-o`.
+(defn obj-path [(a (ptr Allocator)) (out (slice u8))] (-> (slice u8))
+  (let [n (slice-len out) (mut slash) -1 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get out (load i))) 47) (store! slash (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (let [(mut dot) -1 (mut j) (iadd (load slash) 1)]
+      (loop (if (icmp-ge (load j) n) (break)
+        (do (if (icmp-eq (cast i64 (slice-get out (load j))) 46) (store! dot (load j)) 0)
+            (store! j (iadd (load j) 1)))))
+      (let [(mut sb) (sb-new a)]
+        (if (icmp-gt (load dot) (iadd (load slash) 1))
+            (do (sb-push-str! (mut sb) (subslice out 0 (load dot))) (sb-push-str! (mut sb) ".o"))
+          (do (sb-push-str! (mut sb) out) (sb-push-str! (mut sb) ".o")))
+        (sb-str (load sb))))))
+
+(defn wasm-target? [(triple (ptr i8))] (-> bool)
+  (if (icmp-eq (cast i64 triple) 0) false
+    (starts-with (cstr->slice triple) "wasm32-")))
+
+; ---- reading a source file the user named ------------------------------------
+; `read-file` maps ENOENT to "" — right for the loader's disk-first/embedded-module
+; probing, WRONG for a path a user typed. An empty program compiles clean to an object
+; with no `main`, so a mistyped filename surfaced as an arm64 linker error about `_main`
+; that named neither the file nor the mistake — and `fmt --write` on a missing path
+; FABRICATED the file. `read-file-opt` already separates "missing" from "empty" and its
+; own comment says so; this is the one door every user-supplied path goes through.
+; `rc` is the process exit code for a missing file: 1 for build/emit (what clang and
+; rustc do), 2 for `fmt --check`, where 1 already means "this file is not formatted"
+; and a CI gate must be able to tell that apart from a broken invocation.
+(defn read-src-rc [(a (ptr Allocator)) (path (ptr i8)) (rc i64)] (-> (slice u8))
+  (match (read-file-opt a path)
+    (Some [s] s)
+    (None []
+      (let [w (stderr)]
+        (ps w "error: no such file: '") (ps w (cstr->slice path)) (ps w "'") (wb w 10)
+        (exit (cast i32 rc))
+        ""))))
+
+(defn read-src [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
+  (read-src-rc a path 1))
+
+; ---- child exit status ------------------------------------------------------
+; `system` returns a raw wait(2) status, NOT an exit code. The low 7 bits hold the
+; terminating signal (0 when the child exited normally); the exit code sits in the
+; high byte. Reading only the high byte — (st/256)&255 — yields 0 for EVERY signal
+; death, so a child that segfaulted reported success. These two are the one place
+; that decodes a wait status; every call site goes through them.
+(defn wait-signal [(st i64)] (-> i64)
+  (if (icmp-lt st 0) 0 (iand st 127)))
+
+(defn wait-code [(st i64)] (-> i64)
+  (if (icmp-lt st 0) 127                      ; system() itself failed (no shell / fork failed)
+    (let [sig (wait-signal st)]
+      (if (icmp-ne sig 0)
+          (iadd 128 sig)                       ; killed by a signal: 128+signo, as a shell reports
+        (iand (udiv st 256) 255)))))
+
+(defn signal-name [(sig i64)] (-> (slice u8))
+  (cond (icmp-eq sig 2)  "SIGINT"
+        (icmp-eq sig 3)  "SIGQUIT"
+        (icmp-eq sig 4)  "SIGILL"
+        (icmp-eq sig 5)  "SIGTRAP"
+        (icmp-eq sig 6)  "SIGABRT"
+        (icmp-eq sig 8)  "SIGFPE"
+        (icmp-eq sig 9)  "SIGKILL"
+        (icmp-eq sig 10) "SIGBUS"
+        (icmp-eq sig 11) "SIGSEGV"
+        (icmp-eq sig 13) "SIGPIPE"
+        (icmp-eq sig 15) "SIGTERM"
+        ""))
+
+; A signal death is otherwise invisible: the child prints nothing and the status is
+; just a number. Say it out loud, naming what died.
+(defn wait-report [(st i64) (what (slice u8))] (-> i64)
+  (let [sig (wait-signal st)]
+    (if (icmp-eq sig 0) 0
+      (let [w (stderr) nm (signal-name sig)]
+        (ps w what) (ps w " terminated by signal ") (dump-dec w sig)
+        (if (icmp-eq (slice-len [u8] nm) 0) 0 (do (ps w " (") (ps w nm) (ps w ")") 0))
+        (wb w 10)
+        0))))
+
+; ---- argv scanning ----------------------------------------------------------
+; Every subcommand used to read the filename as literally argv[2], so
+; `coil build -o out in.coil` — the universal Unix order — missed the file entirely,
+; fell through to project mode, and reported "no Coil.toml" while never mentioning the
+; file the user had just passed. The parse loop's fallthrough silently skipped anything
+; it did not recognise, so a typo'd `--taget` was indistinguishable from success.
+; One table, one scanner: flags are position-independent and unknown ones are errors.
+(extern opendir  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern closedir :cc c [(ptr i8)] (-> i32))
+
+; ---- the debug-checks / sanitizer build mode (mem-2 · mem-6 · mem-7 · mem-8) ----
+; `--debug-checks` turns on the library-level safety checks (slice bounds,
+; poison-on-free). The checks run inside MACROS that branch on `(debug-checks?)` —
+; a comptime code op (comptime.coil) read at expansion time — so the driver flips the
+; host-side cell here, BEFORE expansion runs, exactly like the target arch. Off by
+; default: the guard macro then expands to the plain unchecked op (zero cost).
+; --debug-checks also auto-applies the bundled stack-return lint (mem-8): the driver
+; --uses it, so its (checker …) runs over the program — no explicit import needed. Off,
+; the module is never loaded (zero cost). `cli-use-add` is idempotent-enough here (the
+; flag is scanned once), and prepend-uses turns it into (import "stacklint.coil" :use *).
+(defn enable-debug-checks! [] (-> i64) (set-debug-checks! 1) (cli-use-add "stacklint.coil") 0)
+
+; `--sanitize=address` — run LLVM's AddressSanitizer pass and link its runtime
+; (mem-7). One value per process; the driver sets it, the LLVM backend reads it
+; (main.coil::build-object) so ONLY the program object is instrumented, never the
+; metaprogram dylib the compiler dlopen's (that is what made a bare
+; `--link-flag -fsanitize=address` abort the compiler).
+(defstruct SanitizeBox [(isset i64) (addr i64)])
+(defn sanitize-box [] (-> (ptr SanitizeBox)) (alloc-static SanitizeBox))
+(defn set-sanitize-address! [] (-> i64)
+  (let [b (sanitize-box)] (store! (field b addr) 1) (store! (field b isset) 1) 0))
+(defn sanitize-address? [] (-> bool) (icmp-ne (load (field (sanitize-box) addr)) 0))
+
+; A link flag we must NEVER pass to the metaprogram dylib link: an instrumentation
+; flag on the dylib gets dlopen'd into the compiler and aborts it ("interceptors are
+; not working … loaded too late"). Frameworks/libraries the program links are kept.
+(defn meta-unsafe-flag? [(f (slice u8))] (-> bool)
+  (or (starts-with f "-fsanitize")
+      (starts-with f "-fno-sanitize")))
+
+; The program's link flags, minus any that would poison the compiler when applied to
+; the metaprogram dylib it dlopen's (mem-7). Frameworks/-l libraries are preserved.
+(defn filter-meta-link-flags [(a (ptr Allocator)) (flags (ArrayList (slice u8)))] (-> (ptr (ArrayList (slice u8))))
+  (let [(mut out) (al-new [(slice u8)] a) (mut i) 0 n (al-len [(slice u8)] flags)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (al-get [(slice u8)] flags (load i))]
+            (if (meta-unsafe-flag? f) 0 (al-push! (mut out) f)))
+          (store! i (iadd (load i) 1)))))
+    (box-al [(slice u8)] a (load out))))
+
+(defn is-flag? [(arg (slice u8))] (-> bool)
+  (and (icmp-ge (slice-len [u8] arg) 1)
+       (icmp-eq (slice-get [u8] arg 0) (cast u8 45))))          ; '-'
+
+(defn dash-l? [(arg (slice u8))] (-> bool)                       ; -l<lib>
+  (and (icmp-ge (slice-len [u8] arg) 2)
+       (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45))
+            (icmp-eq (slice-get [u8] arg 1) (cast u8 108)))))    ; 'l'
+
+; flags that consume the NEXT argv entry — the scanner must step over both.
+(defn flag-takes-value? [(arg (slice u8))] (-> bool)
+  (cond (str-eq arg "-o")            true
+        (str-eq arg "--link-flag")   true
+        (str-eq arg "--target")      true
+        (str-eq arg "--use")         true
+        (str-eq arg "--emit-header") true
+        (str-eq arg "--backend")     true
+        false))
+
+(defn flag-known? [(arg (slice u8))] (-> bool)
+  (cond (flag-takes-value? arg) true
+        (dash-l? arg)           true
+        (str-eq arg "--lib")    true
+        (str-eq arg "--shared") true
+        (str-eq arg "-g")       true
+        (str-eq arg "--debug")  true
+        (str-eq arg "--debug-checks")     true
+        (str-eq arg "--sanitize=address") true
+        false))
+
+; index of the first positional at/after `start`, or 0 if there is none.
+; Stops at `--` (run's program args are not our positionals).
+(defn argv-file-idx [(argc i32) (argv (ptr (ptr i8))) (start i64)] (-> i64)
+  (let [(mut i) start (mut r) 0]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (is-flag? arg)
+              (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
+            (do (store! r (load i)) (break)))))))
+    (load r)))
+
+; the `--target <triple>` value anywhere in argv, or null (host default).
+(defn argv-triple [(argc i32) (argv (ptr (ptr i8)))] (-> (ptr i8))
+  (let [(mut i) 2 (mut r) (cast (ptr i8) 0)]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (if (and (str-eq (cstr->slice (load (index argv (load i)))) "--target")
+                   (icmp-lt (iadd (load i) 1) (cast i64 argc)))
+              (do (store! r (load (index argv (iadd (load i) 1)))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; reject an unrecognised flag instead of skipping it. `fidx` is the positional the
+; caller already claimed as its file; anything else non-flag is a stray argument.
+(defn argv-reject-unknown [(argc i32) (argv (ptr (ptr i8))) (start i64) (fidx i64)] (-> i64)
+  (let [(mut i) start]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (icmp-eq (load i) fidx) (do (store! i (iadd (load i) 1)) 0)
+            (if (is-flag? arg)
+                (if (flag-known? arg)
+                    (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
+                  (let [w (stderr)]
+                    (ps w "error: unknown flag '") (ps w arg) (ps w "'") (wb w 10)
+                    (exit 1) 0))
+              (let [w (stderr)]
+                (ps w "error: unexpected argument '") (ps w arg) (ps w "'") (wb w 10)
+                (exit 1) 0))))))))
+  0)
+
+(defn dir? [(path (ptr i8))] (-> bool)
+  (let [d (opendir path)]
+    (if (icmp-eq (cast i64 d) 0) false (do (closedir d) true))))
+; The arch component of a triple = the text before the first '-' (`x86_64` of
+; `x86_64-apple-macosx11.0.0`). Empty triple would be caught by the null guard first.
+(defn triple-arch [(triple (ptr i8))] (-> (slice u8))
+  (let [s (cstr->slice triple) n (slice-len [u8] s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 45) (break)
+        (store! i (iadd (load i) 1)))))
+    (subslice [u8] s 0 (load i))))
+
+; A `--target <triple>` whose object arch differs from the host's. The host `cc`
+; defaults to producing arm64 Mach-O, so linking such an object raw dies with
+; `found architecture 'x86_64', required arm64`. The fix is to pass `-arch <arch>`
+; to the link step (macOS `cc` cross-links every slice its SDK carries), which this
+; predicate gates. A wasm32 target never touches `cc` (wasm-link-object finalizes it
+; in-process) and a null triple is the host default — neither needs `-arch`.
+(defn native-cross-target? [(triple (ptr i8))] (-> bool)
+  (if (icmp-eq (cast i64 triple) 0) false
+    (if (wasm-target? triple) false
+      (let [arch (triple-arch triple)]
+        (not (or (str-eq arch "arm64") (str-eq arch "aarch64")))))))
+
+; `-g` packaging (Mach-O): the DWARF lives in the kept `<out>.o`; `ld` records a debug
+; map into the executable pointing at it. `dsymutil` gathers a `<out>.dSYM` next to the
+; exe from that map + the .o's DWARF, which is what lldb loads. Best-effort: a failure
+; (e.g. no dsymutil) is a warning — the DWARF is still in the .o. The arm64 backend now
+; emits the __text-relative address RELOCATIONS dsymutil needs (without them it printed
+; "No valid relocations found. Skipping." and produced an empty dSYM — tool-11).
+(defn run-dsymutil [(a (ptr Allocator)) (out (slice u8))] (-> i64)
+  (let [(mut db) (sb-new a)]
+    (sb-push-str! (mut db) "dsymutil ")
+    (sb-push-str! (mut db) out)
+    (let [drc (cast i64 (system (slice->cstr a (sb-str (load db)))))]
+      (if (icmp-ne drc 0)
+          (do (ps (stderr) "warning: dsymutil failed; debug info stays in ") (ps (stderr) out) (ps (stderr) ".o\n") 0)
+        0))))
+
+; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
+; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
+; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
+(defn build-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
+                 (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                 (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                 (default-backend i64)] (-> i64)
+  (let [fidx (argv-file-idx argc argv 2)
+        _rej (argv-reject-unknown argc argv 2 fidx)
+        file (load (index argv fidx))
+        (mut outp)  (cast (ptr i8) 0)
+        (mut flags) (al-new [(slice u8)] a)
+        (mut backend) default-backend
+        (mut trip)  (cast (ptr i8) 0)
+        (mut libmode) 0        ; 0 = executable, 1 = --lib (.a), 2 = --shared (.dylib)
+        (mut ehdr) (None [(slice u8)])
+        (mut wantg) false      ; -g/--debug requested: gather a .dSYM after linking
+        (mut i)     2]
+    ; second pass: --lib / --shared / --emit-header <h> / -g (DWARF via the arm64
+    ; debug backend, which always emits DWARF).
+    (let [(mut j) 2]
+      (loop (if (icmp-ge (load j) (cast i64 argc)) (break)
+        (do (let [arg (cstr->slice (load (index argv (load j))))]
+              (if (str-eq arg "--lib") (store! libmode 1)
+                (if (str-eq arg "--shared") (store! libmode 2)
+                  (if (or (str-eq arg "-g") (str-eq arg "--debug")) (do (store! backend 2) (store! wantg true) 0)
+                    (if (str-eq arg "--debug-checks") (enable-debug-checks!)
+                      (if (str-eq arg "--sanitize=address") (set-sanitize-address!)
+                        (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
+                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0)))))))
+            (store! j (iadd (load j) 1))))))
+    ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (str-eq arg "-o")
+                (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+              (if (str-eq arg "--link-flag")
+                  (do (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
+                (if (str-eq arg "--target")
+                    (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                  (if (str-eq arg "--use")
+                      (do (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1))))) (store! i (iadd (load i) 2)) 0)
+                  (if (and (icmp-ge (slice-len [u8] arg) 2) (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45)) (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
+                      (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)   ; -l<lib>
+                    (if (str-eq arg "--backend")
+                        (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
+                                (store! backend 2)
+                              (store! backend 1))
+                            (store! i (iadd (load i) 2)) 0)
+                      (do (store! i (iadd (load i) 1)) 0)))))))))))
+    ; a usage mistake is exit 1, not SIGABRT — abort here made `coil build f.coil`
+    ; look like the compiler had panicked, and any CI reporting on signals agreed.
+    (if (icmp-eq (cast i64 (load outp)) 0)
+        (do (ps (stderr) "error: build: missing -o <out>\n") (exit 1) 0)
+      0)
+    ; `-o /dev/null` is the classic "just tell me if it compiles" idiom. There is no
+    ; writable object destination, and handing it to codegen abends with a bare
+    ; `LLVMTargetMachineEmitToFile ... Operation not permitted` (SIGABRT). Route it to the
+    ; compile-check path instead — the full front-end, no object, located errors, exit 0
+    ; on success — and `exit` before the pipeline/link machinery ever runs. (diag-12)
+    (if (str-eq (cstr->slice (load outp)) "/dev/null")
+        (do (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+            (set-target-arch! (load trip))
+            (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
+            (exit (cast i32 (if (icmp-eq (run-dump-on-big-stack a (read-src a file) (cwd-slice a) (cstr->slice file) (fnptr-of check-src-program)) 0) 1 0)))
+            0)
+      0)
+    ; --sanitize=address needs the LLVM backend (the native arm64 backend emits
+    ; Mach-O directly, with no instrumentation pass) — reject the combination loudly
+    ; rather than silently produce an UNinstrumented binary. When accepted, the
+    ; program is instrument-LINKED with -fsanitize=address; the meta-link filter keeps
+    ; that flag off the compiler's own metaprogram dylib (mem-7).
+    (if (sanitize-address?)
+        (if (icmp-ne (load backend) 1)
+            (do (ps (stderr) "error: --sanitize=address requires the LLVM backend (not --backend arm64, -g, or the LLVM-free compiler)\n") (exit 1) 0)
+          (al-push! (mut flags) "-fsanitize=address"))
+      0)
+    (let [out-slice (cstr->slice (load outp))
+          obj-slice (obj-path a out-slice)]
+      (let [obj-cstr  (slice->cstr a obj-slice)
+            ctx       (alloc-stack DumpCtx)]
+        (store! (field ctx a)    a)
+        (store! (field ctx src)  (read-src a file))
+        (store! (field ctx cwd)  (cwd-slice a))
+        (store! (field ctx path) (cstr->slice file))
+        (store! (field ctx mode) (load backend))
+        (store! (field ctx obj)  obj-cstr)
+        (store! (field ctx triple) (load trip))        (set-target-arch! (load trip))
+        (store! (field ctx ok) 0)
+        (store! (field ctx build-fn)  build-fn)
+        (store! (field ctx emitir-fn) emitir-fn)
+        ; metaprogram dylibs link the SAME flags as the program (FFI frameworks) —
+        ; MINUS sanitizer flags, which would abort the compiler once the dylib is
+        ; dlopen'd into it ("interceptors … loaded too late"). (mem-7)
+        (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
+        ; HALT on a compile error: run-on-big-stack returns 0 when the pipeline
+        ; reported a diagnostic. Mirror Rust — the diagnostic was already printed;
+        ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
+        ; file` / undefined-symbol junk is ever emitted.
+        (if (icmp-eq (run-on-big-stack ctx) 0) 1
+          ; final step depends on libmode: exe = `cc obj -o out flags`,
+          ; static = `ar rcs out obj`, shared = `cc -dynamiclib obj -o out flags`.
+          (let [(mut cmdsb) (sb-new a)]
+            (if (icmp-eq (load libmode) 1)
+                (do (sb-push-str! (mut cmdsb) "ar rcs ") (sb-push-str! (mut cmdsb) out-slice)
+                    (sb-push-str! (mut cmdsb) " ") (sb-push-str! (mut cmdsb) obj-slice) 0)
+              (do (sb-push-str! (mut cmdsb) (if (icmp-eq (load libmode) 2) "cc -dynamiclib " "cc "))
+                  ; cross-target: the object's arch differs from the host cc's default
+                  ; (arm64), so pass `-arch <arch>` — otherwise ld dies with
+                  ; `found architecture '<arch>', required arm64` (xcompile). wasm never
+                  ; reaches here; a null/host triple is not a cross-target.
+                  (if (native-cross-target? (load trip))
+                      (do (sb-push-str! (mut cmdsb) "-arch ") (sb-push-str! (mut cmdsb) (triple-arch (load trip)))
+                          (sb-push-str! (mut cmdsb) " ") 0)
+                    0)
+                  (sb-push-str! (mut cmdsb) obj-slice)
+                  (sb-push-str! (mut cmdsb) " -o ")
+                  (sb-push-str! (mut cmdsb) out-slice)
+                  (let [(mut k) 0 nf (al-len [(slice u8)] (load flags))]
+                    (loop (if (icmp-ge (load k) nf) (break)
+                      (do (sb-push-str! (mut cmdsb) " ")
+                          (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
+                          (store! k (iadd (load k) 1)))))) 0))
+            (let [rc (if (wasm-target? (load trip))
+                          (wasm-link-object a obj-cstr out-slice)
+                          (cast i64 (system (slice->cstr a (sb-str (load cmdsb))))))]
+              (if (icmp-ne rc 0)
+                  (let [w (stderr) code (wait-code rc)]
+                    (wait-report rc "linker")
+                    (ps w "error: linker/ar failed with exit status: ") (dump-dec w code) (wb w 10) 1)
+                (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10))
+                    ; -g on a native executable: gather the .dSYM (the .o is kept).
+                    (if (and (load wantg) (and (not (wasm-target? (load trip))) (icmp-eq (load libmode) 0)))
+                        (run-dsymutil a out-slice) 0)
+                    (match ehdr
+                      (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
+                      (None [] 0)))))))))))
+
+; ============================ cheader (export-c → C header) =================
+; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +
+; typedef structs) for a program's (export-c …) set.
+
+(defn ch-cname [(a (ptr Allocator)) (qualified (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] qualified) (mut cut) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (slice-get [u8] qualified (load i)) (cast u8 46)) (store! cut (iadd (load i) 1)) 0)
+          (store! i (iadd (load i) 1)))))
+    (let [(mut out) (sb-new a) (mut k) (load cut)]
+      (loop (if (icmp-ge (load k) n) (break)
+        (do (let [c (slice-get [u8] qualified (load k))]
+              (sb-push-byte! (mut out) (if (icmp-eq c (cast u8 45)) (cast u8 95) c)))
+            (store! k (iadd (load k) 1)))))
+      (sb-str (load out)))))
+
+(defn ch-ctype [(a (ptr Allocator)) (t Type) (is-return bool)] (-> (Result (slice u8) (slice u8)))
+  (match-else t
+    (TInt [bits signed]
+      (if (or (icmp-eq bits 8) (or (icmp-eq bits 16) (or (icmp-eq bits 32) (icmp-eq bits 64))))
+          (Ok (cat3-d a (if signed "int" "uint") (cat3-d a (i64->str a bits) "_t")))
+        (Err (cat3-d a "cheader: i" (cat3-d a (i64->str a bits) " has no standard C type (use 8/16/32/64-bit)")))))
+    (TFloat [bits] (Ok (if (icmp-eq bits 32) "float" "double")))
+    (TBool [] (Ok "bool"))
+    (TVoid [] (if is-return (Ok "void") (Err "cheader: void has no C representation")))
+    (TPtr [inner] (match (ch-ctype a (load inner) false) (Ok [s] (Ok (cat3-d a s " *"))) (Err [e] (Err e))))
+    (TStruct [name] (Ok (ch-cname a name)))
+    (_ (Err "cheader: type has no C representation"))))
+
+(defn ch-find-struct [(p (ptr Program)) (name (slice u8))] (-> (ptr StructDef))
+  (let [ss (load (field p structs)) n (al-len [StructDef] ss) (mut i) 0 (mut r) (cast (ptr StructDef) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [StructDef] ss (load i)) name)) name) (do (store! r (al-elem [StructDef] ss (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; collect reachable structs (dependency-first): by-value fields recurse before the
+; containing struct; pointer fields only need the forward decl.
+(defn ch-collect [(a (ptr Allocator)) (t Type) (p (ptr Program)) (order (ptr (ArrayList (slice u8)))) (seen (ptr (HashMap (slice u8) i64)))] (-> i64)
+  (match-else t
+    (TStruct [name]
+      (match (hm-get [(slice u8) i64] (load seen) name) (Some [_] 0)
+        (None []
+          (do (hm-put! [(slice u8) i64] seen name 1)
+              (let [sd (ch-find-struct p name)]
+                (if (icmp-eq (cast i64 sd) 0) 0
+                  (let [fs (load (field sd fields)) n (al-len [Field] fs) (mut i) 0]
+                    (loop (if (icmp-ge (load i) n) (break)
+                      (do (match-else (load (field (al-elem [Field] fs (load i)) ty))
+                            (TPtr [_] 0)
+                            (TArray [elem _] (ch-collect a (load elem) p order seen))
+                            (_ (ch-collect a (load (field (al-elem [Field] fs (load i)) ty)) p order seen)))
+                          (store! i (iadd (load i) 1))))))))
+              (al-push! [(slice u8)] order name) 0))))
+    (TPtr [inner] (ch-collect a (load inner) p order seen))
+    (TArray [inner _] (ch-collect a (load inner) p order seen))
+    (_ 0)))
+
+(defn ch-render-struct [(a (ptr Allocator)) (sd (ptr StructDef))] (-> (Result (slice u8) (slice u8)))
+  (let [tag (ch-cname a (load (field sd name)))
+        attr (match-else (load (field sd layout)) (LPacked [] " __attribute__((__packed__))") (LC [] "") (LAligned [_] "") (_ "BAD"))]
+    (if (str-eq attr "BAD")
+        (Err (cat3-d a "cheader: struct '" (cat3-d a tag "' has an :explicit/:bits layout the header generator can't emit; export a :c-layout struct")))
+      (let [(mut out) (sb-new a) (mut err) (None [(slice u8)])]
+        (sb-push-str! (mut out) (cat3-d a (cat3-d a "struct" attr) (cat3-d a " " (cat3-d a tag " {\n"))))
+        (let [fs (load (field sd fields)) n (al-len [Field] fs) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (let [fp (al-elem [Field] fs (load i)) fn2 (ch-cname a (load (field fp name)))]
+              (match-else (load (field fp ty))
+                (TArray [elem k]
+                  (match (ch-ctype a (load elem) false)
+                    (Err [e] (do (store! err (Some e)) (break)))
+                    (Ok [ct] (sb-push-str! (mut out) (cat3-d a (cat3-d a "    " ct) (cat3-d a " " (cat3-d a fn2 (cat3-d a "[" (cat3-d a (i64->str a k) "];\n"))))))) ))
+                (_ (match (ch-ctype a (load (field fp ty)) false)
+                     (Err [e] (do (store! err (Some e)) (break)))
+                     (Ok [ct] (sb-push-str! (mut out) (cat3-d a (cat3-d a "    " ct) (cat3-d a " " (cat3-d a fn2 ";\n"))))))))
+              (store! i (iadd (load i) 1)))))
+        (match (load err) (Some [e] (Err e)) (None [] (do (sb-push-str! (mut out) "};\n") (Ok (sb-str (load out)))))))))))
+
+; Render the full C header for the program's exports (Result text/err).
+(defn cheader-render [(a (ptr Allocator)) (p (ptr Program))] (-> (Result (slice u8) (slice u8)))
+  (let [order (box a (ArrayList (slice u8)) (al-new [(slice u8)] a))
+        seen  (box a (HashMap (slice u8) i64) (hm-new [(slice u8) i64] a (str-keyops)))
+        es (load (field p exports)) ne (al-len [ExportC] es)
+        (mut protos) (sb-new a) (mut err) (None [(slice u8)]) (mut i) 0]
+    ; collect structs + build prototypes
+    (loop (if (icmp-ge (load i) ne) (break)
+      (let [ep (al-elem [ExportC] es (load i))
+            sym (match (load (field ep symbol)) (Some [s] s) (None [] (load (field ep name))))
+            fp (ch-find-func p (load (field ep name)))]
+        (if (icmp-eq (cast i64 fp) 0) (do (store! err (Some (cat3-d a "cheader: exported function not found: " (load (field ep name))))) (break))
+          (do (ch-collect a (load (field fp ret)) p order seen)
+              (let [ps (load (field ep params)) np (al-len [Type] ps) (mut j) 0]
+                (loop (if (icmp-ge (load j) np) (break) (do (ch-collect a (al-get [Type] ps (load j)) p order seen) (store! j (iadd (load j) 1))))))
+              (match (ch-ctype a (load (field fp ret)) true)
+                (Err [e] (do (store! err (Some e)) (break)))
+                (Ok [rt]
+                  (do (sb-push-str! (mut protos) rt) (sb-push-str! (mut protos) " ") (sb-push-str! (mut protos) sym) (sb-push-str! (mut protos) "(")
+                      (let [ps (load (field ep params)) np (al-len [Type] ps) (mut j) 0]
+                        (if (icmp-eq np 0) (sb-push-str! (mut protos) "void") 0)
+                        (loop (if (icmp-ge (load j) np) (break)
+                          (match (ch-ctype a (al-get [Type] ps (load j)) false)
+                            (Err [e] (do (store! err (Some e)) (break)))
+                            (Ok [pt] (do (if (icmp-gt (load j) 0) (sb-push-str! (mut protos) ", ") 0) (sb-push-str! (mut protos) pt) (store! j (iadd (load j) 1))))))))
+                      (sb-push-str! (mut protos) ");\n"))))))))
+      (store! i (iadd (load i) 1)))
+    (match (load err) (Some [e] (Err e))
+      (None []
+        (let [(mut out) (sb-new a) no (al-len [(slice u8)] (load order))]
+          (sb-push-str! (mut out) "/* Generated by `coil cheader`. */\n#pragma once\n#include <stdint.h>\n#include <stdbool.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
+          (if (icmp-gt no 0)
+              (let [(mut k) 0 (mut serr) (None [(slice u8)])]
+                (loop (if (icmp-ge (load k) no) (break)
+                  (let [tag (ch-cname a (al-get [(slice u8)] (load order) (load k)))]
+                    (sb-push-str! (mut out) (cat3-d a (cat3-d a "typedef struct " tag) (cat3-d a " " (cat3-d a tag ";\n")))) (store! k (iadd (load k) 1)))))
+                (sb-push-str! (mut out) "\n")
+                (store! k 0)
+                (loop (if (icmp-ge (load k) no) (break)
+                  (match (ch-render-struct a (ch-find-struct p (al-get [(slice u8)] (load order) (load k))))
+                    (Err [e] (do (store! serr (Some e)) (break)))
+                    (Ok [sbody] (do (sb-push-str! (mut out) sbody) (sb-push-str! (mut out) "\n") (store! k (iadd (load k) 1)))))))
+                (match (load serr) (Some [e] (Err [(slice u8) (slice u8)] e))
+                  (None [] (do (sb-push-str! (mut out) (sb-str (load protos))) (sb-push-str! (mut out) "\n#ifdef __cplusplus\n}\n#endif\n") (Ok (sb-str (load out)))))))
+            (do (sb-push-str! (mut out) (sb-str (load protos))) (sb-push-str! (mut out) "\n#ifdef __cplusplus\n}\n#endif\n") (Ok (sb-str (load out))))))))))
+
+(defn ch-find-func [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
+  (let [fs (load (field p funcs)) n (al-len [Func] fs) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (al-elem [Func] fs (load i)) name)) name) (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; run the pipeline to a checked Program, render its C header, write to `out`
+; (Some file) or stdout (None). Returns 0 on success, 1 on error.
+(defn cheader-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (out (Option (slice u8)))] (-> i64)
+  (let [s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s resolve_diags) (cast (ptr (ArrayList Diag)) 0)) (store! (field s resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<source>" src)
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
+          (if (ls-err? (mut s))
+              (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error (stderr) dp) 1)
+            (match (resolve-program a (mut s) true false)
+              (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+              (Ok [prog]
+                (match (check-program a prog (mut s))
+                  (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+                  (Ok [cp]
+                    (match (cheader-render a cp)
+                      (Err [e] (do (ps (stderr) "error: ") (ps (stderr) e) (wb (stderr) 10) 1))
+                      (Ok [hdr]
+                        (match out
+                          (None [] (do (ps (stdout) hdr) 0))
+                          (Some [o] (do (d-write-file a o hdr) (let [w (stdout)] (ps w "wrote ") (ps w o) (wb w 10)) 0)))))))))))))))
+
+; ============================ Coil.toml manifest ============================
+; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
+; into the flags the CLI already accepts (port of src/manifest.rs). Deliberately
+; tiny: a line-based reader for [package]/[build]/[link]/[run].
+
+(defn m-ws? [(c u8)] (-> bool)
+  (or (icmp-eq c (cast u8 32)) (or (icmp-eq c (cast u8 9)) (or (icmp-eq c (cast u8 10)) (icmp-eq c (cast u8 13))))))
+(defn m-trim [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s) (mut lo) 0 (mut hi) n]
+    (loop (if (and (icmp-lt (load lo) (load hi)) (m-ws? (slice-get [u8] s (load lo)))) (store! lo (iadd (load lo) 1)) (break)))
+    (loop (if (and (icmp-lt (load lo) (load hi)) (m-ws? (slice-get [u8] s (isub (load hi) 1)))) (store! hi (isub (load hi) 1)) (break)))
+    (subslice [u8] s (load lo) (load hi))))
+(defn m-unquote [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] s)]
+    (if (and (icmp-ge n 2) (and (icmp-eq (slice-get [u8] s 0) (cast u8 34)) (icmp-eq (slice-get [u8] s (isub n 1)) (cast u8 34))))
+        (subslice [u8] s 1 (isub n 1)) s)))
+
+; lines of a text (split on \n).
+(defn m-lines [(a (ptr Allocator)) (text (slice u8))] (-> (ptr (ArrayList (slice u8))))
+  (let [out (box a (ArrayList (slice u8)) (al-new [(slice u8)] a))
+        n (slice-len [u8] text) (mut start) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (slice-get [u8] text (load i)) (cast u8 10))
+              (do (al-push! [(slice u8)] out (subslice [u8] text (load start) (load i))) (store! start (iadd (load i) 1)) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-lt (load start) n) (al-push! [(slice u8)] out (subslice [u8] text (load start) n)) 0)
+    out))
+
+; append the string elements of a TOML array literal `["a", "b"]` to `dst`.
+(defn m-parse-array [(a (ptr Allocator)) (val (slice u8)) (dst (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [n (slice-len [u8] val)
+        inner (if (icmp-ge n 2) (subslice [u8] val 1 (isub n 1)) val)   ; strip [ ]
+        (mut start) 0 (mut j) 0 m (slice-len [u8] inner)]
+    (loop (if (icmp-gt (load j) m) (break)
+      (if (or (icmp-eq (load j) m) (icmp-eq (slice-get [u8] inner (load j)) (cast u8 44)))   ; ',' or end
+          (let [piece (m-trim (subslice [u8] inner (load start) (load j)))]
+            (if (icmp-gt (slice-len [u8] piece) 0) (al-push! [(slice u8)] dst (m-unquote piece)) 0)
+            (store! start (iadd (load j) 1)) (store! j (iadd (load j) 1)))
+        (store! j (iadd (load j) 1)))))
+    0))
+
+; Strict manifest validation (tool-12): the reader knows exactly five sections
+; and a fixed key set per section. An unknown section (e.g. `[dependencies]`,
+; which invites the false inference that deps resolve) or a typo'd key (e.g.
+; `entrypoint` for `entry`) is a LOCATED hard error, not a silent no-op.
+(defn m-known-section? [(s (slice u8))] (-> bool)
+  (or (str-eq s "package") (or (str-eq s "build") (or (str-eq s "link") (or (str-eq s "cc") (str-eq s "run"))))))
+(defn m-err [(a (ptr Allocator)) (lineno i64) (msg (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (ps w "error: Coil.toml:") (ps w (i64->str a lineno)) (ps w ": ") (ps w msg) (wb w 10)
+    (exit 1) 0))
+(defn m-bad-key [(a (ptr Allocator)) (lineno i64) (section (slice u8)) (key (slice u8))] (-> i64)
+  (m-err a lineno (cat3-d a "unknown key '" (cat3-d a key (cat3-d a "' in [" (cat3-d a section "] section"))))))
+
+(defstruct Manifest
+  [(name (slice u8)) (entry (slice u8)) (out (slice u8)) (target (slice u8)) (has-target bool) (debug bool)
+   (frameworks (ptr (ArrayList (slice u8)))) (libs (ptr (ArrayList (slice u8))))
+   (flags (ptr (ArrayList (slice u8)))) (rargs (ptr (ArrayList (slice u8))))
+   (sources (ptr (ArrayList (slice u8)))) (ccflags (ptr (ArrayList (slice u8))))])
+
+(defn parse-manifest [(a (ptr Allocator)) (text (slice u8))] (-> (ptr Manifest))
+  (let [m (box a Manifest (zeroed Manifest))]
+    (store! (field m name) "") (store! (field m entry) "") (store! (field m out) "")
+    (store! (field m target) "") (store! (field m has-target) false) (store! (field m debug) false)
+    (store! (field m frameworks) (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m libs)       (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m flags)      (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m rargs)      (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m sources)    (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (store! (field m ccflags)    (box a (ArrayList (slice u8)) (al-new [(slice u8)] a)))
+    (let [lines (m-lines a text) (mut section) "" (mut i) 0 n (al-len [(slice u8)] (load lines))]
+      (loop (if (icmp-ge (load i) n) (break)
+        (let [line (m-trim (al-get [(slice u8)] (load lines) (load i)))]
+          (if (or (icmp-eq (slice-len [u8] line) 0) (icmp-eq (slice-get [u8] line 0) (cast u8 35))) 0   ; blank/#
+            (if (icmp-eq (slice-get [u8] line 0) (cast u8 91))                                          ; [section]
+                (let [sec (m-trim (subslice [u8] line 1 (isub (slice-len [u8] line) 1)))]
+                  (if (m-known-section? sec) 0
+                    (m-err a (iadd (load i) 1)
+                      (cat3-d a "unknown section [" (cat3-d a sec "] (known: package, build, link, cc, run)"))))
+                  (store! section sec) 0)
+              (let [eq (m-index line (cast u8 61))]                                                     ; key = value
+                (if (icmp-lt eq 0) 0
+                  (let [key (m-trim (subslice [u8] line 0 eq))
+                        val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))
+                        ln (iadd (load i) 1)]
+                    (if (str-eq (load section) "package")
+                        (if (str-eq key "name") (do (store! (field m name) (m-unquote val)) 0)
+                          (if (str-eq key "entry") (do (store! (field m entry) (m-unquote val)) 0)
+                            (m-bad-key a ln (load section) key)))
+                      (if (str-eq (load section) "build")
+                          (if (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
+                            (if (str-eq key "target") (do (store! (field m target) (m-unquote val)) (store! (field m has-target) true) 0)
+                              (if (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0)
+                                (m-bad-key a ln (load section) key))))
+                        (if (str-eq (load section) "link")
+                            (if (str-eq key "frameworks") (do (m-parse-array a val (load (field m frameworks))) 0)
+                              (if (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
+                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0)
+                                  (m-bad-key a ln (load section) key))))
+                          (if (str-eq (load section) "cc")
+                              (if (str-eq key "sources") (do (m-parse-array a val (load (field m sources))) 0)
+                                (if (str-eq key "flags") (do (m-parse-array a val (load (field m ccflags))) 0)
+                                  (m-bad-key a ln (load section) key)))
+                            (if (str-eq (load section) "run")
+                                (if (str-eq key "args") (do (m-parse-array a val (load (field m rargs))) 0)
+                                  (m-bad-key a ln (load section) key))
+                              (m-err a ln (cat3-d a "key '" (cat3-d a key "' appears before any [section] header")))))))))))))
+          (store! i (iadd (load i) 1)))))
+      m)))
+
+(defn m-index [(s (slice u8)) (b u8)] (-> i64)
+  (let [n (slice-len [u8] s) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (if (icmp-eq (slice-get [u8] s (load i)) b) (do (store! r (load i)) (break)) (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; append the manifest's link flags to a command string builder, each as
+; `--link-flag <token>` (frameworks -> two tokens, libs -> -lX, then raw flags).
+(defn m-emit-link [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
+  (let [fw (load (field m frameworks)) (mut i) 0 nf (al-len [(slice u8)] fw)]
+    (loop (if (icmp-ge (load i) nf) (break)
+      (do (sb-push-str! (mut b) " --link-flag -framework --link-flag ") (sb-push-str! (mut b) (al-get [(slice u8)] fw (load i))) (store! i (iadd (load i) 1))))))
+  (let [lb (load (field m libs)) (mut i) 0 nl (al-len [(slice u8)] lb)]
+    (loop (if (icmp-ge (load i) nl) (break)
+      (do (sb-push-str! (mut b) " --link-flag -l") (sb-push-str! (mut b) (al-get [(slice u8)] lb (load i))) (store! i (iadd (load i) 1))))))
+  (let [fl (load (field m flags)) (mut i) 0 nx (al-len [(slice u8)] fl)]
+    (loop (if (icmp-ge (load i) nx) (break)
+      (do (sb-push-str! (mut b) " --link-flag ") (sb-push-str! (mut b) (al-get [(slice u8)] fl (load i))) (store! i (iadd (load i) 1))))))
+  0)
+
+; `coil build`/`coil run` with no file: read Coil.toml, build the equivalent
+; `<self> build|run <entry> …` command, and run it (propagating exit).
+; compile each [cc] source (clang -c <src> -o <src>.o <ccflags>) and append the
+; object to the build command's link flags.
+(defn m-cc-sources [(a (ptr Allocator)) (b (mut StrBuf)) (m (ptr Manifest))] (-> i64)
+  (let [srcs (load (field m sources)) (mut i) 0 ns (al-len [(slice u8)] srcs)]
+    (loop (if (icmp-ge (load i) ns) (break)
+      (let [src (al-get [(slice u8)] srcs (load i))
+            obj (cat3-d a src ".o")
+            (mut cc) (sb-new a)]
+        (sb-push-str! (mut cc) "clang -c ") (sb-push-str! (mut cc) src)
+        (sb-push-str! (mut cc) " -o ") (sb-push-str! (mut cc) obj)
+        (let [cf (load (field m ccflags)) (mut k) 0 nk (al-len [(slice u8)] cf)]
+          (loop (if (icmp-ge (load k) nk) (break)
+            (do (sb-push-str! (mut cc) " ") (sb-push-str! (mut cc) (al-get [(slice u8)] cf (load k))) (store! k (iadd (load k) 1))))))
+        (system (slice->cstr a (sb-str (load cc))))
+        (sb-push-str! (mut b) " --link-flag ") (sb-push-str! (mut b) obj)
+        (store! i (iadd (load i) 1))))))
+  0)
+
+; Forward the user's own CLI flags into the sub-invocation. Project mode used to drop
+; every flag on the floor and report success: `coil build --target wasm32-unknown-unknown`
+; printed `wrote mp`, exited 0, and produced a native Mach-O. The manifest's own flags are
+; emitted first, so a flag the user typed lands later on the command line and wins
+; (build-cmd keeps the last -o/--target it sees).
+(defn m-forward-flags [(a (ptr Allocator)) (b (mut StrBuf)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut i) 2]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) arg) (store! i (iadd (load i) 1)) 0))))))
+  0)
+
+(defn manifest-cmd [(a (ptr Allocator)) (sub (slice u8)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        text (read-file a (slice->cstr a "Coil.toml"))]
+    (if (icmp-eq (slice-len [u8] text) 0)
+        (do (ps (stderr) "error: no Coil.toml in the current directory (pass a <file> to build directly)\n") 1)
+      (let [m (parse-manifest a text)
+            entry (if (icmp-gt (slice-len [u8] (load (field m entry))) 0) (load (field m entry)) "src/main.coil")
+            out   (if (icmp-gt (slice-len [u8] (load (field m out))) 0) (load (field m out)) (load (field m name)))
+            (mut b) (sb-new a)]
+        (sb-push-str! (mut b) self) (sb-push-str! (mut b) " ") (sb-push-str! (mut b) sub)
+        (sb-push-str! (mut b) " ") (sb-push-str! (mut b) entry)
+        (if (str-eq sub "build") (do (sb-push-str! (mut b) " -o ") (sb-push-str! (mut b) out) 0) 0)
+        (m-emit-link a (mut b) m)
+        (m-cc-sources a (mut b) m)
+        (if (load (field m has-target)) (do (sb-push-str! (mut b) " --target ") (sb-push-str! (mut b) (load (field m target))) 0) 0)
+        (m-forward-flags a (mut b) argc argv)
+        ; run: forward CLI args after `--`, else the manifest's [run] args.
+        (if (str-eq sub "run")
+            (let [(mut i) 2 (mut sawdd) false]
+              (sb-push-str! (mut b) " --")
+              (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+                (do (if (str-eq (cstr->slice (load (index argv (load i)))) "--") (do (store! sawdd true) 0)
+                      (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) (cstr->slice (load (index argv (load i))))) 0))
+                    (store! i (iadd (load i) 1)))))
+              (if (not (load sawdd))
+                  (let [ra (load (field m rargs)) (mut k) 0 nr (al-len [(slice u8)] ra)]
+                    (loop (if (icmp-ge (load k) nr) (break)
+                      (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) (al-get [(slice u8)] ra (load k))) (store! k (iadd (load k) 1))))))
+                0))
+          0)
+        (let [rc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
+          (wait-report rc "program")
+          (wait-code rc))))))
+
+; manifest mode = `build`/`run` with no file ANYWHERE in argv — not merely "argv[2]
+; starts with a dash", which made `coil build -o out in.coil` look like a project build.
+(defn manifest-mode? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
+  (icmp-eq (argv-file-idx argc argv 2) 0))
+
+; The CLI entry, parameterized by the backend hooks the top file injects:
+;   build-fn     — LLVM `build` (mode 1); a64 build passes a hard-error stub
+;   emitir-fn    — `emit-ir` / `dump-ir` (mode 0); a64 build passes a hard-error stub
+;   normalize-fn — `__normalize` debug subcommand; a64 build passes a hard-error stub
+;   default-backend — 1 (LLVM) for the full build, 2 (arm64) for the LLVM-free build
+; The top file's `main` just forwards argc/argv here with its fn-ptrs.
+
+; `run <file> [--link-flag X]... [--backend arm64] [-- prog args...]` : build the
+; file to a temp executable, exec it with the forwarded args, propagate its exit
+; code. Mirrors the Rust `coil run` (src/main.rs run_aot): build then exec.
+(defn run-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  ; `run` reuses the working `build` subcommand as a subprocess (self = argv[0]):
+  ;   <self> build <file> -o /tmp/coil-run <flags-before-'--'>   then exec it with
+  ; the args after `--`. Robust — no duplication of the build/link pipeline.
+  (let [self (cstr->slice (load (index argv 0)))
+        file (cstr->slice (load (index argv 2)))
+        (mut b) (sb-new a)
+        (mut progargs) (sb-new a)
+        (mut i) 3 (mut inargs) false]
+    (sb-push-str! (mut b) self)
+    (sb-push-str! (mut b) " build ")
+    (sb-push-str! (mut b) file)
+    (sb-push-str! (mut b) " -o /tmp/coil-run")
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (load inargs)
+            (do (sb-push-str! (mut progargs) " ") (sb-push-str! (mut progargs) arg) (store! i (iadd (load i) 1)) 0)
+          (if (str-eq arg "--")
+              (do (store! inargs true) (store! i (iadd (load i) 1)) 0)
+            (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) arg) (store! i (iadd (load i) 1)) 0))))))
+    (sb-push-str! (mut b) " >/dev/null")
+    (let [brc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
+      (if (icmp-ne brc 0)
+          ; the BUILD failed. A build that died by signal (a runaway comptime, a deep
+          ; macro expansion) also decoded to 0 here, so `run` reported success without
+          ; ever running anything.
+          (do (wait-report brc "compiler")
+              (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
+        (let [runcmd (cat3-d a "/tmp/coil-run" (sb-str (load progargs)))
+              rrc (cast i64 (system (slice->cstr a runcmd)))]
+          (wait-report rrc "program")
+          (wait-code rrc))))))
+
+; `coil test <file> [flags]` — the project test runner (tool-12). Builds the file with
+; lib/assert.coil auto-loaded (`--use`, so `deftest`/`assert`/`assert-eq` need NO import),
+; then RUNS it. assert.coil's `(transform …)` discovers every `(deftest …)` and synthesizes
+; a `main` that runs each test in a forked child; the process exit is 0 iff all pass, 1 if
+; any test fails. Like `run`, it reuses the `build` subcommand as a subprocess so there is
+; no second copy of the build/link pipeline. Flags after the file (e.g. `--backend arm64`,
+; `-l<lib>`) are forwarded to the build.
+(defn test-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        fidx (argv-file-idx argc argv 2)]
+    (if (icmp-eq fidx 0)
+        (do (ps (stderr) "usage: coil test <file.coil> [flags]\n")
+            (ps (stderr) "  Discovers every (deftest …) and runs each in a forked child.\n") 1)
+      (let [file (cstr->slice (load (index argv fidx)))
+            (mut b) (sb-new a)]
+        (sb-push-str! (mut b) self)
+        (sb-push-str! (mut b) " build ")
+        (sb-push-str! (mut b) file)
+        (sb-push-str! (mut b) " -o /tmp/coil-test --use assert.coil")
+        ; forward remaining flags (skip the file positional and stop at `--`).
+        (let [(mut i) 2]
+          (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+            (let [arg (cstr->slice (load (index argv (load i))))]
+              (if (str-eq arg "--") (break)
+                (if (icmp-eq (load i) fidx) (do (store! i (iadd (load i) 1)) 0)
+                  (do (sb-push-str! (mut b) " ") (sb-push-str! (mut b) arg) (store! i (iadd (load i) 1)) 0)))))))
+        (sb-push-str! (mut b) " >/dev/null")
+        (let [brc (cast i64 (system (slice->cstr a (sb-str (load b)))))]
+          (if (icmp-ne brc 0)
+              ; the BUILD failed (compile error already on stderr, or a build signal death).
+              (do (wait-report brc "compiler")
+                  (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
+            (let [rrc (cast i64 (system (slice->cstr a "/tmp/coil-test")))]
+              (wait-report rrc "test runner")
+              (wait-code rrc))))))))
+
+; small local concat (avoid depending on cimport's cat3).
+(defn cat3-d [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
+  (match (str-concat a x y) (Some [s] s) (None [] x)))
+
+; ---- file output + project scaffold (new) ----------------------------------
+; externs are global C symbols; these coincide harmlessly with cimport.coil's.
+(extern fopen  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
+(extern fclose :cc c [(ptr i8)] (-> i32))
+
+(defn d-write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
+  (let [f (fopen (slice->cstr a path) (slice->cstr a "wb"))]
+    (if (icmp-eq (cast i64 f) 0)
+        (do (ps (stderr) "error: cannot write ") (ps (stderr) path) (wb (stderr) 10) 1)
+      (do (fwrite (cast (ptr i8) (slice-data [u8] content)) 1 (slice-len [u8] content) f)
+          (fclose f) 0))))
+
+; Final Wasm linking is a Coil binary transformation, not a child process.
+(defn wasm-link-object [(a (ptr Allocator)) (obj-path (ptr i8)) (out-path (slice u8))] (-> i64)
+  (match (wasm-finalize a (read-file a obj-path))
+    (Ok [module] (d-write-file a out-path module))
+    (Err [why] (do (ps (stderr) why) (wb (stderr) 10) 1))))
+
+; `fmt [--check|--write] <file>` — the Coil source formatter (fmt/rules.coil). Prints
+; the formatted source, or with --write rewrites the file, or with --check exits 1 if
+; the file isn't already formatted. Width 120, Clojure indentation conventions.
+; exit codes follow gofmt/black: 0 clean, 1 unformatted (--check), 2 error. `--check`
+; must distinguish "your file is unformatted" from "your invocation is broken", or a CI
+; gate cannot tell a real violation from a typo'd path.
+(defn fmt-one [(a (ptr Allocator)) (pathc (ptr i8)) (check bool) (write bool)] (-> i64)
+  (if (dir? pathc)
+      (let [w (stderr)]
+        (ps w "error: '") (ps w (cstr->slice pathc)) (ps w "' is a directory") (wb w 10) 2)
+    (let [src  (read-src-rc a pathc 2)
+          out  (fmtr/format-src a src 120)
+          same (str-eq src out)]
+      (if check
+          (if same 0 (do (ps (stderr) "not formatted: ") (ps (stderr) (cstr->slice pathc)) (wb (stderr) 10) 1))
+        (if write
+            (if same 0 (d-write-file a (cstr->slice pathc) out))
+          (do (ps (stdout) out) 0))))))
+
+; Formats EVERY file given, not just argv[2]: `coil fmt --write src/*.coil` silently
+; formatted one file and reported success, and under --check silently gated a fraction
+; of what was asked. Flags may appear anywhere.
+(defn fmt-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut check) false (mut write) false
+        (mut nfiles) 0 (mut rc) 0 (mut i) 2]
+    ; pass 1: flags, wherever they sit
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (is-flag? arg)
+                (cond (str-eq arg "--check") (do (store! check true) 0)
+                      (str-eq arg "--write") (do (store! write true) 0)
+                      (let [w (stderr)]
+                        (ps w "error: unknown flag '") (ps w arg) (ps w "'") (wb w 10)
+                        (exit 2) 0))
+              0))
+          (store! i (iadd (load i) 1)))))
+    ; pass 2: every positional, keeping the worst exit code
+    (store! i 2)
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (do (let [arg (cstr->slice (load (index argv (load i))))]
+            (if (is-flag? arg) 0
+              (do (store! nfiles (iadd (load nfiles) 1))
+                  (let [r (fmt-one a (load (index argv (load i))) (load check) (load write))]
+                    (if (icmp-gt r (load rc)) (do (store! rc r) 0) 0)))))
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (load nfiles) 0)
+        (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") 2)
+      (load rc))))
+
+; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
+(defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (icmp-lt (cast i64 argc) 3)
+      (do (ps (stderr) "usage: coil new <name>\n") 1)
+    (let [name (cstr->slice (load (index argv 2)))]
+      (system (slice->cstr a (cat3-d a "mkdir -p " (cat3-d a name "/src"))))
+      (d-write-file a (cat3-d a name "/Coil.toml")
+        (cat3-d a "[package]\nname  = \"" (cat3-d a name "\"\nentry = \"src/main.coil\"\n")))
+      (d-write-file a (cat3-d a name "/src/main.coil")
+        "(module app)\n\n(defn main [] (-> i64)\n  42)\n")
+      (let [w (stdout)] (ps w "created ") (ps w name) (ps w "/ — cd in and `coil run`\n") 0))))
+
+; `emit-obj <file> [-o out.o] [--target T] [--backend arm64]` — build the object,
+; no link. Mirrors build-cmd's pipeline minus the cc step.
+(defn emit-obj-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
+                    (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                    (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                    (default-backend i64)] (-> i64)
+  (let [file (load (index argv 2))
+        (mut outp) (cast (ptr i8) 0)
+        (mut backend) default-backend
+        (mut trip) (cast (ptr i8) 0)
+        (mut i) 3]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "-o")
+            (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+          (if (str-eq arg "--target")
+              (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+            (if (str-eq arg "--backend")
+                (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64") (store! backend 2) (store! backend 1)) (store! i (iadd (load i) 2)) 0)
+              (do (store! i (iadd (load i) 1)) 0)))))))
+    ; `emit-obj -o /dev/null`: no writable object destination — route to compile-check
+    ; rather than abending in codegen. (diag-12)
+    (if (and (icmp-ne (cast i64 (load outp)) 0) (str-eq (cstr->slice (load outp)) "/dev/null"))
+        (do (ps (stderr) "note: -o /dev/null: compile-check only, no object written\n")
+            (set-target-arch! (load trip))
+            (exit (cast i32 (if (icmp-eq (run-dump-on-big-stack a (read-src a file) (cwd-slice a) (cstr->slice file) (fnptr-of check-src-program)) 0) 1 0)))
+            0)
+      0)
+    (let [out-slice (if (icmp-eq (cast i64 (load outp)) 0) (obj-path a (cstr->slice file)) (cstr->slice (load outp)))
+          obj-cstr  (slice->cstr a out-slice)
+          ctx       (alloc-stack DumpCtx)]
+      (store! (field ctx a)    a)
+      (store! (field ctx src)  (read-src a file))
+      (store! (field ctx cwd)  (cwd-slice a))
+      (store! (field ctx path) (cstr->slice file))
+      (store! (field ctx mode) (load backend))
+      (store! (field ctx obj)  obj-cstr)
+      (store! (field ctx triple) (load trip))      (set-target-arch! (load trip))
+      (store! (field ctx ok) 0)
+      (store! (field ctx build-fn)  build-fn)
+      (store! (field ctx emitir-fn) emitir-fn)
+      (if (icmp-eq (run-on-big-stack ctx) 0) 1
+        (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10) 0)))))
+
+; ============================ repl ==========================================
+; A subprocess REPL. Top-level definitions accumulate as SOURCE; a value
+; expression is TYPE-CHECKED in-process (a throwaway `(defn __repl_probe [] (-> i64)
+; (do EXPR 0))` probe reusing the real front-end pipeline) so the printer is dispatched on the
+; expression's actual inferred type — %ld/%lu for an int, %g for a float,
+; true/false for a bool, the raw bytes for a (slice u8), an address for a
+; pointer — instead of the old blanket `(cast i64 EXPR)`, which silently
+; TRUNCATED floats (`(/ 1.0 2.0)` printed 0) and could not print bools or
+; strings at all. A well-typed expr is compiled and run as a tiny program via
+; `self run`, and the temp file is REMOVED afterward (it used to leak on every
+; call). A type error is rendered against the user's OWN input line via the same
+; span renderer the compiler uses, and nothing is written to /tmp. `:help`,
+; `:type EXPR`, and `:quit` meta-commands are handled ahead of the reader.
+
+(defn repl-head? [(s (slice u8)) (h (slice u8))] (-> bool) (starts-with s h))
+(defn repl-is-def? [(s (slice u8))] (-> bool)
+  (or (repl-head? s "(defn") (or (repl-head? s "(defstruct") (or (repl-head? s "(defsum")
+  (or (repl-head? s "(def ") (or (repl-head? s "(def(") (or (repl-head? s "(import")
+  (or (repl-head? s "(extern") (or (repl-head? s "(deftrait") (or (repl-head? s "(definst")
+  (or (repl-head? s "(const") (or (repl-head? s "(export-c") (or (repl-head? s "(defcc")
+  (repl-head? s "(derive"))))))))))))))
+
+; read one line from fd 0 (byte at a time); None at EOF with no data.
+(defn repl-read-line [(a (ptr Allocator)) (buf (ptr i8))] (-> (Option (slice u8)))
+  (let [(mut out) (sb-new a) (mut got) false]
+    (loop
+      (let [n (read 0 buf 1)]
+        (if (icmp-le n 0) (break)
+          (do (store! got true)
+              (if (icmp-eq (load buf) (cast i8 10)) (break)
+                (sb-push-byte! (mut out) (cast u8 (load buf))))))))
+    (if (load got) (Some (sb-str (load out))) (None [(slice u8)]))))
+
+; The front-end preamble every REPL probe/run program shares.
+(defn repl-preamble [] (-> (slice u8))
+  "(module replsession)\n(extern printf :cc c [(ptr i8) ...] (-> i32))\n")
+
+; Local fat-pointer accessors so the string printer needs no stdlib import (the
+; run program is otherwise self-contained). Byte-identical to lib/slice.coil's
+; slice-len / slice-data llvm-ir, and accepted by BOTH backends.
+(defn repl-str-helpers [] (-> (slice u8))
+  "(defn __repl_slen [(s (slice u8))] (-> i64) (llvm-ir i64 [s] \"%l = extractvalue $t0 $0, 1\nret $ret %l\"))\n(defn __repl_sdat [(s (slice u8))] (-> (ptr u8)) (llvm-ir (ptr u8) [s] \"%d = extractvalue $t0 $0, 0\nret $ret %d\"))\n")
+
+; name == nm, or a module-qualified name ending in ".<nm>" (the resolver prefixes
+; every function with its module, so `__repl_probe` becomes `replsession.__repl_probe`).
+(defn repl-name-eq? [(name (slice u8)) (nm (slice u8))] (-> bool)
+  (if (str-eq name nm) true
+    (let [nl (slice-len [u8] name) ml (slice-len [u8] nm)]
+      (if (icmp-le nl ml) false
+        (and (icmp-eq (cast i64 (slice-get [u8] name (isub (isub nl ml) 1))) 46)   ; the '.'
+             (str-eq (subslice [u8] name (isub nl ml) nl) nm))))))
+(defn repl-func-find [(prog (ptr Program)) (nm (slice u8))] (-> (ptr Func))
+  (let [fs (load (field prog funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (repl-name-eq? (load (field (al-elem [Func] fs (load i)) name)) nm)
+              (do (store! r (al-elem [Func] fs (load i))) (break)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; nid of the user's expression node inside the `(defn __repl_probe [] (-> i64)
+; (do <EXPR> 0))` probe, so its checker-recorded type can be read back from the S2
+; type map. A do-block (unlike a let-bind or const) checks <EXPR> in RUNTIME context
+; through do-synth — so user defns resolve and a void statement is allowed — and
+; never rewrites the node, so its parse-time nid is preserved. 0 = not found.
+(defn repl-probe-nid [(cp (ptr Program))] (-> i64)
+  (let [fp (repl-func-find cp "__repl_probe")]
+    (if (icmp-eq (cast i64 fp) 0) 0
+      (let [body (load (field fp body))]
+        (if (icmp-eq (al-len [Expr] (load body)) 0) 0
+          (match-else (load (field (al-elem [Expr] body 0) kind))
+            (EDo [dbody] (if (icmp-eq (al-len [Expr] (load dbody)) 0) 0
+                           (load (field (al-elem [Expr] dbody 0) nid))))
+            (_ 0)))))))
+
+; Strip the internal probe function's context prefix ("in '…__repl_probe': " /
+; "function '…__repl_probe': ") so a REPL error names only the user's expression.
+(defn repl-clean-msg [(m (slice u8))] (-> (slice u8))
+  (let [p1 "in 'replsession.__repl_probe': " p2 "function 'replsession.__repl_probe': "]
+    (if (starts-with m p1) (subslice [u8] m (slice-len [u8] p1) (slice-len [u8] m))
+      (if (starts-with m p2) (subslice [u8] m (slice-len [u8] p2) (slice-len [u8] m))
+        m))))
+
+; Render a check/parse diagnostic against the user's INPUT line: when the span
+; lands inside the embedded expr (offset >= base), re-anchor it to a source that
+; is only the user's line, so the frame shows exactly what they typed (mirrors
+; report-diag's `error: <msg>` + framed `-->`). Otherwise fall back to the probe.
+(defn repl-report [(a (ptr Allocator)) (s (mut LS)) (d Diag) (base i64) (uinput (slice u8))] (-> i64)
+  (let [w (stderr) dp (alloc-stack Diag)] (store! dp d)
+    (let [src (load (field dp source)) lo (load (field dp lo)) hi (load (field dp hi))
+          ctxt (load (field dp ctxt)) ulen (slice-len [u8] uinput) msg (repl-clean-msg (load (field dp msg)))]
+      (if (and (icmp-eq src 0) (and (icmp-eq ctxt 0) (and (icmp-ge lo base) (icmp-le lo (iadd base ulen)))))
+          (let [uid (al-len [Source] (load (field s sources)))
+                _r (register-source! (mut s) "<repl>" uinput)
+                nlo (isub lo base)
+                nhi (isub (if (icmp-gt hi (iadd base ulen)) (iadd base ulen) hi) base)]
+            (ps w "error: ")
+            (if (render-frame w (mut s) uid nlo nhi msg "-->") 0 (ps w msg))
+            (wb w 10) 0)
+        (report-diag w (mut s) d)))))
+
+; Read back the probe expr's checker-recorded type from the S2 type map. (Factored
+; out of repl-infer-type to keep every function's paren nesting shallow — the
+; bootstrap seed's recursive-descent reader has a bounded parse stack.)
+(defn repl-typemap-lookup [(cp (ptr Program))] (-> (Option Type))
+  (match (type-map-lookup (repl-probe-nid cp))
+    (Some [ty] (Some ty))
+    (None [] (do (ps (stderr) "error: the REPL could not infer the expression's type\n") (None [Type])))))
+
+; Macro-expand + transform + resolve/check an already-LOADED probe (s), then read
+; back the inferred type. Errors render mapped to the user's line.
+(defn repl-check-loaded [(a (ptr Allocator)) (s (mut LS)) (base i64) (uinput (slice u8))] (-> (Option Type))
+  (match (expand-stage3 (mut s))
+    (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+    (Ok [_]
+      (match (run-transforms-and-check a (mut s))
+        (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+        (Ok [cp] (repl-typemap-lookup cp))))))
+
+; Type-check `<defs> (defn __repl_probe [] (-> i64) (do <uinput> 0))` in-process
+; through the SAME front-end run-pipeline uses (read -> load -> macro-expand ->
+; transforms -> resolve+check), so macros/derives/the prelude behave exactly as in
+; a real build AND the expr is checked in RUNTIME context (user defns resolve; a
+; do-block admits a void statement), and return the checker-inferred type of
+; <uinput> (read back from the S2 type map by the expr's node id). On ANY pipeline
+; error, render it mapped to the user's line and return None — the caller then
+; writes nothing to disk.
+(defn repl-infer-type [(a (ptr Allocator)) (defs (slice u8)) (uinput (slice u8))] (-> (Option Type))
+  (let [prefix (sconcat a (repl-preamble) (sconcat a defs "(defn __repl_probe [] (-> i64) (do\n"))
+        probe  (sconcat a prefix (sconcat a uinput "\n0))\n"))
+        base   (slice-len [u8] prefix)
+        s (alloc-stack LS)]
+    (store! (field s a) a)
+    (store! (field s out)     (al-new [TaggedForm] a))
+    (store! (field s loaded)  (al-new [(slice u8)] a))
+    (store! (field s imports) (al-new [ImpEntry] a))
+    (store! (field s exports) (al-new [ExpEntry] a))
+    (store! (field s sources) (al-new [Source] a))
+    (store! (field s expansions) (al-new [Expansion] a))
+    (store! (field s check_diags) (box-al [Diag] a (al-new [Diag] a)))
+    (store! (field s loaderr_set) false)
+    (store! (field s srccount) 1)
+    (register-source! (mut s) "<repl>" probe)
+    (match (read-all a probe 0)
+      (Err [d] (do (repl-report a (mut s) d base uinput) (None [Type])))
+      (Ok [forms]
+        (do (load-program (mut s) (prepend-uses a (mut s) forms) (cwd-slice a))
+          (if (ls-err? (mut s))
+              (do (repl-report a (mut s) (load (field s loaderr)) base uinput) (None [Type]))
+            (repl-check-loaded a (mut s) base uinput)))))))
+
+; (slice u8)? — the string type, so it prints as raw bytes.
+(defn repl-slice-u8? [(tp (ptr Type))] (-> bool)
+  (if (icmp-eq (type-tag tp) 8)
+      (let [el (t-inner tp)] (and (icmp-eq (type-tag el) 0) (and (icmp-eq (t-int-bits el) 8) (not (t-int-signed el)))))
+      false))
+
+; Write `<preamble><helpers><defs>(defn main [] (-> i64) <body>)`, run it via
+; `self run`, then REMOVE the temp file (the old REPL leaked it every call).
+(defn repl-emit-run [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (helpers (slice u8)) (body (slice u8))] (-> i64)
+  (let [prog (sconcat a (repl-preamble) (sconcat a helpers (sconcat a defs (sconcat a "(defn main [] (-> i64) " (sconcat a body ")\n")))))]
+    (d-write-file a "/tmp/coil-repl-eval.coil" prog)
+    (system (slice->cstr a (cat3-d a self " run /tmp/coil-repl-eval.coil")))
+    (unlink (slice->cstr a "/tmp/coil-repl-eval.coil"))
+    0))
+
+(defn repl-unsupported [(a (ptr Allocator)) (tp (ptr Type))] (-> i64)
+  (let [w (stderr)]
+    (ps w "; the REPL has no printer for a value of type ") (ps w (ty-str a tp))
+    (ps w " — bind it with (def name …) or wrap it in your own printf.\n") 0))
+
+; Build the printer around the user's expr text, dispatched on the inferred type,
+; and run it. Never fabricate an answer: a type with no faithful printer says so.
+(defn repl-run [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (uinput (slice u8)) (ty Type)] (-> i64)
+  (let [tp (alloc-stack Type)] (store! tp ty)
+    (let [tag (type-tag tp)]
+      (if (icmp-eq tag 0)                        ; any int
+          (repl-emit-run a self defs ""
+            (sconcat a (if (t-int-signed tp) "(do (printf c\"%ld\\n\" (cast i64 " "(do (printf c\"%lu\\n\" (cast u64 ")
+                       (sconcat a uinput ")) 0)")))
+        (if (icmp-eq tag 1)                      ; float
+            (repl-emit-run a self defs "" (sconcat a "(do (printf c\"%g\\n\" (cast f64 " (sconcat a uinput ")) 0)")))
+          (if (icmp-eq tag 2)                    ; bool
+              (repl-emit-run a self defs "" (sconcat a "(do (if " (sconcat a uinput " (printf c\"true\\n\") (printf c\"false\\n\")) 0)")))
+            (if (icmp-eq tag 4)                  ; pointer -> address
+                (repl-emit-run a self defs "" (sconcat a "(do (printf c\"0x%lx\\n\" (cast i64 " (sconcat a uinput ")) 0)")))
+              (if (or (icmp-eq tag 3) (icmp-eq tag 12))   ; void / never -> statement (no print)
+                  (repl-emit-run a self defs "" (sconcat a "(do " (sconcat a uinput " 0)")))
+                (if (and (icmp-eq tag 8) (repl-slice-u8? tp))   ; (slice u8) -> the bytes
+                    (repl-emit-run a self defs (repl-str-helpers)
+                      (sconcat a "(let [__v " (sconcat a uinput "] (do (printf c\"%.*s\\n\" (cast i32 (__repl_slen __v)) (__repl_sdat __v)) 0))")))
+                  (repl-unsupported a tp))))))))))
+
+; Evaluate a value expression: infer its type, then print it faithfully.
+(defn repl-eval [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (expr (slice u8))] (-> i64)
+  (match (repl-infer-type a defs expr)
+    (None [] 0)                              ; error already rendered; nothing written to /tmp
+    (Some [ty] (repl-run a self defs expr ty))))
+
+; `:type EXPR` — print the inferred type without running anything.
+(defn repl-type-cmd [(a (ptr Allocator)) (defs (slice u8)) (expr (slice u8))] (-> i64)
+  (match (repl-infer-type a defs expr)
+    (None [] 0)
+    (Some [ty] (let [tp (alloc-stack Type) w (stdout)] (store! tp ty) (ps w (ty-str a tp)) (wb w 10) 0))))
+
+(defn repl-help-text [] (-> (slice u8))
+  "commands:
+  :help, :h          this message
+  :type EXPR         print the inferred type of EXPR (does not run it)
+  :quit, :q          exit (Ctrl-D also works)
+define with (defn …)/(def …)/(defstruct …)/(import …); they persist. Any other
+line is a value expression: it is type-checked and its result is printed.
+")
+
+(defn repl-cmd [(a (ptr Allocator)) (argv (ptr (ptr i8)))] (-> i64)
+  (let [self (cstr->slice (load (index argv 0)))
+        (mut defs) (sb-new a)
+        buf (unwrap-ptr [i8] (raw-alloc a 4 1))]
+    (ps (stdout) "coil repl — evaluate an expr (printed by type), or (defn …)/(def …) to define. :help, Ctrl-D to exit.\n")
+    (loop
+      (ps (stdout) "coil> ")
+      (match (repl-read-line a buf)
+        (None [] (break))
+        (Some [line]
+          (let [t (m-trim line)]
+            (if (icmp-eq (slice-len [u8] t) 0) 0
+              (if (or (str-eq t ":quit") (str-eq t ":q")) (break)
+                (if (or (str-eq t ":help") (str-eq t ":h")) (do (ps (stdout) (repl-help-text)) 0)
+                  (if (repl-head? t ":type ") (repl-type-cmd a (sb-str (load defs)) (m-trim (subslice [u8] t 6 (slice-len [u8] t))))
+                    (if (repl-head? t ":") (do (ps (stderr) "; unknown command; :help for help\n") 0)
+                      (if (and (repl-is-def? t) (not (repl-head? t "(module")))
+                          (do (if (repl-head? t "(def ")   ; (def name v) is repl sugar for a coil (const …)
+                                  (do (sb-push-str! (mut defs) "(const ") (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t))) 0)
+                                (sb-push-str! (mut defs) t))
+                              (sb-push-byte! (mut defs) (cast u8 10)) (ps (stdout) "; ok\n") 0)
+                        (repl-eval a self (sb-str (load defs)) t)))))))))))
+    (ps (stdout) "\n") 0))
+
+; `cheader <file.coil> [-o out.h]` — generate the C header for export-c.
+(defn cheader-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (if (icmp-lt (cast i64 argc) 3)
+      (do (ps (stderr) "usage: coil cheader <file.coil> [-o out.h]\n") 1)
+    (let [file (load (index argv 2)) (mut outp) (None [(slice u8)]) (mut i) 3]
+      (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+        (do (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc)) (str-eq (cstr->slice (load (index argv (load i)))) "-o"))
+                (do (store! outp (Some (cstr->slice (load (index argv (iadd (load i) 1)))))) (store! i (iadd (load i) 2)) 0)
+              (do (store! i (iadd (load i) 1)) 0)))))
+      (cheader-program a (read-src a file) (dirname (cstr->slice file)) (load outp)))))
+
+; `coil` (no args) / `coil --help` / `-h` / `help`. Lists only what driver-main
+; actually dispatches — an unimplemented command in here is a lie the CLI tells.
+(defn usage-text [] (-> (slice u8))
+  "coil — the Coil compiler
+
+usage: coil <command> [args]
+
+Build & run
+  run   <file.coil> [flags] [-- args...]   build to a temp exe, run it, propagate its exit code
+  run                                      build+run the ./Coil.toml project
+  build <file.coil> -o <out> [flags]       build a native executable
+  build                                    build the ./Coil.toml project
+  check <file.coil> [flags]                typecheck/compile only — no object, exit 0 if it compiles
+  test  <file.coil> [flags]                run every (deftest …) in a forked child
+  new   <name>                             scaffold Coil.toml + src/main.coil
+  repl                                     interactive session
+  fmt   [--check|--write] <file.coil>      format source (default: print to stdout)
+
+Artifacts
+  emit-obj <file.coil> [-o <out.o>]        build the object file, no link
+  emit-ir  <file.coil>                     print normalized textual LLVM IR
+  dump-ir  <file.coil>                     alias of emit-ir
+  cheader  <file.coil>                     print a C header for (export-c ...) functions
+  cimport  <header.h>                      generate Coil bindings from a C header
+
+Reference
+  guide                                    the full language guide
+  --help, -h                               this message
+
+Common flags (build / run / emit-obj)
+  -o <out>              output path (required by `build`)
+  --target <triple>     cross-compile (e.g. wasm32-unknown-unknown, x86_64-apple-macosx11.0.0)
+  --backend arm64       use the native arm64 backend instead of LLVM
+  -g, --debug           emit DWARF debug info (implies the arm64 backend)
+  -l<name>              link a library (e.g. -lm)
+  --link-flag <flag>    pass a raw flag to the linker
+  --lib / --shared      build a static (.a) / shared (.dylib) library
+  --emit-header <h>     also write a C header
+  --use <file.coil>     load a metaprogram
+
+Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
+  dump-read      the reader's s-expressions
+  dump-ast       the parsed AST
+  dump-load      the AST with imports resolved
+  expand         macro-expanded source
+  dump-expand    the expanded AST
+  dump-resolved  after name resolution
+  dump-checked   after type checking
+  dump-mono      after monomorphization
+")
+
+; ---- per-subcommand help ----------------------------------------------------
+; `coil fmt --help` printed one byte and exited 0; `coil run --help` tried to build a
+; project and complained about a missing Coil.toml. `<cmd> --help` is a reflex, and an
+; empty response reads as a broken binary.
+(defn common-flags-text [] (-> (slice u8))
+  "Flags (may appear before or after <file.coil>)
+  -o <out>              output path (required by `build`)
+  --target <triple>     cross-compile (e.g. wasm32-unknown-unknown)
+  --backend arm64       use the native arm64 backend instead of LLVM
+  -g, --debug           emit DWARF debug info (implies the arm64 backend)
+  -l<name>              link a library (e.g. -lm)
+  --link-flag <flag>    pass a raw flag to the linker
+  --lib / --shared      build a static (.a) / shared (.dylib) library
+  --emit-header <h>     also write a C header
+  --use <file.coil>     load a metaprogram
+")
+
+(defn wants-help? [(argc i32) (argv (ptr (ptr i8)))] (-> bool)
+  (let [(mut i) 2 (mut r) false]
+    (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+      (let [arg (cstr->slice (load (index argv (load i))))]
+        (if (str-eq arg "--") (break)
+          (if (or (str-eq arg "--help") (str-eq arg "-h")) (do (store! r true) (break))
+            (do (store! i (iadd (load i) 1)) 0))))))
+    (load r)))
+
+(defn sub-usage [(sub (slice u8))] (-> i64)
+  (let [w (stdout)]
+    (cond
+      (str-eq sub "build")
+        (do (ps w "usage: coil build <file.coil> -o <out> [flags]\n")
+            (ps w "       coil build [flags]                    build the ./Coil.toml project\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "run")
+        (do (ps w "usage: coil run <file.coil> [flags] [-- args...]\n")
+            (ps w "       coil run [flags] [-- args...]         build+run the ./Coil.toml project\n\n")
+            (ps w "Builds to a temp exe, runs it, and propagates its exit code — 128+signo if it\ndies by a signal.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "test")
+        (do (ps w "usage: coil test <file.coil> [flags]\n\n")
+            (ps w "Auto-loads lib/assert.coil (so `deftest`/`assert`/`assert-eq` need no import),\n")
+            (ps w "discovers every (deftest …), and runs each in a FORKED child so one failing or\n")
+            (ps w "crashing test never stops the suite. Exit: 0 iff all pass, 1 if any fails.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "fmt")
+        (do (ps w "usage: coil fmt [--check|--write] <file.coil>...\n\n")
+            (ps w "  (default)   print formatted source to stdout\n")
+            (ps w "  --write     rewrite each file in place\n")
+            (ps w "  --check     exit 1 if any file is not formatted\n\n")
+            (ps w "Every file given is formatted. Exit: 0 clean, 1 unformatted, 2 error.\n") 0)
+      (str-eq sub "check")
+        (do (ps w "usage: coil check <file.coil> [flags]\n\n")
+            (ps w "Runs the full front-end (typecheck + monomorphize) WITHOUT emitting an object\n")
+            (ps w "or linking. Exit: 0 if it compiles, 1 with a located diagnostic if not.\n")
+            (ps w "`build -o /dev/null` routes here too.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "new")
+        (do (ps w "usage: coil new <name>\n\nScaffolds <name>/Coil.toml and <name>/src/main.coil.\n") 0)
+      (str-eq sub "emit-obj")
+        (do (ps w "usage: coil emit-obj <file.coil> [-o <out.o>]\n\nBuilds the object file without linking.\n\n")
+            (ps w (common-flags-text)) 0)
+      (str-eq sub "emit-ir")
+        (do (ps w "usage: coil emit-ir <file.coil>\n\nPrints normalized textual LLVM IR.\n") 0)
+      (str-eq sub "cheader")
+        (do (ps w "usage: coil cheader <file.coil>\n\nPrints a C header for (export-c ...) functions.\n") 0)
+      (str-eq sub "cimport")
+        (do (ps w "usage: coil cimport <header.h>\n\nGenerates Coil bindings from a C header.\n") 0)
+      (do (ps w (usage-text)) 0))))
+
+; argv[2] for the commands that take a <file>. Missing => NULL, and every caller
+; feeds it straight to read-file/cstr->slice, so guard once here rather than
+; segfaulting on `coil dump-ast` with no argument.
+(defn need-file [(argc i32) (argv (ptr (ptr i8))) (sub (slice u8))] (-> (ptr i8))
+  (let [fidx (argv-file-idx argc argv 2)]
+    (if (icmp-eq fidx 0)
+        (do (ps (stderr) "usage: coil ") (ps (stderr) sub) (ps (stderr) " <file.coil>\n")
+            (exit 1) (cast (ptr i8) 0))
+      (load (index argv fidx)))))
+
+(defn driver-main [(argc i32) (argv (ptr (ptr i8)))
+                   (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
+                   (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
+                   (normalize-fn (fnptr c [(ptr Allocator) (slice u8)] i64))
+                   (cimport-fn (fnptr c [(ptr Allocator) i32 (ptr (ptr i8))] i64))
+                   (default-backend i64)] (-> i64)
+  ; argv[1] is NULL when argc < 2 — read it unguarded and `coil` with no args
+  ; segfaults in cstr->slice before dispatch ever runs.
+  (let [a    (malloc-allocator)
+        sub  (if (icmp-lt (cast i64 argc) 2) "" (cstr->slice (load (index argv 1))))]
+    (if (or (str-eq sub "") (or (str-eq sub "--help") (or (str-eq sub "-h") (str-eq sub "help"))))
+        (do (ps (stdout) (usage-text)) 0)
+    ; `<cmd> --help` before any dispatch, so it never reaches a parser that would
+    ; reject it as an unknown flag or try to build a project.
+    (if (wants-help? argc argv)
+        (sub-usage sub)
+    (if (str-eq sub "__smoke")
+        (smoke a)
+      (if (str-eq sub "guide")
+          (do (ps (stdout) (guide-text)) 0)
+      (if (str-eq sub "__normalize")
+          (let [path (need-file argc argv sub) src (read-src a path)]
+            (call-ptr normalize-fn a src))
+       (if (str-eq sub "cimport")
+           (call-ptr cimport-fn a argc argv)
+        (if (str-eq sub "repl")
+            (repl-cmd a argv)
+        (if (str-eq sub "run")
+            (if (manifest-mode? argc argv) (manifest-cmd a "run" argc argv) (run-cmd a argc argv))
+        (if (str-eq sub "test")
+            (test-cmd a argc argv)
+        (if (str-eq sub "fmt")
+            (fmt-cmd a argc argv)
+        (if (str-eq sub "new")
+            (new-cmd a argc argv)
+        (if (str-eq sub "emit-obj")
+            (emit-obj-cmd a argc argv build-fn emitir-fn default-backend)
+        (if (str-eq sub "cheader")
+            (cheader-cmd a argc argv)
+        (if (str-eq sub "build")
+            (if (manifest-mode? argc argv) (manifest-cmd a "build" argc argv) (build-cmd a argc argv build-fn emitir-fn default-backend))
+         ; `check <file>`: typecheck/compile through mono, emit NO object. Exit 0 on a
+         ; clean compile, 1 with a located diagnostic on failure. (diag-12)
+         (if (str-eq sub "check")
+             (let [path (need-file argc argv sub)]
+               (set-target-arch! (argv-triple argc argv))
+               (if (icmp-eq (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of check-src-program)) 0) 1 0))
+         (if (str-eq sub "dump-read")
+             (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-read-w)))
+          (if (str-eq sub "dump-ast")
+              (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-ast-w)))
+           (if (str-eq sub "dump-load")
+               (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-load-w)))
+            (if (str-eq sub "expand")
+                (let [path (need-file argc argv sub)] (set-target-arch! (argv-triple argc argv)) (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of expand-src-w)))
+            (if (str-eq sub "dump-expand")
+                (let [path (need-file argc argv sub)] (set-target-arch! (argv-triple argc argv)) (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-expand-w)))
+             (if (str-eq sub "dump-resolved")
+                 (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-resolved-w)))
+              (if (str-eq sub "dump-checked")
+                  (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-checked-w)))
+               (if (str-eq sub "dump-mono")
+                   (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-mono-w)))
+          ; fallthrough = emit-ir / dump-ir. Anything else is a typo, not an
+          ; alias for emit-ir — report it instead of compiling argv[2] (NULL).
+          (if (not (or (str-eq sub "emit-ir") (str-eq sub "dump-ir")))
+              (do (ps (stderr) "coil: unknown command '") (ps (stderr) sub) (ps (stderr) "'\n\n")
+                  (ps (stderr) (usage-text)) 1)
+          (let [path (need-file argc argv sub)
+                ctx  (alloc-stack DumpCtx)
+                (mut trip) (cast (ptr i8) 0) (mut i) 3]
+            ; parse `--target <triple>` from argv[3..] (cross-compile override).
+            (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
+              (if (and (icmp-lt (iadd (load i) 1) (cast i64 argc))
+                       (str-eq (cstr->slice (load (index argv (load i)))) "--target"))
+                  (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                (do (store! i (iadd (load i) 1)) 0))))
+            (store! (field ctx a)    a)
+            (store! (field ctx src)  (read-src a path))
+            (store! (field ctx cwd)  (cwd-slice a))
+            (store! (field ctx path) (cstr->slice path))
+            (store! (field ctx mode) 0)
+            (store! (field ctx obj)  (cast (ptr i8) 0))
+            (store! (field ctx triple) (load trip))            (set-target-arch! (load trip))
+            (store! (field ctx ok) 0)
+            (store! (field ctx build-fn)  build-fn)
+            (store! (field ctx emitir-fn) emitir-fn)
+            ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
+            ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))))
+  );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

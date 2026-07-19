@@ -1,0 +1,6 @@
+fn main() -> i64 {
+    let s = str_concat("hel", "lo");
+    let n = str_len(s);                 // 5
+    let eq = if str_eq(s, "hello") { 1 } else { 0 };
+    n * 7 + eq * 7   // 35 + 7 = 42
+}

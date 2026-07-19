@@ -1,0 +1,25 @@
+(program
+  (fn clamp
+    (params
+      (param x
+        (type Int))
+      (param lo
+        (type Int))
+      (param hi
+        (type Int)))
+    (type Int)
+    (block
+      (if
+        (binary <
+          (id x)
+          (id lo))
+        (block
+          (id lo))
+        (if
+          (binary >
+            (id x)
+            (id hi))
+          (block
+            (id hi))
+          (block
+            (id x)))))))

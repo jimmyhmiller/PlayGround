@@ -1,0 +1,17 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [(mut acc) 0]
+    (do
+      (let [i 0] (store! acc (iadd (load acc) i)))
+      (let [i 1] (store! acc (iadd (load acc) i)))
+      (let [i 2] (store! acc (iadd (load acc) i)))
+      (let [i 3] (store! acc (iadd (load acc) i))))
+    (if (icmp-eq (load acc) 6) (do (store! acc (iadd (load acc) 10))) 0)
+    (if (icmp-eq (load acc) 0) 0 (do (store! acc (iadd (load acc) 5))))
+    (let
+      [c (if (icmp-lt (load acc) 10) 1 (if (icmp-lt (load acc) 30) 2 3))]
+      (iadd (imul (iadd (load acc) 1) 2) c))))
+

@@ -1,0 +1,23 @@
+(extern
+  pthread_create
+  :cc
+  c
+  [(ptr i8) (ptr i8) (fnptr c [(ptr i8)] (ptr i8)) (ptr i8)]
+  (-> i32))
+
+(extern pthread_join :cc c [(ptr i8) (ptr i8)] (-> i32))
+
+(defstruct Thread [(handle (ptr i8))])
+
+(defn
+  thread-spawn
+  [(th (ptr Thread)) (body (fnptr c [(ptr i8)] (ptr i8))) (arg (ptr i8))]
+  (-> i32)
+  (pthread_create (cast (ptr i8) (field th handle)) (cast (ptr i8) 0) body arg))
+
+(defn
+  thread-join
+  [(th (ptr Thread))]
+  (-> i32)
+  (pthread_join (load (field th handle)) (cast (ptr i8) 0)))
+

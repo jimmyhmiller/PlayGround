@@ -1,0 +1,15 @@
+class Mix {
+  i: Int
+  f: Float
+  b: Bool
+  s: String
+}
+fn main() {
+  let m = Mix(i: 7, f: 1.5, b: true, s: "hi")
+  print(m.i)
+  print(m.f)
+  print(m.b)
+  print(m.s)
+  m.i = 99
+  print(m.i)
+}

@@ -1,0 +1,9 @@
+// Real OS threads + a shared atom: two workers each do 21 atomic increments.
+fn add(a: Atom<i64>, k: i64) -> i64 { let mut i = 0; while i < k { a.swap(|x| x + 1); i = i + 1; } 0 }
+fn main() -> i64 {
+  let a: Atom<i64> = Atom::new(0);
+  let t1 = Thread::spawn(|| add(a, 21));
+  let t2 = Thread::spawn(|| add(a, 21));
+  t1.join(); t2.join();
+  a.deref()
+}

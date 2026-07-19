@@ -1,0 +1,17 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [w (stdout)]
+    (do
+      (io.print-str w "n=")
+      (fmt.print-i w -42)
+      (io.print-str w " hex=")
+      (fmt.print-uhex w 255)
+      (io.print-str w " ok=")
+      (fmt.print-bool w true)
+      (io.print-str w "
+"))
+    0))
+

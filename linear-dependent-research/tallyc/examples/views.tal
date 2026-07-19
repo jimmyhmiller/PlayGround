@@ -1,0 +1,80 @@
+// THE VIEW LAYER (L3 address/permission split) — RUNS END TO END.
+//
+//   tally run   examples/views.tal      → 2
+//   tally build examples/views.tal -o v && ./v
+//
+// This is the docs/02 memory model as first-class language primitives (in the
+// built-in prelude, with real `malloc`/store/`free` lowering — see
+// `src/dep_codegen.rs`). The one idea, from L3 (Ahmed–Fluet–Morrisett) and ATS
+// "views":
+//
+//   SEPARATE THE ALIAS FROM THE PERMISSION.
+//     * a location `l` is a STATIC, ERASED index (a compile-time name);
+//     * a `Ptr l` is an ordinary COPYABLE (ω) address naming `l` — holding one
+//       grants NO access;
+//     * a `PtsTo l a` (ATS's `a @ l`) is the LINEAR (1) permission to read/write
+//       that cell. There is at most one, so there is never a stale one.
+//
+//   valloc : {0 a} -> a -> Cell a            -- Cell a = ∃l. (Ptr l ⊗ a @ l)
+//   vwrite : ... -> Ptr l -> (1 PtsTo l a) -> b -> PtsTo l b   -- STRONG UPDATE
+//   vread  : ... -> Ptr l -> (1 PtsTo l a) -> a                -- read + reclaim
+//   vfree  : ... -> Ptr l -> (1 PtsTo l a) -> Unit             -- free
+//
+// Everything dangerous in C becomes a *type* error with NO bespoke analysis —
+// it all falls out of QTT linearity on the view — and it compiles to the same
+// raw pointer operations as C.
+
+enum Nat  { Zero : Nat, Succ : Nat -> Nat }
+enum Bool { False : Bool, True : Bool }
+
+// allocate a cell holding 0, STRONG-UPDATE it in place to 2, then read the value
+// back (reclaiming the cell). The address `p` is COPIED (used by both `vwrite`
+// and `vread`) — fine, it is unrestricted; the linear view is threaded exactly
+// once. Runs to `2`.
+main : Nat
+fn main() {
+    match valloc(Zero) {
+        MkCell(p, v) => vread(p, vwrite(p, v, Succ(Succ(Zero)))),
+    }
+}
+
+// STRONG UPDATE can change the stored TYPE in place — sound because the view is
+// linear, so no stale `a @ l` survives. `swap_type` starts with a Bool cell and
+// overwrites it with a Nat, then reads the Nat (5). Rust cannot express this.
+swap_type : Nat
+fn swap_type() {
+    match valloc(False) {
+        MkCell(p, v) => vread(p, vwrite(p, v, Succ(Succ(Succ(Succ(Succ(Zero))))))),
+    }
+}
+
+// READ-MODIFY-WRITE without destroying the cell. `vtake` MOVES the value out,
+// retyping the slot as `Hole` — the returned view is `PtsTo l Hole`, which must
+// be refilled (`vwrite`) or reclaimed (`vfree`) before the cell can be dropped.
+// This is SOUND for any payload (a move, not a copy — so no double-own), unlike a
+// borrowing read, which would require the payload type to be copyable. Here: take
+// 2 out, put 3 back, read it. Runs to `3`.
+rmw : Nat
+fn rmw() {
+    match valloc(Succ(Succ(Zero))) {
+        MkCell(p, v) =>
+            let (x, vh) = vtake(p, v);
+            let v2 = vwrite(p, vh, Succ(x));
+            vread(p, v2),
+    }
+}
+
+// The safety net — copy any of these in to watch linearity reject it:
+//
+//   fn leak() { match valloc(Zero) { MkCell(p, v) => U } }
+//                                 -- REJECTED: view dropped (0 ⋢ 1)  [leak]
+//   enum Two { MkTwo : Unit -> Unit -> Two }
+//   fn dbl()  { match valloc(Zero) { MkCell(p, v) => MkTwo(vfree(p,v), vfree(p,v)) } }
+//                                 -- REJECTED: view used twice (ω ⋢ 1)  [double free]
+//   fn uaf()  { match valloc(Zero) { MkCell(p, v) =>
+//                  MkTwo(vfree(p, vwrite(p,v,True)), vfree(p,v)) } }
+//                                 -- REJECTED: view reused after update (ω ⋢ 1)  [use-after-free]
+//
+// NEXT view-layer slices: a BORROWING `read` that returns the view (not just a
+// destructive read), the separating conjunction `⊗` (disjointness), and
+// recursive user-defined views (`dataview`) for linked structures.

@@ -1,0 +1,39 @@
+// SIZED-ELEMENT ARRAYS — a real C byte buffer (Phase Scalars, S1).
+//
+//   tally run examples/bytes.tal       →  220
+//
+// `Arr U8 n` is a DENSE `malloc(n)` block — stride 1, not 8. A store truncates
+// the i64 register to one byte; a load reads one byte and zero-extends it back
+// (sext for the signed `I8`…`I64`). So a byte buffer costs exactly `n` bytes,
+// byte-identical to C's `unsigned char[n]` — while bounds stay the erased `Lt`
+// proof (no bounds branch) and the buffer stays linear (leak / double-free are
+// compile errors).
+//
+// Scalar VALUES are still i64 in registers (C's integer promotion): `u8` masks a
+// Nat into a byte, `nat_u8` reads it back, and the arithmetic (`acc + x`) happens
+// in the Nat register — exactly `for (i=0;i<n;i++) acc += buf[i];` on `unsigned
+// char buf[n]`.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+// Sum a U8 buffer: descend on the remaining count `b`, cursor `m` ascending, the
+// buffer typed `Arr U8 (b + m)` — every bound is a closed universal the solver
+// discharges, so no proof is threaded (same convoy shape as arr.tal, over bytes).
+sum : (m : Nat) -> (b : Nat) -> (acc : Nat) -> (1 buf : Arr U8 (b + m)) -> Nat
+%partial fn sum(m, b, acc, buf) {
+    match b {
+        Zero => let u = afree(buf); acc,
+        Succ(k) =>
+            let (x, buf2) = aget(m, lt(m, Succ(k) + m), buf);
+            sum(Succ(m), k, acc + nat_u8(x), buf2),
+    }
+}
+
+main : Nat
+fn main() {
+    let b0 = anew(6, u8(42));                    // [42,42,42,42,42,42] : Arr U8 6
+    let b1 = aset(1, lt(1, 6), u8(300), b0);     // 300 & 0xff = 44 at index 1
+    let b2 = aset(4, lt(4, 6), u8(8), b1);       // 8 at index 4
+    sum(0, 6, 0, b2)                             // [42,44,42,42,8,42] = 220
+}

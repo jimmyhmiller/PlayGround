@@ -1,0 +1,186 @@
+// examples/agents.scry — the Phase 5 / M5 demo app.
+//
+// Three named agents (researcher, coder, reviewer) each run on their OWN real OS thread
+// (Thread.spawn), pulling from a shared task list guarded by a Mutex, each appending
+// Messages to its own Conversation with Clock.sleep(400) pacing so the counts are
+// watchable. A viewer-invoked pause() flips an agent's `paused` flag and its terminal
+// activity visibly stops; resume() restarts it. When the shared task list drains every
+// worker sets status Done and returns; main() joins all three and exits (the process
+// stays alive afterward for browsing, per Phase 4).
+//
+// Concurrency-safety by construction: `paused` is written ONLY by the viewer/eval thread
+// (pause/resume) and read by the worker; `status` and the Conversation are written ONLY by
+// the worker. Single-writer per field means no torn state without a lock. The one place
+// threads genuinely share a mutable cell — the task list's remaining counter — is behind a
+// real Mutex.
+
+enum AgentStatus {
+  Waiting
+  Running
+  Paused
+  Done
+}
+
+enum ToolError {
+  NotFound(String)
+  Failed(String)
+}
+
+class Message {
+  role: String
+  content: String
+  fn init(role: String, content: String) {
+    self.role = role
+    self.content = content
+  }
+}
+
+class Conversation {
+  messages: List<Message>
+  count: Int
+  fn init() {
+    self.messages = List<Message>()
+    self.count = 0
+  }
+  fn append(m: Message) {
+    self.messages.push(m)
+    self.count = self.count + 1
+  }
+  fn size() -> Int { self.count }
+}
+
+// Heterogeneous tools through a real interface (itable dispatch), not an enum switch.
+interface Tool {
+  fn name() -> String
+  fn run(input: String) -> String
+}
+
+class ShellTool implements Tool {
+  command: String
+  fn name() -> String { "shell" }
+  fn run(input: String) -> String { "$ " + self.command + " " + input }
+}
+
+class SearchTool implements Tool {
+  index: String
+  fn name() -> String { "search" }
+  fn run(input: String) -> String { "search(" + self.index + "): " + input }
+}
+
+// Honestly-named canned model — visible in the viewer's type list as ScriptedModel.
+class ScriptedModel {
+  reply: String
+  fn complete(prompt: String) -> String { self.reply + " re: " + prompt }
+}
+
+class Task {
+  description: String
+  fn init(description: String) { self.description = description }
+}
+
+// The shared work queue: a remaining-count behind a Mutex. take() hands out one task id
+// (>0) atomically, or 0 once drained.
+class TaskList {
+  remaining: Mutex<Int>
+  fn init(n: Int) { self.remaining = Mutex<Int>(n) }
+  fn take() -> Int {
+    self.remaining.lock()
+    let r = self.remaining.get()
+    var out = 0
+    if r > 0 {
+      self.remaining.set(r - 1)
+      out = r
+    }
+    self.remaining.unlock()
+    out
+  }
+}
+
+class Agent {
+  name: String
+  color: String
+  status: AgentStatus
+  paused: Bool
+  model: ScriptedModel
+  conversation: Conversation
+  tools: List<Tool>
+
+  fn init(name: String, color: String, model: ScriptedModel, tools: List<Tool>) {
+    self.name = name
+    self.color = color
+    self.status = AgentStatus.Waiting
+    self.paused = false
+    self.model = model
+    self.conversation = Conversation()
+    self.tools = tools
+  }
+
+  // Written by the viewer/eval thread only (single-writer).
+  fn pause() { self.paused = true }
+  fn resume() { self.paused = false }
+  fn isPaused() -> Bool { self.paused }
+
+  // Written by this agent's worker thread only (single-writer).
+  fn finish() { self.status = AgentStatus.Done }
+
+  fn banner() -> String {
+    // ANSI color prefix via \xHH raw-byte escapes (ESC = \x1b). Minimal scrolling-log TUI.
+    "\x1b[1m\x1b[" + self.color + "m" + self.name + "\x1b[0m"
+  }
+
+  fn step(taskNo: Int) {
+    self.status = AgentStatus.Running
+    self.conversation.append(Message(role: "user", content: "handle task ${taskNo}"))
+    let reply = self.model.complete("task ${taskNo}")
+    self.conversation.append(Message(role: "assistant", content: reply))
+    let tool = self.tools.get(0)
+    self.conversation.append(Message(role: "tool", content: tool.run("task ${taskNo}")))
+    self.status = AgentStatus.Waiting
+    Console.log(self.banner() + "  msg#${self.conversation.size()}  " + reply)
+  }
+}
+
+class AgentWorker implements Runnable {
+  agent: Agent
+  tasks: TaskList
+  fn run() -> Void {
+    while true {
+      while self.agent.isPaused() {
+        Clock.sleep(150)
+      }
+      let t = self.tasks.take()
+      if t == 0 {
+        self.agent.finish()
+        return
+      }
+      self.agent.step(t)
+      Clock.sleep(400)
+    }
+  }
+}
+
+fn main() {
+  let tools = List<Tool>()
+  tools.push(ShellTool(command: "ls"))
+  tools.push(SearchTool(index: "docs"))
+
+  let researcher = Agent(name: "researcher", color: "36", model: ScriptedModel(reply: "investigating"), tools: tools)
+  let coder = Agent(name: "coder", color: "32", model: ScriptedModel(reply: "writing code"), tools: tools)
+  let reviewer = Agent(name: "reviewer", color: "35", model: ScriptedModel(reply: "reviewing diff"), tools: tools)
+
+  let tasks = TaskList(n: 120)
+
+  Console.log("\x1b[1mspawning 3 agents on 3 OS threads...\x1b[0m")
+
+  let hs = List<ThreadHandle>()
+  hs.push(Thread.spawn(AgentWorker(agent: researcher, tasks: tasks)))
+  hs.push(Thread.spawn(AgentWorker(agent: coder, tasks: tasks)))
+  hs.push(Thread.spawn(AgentWorker(agent: reviewer, tasks: tasks)))
+
+  var i = 0
+  while i < 3 {
+    hs.get(i).join()
+    i = i + 1
+  }
+  Console.log("\x1b[1mall agents done — heap still browsable\x1b[0m")
+}

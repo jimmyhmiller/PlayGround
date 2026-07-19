@@ -1,0 +1,18 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a (malloc-allocator) (mut m) (hm-new-scalar [i64 i64] a)]
+    (let
+      [(mut $g0) (isub 0 1)]
+      (loop
+        (store! $g0 (iadd (load $g0) 1))
+        (if (icmp-lt (load $g0) 30) (let [i (load $g0)] (hm-put! (mut m) i i)) (break))))
+    (hm-put! (mut m) 13 9)
+    (hm-remove! (mut m) 1)
+    (let
+      [r (iadd (match (hm-get [i64 i64] m 13) (None [] -1) (Some [v] v)) (hm-len m))]
+      (hm-free! (mut m))
+      (iadd r 4))))
+

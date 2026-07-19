@@ -66,12 +66,91 @@ impl Parinfer {
         }
     }
 
+    /// True when every closer matches the most recent opener (so `([)]` is
+    /// rejected, not merely count-balanced), skipping string literals (with `\`
+    /// escapes) and `;` line comments. Well-formed input has no missing/extra
+    /// parens to repair, so `balance` preserves it verbatim.
+    fn is_well_formed(source: &str) -> bool {
+        let mut stack: Vec<char> = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut in_comment = false;
+        for ch in source.chars() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            // `\` escapes the next char: a string escape inside a string, a
+            // character literal (`\(`, `\"`, `\;`, …) in code. The following char
+            // is never structural.
+            if ch == '\\' && !in_comment {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' && !in_comment {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if ch == ';' {
+                in_comment = true;
+            }
+            if ch == '\n' || ch == '\r' {
+                in_comment = false;
+            }
+            if in_comment {
+                continue;
+            }
+            match ch {
+                '(' | '[' | '{' => stack.push(ch),
+                ')' => {
+                    if stack.pop() != Some('(') {
+                        return false;
+                    }
+                }
+                ']' => {
+                    if stack.pop() != Some('[') {
+                        return false;
+                    }
+                }
+                '}' => {
+                    if stack.pop() != Some('{') {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        !in_string && stack.is_empty()
+    }
+
     pub fn balance(&self) -> Result<String> {
+        // If the input is already well-formed there are no missing/extra parens to
+        // fix, so preserve it verbatim. The indentation-driven balancing below
+        // reflows structure from leading whitespace, which corrupts structurally
+        // valid code whose indentation deliberately doesn't track nesting depth.
+        // This is common in Coil: tail-`if` staircases, `let` bindings aligned with
+        // the body at the same column, and multi-line string literals (e.g.
+        // `llvm-ir` IR blocks) whose lines are dedented below the enclosing form —
+        // the string's leading whitespace was being misread as a dedent that closed
+        // the enclosing paren. Only genuinely broken paren structure falls through.
+        if Self::is_well_formed(&self.source) {
+            return Ok(self.source.clone());
+        }
+
         let lines: Vec<&str> = self.source.lines().collect();
         let mut result_lines = Vec::new();
         let mut delim_stack: Vec<DelimInfo> = Vec::new();
         let mut in_string = false;
         let mut in_comment = false;
+        // Set when the final line ends on a dangling `\` (an incomplete character
+        // literal). Like an unclosed string, that is an unterminated token we can't
+        // sensibly complete, so it blocks auto-closing at EOF and keeps balancing
+        // idempotent (a synthesized closer would just be eaten as the literal's
+        // char on the next pass).
+        let mut trailing_escape = false;
 
         for (line_idx, line) in lines.iter().enumerate() {
             let line_indent = line.chars().take_while(|c| c.is_whitespace()).count();
@@ -98,7 +177,12 @@ impl Parinfer {
                     continue;
                 }
 
-                if ch == '\\' && in_string {
+                // A backslash escapes the next character: inside a string it is a
+                // string escape (`\"`), and in code it introduces a Lisp/Coil
+                // character literal (`\(`, `\)`, `\"`, `\;`, `\space`, …). Either
+                // way the following char is literal and must not be treated as a
+                // structural delimiter, string quote, or comment start.
+                if ch == '\\' && !in_comment {
                     escape_next = true;
                     new_line.push(ch);
                     continue;
@@ -174,9 +258,13 @@ impl Parinfer {
                 }
             }
 
+            // A `\` at end of line leaves a pending char-literal escape; remember it
+            // for the EOF close and don't auto-close past it on this line.
+            trailing_escape = escape_next;
+
             // After processing the line, check if we need to auto-close delimiters
             // based on indentation of the next non-empty line
-            if !in_string && !in_comment {
+            if !in_string && !in_comment && !escape_next {
                 let next_indent = Self::find_next_indent(&lines, line_idx);
 
                 // Check if next line starts with closing delimiters
@@ -197,10 +285,30 @@ impl Parinfer {
                 // If we used col_pos, we'd wrongly close scf.if after first region
                 // because 4 < 12. But both regions are children of scf.if!
                 if !next_line_has_closers {
+                    // Does the next significant (non-blank, non-comment) line begin a
+                    // NEW form — an opener token, not a continuation atom? Parinfer
+                    // indent-mode's core rule: a line that starts a new form at
+                    // indentation <= an open delimiter's opening indent closes that
+                    // delimiter first. This is what lets the equal-indent case count
+                    // (`>=`, not strict `>`). Without it, a column-0 opener has
+                    // line_indent 0, `0 > 0` is false, so it can NEVER be closed by
+                    // dedent — it rides the stack to the EOF fallback below, which
+                    // appends its closer after the LAST line and silently nests every
+                    // following top-level form inside it (bug: non-local EOF close).
+                    // For continuation/atom-led lines we keep the strict `>` so we
+                    // don't over-close forms whose body merely dedents to column 0.
+                    let next_line_starts_form = Self::find_next_significant_char(&lines, line_idx)
+                        .map(|c| matches!(c, '(' | '[' | '{'))
+                        .unwrap_or(false);
                     while let Some(open_info) = delim_stack.last() {
                         // Only use line_indent, not col_pos, for determining nesting level
                         let opener_indent = open_info.line_indent;
-                        if next_indent < line_indent && opener_indent > next_indent {
+                        let dedents_past_opener = if next_line_starts_form {
+                            opener_indent >= next_indent
+                        } else {
+                            opener_indent > next_indent
+                        };
+                        if next_indent < line_indent && dedents_past_opener {
                             let delim_type = open_info.delim_type;
                             delim_stack.pop();
                             new_line.push(delim_type.close_char());
@@ -216,8 +324,9 @@ impl Parinfer {
 
         // Close any remaining open delimiters at the end of file
         // Add them all to the last line (Lisp convention)
-        // Only if we're not inside a string (unclosed strings leave delimiters unclosed)
-        if !in_string && !in_comment {
+        // Only if we're not inside a string (unclosed strings leave delimiters
+        // unclosed) and not on a dangling char-literal escape.
+        if !in_string && !in_comment && !trailing_escape {
             if let Some(last_line) = result_lines.last_mut() {
                 while let Some(open_info) = delim_stack.pop() {
                     last_line.push(open_info.delim_type.close_char());
@@ -236,6 +345,20 @@ impl Parinfer {
             }
         }
         0 // End of file
+    }
+
+    /// First non-whitespace character of the next significant line (skipping
+    /// blank and comment-only lines), or `None` at end of file. Uses the same
+    /// notion of "significant line" as `find_next_indent`, so the opener check
+    /// in the dedent loop lines up with the indent it is compared against.
+    fn find_next_significant_char(lines: &[&str], current_idx: usize) -> Option<char> {
+        for line in lines.iter().skip(current_idx + 1) {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with(';') {
+                return trimmed.chars().next();
+            }
+        }
+        None
     }
 }
 
@@ -485,5 +608,173 @@ mod tests {
         let parinfer = Parinfer::new(source);
         let result = parinfer.balance().unwrap();
         assert_eq!(result, source);
+    }
+
+    // ---- Coil regression cases -------------------------------------------
+    // These are valid, already-balanced Coil forms whose indentation does not
+    // track nesting depth. Indentation-driven balancing used to corrupt them;
+    // well-formed input must now round-trip verbatim.
+
+    #[test]
+    fn test_coil_llvm_ir_multiline_string_dedented() {
+        // A multi-line string argument whose lines sit at column 0 — dedented
+        // below the enclosing `(llvm-ir ...)`. The string's leading whitespace
+        // must not be read as a dedent that closes the enclosing paren.
+        let source = "(defn uart-byte [(c i64)] (-> i64)\n  (llvm-ir i64 [c]\n\"%p = inttoptr i64 150994944 to ptr\nret i64 0\"))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_let_bindings_aligned_with_body() {
+        // `let` binding elements and body forms at the SAME column: the `]`
+        // must stay where it is, not migrate past the body.
+        let source = "(let [sig a\n     fv b]\n     (use sig)\n     (use fv))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_tail_if_staircase() {
+        // Deeply nested tail `if`s drawn at shallow (back-dented) indentation,
+        // closed by a long run of parens on the last line.
+        let source = "(if a\n    x\n (if b\n     y\n  (if c\n      z\n   w)))";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_coil_trailing_newline_preserved() {
+        // A well-formed file with a trailing newline must keep it (the old
+        // line-join path silently dropped it).
+        let source = "(defn f [] (-> i64) 0)\n";
+        let parinfer = Parinfer::new(source);
+        assert_eq!(parinfer.balance().unwrap(), source);
+    }
+
+    #[test]
+    fn test_char_literal_delimiters_not_structural() {
+        // Lisp/Coil character literals `\(` `\)` `\]` are the *characters*, not
+        // structural delimiters. These forms are already balanced and must be
+        // preserved verbatim.
+        for source in [
+            "(str \\()",           // \( is a char, ) closes (str
+            "[\\\"]",              // \" is a char, brackets balance
+            "(list \\) \\( \\])",  // several delimiter char-literals
+        ] {
+            let out = Parinfer::new(source).balance().unwrap();
+            assert_eq!(out, source, "char literals must be preserved: {source:?}");
+        }
+    }
+
+    #[test]
+    fn test_char_literal_does_not_absorb_real_closer_on_repair() {
+        // `(foo \(` is missing its real closer; the `\(` must not consume the
+        // synthesized `)`. Expect `(foo \()`.
+        assert_eq!(Parinfer::new("(foo \\(").balance().unwrap(), "(foo \\()");
+        // `[\"` — missing `]`; the `\"` is a char literal, not a string opener.
+        assert_eq!(Parinfer::new("[\\\"").balance().unwrap(), "[\\\"]");
+    }
+
+    #[test]
+    fn test_dangling_backslash_is_left_alone() {
+        // A trailing `\` is an incomplete character literal — like an unclosed
+        // string, it can't be sensibly completed, so balancing is a no-op and
+        // stays idempotent.
+        let source = "[\\ \\";
+        let once = Parinfer::new(source).balance().unwrap();
+        assert_eq!(once, source, "dangling backslash left as-is");
+        assert_eq!(Parinfer::new(&once).balance().unwrap(), once, "idempotent");
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_repro() {
+        // The reported bug: `alpha` is missing its final `)`; `beta` and `gamma`
+        // are complete column-0 top-level forms. A new column-0 opener means
+        // everything open must close first, so `alpha` closes at the end of its
+        // own body — the synthesized `)` must NOT be appended after `gamma`.
+        let source = "\
+(defn alpha [x] (-> i64)
+  (+ x 1)
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let expected = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        assert_eq!(Parinfer::new(source).balance().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_broken_form_in_middle() {
+        // Same bug with the broken form (`beta`) in the middle of three forms.
+        // Only `beta` should gain its missing closer; `gamma` must be untouched.
+        let source = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2)
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let expected = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        assert_eq!(Parinfer::new(source).balance().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_nonlocal_eof_close_is_local() {
+        // Locality: balancing a file with one broken function must change ONLY
+        // that function. Drop the trailing `)` from `beta` and confirm every
+        // other line round-trips unchanged.
+        let good = "\
+(defn alpha [x] (-> i64)
+  (+ x 1))
+
+(defn beta [y] (-> i64)
+  (* y 2))
+
+(defn gamma [z] (-> i64)
+  (- z 3))";
+        let broken = good.replacen("  (* y 2))", "  (* y 2)", 1);
+        let fixed = Parinfer::new(&broken).balance().unwrap();
+        assert_eq!(fixed, good);
+        // The only differing line between broken input and fixed output is the
+        // perturbed one — nothing at EOF moved.
+        let diffs: Vec<_> = broken
+            .lines()
+            .zip(fixed.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(diffs, vec![("  (* y 2)", "  (* y 2))")]);
+    }
+
+    #[test]
+    fn test_coil_broken_input_still_repaired() {
+        // The fix must not disable repair: genuinely unbalanced input still
+        // gets its missing closer synthesized.
+        let source = "(iadd 1 2";
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
+        let opens = result.chars().filter(|&c| c == '(').count();
+        let closes = result.chars().filter(|&c| c == ')').count();
+        assert_eq!(opens, closes, "unbalanced input should be repaired: {result:?}");
     }
 }

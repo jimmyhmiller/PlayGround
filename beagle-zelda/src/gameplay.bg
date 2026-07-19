@@ -39,6 +39,9 @@ struct Tuning {
     camera_smoothing
     run_multiplier
     sneak_multiplier
+    stamina_max
+    stamina_sprint_drain
+    stamina_regen
 }
 
 fn default_tuning() {
@@ -55,7 +58,10 @@ fn default_tuning() {
         ambient: 0.08,
         camera_smoothing: 8.0,
         run_multiplier: 1.75,
-        sneak_multiplier: 0.4
+        sneak_multiplier: 0.4,
+        stamina_max: 100.0,
+        stamina_sprint_drain: 40.0,
+        stamina_regen: 25.0
     }
 }
 
@@ -70,6 +76,7 @@ struct Player {
     half          // half-extents (Vec2)
     aim           // Vec2 unit vector
     speed_mult    // 1.0 normal, run_multiplier, sneak_multiplier
+    stamina       // current stamina (0..stamina_max)
     hp            // hit points — attacks subtract, respawn on 0
     iframes       // invulnerability timer (seconds) after being hit
 }
@@ -132,11 +139,11 @@ fn read_desired_dir() {
     v/normalize_or_zero(v/make(dx, dy))
 }
 
-fn read_speed_mult(tuning) {
+fn read_speed_mult(tuning, stamina) {
     let sneak = r/is_key_down(r/KEY_LEFT_CONTROL) || r/is_key_down(r/KEY_RIGHT_CONTROL)
     let run = r/is_key_down(r/KEY_LEFT_SHIFT) || r/is_key_down(r/KEY_RIGHT_SHIFT)
     if sneak { tuning.sneak_multiplier }
-    else if run { tuning.run_multiplier }
+    else if run && stamina > 0.0 { tuning.run_multiplier }
     else { 1.0 }
 }
 
@@ -201,12 +208,19 @@ fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
     let new_vel = approach_velocity(player.vel, target, rate, dt)
     let move_delta = v/scale(new_vel, dt)
     let res = resolve_collision(player.pos, player.half, move_delta, walls, new_vel)
+    let stamina_delta = if speed_mult > 1.0 {
+        0.0 - tuning.stamina_sprint_drain * dt
+    } else {
+        tuning.stamina_regen * dt
+    }
+    let new_stamina = clamp(player.stamina + stamina_delta, 0.0, tuning.stamina_max)
     Player {
         ...player,
         pos: res.pos,
         prev: player.pos,
         vel: res.vel,
         speed_mult: speed_mult,
+        stamina: new_stamina,
         iframes: if player.iframes > 0.0 { player.iframes - dt } else { 0.0 }
     }
 }
@@ -216,7 +230,7 @@ fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
 // ============================================================
 
 fn update_camera(camera, player_pos, smoothing, dt) {
-    // alpha = 1 - exp(-k*dt) — exponential approach
+    // alpha = 1 - exp(-k*dt) u014 exponential approach
     if smoothing <= 0.0 {
         player_pos
     } else {
@@ -272,44 +286,6 @@ fn ray_segment_hit(origin, dir, a, b) {
 // it mutates the Player, not the monsters.
 // ============================================================
 
-// Spiral outward from origin until we find a respawn point clear of every
-// monster's reach and every wall's AABB. Falls back to (0, 0) if nothing
-// better is found (shouldn't happen with the default level).
-fn pick_respawn(player, monsters, walls) {
-    let candidates = [
-        v/make(0.0, 0.0),
-        v/make(40.0, 0.0),  v/make(0.0 - 40.0, 0.0),
-        v/make(0.0, 40.0),  v/make(0.0, 0.0 - 40.0),
-        v/make(80.0, 0.0),  v/make(0.0 - 80.0, 0.0),
-        v/make(0.0, 80.0),  v/make(0.0, 0.0 - 80.0),
-        v/make(160.0, 0.0), v/make(0.0 - 160.0, 0.0)
-    ]
-    let mut chosen = v/ZERO
-    let mut found = false
-    let mut i = 0
-    while i < length(candidates) && !found {
-        let c = candidates[i]
-        let mut clear = true
-        let mut j = 0
-        while j < length(monsters) && clear {
-            if v/length(v/sub(c, monsters[j].pos)) < monsters[j].attack_reach + player.half.x + 8.0 {
-                clear = false
-            }
-            j = j + 1
-        }
-        let mut k = 0
-        while k < length(walls) && clear {
-            if v/aabb_overlap(c, player.half, walls[k].center, walls[k].half) {
-                clear = false
-            }
-            k = k + 1
-        }
-        if clear { chosen = c; found = true }
-        i = i + 1
-    }
-    chosen
-}
-
 fn apply_monster_attacks(player, monsters, walls) {
     if player.iframes > 0.0 {
         player
@@ -329,8 +305,11 @@ fn apply_monster_attacks(player, monsters, walls) {
         if !hit {
             player
         } else if hp <= 0.0 {
-            let spawn = pick_respawn(player, monsters, walls)
-            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 3.0, iframes: 1.5 }
+            // Death: leave hp at 0 and stop motion. The play tick detects
+            // hp <= 0 and triggers a fade-transition back to the starting
+            // room (see playing_tick in main.bg) — respawn is a map change,
+            // not an in-place teleport.
+            Player { ...player, hp: 0.0, vel: v/ZERO }
         } else {
             Player { ...player, hp: hp, iframes: 0.4 }
         }

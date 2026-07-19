@@ -1,0 +1,12 @@
+; lib/mem.coil — typed low-level memory ops over libc (copy/move/zero/fill/eql).
+;   coil run examples/mem.coil; echo $?   => 107
+(module app)
+(import "lib/mem.coil" :use *)
+
+(defn main [] (-> :i64)
+  (let [src (alloc-stack (array i64 4))
+        dst (alloc-stack (array i64 4))]
+    (mem-fill (index src 0) 7 4)                 ; src = [7 7 7 7]
+    (mem-copy (index dst 0) (index src 0) 4)     ; dst = [7 7 7 7]
+    (iadd (load (index dst 3))                    ; 7
+          (if (mem-eql (index src 0) (index dst 0) 4) 100 0))))   ; + 100 = 107

@@ -7,11 +7,28 @@
 //! keep working — the user's declaration shadows the prelude's.
 
 use crate::ast::{Item, ItemKind, Module};
-use crate::lexer::lex;
+use crate::core::SourceEntry;
+use crate::lexer::{lex, lex_with_source, SourceId};
 use crate::parser::{ParseError, parse_module};
 use std::path::{Path, PathBuf};
 
 const PRELUDE_SRC: &str = include_str!("prelude.gcr");
+
+/// The SourceMap built during prelude/module merging: one [`SourceEntry`] per
+/// [`SourceId`] (0 = user, then `mod` files, then the prelude). Returned by the
+/// parse entries and attached to `CoreProgram.sources` so spans resolve against
+/// their real source (multi-source span resolution — debugger foundation).
+pub type SourceMap = Vec<SourceEntry>;
+
+/// Register a source, returning its [`SourceId`] (= its index in the map). Fails
+/// loudly rather than silently wrapping if a program somehow exceeds the
+/// `SourceId` (u16) capacity — the `id == map index` invariant must hold.
+fn add_source(sources: &mut SourceMap, path: String, text: String) -> SourceId {
+    let id = SourceId::try_from(sources.len())
+        .expect("source count exceeds SourceId (u16) capacity");
+    sources.push(SourceEntry { path, text });
+    id
+}
 
 /// Resolve a `mod foo;` declaration to its file. Following modern Rust, a module
 /// `foo` declared in a file living in `dir` is loaded from either `dir/foo.gcr`
@@ -40,24 +57,27 @@ fn module_file(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf), ParseError>
 /// sibling files and replacing each declaration with an inline module holding the
 /// loaded items. `dir` is the directory that this set of items' file modules
 /// resolve against.
-fn load_file_modules(items: &mut Vec<Item>, dir: &Path) -> Result<(), ParseError> {
+fn load_file_modules(items: &mut Vec<Item>, dir: &Path, sources: &mut SourceMap) -> Result<(), ParseError> {
     for item in items.iter_mut() {
         if let ItemKind::Mod(m) = &mut item.kind {
             if m.inline {
                 // Inline module: its own nested file mods resolve against
                 // `dir/<modname>/` (matching the nested-directory convention).
                 let sub = dir.join(&m.name);
-                load_file_modules(&mut m.items, &sub)?;
+                load_file_modules(&mut m.items, &sub, sources)?;
             } else {
                 let (file, subdir) = module_file(dir, &m.name)?;
                 let src = std::fs::read_to_string(&file).map_err(|e| ParseError {
                     msg: format!("cannot read module file `{}`: {}", file.display(), e),
                     span: m.span,
                 })?;
-                let toks = lex(&src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
+                // Each module is its own source: register it + lex with its id so
+                // its spans resolve against its own text, not the user file.
+                let sid = add_source(sources, file.display().to_string(), src.clone());
+                let toks = lex_with_source(&src, sid).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
                 let mut parsed = parse_module(&toks)?;
                 // Recurse into this file's own `mod foo;` declarations.
-                load_file_modules(&mut parsed.items, &subdir)?;
+                load_file_modules(&mut parsed.items, &subdir, sources)?;
                 m.items = parsed.items;
                 m.inline = true;
             }
@@ -82,14 +102,17 @@ fn item_name(item: &Item) -> Option<&str> {
 
 /// Prepend the prelude to a user module's items (dropping prelude items the user
 /// redeclares), producing the final module.
-fn inject_prelude(user: Module) -> Module {
+fn inject_prelude(user: Module, sources: &mut SourceMap) -> Module {
     let user_names: std::collections::HashSet<String> = user
         .items
         .iter()
         .filter_map(|i| item_name(i).map(|s| s.to_string()))
         .collect();
 
-    let prelude_tokens = lex(PRELUDE_SRC).expect("prelude must lex");
+    // The prelude is its own source ("<std>"): register it + lex with its id so
+    // prelude spans resolve against PRELUDE_SRC, never a fabricated user line.
+    let sid = add_source(sources, "<std>".to_string(), PRELUDE_SRC.to_string());
+    let prelude_tokens = lex_with_source(PRELUDE_SRC, sid).expect("prelude must lex");
     let prelude = parse_module(&prelude_tokens).expect("prelude must parse");
 
     let mut items: Vec<Item> = prelude
@@ -106,25 +129,31 @@ fn inject_prelude(user: Module) -> Module {
 
 /// Parse a user program (a single source string, no file modules) and inject the
 /// prelude. Used for tests and the in-memory REPL-style path.
-pub fn parse_with_prelude(user_src: &str) -> Result<Module, ParseError> {
+pub fn parse_with_prelude(user_src: &str) -> Result<(Module, SourceMap), ParseError> {
+    let mut sources: SourceMap = Vec::new();
+    add_source(&mut sources, "<input>".to_string(), user_src.to_string()); // user = id 0
     let user_tokens = lex(user_src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
     let user = parse_module(&user_tokens)?;
-    Ok(inject_prelude(user))
+    let module = inject_prelude(user, &mut sources);
+    Ok((module, sources))
 }
 
 /// Parse a user program from a file, recursively loading any `mod foo;` file
 /// modules relative to the file's directory, then inject the prelude. This is the
 /// driver entry point for multi-file projects.
-pub fn parse_file_with_prelude(path: &Path) -> Result<Module, ParseError> {
+pub fn parse_file_with_prelude(path: &Path) -> Result<(Module, SourceMap), ParseError> {
     let src = std::fs::read_to_string(path).map_err(|e| ParseError {
         msg: format!("cannot read `{}`: {}", path.display(), e),
         span: crate::lexer::Span::new(0, 0),
     })?;
+    let mut sources: SourceMap = Vec::new();
+    add_source(&mut sources, path.display().to_string(), src.clone()); // user = id 0
     let tokens = lex(&src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
     let mut user = parse_module(&tokens)?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    load_file_modules(&mut user.items, dir)?;
-    Ok(inject_prelude(user))
+    load_file_modules(&mut user.items, dir, &mut sources)?; // mods get ids 1..
+    let module = inject_prelude(user, &mut sources); // prelude gets the next id
+    Ok((module, sources))
 }
 
 #[cfg(test)]
@@ -135,7 +164,7 @@ mod tests {
     use crate::codegen::jit_run_i64_gc;
 
     fn run(src: &str) -> i64 {
-        let m = parse_with_prelude(src).unwrap();
+        let (m, _) = parse_with_prelude(src).unwrap();
         let r = resolve_module(m).unwrap();
         let prog = lower_program(&r.globals).unwrap();
         jit_run_i64_gc(&prog, false).unwrap()
@@ -165,7 +194,7 @@ mod tests {
                      let mut v: Vec<i64> = vec_new(); \
                      let mut i = 0; \
                      while i < 30 { v = vec_push(v, i * i); i = i + 1; } \
-                     vec_get(v, 5) + vec_get(v, 29) + vec_len(v) \
+                     vec_get_unchecked(v, 5) + vec_get_unchecked(v, 29) + vec_len(v) \
                    }";
         // 25 + 841 + 30 = 896
         assert_eq!(run(src), 896);
@@ -178,7 +207,7 @@ mod tests {
                      let mut i = 0; \
                      while i < 8 { v = vec_push(v, i); i = i + 1; } \
                      v = vec_set(v, 0, 100); \
-                     vec_get(v, 0) + vec_get(v, 7) + vec_len(v) \
+                     vec_get_unchecked(v, 0) + vec_get_unchecked(v, 7) + vec_len(v) \
                    }";
         // 100 + 7 + 8 = 115
         assert_eq!(run(src), 115);
@@ -268,7 +297,7 @@ mod tests {
                      let mut v: Vec<i64> = vec_new(); \
                      v = vec_push(v, 5); v = vec_push(v, 3); v = vec_push(v, 8); v = vec_push(v, 1); \
                      let s = vec_sort_i64(vec_copy(v)); \
-                     vec_get(s, 0) * 1000 + vec_get(s, 3) * 100 + vec_index_of_i64(v, 8) * 10 + vec_sum_i64(v) \
+                     vec_get_unchecked(s, 0) * 1000 + vec_get_unchecked(s, 3) * 100 + vec_index_of_i64(v, 8) * 10 + vec_sum_i64(v) \
                    }";
         // sorted[0]=1, sorted[3]=8, index_of(8)=2, sum=17 -> 1000+800+20+17 = 1837
         assert_eq!(run(src), 1837);
@@ -282,7 +311,7 @@ mod tests {
                      let last = opt_unwrap_or(vec_last(v), 0); \
                      let rev = vec_reverse(v); \
                      let popped = vec_pop(v); \
-                     last * 100 + vec_get(rev, 0) * 10 + vec_len(popped) \
+                     last * 100 + vec_get_unchecked(rev, 0) * 10 + vec_len(popped) \
                    }";
         // last=3, rev[0]=3, pop len=2 -> 300 + 30 + 2 = 332
         assert_eq!(run(src), 332);
@@ -327,7 +356,7 @@ mod tests {
                      v = vec_push(v, 30); v = vec_push(v, 10); v = vec_push(v, 20); \
                      let s = vec_sort(vec_copy(v)); \
                      let c = if vec_contains(v, 20) { 1 } else { 0 }; \
-                     vec_get(s, 0) * 100 + vec_get(s, 2) + opt_unwrap_or(vec_max(v), 0) + c \
+                     vec_get_unchecked(s, 0) * 100 + vec_get_unchecked(s, 2) + opt_unwrap_or(vec_max(v), 0) + c \
                    }";
         // sorted[0]=10, sorted[2]=30, max=30, contains=1 -> 1000+30+30+1 = 1061
         assert_eq!(run(src), 1061);
@@ -346,7 +375,7 @@ mod tests {
                      let mut v: Vec<P> = vec_new(); \
                      v = vec_push(v, P { level: 3 }); v = vec_push(v, P { level: 1 }); v = vec_push(v, P { level: 2 }); \
                      let s = vec_sort(v); \
-                     vec_get(s, 0).level * 100 + vec_get(s, 1).level * 10 + vec_get(s, 2).level \
+                     vec_get_unchecked(s, 0).level * 100 + vec_get_unchecked(s, 1).level * 10 + vec_get_unchecked(s, 2).level \
                    }";
         // sorted levels: 1, 2, 3 -> 123
         assert_eq!(run(src), 123);

@@ -1,0 +1,19 @@
+; Allocation is part of the type: a pointer's *region* is in its type, picks its
+; storage, and is checked. `make` returns a (ptr heap) -- allowed to cross a
+; function boundary -- while a (ptr frame) may not (it would fail to type-check).
+;   coil examples/allocation.coil  =>  42
+
+(defn make [(v :i64)] (-> (ptr heap))
+  (let [p (alloc heap)]      ; malloc
+    (store! p v)
+    p))
+
+(defn main [] (-> :i64)
+  (let [h (make 10)          ; heap pointer from another function
+        s (alloc static)     ; a global
+        f (alloc frame)]     ; an alloca, cannot escape this frame
+    (store! s 30)
+    (store! f 2)
+    (let [sum (iadd (load h) (iadd (load s) (load f)))]
+      (free h)               ; only heap pointers can be freed
+      sum)))                 ; 10 + 30 + 2 = 42

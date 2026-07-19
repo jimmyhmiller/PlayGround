@@ -1,0 +1,8 @@
+struct Pt { x: i64, y: i64 }
+fn make(b: bool) -> Result<Pt, i64> { if b { Result::Ok(Pt { x: 10, y: 8 }) } else { Result::Err(0 - 1) } }
+fn chain() -> Result<i64, i64> { let p = make(true)?; Result::Ok(p.x + p.y) }   // 18
+fn main() -> i64 {
+  let a = match make(true) { Result::Ok(p) => p.x + p.y, Result::Err(e) => 0 };   // 18
+  let b = match chain() { Result::Ok(v) => v, Result::Err(e) => 0 };               // 18
+  a + b + 6
+}

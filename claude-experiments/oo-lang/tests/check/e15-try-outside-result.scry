@@ -1,0 +1,7 @@
+
+fn f() -> Result<Int, Int> { Ok(1) }
+fn g() -> Int {
+  let n = f()?
+  n
+}
+fn main() {}

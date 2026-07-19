@@ -1,0 +1,34 @@
+(module host)
+(import "alloc.coil" :use *)
+(import "io.coil"  :use *)
+(import "fmt.coil" :use *)
+(import "slice.coil" :use *)
+
+(defn mk-cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
+  (let [n (slice-len s)
+        buf (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index buf (load i)) (cast i8 (slice-get s (load i))))
+          (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast i8 0))
+    buf))
+(extern dlopen :cc c [(ptr i8) :i64] (-> (ptr i8)))
+(extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern dlerror :cc c [] (-> (ptr i8)))
+
+; the callback the plugin will reach back into
+(defn host-add [(a :i64) (b :i64)] (-> :i64) (iadd a b))
+(export-c [host-add :as "host_add"])
+
+(defn main [] (-> :i64)
+  (let [al (malloc-allocator)
+        h (dlopen (mk-cstr al "./plugin.dylib") 2)]
+    (if (icmp-eq (cast :i64 h) 0)
+        (do (fmt (stdout) "dlopen FAILED\n") 1)
+      (let [f (dlsym h (mk-cstr al "plugin_entry"))]
+        (if (icmp-eq (cast :i64 f) 0)
+            (do (fmt (stdout) "dlsym FAILED\n") 1)
+          (do (fmt (stdout) "plugin_entry(20) = {d}  (expect 42)\n"
+                   (call-ptr (cast (fnptr c [:i64] :i64) f) 20))
+              0))))))

@@ -1,0 +1,26 @@
+(program
+  (fn first
+    (typeparams
+      (typeparam T))
+    (params
+      (param items
+        (type List (type T))))
+    (type Option (type T))
+    (block
+      (if
+        (binary ==
+          (call
+            (dot len
+              (id items)))
+          (int 0))
+        (block
+          (id None))
+        (block
+          (call
+            (id Some)
+            (arg
+              (call
+                (dot get
+                  (id items))
+                (arg
+                  (int 0))))))))))

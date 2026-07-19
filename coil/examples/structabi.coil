@@ -1,0 +1,11 @@
+;; Struct-by-value across the C boundary, ABI-correct (SysV + AAPCS64).
+;;   coil run examples/structabi.coil        (native arm64)
+;; libc's div() returns `div_t { int quot; int rem; }` BY VALUE.
+;; div(47, 5) = { quot: 9, rem: 2 };  result = quot*10 + rem = 92.
+(defstruct DivT [(quot :i32) (rem :i32)])
+(extern div [:i32 :i32] (-> DivT))
+
+(defn main [] (-> :i64)
+  (let [d (div 47 5)]
+    (iadd (imul (cast :i64 (load (field d quot))) 10)
+          (cast :i64 (load (field d rem))))))

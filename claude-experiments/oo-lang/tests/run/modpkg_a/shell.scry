@@ -1,0 +1,10 @@
+module modpkg_a.shell
+
+// loaded transitively so main.scry can reference modpkg_b.shell.Shell fully-qualified
+// with no import of its own (07-modules.md §4/§6).
+import modpkg_b.shell.{Shell}
+
+class Shell {
+  label: String
+  fn describe() -> String { "A:" + self.label }
+}

@@ -1,0 +1,56 @@
+// MANDELBROT — a real float-heavy kernel at C speed. The escape loop is a
+// bounded recursion over a fuel `Nat` with early exit on divergence; the F64
+// arithmetic is native (Phase Scalars — C's `double` in FP registers). `maxiter`
+// is read from stdin so the whole computation is runtime-dependent (not folded).
+//
+//   tally build examples/mandelbrot.tal -o /tmp/mb -O2
+//   cc -O2 bench/mandelbrot.c -o /tmp/mbc
+//   echo A | /tmp/mb ; echo A | /tmp/mbc          -> same checksum; compare time
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+escape : F64 -> F64 -> F64 -> F64 -> Nat -> Nat -> Nat
+%partial fn escape(cx, cy, zx, zy, fuel, count) {
+  match fuel {
+    Zero => count,
+    Succ(k) =>
+      let zx2 = fmul(zx, zx);
+      let zy2 = fmul(zy, zy);
+      match flt(fadd(zx2, zy2), 4.0) {
+        Zero    => count,
+        Succ(b) =>
+          let nzx = fadd(fsub(zx2, zy2), cx);
+          let nzy = fadd(fmul(fmul(2.0, zx), zy), cy);
+          escape(cx, cy, nzx, nzy, k, Succ(count)),
+      },
+  }
+}
+
+rowSum : (fuel : Nat) -> (col : Nat) -> F64 -> (mi : Nat) -> (acc : Nat) -> Nat
+%partial fn rowSum(fuel, col, cy, mi, acc) {
+  match fuel {
+    Zero => acc,
+    Succ(k) =>
+      let cx = fadd(fneg(2.5), fmul(f64_of_nat(col), 0.003));
+      let c  = escape(cx, cy, 0.0, 0.0, mi, 0);
+      rowSum(k, Succ(col), cy, mi, acc + c),
+  }
+}
+
+allRows : (fuel : Nat) -> (r : Nat) -> (mi : Nat) -> (acc : Nat) -> Nat
+%partial fn allRows(fuel, r, mi, acc) {
+  match fuel {
+    Zero => acc,
+    Succ(k) =>
+      let cy = fadd(fneg(1.5), fmul(f64_of_nat(r), 0.0025));
+      let s  = rowSum(1000, 0, cy, mi, 0);
+      allRows(k, Succ(r), mi, acc + s),
+  }
+}
+
+main : Nat
+fn main() {
+  let d  = getc(U);
+  let mi = d + 3000;
+  allRows(1200, 0, mi, 0)
+}

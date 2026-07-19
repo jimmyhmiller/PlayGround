@@ -11,6 +11,14 @@
 //!
 //! Run deeper with `GCR_STRESS_ITERS=N GCR_STRESS_SEED=S cargo test --test
 //! concurrency_stress -- --nocapture`.
+//!
+//! COVERAGE / TIME-BOX (no silent cap): `--gc-stress` collects on EVERY
+//! allocation, so each multithreaded program is ~quadratic and the default 50
+//! iters are intractable per-commit (tens of minutes even in release). The
+//! per-commit gate runs **6 iters in release with the detector armed**
+//! (`GCR_GC_VERIFY=1 GCR_STRESS_ITERS=6 cargo test --release --test
+//! concurrency_stress`); the full 50+ soak is an occasional/nightly run. The
+//! coverage is reduced for speed, not dropped — see docs/FUTURE_WORK.md (P3).
 
 use gcrust::codegen::jit_run_i64_gc;
 use gcrust::compile::parse_with_prelude;
@@ -18,7 +26,7 @@ use gcrust::lower::lower_program;
 use gcrust::resolve::resolve_module;
 
 fn run_stress(src: &str) -> Result<i64, String> {
-    let module = parse_with_prelude(src).map_err(|e| format!("parse: {e:?}"))?;
+    let (module, _) = parse_with_prelude(src).map_err(|e| format!("parse: {e:?}"))?;
     let resolved = resolve_module(module).map_err(|e| format!("resolve: {e:?}"))?;
     let prog = lower_program(&resolved.globals).map_err(|e| format!("lower: {}", e.msg))?;
     jit_run_i64_gc(&prog, true).map_err(|e| format!("codegen/run: {}", e.0))
@@ -43,7 +51,7 @@ const HELPERS: &str = r#"
         let mut acc = v; let mut i = 0;
         while i < n { acc = vec_push(acc, i); i = i + 1; }
         let mut s = 0; let mut j = 0;
-        while j < vec_len(acc) { s = s + vec_get(acc, j); j = j + 1; }
+        while j < vec_len(acc) { s = s + vec_get_unchecked(acc, j); j = j + 1; }
         s
     }
     fn bvec(n: i64) -> Vec<i64> {
@@ -54,7 +62,7 @@ const HELPERS: &str = r#"
     }
     fn vsum(v: Vec<i64>) -> i64 {
         let mut s = 0; let mut j = 0;
-        while j < vec_len(v) { s = s + vec_get(v, j); j = j + 1; }
+        while j < vec_len(v) { s = s + vec_get_unchecked(v, j); j = j + 1; }
         s
     }
 "#;
@@ -127,7 +135,7 @@ fn gen_prog(rng: &mut Rng) -> (String, i64) {
             }
             let n_total = per * k;
             body.push_str(&format!(
-                "  let mut total = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); total = total + vec_get(item, 0); got = got + 1; }}\n",
+                "  let mut total = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); total = total + vec_get_unchecked(item, 0); got = got + 1; }}\n",
                 n_total));
             for i in 0..k { body.push_str(&format!("  let _j{} = t{}.join();\n", i, i)); }
             body.push_str("  total\n}\n");
@@ -150,7 +158,7 @@ fn gen_prog(rng: &mut Rng) -> (String, i64) {
             body.push_str(&format!("  let tp = Thread::spawn(|| prod(ch, {}));\n", per));
             body.push_str(&format!("  let tv = Thread::spawn(|| bvec({}));\n", vn));
             body.push_str(&format!(
-                "  let mut csum = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); csum = csum + vec_get(item, 0); got = got + 1; }}\n",
+                "  let mut csum = 0; let mut got = 0;\n  while got < {} {{ let item = ch.recv(); csum = csum + vec_get_unchecked(item, 0); got = got + 1; }}\n",
                 per));
             body.push_str("  let _ja = ta.join();\n  let _jp = tp.join();\n  let vres = vsum(tv.join());\n");
             body.push_str("  a.deref() + csum + vres\n}\n");

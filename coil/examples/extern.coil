@@ -1,0 +1,17 @@
+; C interop via `extern`: declare a foreign function's convention + signature,
+; and the type checker enforces calls to it. Links against libc.
+;   coil run examples/extern.coil   prints: 12345
+
+(extern putchar :cc c [:i64] (-> :i64))   ; int putchar(int)
+
+; Print a non-negative integer in decimal, most-significant digit first.
+(defn print-int [(n :i64)] (-> :i64)
+  (if (icmp-lt n 10)
+      (putchar (iadd n 48))                       ; '0' + n
+      (do (print-int (idiv n 10))                 ; higher digits first
+          (putchar (iadd (irem n 10) 48)))))
+
+(defn main [] (-> :i64)
+  (do (print-int 12345)
+      (putchar 10)                                ; newline
+      0))

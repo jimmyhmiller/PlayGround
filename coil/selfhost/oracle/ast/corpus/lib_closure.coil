@@ -1,0 +1,104 @@
+(defn
+  cl--param-types
+  [(ps Code) (i i64)]
+  (-> Code)
+  (if
+    (icmp-eq i (code-count ps))
+    (quasiquote ())
+    (quasiquote
+      ((unquote (code-nth (code-nth ps i) 1))
+        (unquote-splicing (cl--param-types ps (iadd i 1)))))))
+
+(defn
+  cl--param-names
+  [(ps Code) (i i64)]
+  (-> Code)
+  (if
+    (icmp-eq i (code-count ps))
+    (quasiquote ())
+    (quasiquote
+      ((unquote (code-nth (code-nth ps i) 0))
+        (unquote-splicing (cl--param-names ps (iadd i 1)))))))
+
+(defn
+  cl--cap-loads
+  [(caps Code) (i i64)]
+  (-> Code)
+  (if
+    (icmp-eq i (code-count caps))
+    (quasiquote ())
+    (let
+      [nm (code-nth (code-nth caps i) 0)]
+      (quasiquote
+        ((unquote nm)
+          (load (field __self (unquote nm)))
+          (unquote-splicing (cl--cap-loads caps (iadd i 1))))))))
+
+(defn
+  cl--cap-stores
+  [(caps Code) (i i64)]
+  (-> Code)
+  (if
+    (icmp-eq i (code-count caps))
+    (quasiquote ())
+    (let
+      [nm (code-nth (code-nth caps i) 0)]
+      (quasiquote
+        ((store! (field __e (unquote nm)) (unquote nm))
+          (unquote-splicing (cl--cap-stores caps (iadd i 1))))))))
+
+(defn
+  defclosure
+  [(name Code) (caps Code) (params Code) (ret Code) & (body Code)]
+  (-> Code)
+  (let
+    [env-name
+      (code-symbol name "-env")
+      code-name
+      (code-symbol name "-code")
+      new-name
+      (code-symbol name "-new")
+      call-name
+      (code-symbol name "-call")
+      free-name
+      (code-symbol name "-free")]
+    (quasiquote
+      (do
+        (defstruct (unquote env-name) [(unquote-splicing caps)])
+        (defn
+          (unquote code-name)
+          [(__self (ptr (unquote env-name))) (unquote-splicing params)]
+          (-> (unquote ret))
+          (let [(unquote-splicing (cl--cap-loads caps 0))] (unquote-splicing body)))
+        (defstruct
+          (unquote name)
+          [(code
+             (fnptr
+               c
+               [(ptr (unquote env-name)) (unquote-splicing (cl--param-types params 0))]
+               (unquote ret)))
+            (env (ptr (unquote env-name)))])
+        (defn
+          (unquote new-name)
+          [(unquote-splicing caps)]
+          (-> (ptr (unquote name)))
+          (let
+            [__e (alloc-heap (unquote env-name)) __c (alloc-heap (unquote name))]
+            (unquote-splicing (cl--cap-stores caps 0))
+            (store! (field __c code) (fnptr-of (unquote code-name)))
+            (store! (field __c env) __e)
+            __c))
+        (defn
+          (unquote call-name)
+          [(__c (ptr (unquote name))) (unquote-splicing params)]
+          (-> (unquote ret))
+          (call-ptr
+            (load (field __c code))
+            (load (field __c env))
+            (unquote-splicing (cl--param-names params 0))))
+        (defn
+          (unquote free-name)
+          [(__c (ptr (unquote name)))]
+          (-> i64)
+          (do (free (load (field __c env))) (free __c)))))))
+

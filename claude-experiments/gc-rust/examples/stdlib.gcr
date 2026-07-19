@@ -25,7 +25,7 @@ fn main() -> i64 {
     let words = str_split_byte("the quick brown fox", 32);   // split on space
     let mut i = 0;
     while i < vec_len(words) {
-        let w = vec_get(words, i);
+        let w = vec_get_unchecked(words, i);
         lengths = mapstr_insert(lengths, w, str_len(w));
         i = i + 1;
     }
@@ -41,6 +41,6 @@ fn main() -> i64 {
 
     let ranked = vec_sort(board);                      // ascending by points
     // Checksum: sum_big + map length + lowest & highest points.
-    sum_big + mapstr_len(lengths) + vec_get(ranked, 0).points + top.points
+    sum_big + mapstr_len(lengths) + vec_get_unchecked(ranked, 0).points + top.points
     // 330 + 4 + 30 + 50 = 414
 }

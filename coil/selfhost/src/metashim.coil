@@ -1,0 +1,130 @@
+; selfhost/src/metashim.coil — the COMPILED-metaprogram boundary shim.
+;
+; When the compiled metaprogram engine is on (COIL_META=compiled), expand-stage3
+; injects this module's forms into the metaprogram sub-program, and metalower.coil
+; rewrites every ECodeOp/EQuote/EQuasi node into a plain call to one of the mp-*
+; functions below. The metaprogram is then compiled to a dylib like any other
+; program.
+;
+; The HOST BINDING is a VTABLE HANDSHAKE, not dynamic symbols: the compiler
+; (metaengine.coil) dlopens the dylib, dlsyms the one exported `coil_mp_init`, and
+; passes a (ptr MetaVt) whose fields are fnptr-of's of metahost.coil's callbacks.
+; No -export_dynamic, no export-c in the compiler itself (the arm64 backend has no
+; export-c yet — the compiler must keep bootstrapping through it), and the
+; interpreter's `code-op` still implements every op host-side, so both engines
+; share one semantics by construction.
+;
+; RULES for this file:
+;   - No imports. It must resolve standalone inside ANY user program's sub-program.
+;     The slice primitives are non-generic u8 copies of lib/slice.coil's llvm-ir
+;     one-liners (proven on both backends).
+;   - Everything crossing the boundary is (ptr ...) / i64 / f64 — no struct-by-value
+;     ABI anywhere. Strings cross as ptr+len; string RESULTS come back as a
+;     (ptr MetaBuf) into host-owned memory.
+;   - A `Code` value in compiled land is an opaque (ptr i8) handle; only the host
+;     dereferences it (it is really a (ptr Sexp) into host memory — same process).
+;
+; Every code op call becomes: (mp-op-RET op (mp-arg-K .. (mp-arg-K (mp-arg-new) A0) .. AN))
+; — an ARG BUILDER accumulating real host-side CtVals, so the host runs `code-op`
+; on exactly what the interpreter would have seen, INCLUDING wrong-typed arguments
+; (they produce the interpreter's own runtime diagnostics, not a divergent error).
+; An op that fails records the diagnostic host-side and terminates the metaprogram
+; thread — the mp-op-* call then simply never returns.
+(module metashim)
+
+; ---- the host vtable ----------------------------------------------------------
+; FIELD ORDER IS ABI: metahost.coil builds the identical struct (same names, same
+; order, all pointer-sized) and metaengine passes it through coil_mp_init.
+(defstruct MetaVt
+  [(arg_new   (fnptr c [] (ptr i8)))
+   (arg_c     (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (arg_i     (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_s     (fnptr c [(ptr i8) (ptr u8) i64] (ptr i8)))
+   (arg_b     (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_f     (fnptr c [(ptr i8) f64] (ptr i8)))
+   (op_i      (fnptr c [i64 (ptr i8)] i64))
+   (op_h      (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (op_s      (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (quoted    (fnptr c [i64] (ptr i8)))
+   (qq_new    (fnptr c [] (ptr i8)))
+   (qq_push   (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (qq_splice (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (qq_list   (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_listq  (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_vec    (fnptr c [(ptr i8)] (ptr i8)))
+   (unq_int   (fnptr c [i64] (ptr i8)))
+   (unq_bool  (fnptr c [i64] (ptr i8)))
+   (unq_float (fnptr c [f64] (ptr i8)))
+   (unq_str   (fnptr c [(ptr u8) i64] (ptr i8)))
+   (fail      (fnptr c [i64] i64))])
+
+(defstruct MpVtBox [(vt (ptr MetaVt))])
+(defn mp-vtbox [] (-> (ptr MpVtBox)) (alloc-static MpVtBox))
+(defn mp-vt [] (-> (ptr MetaVt)) (load (field (mp-vtbox) vt)))
+
+; The dylib's ONE exported symbol: the engine calls it right after dlopen, before
+; any entry runs. (Its export-c record is appended by metalower.coil — an export-c
+; form here would be dropped, since closure-subprogram builds the sub-program with
+; empty exports.)
+(defn mp-init [(vt (ptr i8))] (-> i64)
+  (store! (field (mp-vtbox) vt) (cast (ptr MetaVt) vt)) 0)
+
+; String results: host-owned {ptr,len}. Layout shared with metahost.coil by
+; construction (same compiler lays out both).
+(defstruct MetaBuf [(p (ptr u8)) (n i64)])
+
+; ---- slice primitives (u8-only copies of lib/slice.coil) ---------------------
+(defn mp-sdata [(s (slice u8))] (-> (ptr u8))
+  (llvm-ir (ptr u8) [s] "%d = extractvalue $t0 $0, 0
+ret $ret %d"))
+(defn mp-slen [(s (slice u8))] (-> i64)
+  (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
+ret $ret %l"))
+(defn mp-mkslice [(p (ptr u8)) (n i64)] (-> (slice u8))
+  (llvm-ir (slice u8) [p n]
+    "%s0 = insertvalue $ret undef, $t0 $0, 0
+%s1 = insertvalue $ret %s0, $t1 $1, 1
+ret $ret %s1"))
+
+(defn mp-buf->str [(r (ptr i8))] (-> (slice u8))
+  (let [b (cast (ptr MetaBuf) r)]
+    (mp-mkslice (load (field b p)) (load (field b n)))))
+
+; ---- code-op argument builder -------------------------------------------------
+(defn mp-arg-new [] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_new))))
+(defn mp-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_c)) b c))
+(defn mp-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_i)) b v))
+(defn mp-arg-s [(b (ptr i8)) (s (slice u8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_s)) b (mp-sdata s) (mp-slen s)))
+(defn mp-arg-b [(b (ptr i8)) (v bool)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_b)) b (if v 1 0)))
+(defn mp-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_f)) b x))
+
+; ---- run an op (result shape = codeop-rty, known statically per op) -----------
+(defn mp-op-int  [(op i64) (b (ptr i8))] (-> i64) (call-ptr (load (field (mp-vt) op_i)) op b))
+(defn mp-op-bool [(op i64) (b (ptr i8))] (-> bool) (icmp-ne (call-ptr (load (field (mp-vt) op_i)) op b) 0))
+(defn mp-op-code [(op i64) (b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) op_h)) op b))
+(defn mp-op-str  [(op i64) (b (ptr i8))] (-> (slice u8)) (mp-buf->str (call-ptr (load (field (mp-vt) op_s)) op b)))
+; op 9 `(error MSG)`: the host records the diagnostic and terminates the
+; metaprogram thread — never returns. metalower wraps the call site in
+; (do (mp-op-int 9 b) (loop 0)) so the expression is never-typed downstream.
+
+; ---- quote / quasiquote -------------------------------------------------------
+(defn mp-quoted [(k i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) quoted)) k))
+(defn mp-qq-new [] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_new))))
+(defn mp-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_push)) b c))
+(defn mp-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_splice)) b c))
+(defn mp-qq-list [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_list)) b))
+(defn mp-qq-listq [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_listq)) b))
+(defn mp-qq-vec [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_vec)) b))
+(defn mp-unq-int [(v i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_int)) v))
+(defn mp-unq-bool [(v bool)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_bool)) (if v 1 0)))
+(defn mp-unq-float [(x f64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_float)) x))
+(defn mp-unq-str [(s (slice u8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_str)) (mp-sdata s) (mp-slen s)))
+
+; ---- interpreter-parity runtime failures --------------------------------------
+; Where the interpreter fails only WHEN EVALUATED (unquoting an aggregate, splicing
+; a non-Code value, a top-level ~@), metalower emits a call here instead of a
+; compile-time error, so a metaprogram whose bad branch never runs behaves
+; identically under both engines. The host fails with the interpreter's own message
+; for the given code; this never returns (the return value is for typing only).
+(defn mp-parity-fail [(code i64)] (-> (ptr i8))
+  (do (call-ptr (load (field (mp-vt) fail)) code) (cast (ptr i8) 0)))

@@ -1,0 +1,19 @@
+(module tower_test)
+(import "lib/control.coil" :use *)
+; MACROS IN A MACRO BODY (the tower):
+; - `when` as a statement (both branches i64)
+; - `cond` in Code-tail position (all branches Code)
+; - a Code->Code helper called WITH a Code argument stays a FUNCTION call
+(defn wrap2 [(c Code)] (-> Code) `(do ~c ~c))
+(defn dbl [(c Code)] (-> Code)
+  (let [(mut n) 0]
+    (when (code-int? c) (store! n (code-int c)))
+    `~(imul (load n) 2)))
+(defn pick [(c Code)] (-> Code)
+  (cond
+    (code-int? c) (wrap2 `1)
+    (code-sym? c) `2
+    `3))
+(defn main [] (-> :i64)
+  ; dbl 21 -> 42 ; pick 9 -> (do 1 1) -> 1 ; pick foo -> 2
+  (iadd (dbl 21) (iadd (pick 9) (pick foo))))

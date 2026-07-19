@@ -1,0 +1,31 @@
+; counter.coil -- the minimal example, over externref. Build:
+;   coil build counter.coil --target wasm32-unknown-unknown -o counter.wasm
+(module counter)
+(import "slice.coil" :use *)
+(import "js.coil"    :use *)
+(import "dom.coil"   :use *)
+
+(defn count [] (-> (ptr i32)) (alloc-static i32))   ; the tally
+(defn view  [] (-> (ptr i32)) (alloc-static i32))   ; retain index of the display node
+
+(defn render [] (-> i32) (set-text-ref! (deref (load (view))) (js-num (load (count)))))
+
+(defn on-inc [(u i32) (e externref)] (-> i64) (store! (count) (iadd (load (count)) (cast i32 1))) (render) 0)
+(defn on-dec [(u i32) (e externref)] (-> i64) (store! (count) (isub (load (count)) (cast i32 1))) (render) 0)
+
+(defn main [] (-> i64)
+  (let [root    (body)
+        title   (create "h1")
+        display (create "div")
+        inc     (create "button")
+        dec     (create "button")]
+    (set-text! title "Coil counter") (append! root title)
+    (set-attr! display "id" "count") (set-text! display "0") (append! root display)
+    (set-text! inc "+") (on! inc "click" "on_inc" (cast i32 0)) (append! root inc)
+    (set-text! dec "-") (on! dec "click" "on_dec" (cast i32 0)) (append! root dec)
+    (store! (count) (cast i32 0))
+    (store! (view) (retain display))
+    (render)
+    0))
+
+(export-c [on-inc :as "on_inc"] [on-dec :as "on_dec"])

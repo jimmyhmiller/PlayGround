@@ -1,0 +1,10 @@
+// Producer/consumer over a bounded channel.
+fn produce(ch: Channel<i64>, n: i64) -> i64 { let mut i = 0; while i < n { ch.send(i); i = i + 1; } 0 }
+fn main() -> i64 {
+  let ch: Channel<i64> = Channel::new(2);
+  let t = Thread::spawn(|| produce(ch, 9));
+  let mut total = 0; let mut got = 0;
+  while got < 9 { total = total + ch.recv(); got = got + 1; }
+  t.join();
+  total + 6   // sum 0..8 = 36, +6 = 42
+}

@@ -131,6 +131,12 @@ pub enum OnSpawnStmt {
     /// packet to the new instance's inbox at sim-now. Payload defaults
     /// to `Nil` when omitted.
     Inject { tag: String, payload: Option<Expr> },
+    /// `sibling("Name") -> self : LAT` (`inbound = true`) or
+    /// `self -> sibling("Name") : LAT` (`inbound = false`) — wire the new
+    /// instance to a named sibling resolved against the spawner's
+    /// enclosing-compound prefix. Used so a spawned worker can attach to
+    /// a fixed load balancer / output node, not just its spawner.
+    SiblingEdge { sibling: String, inbound: bool, latency: Expr },
 }
 
 #[derive(Debug, Clone)]
@@ -220,7 +226,14 @@ pub enum Stmt {
         rp_op: ReturnPathOp,
     },
     Record  { name: String, value: Expr },
-    Spawn   { template: String, into: String },
+    /// `spawn EXPR -> var` — instantiate the class named by `EXPR`
+    /// (a string literal for a fixed class, or a slot read like
+    /// `template` for a runtime-configurable autoscaler).
+    Spawn   { template: Expr, into: String },
+    /// `despawn EXPR` — remove the node the expression resolves to (a
+    /// `NodeRef`). Drops its incident edges and nulls dangling refs to
+    /// it. Used by an autoscaling controller to shed idle workers.
+    Despawn { node: Expr },
     /// `error "kind" detail_expr` — record a runtime error in
     /// `Sim.error_counts[kind]` and emit a `RuntimeError` event.
     /// `kind` must be a string literal at parse time; detail can be

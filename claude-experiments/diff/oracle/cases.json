@@ -1,0 +1,92 @@
+[
+  {
+    "name": "static-typescript",
+    "entry": "fixtures/static-typescript/entry.ts",
+    "tags": ["baseline", "esm", "typescript"],
+    "stdout": "sum:5\n"
+  },
+  {
+    "name": "reexports",
+    "entry": "fixtures/reexports/entry.js",
+    "tags": ["baseline", "esm", "reexport"],
+    "stdout": "answer:42:default-ok\n"
+  },
+  {
+    "name": "commonjs-interop",
+    "entry": "fixtures/commonjs-interop/entry.js",
+    "tags": ["baseline", "commonjs", "interop"],
+    "stdout": "cjs:7\n"
+  },
+  {
+    "name": "json-module",
+    "entry": "fixtures/json-module/entry.js",
+    "tags": ["baseline", "json"],
+    "stdout": "oracle:3\n"
+  },
+  {
+    "name": "literal-dynamic-import",
+    "entry": "fixtures/literal-dynamic-import/entry.js",
+    "tags": ["baseline", "dynamic-import"],
+    "stdout": "before\nlazy:loaded\n"
+  },
+  {
+    "name": "package-exports",
+    "entry": "fixtures/package-exports/entry.js",
+    "tags": ["baseline", "package", "resolution"],
+    "stdout": "package:exports-ok\n"
+  },
+  {
+    "name": "side-effect-order",
+    "entry": "fixtures/side-effect-order/entry.js",
+    "tags": ["baseline", "esm", "evaluation-order"],
+    "stdout": "first\nsecond\nentry\n"
+  },
+  {
+    "name": "live-import-bindings",
+    "entry": "fixtures/live-import-bindings/entry.js",
+    "tags": ["esm-linking", "esm", "live-binding"],
+    "stdout": "count:0\ncount:1:{\"count\":1}\n"
+  },
+  {
+    "name": "namespace-object",
+    "entry": "fixtures/namespace-object/entry.js",
+    "tags": ["esm-linking", "esm", "namespace"],
+    "stdout": "keys:alpha,beta\nvalues:1:2\nmeta:Module:false\n"
+  },
+  {
+    "name": "circular-esm-functions",
+    "entry": "fixtures/circular-esm-functions/entry.js",
+    "tags": ["esm-linking", "esm", "cycle"],
+    "stdout": "cycle:a:b\n"
+  },
+  {
+    "name": "circular-esm-tdz",
+    "entry": "fixtures/circular-esm-tdz/entry.js",
+    "tags": ["esm-linking", "esm", "cycle", "error"],
+    "failure": true
+  },
+  {
+    "name": "mixed-esm-commonjs-cycle",
+    "entry": "fixtures/mixed-esm-commonjs-cycle/entry.js",
+    "tags": ["esm-linking", "esm", "commonjs", "cycle"],
+    "stdout": "mixed:esm-ready\n"
+  },
+  {
+    "name": "ambiguous-star-reexport",
+    "entry": "fixtures/ambiguous-star-reexport/entry.js",
+    "tags": ["esm-linking", "esm", "reexport", "error"],
+    "failure": true
+  },
+  {
+    "name": "syntax-error",
+    "entry": "fixtures/syntax-error/entry.js",
+    "tags": ["esm-linking", "diagnostic", "error"],
+    "failure": true
+  },
+  {
+    "name": "resolution-error",
+    "entry": "fixtures/resolution-error/entry.js",
+    "tags": ["esm-linking", "resolution", "diagnostic", "error"],
+    "failure": true
+  }
+]

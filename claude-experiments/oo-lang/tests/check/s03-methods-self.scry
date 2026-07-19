@@ -1,0 +1,12 @@
+class Counter {
+  n: Int
+  fn init() { self.n = 0 }
+  fn inc() { self.n = self.n + 1 }
+  fn get() -> Int { self.n }
+}
+fn main() {
+  let c = Counter()
+  c.inc()
+  c.inc()
+  print(c.get())
+}

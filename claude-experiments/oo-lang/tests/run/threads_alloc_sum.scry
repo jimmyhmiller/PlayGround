@@ -1,0 +1,32 @@
+// Each worker allocates its own instances and reports work done via a shared mutex sum;
+// 4 threads x 50 = 200. Also proves concurrent OP_NEW into two arenas is race-free (the
+// aggregate is exact).
+class Node { v: Int  fn init(v: Int) { self.v = v } }
+class Builder implements Runnable {
+  box: Mutex<Int>
+  fn run() -> Void {
+    var i = 0
+    while i < 50 {
+      let n = Node(v: i)
+      self.box.lock()
+      self.box.set(self.box.get() + 1)
+      self.box.unlock()
+      i = i + 1
+    }
+  }
+}
+fn main() {
+  let box = Mutex<Int>(0)
+  let hs = List<ThreadHandle>()
+  var t = 0
+  while t < 4 {
+    hs.push(Thread.spawn(Builder(box: box)))
+    t = t + 1
+  }
+  var j = 0
+  while j < 4 {
+    hs.get(j).join()
+    j = j + 1
+  }
+  print(box.get())
+}

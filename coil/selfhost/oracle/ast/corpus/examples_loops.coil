@@ -1,0 +1,31 @@
+(defn
+  sum-to
+  [(n :i64)]
+  (-> :i64)
+  (let
+    [(mut i) 1 (mut acc) 0]
+    (loop
+      (if
+        (icmp-gt (load i) n)
+        (break (load acc))
+        (do (store! acc (iadd (load acc) (load i))) (store! i (iadd (load i) 1)))))))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [(mut evens) 0]
+    (let
+      [(mut $g0) (isub 0 1)]
+      (loop
+        (store! $g0 (iadd (load $g0) 1))
+        (if
+          (icmp-lt (load $g0) 10)
+          (let
+            [i (load $g0)]
+            (if (icmp-eq (irem i 2) 1) (continue) 0)
+            (store! evens (iadd (load evens) 1)))
+          (break))))
+    (sum-to 10)))
+

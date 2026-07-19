@@ -1,0 +1,8 @@
+
+interface Tool { fn name() -> String }
+class ShellTool implements Tool { fn name() -> String { "s" } }
+fn needShell(t: ShellTool) -> String { t.name() }
+fn takeTool(t: Tool) -> String {
+  needShell(t)
+}
+fn main() {}

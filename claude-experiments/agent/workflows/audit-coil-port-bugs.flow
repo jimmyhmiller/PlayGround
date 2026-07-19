@@ -1,0 +1,12 @@
+workflow Audit Coil port bugs
+runner deepseek
+
+agent audit
+title Analyze main.coil for port-bug patterns
+prompt Given docs/coil-port-bugs.md and src/main.coil, identify any code that could trigger the same bugs (missing Eq bounds, field-on-call, etc.). Include file:line and bug pattern.
+after none
+
+agent prioritize
+title Prioritize fix candidates
+prompt Using the audit output, rank findings by severity and draft text descriptions of the top 2 fixes, referencing the bug doc.
+after audit

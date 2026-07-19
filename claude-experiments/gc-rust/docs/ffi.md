@@ -10,7 +10,9 @@ between gc-rust and C is where those invariants are most easily broken.
 This document records how comparable safe, GC'd languages solve the problem,
 the design we chose for gc-rust, and the phased plan for building it. Phases A–D
 are implemented today: scalar `extern "C"` calls; the safe-by-default native
-transition and `#[repr(C)]` value-struct passing by pointer; passing
+transition and `#[repr(C)]` value-struct passing **by value per the C ABI**
+(AAPCS64 register coercion — small structs/HFAs in registers, `mut` params by
+pointer); passing
 `String`/`Array` bytes to C by copy-to-stack (with copy-out for `mut` buffers);
 and **callbacks from C into gc-rust** via synthesized C-ABI trampolines.
 
@@ -73,9 +75,14 @@ from holding a pointer the collector will move or free.*
 extern "C" fn cos(x: f64) -> f64;
 extern "C" fn abs(x: i32) -> i32;
 
-// Tier 1+ (Phase B): #[repr(C)] value structs of scalars cross by copy.
-#[repr(C)]
-value struct Timespec { sec: i64, nsec: i64 }
+// Tier 1+ (Phase B): #[repr(C)] value structs cross BY VALUE per the C ABI.
+#[value] struct Color { r: u8, g: u8, b: u8, a: u8 }   // 4B -> one GPR
+#[value] struct Vector2 { x: f32, y: f32 }             // HFA -> SIMD regs
+extern "C" fn ClearBackground(c: Color);               // by value
+extern "C" fn GetMousePosition() -> Vector2;           // returned by value
+
+// A `mut` value-struct param is a C POINTER instead (an out / in-out param).
+#[value] struct Timespec { sec: i64, nsec: i64 }
 extern "C" fn clock_gettime(clk: i32, ts: mut Timespec) -> i32;
 
 // Fast tier (Phase B): promises not to allocate / GC / call back.
@@ -93,6 +100,20 @@ resolved at link time (AOT) or via the host process / `dlsym` (JIT).
    blittable. Passing a `String`, `Vec<T>`, or any heap (`Ref`) type to an
    `extern` function is a **compile error** — a managed pointer never crosses
    raw.
+
+1b. **Value structs use the real C ABI (AAPCS64).** A non-`mut` value-struct
+   parameter (and a return ≤ 16 bytes) crosses **by value**, coerced exactly as
+   `clang` does on this target — so gc-rust calls C libraries that pass small
+   structs in registers (e.g. raylib's `Color`/`Vector2`) with **no shim**:
+   - a **homogeneous float aggregate** (1–4 members all `f32` or all `f64`, e.g.
+     `Vector2`, `Rectangle`) → `[N x float|double]`, passed/returned in SIMD regs;
+   - a non-HFA **≤ 8 bytes** → one general register (`i64`; a ≤4-byte return uses
+     the tighter `i32`);
+   - **9–16 bytes** → two general registers (`[2 x i64]`);
+   - **> 16 bytes** → indirect (a pointer to a caller-allocated copy).
+   A **`mut`** value-struct parameter is instead a C **pointer** (an out/in-out
+   param, e.g. `gettimeofday(struct timeval*)`). See `abi_coerce` in
+   `src/codegen.rs`; `examples/raylib/` is the end-to-end proof.
 
 2. **No leading `Thread*`.** Ordinary gc-rust functions take a hidden leading
    `Thread*` (the GC ABI). Extern functions are plain C — codegen declares them

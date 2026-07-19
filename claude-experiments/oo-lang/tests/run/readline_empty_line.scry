@@ -1,0 +1,16 @@
+// A blank line (just Enter) is Some("") — a real empty line, distinct from EOF's None.
+fn main() {
+  var i = 0
+  while i < 3 {
+    match Console.readLine() {
+      None -> {
+        Console.log("none")
+        i = 3
+      }
+      Some(line) -> {
+        Console.log("len=" + "${line.len()}")
+        i = i + 1
+      }
+    }
+  }
+}

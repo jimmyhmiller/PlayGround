@@ -1,0 +1,61 @@
+# Behavioral corpus for the arm64 backend gate: <file> [argv...]
+# Programs must be deterministic (verified by running twice) and non-interactive.
+# Lines prefixed `R ` snapshot their reference behavior from the RUST compiler:
+# the self-host LLVM backend cannot build them (inline-asm streamer limitation)
+# but the arm64 backend assembles :shim trampolines natively.
+examples/allocation.coil
+examples/allocators.coil
+examples/args.coil alpha beta gamma
+examples/arraylist.coil
+examples/bitfields.coil
+examples/calc.coil
+examples/cinterop.coil
+examples/closure-lib.coil
+examples/closure.coil
+examples/control.coil
+examples/conventions.coil
+examples/defclosure.coil
+examples/defer.coil
+examples/dyn_write.coil
+examples/explicit-layout.coil
+examples/extern.coil
+examples/fib.coil
+examples/fmt.coil
+examples/generics.coil
+examples/hashmap.coil
+examples/inference.coil
+examples/io.coil
+examples/iter.coil
+examples/json.coil
+examples/layout.coil
+examples/lisp.coil
+examples/lockfree.coil
+examples/loops.coil
+examples/macros.coil
+examples/mem.coil
+examples/nl.coil
+examples/per-arch.coil
+examples/references.coil
+examples/simd.coil
+examples/slice.coil
+examples/structabi.coil
+examples/structs.coil
+examples/sums.coil
+examples/threads.coil
+examples/try.coil
+examples/vector.coil
+examples/widths.coil
+R examples/everything.coil
+R examples/shim.coil
+selfhost/oracle/arm64/tests/int-edges.coil
+selfhost/oracle/arm64/tests/float-edges.coil
+selfhost/oracle/arm64/tests/abi-stress.coil
+selfhost/oracle/arm64/tests/aggregates.coil
+selfhost/oracle/arm64/tests/control-edges.coil
+selfhost/oracle/arm64/tests/bits-widths.coil
+selfhost/oracle/arm64/tests/varargs-fnptr.coil
+selfhost/oracle/arm64/tests/recursion-strings.coil
+selfhost/oracle/arm64/tests/sums-deep.coil
+selfhost/oracle/arm64/tests/atomics-globals.coil
+selfhost/oracle/arm64/tests/impl-structural.coil
+selfhost/oracle/arm64/tests/comptime-readback.coil

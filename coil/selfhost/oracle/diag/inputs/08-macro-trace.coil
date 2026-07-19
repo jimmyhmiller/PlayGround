@@ -1,0 +1,3 @@
+(module app)
+(defn add-half [(x Code)] (-> Code) `(iadd ~x 1.5))
+(defn main [] (-> i64) (add-half 3))

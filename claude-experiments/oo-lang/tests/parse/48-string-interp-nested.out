@@ -1,0 +1,14 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let s
+        (str-interp
+          (str "outer ")
+          (call
+            (id f)
+            (arg
+              (str-interp
+                (str "inner ")
+                (id x))))
+          (str " end"))))))

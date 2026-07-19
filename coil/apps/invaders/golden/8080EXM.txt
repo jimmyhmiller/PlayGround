@@ -1,0 +1,27 @@
+8080 instruction exerciser
+dad <b,d,h,sp>................  ERROR **** crc expected:14474ba6 found:33b6a681
+aluop nn......................  ERROR **** crc expected:9e922f9e found:00e69965
+aluop <b,c,d,e,h,l,m,a>.......  ERROR **** crc expected:cf762c86 found:d0115665
+<daa,cma,stc,cmc>.............  ERROR **** crc expected:bb3f030c found:d8ce5b71
+<inr,dcr> a...................  ERROR **** crc expected:adb6460e found:5e929ee1
+<inr,dcr> b...................  ERROR **** crc expected:83ed1345 found:24b88375
+<inx,dcx> b...................  ERROR **** crc expected:f79287cd found:eb7d1a2b
+<inr,dcr> c...................  ERROR **** crc expected:e5f6721b found:ee8ec9c4
+<inr,dcr> d...................  ERROR **** crc expected:15b5579a found:6ceb0afc
+<inx,dcx> d...................  ERROR **** crc expected:7f4e2501 found:63a1b8e7
+<inr,dcr> e...................  ERROR **** crc expected:cf2ab396 found:f3c5a8f4
+<inr,dcr> h...................  ERROR **** crc expected:12b2952c found:61fbdd1f
+<inx,dcx> h...................  ERROR **** crc expected:9f2b23c0 found:83c4be26
+<inr,dcr> l...................  ERROR **** crc expected:ff57d356 found:303a359a
+<inr,dcr> m...................  ERROR **** crc expected:92e963bd found:d2e282b6
+<inx,dcx> sp..................  ERROR **** crc expected:d5702fab found:c99fb24d
+lhld nnnn.....................  ERROR **** crc expected:a9c3d5cb found:6d1eeb35
+shld nnnn.....................  ERROR **** crc expected:e8864f26 found:2c5b71d8
+lxi <b,d,h,sp>,nnnn...........  PASS! crc is:fcf46e12
+ldax <b,d>....................  ERROR **** crc expected:2b821d5f found:06cfc034
+mvi <b,c,d,e,h,l,m,a>,nn......  PASS! crc is:eaa72044
+mov <bcdehla>,<bcdehla>.......  ERROR **** crc expected:10b58cee found:dfe39de0
+sta nnnn / lda nnnn...........  ERROR **** crc expected:ed57af72 found:c01a7219
+<rlc,rrc,ral,rar>.............  ERROR **** crc expected:e0d89235 found:4bae6af9
+stax <b,d>....................  ERROR **** crc expected:2b0471e9 found:b726a433
+Tests complete

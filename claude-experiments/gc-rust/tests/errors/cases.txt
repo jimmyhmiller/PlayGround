@@ -1,0 +1,21 @@
+missing_brace	fn main() -> i64 { let x = 5
+empty_block	fn main() -> i64 {
+incomplete_add	fn main() -> i64 { 3 +
+unclosed_paren	fn main() -> i64 { foo((1 }
+unclosed_fn_params	fn f(
+bare_fn	fn
+undefined_var	fn main() -> i64 { x + 1 }
+unknown_fn	fn main() -> i64 { nope(3) }
+garbage_tokens	fn main() -> i64 { @#$ }
+field_on_int	fn main() -> i64 { let x = 5; x.f }
+unclosed_string	fn main() -> i64 { "unterminated
+missing_arrow	fn main() i64 { 0 }
+double_op	fn main() -> i64 { 1 * * 2 }
+unclosed_match	fn main() -> i64 { match 1 {
+empty_input	
+just_brace	}
+keyword_as_name	fn main() -> i64 { let fn = 5; 0 }
+unclosed_bracket	fn main() -> i64 { let a = [1, 2
+loc_check_brace	fn main() -> i64 { let x = 5
+loc_undef_var	fn main() -> i64 { let a = 1; a + zzz }
+loc_unknown_fn	fn main() -> i64 { nope(1) }

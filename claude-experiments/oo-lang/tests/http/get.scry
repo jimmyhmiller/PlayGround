@@ -1,0 +1,9 @@
+// Phase 8a real-network gate: a plain HTTPS GET to the Anthropic API root. Any real HTTP
+// status (200/401/404) proves DNS + TLS (system trust store) + HTTP response parsing all work
+// end to end through libcurl. Prints "status=NNN" for the harness to assert on.
+fn main() {
+  let headers = List<String>()
+  let resp = Http.request("GET", "https://api.anthropic.com/", headers, "")
+  Console.log("status=${resp.status}")
+  Console.log("bodylen=${resp.body.len()}")
+}

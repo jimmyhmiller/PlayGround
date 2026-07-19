@@ -1,0 +1,13 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let m
+        (call
+          (type Mutex (type AgentStatus))
+          (arg
+            (dot Waiting
+              (id AgentStatus)))))
+      (let l
+        (call
+          (type List (type Tool)))))))

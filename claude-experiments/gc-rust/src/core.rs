@@ -6,9 +6,11 @@
 //! `gc::TypeInfo`.
 
 use crate::ast::{BinOp, UnOp};
+use crate::gc::TypeMeta;
+use serde::Serialize;
 
 /// How a value is represented at the machine level.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Repr {
     /// Zero-size, no storage.
     Unit,
@@ -20,7 +22,7 @@ pub enum Repr {
     Ref(LayoutId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ScalarRepr {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
@@ -63,7 +65,7 @@ pub type LocalId = u32;
 // Heap object layout → gc::TypeInfo
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Layout {
     /// Number of leading 8-byte GC pointer slots (traced). Must come first.
     pub ptr_fields: u16,
@@ -77,17 +79,34 @@ pub struct Layout {
     /// For array layouts: the element stride in bytes (codegen-only; does not
     /// affect the GC `TypeInfo`). 0 for non-array layouts.
     pub elem_stride: u16,
+    /// Absolute byte offsets (header included) of GC pointers embedded in the raw
+    /// region — i.e. references inside flattened `#[value]` fields. These become
+    /// `gc::TypeInfo::interior_ptrs` so the collector traces them. Empty for the
+    /// common case (no value-with-ref fields).
+    pub interior_ptrs: Vec<u16>,
+    /// Runtime reflection metadata (nominal type/field names + field types) for
+    /// this layout. Travels 1:1 with the layout so the JIT/AOT paths and the
+    /// `emit reflect` view all read the same source of truth. Skipped in the
+    /// `core` JSON dump (it has a dedicated `reflect` view) and not consumed by
+    /// the GC, which only needs the structural fields above.
+    #[serde(skip)]
+    pub meta: TypeMeta,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum VarLen { None, Values, Bytes }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub enum FieldLoc {
     /// A GC pointer slot at pointer-index `idx` (byte offset = header + idx*8).
     Ptr { idx: u16 },
     /// A raw scalar at byte `offset` within the raw section.
     Raw { offset: u16, repr: ScalarRepr },
+    /// A flattened `#[value]` aggregate stored inline at byte `offset` within the
+    /// raw section. `value` is its [`ValueId`]; codegen stores/loads it as the
+    /// whole LLVM aggregate (not a scalar). Distinct from `ValueField`, which
+    /// addresses a sub-field of an already-loaded value aggregate.
+    ValueAt { offset: u16, value: ValueId },
     /// A field of an inline value aggregate, by its index in the LLVM struct.
     ValueField { index: u32 },
 }
@@ -96,44 +115,93 @@ pub enum FieldLoc {
 // Inline value aggregates (unboxed)
 // ============================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ValueLayout {
     pub name: String,
     /// `None` for a value struct; `Some` for a value enum (tagged union).
     pub variants: Option<Vec<ValueVariant>>,
     /// For a value struct: its fields in order.
     pub fields: Vec<Repr>,
+    /// Source field names for a value struct (`"0"`,`"1"`,… for tuples), for
+    /// reflection. Empty for value enums and tuples-without-names.
+    pub field_names: Vec<String>,
     pub size: u32,
     pub align: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ValueVariant {
     pub name: String,
     pub fields: Vec<Repr>,
+}
+
+/// The number of leading GC-pointer slots a flattened value enum reserves —
+/// the max over its variants of their `Ref` payload count. Pointer payloads of
+/// every variant share these leading slots (at fixed offsets `0, 8, …`), exactly
+/// like a reference enum's heap layout, so an embedded ref's offset does not
+/// depend on the runtime tag. The single source of truth for layout, codegen,
+/// and GC interior-pointer offsets. `0` means no ref payloads (the value enum
+/// keeps its compact `{ tag, raw }` form).
+pub fn value_enum_max_ptrs(variants: &[ValueVariant]) -> u16 {
+    variants
+        .iter()
+        .map(|v| v.fields.iter().filter(|f| matches!(f, Repr::Ref(_))).count() as u16)
+        .max()
+        .unwrap_or(0)
 }
 
 // ============================================================================
 // Program / functions
 // ============================================================================
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct CoreProgram {
     pub funcs: Vec<CoreFn>,
     /// Index = `type_id` in the runtime type table.
     pub layouts: Vec<Layout>,
     pub values: Vec<ValueLayout>,
     pub entry: Option<FuncId>,
+    /// Interned source spans (the span-threading side table). A `CoreExpr.span`
+    /// of `k` (≥1) refers to `spans[k-1]`; [`NO_SPAN`] (0) means no location.
+    pub spans: Vec<crate::lexer::Span>,
+    /// The SourceMap: one entry per [`crate::lexer::SourceId`] (0 = user, then
+    /// `mod` files in load order, then the prelude assigned last). A span resolves
+    /// against `sources[span.source]`
+    /// so prelude/module spans (lexed in their own offset spaces) get their REAL
+    /// `file:line:col`, never a fabricated user-file line. Set by the driver after
+    /// lowering; empty when source isn't available (unit tests build programs
+    /// directly → spans resolve to `None`).
+    pub sources: Vec<SourceEntry>,
 }
 
-#[derive(Clone, Debug)]
+/// One source in the [`CoreProgram`] SourceMap: its display path + full text.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SourceEntry {
+    pub path: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreFn {
     /// Mangled, globally-unique name.
     pub name: String,
     pub params: Vec<Repr>,
+    /// For an `extern "C"` function only: parallel to `params`, marks each
+    /// value-struct parameter that crosses **by pointer** (a `mut` param — the C
+    /// side reads/writes through it, e.g. `gettimeofday(struct timeval*)`). A
+    /// non-`mut` value-struct param is `false` here and crosses **by value** per
+    /// the platform C ABI (AAPCS64 coercion). Empty / all-`false` for scalars and
+    /// non-extern functions. See `docs/ffi.md`.
+    pub extern_by_ref: Vec<bool>,
     pub ret: Repr,
     /// Total local slots (params first, then `let`/temp locals).
     pub locals: Vec<Repr>,
+    /// Parallel to `locals`: each local's source-level name, when it has one
+    /// (`let x`, a parameter, a closure capture). `None` for compiler temps.
+    /// Drives DWARF local-variable DIEs (debugger P3) so `frame variable` shows
+    /// `x`, not `l7`. Empty for functions lowered before this was threaded
+    /// (treated as all-`None`).
+    pub local_names: Vec<Option<String>>,
     pub body: CoreBlock,
     /// If this is a lifted closure function, it takes an extra *leading* `env`
     /// pointer parameter (before `params`), and its first `closure_captures.len()`
@@ -145,10 +213,16 @@ pub struct CoreFn {
     /// and `name` is the unmangled C symbol resolved at link/JIT time. Calls to
     /// it omit the `Thread*` argument. See `docs/ffi.md`.
     pub is_extern: bool,
+    /// The function's definition span (interned), for DWARF: it names the source
+    /// + line the function is DEFINED in — used to place its `DISubprogram` in the
+    /// right `DIFile` (a monomorphized prelude/`mod` function resolves to ITS
+    /// source, not the user file). [`NO_SPAN`] when unknown. See the debugger P2
+    /// plan; far more robust than scanning the body for a representative node.
+    pub span: SpanId,
 }
 
 /// How to initialize one capture local from the closure env object.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct ClosureCapture {
     /// The local slot (in `CoreFn.locals`) this capture initializes.
     pub local: LocalId,
@@ -157,13 +231,13 @@ pub struct ClosureCapture {
     pub offset: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreBlock {
     pub stmts: Vec<CoreStmt>,
     pub tail: Option<CoreExpr>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum CoreStmt {
     Let(LocalId, CoreExpr),
     Expr(CoreExpr),
@@ -173,13 +247,27 @@ pub enum CoreStmt {
 // Expressions
 // ============================================================================
 
-#[derive(Clone, Debug)]
+/// A compact source-location handle: a 1-based index into [`CoreProgram::spans`]
+/// (0 = [`NO_SPAN`], no location). Keeps the Core IR lean — nodes carry a `u32`,
+/// not a full `Span` — while an interned side table holds the real spans
+/// (consulted only at DWARF emission / alloc-site labeling, not in hot passes).
+/// This is the debugger's span-threading foundation (docs/DEBUGGER_DESIGN.md).
+pub type SpanId = u32;
+
+/// Sentinel `SpanId` meaning "no source location attached".
+pub const NO_SPAN: SpanId = 0;
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreExpr {
     pub kind: Box<CoreExprKind>,
     pub repr: Repr,
+    /// Source location (interned). [`NO_SPAN`] if unknown. Threaded from the AST
+    /// through lowering + ANF so codegen can label alloc sites with file:line:col
+    /// and (later) emit DWARF line tables.
+    pub span: SpanId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum CoreExprKind {
     ConstInt(u64, ScalarRepr),
     ConstFloat(f64, ScalarRepr),
@@ -204,6 +292,8 @@ pub enum CoreExprKind {
     /// String primitives. Operands are `Ref`s to `String` heap objects.
     /// `print_str(s)` → i64 0.
     PrintStr(Box<CoreExpr>),
+    /// `print(s)` → i64 0. Like `PrintStr` but NO trailing newline; flushes.
+    PrintStrRaw(Box<CoreExpr>),
     /// `str_len(s)` → i64 byte length.
     StrLen(Box<CoreExpr>),
     /// `str_eq(a, b)` → bool.
@@ -218,10 +308,26 @@ pub enum CoreExprKind {
     /// `to_string(v)` → a fresh `String` (int or float rendering). `is_float`
     /// selects the runtime entry point.
     StrFromNum { layout: LayoutId, is_float: bool, v: Box<CoreExpr> },
+    /// `char_to_str(cp)` → a fresh 1–4 byte `String`, the UTF-8 encoding of the
+    /// Unicode scalar `cp` (invalid scalars become U+FFFD).
+    StrFromChar { layout: LayoutId, cp: Box<CoreExpr> },
+    /// `read_file(path)` → a fresh `String` with the file's bytes (empty if the
+    /// file can't be read). Lets a self-hosted compiler driver read source files.
+    ReadFile { layout: LayoutId, path: Box<CoreExpr> },
     /// `str_to_float(s)` → f64 (0.0 on malformed input).
     StrToFloat(Box<CoreExpr>),
+    /// `float_bits(f)` → i64 reinterpreting the f64's bit pattern (bitcast). Lets a
+    /// self-hosted compiler get a float literal's raw bits for uniform i64 storage.
+    FloatBits(Box<CoreExpr>),
     /// `str_hash(s)` → i64 non-negative hash.
     StrHash(Box<CoreExpr>),
+    /// `type_id_of(x)` → i64: the runtime `type_id` from a heap object's header.
+    /// `x` must be a `Ref` (heap) value. Reflection primitive.
+    TypeIdOf(Box<CoreExpr>),
+    /// `type_name_of(x)` → String: the source type name from the reflection
+    /// metadata table, allocated as a heap String (`layout` is the String
+    /// layout). `obj` must be a `Ref` value. Reflection primitive.
+    TypeNameOf { layout: LayoutId, obj: Box<CoreExpr> },
     /// FFI `as_c_bytes(x)` → a `RawPtr` (`Scalar(Ptr)`) to a stack-resident copy
     /// of a `String`'s or scalar `Array`'s contents. Codegen copies the heap
     /// bytes into a fresh stack alloca for the duration of the enclosing extern
@@ -245,8 +351,20 @@ pub enum CoreExprKind {
     ArrayNew { layout: LayoutId, len: Box<CoreExpr>, elem: Repr },
     /// Number of elements in an array (its varlen count). Yields i64.
     ArrayLen(Box<CoreExpr>),
-    /// Read element `index` from an array. Repr is the element repr.
+    /// Read element `index` from an array, returning `Option<T>` (`None` when
+    /// out of bounds). The CoreExpr's repr is the `Option<T>` value enum; `elem`
+    /// is the element repr used for the in-bounds load.
     ArrayGet { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
+    /// Unchecked element read: a raw load with NO bounds check, yielding `T`
+    /// directly. The unsafe escape hatch behind `array_get`; out-of-bounds is
+    /// undefined behaviour. Used by trusted, already-bounds-checked code (e.g.
+    /// the prelude's `Vec` internals) and hot paths. Repr is the element repr.
+    ArrayGetUnchecked { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
+    /// Checked element read for the `a[i]` index operator: bounds-checked, yields
+    /// `T` directly, and aborts (clear error) on out-of-bounds — Rust-like
+    /// indexing. (`array_get` the function returns `Option<T>` instead.) Repr is
+    /// the element repr.
+    ArrayGetChecked { array: Box<CoreExpr>, index: Box<CoreExpr>, elem: Repr },
     /// Write `value` to element `index` of an array. Yields i64 0.
     ArraySet { array: Box<CoreExpr>, index: Box<CoreExpr>, value: Box<CoreExpr>, elem: Repr },
     /// Numeric conversion: trunc / sext / zext / fp<->int / fp resize.
@@ -345,7 +463,7 @@ pub enum CoreExprKind {
     Assign { local: LocalId, value: Box<CoreExpr> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CoreArm {
     /// Variant tag this arm matches.
     pub tag: u32,
@@ -354,11 +472,57 @@ pub struct CoreArm {
     pub body: CoreExpr,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum FloatIntrinsic { Sqrt, Abs, Floor, Ceil }
 
 impl CoreExpr {
     pub fn new(kind: CoreExprKind, repr: Repr) -> Self {
-        CoreExpr { kind: Box::new(kind), repr }
+        CoreExpr { kind: Box::new(kind), repr, span: NO_SPAN }
+    }
+
+    /// Attach a source location (builder form): `CoreExpr::new(k, r).at(span_id)`.
+    /// Used by lowering at construction/alloc sites and by ANF to preserve the
+    /// span when it rebuilds a node.
+    pub fn at(mut self, span: SpanId) -> Self {
+        self.span = span;
+        self
+    }
+}
+
+impl CoreProgram {
+    /// Resolve an interned [`SpanId`] to `(source-label, 1-based line, col)`,
+    /// MULTI-SOURCE-AWARE: each span carries its [`crate::lexer::SourceId`], so a
+    /// prelude/module span (lexed in its own offset space) resolves against the
+    /// RIGHT source text in `sources` — its real location, never a fabricated
+    /// user-file line. `None` if the id is [`NO_SPAN`], out of range, or no
+    /// source is available (tests that build a program directly).
+    pub fn span_location(&self, span: SpanId) -> Option<(String, usize, usize)> {
+        let (sid, line, col) = self.span_source_loc(span)?;
+        Some((self.sources[sid as usize].path.clone(), line, col))
+    }
+
+    /// Like [`span_location`](Self::span_location) but returns the resolved
+    /// [`crate::lexer::SourceId`] (not the path label) alongside `(line, col)` —
+    /// the form DWARF emission needs to pick the per-source `DIFile`.
+    pub fn span_source_loc(
+        &self,
+        span: SpanId,
+    ) -> Option<(crate::lexer::SourceId, usize, usize)> {
+        if span == NO_SPAN {
+            return None;
+        }
+        let s = self.spans.get((span - 1) as usize)?;
+        let entry = self.sources.get(s.source as usize)?;
+        if entry.text.is_empty() {
+            return None;
+        }
+        let (line, col) = crate::diag::line_col(&entry.text, s.start as usize);
+        Some((s.source, line, col))
+    }
+
+    /// `file:line:col` for an interned span, or `None` if unresolvable.
+    pub fn span_label(&self, span: SpanId) -> Option<String> {
+        let (file, line, col) = self.span_location(span)?;
+        Some(format!("{file}:{line}:{col}"))
     }
 }

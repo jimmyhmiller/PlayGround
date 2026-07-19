@@ -1,0 +1,75 @@
+; The COMPILED comptime readback (interp deletion step 2).
+;
+; Every `(comptime …)` below calls `sizeof`, which the tree-walking interpreter
+; rejects outright. So the interpreter declines, the site routes to the compiled
+; engine, and the value can only come back through comptime_eval's native-memory
+; reader. If that reader is wrong these print wrong values or the build fails —
+; and because the gate diffs arm64 against the LLVM reference, a reader that
+; matches only one backend's layout fails too.
+;
+; Covered here: sums (fields and nullary), f32, arrays, strings, nested structs,
+; and the non-default `packed` / `explicit` layouts.
+(module t)
+(import "lib/alloc.coil" :use *)
+(import "lib/io.coil" :use *)
+(import "lib/fmt.coil" :use *)
+
+(defn out [(w (ptr Writer)) (l (slice u8)) (v i64)] (-> i64)
+  (print-str w l) (print-str w "=") (print-i w v) (print-nl w) 0)
+
+(defsum R (Yes [(v i64) (w i32)]) (No []) (Frac [(f f64)]))
+(defstruct Inner [(a i32) (b i64)])
+(defstruct Outer [(tag i64) (inner Inner) (cells (array i32 3))])
+(defstruct Reg :layout explicit :size 16 :align 8
+  [(id i32 :at 0) (data i64 :at 8)])
+(defstruct Pk :layout packed [(a u8) (b i64)])
+
+(defn mk-yes  [] (-> R)   (Yes (sizeof i64) 7))
+(defn mk-no   [] (-> R)   (if (icmp-gt (sizeof i64) 0) (No) (Yes 0 0)))
+(defn mk-frac [] (-> R)   (Frac (fdiv (cast f64 (sizeof i64)) 4.0)))
+(defn mk-f32  [] (-> f32) (fdiv (cast f32 (sizeof i64)) 4.0))
+(defn mk-outer [] (-> Outer)
+  (let [p (alloc-stack Outer)]
+    (store! (field p tag) (sizeof i64))
+    (store! (field (field p inner) a) 11)
+    (store! (field (field p inner) b) 22)
+    (store! (index (field p cells) 0) 1)
+    (store! (index (field p cells) 1) 2)
+    (store! (index (field p cells) 2) 3)
+    (load p)))
+(defn mk-reg [] (-> Reg)
+  (let [p (alloc-stack Reg)]
+    (store! (field p id) (cast i32 (sizeof i64))) (store! (field p data) 99) (load p)))
+(defn mk-pk [] (-> Pk)
+  (let [p (alloc-stack Pk)]
+    (store! (field p a) (cast u8 (sizeof i64))) (store! (field p b) 1234) (load p)))
+(defn mk-str [] (-> (slice u8)) (if (icmp-gt (sizeof i64) 0) "eight" "other"))
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    (match (comptime (mk-yes))
+      (Yes [v x] (do (out w "yes.v" v) (out w "yes.w" (cast i64 x))))
+      (No [] (out w "yes" -1)) (Frac [f] (out w "yes" -2)))
+    (match (comptime (mk-no))
+      (Yes [v x] (out w "no" -1)) (No [] (out w "no" 0)) (Frac [f] (out w "no" -2)))
+    (match (comptime (mk-frac))
+      (Yes [v x] (out w "frac" -1)) (No [] (out w "frac" -2))
+      (Frac [f] (out w "frac.x10" (cast i64 (fmul f 10.0)))))
+    (out w "f32.x10" (cast i64 (fmul (cast f64 (comptime (mk-f32))) 10.0)))
+    (let [o (alloc-stack Outer)]
+      (store! o (comptime (mk-outer)))
+      (out w "outer.tag" (load (field o tag)))
+      (out w "outer.a"   (cast i64 (load (field (field o inner) a))))
+      (out w "outer.b"   (load (field (field o inner) b)))
+      (out w "outer.c0"  (cast i64 (load (index (field o cells) 0))))
+      (out w "outer.c2"  (cast i64 (load (index (field o cells) 2)))))
+    (let [r (alloc-stack Reg)]
+      (store! r (comptime (mk-reg)))
+      (out w "reg.id"   (cast i64 (load (field r id))))
+      (out w "reg.data" (load (field r data))))
+    (let [k (alloc-stack Pk)]
+      (store! k (comptime (mk-pk)))
+      (out w "pk.a" (cast i64 (load (field k a))))
+      (out w "pk.b" (load (field k b))))
+    (print-str w "str=") (print-str w (comptime (mk-str))) (print-nl w)
+    0))

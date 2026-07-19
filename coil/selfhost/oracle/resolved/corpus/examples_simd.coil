@@ -1,0 +1,23 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a
+      (llvm-ir
+        (vec f32 4)
+        [(cast :f32 10) (cast :f32 10) (cast :f32 10) (cast :f32 12)]
+        "%v0 = insertelement <4 x float> undef, $t0 $0, i32 0
+%v1 = insertelement <4 x float> %v0, $t1 $1, i32 1
+%v2 = insertelement <4 x float> %v1, $t2 $2, i32 2
+%r  = insertelement <4 x float> %v2, $t3 $3, i32 3
+ret $ret %r")
+      b
+      (llvm-ir
+        (vec f32 4)
+        [(cast :f32 1)]
+        "%v = insertelement <4 x float> undef, $t0 $0, i32 0
+%r = shufflevector <4 x float> %v, <4 x float> undef, <4 x i32> zeroinitializer
+ret $ret %r")]
+    (cast :i64 (dot4f a b))))
+

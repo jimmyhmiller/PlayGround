@@ -1,0 +1,67 @@
+(defn
+  when
+  [(c Code) & (body Code)]
+  (-> Code)
+  (quasiquote (if (unquote c) (do (unquote-splicing body)) 0)))
+
+(defn inc [(x Code)] (-> Code) (quasiquote (iadd (unquote x) 1)))
+
+(defn
+  cond-arms
+  [(cs Code)]
+  (-> Code)
+  (if
+    (icmp-eq (code-count cs) 0)
+    (quasiquote 0)
+    (if
+      (icmp-eq (code-count cs) 1)
+      (code-nth cs 0)
+      (quasiquote
+        (if
+          (unquote (code-nth cs 0))
+          (unquote (code-nth cs 1))
+          (unquote (cond-arms (code-rest (code-rest cs)))))))))
+
+(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
+
+(defn
+  pow-form
+  [(x Code) (n i64)]
+  (-> Code)
+  (if
+    (icmp-eq n 0)
+    (quasiquote 1)
+    (quasiquote (imul (unquote x) (unquote (pow-form x (isub n 1)))))))
+
+(defn pow [(x Code) (n Code)] (-> Code) (pow-form x (code-int n)))
+
+(defn
+  double
+  [(x Code)]
+  (-> Code)
+  (let
+    [t (gensym)]
+    (quasiquote (let [(unquote t) (unquote x)] (iadd (unquote t) (unquote t))))))
+
+(defn
+  defconst
+  [(name Code) (v Code)]
+  (-> Code)
+  (quasiquote (defn (unquote name) [] (-> :i64) (unquote v))))
+
+(defn base [] (-> :i64) 3)
+
+(defn classify [(n :i64)] (-> :i64) (if (icmp-lt n 0) 100 (if (icmp-eq n 0) 200 300)))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (if
+    (icmp-eq (classify 0) 200)
+    (do
+      (iadd
+        (imul (base) (imul (base) (imul (base) 1)))
+        (let [$g0 (iadd 6 1)] (iadd $g0 $g0))))
+    0))
+

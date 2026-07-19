@@ -1,0 +1,7 @@
+// SCENARIO 1 — redefine a function while it runs.
+//
+// `radius` is called once per particle per frame. Installing a new version
+// takes effect at the very next call: the particles resize mid-flight. The
+// `main` loop is never restarted and the canvas is never reopened.
+
+fn radius(p: Particle) -> i64 { 8 + p.y / 24 }

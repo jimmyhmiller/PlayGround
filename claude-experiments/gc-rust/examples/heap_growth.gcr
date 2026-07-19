@@ -1,0 +1,24 @@
+// heap_growth — a deliberate "leak" for the heap explorer's growth/leak tab.
+// Each loop iteration conses one more (Node, List) cell onto an ever-growing
+// list and takes a `heap_snapshot()`, so the snapshot SERIES shows List + Node
+// retained bytes climbing monotonically — the classic leak signature the growth
+// tab flags. Run with: `gcr heap examples/heap_growth.gcr --series <out.json>`.
+
+struct Node { v: i64 }
+enum List { Nil, Cons(Node, List) }
+
+fn len(l: List) -> i64 {
+    match l { List::Nil => 0, List::Cons(n, rest) => 1 + len(rest) }
+}
+
+fn main() -> i64 {
+    let mut acc = List::Nil;
+    let mut i = 0;
+    while i < 8 {
+        acc = List::Cons(Node { v: i }, acc);
+        // `acc` is live here — each snapshot sees one more cell than the last.
+        heap_snapshot();
+        i = i + 1;
+    }
+    len(acc)
+}

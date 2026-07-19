@@ -1,0 +1,7 @@
+(module app)
+(import "located.coil" :use *)
+(checker located-check)
+(defn banned [(x :i64)] (-> :i64) x)
+(defn f [(x :i64)] (-> :i64) (banned x))     ; error 1
+(defn g [(y :i64)] (-> :i64) (banned y))     ; error 2
+(defn main [] (-> :i64) 0)

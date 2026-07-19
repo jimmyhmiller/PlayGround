@@ -71,6 +71,51 @@ impl EffectSet {
     pub fn without(self, mask: EffectSet) -> EffectSet {
         EffectSet(self.0 & !mask.0)
     }
+
+    /// The individual effects in this set, as lowercase tokens (the inverse
+    /// of [`from_tokens`](Self::from_tokens)). Empty ⇒ `[]` (i.e. `pure`).
+    pub fn tokens(self) -> Vec<&'static str> {
+        [
+            (EffectSet::IO, "io"),
+            (EffectSet::NET, "net"),
+            (EffectSet::STATE, "state"),
+            (EffectSet::ATOM, "atom"),
+            (EffectSet::MUT, "mut"),
+            (EffectSet::FFI, "ffi"),
+        ]
+        .into_iter()
+        .filter(|(bit, _)| self.contains(*bit))
+        .map(|(_, name)| name)
+        .collect()
+    }
+
+    /// Parse a node effect policy: a comma/space/`|`-separated list of
+    /// `io,net,state,atom,mut,ffi`, or the shorthands `all` (every effect)
+    /// and `pure`/`none`/empty (no effects). Used to read a node's allowed
+    /// effect set from config (`AI_LANG_AT_EFFECTS`). Unknown tokens error
+    /// rather than being silently ignored (a typo'd policy must not widen
+    /// access).
+    pub fn from_tokens(s: &str) -> Result<EffectSet, String> {
+        let mut set = EffectSet::EMPTY;
+        for tok in s.split([',', ' ', '|', '\t']).filter(|t| !t.is_empty()) {
+            set |= match tok.to_ascii_lowercase().as_str() {
+                "all" => EffectSet::ALL,
+                "pure" | "none" => EffectSet::EMPTY,
+                "io" => EffectSet::IO,
+                "net" => EffectSet::NET,
+                "state" => EffectSet::STATE,
+                "atom" => EffectSet::ATOM,
+                "mut" => EffectSet::MUT,
+                "ffi" => EffectSet::FFI,
+                other => {
+                    return Err(format!(
+                        "unknown effect `{other}` (expected io|net|state|atom|mut|ffi|all|pure)"
+                    ))
+                }
+            };
+        }
+        Ok(set)
+    }
 }
 
 impl std::ops::BitOr for EffectSet {

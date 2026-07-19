@@ -1,0 +1,21 @@
+(module smoke)
+(import "gcrun.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "control.coil" :use *)
+(defn build [(k i64) (i i64)] (-> (ptr Pair))
+  (if (>= i k) (nil)
+    (let [t (build k (+ i 1))]
+      (gc-root t)
+      (cons i t))))
+(defn sum [(xs (ptr Pair))] (-> i64)
+  (if (nil? xs) 0 (+ (car xs) (sum (cdr xs)))))
+(defn main [] (-> :i64)
+  (let [(mut total) 0]
+    (for [m 0 2000]
+      (let [sp (gc-sp) h (build 50 0)]
+        (gc-root h)
+        (store! total (+ total (sum h)))
+        (gc-sp-set sp)))
+    (fmt (stdout) "sum={d} (expect 2450000) peak={d} collections={d}\n" total (gc-peak) (gc-collections))
+    0))

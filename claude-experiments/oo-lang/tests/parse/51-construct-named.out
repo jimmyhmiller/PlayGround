@@ -1,0 +1,13 @@
+(program
+  (fn main
+    (params)
+    (block
+      (let t
+        (call
+          (id Task)
+          (arg title
+            (str "scrape docs"))
+          (arg priority
+            (int 2))
+          (arg done
+            (bool false)))))))

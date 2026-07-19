@@ -1,0 +1,17 @@
+; Bidirectional literal inference: integer literals adopt the iN/uN type of
+; their context, so the cast-noise of writing (cast :u8 ...) everywhere is gone.
+; The checker inserts the casts for you (and rejects literals that don't fit).
+;   coil run examples/inference.coil; echo $?   => 42
+
+(defstruct Pixel [(r :u8) (g :u8) (b :u8) (a :u8)])
+
+; `lo : u8` makes the bare 1 below infer as u8 (same width as its sibling).
+(defn channel :cc c [(base :u8)] (-> :u8)
+  (iadd base 1))            ; `1` is u8 here — no (cast :u8 1)
+
+(defn main [] (-> :i64)
+  (let [px (alloc-stack Pixel)]
+    (store! (field px r) 40)        ; literal 40 adopts u8 from (ptr u8)
+    (store! (field px g) (channel 1))   ; call arg 1 adopts u8; result 2
+    (iadd (cast :i64 (load (field px r)))
+          (cast :i64 (load (field px g))))))   ; 40 + 2 = 42

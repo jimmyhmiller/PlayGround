@@ -107,6 +107,11 @@ pub enum Example {
     /// 1s / 2s / 4s / 8s waves — the thundering herd. Bring the
     /// Worker back up and watch a wall of simultaneous reqs hit it.
     BackoffHerd,
+    /// A Generator drives an AutoScalingGroup that spawns/destroys
+    /// worker nodes to track load. Drill into the ASG to watch the load
+    /// balancer fan out to the live fleet as it grows under load and
+    /// shrinks when the generator can't keep it busy.
+    AutoScaling,
 }
 
 impl Example {
@@ -117,6 +122,7 @@ impl Example {
         Example::TwoClientsOneWorker,
         Example::ClientQueueWorker,
         Example::BackoffHerd,
+        Example::AutoScaling,
     ];
 
     pub fn label(self) -> &'static str {
@@ -127,6 +133,7 @@ impl Example {
             Example::TwoClientsOneWorker => "2 Clients→1 Worker",
             Example::ClientQueueWorker  => "Client→Queue→Worker",
             Example::BackoffHerd        => "Backoff herd",
+            Example::AutoScaling        => "Auto scaling group",
         }
     }
 
@@ -138,6 +145,7 @@ impl Example {
             Example::TwoClientsOneWorker => "Two clients share one worker. Each client's return_path steers its own response back — they never cross.",
             Example::ClientQueueWorker  => "Client submits to a queue, queue acks immediately; a worker pulls from the queue on its own schedule.",
             Example::BackoffHerd        => "Twenty BackoffClients hammering one Worker. Toggle the Worker down/up to see fixed exponential backoff synchronise into a thundering herd.",
+            Example::AutoScaling        => "A Generator feeds an AutoScalingGroup that spawns and destroys workers to track load. Drill in (double-click) to watch the load balancer fan out to the live fleet.",
         }
     }
 }
@@ -222,6 +230,7 @@ fn handle_load_example(
         Example::TwoClientsOneWorker => build_two_clients_one_worker(&mut ctx),
         Example::ClientQueueWorker  => build_client_queue_worker(&mut ctx),
         Example::BackoffHerd        => build_backoff_herd(&mut ctx),
+        Example::AutoScaling        => build_autoscaling(&mut ctx),
     }
 
     // Recompute compound membership from the freshly built sim. The
@@ -609,4 +618,26 @@ fn build_backoff_herd(ctx: &mut BuildCtx) {
             ctx.wire(client, Kind::BackoffClient, worker, Kind::Worker);
         }
     }
+}
+
+/// Generator → AutoScalingGroup → Sink. The Generator runs faster than a
+/// single worker can drain, so the ASG's Scaler spawns more workers until
+/// the fleet keeps up (capped at `max_workers`); when the load can't fill
+/// the fleet it sheds the idle ones. Double-click the ASG to drill in and
+/// watch the load balancer fan out to the live workers.
+fn build_autoscaling(ctx: &mut BuildCtx) {
+    let source = ctx.place(Kind::Generator, 0, Vec2::new(-360.0, 0.0));
+    let asg = ctx.place(Kind::AutoScalingGroup, 0, Vec2::new(0.0, 0.0));
+    let sink = ctx.place(Kind::Sink, 0, Vec2::new(360.0, 0.0));
+
+    // Push hard enough that one 40 ms worker saturates and the group has
+    // to scale out.
+    ctx.set_slot(source, "period_ns", Value::Int(25_000_000)); // 40/s
+    // A brisk control loop so scaling is visible within a few seconds.
+    ctx.set_slot(asg, "tick_ns", Value::Int(150_000_000));
+    ctx.set_slot(asg, "max_workers", Value::Int(6));
+    ctx.set_slot(asg, "min_workers", Value::Int(1));
+
+    ctx.wire(source, Kind::Generator, asg, Kind::AutoScalingGroup);
+    ctx.wire(asg, Kind::AutoScalingGroup, sink, Kind::Sink);
 }

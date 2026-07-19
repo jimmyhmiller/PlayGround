@@ -1,0 +1,21 @@
+workflow Review Flowline UI Changes for Bugs
+runner codex
+
+agent review-main
+title Review src/main.coil
+prompt Review \`src/main.coil\` for bugs related to flowline UI changes. Examine the application state machine, input handling, layout, and rendering. Identify potential issues, logic errors, UI glitches, and regressions. Output a list of findings.
+after none
+
+agent review-native
+title Review src/native.coil
+prompt Review \`src/native.coil\` for bugs related to flowline UI changes. Examine native widget bindings, text rendering, layout, and integration with the application. Identify potential issues, misalignments, and rendering bugs. Output a list of findings.
+after none
+
+agent merge-findings
+title Merge findings into risk list
+prompt Combine the two review reports into a single risk list. Remove duplicate issues, merge related observations, and prioritize by severity. Produce a concise, actionable list of bugs and risks for human review.
+after review-main, review-native
+
+approval approve-risks
+title Human approval of risk list
+after merge-findings

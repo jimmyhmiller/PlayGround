@@ -1,0 +1,9 @@
+enum Status { Waiting Running Done }
+fn describe(s: Status) -> String {
+  match s {
+    Waiting -> "waiting"
+    Running -> "running"
+    Done -> "done"
+  }
+}
+fn main() { print(describe(Status.Waiting)) }

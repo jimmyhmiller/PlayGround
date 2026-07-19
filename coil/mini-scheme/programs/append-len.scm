@@ -1,0 +1,5 @@
+(define (append2 a b) (if (null? a) b (cons (car a) (append2 (cdr a) b))))
+(define (range n) (if (= n 0) (quote ()) (cons n (range (- n 1)))))
+(define (len xs) (if (null? xs) 0 (+ 1 (len (cdr xs)))))
+(define (bench k last) (if (= k 0) last (bench (- k 1) (len (append2 (range 30) (range 20))))))
+(display (bench 250000 0)) (newline)

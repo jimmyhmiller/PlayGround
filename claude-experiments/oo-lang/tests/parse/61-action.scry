@@ -1,0 +1,5 @@
+action "Pause" for Agent { self.pause() }
+action "Ask" for Agent (question: String) { self.runLoop(question) }
+action "Spawn researcher" for Orchestrator (topic: String, count: Int) {
+  self.research(topic)
+}

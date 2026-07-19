@@ -1,0 +1,16 @@
+/target
+/.cargo
+apps/chip8/chip8-gui
+
+# Copyrighted arcade ROM — user must supply (see apps/invaders/README.md)
+roms/invaders.rom
+roms/invaders.[hgfe]
+
+# compiled app binaries
+apps/invaders/invaders
+apps/invaders/*.o
+
+# repro build artifacts
+docs/repro/*/repro
+docs/repro/*/librepro.a
+docs/repro/*/librepro.o

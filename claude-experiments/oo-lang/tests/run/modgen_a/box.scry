@@ -1,0 +1,10 @@
+module modgen_a.box
+
+// used by tests/eval/*modgen* goldens (07-modules.md §6/§7 Phase 2 item 1): a GENERIC
+// class instantiated with a type argument from ANOTHER module, so the mono's qualified
+// identity key must qualify both the base AND the argument (modgen_a.box.Box<modgen_b.item.Item>).
+import modgen_b.item.{Item}
+
+class Box<T> {
+  items: List<T>
+}

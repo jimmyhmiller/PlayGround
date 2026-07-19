@@ -1,0 +1,24 @@
+// Clock.sleep is safepoint-cooperative and must not hang or crash. A thread sleeps in
+// short/long slices, a second thread sleeps too; after join we print a deterministic total.
+class Napper implements Runnable {
+  box: Mutex<Int>
+  fn run() -> Void {
+    var i = 0
+    while i < 3 {
+      Clock.sleep(20)
+      self.box.lock()
+      self.box.set(self.box.get() + 1)
+      self.box.unlock()
+      i = i + 1
+    }
+  }
+}
+fn main() {
+  let box = Mutex<Int>(0)
+  let a = Thread.spawn(Napper(box: box))
+  let b = Thread.spawn(Napper(box: box))
+  Clock.sleep(10)
+  a.join()
+  b.join()
+  print(box.get())
+}

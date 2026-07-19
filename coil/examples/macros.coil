@@ -1,0 +1,40 @@
+; User-defined macros — a real compile-time Lisp, not template substitution.
+; A macro is an ordinary Coil function over `Code`: `[Code…] -> Code`, run at
+; compile time, its calls expanded inline.
+
+; 1. Simple quasiquote/splicing macros.
+(defn when [(c Code) & (body Code)] (-> Code) `(if ~c (do ~@body) 0))
+(defn inc [(x Code)] (-> Code) `(iadd ~x 1))
+
+; 2. A recursive macro: cond expands to nested ifs (via a Code-list helper). A lone
+;    trailing clause is the else branch.
+(defn cond-arms [(cs Code)] (-> Code)
+  (if (icmp-eq (code-count cs) 0) `0
+    (if (icmp-eq (code-count cs) 1) (code-nth cs 0)
+      `(if ~(code-nth cs 0)
+           ~(code-nth cs 1)
+           ~(cond-arms (code-rest (code-rest cs)))))))
+(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
+
+; 3. Compile-time computation: a helper unrolls `pow` into nested imuls.
+(defn pow-form [(x Code) (n i64)] (-> Code)
+  (if (icmp-eq n 0) `1 `(imul ~x ~(pow-form x (isub n 1)))))
+(defn pow [(x Code) (n Code)] (-> Code) (pow-form x (code-int n)))
+
+; 4. Hygiene: gensym introduces a fresh temp so `x` is evaluated once.
+(defn double [(x Code)] (-> Code)
+  (let [t (gensym)] `(let [~t ~x] (iadd ~t ~t))))
+
+; 5. A macro that emits a top-level definition.
+(defn defconst [(name Code) (v Code)] (-> Code) `(defn ~name [] (-> :i64) ~v))
+(defconst base 3)
+
+(defn classify [(n :i64)] (-> :i64)
+  (cond (icmp-lt n 0) 100
+        (icmp-eq n 0) 200
+        300))
+
+(defn main [] (-> :i64)
+  (when (icmp-eq (classify 0) 200)
+    (iadd (pow (base) 3)        ; 3^3 = 27
+          (double (inc 6)))))   ; (6+1)*2 = 14  -> 41

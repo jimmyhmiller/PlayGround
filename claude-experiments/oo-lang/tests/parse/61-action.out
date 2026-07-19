@@ -1,0 +1,28 @@
+(program
+  (action "Pause" (for (type Agent))
+    (block
+      (call
+        (dot pause
+          self))))
+  (action "Ask" (for (type Agent))
+    (params
+      (param question
+        (type String)))
+    (block
+      (call
+        (dot runLoop
+          self)
+        (arg
+          (id question)))))
+  (action "Spawn researcher" (for (type Orchestrator))
+    (params
+      (param topic
+        (type String))
+      (param count
+        (type Int)))
+    (block
+      (call
+        (dot research
+          self)
+        (arg
+          (id topic))))))

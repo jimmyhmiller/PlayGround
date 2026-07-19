@@ -1,0 +1,11 @@
+[package]
+name = "memscope"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Drop-in tracking global allocator with real-time monitoring, type-resolved heap dumps, and a UI transport. JVM-style memory tooling for Rust."
+
+[dependencies]
+memscope-core = { path = "../memscope-core" }
+memscope-agent = { path = "../memscope-agent" }
+memscope-proto = { path = "../memscope-proto" }

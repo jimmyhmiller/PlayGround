@@ -1,0 +1,20 @@
+(defn
+  greet
+  [(w (ptr Writer)) (n :i64)]
+  (-> (Result :i64 IoError))
+  (do (print-str w "answer=") (print-int w n) (write-byte w (cast :u8 10))))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a (malloc-allocator) buf (unwrap-ptr (alloc-slice [i8] a 64)) fb (alloc-static FixBuf)]
+    (store! (field fb data) buf)
+    (store! (field fb cap) 64)
+    (greet (fixed-buffer-writer (alloc-stack Writer) fb) 42)
+    (match
+      (write-all (stdout) (load (field fb data)) (load (field fb len)))
+      (Ok [n] 0)
+      (Err [e] 1))))
+

@@ -1,0 +1,74 @@
+(defstruct adder-env [(n :i64)])
+
+(defn
+  adder-code
+  [(__self (ptr adder-env)) (x :i64)]
+  (-> :i64)
+  (let [n (load (field __self n))] (iadd n x)))
+
+(defstruct adder [(code (fnptr c [(ptr adder-env) :i64] :i64)) (env (ptr adder-env))])
+
+(defn
+  adder-new
+  [(n :i64)]
+  (-> (ptr adder))
+  (let
+    [$hy0 (alloc-heap adder-env) $hy1 (alloc-heap adder)]
+    (store! (field $hy0 n) n)
+    (store! (field $hy1 code) (fnptr-of adder-code))
+    (store! (field $hy1 env) $hy0)
+    $hy1))
+
+(defn
+  adder-call
+  [(__c (ptr adder)) (x :i64)]
+  (-> :i64)
+  (call-ptr (load (field __c code)) (load (field __c env)) x))
+
+(defn adder-free [(__c (ptr adder))] (-> i64) (do (free (load (field __c env))) (free __c)))
+
+(defstruct scaler-env [(k :i64)])
+
+(defn
+  scaler-code
+  [(__self (ptr scaler-env)) (x :i64)]
+  (-> :i64)
+  (let [k (load (field __self k))] (imul k x)))
+
+(defstruct scaler [(code (fnptr c [(ptr scaler-env) :i64] :i64)) (env (ptr scaler-env))])
+
+(defn
+  scaler-new
+  [(k :i64)]
+  (-> (ptr scaler))
+  (let
+    [$hy2 (alloc-heap scaler-env) $hy3 (alloc-heap scaler)]
+    (store! (field $hy2 k) k)
+    (store! (field $hy3 code) (fnptr-of scaler-code))
+    (store! (field $hy3 env) $hy2)
+    $hy3))
+
+(defn
+  scaler-call
+  [(__c (ptr scaler)) (x :i64)]
+  (-> :i64)
+  (call-ptr (load (field __c code)) (load (field __c env)) x))
+
+(defn
+  scaler-free
+  [(__c (ptr scaler))]
+  (-> i64)
+  (do (free (load (field __c env))) (free __c)))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [a (adder-new 5) s (scaler-new 3)]
+    (let
+      [r (iadd (adder-call a 37) (isub (scaler-call s 14) 42))]
+      (adder-free a)
+      (scaler-free s)
+      r)))
+

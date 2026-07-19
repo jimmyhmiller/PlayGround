@@ -1,0 +1,141 @@
+; ── DIALECT: gc ───────────────────────────────────────────────────────────
+; A precise, non-moving, stop-the-world mark-sweep GC — built entirely as a
+; metaprogram + runtime library over the C-level core. The core knows nothing
+; about GC.
+;   • implicit allocation  — `new` injects an ambient heap; no Allocator value
+;   • implicit reclamation  — no `free`; the collector sweeps unreachable objects
+;   • precise roots         — a shadow stack the `gc-let` binding form maintains
+;   • precise tracing       — each type's tracer is GENERATED from field
+;                             reflection (`gctype T`), so object graphs are
+;                             followed without the core knowing any layout
+(module gc)
+
+(extern malloc :cc c [:i64]     (-> (ptr u8)))
+(extern free   :cc c [(ptr u8)] (-> :i64))
+
+; Object header: intrusive all-objects list + mark bit + the type's tracer.
+(defstruct GcHeader
+  [(next  (ptr GcHeader))
+   (mark  :i64)
+   (size  :i64)
+   (trace (fnptr c [(ptr u8)] :i64))])
+
+; ── global singletons (alloc-static returns the same cell every call) ──
+(defn g-list  [] (-> (ptr (ptr GcHeader)))          (alloc-static (ptr GcHeader)))
+(defn g-roots [] (-> (ptr (array (ptr u8) 8192)))   (alloc-static (array (ptr u8) 8192)))
+(defn g-rtop  [] (-> (ptr :i64)) (alloc-static :i64))
+(defn g-live  [] (-> (ptr :i64)) (alloc-static :i64))
+(defn g-peak  [] (-> (ptr :i64)) (alloc-static :i64))
+(defn g-ncol  [] (-> (ptr :i64)) (alloc-static :i64))
+(defn g-total [] (-> (ptr :i64)) (alloc-static :i64))   ; objects ever allocated
+
+(defn null-ptr? [(p (ptr u8))]      (-> bool) (icmp-eq (cast i64 p) 0))
+(defn hnull?    [(p (ptr GcHeader))] (-> bool) (icmp-eq (cast i64 p) 0))
+(defn hdr-of [(payload (ptr u8))] (-> (ptr GcHeader))
+  (cast (ptr GcHeader) (isub (cast i64 payload) (sizeof GcHeader))))
+
+; ── roots (shadow stack) ──
+(defn gc-root-push [(p (ptr u8))] (-> :i64)
+  (let [t (load (g-rtop))]
+    (store! (index (g-roots) t) p)
+    (store! (g-rtop) (iadd t 1))
+    0))
+(defn gc-root-pop [] (-> :i64)
+  (store! (g-rtop) (isub (load (g-rtop)) 1))
+  0)
+
+; ── marking: set the mark, then follow the object's own tracer (recursively).
+;    The mark check makes cyclic graphs terminate.
+(defn gc-mark [(payload (ptr u8))] (-> :i64)
+  (if (null-ptr? payload)
+      0
+      (let [h (hdr-of payload)]
+        (if (icmp-eq (load (field h mark)) 1)
+            0
+            (do
+              (store! (field h mark) 1)
+              (call-ptr (load (field h trace)) payload))))))
+
+; ── collection: mark reachable-from-roots, sweep the rest ──
+(defn gc-collect [] (-> :i64)
+  (let [(mut i) 0]                                     ; mark from every root
+    (loop
+      (if (icmp-ge (load i) (load (g-rtop)))
+          (break 0)
+          (do
+            (gc-mark (load (index (g-roots) (load i))))
+            (store! i (iadd (load i) 1))))))
+  (let [(mut cur) (load (g-list))                      ; sweep, rebuild from survivors
+        (mut newhead) (cast (ptr GcHeader) 0)]
+    (loop
+      (if (hnull? (load cur))
+          (break 0)
+          (let [nxt (load (field (load cur) next))]
+            (if (icmp-eq (load (field (load cur) mark)) 1)
+                (do
+                  (store! (field (load cur) mark) 0)
+                  (store! (field (load cur) next) (load newhead))
+                  (store! newhead (load cur))
+                  0)
+                (do
+                  (free (cast (ptr u8) (load cur)))
+                  (store! (g-live) (isub (load (g-live)) 1))
+                  0))
+            (store! cur nxt))))
+    (store! (g-list) (load newhead)))
+  (store! (g-ncol) (iadd (load (g-ncol)) 1))
+  0)
+
+; ── allocation (implicit ambient heap; collects when the live set gets big) ──
+(defn gc-alloc [(size :i64) (tr (fnptr c [(ptr u8)] :i64))] (-> (ptr u8))
+  (if (icmp-ge (load (g-live)) 32) (gc-collect) 0)
+  (let [raw (malloc (iadd (sizeof GcHeader) size))
+        h   (cast (ptr GcHeader) raw)]
+    (store! (field h next)  (load (g-list)))
+    (store! (field h mark)  0)
+    (store! (field h size)  size)
+    (store! (field h trace) tr)
+    (store! (g-list) h)
+    (store! (g-total) (iadd (load (g-total)) 1))
+    (store! (g-live) (iadd (load (g-live)) 1))
+    (if (icmp-gt (load (g-live)) (load (g-peak)))
+        (store! (g-peak) (load (g-live))) 0)
+    (cast (ptr u8) (iadd (cast i64 raw) (sizeof GcHeader)))))
+
+; ── the dialect vocabulary (macros) ──
+(defn new  [(t Code)]                   (-> Code)
+  `(cast (ptr ~t) (gc-alloc (sizeof ~t) (fnptr-of ~(code-symbol t "-trace")))))
+(defn fset [(p Code) (f Code) (v Code)] (-> Code) `(store! (field ~p ~f) ~v))
+(defn fget [(p Code) (f Code)]          (-> Code) `(load  (field ~p ~f)))
+
+; gc-let: bind a GC pointer AND root it for the duration of the body.
+(defn gc-let [(name Code) (init Code) & (body Code)] (-> Code)
+  (let [r (gensym)]
+    `(let [~name ~init]
+       (gc-root-push (cast (ptr u8) ~name))
+       (let [~r (do ~@body)]
+         (gc-root-pop)
+         ~r))))
+
+; ── gctype: GENERATE a struct's tracer from field reflection ──
+; For each field whose kind is 5 (pointer), emit a (gc-mark …) that follows it.
+; kind tags (from lib/derive.coil): 0=int 1=float 2=bool 3=struct 4=sum 5=ptr …
+(defn gc--trace-fields [(T Code) (p Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-eq i n)
+      `0
+      (let [rest (gc--trace-fields T p (iadd i 1) n)]
+        (if (icmp-eq (code-field-kind T i) 5)
+            `(do (gc-mark (cast (ptr u8) (load (field ~p ~(code-field-name T i))))) ~rest)
+            rest))))
+
+(defn gctype [(tname Code)] (-> Code)
+  (let [p (gensym)]
+    `(defn ~(code-symbol tname "-trace") [(pp (ptr u8))] (-> :i64)
+       (let [~p (cast (ptr ~tname) pp)]
+         ~(gc--trace-fields tname p 0 (code-field-count tname))))))
+
+; observability
+(defn peak-live       [] (-> :i64) (load (g-peak)))
+(defn num-collections [] (-> :i64) (load (g-ncol)))
+(defn live-now        [] (-> :i64) (load (g-live)))
+(defn objects-ever    [] (-> :i64) (load (g-total)))

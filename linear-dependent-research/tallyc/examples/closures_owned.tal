@@ -1,0 +1,41 @@
+// OWNED (heap, existential) closures — the representation you reach for when
+// closures of DIFFERENT capture shapes must share one type and be stored
+// together (a list of callbacks, a plugin table). See docs/FIRST_CLASS_FUNCTIONS.md §3.
+//
+//   tally run examples/closures_owned.tal        →  31
+//
+// `OwnClo a b` hides the environment TYPE existentially (`{0 e}`), so it is a
+// uniform 2-word `{code, envptr}` value regardless of what was captured — the
+// price is one universe level (`Type 1`). Every heap cell is an `alloc` you
+// wrote, the closure is LINEAR (leak / double-free are compile errors), and the
+// single call frees the captured environment. The `code` takes its environment
+// BY POINTER (`Own e`) so the existential crosses the abstract boundary as a
+// uniform word; each concrete `code` unboxes it.
+
+boxed enum OwnClo (a : Type) (b : Type) : Type 1 {
+  MkOwnClo : {0 e : Type} -> (1 env : Own e) -> (code : (1 o : Own e) -> a -> b) -> OwnClo a b
+}
+callOwn : {0 a : Type} -> {0 b : Type} -> (1 f : OwnClo a b) -> a -> b
+fn callOwn(f, x) { match f { MkOwnClo(env, code) => code(env, x) } }
+
+// two closures with DIFFERENT captured environments, one shared `OwnClo Nat Nat`:
+addK : (1 o : Own Nat) -> Nat -> Nat
+fn addK(o, x) { let k = unbox(o); x + k }
+mulK : (1 o : Own Nat) -> Nat -> Nat
+fn mulK(o, x) { let k = unbox(o); mul(k, x) }
+add7 : OwnClo Nat Nat
+fn add7() { MkOwnClo(alloc(7), addK) }         // captures 7 on the heap
+mul3 : OwnClo Nat Nat
+fn mul3() { MkOwnClo(alloc(3), mulK) }          // captures 3, DIFFERENT env, same type
+
+// a LIST of them (Type 1 propagates), folded over a seed — each freed exactly once:
+boxed enum CloList : Type 1 { CNil : CloList, CCons : OwnClo Nat Nat -> CloList -> CloList }
+runAll : (1 fs : CloList) -> Nat -> Nat
+fn runAll(fs, x) {
+  match fs { CNil => x, CCons(f, rest) => let y = callOwn(f, x); runAll(rest, y) }
+}
+pipeline : CloList
+fn pipeline() { CCons(add7, CCons(mul3, CCons(add7, CNil))) }   // ((x+7)*3)+7
+
+main : Nat
+fn main() { runAll(pipeline, 1) }               // ((1+7)*3)+7 = 31

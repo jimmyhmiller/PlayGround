@@ -20,6 +20,7 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
         project
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
     }
 
     func hash(into hasher: inout Hasher) {

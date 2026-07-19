@@ -1,0 +1,158 @@
+(module schemeproper)
+; The SAME metacircular evaluator, written PROPERLY in idiomatic native Coil: a
+; sum-typed Scheme value with UNBOXED integers (only pairs/closures touch the heap),
+; `match` for dispatch, an arena allocator. No per-integer boxing, no GC overhead —
+; how a Coil programmer would actually write a fast tree-walking interpreter.
+(import "alloc.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+(import "result.coil" :use *)
+(import "../../selfhost/src/reader.coil" :use *)
+(import "../../selfhost/src/parser.coil" :use *)
+
+; a Scheme value — small, BY VALUE. ints/syms/bools/nil/prims are immediate.
+(defstruct Cell [(a Val) (d Val)])
+(defstruct Clo  [(params Val) (body Val) (env Val)])
+(defsum Val
+  (VNil)
+  (VInt  [(v i64)])
+  (VBool [(b bool)])
+  (VSym  [(id i64)])
+  (VPair [(c (ptr Cell))])
+  (VClos [(k (ptr Clo))])
+  (VPrim [(op i64)]))
+
+; --- arena (bump; a batch interpreter never frees) ---
+(defn arena [] (-> (ptr Allocator)) (alloc-static Allocator))
+(defn galloc [] (-> (ptr i64)) (alloc-static i64))               ; alloc counter
+(defn cons [(a Val) (d Val)] (-> Val)
+  (store! (galloc) (+ (load (galloc)) 1))
+  (let [c (unwrap-ptr [Cell] (create [Cell] (arena)))]
+    (store! (field c a) a) (store! (field c d) d) (VPair c)))
+(defn mkclos [(p Val) (b Val) (e Val)] (-> Val)
+  (store! (galloc) (+ (load (galloc)) 1))
+  (let [c (unwrap-ptr [Clo] (create [Clo] (arena)))]
+    (store! (field c params) p) (store! (field c body) b) (store! (field c env) e) (VClos c)))
+(defn car [(x Val)] (-> Val) (match-else x (VPair [c] (load (field c a))) (_ (VNil))))
+(defn cdr [(x Val)] (-> Val) (match-else x (VPair [c] (load (field c d))) (_ (VNil))))
+(defn nullp [(x Val)] (-> bool) (match-else x (VNil [] true) (_ false)))
+(defn truthy [(x Val)] (-> bool) (match-else x (VBool [b] b) (_ true)))
+(defn v= [(x Val) (y Val)] (-> bool)   ; eq? on ints/syms/nil
+  (match-else x
+    (VInt [a] (match-else y (VInt [b] (= a b)) (_ false)))
+    (VSym [a] (match-else y (VSym [b] (= a b)) (_ false)))
+    (VNil [] (nullp y))
+    (_ false)))
+(defn ival [(x Val)] (-> i64) (match-else x (VInt [v] v) (_ 0)))
+
+; --- symbol interning ---
+(defstruct SymTab [(init i64) (names (ptr (ArrayList (slice u8))))])
+(defn symtab [] (-> (ptr SymTab)) (alloc-static SymTab))
+(defn sym-names [] (-> (ptr (ArrayList (slice u8))))
+  (let [t (symtab)]
+    (if (= (load (field t init)) 0)
+        (let [b (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] (malloc-allocator)))]
+          (store! b (al-new [(slice u8)] (malloc-allocator))) (store! (field t names) b) (store! (field t init) 1) 0) 0)
+    (load (field t names))))
+(defn intern [(name (slice u8))] (-> i64)
+  (let [ns (sym-names) n (al-len [(slice u8)] (load ns)) (mut found) -1]
+    (for [i 0 n] (if (and (< found 0) (str-eq (al-get [(slice u8)] (load ns) i) name)) (do (store! found i) 0) 0))
+    (if (>= found 0) found (do (al-push! [(slice u8)] ns name) n))))
+(defn sym-name [(id i64)] (-> (slice u8)) (al-get [(slice u8)] (load (sym-names)) id))
+
+; --- the mutable global environment ---
+(defn genvc [] (-> (ptr Val)) (alloc-static Val))
+(defn genv [] (-> Val) (load (genvc)))
+(defn set-genv! [(v Val)] (-> i64) (store! (genvc) v) 0)
+
+; --- evaluator (mirrors evalcore.scm) ---
+(defn cadr2 [(x Val)] (-> Val) (car (cdr x)))
+(defn caddr2 [(x Val)] (-> Val) (car (cdr (cdr x))))
+(defn cadddr2 [(x Val)] (-> Val) (car (cdr (cdr (cdr x)))))
+(defn cdddr2 [(x Val)] (-> Val) (cdr (cdr (cdr x))))
+(defn glookup [(s Val) (g Val)] (-> Val)
+  (if (nullp g) s (if (v= (car (car g)) s) (cdr (car g)) (glookup s (cdr g)))))
+(defn lookup [(s Val) (env Val)] (-> Val)
+  (if (nullp env) (glookup s (genv))
+    (if (v= (car (car env)) s) (cdr (car env)) (lookup s (cdr env)))))
+(defn bind [(ps Val) (as Val) (env Val)] (-> Val)
+  (if (nullp ps) env (bind (cdr ps) (cdr as) (cons (cons (car ps) (car as)) env))))
+(defn evlist [(es Val) (env Val)] (-> Val)
+  (if (nullp es) (VNil) (cons (seval (car es) env) (evlist (cdr es) env))))
+(defstruct SF [(init i64) (q i64) (i i64) (l i64) (d i64)])
+(defn sf [] (-> (ptr SF)) (alloc-static SF))
+(defn sf-init [] (-> i64)
+  (let [s (sf)]
+    (if (= (load (field s init)) 0)
+        (do (store! (field s q) (intern "quote")) (store! (field s i) (intern "if"))
+            (store! (field s l) (intern "lambda")) (store! (field s d) (intern "define"))
+            (store! (field s init) 1) 0) 0)))
+(defn head-id [(x Val)] (-> i64) (match-else x (VSym [id] id) (_ -1)))
+(defn defvar! [(name Val) (val Val)] (-> Val) (set-genv! (cons (cons name val) (genv))) name)
+(defn seval [(e Val) (env Val)] (-> Val)
+  (match e
+    (VInt [v] e) (VBool [b] e) (VNil [] e) (VClos [k] e) (VPrim [o] e)
+    (VSym [id] (lookup e env))
+    (VPair [c]
+      (let [hid (head-id (car e)) s (sf)]
+        (if (= hid (load (field s q))) (cadr2 e)
+        (if (= hid (load (field s i))) (if (truthy (seval (cadr2 e) env)) (seval (caddr2 e) env) (seval (cadddr2 e) env))
+        (if (= hid (load (field s l))) (mkclos (cadr2 e) (caddr2 e) env)
+        (if (= hid (load (field s d))) (defvar! (cadr2 e) (seval (caddr2 e) env))
+          (sapply (seval (car e) env) (evlist (cdr e) env))))))))))
+(defn doprim [(op i64) (as Val)] (-> Val)
+  (if (= op 0) (VInt (+ (ival (car as)) (ival (cadr2 as))))
+  (if (= op 1) (VInt (- (ival (car as)) (ival (cadr2 as))))
+  (if (= op 2) (VInt (* (ival (car as)) (ival (cadr2 as))))
+  (if (= op 3) (VBool (< (ival (car as)) (ival (cadr2 as))))
+  (if (= op 4) (VBool (= (ival (car as)) (ival (cadr2 as)))) (VNil)))))))
+(defn sapply [(f Val) (as Val)] (-> Val)
+  (match-else f
+    (VPrim [op] (doprim op as))
+    (VClos [k] (seval (load (field k body)) (bind (load (field k params)) as (load (field k env)))))
+    (_ (VNil))))
+
+; --- Sexp -> Val (parse the target) ---
+(defn sexp->val [(x Sexp)] (-> Val)
+  (let [tg (sx-tag x)]
+    (if (icmp-eq tg 0) (VInt (sx-ival x))
+    (if (icmp-eq tg 2) (VSym (intern (sx-sval x)))
+    (if (or (icmp-eq tg 6) (icmp-eq tg 7)) (sexp-list->val (sx-items x) 0 (sx-len (sx-items x)))
+        (VNil))))))
+(defn sexp-list->val [(items (ptr (ArrayList Sexp))) (i i64) (n i64)] (-> Val)
+  (if (icmp-ge i n) (VNil) (cons (sexp->val (sx-at items i)) (sexp-list->val items (+ i 1) n))))
+
+(defn prim [(op i64)] (-> Val) (VPrim op))
+(defn setup [] (-> i64)
+  (sf-init)
+  (defvar! (VSym (intern "+")) (prim 0)) (defvar! (VSym (intern "-")) (prim 1))
+  (defvar! (VSym (intern "*")) (prim 2)) (defvar! (VSym (intern "<")) (prim 3))
+  (defvar! (VSym (intern "=")) (prim 4)) 0)
+(defn print-val [(x Val)] (-> i64)
+  (match-else x
+    (VInt [v] (do (fmt (stdout) "{d}" v) 0))
+    (VBool [b] (do (fmt (stdout) "{s}" (if b "#t" "#f")) 0))
+    (VNil [] (do (fmt (stdout) "()") 0))
+    (VSym [id] (do (fmt (stdout) "{s}" (sym-name id)) 0))
+    (_ (do (fmt (stdout) "#<obj>") 0))))
+
+(defn main [] (-> :i64)
+  (store! (arena) (load (arena-allocator (* 2000 (* 1024 1024)))))   ; 2 GiB bump arena
+  (set-genv! (VNil))
+  (setup)
+  (match (read-all (malloc-allocator)
+                   "(begin (define fib (lambda (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 30))" 0)
+    (Err [d] 1)
+    (Ok [fs]
+      (let [tgt (sexp->val (forms-nth fs 0))]
+        (seval (cadr2 tgt) (VNil))
+        (print-val (seval (caddr2 tgt) (VNil)))
+        (fmt (stdout) "\n")
+        (fmt (stderr) "[arena] pairs+closures allocated={d}\n" (load (galloc)))
+        0))))
+(defn forms-nth [(fs (ptr (ArrayList Sexp))) (i i64)] (-> Sexp) (al-get [Sexp] (load fs) i))

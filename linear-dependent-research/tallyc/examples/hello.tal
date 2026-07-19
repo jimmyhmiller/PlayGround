@@ -1,0 +1,19 @@
+// HELLO, WORLD — strings are real: `"…"` literals are values of the prelude
+// `Str` type (a pointer into one shared global — no allocation), passed around
+// like any ω value; `prints : Str -> Unit` and `print : Nat -> Unit` are the
+// observable effects, sequenced by `let`. `main : Unit` — the program's output
+// IS its effects (no trailing result value is printed).
+//   tally run examples/hello.tal
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+greet : Str -> Unit
+fn greet(name) { prints(name) }
+
+main : Unit
+fn main() {
+    let a = prints("hello, world");
+    let b = greet("from tallyc: dependent types, linear memory, zero GC");
+    print(42)
+}

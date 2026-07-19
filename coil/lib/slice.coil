@@ -1,0 +1,184 @@
+(module slice)
+; A `(slice T)` is a fat pointer `{ data: (ptr T), len: i64 }` over contiguous
+; elements — the everyday view into an array/buffer, and the representation of a
+; string (`(slice u8)`). The fat-pointer TYPE is the one piece of core support
+; slices need; every operation here is a LIBRARY over `(llvm-ir …)`, exactly as
+; lib/simd.coil builds SIMD over the core `(vec T N)` type.
+;
+;   (import "lib/slice.coil")
+;   (let [arr (alloc-stack (array i64 3))] … (let [s (slice-of arr 3)] (slice-for [x s] …)))
+;
+; Slices ALIAS their backing storage: `slice-set!` writes through to the original,
+; and a `subslice` shares the same memory. A slice is a small value (two words),
+; so it is passed/returned BY VALUE (like Rust's `&str`).
+;
+; Bounds checking is the `--debug-checks` build mode (mem-6): `slice-get`,
+; `slice-set!` and `subslice` verify their indices (and reject a `lo > hi`
+; subslice, which used to yield a slice reporting length -2) ONLY when the build
+; requested it. The check lives in a MACRO branched on `(debug-checks?)` at
+; expansion time, so with the flag off the op expands to the exact unchecked form
+; — genuinely zero-cost, byte-identical IR. `write`/`abort` are module-private (see
+; the `export` list) so they never collide with io/main's own decls via `:use *`.
+
+; Only the public API is exported — the debug panic's `write`/`abort` externs stay
+; private (they would otherwise be ambiguous where a `:use *` importer of slice also
+; declares them, e.g. io.coil's `write`, main.coil's `abort`).
+(export slice-new slice-len slice-data slice-empty? slice-get slice-set! subslice slice-of slice-for sort SliceIter)
+
+(import "control.coil" :use *)   ; `for` (and its loop/break lowering) for slice-for
+; `(debug-checks?)` is a comptime code op (the --debug-checks predicate, mem-6) — a
+; builtin like `target-arch`/`gensym`, so it needs no import.
+
+; ---- debug-mode bounds-check panic (mem-6), only emitted under --debug-checks ----
+; `write` is the libc write(2); it is ALREADY declared globally (io.coil), so slice
+; naming it adds no new declaration — the off-path stays byte-identical. `abort` is
+; NOT declared here on purpose: an unreferenced module-level extern decl leaks a
+; `declare` into programs that never trip a check, so we crash via a store through a
+; null pointer instead — that needs no symbol at all.
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int fd, const void*, size_t)
+
+; Report an out-of-bounds slice access and hard-fail the process. The message is
+; flushed with `write` FIRST (an observable side effect the optimizer must keep),
+; then a store through null traps — LLVM lowers the trailing UB to an actual trap
+; rather than deleting the guard, precisely because the write before it is observable
+; (verified: SIGTRAP under -O3, SIGSEGV on the arm64 backend; `coil run` reports it).
+; GENERIC (T inferred from the offending slice): a generic function is emitted only
+; when instantiated, so with --debug-checks OFF nothing calls it, it is never
+; instantiated, and NOT one byte of it reaches the output — the guard is genuinely
+; zero-cost, and the off-path IR is byte-identical to the unchecked form.
+(defn slice-oob-fail! [T] [(s (slice T)) (msg (slice u8))] (-> i64)
+  (write 2 (cast (ptr i8) (slice-data msg)) (cast isize (slice-len msg)))
+  (store! (cast (ptr i64) 0) 0)
+  0)
+
+; The three guards are macros so `(debug-checks?)` is read at EXPANSION time: with the
+; flag off each expands to the ORIGINAL unchecked expression (byte-identical), with it
+; on it prefixes the bounds test. `s`/`i`/`lo`/`hi` arrive as already-evaluated param
+; symbols, so referencing them twice is side-effect-free; `~s` also fixes the panic's T.
+(defn dbg-slice-get [(s Code) (i Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~i 0) (icmp-ge ~i (slice-len ~s)))
+               (do (slice-oob-fail! ~s "coil: slice-get index out of bounds (--debug-checks)\n") 0) 0)
+           (load (index (slice-data ~s) ~i)))
+      `(load (index (slice-data ~s) ~i))))
+
+(defn dbg-slice-set [(s Code) (i Code) (v Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~i 0) (icmp-ge ~i (slice-len ~s)))
+               (do (slice-oob-fail! ~s "coil: slice-set! index out of bounds (--debug-checks)\n") 0) 0)
+           (store! (index (slice-data ~s) ~i) ~v)
+           0)
+      `(do (store! (index (slice-data ~s) ~i) ~v)
+           0)))
+
+; A subslice's lo/hi must satisfy 0 <= lo <= hi <= len — the `lo > hi` case is the
+; mem-6 invariant break (length hi-lo went negative). Checked here under the flag.
+(defn dbg-subslice [(s Code) (lo Code) (hi Code)] (-> Code)
+  (if (debug-checks?)
+      `(do (if (or (icmp-lt ~lo 0) (or (icmp-gt ~hi (slice-len ~s)) (icmp-gt ~lo ~hi)))
+               (do (slice-oob-fail! ~s "coil: subslice out of range or lo>hi (--debug-checks)\n") 0) 0)
+           (slice-new (index (slice-data ~s) ~lo) (isub ~hi ~lo)))
+      `(slice-new (index (slice-data ~s) ~lo) (isub ~hi ~lo))))
+
+; Construct a slice from a base element pointer and a length — `{data, len}` built
+; with two `insertvalue`s. T is inferred from `data` at the call site.
+(defn slice-new [T] [(data (ptr T)) (len i64)] (-> (slice T))
+  (llvm-ir (slice T) [data len]
+    "%s0 = insertvalue $ret undef, $t0 $0, 0
+%s1 = insertvalue $ret %s0, $t1 $1, 1
+ret $ret %s1"))
+
+; The element count (field 1).
+(defn slice-len [T] [(s (slice T))] (-> i64)
+  (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
+ret $ret %l"))
+
+; The base element pointer (field 0) — for interop / building sub-views.
+(defn slice-data [T] [(s (slice T))] (-> (ptr T))
+  (llvm-ir (ptr T) [s] "%d = extractvalue $t0 $0, 0
+ret $ret %d"))
+
+(defn slice-empty? [T] [(s (slice T))] (-> bool) (icmp-eq (slice-len s) 0))
+
+; Read / write element i. Bounds-checked only under --debug-checks (mem-6); off, the
+; guard macro expands to the exact unchecked load/store (zero-cost, byte-identical).
+(defn slice-get [T] [(s (slice T)) (i i64)] (-> T)
+  (dbg-slice-get s i))
+
+(defn slice-set! [T] [(s (slice T)) (i i64) (v T)] (-> i64)
+  (dbg-slice-set s i v))
+
+; `subslice s lo hi` → the half-open view `[lo, hi)`, sharing storage. Under
+; --debug-checks, rejects lo<0 / hi>len / lo>hi (the mem-6 length-(-2) invariant break).
+(defn subslice [T] [(s (slice T)) (lo i64) (hi i64)] (-> (slice T))
+  (dbg-subslice s lo hi))
+
+; `(slice-of ARR LEN)` — a slice over a fixed array `ARR` (a `(ptr (array T N))`
+; or element pointer) of length LEN. T is inferred.
+(defn slice-of [(arr Code) (len Code)] (-> Code)
+  `(slice-new (index ~arr 0) ~len))
+
+; `(slice-for [x s] body...)` — iterate a slice's elements, binding x to each.
+; A thin alias for the unified iterator protocol `(for x (iter s))` (gen-1): it
+; expands to `(for-in [x (iter s)])`, driving the slice's `Iterator` impl. Kept as
+; a convenience spelling; break/continue work inside.
+(defn slice-for [(binding Code) & (body Code)] (-> Code)
+  (if (not (icmp-eq (code-count binding) 2))
+      (error "slice-for: binding must be [x slice]")
+      `(for-in [~(code-nth binding 0) (iter ~(code-nth binding 1))] ~@body)))
+
+; `(sort s cmp)` — sort the slice IN PLACE (writing through to its backing storage)
+; using the comparator `cmp : (fnptr c [T T] i64)` (negative ⇒ a before b, 0 ⇒ equal,
+; positive ⇒ a after b — the `str-cmp`/`isub` convention). A stable insertion sort:
+; simple and correct, the everyday sort for the small-to-moderate slices Coil programs
+; hold; a caller needing n·log n can write it over the same `slice-get`/`slice-set!`.
+; `cmp` is a plain function taken with `(fnptr-of my-cmp)`.
+(defn sort [T] [(s (slice T)) (cmp (fnptr c [T T] i64))] (-> i64)
+  (let [n (slice-len s)
+        (mut i) 1]
+    (loop
+      (if (icmp-ge (load i) n)
+          (break)
+          (let [key    (slice-get s (load i))
+                (mut j) (isub (load i) 1)]
+            (loop
+              (if (and (icmp-ge (load j) 0)
+                       (icmp-gt (call-ptr cmp (slice-get s (load j)) key) 0))
+                  (do (slice-set! s (iadd (load j) 1) (slice-get s (load j)))
+                      (store! j (isub (load j) 1)))
+                  (break)))
+            (slice-set! s (iadd (load j) 1) key)
+            (store! i (iadd (load i) 1)))))
+    0))
+
+; ---- the core collection traits (coil.core) ---------------------------------
+; `(len s)` / `(get s i)` on any (slice T) — including strings, which are
+; (slice u8). `set!` writes through the view (a slice borrows its elements);
+; the (mut Self) receiver is the trait's shape, so rebind a slice as
+; (mut s) to write. No Push/Pop: a slice can't grow.
+(impl [T] Len (slice T)
+  (len [(s (slice T))] (-> i64) (slice-len s)))
+(impl [T] Get (slice T)
+  (get [(s (slice T)) (i i64)] (-> T) (slice-get s i)))
+(impl [T] Set (slice T)
+  (set! [(s (mut (slice T))) (i i64) (v T)] (-> i64) (slice-set! (load s) i v)))
+
+; ---- iteration (coil.core Iterator/Iterable) --------------------------------
+; A slice's iterator is a `(SliceIter T)` — the slice plus a cursor. `iter` mints
+; one; `next` yields each element and advances the cursor (`Item = T`). This is the
+; iterator ArrayList reuses (over `al-slice`) and the one `(for x (iter s))` drives.
+; Option/Some/None are coil.core (auto-loaded), so no result.coil import is needed.
+(defstruct SliceIter [T] [(s (slice T)) (pos i64)])
+(impl [T] Iterable (slice T)
+  (iter [(s (slice T))] (-> (SliceIter T))
+    (let [it (alloc-stack (SliceIter T))]
+      (store! (field it s) s)
+      (store! (field it pos) 0)
+      (load it))))
+(impl [T] Iterator (SliceIter T)
+  (next [(it (mut (SliceIter T)))] (-> (Option T))
+    (let [p (load (field it pos))]
+      (if (icmp-lt p (slice-len (load (field it s))))
+          (do (store! (field it pos) (iadd p 1))
+              (Some (slice-get (load (field it s)) p)))
+          (None)))))

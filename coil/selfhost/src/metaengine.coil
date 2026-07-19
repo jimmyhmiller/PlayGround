@@ -1,0 +1,432 @@
+; selfhost/src/metaengine.coil — the compiled metaprogram ENGINE.
+;
+; With COIL_META=compiled, expand-stage3 (expander.coil) uses this module to turn
+; the checked metaprogram sub-program into a dylib and run metaprogram entries as
+; native code instead of interpreting them:
+;
+;   metalower-program  (metalower.coil: Code -> (ptr i8), code ops -> metashim calls)
+;   -> monomorphize -> the injected backend object builder -> cc -dynamiclib
+;      -Wl,-undefined,dynamic_lookup   (coil_meta_* stay undefined until dlopen)
+;   -> dlopen against the compiler process (linked -Wl,-export_dynamic, so the
+;      metahost.coil exports resolve) -> dlsym each coil_mp_<k> entry.
+;
+; Every entry call runs on ITS OWN pthread: metahost's mh-halt implements
+; `(error ...)` (and every interpreter-Err) as record-the-Diag + pthread_exit, so
+; the pipeline thread just joins, reads the Diag, and reports it exactly like the
+; interpreter path. The interpreter stays available (flag off) as the oracle.
+(module metaengine)
+
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "result.coil" :use *)
+(import "match.coil" :use *)
+(import "control.coil" :use *)
+(import "try.coil" :use *)
+(import "io.coil" :use *)
+(import "reader.coil" :use *)
+(import "parser.coil" :use *)
+(import "loader.coil" :use *)
+(import "ast.coil" :use *)
+(import "ctval.coil" :use *)   ; CtVal / EnvBind / CtCtx (was reached via comptime.coil)
+(import "astdump.coil" :use *)
+(import "resolve.coil" :use *)
+(import "comptime.coil" :use *)
+(import "mono.coil" :use *)
+(import "metalower.coil" :use *)
+(import "metahost.coil" :use *)
+(import "ffi.coil" :use *)
+(import "macho.coil" :use *)    ; MObj — the in-memory object handed to jit.coil
+
+(extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern access :cc c [(ptr i8) i64] (-> i32))     ; F_OK=0: does the path exist
+(extern rename :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern unlink :cc c [(ptr i8)] (-> i32))
+(extern dispatch_semaphore_create :cc c [i64] (-> (ptr i8)))
+(extern dispatch_semaphore_wait   :cc c [(ptr i8) i64] (-> i64))   ; -1 = DISPATCH_TIME_FOREVER
+(extern dispatch_semaphore_signal :cc c [(ptr i8)] (-> i64))
+
+; ---- the engine flag ------------------------------------------------------------
+; DEFAULT = compiled, whenever a backend object builder is registered (main.coil
+; registers the LLVM one; the LLVM-free main_a64.coil registers none — its native
+; backend has no export-c yet, so it stays on the interpreter by default and an
+; explicit COIL_META=compiled fails loudly at engine setup instead of degrading).
+; COIL_META=interp opts back into the interpreter; COIL_META=compiled forces the
+; engine. Both engines are byte-identical (metaprog-poc/compile-and-run/parity.sh).
+(defn meta-compiled? [] (-> bool)
+  (let [v (getenv c"COIL_META")]
+    (if (icmp-ne (cast i64 v) 0)
+        (str-eq (cstr->slice v) "compiled")
+      (icmp-ne (load (field (meta-build-box) isset)) 0))))
+
+; ---- engine state ----------------------------------------------------------------
+(defstruct MEEntry [(name (slice u8)) (fp (ptr i8))])
+(defstruct MetaEngine
+  [(active i64)
+   (entries (ptr (ArrayList MEEntry)))
+   (registry (ptr (ArrayList (ptr Sexp))))])
+(defn meta-engine [] (-> (ptr MetaEngine)) (alloc-static MetaEngine))
+(defn meta-engine-active? [] (-> bool) (icmp-ne (load (field (meta-engine) active)) 0))
+(defn meta-engine-lookup [(name (slice u8))] (-> (ptr i8))
+  (let [b (meta-engine)]
+    (if (icmp-eq (load (field b active)) 0) (cast (ptr i8) 0)
+      (let [es (load (field b entries)) n (al-len [MEEntry] (load es)) (mut i) 0 (mut r) (cast (ptr i8) 0)]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (if (str-eq (load (field (al-elem [MEEntry] es (load i)) name)) name)
+                  (do (store! r (load (field (al-elem [MEEntry] es (load i)) fp))) (break)) 0)
+              (store! i (iadd (load i) 1)))))
+        (load r)))))
+
+; ---- MAIN-THREAD execution (COIL_META_MAIN=1) --------------------------------------
+; AppKit windows only work on the process main thread, so a GUI metaprogram cannot
+; run on the engine's per-call worker thread. With COIL_META_MAIN=1, the driver's
+; main thread (normally parked in pthread_join) runs this job loop instead, and
+; every metaprogram entry is dispatched to it. The trade: `(error ...)` in this
+; mode prints its diagnostic and exits the process (there is no thread to end),
+; which is behaviorally the same failed build, minus multi-metaprogram continuation.
+(defn meta-main? [] (-> bool)
+  (let [v (getenv c"COIL_META_MAIN")]
+    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
+(defstruct MainSvc [(isinit i64) (jobsem (ptr i8)) (donesem (ptr i8)) (finished i64) (call (ptr i8))])
+(defn main-svc [] (-> (ptr MainSvc)) (alloc-static MainSvc))
+(defn main-svc-init! [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-ne (load (field b isinit)) 0) 0
+      (do (store! (field b jobsem) (dispatch_semaphore_create 0))
+          (store! (field b donesem) (dispatch_semaphore_create 0))
+          (store! (field b isinit) 1) 0))))
+; the driver's main thread sits here servicing metaprogram calls until the
+; pipeline thread signals it is done (no-op unless main-svc-init! ran)
+(defn main-svc-loop [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-eq (load (field b isinit)) 0) 0
+      (loop
+        (do (dispatch_semaphore_wait (load (field b jobsem)) -1)
+            (if (icmp-ne (load (field b finished)) 0) (break 0) 0)
+            (me-tramp (load (field b call)))
+            (dispatch_semaphore_signal (load (field b donesem))))))))
+(defn main-svc-finish! [] (-> i64)
+  (let [b (main-svc)]
+    (if (icmp-eq (load (field b isinit)) 0) 0
+      (do (store! (field b finished) 1)
+          (dispatch_semaphore_signal (load (field b jobsem))) 0))))
+(defn main-svc-run [(c (ptr i8))] (-> i64)
+  (let [b (main-svc)]
+    (store! (field b call) c)
+    (dispatch_semaphore_signal (load (field b jobsem)))
+    (dispatch_semaphore_wait (load (field b donesem)) -1)
+    0))
+
+; ---- the program's --link-flag list (set by the driver) ----------------------------
+; A metaprogram doing FFI needs the same frameworks/libraries the program would
+; link (the dylib binds them at ITS link, not against the compiler process). They
+; are part of the dylib cache key.
+(defstruct MetaLinkBox [(isset i64) (flags (ptr (ArrayList (slice u8))))])
+(defn meta-link-box [] (-> (ptr MetaLinkBox)) (alloc-static MetaLinkBox))
+(defn set-meta-link-flags! [(fl (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [b (meta-link-box)] (store! (field b flags) fl) (store! (field b isset) 1) 0))
+
+; ---- backend object-builder injection (main.coil / main_a64.coil register one) ---
+(defstruct MetaBuildBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))])
+(defn meta-build-box [] (-> (ptr MetaBuildBox)) (alloc-static MetaBuildBox))
+(defn set-meta-build-obj! [(fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))] (-> i64)
+  (let [b (meta-build-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+
+; ---- in-memory object builder (the JIT path) --------------------------------------
+; A backend that can hand back the object as an MObj instead of a file lets
+; comptime_eval skip the whole serialize / fork `cc -dynamiclib` / dlopen round
+; trip and load it straight into executable memory (jit.coil). The arm64 backend
+; registers one (main_a64.coil); the LLVM backend has no MObj to give — it emits
+; through LLVMTargetMachineEmitToFile — so with LLVM this stays unset and the
+; dylib path below is used. Whichever runs, the CODEGEN is identical; only the way
+; the bytes reach memory differs.
+(defstruct MetaMobjBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))])
+(defn meta-mobj-box [] (-> (ptr MetaMobjBox)) (alloc-static MetaMobjBox))
+(defn set-meta-build-mobj! [(fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))] (-> i64)
+  (let [b (meta-mobj-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+(defn meta-mobj-available? [] (-> bool)
+  (icmp-ne (load (field (meta-mobj-box) isset)) 0))
+
+; ---- unique scratch paths ---------------------------------------------------------
+; per-process uniqueness from the static box's (ASLR-randomized) address, plus a
+; counter for multiple engine builds in one process. No extra libc externs needed.
+(defstruct MECounter [(n i64)])
+(defn me-counter [] (-> (ptr MECounter)) (alloc-static MECounter))
+(defn me-unique [(a (ptr Allocator))] (-> (slice u8))
+  (let [c (me-counter) k (load (field c n))]
+    (store! (field c n) (iadd k 1))
+    (sconcat3 a (dec->str a (udiv (cast i64 (me-counter)) 16)) "-" (dec->str a k))))
+
+; ---- the sub-program's form list (BEFORE its resolve) ------------------------------
+; ALWAYS a FRESH list: both the shim (compiled engine) and the definition-time
+; expansion tower (expander.coil) replace entries/subtrees for the SUB-PROGRAM
+; only — s.out and its buffer must stay untouched (box-al shares the buffer, and
+; growing or writing through the copy corrupts the main program's forms).
+; Under the compiled engine, metashim.coil's forms (module tag "metashim") are
+; appended so metalower's rewritten code ops resolve; the embedded text is
+; registered as a real source (id from srccount, exactly like the loader) so spans
+; in shim diagnostics point somewhere meaningful.
+(defn meta-sub-forms [(a (ptr Allocator)) (s (mut LS)) (base (ptr (ArrayList TaggedForm)))] (-> (Result (ptr (ArrayList TaggedForm)) Diag))
+  (let [(mut out) (al-new [TaggedForm] a)
+        nb (al-len [TaggedForm] (load base)) (mut k) 0]
+    (loop (if (icmp-ge (load k) nb) (break)
+      (do (al-push! (mut out) (al-get [TaggedForm] (load base) (load k)))
+          (store! k (iadd (load k) 1)))))
+    (if (not (meta-compiled?)) (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out)))
+      (let [text (include-str "metashim.coil")
+            sid (load (field s srccount))]
+        (store! (field s srccount) (iadd sid 1))
+        (register-source! (mut s) "<metashim>" text)
+        (match (read-all a text sid)
+          (Err [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
+          (Ok [forms]
+            (let [n (al-len [Sexp] (load forms)) (mut i) 0]
+              (loop (if (icmp-ge (load i) n) (break)
+                (do (let [f (al-elem [Sexp] forms (load i))
+                          ismod (and (icmp-eq (sx-tag (load f)) 6)
+                                     (and (icmp-ge (sx-len (sx-items (load f))) 1)
+                                          (and (icmp-eq (sx-tag (sx-at (sx-items (load f)) 0)) 2)
+                                               (str-eq (sx-sval (sx-at (sx-items (load f)) 0)) "module"))))]
+                      (if ismod 0
+                          (do (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0)))
+                    (store! i (iadd (load i) 1)))))
+              (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out))))))))))
+
+; closure seeds for the engine: the metaprogram entries PLUS every metashim
+; function (the lowering's calls to them are created after the closure walk runs).
+(defn meta-shim-seeds [(a (ptr Allocator)) (macroctx (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (ptr (ArrayList (slice u8))))
+  (let [(mut out) (al-new [(slice u8)] a) nq (al-len [(slice u8)] (load quals)) (mut i) 0]
+    (loop (if (icmp-ge (load i) nq) (break)
+      (do (al-push! (mut out) (al-get [(slice u8)] (load quals) (load i))) (store! i (iadd (load i) 1)))))
+    (let [fs (load (field macroctx funcs)) nf (al-len [Func] (load fs)) (mut j) 0]
+      (loop (if (icmp-ge (load j) nf) (break)
+        (do (let [nm (func-name (al-get [Func] (load fs) (load j)))]
+              (if (starts-with nm "metashim.") (do (al-push! (mut out) nm) 0) 0))
+            (store! j (iadd (load j) 1))))))
+    (box-al [(slice u8)] a (load out))))
+
+; ---- the content-addressed dylib cache ---------------------------------------------
+; Key = FNV-1a over the DUMPED mono'd metaprogram program (astdump's d-program, the
+; deterministic oracle dumper) + the entry symbol map. SELF-VALIDATING against
+; compiler changes: any change that alters what would be compiled alters the dump;
+; a change that leaves the dump identical produces an identical dylib anyway.
+; Location: $HOME/.cache/coil/metaprog/. Kill switch: COIL_META_CACHE=0.
+(defstruct FnvCell [(h i64)])
+(defn me-fnv-write [(ctx (ptr i8)) (buf (ptr i8)) (n i64)] (-> (Result i64 IoError))
+  (let [c (cast (ptr FnvCell) ctx) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (field c h) (imul (ixor (load (field c h)) (iand (cast i64 (load (index buf (load i)))) 255))
+                                    1099511628211))
+          (store! i (iadd (load i) 1)))))
+    (Ok [i64 IoError] n)))
+(defn me-fnv-str [(c (ptr FnvCell)) (s (slice u8))] (-> i64)
+  (let [n (slice-len s) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (field c h) (imul (ixor (load (field c h)) (cast i64 (slice-get s (load i))))
+                                    1099511628211))
+          (store! i (iadd (load i) 1)))))
+    0))
+(defn me-hex [(a (ptr Allocator)) (v i64)] (-> (slice u8))
+  (let [buf (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a 16 1))) (mut i) 0]
+    (loop (if (icmp-ge (load i) 16) (break)
+      (do (let [d (iand (ishr v (imul (isub 15 (load i)) 4)) 15)]
+            (store! (index buf (load i)) (cast u8 (if (icmp-lt d 10) (iadd 48 d) (iadd 87 d)))))
+          (store! i (iadd (load i) 1)))))
+    (slice-new buf 16)))
+(defn me-program-key [(a (ptr Allocator)) (mp (ptr Program)) (entries (ptr (ArrayList MLEntry)))] (-> (slice u8))
+  (let [c (alloc-stack FnvCell) w (alloc-stack Writer)]
+    (store! (field c h) -3750763034362895579)          ; FNV-1a offset basis
+    (me-fnv-str c "coil-metaprog-v1|")
+    (store! (field w write-fn) (fnptr-of me-fnv-write))
+    (store! (field w ctx) (cast (ptr i8) c))
+    (d-program w mp a)
+    (let [n (al-len [MLEntry] (load entries)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) name)))
+            (me-fnv-str c "=")
+            (me-fnv-str c (load (field (al-elem [MLEntry] entries (load i)) symbol)))
+            (me-fnv-str c ";")
+            (store! i (iadd (load i) 1))))))
+    ; the link flags are part of what the dylib IS (frameworks a metaprogram binds)
+    (let [lb (meta-link-box)]
+      (if (icmp-eq (load (field lb isset)) 0) 0
+        (let [fl (load (field lb flags)) n (al-len [(slice u8)] (load fl)) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (me-fnv-str c (al-get [(slice u8)] (load fl) (load i)))
+                (me-fnv-str c "|")
+                (store! i (iadd (load i) 1)))))
+          0)))
+    (me-hex a (load (field c h)))))
+; the program's --link-flag list, space-joined (empty string if none)
+(defn me-link-flags-str [(a (ptr Allocator))] (-> (slice u8))
+  (let [lb (meta-link-box)]
+    (if (icmp-eq (load (field lb isset)) 0) ""
+      (let [fl (load (field lb flags)) n (al-len [(slice u8)] (load fl)) (mut out) "" (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (store! out (sconcat a (sconcat a (load out) " ") (al-get [(slice u8)] (load fl) (load i))))
+              (store! i (iadd (load i) 1)))))
+        (load out)))))
+(defn me-cache-on? [] (-> bool)
+  (let [v (getenv c"COIL_META_CACHE")]
+    (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
+(defn me-cache-dir [(a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [h (getenv c"HOME")]
+    (if (icmp-eq (cast i64 h) 0) (None [(slice u8)])
+      (Some (sconcat a (cstr->slice h) "/.cache/coil/metaprog")))))
+
+; dlopen + the vtable handshake (hand the dylib the host callbacks BEFORE any
+; entry can run — see metashim.coil coil_mp_init)
+(defn me-open-dylib [(a (ptr Allocator)) (path (slice u8))] (-> (Result (ptr i8) Diag))
+  (let [h (dlopen (slice->cstr a path) 2)]
+    (if (icmp-eq (cast i64 h) 0)
+        (Err [(ptr i8) Diag] (derr "metaengine: dlopen of the metaprogram dylib failed"))
+      (let [ini (dlsym h (slice->cstr a "coil_mp_init"))]
+        (if (icmp-eq (cast i64 ini) 0)
+            (Err [(ptr i8) Diag] (derr "metaengine: coil_mp_init missing from the metaprogram dylib (compiler bug)"))
+          (do (call-ptr (cast (fnptr c [(ptr i8)] i64) ini) (meta-vtable))
+              (Ok [(ptr i8) Diag] h)))))))
+
+; ---- build the metaprogram dylib ---------------------------------------------------
+(defn meta-build-dylib [(a (ptr Allocator)) (lowered (ptr Program)) (entries (ptr (ArrayList MLEntry)))] (-> (Result (ptr i8) Diag))
+  (try (do
+    (let [bb (meta-build-box)]
+      (if (icmp-eq (load (field bb isset)) 0)
+          (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: this compiler build cannot compile metaprograms (the arm64-only compiler has no export-c yet) — unset COIL_META to use the interpreter"))) 0)
+      (let [mp (try! (monomorphize a lowered))]
+        (sort-mono-program a mp)
+        (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))
+              cpath (match cdir
+                      (None [] (None [(slice u8)]))
+                      (Some [d] (Some (sconcat a (sconcat3 a d "/" (me-program-key a mp entries)) ".dylib"))))]
+          ; cache hit: the dylib for this exact program already exists
+          (match cpath
+            (Some [p] (if (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0)
+                          (return-from :try (me-open-dylib a p)) 0))
+            (None [] 0))
+          (let [id (me-unique a)
+                obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
+                tmp-s (sconcat3 a "/tmp/coil-mp-" id ".dylib")]
+            (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
+            (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
+                                          (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))
+                                 (me-link-flags-str a))]
+              (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
+                  (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))
+                (do
+                  (unlink (slice->cstr a obj-s))
+                  ; move into the cache (mkdir -p once; rename is atomic on one fs)
+                  (match cpath
+                    (Some [p]
+                      (match cdir
+                        (Some [d] (do (system (slice->cstr a (sconcat a "mkdir -p " d)))
+                                      (if (icmp-eq (cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
+                                          (return-from :try (me-open-dylib a p)) 0)))
+                        (None [] 0)))
+                    (None [] 0))
+                  ; no cache (or rename failed): open the temp dylib directly
+                  (me-open-dylib a tmp-s)))))))))))
+
+; ---- one-time engine setup (from expand-stage3, after check-program) ----------------
+(defn meta-engine-setup [(a (ptr Allocator)) (checked (ptr Program)) (quals (ptr (ArrayList (slice u8))))] (-> (Option Diag))
+  (match (metalower-program a checked quals)
+    (Err [d] (Some d))
+    (Ok [mo]
+      (match (meta-build-dylib a (load (field mo prog)) (load (field mo entries)))
+        (Err [d] (Some d))
+        (Ok [h]
+          (let [es (load (field mo entries)) n (al-len [MLEntry] (load es))
+                (mut out) (al-new [MEEntry] a) (mut i) 0 (mut failed) (None [Diag])]
+            (loop (if (or (diag-some? (load failed)) (icmp-ge (load i) n)) (break)
+              (do (let [ep (al-elem [MLEntry] es (load i))
+                        fp (dlsym h (slice->cstr a (load (field ep symbol))))]
+                    (if (icmp-eq (cast i64 fp) 0)
+                        (do (store! failed (Some (derr (sconcat3 a "metaengine: entry '" (load (field ep name)) "' missing from the metaprogram dylib (compiler bug)")))) 0)
+                      (let [me (alloc-stack MEEntry)]
+                        (store! (field me name) (load (field ep name)))
+                        (store! (field me fp) fp)
+                        (al-push! (mut out) (load me)) 0)))
+                  (store! i (iadd (load i) 1)))))
+            (match (load failed)
+              (Some [d] (Some d))
+              (None []
+                (let [b (meta-engine)]
+                  (store! (field b entries) (box-al [MEEntry] a (load out)))
+                  (store! (field b registry) (load (field mo registry)))
+                  (store! (field b active) 1)
+                  (None [Diag]))))))))))
+
+; ---- invoking an entry ---------------------------------------------------------------
+; The call runs on its own 32 MiB pthread (mirroring run-on-big-stack): metaprograms
+; recurse like the pipeline does, and mh-halt ends only THIS thread on a
+; metaprogram-level failure.
+(defstruct MPCall
+  [(fp (ptr i8)) (argc i64) (ret (ptr i8))
+   (a0 (ptr i8)) (a1 (ptr i8)) (a2 (ptr i8)) (a3 (ptr i8))
+   (a4 (ptr i8)) (a5 (ptr i8)) (a6 (ptr i8)) (a7 (ptr i8))])
+(defn me-tramp [(arg (ptr i8))] (-> (ptr i8))
+  (let [c (cast (ptr MPCall) arg) fp (load (field c fp)) n (load (field c argc))]
+    (store! (field c ret)
+      (cond
+        (icmp-eq n 0) (call-ptr (cast (fnptr c [] (ptr i8)) fp))
+        (icmp-eq n 1) (call-ptr (cast (fnptr c [(ptr i8)] (ptr i8)) fp) (load (field c a0)))
+        (icmp-eq n 2) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)))
+        (icmp-eq n 3) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)))
+        (icmp-eq n 4) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)) (load (field c a3)))
+        (icmp-eq n 5) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)) (load (field c a3)) (load (field c a4)))
+        (icmp-eq n 6) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)) (load (field c a3)) (load (field c a4)) (load (field c a5)))
+        (icmp-eq n 7) (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)) (load (field c a3)) (load (field c a4)) (load (field c a5)) (load (field c a6)))
+        (call-ptr (cast (fnptr c [(ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)) fp) (load (field c a0)) (load (field c a1)) (load (field c a2)) (load (field c a3)) (load (field c a4)) (load (field c a5)) (load (field c a6)) (load (field c a7)))))
+    (cast (ptr i8) 0)))
+
+(defn me-box-arg [(a (ptr Allocator)) (s Sexp)] (-> (ptr i8))
+  (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) (cast (ptr i8) p)))
+
+(defn meta-engine-invoke [(a (ptr Allocator)) (fp (ptr i8)) (cx (ptr CtCtx)) (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
+  (let [n (al-len [Sexp] (load argv))]
+    (if (icmp-gt n 8)
+        (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
+      (let [b (meta-engine) c (alloc-stack MPCall)]
+        (meta-host-set! cx (load (field b registry)))
+        (store! (field c fp) fp) (store! (field c argc) n) (store! (field c ret) (cast (ptr i8) 0))
+        (store! (field c a0) (if (icmp-gt n 0) (me-box-arg a (al-get [Sexp] (load argv) 0)) (cast (ptr i8) 0)))
+        (store! (field c a1) (if (icmp-gt n 1) (me-box-arg a (al-get [Sexp] (load argv) 1)) (cast (ptr i8) 0)))
+        (store! (field c a2) (if (icmp-gt n 2) (me-box-arg a (al-get [Sexp] (load argv) 2)) (cast (ptr i8) 0)))
+        (store! (field c a3) (if (icmp-gt n 3) (me-box-arg a (al-get [Sexp] (load argv) 3)) (cast (ptr i8) 0)))
+        (store! (field c a4) (if (icmp-gt n 4) (me-box-arg a (al-get [Sexp] (load argv) 4)) (cast (ptr i8) 0)))
+        (store! (field c a5) (if (icmp-gt n 5) (me-box-arg a (al-get [Sexp] (load argv) 5)) (cast (ptr i8) 0)))
+        (store! (field c a6) (if (icmp-gt n 6) (me-box-arg a (al-get [Sexp] (load argv) 6)) (cast (ptr i8) 0)))
+        (store! (field c a7) (if (icmp-gt n 7) (me-box-arg a (al-get [Sexp] (load argv) 7)) (cast (ptr i8) 0)))
+        (let [failed
+              (if (meta-main?)
+                  ; COIL_META_MAIN=1: run on the process MAIN thread (AppKit
+                  ; metaprograms); an (error ...) there prints and exits.
+                  (do (meta-host-onmain! 1) (main-svc-run (cast (ptr i8) c)) false)
+                (let [attr (alloc-stack (array i8 64)) tid (alloc-stack (ptr i8)) rv (alloc-stack (ptr i8))]
+                  (pthread_attr_init (cast (ptr i8) attr))
+                  (pthread_attr_setstacksize (cast (ptr i8) attr) 536870912)   ; 512 MiB, like run-on-big-stack
+                  (pthread_create (cast (ptr i8) tid) (cast (ptr i8) attr) (fnptr-of me-tramp) (cast (ptr i8) c))
+                  (pthread_join (load tid) (cast (ptr i8) rv))
+                  (icmp-ne (cast i64 (load rv)) 0)))]
+          (if failed
+              (match (meta-host-err)
+                (Some [d] (Err [Sexp Diag] d))
+                (None [] (Err [Sexp Diag] (derr "metaengine: metaprogram thread failed without recording a diagnostic (compiler bug)"))))
+            (let [ret (load (field c ret))]
+              (if (icmp-eq (cast i64 ret) 0)
+                  (Err [Sexp Diag] (derr "metaengine: metaprogram returned a null Code handle (compiler bug)"))
+                (Ok [Sexp Diag] (load (cast (ptr Sexp) ret)))))))))))
+
+; ---- the finish-macro fast path -------------------------------------------------------
+; The interpreter's env (param -> CCode arg, variadic already packed) IS the packed
+; argument list; extract it and run the compiled entry instead of eval-seq.
+(defn meta-engine-run-env [(a (ptr Allocator)) (fp (ptr i8)) (cx (ptr CtCtx)) (env (ptr (ArrayList EnvBind)))] (-> (Result Sexp Diag))
+  (let [n (al-len [EnvBind] (load env)) (mut argv) (al-new [Sexp] a) (mut i) 0 (mut bad) false]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [v (load (field (al-elem [EnvBind] env (load i)) val))]
+            (if (is-ccode v) (do (al-push! (mut argv) (ccode-of v)) 0) (do (store! bad true) (break))))
+          (store! i (iadd (load i) 1)))))
+    (if (load bad)
+        (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
+      (meta-engine-invoke a fp cx (box-al [Sexp] a (load argv))))))

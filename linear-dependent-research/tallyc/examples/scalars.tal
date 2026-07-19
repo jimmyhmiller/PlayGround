@@ -1,0 +1,39 @@
+// FIRST-CLASS SCALAR ARITHMETIC (Phase Scalars, S2) — the C machine ops with
+// C semantics: two's-complement WRAPPING, signedness by type, honest casts.
+//
+//   tally run examples/scalars.tal     →  1
+//
+// `sadd`/`ssub`/`smul`/`sdiv`/`smod`/`sand`/`sor`/`sxor`/`sshl`/`sshr`/`sneg`
+// and `slt`/`sle`/`seq` are polymorphic over ANY scalar type — the width and
+// signedness are recovered from the (erased) operand type, so ONE `ssub` wraps
+// in `U8`, `I32`, whatever. Typed literals (`200u8`) and `cast` round it out.
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+main : Nat
+fn main() {
+    // wrapping: 200 + 100 = 300, mod 256 = 44 (U8)
+    let w = sadd(200u8, 100u8);
+    let ok_wrap = seq(w, 44u8);                 // 1
+
+    // signed vs unsigned: -1 : I8 is < 1, but as U8 (255) it is NOT < 1
+    let neg = sneg(1i8);
+    let ok_signed = slt(neg, 1i8);              // 1
+
+    // bit twiddling: (0xF0 | 0x0F) ^ 0xFF = 0x00
+    let bits = sxor(sor(240u8, 15u8), 255u8);
+    let ok_bits = seq(bits, 0u8);               // 1
+
+    // cast widening then narrowing: U8 255 -> I32 255 -> U8 255
+    let up : I32 = cast(255u8);
+    let dn : U8 = cast(up);
+    let ok_cast = seq(dn, 255u8);               // 1
+
+    // all four must hold (1*1*1*1 = 1); smul on the Nat 0/1 results
+    smul_nat(smul_nat(ok_wrap, ok_signed), smul_nat(ok_bits, ok_cast))
+}
+
+// the four checks are Nat 0/1; AND them by Nat multiplication (a fold)
+smul_nat : Nat -> Nat -> Nat
+fn smul_nat(a, b) { mul(a, b) }

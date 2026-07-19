@@ -93,8 +93,8 @@ fn jit_object_survives_collection_via_precise_roots() {
     let ptr = context.ptr_type(AddressSpace::default());
 
     // extern declarations (resolved via global mappings below).
-    // ptr ai_gc_alloc_fixed(ptr thread, i32 type_id)
-    let alloc_fixed_ty = ptr.fn_type(&[ptr.into(), i32t.into()], false);
+    // ptr ai_gc_alloc_fixed(ptr thread, i32 type_id, i32 site_id)
+    let alloc_fixed_ty = ptr.fn_type(&[ptr.into(), i32t.into(), i32t.into()], false);
     let alloc_fixed = module.add_function("ai_gc_alloc_fixed", alloc_fixed_ty, Some(Linkage::External));
     // void gcr_test_force_gc(ptr thread)
     let force_gc_ty = context.void_type().fn_type(&[ptr.into()], false);
@@ -175,7 +175,11 @@ fn jit_object_survives_collection_via_precise_roots() {
     // ---- Allocate child (type_id 1), spill into root slot 1 ----------------
     let child = call_result(
         builder
-            .build_call(alloc_fixed, &[thread.into(), i32t.const_int(1, false).into()], "child")
+            .build_call(
+                alloc_fixed,
+                &[thread.into(), i32t.const_int(1, false).into(), i32t.const_int(0, false).into()],
+                "child",
+            )
             .unwrap(),
     )
     .into_pointer_value();
@@ -186,7 +190,11 @@ fn jit_object_survives_collection_via_precise_roots() {
     // slot1, so it survives and we reload it afterwards.
     let obj = call_result(
         builder
-            .build_call(alloc_fixed, &[thread.into(), i32t.const_int(0, false).into()], "obj")
+            .build_call(
+                alloc_fixed,
+                &[thread.into(), i32t.const_int(0, false).into(), i32t.const_int(0, false).into()],
+                "obj",
+            )
             .unwrap(),
     )
     .into_pointer_value();

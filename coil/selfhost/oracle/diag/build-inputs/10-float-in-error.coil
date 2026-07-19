@@ -1,0 +1,4 @@
+; A float literal where a let-binding name is required. Rust interpolates the f64
+; via `{x:?}` (shortest round-trip): `error: let binding name must be `name` or
+; `(mut name)`, got 3.5`. The self-host now reproduces Rust's f64 Debug formatter.
+(defn main [] (-> :i64) (let [3.5 5] 5))

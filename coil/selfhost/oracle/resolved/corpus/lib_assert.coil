@@ -1,0 +1,302 @@
+(defn
+  assert-fail
+  [(expr (slice u8)) (file (slice u8)) (line i64)]
+  (-> i64)
+  (let
+    [w (stderr)]
+    (do
+      (io.print-str w "assertion failed: ")
+      (io.print-str w expr)
+      (io.print-str w "
+  at ")
+      (io.print-str w file)
+      (io.print-str w ":")
+      (fmt.print-i w line)
+      (io.print-str w "
+")))
+  (abort)
+  0)
+
+(defn
+  assert-fail-cmp
+  [(op (slice u8)) (lx (slice u8)) (rx (slice u8)) (file (slice u8)) (line i64)]
+  (-> i64)
+  (let
+    [w (stderr)]
+    (do
+      (io.print-str w "assertion failed: ")
+      (io.print-str w lx)
+      (io.print-str w " ")
+      (io.print-str w op)
+      (io.print-str w " ")
+      (io.print-str w rx)
+      (io.print-str w "
+  at ")
+      (io.print-str w file)
+      (io.print-str w ":")
+      (fmt.print-i w line)
+      (io.print-str w "
+")))
+  (abort)
+  0)
+
+(defn
+  assert
+  [(c Code)]
+  (-> Code)
+  (quasiquote
+    (if
+      (unquote c)
+      0
+      (do
+        (assert-fail (unquote (code-src c)) (unquote (code-file c)) (unquote (code-line c)))
+        0))))
+
+(defn
+  assert-eq
+  [(x Code) (y Code)]
+  (-> Code)
+  (quasiquote
+    (if
+      (= (unquote x) (unquote y))
+      0
+      (do
+        (assert-fail-cmp
+          "=="
+          (unquote (code-src x))
+          (unquote (code-src y))
+          (unquote (code-file x))
+          (unquote (code-line x)))
+        0))))
+
+(defn
+  assert-ne
+  [(x Code) (y Code)]
+  (-> Code)
+  (quasiquote
+    (if
+      (!= (unquote x) (unquote y))
+      0
+      (do
+        (assert-fail-cmp
+          "!="
+          (unquote (code-src x))
+          (unquote (code-src y))
+          (unquote (code-file x))
+          (unquote (code-line x)))
+        0))))
+
+(defn
+  deftest
+  [(name Code) & (body Code)]
+  (-> Code)
+  (quasiquote
+    (defn (unquote (code-symbol "coil-test$" name)) [] (-> i64) (unquote-splicing body) 0)))
+
+(defn
+  tr-test-name
+  [(f Code)]
+  (-> Code)
+  (if
+    (and
+      (code-list? f)
+      (and
+        (icmp-ge (code-count f) 2)
+        (and
+          (code-eq (code-nth f 0) (quasiquote defn))
+          (and (code-sym? (code-nth f 1)) (tr-is-test-sym? (code-nth f 1))))))
+    (code-nth f 1)
+    (quasiquote ())))
+
+(defn tr-is-test-sym? [(s Code)] (-> bool) (starts-with (code-str s) "coil-test$"))
+
+(defn
+  tr-count
+  [(m Code) (i i64) (n i64)]
+  (-> i64)
+  (if
+    (icmp-ge i n)
+    0
+    (iadd (if (code-list? (tr-test-name (code-nth m i))) 0 1) (tr-count m (iadd i 1) n))))
+
+(defn
+  tr-has-main?
+  [(m Code) (i i64) (n i64)]
+  (-> bool)
+  (if
+    (icmp-ge i n)
+    false
+    (let
+      [f (code-nth m i)]
+      (if
+        (and
+          (code-list? f)
+          (and
+            (icmp-ge (code-count f) 2)
+            (and
+              (code-eq (code-nth f 0) (quasiquote defn))
+              (code-eq (code-nth f 1) (quasiquote main)))))
+        true
+        (tr-has-main? m (iadd i 1) n)))))
+
+(defn
+  tr-calls
+  [(m Code) (i i64) (n i64)]
+  (-> Code)
+  (if
+    (icmp-ge i n)
+    (quasiquote ())
+    (let
+      [nm (tr-test-name (code-nth m i))]
+      (if
+        (code-list? nm)
+        (tr-calls m (iadd i 1) n)
+        (let
+          [full (code-str nm) disp (subslice [u8] full 10 (slice-len [u8] full))]
+          (quasiquote
+            ((test-run-one (unquote disp) (fnptr-of (unquote nm)))
+              (unquote-splicing (tr-calls m (iadd i 1) n)))))))))
+
+(defn
+  tr-emit-main
+  [(m Code)]
+  (-> Code)
+  (quasiquote
+    ((unquote-splicing m)
+      (defn
+        main
+        []
+        (-> i64)
+        (test-run-begin (unquote (tr-count m 1 (code-count m))))
+        (unquote-splicing (tr-calls m 1 (code-count m)))
+        (test-run-end)))))
+
+(defn
+  tr-mods
+  [(ms Code) (i i64) (n i64) (emitted bool)]
+  (-> Code)
+  (if
+    (icmp-ge i n)
+    (quasiquote ())
+    (let
+      [m
+        (code-nth ms i)
+        wants
+        (and
+          (not emitted)
+          (and
+            (icmp-gt (tr-count m 1 (code-count m)) 0)
+            (not (tr-has-main? m 1 (code-count m)))))]
+      (if
+        wants
+        (quasiquote
+          ((unquote (tr-emit-main m)) (unquote-splicing (tr-mods ms (iadd i 1) n true))))
+        (quasiquote ((unquote m) (unquote-splicing (tr-mods ms (iadd i 1) n emitted))))))))
+
+(defn
+  tr-run
+  [(modules Code)]
+  (-> Code)
+  (quasiquote (do (unquote-splicing (tr-mods modules 0 (code-count modules) false)))))
+
+(extern fork :cc c [] (-> i32))
+
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+
+(extern _exit :cc c [i32] (-> void))
+
+(defstruct TestState [(total i64) (passed i64) (failed i64)])
+
+(defn test-state [] (-> (ptr TestState)) (alloc-static TestState))
+
+(defn
+  test-run-begin
+  [(n i64)]
+  (-> i64)
+  (let
+    [s (test-state)]
+    (store! (field s total) n)
+    (store! (field s passed) 0)
+    (store! (field s failed) 0))
+  (let
+    [w (stdout)]
+    (do
+      (io.print-str w "
+running ")
+      (fmt.print-i w n)
+      (io.print-str w " test")
+      (io.print-str w (if (icmp-eq n 1) "" "s"))
+      (io.print-str w "
+")))
+  0)
+
+(defn
+  test-wait-code
+  [(st i64)]
+  (-> i64)
+  (let [sig (iand st 127)] (if (icmp-ne sig 0) (iadd 128 sig) (iand (udiv st 256) 255))))
+
+(defn
+  test-run-one
+  [(name (slice u8)) (fp (fnptr c [] i64))]
+  (-> i64)
+  (let
+    [w (stdout)]
+    (do (io.print-str w "test ") (io.print-str w name) (io.print-str w " ... ")))
+  (let
+    [pid (cast i64 (fork))]
+    (if
+      (icmp-lt pid 0)
+      (let
+        [s (test-state) w (stdout)]
+        (store! (field s failed) (iadd (load (field s failed)) 1))
+        (do (io.print-str w "FAILED (could not fork)
+"))
+        0)
+      (if
+        (icmp-eq pid 0)
+        (do (call-ptr fp) (_exit 0) 0)
+        (let
+          [stp (alloc-stack i32)]
+          (store! stp 0)
+          (waitpid (cast i32 pid) stp 0)
+          (let
+            [code (test-wait-code (cast i64 (load stp))) s (test-state) w (stdout)]
+            (if
+              (icmp-eq code 0)
+              (do
+                (store! (field s passed) (iadd (load (field s passed)) 1))
+                (do (io.print-str w "ok
+"))
+                0)
+              (do
+                (store! (field s failed) (iadd (load (field s failed)) 1))
+                (if
+                  (icmp-gt code 128)
+                  (do
+                    (io.print-str w "FAILED (signal ")
+                    (fmt.print-i w (isub code 128))
+                    (io.print-str w ")
+"))
+                  (do (io.print-str w "FAILED
+")))
+                0))))))))
+
+(defn
+  test-run-end
+  []
+  (-> i64)
+  (let
+    [s (test-state) w (stdout) p (load (field s passed)) f (load (field s failed))]
+    (do
+      (io.print-str w "
+test result: ")
+      (io.print-str w (if (icmp-eq f 0) "ok" "FAILED"))
+      (io.print-str w ". ")
+      (fmt.print-i w p)
+      (io.print-str w " passed; ")
+      (fmt.print-i w f)
+      (io.print-str w " failed
+"))
+    (if (icmp-gt f 0) 1 0)))
+

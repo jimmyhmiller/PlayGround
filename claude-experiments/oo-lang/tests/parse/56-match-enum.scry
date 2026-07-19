@@ -1,0 +1,6 @@
+fn area(s: Shape) -> Float {
+  match s {
+    Circle(r) -> 3.14159 * r * r
+    Rectangle(w, h) -> w * h
+  }
+}

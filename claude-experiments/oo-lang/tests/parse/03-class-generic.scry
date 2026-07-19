@@ -1,0 +1,7 @@
+class Inventory<T> {
+  items: List<T>
+
+  fn init() { self.items = List<T>() }
+  fn add(item: T) { self.items.push(item) }
+  fn count() -> Int { self.items.len() }
+}

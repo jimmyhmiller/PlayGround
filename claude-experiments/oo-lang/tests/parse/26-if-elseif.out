@@ -1,0 +1,18 @@
+(program
+  (fn main
+    (params)
+    (block
+      (if
+        (binary <
+          (id x)
+          (id lo))
+        (block
+          (id lo))
+        (if
+          (binary >
+            (id x)
+            (id hi))
+          (block
+            (id hi))
+          (block
+            (id x)))))))

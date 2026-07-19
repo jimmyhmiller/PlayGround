@@ -1,0 +1,234 @@
+# 00 — Vision
+
+> Name: **Scry** (directory is still `oo-lang`, but the language, CLI, and file extension are Scry — see [Name](#name) at the bottom).
+
+## The thesis
+
+AI systems are the most opaque software we have ever run in production. An agent framework
+is a pile of objects — agents, conversations, tools, tool calls, tasks — mutating each other
+thousands of times a minute, and the state of the art for understanding it is `print()` and
+a JSON log viewer. You cannot ask a running agent system the most basic questions: *what
+agents exist right now? what is this one doing? what's in that conversation? what happens
+if I pause it?*
+
+Scry is a statically-typed, OO-style language where **runtime observability is the
+product**. Not a debugger you attach when things go wrong. Not tracing you bolt on. The
+runtime is built, from the allocator up, so that every live object is enumerable, browsable,
+searchable, and pokeable — and a good-looking browser viewer that does all of that ships as
+a co-equal, day-one deliverable with the compiler.
+
+The bet: if the language's memory layout makes "list every live `Agent`" an O(live agents)
+slab walk instead of a heap crawl, and the viewer is always one URL away, then understanding
+a running AI system stops being archaeology and starts being *looking at it*.
+
+## What it looks like
+
+The language is deliberately unexciting. TS/Kotlin-ish braces, classes with data members and
+methods, generics, static types, **no inheritance**. If you can read TypeScript you can read
+this on day one:
+
+```
+class Agent {
+  name: String
+  model: String
+  status: AgentStatus
+  conversation: Conversation
+  tools: List<Tool>
+
+  fn pause() { self.status = AgentStatus.Paused }
+  fn resume() { self.status = AgentStatus.Running }
+  fn currentTask() -> Task { self.conversation.task }
+}
+
+class Conversation {
+  task: Task
+  messages: List<Message>
+
+  fn append(m: Message) { self.messages.push(m) }
+  fn tokenEstimate() -> Int { ... }
+}
+
+class Inventory<T> {
+  items: List<T>
+  fn add(item: T) { self.items.push(item) }
+}
+```
+
+What's exciting is what the runtime does with it. Every entity type gets its own arena
+(slab/magazine-style allocation, one arena per class). That single decision powers
+everything the viewer needs:
+
+- **Enumerate**: all live `Agent`s = walk the `Agent` slab. No heap scan, no registry
+  objects the programmer maintains, no forgetting to register.
+- **Search**: the viewer filters instances by field values because the runtime knows every
+  field's name, type, and offset — it's a statically-typed language; the metadata is free.
+- **Watch**: the viewer re-evaluates a pane's expression on an interval (or on focus, or
+  after an action); mutate `agent.status` in the running program and the next re-eval in
+  the detail pane picks it up. There is no push channel — the viewer keeps asking.
+- **Invoke**: click a method in the viewer, fill in typed arguments — that's sugar for
+  evaluating a call expression against the live process.
+
+Concretely, the viewer is a REPL client over the live process. The runtime embeds a server
+whose **only** wire operation is `eval`: send an expression or definition in Scry itself,
+get back its value (or an error), evaluated against the live heap at a safepoint:
+
+```json
+→ {"id": 7, "source": "Agent.instances()"}
+← {"id": 7, "value": [{"ref": "Agent#3", "type": "Agent"}, {"ref": "Agent#7", "type": "Agent"},
+                       {"ref": "Agent#9", "type": "Agent"}]}
+```
+
+Every viewer pane is sugar over this one channel: the type index is an eval of instance
+counts, the instance table is an eval of `Agent.instances()`, clicking `resume()` on
+`Agent#7` is an eval of `Agent#7.resume()`, live code change is an eval of a new method
+definition. There is no per-feature op, and no subscription/delta/push machinery sitting
+underneath it — refresh is just re-eval, driven by the client, not the runtime.
+
+An ordinary program plus a REPL. That's the whole shape of it.
+
+## Why this is not Smalltalk
+
+Everyone's first reaction will be "so, Smalltalk." The lineage is real — live objects you
+browse and message — but three deliberate choices make it a different thing:
+
+1. **Static types.** People will not adopt a dynamically-typed language in 2026 for
+   serious systems, and they're right not to: types are how you understand code you didn't
+   write, which is the whole thesis. Yes, this makes live redefinition genuinely hard —
+   changing a method while instances exist has to answer "what do existing callers and
+   existing instances do now?" precisely, not vibes. That's a design problem we take on
+   head-first (`03-live-semantics.md`), not a reason to give up types.
+2. **No image.** State is never baked into the program. You edit source files, you run a
+   program, it starts from `main`, it exits. Version control works. Deployment works.
+   The liveness lives in the *runtime of a normal process*, not in a persistent world
+   you sculpt.
+3. **Ordinary processes.** Your program is a normal executable with normal stdin/stdout —
+   a CLI tool, a TUI, a server. The viewer *attaches* to it from a browser. There is no
+   special environment the program must live inside. Kill the viewer tab; the program
+   doesn't care.
+
+Smalltalk made the environment the world. We make the world an ordinary process and hand
+you X-ray glasses.
+
+## Non-goals
+
+- **No inheritance.** Not "discouraged" — absent. No subclassing, no virtual dispatch
+  hierarchies, no diamond problems. Composition and generics. Polymorphism without
+  inheritance comes from **Java-style interfaces**: nominal, explicit `implements`,
+  interface types usable as field/param/return types, dynamic dispatch through them — see
+  `01-language.md`. (Default methods on interfaces: OPEN, lean no for the PoC.)
+- **No image.** Covered above; worth repeating because every "live" feature will tempt
+  us toward one. Any design that requires serializing the heap to disk to be useful is
+  wrong.
+- **No JIT (yet).** Execution is a bytecode interpreter, implemented in Coil (the clox
+  port at `coil/apps/clox/` proved the approach runs at C speed for the interpreter loop).
+  A Java-style optimizing JIT is explicitly deferred; the bytecode format must not paint
+  us out of one, but no milestone depends on it.
+- **Not a general-purpose ecosystem play.** No package manager, no LSP, no self-hosting
+  ambitions in scope. One language, one runtime, one viewer, one killer demo.
+- **Not an observability SDK for other languages.** The observability comes from owning
+  the allocator and the object model. Retrofitting this onto Python is a different (worse)
+  project.
+
+## The demo
+
+The proof-of-concept application is an **agent TUI**: a terminal app, written in Scry,
+that runs AI agents against tasks. Entity types: `Agent`, `Conversation`, `Message`,
+`Task`, and `interface Tool` implemented by concrete classes `ShellTool`/`SearchTool`
+(so `ToolCall.tool` is typed as the interface, dispatch is dynamic, and each concrete
+tool class still gets its own arena for the viewer to enumerate). Each agent runs on its
+own real OS thread. It dogfoods the thesis — the language for understanding AI systems,
+demonstrated on an AI system.
+
+The demo is one terminal window and one browser window, side by side. Minute by minute:
+
+**0:00 — Start the program.** In the terminal: `scry run agents.scry`. A TUI comes up:
+three agents (`researcher`, `coder`, `reviewer`), each spun up on its own real OS thread,
+working a shared task list. Status lines tick, a log pane scrolls tool calls. It looks like
+any agent runner. Nothing about it suggests there's anything to see beyond what it prints.
+
+**0:30 — Open the viewer.** The runtime printed `viewer: http://localhost:7357` at startup.
+Open it. The audience sees a clean entity-type index — not programmer-art, an actually
+designed UI:
+
+```
+Agent          3 live
+Conversation   3 live
+Message       47 live     ▲ climbing
+ShellTool      3 live
+SearchTool     2 live
+ToolCall      12 live     ▲ climbing
+Task           8 live
+```
+
+The counts on `Message` and `ToolCall` are visibly climbing as the agents work. First
+audience beat: *the program didn't do anything to make this happen. No annotations, no
+registry, no instrumentation. These are just its live objects.*
+
+**1:30 — Drill in.** Click `Agent` → a searchable table of the three instances with their
+fields as columns. Click `researcher` → instance detail: every field, typed; references
+like `conversation: Conversation#2` are links. Click through to the conversation and the
+audience is reading the agent's messages *mid-run* — the pane re-evaluates the
+conversation on an interval, so new messages the agent produces show up on the next tick.
+Type `status == Waiting` into the instance search and filter agents by a field predicate.
+
+**2:30 — Poke it.** In `researcher`'s detail pane, the methods are listed with their
+signatures. Click `pause()` → invoke. In the *terminal*, the researcher's status line
+flips to `⏸ paused` within a frame. Second audience beat: *the viewer isn't a read-only
+dashboard; it's a two-way lens on the same objects the TUI is rendering.* Open a `Task`,
+call `setPriority(1)`, watch the TUI's task list re-sort itself.
+
+**3:30 — The "I changed it live" moment.** The `reviewer` agent's summaries are too long.
+Open its `summarize` method in the viewer's code pane (or in your editor — the runtime
+accepts redefinitions either way), change the prompt-building line, save. The runtime
+**typechecks the new method body against the live class before swapping it in** — make a
+type error and the viewer shows the error and refuses; the program never sees a
+half-applied change. Fix it, save again: `method Agent.summarize replaced — next call uses
+new code`. The very next review in the terminal is short. No restart, no lost
+conversations, all 47 `Message` instances still there. Third audience beat, the one people
+remember: *I changed the behavior of a statically-typed program while it ran, and the type
+checker had my back.*
+
+**4:30 — Close the loop.** Kill the browser tab. The TUI keeps running, indifferent —
+it's an ordinary process; the viewer was just a lens. Re-open the URL; everything's there
+again. `Ctrl-C` the TUI; the program exits like any program. No image was harmed.
+
+Total: under five minutes, no slides, nothing faked. Every capability shown falls directly
+out of a pinned design decision: per-type arenas (the counts and tables), the embedded
+HTTP/WS server (the attach/detach), static metadata (typed fields, typed invoke forms),
+and live-redefinition semantics (the swap).
+
+## Who it's for
+
+- **People building agent systems** who currently understand their own software through
+  log spelunking. This is the primary audience and the demo speaks directly to them.
+- **People operating AI systems** — the "what is it doing *right now*" question, asked by
+  someone who didn't write the code. The viewer is designed to be legible to a reader,
+  not just the author: concrete entity types, real field names, no memory addresses.
+- **Language-runtime people**, as an existence proof: observability-first is a viable
+  design axis for a statically-typed language, and it costs an allocator design, not a
+  research program.
+
+It is explicitly **not** aimed (yet) at people who need a mature general-purpose language.
+The PoC wins by being the best possible way to *watch and steer* one class of program.
+
+## Name
+
+**Scry** (Jimmy ruling) — divination by gazing into a live surface. Short, verb-able
+("scry the process"), `.scry` files, `scry run agents.scry`. Picked over four other
+candidates pitched at the same "lens over a live system" identity, kept here for the
+record: **Vivarium** (nailed the semantics but risked image connotations we explicitly
+reject), **Aperture** (clean but heavily used elsewhere — Portal, Apple's old photo app),
+**Plainview** (zero mysticism, a bit sedate), and **Lucid** (best meaning, worst
+collision — a historical dataflow language already owns it). The directory on disk stays
+`oo-lang`; the language, CLI, and file extension are Scry everywhere else.
+
+## OPEN: flagged elsewhere, not decided here
+
+- **How the viewer's eval channel interleaves with running threads** — evals that read
+  can likely run at a partial safepoint; definition evals need full stop-the-world.
+  Proposed in `02-runtime.md`. The demo script above assumes it works; it does not assume
+  how.
+- **Thread API surface** — spawn/join shape, what synchronization primitives (mutex?
+  channels? atomics?) the language exposes for the PoC. Proposed in
+  `01-language.md`/`02-runtime.md`.
+- **Interface default methods** — lean no for the PoC. Proposed in `01-language.md`.

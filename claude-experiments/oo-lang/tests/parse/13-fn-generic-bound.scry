@@ -1,0 +1,7 @@
+fn largest<T: Comparable>(items: List<T>) -> T {
+  var best = items.get(0)
+  for x in items {
+    if x.compareTo(best) > 0 { best = x }
+  }
+  best
+}

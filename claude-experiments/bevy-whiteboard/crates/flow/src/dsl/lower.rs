@@ -294,6 +294,18 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
                 };
                 initial_packets.push(Value::variant(tag.clone(), inner));
             }
+            ast::OnSpawnStmt::SiblingEdge { sibling, inbound, latency } => {
+                let lat = lower_expr(latency, &HashSet::new())?;
+                let sib = EdgeEnd::Sibling(sibling.clone());
+                let (from, to) = if *inbound {
+                    // `sibling("X") -> self`
+                    (sib, EdgeEnd::ThisInstance)
+                } else {
+                    // `self -> sibling("X")`
+                    (EdgeEnd::ThisInstance, sib)
+                };
+                edges.push(EdgeSpec { from, to, latency: lat });
+            }
         }
     }
 
@@ -464,9 +476,13 @@ fn lower_stmt(s: &ast::Stmt, bound: &mut HashSet<String>) -> Result<Ieff, String
             detail: lower_expr(detail, bound)?,
         },
         ast::Stmt::Spawn { template, into } => {
+            // `template` evaluates in the pre-`into` scope; then `into`
+            // binds the new node for subsequent effects.
+            let template = lower_expr(template, bound)?;
             bound.insert(into.clone());
-            Ieff::Spawn { template: template.clone(), into_var: Some(into.clone()) }
+            Ieff::Spawn { template, into_var: Some(into.clone()) }
         }
+        ast::Stmt::Despawn { node } => Ieff::Despawn { node: lower_expr(node, bound)? },
     })
 }
 
@@ -581,6 +597,18 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
         }
         ("tail", 1) => {
             return Ok(Ie::tail(lower_expr(&args[0], bound)?));
+        }
+        ("append", 2) => {
+            return Ok(Ie::append(
+                lower_expr(&args[0], bound)?,
+                lower_expr(&args[1], bound)?,
+            ));
+        }
+        ("contains", 2) => {
+            return Ok(Ie::contains(
+                lower_expr(&args[0], bound)?,
+                lower_expr(&args[1], bound)?,
+            ));
         }
         ("index", 2) => {
             return Ok(Ie::index(

@@ -1,0 +1,51 @@
+; selfhost/src/embedded_stdlib.coil — the prelude + bundled stdlib, embedded as
+; string constants so the compiler is portable (runs outside the repo, where
+; lib/*.coil don't exist). This is the Coil analog of the Rust compiler's
+; `include_str!`: `(include-str "path")` reads the file AT COMPILE TIME and folds it
+; into a string literal, so the bytes are baked into the compiler binary. Paths are
+; resolved relative to THIS file's directory (selfhost/src), so prelude.coil is a
+; sibling and the bundled libs are ../../lib. No external codegen step, no escaping,
+; no generated blob to keep in sync — editing prelude.coil or a bundled lib and
+; rebuilding is all it takes (the embed can never go stale relative to the build).
+;
+; With COIL_STDLIB_DIR set, the loader prefers live source under it over these
+; embedded copies (dev workflow); unset, the embedded copies are authoritative
+; (loader.coil).
+(module embedded_stdlib)
+
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+
+(defn embedded-prelude [] (-> (slice u8))
+  (include-str "prelude.coil"))
+
+; text of a bundled stdlib module by filename, or an empty slice if not bundled.
+; This `cond` is the single source of truth for what is bundled — `bundled?`
+; derives from it, and the snapshot corpus globs lib/*.coil directly.
+(defn embedded-lib [(name (slice u8))] (-> (slice u8))
+  (cond
+    (str-eq name "alloc.coil")     (include-str "../../lib/alloc.coil")
+    (str-eq name "arraylist.coil") (include-str "../../lib/arraylist.coil")
+    (str-eq name "assert.coil")    (include-str "../../lib/assert.coil")
+    (str-eq name "atomic.coil")    (include-str "../../lib/atomic.coil")
+    (str-eq name "closure.coil")   (include-str "../../lib/closure.coil")
+    (str-eq name "control.coil")   (include-str "../../lib/control.coil")
+    (str-eq name "dbgalloc.coil")  (include-str "../../lib/dbgalloc.coil")
+    (str-eq name "derive.coil")    (include-str "../../lib/derive.coil")
+    (str-eq name "fmt.coil")       (include-str "../../lib/fmt.coil")
+    (str-eq name "fs.coil")        (include-str "../../lib/fs.coil")
+    (str-eq name "hashmap.coil")   (include-str "../../lib/hashmap.coil")
+    (str-eq name "io.coil")        (include-str "../../lib/io.coil")
+    (str-eq name "match.coil")     (include-str "../../lib/match.coil")
+    (str-eq name "mem.coil")       (include-str "../../lib/mem.coil")
+    (str-eq name "mmio.coil")      (include-str "../../lib/mmio.coil")
+    (str-eq name "print.coil")     (include-str "../../lib/print.coil")
+    (str-eq name "result.coil")    (include-str "../../lib/result.coil")
+    (str-eq name "sexp.coil")      (include-str "../../lib/sexp.coil")
+    (str-eq name "simd.coil")      (include-str "../../lib/simd.coil")
+    (str-eq name "slice.coil")     (include-str "../../lib/slice.coil")
+    (str-eq name "stacklint.coil") (include-str "../../lib/stacklint.coil")
+    (str-eq name "str.coil")       (include-str "../../lib/str.coil")
+    (str-eq name "thread.coil")    (include-str "../../lib/thread.coil")
+    (str-eq name "try.coil")       (include-str "../../lib/try.coil")
+    ""))

@@ -4,10 +4,12 @@
   "description": "",
   "main": "index.js",
   "bin": {
-    "beagle-agent": "./bin/beagle-agent.js"
+    "beagle-agent": "./bin/beagle-agent.js",
+    "beagle": "./bin/beagle.js"
   },
   "scripts": {
-    "start": "tsx beagle_agent.ts"
+    "start": "tsx beagle_agent.ts",
+    "cli": "tsx beagle_repl_cli.ts"
   },
   "keywords": [],
   "author": "",

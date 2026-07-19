@@ -1,0 +1,35 @@
+(defn
+  def-reg2
+  [(name Code)]
+  (-> Code)
+  (if
+    (code-eq (target-arch) (quasiquote x86_64))
+    (quasiquote
+      (defcc
+        (unquote name)
+        :params
+        [rax rdx]
+        :ret
+        rax
+        :clobber
+        [rax rdx rcx rsi rdi r8 r9 r10 r11]
+        :lower
+        shim))
+    (quasiquote
+      (defcc
+        (unquote name)
+        :params
+        [x9 x10]
+        :ret
+        x9
+        :clobber
+        [x9 x10 x11 x12 x13 x14 x15]
+        :lower
+        shim))))
+
+(defcc reg2 :params [x9 x10] :ret x9 :clobber [x9 x10 x11 x12 x13 x14 x15] :lower shim)
+
+(defn sub2 :cc reg2 [(a :i64) (b :i64)] (-> :i64) (isub a b))
+
+(defn main [] (-> :i64) (let [x (iadd 40 10)] (sub2 x 8)))
+

@@ -1,0 +1,135 @@
+// demo-mini.scry — a small, SELF-CONTAINED agent-flavored program for Phase 3 (M0).
+//
+// Unlike examples/agents-core.scry (which references Llm/AgentError/__builtin_* that
+// only exist from M4/M5 and so cannot `run`), this file runs end to end today. It
+// exercises every M0 feature: entity classes with methods that mutate self, a real
+// `interface Tool` with two implementors dispatched through one interface-typed value
+// (itable dispatch, not a switch), monomorphized generics (`Inventory<Tool>` and
+// `Inventory<Message>` become two distinct arenas), an enum + `match`, `?`
+// propagation over `Result`, string concatenation + `${}` interpolation, and `List`.
+//
+// `scry run --dump-arenas examples/demo-mini.scry` shows one arena per concrete class,
+// including the two generic instantiations — proving per-type-arena monomorphization.
+
+interface Tool {
+  fn call(input: String) -> String
+}
+
+class ShellTool implements Tool {
+  name: String
+  fn call(input: String) -> String {
+    "[shell:" + self.name + "] ran: " + input
+  }
+}
+
+class SearchTool implements Tool {
+  name: String
+  fn call(input: String) -> String {
+    "[search:" + self.name + "] 3 hits for: " + input
+  }
+}
+
+enum Role {
+  User
+  Assistant
+}
+
+class Message {
+  role: Role
+  content: String
+  fn render() -> String {
+    let who = match self.role {
+      User -> "user"
+      Assistant -> "assistant"
+    }
+    who + ": " + self.content
+  }
+}
+
+// A monomorphized generic container: Inventory<Tool> and Inventory<Message> are two
+// distinct compiled types with two distinct arenas (DECISIONS.md #6).
+class Inventory<T> {
+  items: List<T>
+  fn add(item: T) {
+    self.items.push(item)
+  }
+  fn count() -> Int {
+    self.items.len()
+  }
+}
+
+class Conversation {
+  messages: Inventory<Message>
+  fn append(m: Message) {
+    self.messages.add(m)
+  }
+  fn size() -> Int {
+    self.messages.count()
+  }
+}
+
+// ScriptedModel: honestly-named canned model (05 "What we fake" #7 — never disguised).
+class ScriptedModel {
+  reply: String
+  fn complete(prompt: String) -> String {
+    self.reply
+  }
+}
+
+class Agent {
+  name: String
+  model: ScriptedModel
+  conversation: Conversation
+  tools: Inventory<Tool>
+
+  fn firstTool() -> Result<Tool, String> {
+    if self.tools.count() == 0 {
+      Err("no tools")
+    } else {
+      Ok(self.tools.items.get(0))
+    }
+  }
+
+  fn step(userText: String) -> String {
+    let um = Message(role: User, content: userText)
+    self.conversation.append(um)
+    let answer = self.model.complete(userText)
+    let am = Message(role: Assistant, content: answer)
+    self.conversation.append(am)
+    am.render()
+  }
+
+  fn runTool(input: String) -> Result<String, String> {
+    let t = self.firstTool()?
+    Ok(t.call(input))
+  }
+}
+
+fn makeAgent(nm: String, model: ScriptedModel, t1: Tool, t2: Tool) -> Agent {
+  let inv = Inventory<Tool>(items: List<Tool>())
+  inv.add(t1)
+  inv.add(t2)
+  let conv = Conversation(messages: Inventory<Message>(items: List<Message>()))
+  Agent(name: nm, model: model, conversation: conv, tools: inv)
+}
+
+fn main() {
+  let sh = ShellTool(name: "bash")
+  let se = SearchTool(name: "web")
+
+  let agents = List<Agent>()
+  agents.push(makeAgent("researcher", ScriptedModel(reply: "I will investigate that."), sh, se))
+  agents.push(makeAgent("coder", ScriptedModel(reply: "Here is the code."), sh, se))
+  agents.push(makeAgent("reviewer", ScriptedModel(reply: "Looks good to me."), sh, se))
+
+  for a in agents {
+    Console.log("=== agent " + a.name + " ===")
+    print(a.step("start your task"))
+    print(a.step("continue"))
+    match a.runTool("ls -la") {
+      Ok(out) -> print(out)
+      Err(e) -> print("tool error: " + e)
+    }
+    Console.log("conversation has ${a.conversation.size()} messages")
+  }
+}

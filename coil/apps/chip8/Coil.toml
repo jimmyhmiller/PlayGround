@@ -1,0 +1,10 @@
+[package]
+name  = "chip8-gui"
+entry = "main.coil"
+
+[link]
+frameworks = ["AppKit", "CoreGraphics"]
+libs       = ["objc"]
+
+[run]
+args = ["../../roms/ibm.ch8"]   # default ROM for `coil run`; override with `coil run -- <rom>`

@@ -536,7 +536,19 @@ impl Sim {
                 self.record_error(kind, Some(nid), Some(rule_name), detail_s);
             }
             Effect::Spawn { template, into_var } => {
-                match self.try_spawn_from_template(template, Some(nid)) {
+                let class = match self.eval_at_node(nid, bindings, template, consumed_pkt) {
+                    Value::Str(s) => s,
+                    other => {
+                        self.record_error(
+                            "spawn_bad_template",
+                            Some(nid),
+                            Some(rule_name),
+                            format!("Spawn: template must evaluate to a Str class name, got {:?}", other),
+                        );
+                        return;
+                    }
+                };
+                match self.try_spawn_from_template(&class, Some(nid)) {
                     Ok(new_id) => {
                         if let Some(var) = into_var {
                             bindings.insert(var.clone(), Value::NodeRef(new_id));
@@ -550,7 +562,16 @@ impl Sim {
             Effect::Despawn { node } => {
                 let v = self.eval_at_node(nid, bindings, node, consumed_pkt);
                 match v {
-                    Value::NodeRef(id) => { self.despawn_node(id); }
+                    Value::NodeRef(id) => {
+                        // Despawning a compound shim must take its whole
+                        // interior with it — otherwise the inner nodes
+                        // (a Worker's Service/Reply/…) are orphaned and
+                        // surface as loose nodes on the top-level canvas.
+                        match self.nodes.get(&id).filter(|n| n.is_compound()).map(|n| n.name.clone()) {
+                            Some(name) => { self.despawn_compound_interior(&name, true); }
+                            None => { self.despawn_node(id); }
+                        }
+                    }
                     other => {
                         self.record_error(
                             "expr_type_mismatch",
@@ -749,6 +770,16 @@ impl Sim {
         template_name: &str,
         parent: Option<NodeId>,
     ) -> Result<NodeId, String> {
+        // Compound class (e.g. the real `WorkerComposite`): instantiate it
+        // and auto-wire the spawner to its input port so a dispatched
+        // `req` reaches the worker and its `resp` reverse-routes back —
+        // the same single-edge request/response wiring a Client→Worker
+        // edge uses. This is what lets an autoscaler clone *any* gadget.
+        if !self.template_by_name.contains_key(template_name)
+            && self.compound_templates.contains_key(template_name)
+        {
+            return self.try_spawn_compound(template_name, parent);
+        }
         let tid = self
             .template_by_name
             .get(template_name)
@@ -758,6 +789,11 @@ impl Sim {
 
         self.next_instance_seq += 1;
         let seq = self.next_instance_seq;
+        // Spawned instances live at the TOP LEVEL (no `<compound>::`
+        // prefix): an autoscaler's workers are meant to be visible on the
+        // canvas next to it, fanning out, not buried inside a compound.
+        // The spawner relationship is carried by the `parent` field +
+        // template edges, not by the name.
         let instance_name = format!("{}_{}", t.node_name_prefix, seq);
 
         let new_id = NodeId(self.next_node_id);
@@ -787,26 +823,28 @@ impl Sim {
 
         // Materialize template edges.
         for spec in &t.edges {
-            let from = match spec.from {
-                EdgeEnd::ThisInstance => new_id,
-                EdgeEnd::Parent => match parent {
-                    Some(p) => p,
-                    None => return Err(format!(
+            let resolve = |end: &EdgeEnd| -> Result<NodeId, String> {
+                match end {
+                    EdgeEnd::ThisInstance => Ok(new_id),
+                    EdgeEnd::Parent => parent.ok_or_else(|| format!(
                         "template `{}` has an edge with EdgeEnd::Parent but no parent was supplied",
                         template_name,
                     )),
-                },
+                    EdgeEnd::Sibling(name) => {
+                        let spawner = parent.ok_or_else(|| format!(
+                            "template `{}` has an edge with sibling(\"{}\") but no spawner was supplied",
+                            template_name, name,
+                        ))?;
+                        self.resolve_sibling(spawner, name).ok_or_else(|| format!(
+                            "template `{}`: sibling(\"{}\") did not resolve — no node sharing the \
+                             spawner's compound prefix has that local name",
+                            template_name, name,
+                        ))
+                    }
+                }
             };
-            let to = match spec.to {
-                EdgeEnd::ThisInstance => new_id,
-                EdgeEnd::Parent => match parent {
-                    Some(p) => p,
-                    None => return Err(format!(
-                        "template `{}` has an edge with EdgeEnd::Parent but no parent was supplied",
-                        template_name,
-                    )),
-                },
-            };
+            let from = resolve(&spec.from)?;
+            let to = resolve(&spec.to)?;
             self.add_edge(from, to, spec.latency.clone());
         }
 
@@ -820,6 +858,60 @@ impl Sim {
         }
 
         Ok(new_id)
+    }
+
+    /// Spawn an instance of a *compound* class at the top level and wire
+    /// the spawner to its input port. Used by an autoscaler to clone a
+    /// real gadget (Worker, Queue, …) on demand.
+    ///
+    /// Two edges are created when the spawned compound is request/
+    /// response-shaped:
+    ///   `parent → <worker>.<in_port>`   — dispatch a `req(... pushing self)`
+    ///   `<worker>.response → parent`     — the worker's `resp` back to us
+    /// The explicit response edge matters: a reply can't reverse-route
+    /// through compound ports (the same reason `wire_flow_edge` adds a
+    /// response edge for compound↔compound), so without it `resp` would
+    /// be dropped, `completed` would never increment, and `inflight`
+    /// would grow without bound — pinning the fleet to `max`.
+    ///
+    /// `in_port` is `"request"` when present, else the first in-port.
+    /// The response edge is created only if the worker declares a
+    /// `"response"` out-port (so non-replying templates still work).
+    fn try_spawn_compound(
+        &mut self,
+        class_name: &str,
+        parent: Option<NodeId>,
+    ) -> Result<NodeId, String> {
+        self.next_instance_seq += 1;
+        let seq = self.next_instance_seq;
+        let inst_name = format!("{}_{}", class_name, seq);
+        let shim = self.instantiate_compound(class_name, &inst_name, &Default::default())?;
+        if let Some(p) = parent {
+            // NB: deliberately do NOT set `shim.parent = p`. The `parent`
+            // field drives compound-ancestry walking during routing; if
+            // the worker's ancestry climbed into the ASG, a reply walking
+            // up would hit the ASG's own self-loop and mis-route. The
+            // spawner relationship is carried by the dispatch edge and the
+            // ASG's `members` list, not by ancestry.
+            let (in_port, has_response) = self
+                .nodes
+                .get(&shim)
+                .and_then(|n| n.compound.as_ref())
+                .map(|c| {
+                    let inp = if c.in_ports.contains_key("request") {
+                        "request".to_string()
+                    } else {
+                        c.in_ports.keys().next().cloned().unwrap_or_else(|| "request".to_string())
+                    };
+                    (inp, c.out_ports.contains_key("response"))
+                })
+                .unwrap_or_else(|| ("request".to_string(), false));
+            self.add_edge_ports(p, None, shim, Some(in_port), Expr::int(1_000_000));
+            if has_response {
+                self.add_edge_ports(shim, Some("response".to_string()), p, None, Expr::int(1_000_000));
+            }
+        }
+        Ok(shim)
     }
 
     /// Instantiate a class with an explicit instance name. Distinct
@@ -866,9 +958,10 @@ impl Sim {
             at_ns: self.now_ns,
         });
         for spec in &t.edges {
-            // Only ThisInstance endpoints are meaningful here — Parent
-            // has no referent in the named-instance path.
-            let resolve = |end: EdgeEnd| -> Result<NodeId, String> {
+            // Only ThisInstance endpoints are meaningful here — Parent and
+            // Sibling have no referent in the named-instance path (there
+            // is no spawner whose compound prefix to resolve against).
+            let resolve = |end: &EdgeEnd| -> Result<NodeId, String> {
                 match end {
                     EdgeEnd::ThisInstance => Ok(new_id),
                     EdgeEnd::Parent => Err(format!(
@@ -876,10 +969,15 @@ impl Sim {
                          instantiate() does not supply a parent",
                         class_name
                     )),
+                    EdgeEnd::Sibling(name) => Err(format!(
+                        "class `{}` has an edge with sibling(\"{}\"); \
+                         instantiate() does not supply a spawner to resolve against",
+                        class_name, name,
+                    )),
                 }
             };
-            let from = resolve(spec.from)?;
-            let to = resolve(spec.to)?;
+            let from = resolve(&spec.from)?;
+            let to = resolve(&spec.to)?;
             self.add_edge(from, to, spec.latency.clone());
         }
         for payload in t.initial_packets.iter().cloned() {

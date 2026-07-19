@@ -1,0 +1,147 @@
+{
+  "groups": [
+    {
+      "name": "alloc_heavy",
+      "series": [
+        {
+          "label": "gc-rust",
+          "values": {
+            "alloc_bytes": 262136000,
+            "alloc_objects": 6553400,
+            "binary_kb": 1717.9609375,
+            "compile_ms": 179.820625,
+            "gc_major": 0,
+            "gc_minor": 15,
+            "gc_pause_max_ms": 4.158,
+            "gc_pause_total_ms": 47.6647,
+            "peak_heap_bytes": 16777200,
+            "wall_ms": {
+              "max": 352.960334,
+              "mean": 172.67517383333333,
+              "min": 134.734458,
+              "stddev": 88.33734130186419
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "heap_demo",
+      "series": [
+        {
+          "label": "gc-rust",
+          "values": {
+            "alloc_bytes": 2520,
+            "alloc_objects": 68,
+            "binary_kb": 1718.4453125,
+            "compile_ms": 182.229166,
+            "gc_major": 0,
+            "gc_minor": 0,
+            "gc_pause_max_ms": 0.0,
+            "gc_pause_total_ms": 0.0,
+            "peak_heap_bytes": 0,
+            "wall_ms": {
+              "max": 199.97183299999998,
+              "mean": 36.1039445,
+              "min": 3.230625,
+              "stddev": 80.2786179165795
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "fib",
+      "series": [
+        {
+          "label": "gc-rust",
+          "values": {
+            "alloc_bytes": 0,
+            "alloc_objects": 0,
+            "binary_kb": 1717.625,
+            "compile_ms": 172.296541,
+            "gc_major": 0,
+            "gc_minor": 0,
+            "gc_pause_max_ms": 0.0,
+            "gc_pause_total_ms": 0.0,
+            "peak_heap_bytes": 0,
+            "wall_ms": {
+              "max": 213.692708,
+              "mean": 44.833097166666676,
+              "min": 9.733500000000001,
+              "stddev": 82.73817699942545
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "kind": "programs",
+    "runs": 6
+  },
+  "metrics": [
+    {
+      "dist": true,
+      "key": "wall_ms",
+      "label": "runtime",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "compile_ms",
+      "label": "compile",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "binary_kb",
+      "label": "binary size",
+      "lower_better": true,
+      "unit": "KB"
+    },
+    {
+      "key": "gc_minor",
+      "label": "minor GCs",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "gc_major",
+      "label": "major GCs",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "gc_pause_max_ms",
+      "label": "max GC pause",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "gc_pause_total_ms",
+      "label": "total GC pause",
+      "lower_better": true,
+      "unit": "ms"
+    },
+    {
+      "key": "alloc_objects",
+      "label": "allocations",
+      "lower_better": true,
+      "unit": ""
+    },
+    {
+      "key": "alloc_bytes",
+      "label": "alloc churn",
+      "lower_better": true,
+      "unit": "B"
+    },
+    {
+      "key": "peak_heap_bytes",
+      "label": "peak heap",
+      "lower_better": true,
+      "unit": "B"
+    }
+  ],
+  "schema": "gcr-bench/1"
+}

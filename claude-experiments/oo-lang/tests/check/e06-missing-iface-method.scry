@@ -1,0 +1,9 @@
+
+interface Tool {
+  fn name() -> String
+  fn call() -> String
+}
+class Bad implements Tool {
+  fn name() -> String { "b" }
+}
+fn main() {}

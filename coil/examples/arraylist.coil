@@ -1,0 +1,16 @@
+; `ArrayList T` — a growable array over slices + an explicit allocator value
+; (lib/arraylist.coil); no ambient heap, no compiler support.
+;   coil run examples/arraylist.coil; echo $?   => 45
+(module app)
+(import "lib/arraylist.coil" :use *)
+(import "lib/alloc.coil" :use *)
+(import "lib/control.coil" :use *)
+
+(defn main [] (-> :i64)
+  (let [a (malloc-allocator)         ; allocation is an explicit value
+        (mut xs) (al-new [i64] a)]
+    (for [i 0 10] (al-push! (mut xs) i))   ; 0..9, grows past the initial cap
+    (let [(mut acc) 0]
+      (al-for [v xs] (store! acc (iadd (load acc) v)))   ; 0+1+…+9 = 45
+      (al-free! (mut xs))                                 ; explicit cleanup
+      (load acc))))

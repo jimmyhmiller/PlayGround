@@ -40,6 +40,18 @@ pub struct TypeInfo {
 
     /// Log2 of allocation alignment (minimum 3, i.e. 8-byte aligned).
     pub align_log2: u8,
+
+    /// Absolute byte offsets (from the object start) of GC pointers embedded in
+    /// the *raw* region — i.e. references inside flattened `#[value]` aggregates
+    /// stored inline. The leading `value_field_count` slots cover ordinary
+    /// pointer fields; these cover interior pointers the contiguous-slots model
+    /// can't express. Empty for the common case.
+    ///
+    /// A `&'static` slice keeps `TypeInfo` `Copy` and const-constructible.
+    /// Dynamically-built type tables (JIT/AOT) leak the slice once at startup;
+    /// the type table lives for the whole program, so this is a bounded one-time
+    /// leak, not a per-object cost.
+    pub interior_ptrs: &'static [u16],
 }
 
 /// Whether a heap object has a variable-length tail section.
@@ -78,6 +90,7 @@ impl TypeInfo {
             raw_byte_count: 0,
             varlen: VarLenKind::None,
             align_log2: 3, // 8-byte alignment minimum
+            interior_ptrs: &[],
         }
     }
 
@@ -112,6 +125,13 @@ impl TypeInfo {
     pub const fn with_varlen_bytes(mut self, fixed_fields: u16) -> Self {
         self.value_field_count = fixed_fields;
         self.varlen = VarLenKind::Bytes;
+        self
+    }
+
+    /// Set the interior-pointer offsets (GC refs embedded in flattened value
+    /// fields). Offsets are absolute from the object start (header included).
+    pub const fn with_interior_ptrs(mut self, offsets: &'static [u16]) -> Self {
+        self.interior_ptrs = offsets;
         self
     }
 

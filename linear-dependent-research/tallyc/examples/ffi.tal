@@ -1,0 +1,27 @@
+// %foreign — FFI to arbitrary C functions.
+//
+//   tally run examples/ffi.tal        →  14
+//
+// A `%foreign` declaration is an opaque postulate to the kernel (every use is
+// checked against the tally type you declare; it can never reduce in a type)
+// whose native lowering is a DIRECT CALL to the extern C symbol, at the i64
+// ABI: one i64 per non-erased argument, an i64 result. Erased ({0 …}) binders
+// are dropped exactly like every other postulate, so indices and proofs never
+// cross the boundary.
+//
+// This is THE audited escape hatch (FUTURE_WORK §6): the C side is trusted —
+// you vouch for the type you write, like Rust's `extern`. Declare honestly:
+// a C function that frees or retains its argument should be typed linear.
+//
+// Two forms:
+//   %foreign strlen : Str -> Nat              -- symbol = the tally name
+//   %foreign "strlen" clen : Str -> Nat       -- tally name ≠ C symbol
+
+%builtin Nat Nat
+enum Nat { Zero : Nat, Succ : Nat -> Nat }
+
+%foreign strlen : Str -> Nat
+%foreign "strlen" clen : Str -> Nat
+
+main : Nat
+fn main() { strlen("hello") + clen("FFI works") }   // 5 + 9

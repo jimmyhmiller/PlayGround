@@ -1,0 +1,1041 @@
+; serialize.coil — turn a live VM value into the tagged JSON of 04-viewer.md §4.1, and
+; build the reflection responses (types/fields/methods). This is the ONLY place the wire
+; format lives. The depth rule (§4.1) is one rule applied uniformly: the directly-returned
+; value(s) are depth 0 (entities expand their fields, list/map elements stay depth 0);
+; anything reached through an entity FIELD is depth ≥ 1 and collapses to a clickable ref.
+(module serialize)
+(import "ioutil.coil" :use *)
+(import "lexer.coil" :use *)   ; alc-global — used by modules() (ModNode's children ArrayList)
+(import "arena.coil" :use *)
+(import "builtins.coil" :use *)
+(import "bytecode.coil" :use *)
+(import "types.coil" :use *)
+(import "ast.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "json.coil" :use *)
+
+(const COLL_CAP 100)   ; list/map truncation threshold (04 uses ~20; task says ~100)
+
+(defn mono-by-id [(tid i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos))] (if (or (< tid 0) (>= tid (al-len ms))) (cast (ptr MonoType) 0) (al-get ms tid))))
+(defn f-bits [(b i64)] (-> f64) (let [p (alloc-static i64)] (store! p b) (load (cast (ptr f64) p))))
+
+; ---- type display strings (for schema) ----
+(defn ty-display [(b (ptr JBuf)) (t (ptr Type))] (-> i64)   ; e.g. "Inventory<Tool>"
+  (let [k (ty-kind t)]
+    (cond
+      (= k TY_INT) (jb-cstr b c"Int") (= k TY_FLOAT) (jb-cstr b c"Float") (= k TY_BOOL) (jb-cstr b c"Bool")
+      (= k TY_STRING) (jb-cstr b c"String") (= k TY_VOID) (jb-cstr b c"Void") (= k TY_UNIT) (jb-cstr b c"()")
+      (= k TY_VAR) (jb-bytes b (load (field t name)) (load (field t name-len)))
+      (= k TY_NAMED)
+        (do (jb-bytes b (load (field t name)) (load (field t name-len)))
+            (let [aa (load (field t args)) n (al-len aa)]
+              (if (> n 0)
+                (do (jb-byte b \<) (let [(mut i) 0] (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (ty-display b (al-get aa (load i))) (store! i (+ (load i) 1)) 0) (break)))) (jb-byte b \>) 0)
+                0)))
+      (jb-cstr b c"?"))))
+
+; schema field-type string: "list:Tool", "map:String,Int", "ref:Conversation", enum/scalar name
+(defn ty-schema [(b (ptr JBuf)) (t (ptr Type))] (-> i64)
+  (jb-byte b \")
+  (let [k (ty-kind t)]
+    (if (= k TY_NAMED)
+      (let [d (load (field t decl)) dk (load (field d kind)) aa (load (field t args))]
+        (cond
+          (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"List") 4)
+            (do (jb-cstr b c"list:") (ty-display b (al-get aa 0)))
+          (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"Map") 3)
+            (do (jb-cstr b c"map:") (ty-display b (al-get aa 0)) (jb-byte b \,) (ty-display b (al-get aa 1)))
+          (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)))
+            (do (jb-cstr b c"ref:") (ty-display b t))
+          (ty-display b t)))
+      (ty-display b t)))
+  (jb-byte b \") 0)
+
+; AST TYPE node -> display string (for method signatures)
+(defn ast-ty-str [(b (ptr JBuf)) (tn (ptr Node))] (-> i64)
+  (if (= (cast i64 tn) 0) (jb-cstr b c"Void")
+    (if (= (load (field tn ival)) 1) (jb-cstr b c"()")
+      (do (jb-bytes b (nm tn) (nlen tn))
+          (let [n (kid-count tn)]
+            (if (> n 0) (do (jb-byte b \<) (let [(mut i) 0] (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (ast-ty-str b (kid-at tn (load i))) (store! i (+ (load i) 1)) 0) (break)))) (jb-byte b \>) 0) 0))))))
+
+; ---- ref helpers ----
+(defn emit-ref-id [(b (ptr JBuf)) (m (ptr MonoType)) (slot i64)] (-> i64)   ; "Name#slot"
+  (jb-byte b \") (jb-bytes b (load (field m name)) (load (field m name-len))) (jb-byte b \#) (jb-int b slot) (jb-byte b \") 0)
+
+; a short summary: value of a String field named "name"/"title"/"content" else first String field
+(defn summary-field-index [(m (ptr MonoType))] (-> i64)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut best) -1 (mut firsts) -1]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (= (ty-kind (load (field mf ty))) TY_STRING)
+                (do (if (< (load firsts) 0) (do (store! firsts (load i)) 0) 0)
+                    (if (or (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"name") 4)
+                            (or (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"title") 5)
+                                (name-eq (load (field mf name)) (load (field mf name-len)) (cast (ptr u8) c"content") 7)))
+                      (if (< (load best) 0) (do (store! best (load i)) 0) 0) 0) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (if (>= (load best) 0) (load best) (load firsts))))
+
+(defn field-addr-at [(inst i64) (i i64)] (-> i64) (+ inst (+ (sizeof InstanceHeader) (* i 8))))
+
+; ================= main value serializer =================
+(defn serialize-value [(b (ptr JBuf)) (v i64) (t (ptr Type)) (depth i64)] (-> i64)
+  (let [k (ty-kind t)]
+    (cond
+      (= k TY_INT) (do (jb-cstr b c"{\"type\":\"Int\",\"value\":") (jb-int b v) (jb-byte b \}))
+      (= k TY_BOOL) (do (jb-cstr b c"{\"type\":\"Bool\",\"value\":") (jb-bool b v) (jb-byte b \}))
+      (= k TY_FLOAT) (do (jb-cstr b c"{\"type\":\"Float\",\"value\":") (jb-float b (f-bits v)) (jb-byte b \}))
+      (= k TY_STRING) (do (jb-cstr b c"{\"type\":\"String\",\"value\":") (let [s (cast (ptr StringObj) v)] (jb-str b (load (field s data)) (load (field s len)))) (jb-byte b \}))
+      (or (= k TY_VOID) (= k TY_UNIT)) (jb-cstr b c"{\"type\":\"Void\"}")
+      (= k TY_NAMED)
+        (let [d (load (field t decl)) dk (load (field d kind))]
+          (cond
+            (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"List") 4) (serialize-list b (cast (ptr ListObj) v) (al-get (load (field t args)) 0) depth)
+            (name-eq (load (field t name)) (load (field t name-len)) (cast (ptr u8) c"Map") 3) (serialize-map b (cast (ptr MapObj) v) (al-get (load (field t args)) 0) (al-get (load (field t args)) 1) depth)
+            (= dk DK_ENUM) (serialize-enum b (cast (ptr i64) v) t depth)
+            (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))) (serialize-entity b v depth)
+            (jb-cstr b c"{\"type\":\"unknown\"}")))
+      (jb-cstr b c"{\"type\":\"unknown\"}"))))
+
+(defn serialize-entity [(b (ptr JBuf)) (v i64) (depth i64)] (-> i64)
+  (if (= v 0) (jb-cstr b c"null")
+    (let [hp (cast (ptr InstanceHeader) v) tid (load (field hp type-id)) m (mono-by-id tid)
+          slot (load (field hp slot-index)) gen (load (field hp generation))]
+      (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"unknown\"}")
+        (if (> depth 0)
+          ; collapsed reference
+          (do (jb-cstr b c"{\"type\":\"ref\",\"class\":") (jb-str b (load (field m name)) (load (field m name-len)))
+              (jb-cstr b c",\"ref\":") (emit-ref-id b m slot)
+              (jb-cstr b c",\"generation\":") (jb-int b gen)
+              (jb-cstr b c",\"summary\":")
+              (let [si (summary-field-index m)]
+                (if (< si 0) (emit-ref-id b m slot)
+                  (let [s (cast (ptr StringObj) (load (cast (ptr i64) (field-addr-at v si))))]
+                    (if (= (cast i64 s) 0) (jb-cstr b c"\"\"") (jb-str b (load (field s data)) (load (field s len)))))))
+              (jb-byte b \}))
+          ; depth 0: full field expansion
+          (do (jb-cstr b c"{\"type\":") (jb-str b (load (field m name)) (load (field m name-len)))
+              (jb-cstr b c",\"ref\":") (emit-ref-id b m slot)
+              (jb-cstr b c",\"generation\":") (jb-int b gen)
+              (jb-cstr b c",\"fields\":{")
+              (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+                (loop (if (< (load i) n)
+                        (let [mf (al-get fs (load i))]
+                          (if (> (load i) 0) (jb-byte b \,) 0)
+                          (jb-str b (load (field mf name)) (load (field mf name-len))) (jb-byte b \:)
+                          (serialize-value b (load (cast (ptr i64) (field-addr-at v (load i)))) (load (field mf ty)) (+ depth 1))
+                          (store! i (+ (load i) 1)) 0)
+                        (break))))
+              (jb-cstr b c"}}")))))))
+
+(defn serialize-list [(b (ptr JBuf)) (l (ptr ListObj)) (elem (ptr Type)) (depth i64)] (-> i64)
+  (let [n (if (= (cast i64 l) 0) 0 (list-len l)) shown (if (> n COLL_CAP) COLL_CAP n)]
+    (jb-cstr b c"{\"type\":\"list\",\"elementType\":") (ty-display-quoted b elem)
+    (jb-cstr b c",\"length\":") (jb-int b n)
+    (jb-cstr b c",\"truncated\":") (jb-bool b (if (> n COLL_CAP) 1 0))
+    (jb-cstr b c",\"items\":[")
+    (let [(mut i) 0]
+      (loop (if (< (load i) shown)
+              (do (if (> (load i) 0) (jb-byte b \,) 0) (serialize-value b (list-get l (load i)) elem depth) (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn serialize-map [(b (ptr JBuf)) (mp (ptr MapObj)) (kt (ptr Type)) (vt (ptr Type)) (depth i64)] (-> i64)
+  (let [n (if (= (cast i64 mp) 0) 0 (map-len mp)) shown (if (> n COLL_CAP) COLL_CAP n)]
+    (jb-cstr b c"{\"type\":\"map\",\"keyType\":") (ty-display-quoted b kt)
+    (jb-cstr b c",\"valueType\":") (ty-display-quoted b vt)
+    (jb-cstr b c",\"length\":") (jb-int b n)
+    (jb-cstr b c",\"truncated\":") (jb-bool b (if (> n COLL_CAP) 1 0))
+    (jb-cstr b c",\"entries\":[")
+    (let [(mut i) 0]
+      (loop (if (< (load i) shown)
+              (do (if (> (load i) 0) (jb-byte b \,) 0)
+                  (jb-byte b \[)
+                  (serialize-value b (load (index (load (field mp keys)) (load i))) kt depth) (jb-byte b \,)
+                  (serialize-value b (load (index (load (field mp vals)) (load i))) vt depth)
+                  (jb-byte b \]) (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn ty-display-quoted [(b (ptr JBuf)) (t (ptr Type))] (-> i64) (jb-byte b \") (ty-display b t) (jb-byte b \") 0)
+
+; enum box [tag argc arg...]; variant name + payload types from the enum decl
+(defn serialize-enum [(b (ptr JBuf)) (box (ptr i64)) (t (ptr Type)) (depth i64)] (-> i64)
+  (if (= (cast i64 box) 0) (jb-cstr b c"null")
+    (let [d (load (field t decl)) tag (enum-tag box) argc (enum-argc box)]
+      (jb-cstr b c"{\"type\":") (jb-str b (load (field t name)) (load (field t name-len)))
+      (jb-cstr b c",\"case\":")
+      (let [vn (enum-variant-node d tag)]
+        (if (= (cast i64 vn) 0) (jb-cstr b c"\"?\"") (jb-str b (nm vn) (nlen vn)))
+        (if (> argc 0)
+          (do (jb-cstr b c",\"payload\":[")
+              (let [(mut i) 0]
+                (loop (if (< (load i) argc)
+                        (do (if (> (load i) 0) (jb-byte b \,) 0)
+                            (serialize-value b (enum-arg box (load i)) (enum-payload-type d vn (load i) t) depth)
+                            (store! i (+ (load i) 1)) 0)
+                        (break))))
+              (jb-byte b \])) 0))
+      (jb-byte b \}) 0)))
+
+(defn enum-variant-node [(d (ptr Decl)) (tag i64)] (-> (ptr Node))
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut idx) 0 (mut r) (cast (ptr Node) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_VARIANT) (do (if (= (load idx) tag) (do (store! r mem) 0) 0) (store! idx (+ (load idx) 1)) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+(defn enum-payload-type [(d (ptr Decl)) (vn (ptr Node)) (i i64) (enum-t (ptr Type))] (-> (ptr Type))
+  (if (= (cast i64 vn) 0) (ty-int)
+    (subst-type (resolve-type (kid-at vn i) d) d (load (field enum-t args)))))
+
+; ================= reflection: types() / fields() / methods() =================
+(defn mono-implements [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [cn (load (field d node))]
+    (if (= (cast i64 cn) 0) 0
+      (let [impl (load (field cn b))]
+        (if (= (cast i64 impl) 0) 0
+          (let [n (kid-count impl) (mut i) 0]
+            (loop (if (< (load i) n) (do (if (> (load i) 0) (jb-byte b \,) 0) (let [tn (kid-at impl (load i))] (jb-str b (nm tn) (nlen tn))) (store! i (+ (load i) 1)) 0) (break))))))))
+  (jb-byte b \]) 0)
+
+(defn emit-fields-array [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-byte b \[)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+              (jb-cstr b c",\"type\":") (ty-schema b (load (field mf ty))) (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; a hidden synthetic action method (name starts with "__action_") — excluded from the
+; shown method list; surfaced instead by actions() as a curated affordance.
+(defn is-action-method [(mem (ptr Node))] (-> bool)
+  (and (>= (nlen mem) 9) (name-eq (nm mem) 9 (cast (ptr u8) c"__action_") 9)))
+
+(defn emit-methods-array [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [mem (al-get ms (load i))]
+              (if (and (and (= (load (field mem kind)) NK_FN) (not (node-name-eq mem c"init"))) (not (is-action-method mem)))
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
+                    (jb-cstr b c",\"params\":[")
+                    (let [ps (load (field mem b)) np (kid-count ps) (mut j) 0]
+                      (loop (if (< (load j) np)
+                              (let [pn (kid-at ps (load j))]
+                                (if (> (load j) 0) (jb-byte b \,) 0)
+                                (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+                                (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+                                (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"],\"returns\":") (jb-byte b \") (ast-ty-str b (load (field mem c))) (jb-byte b \") (jb-byte b \})
+                    0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; ---- module identity on every schema()/types() node (07-modules.md §7 Phase 2 item 1) ----
+; "name" stays the bare display name everywhere (unchanged); these ADD "module" (the
+; declaring module's dotted name, "" for a builtin) and "qualified" (the canonical
+; identity — for an entity mono this is exactly its qkey, so it matches the mono table 1:1;
+; for a plain decl — interface/enum — it's "<module>.<Name>" or bare "<Name>" for a builtin).
+(defn emit-module-qualified-for-mono [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (let [d (load (field m base))]
+    (jb-cstr b c",\"module\":") (jb-str b (load (field d qmod)) (load (field d qmod-len)))
+    (jb-cstr b c",\"qualified\":") (jb-str b (load (field m qkey)) (load (field m qkey-len))))
+  0)
+(defn emit-module-qualified-for-decl [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-cstr b c",\"module\":") (jb-str b (load (field d qmod)) (load (field d qmod-len)))
+  (jb-cstr b c",\"qualified\":") (jb-byte b \")
+  (if (> (load (field d qmod-len)) 0) (do (jb-bytes b (load (field d qmod)) (load (field d qmod-len))) (jb-byte b \.) 0) 0)
+  (jb-bytes b (load (field d name)) (load (field d name-len)))
+  (jb-byte b \") 0)
+
+(defn emit-type-descriptor [(b (ptr JBuf)) (m (ptr MonoType)) (ti (ptr TypeInfo))] (-> i64)
+  (jb-cstr b c"{\"type\":\"TypeDescriptor\",\"name\":") (jb-str b (load (field m name)) (load (field m name-len)))
+  (emit-module-qualified-for-mono b m)
+  (jb-cstr b c",\"liveCount\":") (jb-int b (if (= (cast i64 ti) 0) 0 (load (field (load (field ti arena)) live-count))))
+  (jb-cstr b c",\"implements\":") (mono-implements b (load (field m base)))
+  (jb-cstr b c",\"fields\":") (emit-fields-array b m)
+  (jb-cstr b c",\"methods\":") (emit-methods-array b (load (field m base)))
+  (jb-byte b \}) 0)
+
+(defn reflect-types [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut count) 0]
+    ; count entity monos
+    (loop (if (< (load i) n) (do (if (load (field (al-get ms (load i)) is-entity)) (do (store! count (+ (load count) 1)) 0) 0) (store! i (+ (load i) 1)) 0) (break)))
+    (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"TypeDescriptor\",\"length\":") (jb-int b (load count))
+    (jb-cstr b c",\"truncated\":false,\"items\":[")
+    (store! i 0)
+    (let [(mut first) true]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (load (field m is-entity))
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (emit-type-descriptor b m (load (index (load (field p types)) (load i)))) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+; fields("Name") / methods("Name") — one type's shape. 07-modules.md §6 Phase 2 item 4:
+; the name arg accepts EITHER a fully-qualified name (exact match against a mono's
+; qualified identity key, e.g. "a.b.ShellTool" or "a.b.Inventory<a.b.Tool>") or a bare
+; display name — resolved against the ENTRY module first (so single-module programs and
+; the common case need no qualification), else uniquely across the whole program;
+; genuinely ambiguous (2+ non-entry modules declare the same bare name) is a real error,
+; never a silent first-match — see resolve-entity-mono-named below.
+
+; bare, first-match, UNSCOPED lookup — kept only as the plain building block other
+; resolvers compose (never call this directly to resolve a viewer-facing name argument;
+; use resolve-entity-mono-named, which is qualification- and ambiguity-aware).
+(defn find-entity-mono-by-name [(nm0 (ptr u8)) (len i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut r) (cast (ptr MonoType) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (name-eq (load (field m name)) (load (field m name-len)) nm0 len)) (do (store! r m) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+; exact match against the QUALIFIED identity key (m.qkey) — the fully-qualified form.
+(defn find-entity-mono-exact-qualified [(nm0 (ptr u8)) (len i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut r) (cast (ptr MonoType) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (name-eq (load (field m qkey)) (load (field m qkey-len)) nm0 len)) (do (store! r m) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+; bare display-name match, scoped to entities whose declaring module is exactly `mod`.
+(defn find-entity-mono-bare-in-module [(mod (ptr u8)) (mlen i64) (nm0 (ptr u8)) (len i64)] (-> (ptr MonoType))
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut r) (cast (ptr MonoType) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) n))
+            (let [m (al-get ms (load i)) d (load (field m base))]
+              (if (and (load (field m is-entity))
+                       (and (name-eq (load (field m name)) (load (field m name-len)) nm0 len)
+                            (name-eq (load (field d qmod)) (load (field d qmod-len)) mod mlen)))
+                (do (store! r m) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+; every entity mono's qualified identity key whose BARE display name equals nm0/len,
+; comma-joined into `sb` — the "which one did you mean?" candidate list for an ambiguous
+; bare-name lookup (07-modules.md §6 Phase 2 item 4: "a message listing the qualified
+; candidates").
+(defn write-ambiguous-candidates [(sb (ptr StrBuf)) (nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (name-eq (load (field m name)) (load (field m name-len)) nm0 len))
+                (do (if (load first) (do (store! first false) 0) (do (sb-push-str sb c", ") 0))
+                    (sb-push-bytes sb (load (field m qkey)) (load (field m qkey-len))) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+; the resolver every name-string wire op (fields/methods, and any future one) should use.
+; Order: (1) exact fully-qualified match; (2) bare name in the ENTRY module; (3) bare name
+; unique across the whole program. Returns null with `candbuf` left EMPTY for "no such
+; type" (existing behavior — callers render an empty result, not an error). Returns null
+; with `candbuf` populated (comma-joined qualified names) for a genuine ambiguity — the
+; caller (server.coil, which owns the eval-error channel) must surface that as a real
+; error, never silently pick one.
+(defn resolve-entity-mono-named [(nm0 (ptr u8)) (len i64) (candbuf (ptr StrBuf))] (-> (ptr MonoType))
+  (let [exact (find-entity-mono-exact-qualified nm0 len)]
+    (if (!= (cast i64 exact) 0) exact
+      (let [ef (load (field (ctx) entry-file)) efm (find-file-mod ef)
+            entry-hit (if (= (cast i64 efm) 0) (cast (ptr MonoType) 0)
+                        (find-entity-mono-bare-in-module (load (field efm mod)) (load (field efm mod-len)) nm0 len))]
+        (if (!= (cast i64 entry-hit) 0) entry-hit
+          (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut hit) (cast (ptr MonoType) 0) (mut count) 0]
+            (loop (if (< (load i) n)
+                    (let [m (al-get ms (load i))]
+                      (if (and (load (field m is-entity)) (name-eq (load (field m name)) (load (field m name-len)) nm0 len))
+                        (do (store! count (+ (load count) 1)) (store! hit m) 0) 0)
+                      (store! i (+ (load i) 1)) 0)
+                    (break)))
+            (cond
+              (= (load count) 1) (load hit)
+              (= (load count) 0) (cast (ptr MonoType) 0)
+              (do (write-ambiguous-candidates candbuf nm0 len) (cast (ptr MonoType) 0)))))))))
+
+(defn reflect-fields [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"FieldDescriptor\",\"length\":0,\"truncated\":false,\"items\":[]}") (emit-fields-array b m)))
+; The real source of a declaration, straight out of the file buffer the parser tokenised
+; (Node.src-start/src-len, captured at parse time). This is what the viewer's "edit source"
+; shows, so you edit the code that is ACTUALLY running rather than a skeleton regenerated
+; from the schema. Empty `source` means the span wasn't recorded (e.g. a builtin).
+(defn reflect-source [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-cstr b c"{\"type\":\"SourceText\"")
+  (if (= (cast i64 m) 0) (jb-cstr b c",\"found\":false,\"source\":\"\"}")
+    (let [d (load (field m base))]
+      (jb-cstr b c",\"found\":true,\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+      (jb-cstr b c",\"module\":") (jb-str b (load (field d qmod)) (load (field d qmod-len)))
+      (jb-cstr b c",\"file\":") (jb-cstr-quoted b (load (field d file)))
+      (jb-cstr b c",\"source\":")
+      ; The declaration's own text only. `view`/`action` blocks that target this type are
+      ; deliberately NOT bundled in: an eval cannot parse them ("expected an expression"), so
+      ; including them would make the editor's contents impossible to apply. The synthetic
+      ; `__action_<i>` methods the compiler injects from those blocks are preserved across a
+      ; redefinition by re-injecting them (server.coil), not by round-tripping their source.
+      (let [nd (load (field d node))]
+        (if (= (cast i64 nd) 0) (jb-cstr b c"\"\"")
+          (let [sp (load (field nd src-start)) sl (load (field nd src-len))]
+            (if (or (= (cast i64 sp) 0) (<= sl 0)) (jb-cstr b c"\"\"")
+              (jb-str b sp sl)))))
+      (jb-byte b \}) 0)))
+
+; emit one JSON string: the decl's own span, then every view/action whose target names
+; `tn`, each separated by a blank line.
+(defn reflect-methods [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (if (= (cast i64 m) 0) (jb-cstr b c"[]") (emit-methods-array b (load (field m base)))))
+
+; ================= schema() : the full static class graph (Phase 9) =================
+; Unlike types() (entity classes only), schema() emits EVERY graph node — classes/objects,
+; interfaces and enums — plus, per field/variant, a `refTypes` array naming the OTHER graph
+; nodes this type references (through List<T>/Map<K,V> element types too). Edges are therefore
+; server-resolved against the real type table, never client-side string-parsed. types() is
+; left byte-for-byte unchanged (the rail + every existing golden still consume it); only the
+; new graph view consumes schema(). liveCount reuses the arena live-count, so it climbs live.
+
+; walk a Type, emitting ,"Name" for every named graph-node it references (classes, objects,
+; interfaces, enums). List/Map are transparent wrappers (recurse into element types, don't emit
+; the wrapper). Scalars (Int/String/Bool/Float/Void) are not TY_NAMED and contribute nothing.
+; `firstp` points at an i64 = 1 while no name has been emitted yet (so the first omits the comma).
+(defn collect-ref-types [(b (ptr JBuf)) (t (ptr Type)) (firstp (ptr i64))] (-> i64)
+  (if (= (ty-kind t) TY_NAMED)
+    (let [nmp (load (field t name)) nml (load (field t name-len)) d (load (field t decl))
+          isList (name-eq nmp nml (cast (ptr u8) c"List") 4)
+          isMap  (name-eq nmp nml (cast (ptr u8) c"Map") 3)]
+      (if (or isList isMap) 0
+        (if (= (cast i64 d) 0) 0
+          (let [dk (load (field d kind))]
+            (if (or (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                    (or (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) (= dk DK_ENUM)))
+              (do (if (= (load firstp) 1) (store! firstp 0) (jb-byte b \,)) (jb-str b nmp nml) 0)
+              0))))
+      ; recurse into type arguments regardless (List<Tool> -> Tool, Map<String,JsonValue> -> JsonValue)
+      (let [aa (load (field t args)) n (al-len aa) (mut i) 0]
+        (loop (if (< (load i) n) (do (collect-ref-types b (al-get aa (load i)) firstp) (store! i (+ (load i) 1)) 0) (break))))
+      0)
+    0))
+
+; write the QUALIFIED canonical string for a Type (07-modules.md §4/§6's type-canon-qual,
+; scratch-built into a StrBuf then copied out as a quoted JSON string).
+(defn jb-qualified-of-type [(b (ptr JBuf)) (t (ptr Type))] (-> i64)
+  (let [sb (sb-new)]
+    (type-canon-qual sb t)
+    (jb-byte b \") (jb-bytes b (load (field sb data)) (load (field sb len))) (jb-byte b \"))
+  0)
+; QUALIFIED-name twin of collect-ref-types — 07-modules.md §7 Phase 2 item 1: refTypes
+; itself stays BARE (the viewer's byName Map is keyed by bare node.name — see
+; viewer/app.js; switching refTypes to qualified would silently break every existing
+; cross-reference lookup with no compile-time signal). This is the ADDITIVE
+; "refQualified" array instead, carrying the same references' fully-qualified identity —
+; Phase 3 (viewer focus/cross-module rendering) is expected to migrate the viewer onto it.
+(defn collect-ref-types-qualified [(b (ptr JBuf)) (t (ptr Type)) (firstp (ptr i64))] (-> i64)
+  (if (= (ty-kind t) TY_NAMED)
+    (let [nmp (load (field t name)) nml (load (field t name-len)) d (load (field t decl))
+          isList (name-eq nmp nml (cast (ptr u8) c"List") 4)
+          isMap  (name-eq nmp nml (cast (ptr u8) c"Map") 3)]
+      (if (or isList isMap) 0
+        (if (= (cast i64 d) 0) 0
+          (let [dk (load (field d kind))]
+            (if (or (or (= dk DK_CLASS) (= dk DK_OBJECT))
+                    (or (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE)) (= dk DK_ENUM)))
+              (do (if (= (load firstp) 1) (store! firstp 0) (jb-byte b \,)) (jb-qualified-of-type b t) 0)
+              0))))
+      (let [aa (load (field t args)) n (al-len aa) (mut i) 0]
+        (loop (if (< (load i) n) (do (collect-ref-types-qualified b (al-get aa (load i)) firstp) (store! i (+ (load i) 1)) 0) (break))))
+      0)
+    0))
+
+; fields array WITH per-field refTypes (superset of emit-fields-array).
+(defn emit-fields-with-refs [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-byte b \[)
+  (let [fs (load (field m fields)) n (al-len fs) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [mf (al-get fs (load i))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+              (jb-cstr b c",\"type\":") (ty-schema b (load (field mf ty)))
+              (jb-cstr b c",\"refTypes\":[")
+              (let [(mut rf) 1] (collect-ref-types b (load (field mf ty)) (mut rf)))
+              (jb-cstr b c"],\"refQualified\":[")
+              (let [(mut rf) 1] (collect-ref-types-qualified b (load (field mf ty)) (mut rf)))
+              (jb-cstr b c"]}")
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; enum variants: [{name, payload:[typeStr,...], refTypes:[Name,...]}]
+(defn emit-variants [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [mem (al-get ms (load i))]
+              (if (= (load (field mem kind)) NK_VARIANT)
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
+                    (jb-cstr b c",\"payload\":[")
+                    (let [np (kid-count mem) (mut j) 0]
+                      (loop (if (< (load j) np)
+                              (do (if (> (load j) 0) (jb-byte b \,) 0)
+                                  (jb-byte b \") (ast-ty-str b (kid-at mem (load j))) (jb-byte b \")
+                                  (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"],\"refTypes\":[")
+                    (let [np (kid-count mem) (mut j) 0 (mut rf) 1]
+                      (loop (if (< (load j) np)
+                              (do (collect-ref-types b (resolve-type (kid-at mem (load j)) d) (mut rf))
+                                  (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"],\"refQualified\":[")
+                    (let [np (kid-count mem) (mut j) 0 (mut rf) 1]
+                      (loop (if (< (load j) np)
+                              (do (collect-ref-types-qualified b (resolve-type (kid-at mem (load j)) d) (mut rf))
+                                  (store! j (+ (load j) 1)) 0)
+                              (break))))
+                    (jb-cstr b c"]}") 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; does class/object decl `d` name interface `iname` in its `implements` clause?
+(defn decl-implements? [(d (ptr Decl)) (iname (ptr u8)) (ilen i64)] (-> bool)
+  (let [cn (load (field d node))]
+    (if (= (cast i64 cn) 0) false
+      (let [impl (load (field cn b))]
+        (if (= (cast i64 impl) 0) false
+          (let [n (kid-count impl) (mut i) 0 (mut r) false]
+            (loop (if (< (load i) n)
+                    (do (let [tn (kid-at impl (load i))] (if (name-eq (nm tn) (nlen tn) iname ilen) (do (store! r true) 0) 0))
+                        (store! i (+ (load i) 1)) 0)
+                    (break)))
+            (load r)))))))
+
+; implementors of interface `d`: the entity monos whose decl implements it, by mono name.
+(defn emit-implementors [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (let [iname (load (field d name)) ilen (load (field d name-len))
+        ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (load (field m is-entity)) (decl-implements? (load (field m base)) iname ilen))
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (jb-str b (load (field m name)) (load (field m name-len))) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+
+; constructor parameter list for the create-new form: the params Scry construction takes,
+; `Type(name: value, ...)`. If the class declares an explicit `init`, those are its params
+; (name + AST type). Otherwise construction is the synthesized memberwise ctor over the class
+; FIELDS (construct-with-fields in typecheck.coil), so we emit one {name,type} per NK_FIELD.
+; Objects are singletons (never constructed via Type(...)) -> empty. Same {name,type} shape as
+; method params, so the viewer's ArgInput/classifyParam can drive each recursively.
+(defn emit-ctor-array [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-byte b \[)
+  (if (= (load (field d kind)) DK_OBJECT) 0
+    (let [init (decl-member-c d c"init")]
+      (if (!= (cast i64 init) 0)
+        (let [ps (load (field init b)) np (if (= (cast i64 ps) 0) 0 (kid-count ps)) (mut j) 0]
+          (loop (if (< (load j) np)
+                  (let [pn (kid-at ps (load j))]
+                    (if (> (load j) 0) (jb-byte b \,) 0)
+                    (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+                    (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+                    (store! j (+ (load j) 1)) 0)
+                  (break))))
+        (let [ms (load (field d members)) n (al-len ms) (mut i) 0 (mut first) true]
+          (loop (if (< (load i) n)
+                  (let [mem (al-get ms (load i))]
+                    (if (= (load (field mem kind)) NK_FIELD)
+                      (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                          (jb-cstr b c"{\"name\":") (jb-str b (nm mem) (nlen mem))
+                          (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field mem a))) (jb-byte b \") (jb-byte b \}) 0)
+                      0)
+                    (store! i (+ (load i) 1)) 0)
+                  (break)))))))
+  (jb-byte b \]) 0)
+
+(defn emit-schema-class [(b (ptr JBuf)) (m (ptr MonoType)) (ti (ptr TypeInfo))] (-> i64)
+  (let [d (load (field m base))]
+    (jb-cstr b c"{\"name\":") (jb-str b (load (field m name)) (load (field m name-len)))
+    (emit-module-qualified-for-mono b m)
+    (jb-cstr b c",\"kind\":") (if (= (load (field d kind)) DK_OBJECT) (jb-cstr b c"\"object\"") (jb-cstr b c"\"class\""))
+    (jb-cstr b c",\"builtin\":false")
+    (jb-cstr b c",\"liveCount\":") (jb-int b (if (= (cast i64 ti) 0) 0 (load (field (load (field ti arena)) live-count))))
+    (jb-cstr b c",\"implements\":") (mono-implements b d)
+    (jb-cstr b c",\"fields\":") (emit-fields-with-refs b m)
+    (jb-cstr b c",\"methods\":") (emit-methods-array b d)
+    (jb-cstr b c",\"ctor\":") (emit-ctor-array b d)
+    (jb-byte b \}) 0))
+
+(defn emit-schema-iface [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+  (emit-module-qualified-for-decl b d)
+  (jb-cstr b c",\"kind\":\"interface\",\"builtin\":") (jb-bool b (if (= (cast i64 (load (field d node))) 0) 1 0))
+  (jb-cstr b c",\"liveCount\":0,\"implements\":[],\"fields\":[]")
+  (jb-cstr b c",\"methods\":") (emit-methods-array b d)
+  (jb-cstr b c",\"implementors\":") (emit-implementors b d)
+  (jb-byte b \}) 0)
+
+(defn emit-schema-enum [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+  (emit-module-qualified-for-decl b d)
+  (jb-cstr b c",\"kind\":\"enum\",\"builtin\":") (jb-bool b (if (= (cast i64 (load (field d node))) 0) 1 0))
+  (jb-cstr b c",\"liveCount\":0,\"implements\":[],\"fields\":[],\"methods\":[]")
+  (jb-cstr b c",\"variants\":") (emit-variants b d)
+  (jb-byte b \}) 0)
+
+; ================= graph() : the live instance-reference graph (Phase V1) =================
+; Powers the bespoke NESTED-CONTAINMENT view. Unlike schema() (static class SHAPE) and
+; instances() (one type's rows), graph() walks EVERY entity arena and emits one compact record
+; per LIVE instance so the client can compute ownership (nesting) vs sharing (identity chips):
+;   { "ref":"Agent#3", "type":"Agent", "generation":0,
+;     "scalars": { "name":{..}, "role":{..}, "status":{..} },   // shallow scalar/enum fields only
+;     "refs": [ {"field":"conversation","list":false,"ids":["Conversation#3"]},
+;               {"field":"tools","list":true,"ids":["CalcTool#0","WeatherTool#0", ...]} ] }
+; Every referenced id is the CONCRETE runtime type#slot of the target instance (recovered from the
+; target's own InstanceHeader), so an interface/`List<T>`-typed field resolves to real implementors.
+; The client assembles the tree + reverse-reference counts from these ids — this one eval is the
+; whole live payload (counts come from grouping instances by type; static reachability from schema()).
+
+; is a field's DECLARED type a scalar/enum leaf we inline into "scalars"? (skip List/Map/entity)
+(defn graph-scalar-leaf? [(t (ptr Type))] (-> bool)
+  (let [k (ty-kind t)]
+    (if (or (or (= k TY_INT) (= k TY_BOOL)) (or (= k TY_FLOAT) (= k TY_STRING))) true
+      (if (= k TY_NAMED)
+        (let [d (load (field t decl))]
+          (if (= (cast i64 d) 0) false (= (load (field d kind)) DK_ENUM)))
+        false))))
+
+; is a Type an entity (class/object/interface)?
+(defn graph-type-entity? [(t (ptr Type))] (-> bool)
+  (if (!= (ty-kind t) TY_NAMED) false
+    (let [d (load (field t decl))]
+      (if (= (cast i64 d) 0) false
+        (let [dk (load (field d kind))]
+          (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))))))))
+
+; classify a field's declared type for the graph: 0 = scalar/other, 1 = single entity ref,
+; 2 = List<entity>. (List/Map of scalars -> 0, skipped entirely; counts come from arenas.)
+(defn graph-field-kind [(t (ptr Type))] (-> i64)
+  (if (!= (ty-kind t) TY_NAMED) 0
+    (let [nmp (load (field t name)) nml (load (field t name-len))]
+      (if (name-eq nmp nml (cast (ptr u8) c"List") 4)
+        (if (graph-type-entity? (al-get (load (field t args)) 0)) 2 0)
+        (if (name-eq nmp nml (cast (ptr u8) c"Map") 3) 0
+          (if (graph-type-entity? t) 1 0))))))
+
+; emit "ConcreteType#slot" (quoted) for an instance pointer, using the target's OWN mono.
+(defn emit-inst-id [(b (ptr JBuf)) (v i64)] (-> i64)
+  (if (= v 0) (jb-cstr b c"null")
+    (let [hp (cast (ptr InstanceHeader) v) tid (load (field hp type-id)) m (mono-by-id tid) slot (load (field hp slot-index))]
+      (if (= (cast i64 m) 0) (jb-cstr b c"null") (emit-ref-id b m slot)))))
+
+; 07-modules.md §7 Phase 3: graph() was left bare/pre-module in Phase 2 (types()/schema() got
+; "module"/"qualified", graph() did not). Two modules can coexist with the SAME bare class name
+; (tests/run/modules_coexist.scry), so the viewer's live nested-containment view needs each
+; instance's owning module + qualified type identity to build correct `<qualified>.at(slot,gen)`
+; eval sources and to group/label cross-module instances — this closes that gap. Purely additive
+; (new trailing keys only; "ref"/"type"/"refs" id format is UNCHANGED, so existing single-module
+; consumers are unaffected byte-for-byte up to these two new keys).
+(defn emit-graph-instance [(b (ptr JBuf)) (m (ptr MonoType)) (hp (ptr InstanceHeader))] (-> i64)
+  (let [slot (load (field hp slot-index)) gen (load (field hp generation)) v (cast i64 hp)]
+    (jb-cstr b c"{\"ref\":") (emit-ref-id b m slot)
+    (jb-cstr b c",\"type\":") (jb-str b (load (field m name)) (load (field m name-len)))
+    (emit-module-qualified-for-mono b m)
+    (jb-cstr b c",\"generation\":") (jb-int b gen)
+    ; ---- scalars ----
+    (jb-cstr b c",\"scalars\":{")
+    (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut first) true]
+      (loop (if (< (load i) n)
+              (let [mf (al-get fs (load i)) ty (load (field mf ty))]
+                (if (graph-scalar-leaf? ty)
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (jb-str b (load (field mf name)) (load (field mf name-len))) (jb-byte b \:)
+                      (serialize-value b (load (cast (ptr i64) (field-addr-at v (load i)))) ty 1) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"}")
+    ; ---- refs ----
+    (jb-cstr b c",\"refs\":[")
+    (let [fs (load (field m fields)) n (al-len fs) (mut i) 0 (mut first) true]
+      (loop (if (< (load i) n)
+              (let [mf (al-get fs (load i)) ty (load (field mf ty)) fk (graph-field-kind ty)]
+                (if (> fk 0)
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (jb-cstr b c"{\"field\":") (jb-str b (load (field mf name)) (load (field mf name-len)))
+                      (jb-cstr b c",\"list\":") (jb-bool b (if (= fk 2) 1 0))
+                      (jb-cstr b c",\"ids\":[")
+                      (let [raw (load (cast (ptr i64) (field-addr-at v (load i))))]
+                        (if (= fk 1)
+                          (if (= raw 0) 0 (emit-inst-id b raw))
+                          (let [l (cast (ptr ListObj) raw) ln (if (= raw 0) 0 (list-len l)) (mut j) 0 (mut fe) true]
+                            (loop (if (< (load j) ln)
+                                    (let [ev (list-get l (load j))]
+                                      (if (= ev 0) 0
+                                        (do (if (load fe) (do (store! fe false) 0) (jb-byte b \,)) (emit-inst-id b ev) 0))
+                                      (store! j (+ (load j) 1)) 0)
+                                    (break)))
+                            0)))
+                      (jb-cstr b c"]}") 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    (jb-cstr b c"]}") 0))
+
+(defn reflect-graph [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Graph\",\"instances\":[")
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (load (field m is-entity))
+                (let [ti (load (index (load (field p types)) (load i)))]
+                  (if (= (cast i64 ti) 0) 0
+                    (let [a (load (field ti arena))]
+                      (if (= (cast i64 a) 0) 0
+                        (let [hwm (load (field a bump-cursor)) (mut s) 0]
+                          (loop (if (< (load s) hwm)
+                                  (let [hp (cast (ptr InstanceHeader) (arena-slot-ptr a (load s)))]
+                                    (if (= (iand (load (field hp flags)) FLAG_LIVE) FLAG_LIVE)
+                                      (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                                          (emit-graph-instance b m hp) 0)
+                                      0)
+                                    (store! s (+ (load s) 1)) 0)
+                                  (break)))
+                          0)))))
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
+; ================= views() : the program-declared view specs (Phase V2) =================
+; Static (from the parsed+checked program): each `view N for T { ... }` as JSON so a bespoke
+; renderer can honor it. One clause per entry (top-level clause or section), each carrying its
+; dotted field-path, optional representation, and representation args:
+;   { "type":"Views", "views":[
+;     { "name":"AgentBoard", "target":"Agent", "clauses":[
+;       {"kind":"clause","key":"title","path":"name","representation":null,"args":[]},
+;       {"kind":"section","label":"conversation","path":"conversation.messages",
+;        "representation":"timeline","args":[{"name":"order","value":"createdAt"}]} ] } ] }
+(defn emit-view-path [(b (ptr JBuf)) (path (ptr Node))] (-> i64)
+  (jb-byte b \")
+  (let [n (kid-count path) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [hop (kid-at path (load i))]
+              (if (> (load i) 0) (jb-byte b \.) 0)
+              (jb-bytes b (load (field hop s-name)) (load (field hop s-len)))
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \") 0)
+(defn emit-view-item [(b (ptr JBuf)) (item (ptr Node))] (-> i64)
+  (jb-cstr b c",\"path\":") (emit-view-path b (load (field item a)))
+  (jb-cstr b c",\"representation\":")
+  (if (> (load (field item s-len)) 0) (jb-str b (load (field item s-name)) (load (field item s-len))) (jb-cstr b c"null"))
+  (jb-cstr b c",\"args\":[")
+  (let [n (kid-count item) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [arg (kid-at item (load i)) v (load (field arg a))]
+              (if (> (load i) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (load (field arg s-name)) (load (field arg s-len)))
+              (jb-cstr b c",\"value\":") (jb-str b (load (field v s-name)) (load (field v s-len)))
+              (jb-byte b \})
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-byte b \]) 0)
+(defn emit-view-clause [(b (ptr JBuf)) (c (ptr Node))] (-> i64)
+  (if (= (load (field c kind)) NK_VIEW_SECTION)
+    (do (jb-cstr b c"{\"kind\":\"section\",\"label\":") (jb-str b (load (field c s-name)) (load (field c s-len)))
+        (emit-view-item b (load (field c a))) (jb-byte b \}))
+    (do (jb-cstr b c"{\"kind\":\"clause\",\"key\":") (jb-str b (load (field c s-name)) (load (field c s-len)))
+        (emit-view-item b (load (field c a))) (jb-byte b \})))
+  0)
+(defn emit-view [(b (ptr JBuf)) (vn (ptr Node))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field vn s-name)) (load (field vn s-len)))
+  (let [tn (load (field vn a))]
+    (jb-cstr b c",\"target\":") (jb-str b (load (field tn s-name)) (load (field tn s-len))))
+  (jb-cstr b c",\"clauses\":[")
+  (let [n (kid-count vn) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-view-clause b (kid-at vn (load i)))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+(defn reflect-views [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Views\",\"views\":[")
+  (let [n (view-count) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-view b (view-at (load i)))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
+; ================= actions() : the program-declared action affordances (Phase V6) =================
+; The mirror of views(). Each `action "L" for T (params) { body }` as JSON so the inspector can
+; surface it as a BUTTON. `invoke` is the hidden synthetic method name the button evals against the
+; instance (T.at(slot,gen).<invoke>(args)); index i mirrors build-program's __action_<i> desugar:
+;   { "type":"Actions", "actions":[
+;     { "label":"Pause", "target":"Agent", "invoke":"__action_0", "params":[], "returns":"Void" },
+;     { "label":"Ask", "target":"Agent", "invoke":"__action_2",
+;       "params":[{"name":"question","type":"String"}], "returns":"Void" } ] }
+(defn emit-action [(b (ptr JBuf)) (an (ptr Node)) (idx i64)] (-> i64)
+  (jb-cstr b c"{\"label\":") (jb-str b (nm an) (nlen an))
+  (let [tn (load (field an a))]
+    (jb-cstr b c",\"target\":") (jb-str b (nm tn) (nlen tn)))
+  (jb-cstr b c",\"invoke\":") (jb-byte b \") (jb-cstr b c"__action_") (jb-int b idx) (jb-byte b \")
+  (jb-cstr b c",\"params\":[")
+  (let [ps (load (field an b)) np (if (= (cast i64 ps) 0) 0 (kid-count ps)) (mut j) 0]
+    (loop (if (< (load j) np)
+            (let [pn (kid-at ps (load j))]
+              (if (> (load j) 0) (jb-byte b \,) 0)
+              (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+              (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+              (store! j (+ (load j) 1)) 0)
+            (break))))
+  (jb-cstr b c"],\"returns\":") (jb-byte b \") (ast-ty-str b (load (field an c))) (jb-byte b \") (jb-byte b \}) 0)
+(defn reflect-actions [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Actions\",\"actions\":[")
+  (let [n (action-count) (mut i) 0]
+    (loop (if (< (load i) n)
+            (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-action b (action-at (load i)) (load i))
+                (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
+; ================= functions() : the program's TOP-LEVEL functions (Phase F2) =================
+; The STATIC counterpart to trace(): trace() needs a running call to visualize (useless before a
+; run), but functions() lists what CAN be called — parallel to how types()/schema() show the class
+; shape statically, so you can SEE a program's functions in inspect/portal-static mode with nothing
+; running. Source of truth: the typecheck/compile decl table (ctx().decls). Every DK_FN decl with a
+; non-null node is a user-written top-level function (builtins have node==0). Class/object methods
+; live on their DK_CLASS/DK_OBJECT decl's `members` (never DK_FN), so they don't appear here; the
+; synthetic `__action_<n>` methods are members too and are excluded by construction. `main` IS
+; included. FN node layout matches emit-methods-array (b=params, c=rettype). Each entry:
+;   { "type":"Functions", "functions":[
+;     {"name":"fib","params":[{"name":"n","type":"Int"}],"returns":"Int"},
+;     {"name":"main","params":[],"returns":"Void"} ] }
+; 07-modules.md §7 Phase 3: functions() was left bare/pre-module in Phase 2 (it lists EVERY
+; top-level function across the whole program, not just the entry module — agent.core/std.json
+; helpers all show up flat). The viewer's focus mode needs to scope "functions" per §7's list to
+; the focused subtree, which needs a module on each entry. Additive only (mirrors the
+; module/qualified fields already on schema()/types()/graph() nodes).
+(defn emit-function [(b (ptr JBuf)) (d (ptr Decl))] (-> i64)
+  (let [fnn (load (field d node))]
+    (jb-cstr b c"{\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+    (emit-module-qualified-for-decl b d)
+    (jb-cstr b c",\"params\":[")
+    (let [ps (load (field fnn b)) np (if (= (cast i64 ps) 0) 0 (kid-count ps)) (mut j) 0]
+      (loop (if (< (load j) np)
+              (let [pn (kid-at ps (load j))]
+                (if (> (load j) 0) (jb-byte b \,) 0)
+                (jb-cstr b c"{\"name\":") (jb-str b (nm pn) (nlen pn))
+                (jb-cstr b c",\"type\":") (jb-byte b \") (ast-ty-str b (load (field pn a))) (jb-byte b \") (jb-byte b \})
+                (store! j (+ (load j) 1)) 0)
+              (break))))
+    (jb-cstr b c"],\"returns\":") (jb-byte b \") (ast-ty-str b (load (field fnn c))) (jb-byte b \") (jb-byte b \}) 0))
+(defn reflect-functions [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Functions\",\"functions\":[")
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0 (mut first) true]
+    (loop (if (< (load i) n)
+            (let [d (al-get ds (load i))]
+              (if (and (= (load (field d kind)) DK_FN) (!= (cast i64 (load (field d node))) 0))
+                (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                    (emit-function b d) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (jb-cstr b c"]}") 0)
+
+(defn reflect-schema [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (jb-cstr b c"{\"type\":\"Schema\",\"nodes\":[")
+  (let [(mut first) true]
+    ; classes/objects — entity monos (index == mono id == TypeInfo index, as in reflect-types)
+    (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [m (al-get ms (load i))]
+                (if (load (field m is-entity))
+                  (do (if (load first) (do (store! first false) 0) (jb-byte b \,))
+                      (emit-schema-class b m (load (index (load (field p types)) (load i)))) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break))))
+    ; interfaces + enums — from the decl table
+    (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+      (loop (if (< (load i) n)
+              (let [d (al-get ds (load i)) dk (load (field d kind))]
+                (cond
+                  (or (= dk DK_INTERFACE) (= dk DK_BUILTIN_IFACE))
+                    (do (if (load first) (do (store! first false) 0) (jb-byte b \,)) (emit-schema-iface b d) 0)
+                  (= dk DK_ENUM)
+                    (do (if (load first) (do (store! first false) 0) (jb-byte b \,)) (emit-schema-enum b d) 0)
+                  0)
+                (store! i (+ (load i) 1)) 0)
+              (break)))))
+  (jb-cstr b c"]}") 0)
+
+; ================= modules() : the module TREE with per-module aggregates (07-modules.md
+; §6/§7 Phase 2) ================= The data source for the viewer's future focus tree
+; (Phase 3), and it works statically too (schema-json / the portal's cached static
+; project view get it for free, exactly like functions()/types()). Directories are not
+; modules themselves but form the hierarchy (07-modules.md §2), so the tree has one node
+; per distinct DOTTED PREFIX of every loaded module's name — `agents.tools.shell` implies
+; synthetic intermediate nodes `agents` and `agents.tools` even though no FILE registers
+; those exact names. Each node aggregates typeCount/fnCount/liveCount over its own decls
+; (only real, file-registered modules have any) PLUS every descendant, so a parent segment
+; reads as "everything under here" — the natural shape for a containment/focus UI.
+;   { "type":"Modules", "children":[
+;     { "name":"agents", "path":"agents", "typeCount":N, "fnCount":N, "liveCount":N,
+;       "children":[ { "name":"tools", "path":"agents.tools", ..., "children":[...] } ] },
+;     ... ] }
+(defstruct ModNode
+  [(name (ptr u8)) (name-len i64) (path (ptr u8)) (path-len i64)
+   (children (ArrayList (ptr ModNode)))
+   (own-types i64) (own-fns i64) (own-live i64)
+   (agg-types i64) (agg-fns i64) (agg-live i64)])
+(defn modnode-new [(name (ptr u8)) (nlen i64) (path (ptr u8)) (plen i64)] (-> (ptr ModNode))
+  (let [n (cast (ptr ModNode) (xalloc (sizeof ModNode)))]
+    (store! (field n name) name) (store! (field n name-len) nlen)
+    (store! (field n path) path) (store! (field n path-len) plen)
+    (store! (field n children) (al-new [(ptr ModNode)] (alc-global)))
+    (store! (field n own-types) 0) (store! (field n own-fns) 0) (store! (field n own-live) 0)
+    (store! (field n agg-types) 0) (store! (field n agg-fns) 0) (store! (field n agg-live) 0)
+    n))
+(defn modnode-find-child [(n (ptr ModNode)) (seg (ptr u8)) (seglen i64)] (-> (ptr ModNode))
+  (let [cs (load (field n children)) cn (al-len cs) (mut i) 0 (mut r) (cast (ptr ModNode) 0)]
+    (loop (if (and (= (cast i64 (load r)) 0) (< (load i) cn))
+            (let [c (al-get cs (load i))]
+              (if (name-eq (load (field c name)) (load (field c name-len)) seg seglen) (do (store! r c) 0) 0)
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (load r)))
+; walk/create the path segment-by-segment under `root`; returns the leaf node for the
+; full dotted `path`/`plen` (creating any missing intermediate segment nodes).
+(defn modtree-insert [(root (ptr ModNode)) (path (ptr u8)) (plen i64)] (-> (ptr ModNode))
+  (let [(mut cur) root (mut segstart) 0 (mut i) 0]
+    (loop
+      (if (> (load i) plen) (break)
+        (if (or (= (load i) plen) (= (cast i64 (load (index path (load i)))) \.))
+          (let [seglen (- (load i) (load segstart)) segptr (index path (load segstart))
+                existing (modnode-find-child (load cur) segptr seglen)]
+            (if (!= (cast i64 existing) 0)
+              (store! cur existing)
+              (let [child (modnode-new segptr seglen path (load i))]
+                (al-push! (mut (field (load cur) children)) child)
+                (store! cur child)))
+            (store! segstart (+ (load i) 1))
+            (store! i (+ (load i) 1)) 0)
+          (do (store! i (+ (load i) 1)) 0))))
+    (load cur)))
+; same walk, but READ-ONLY — null if any segment is missing (used to find the node for a
+; decl's qmod, which is always already-inserted by the time this runs).
+(defn modtree-find [(root (ptr ModNode)) (path (ptr u8)) (plen i64)] (-> (ptr ModNode))
+  (let [(mut cur) root (mut segstart) 0 (mut i) 0 (mut ok) true]
+    (loop
+      (if (or (not (load ok)) (> (load i) plen)) (break)
+        (if (or (= (load i) plen) (= (cast i64 (load (index path (load i)))) \.))
+          (let [seglen (- (load i) (load segstart)) segptr (index path (load segstart))
+                nxt (modnode-find-child (load cur) segptr seglen)]
+            (if (= (cast i64 nxt) 0) (do (store! ok false) 0) (do (store! cur nxt) 0))
+            (store! segstart (+ (load i) 1)) (store! i (+ (load i) 1)) 0)
+          (do (store! i (+ (load i) 1)) 0))))
+    (if (load ok) (load cur) (cast (ptr ModNode) 0))))
+(defn build-mod-tree [] (-> (ptr ModNode))
+  (let [root (modnode-new (cast (ptr u8) c"") 0 (cast (ptr u8) c"") 0)
+        ms (load (field (ctx) modules)) n (al-len ms) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [me (al-get ms (load i))]
+              (modtree-insert root (load (field me name)) (load (field me name-len)))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    root))
+; is decl kind one of the "type" kinds modules() counts (class/object/interface/enum —
+; parallel to schema()'s node kinds; builtins are excluded by construction since they
+; carry qmod-len 0 and modnode-compute-own only looks up decls with qmod-len > 0)?
+(defn is-type-decl-kind [(dk i64)] (-> bool)
+  (or (or (= dk DK_CLASS) (= dk DK_OBJECT)) (or (= dk DK_INTERFACE) (= dk DK_ENUM))))
+(defn modnode-compute-own [(root (ptr ModNode)) (p (ptr Program))] (-> i64)
+  (let [ds (load (field (ctx) decls)) n (al-len ds) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [d (al-get ds (load i)) dk (load (field d kind)) qm (load (field d qmod)) qml (load (field d qmod-len))]
+              (if (> qml 0)
+                (let [node (modtree-find root qm qml)]
+                  (if (!= (cast i64 node) 0)
+                    (do
+                      (if (is-type-decl-kind dk) (store! (field node own-types) (+ (load (field node own-types)) 1)) 0)
+                      (if (and (= dk DK_FN) (!= (cast i64 (load (field d node))) 0))
+                        (store! (field node own-fns) (+ (load (field node own-fns)) 1)) 0)
+                      0)
+                    0))
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  (let [ms (load (field (ctx) monos)) n (al-len ms) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (load (field m is-entity))
+                (let [d (load (field m base)) qm (load (field d qmod)) qml (load (field d qmod-len))]
+                  (if (> qml 0)
+                    (let [node (modtree-find root qm qml)]
+                      (if (!= (cast i64 node) 0)
+                        (let [ti (load (index (load (field p types)) (load (field m id))))]
+                          (if (!= (cast i64 ti) 0)
+                            (store! (field node own-live) (+ (load (field node own-live)) (load (field (load (field ti arena)) live-count))))
+                            0))
+                        0))
+                    0))
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+; post-order: aggregate = own + sum(children's aggregate).
+(defn modnode-aggregate [(n (ptr ModNode))] (-> i64)
+  (let [cs (load (field n children)) cn (al-len cs) (mut i) 0
+        (mut tt) (load (field n own-types)) (mut tf) (load (field n own-fns)) (mut tl) (load (field n own-live))]
+    (loop (if (< (load i) cn)
+            (let [c (al-get cs (load i))]
+              (modnode-aggregate c)
+              (store! tt (+ (load tt) (load (field c agg-types))))
+              (store! tf (+ (load tf) (load (field c agg-fns))))
+              (store! tl (+ (load tl) (load (field c agg-live))))
+              (store! i (+ (load i) 1)) 0)
+            (break)))
+    (store! (field n agg-types) (load tt))
+    (store! (field n agg-fns) (load tf))
+    (store! (field n agg-live) (load tl)))
+  0)
+(defn emit-mod-node [(b (ptr JBuf)) (n (ptr ModNode))] (-> i64)
+  (jb-cstr b c"{\"name\":") (jb-str b (load (field n name)) (load (field n name-len)))
+  (jb-cstr b c",\"path\":") (jb-str b (load (field n path)) (load (field n path-len)))
+  (jb-cstr b c",\"typeCount\":") (jb-int b (load (field n agg-types)))
+  (jb-cstr b c",\"fnCount\":") (jb-int b (load (field n agg-fns)))
+  (jb-cstr b c",\"liveCount\":") (jb-int b (load (field n agg-live)))
+  (jb-cstr b c",\"children\":[")
+  (let [cs (load (field n children)) cn (al-len cs) (mut i) 0]
+    (loop (if (< (load i) cn) (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-mod-node b (al-get cs (load i))) (store! i (+ (load i) 1)) 0) (break))))
+  (jb-cstr b c"]}") 0)
+(defn reflect-modules [(b (ptr JBuf)) (p (ptr Program))] (-> i64)
+  (let [root (build-mod-tree)]
+    (modnode-compute-own root p)
+    (modnode-aggregate root)
+    (jb-cstr b c"{\"type\":\"Modules\",\"children\":[")
+    (let [cs (load (field root children)) cn (al-len cs) (mut i) 0]
+      (loop (if (< (load i) cn) (do (if (> (load i) 0) (jb-byte b \,) 0) (emit-mod-node b (al-get cs (load i))) (store! i (+ (load i) 1)) 0) (break))))
+    (jb-cstr b c"]}") 0))

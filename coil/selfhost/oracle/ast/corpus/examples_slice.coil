@@ -1,0 +1,23 @@
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [arr (alloc-stack (array i64 5))]
+    (store! (index arr 0) 1)
+    (store! (index arr 1) 2)
+    (store! (index arr 2) 3)
+    (store! (index arr 3) 4)
+    (store! (index arr 4) 5)
+    (let
+      [s (slice.slice-new (index arr 0) 5) mid (subslice s 1 4) (mut acc) 0]
+      (slice-set! mid 0 20)
+      (let
+        [(mut $g0) (iter mid)]
+        (loop
+          (match
+            (next (mut $g0))
+            (None [] (break))
+            (Some [x] (store! acc (iadd (load acc) x))))))
+      (iadd (load acc) (slice-len s)))))
+

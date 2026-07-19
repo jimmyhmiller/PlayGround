@@ -1,0 +1,573 @@
+<style>
+  :root{
+    --ground:#EEF0F3; --surface:#FBFBFD; --surface-2:#FFFFFF; --editor:#FCFCFD;
+    --ink:#15181E; --ink-soft:#3A404B; --muted:#697080;
+    --line:#D8DCE3; --line-strong:#C4C9D2;
+    --accent:#BF5711; --accent-ink:#8C3F0B; --accent-soft:rgba(191,87,17,.09);
+    --signal:#1C6C79; --good:#2E7D4F; --warn:#B4790E; --bad:#B23A2E;
+    --ev-update:#3A5EA8; --ev-migrate:#1C6C79; --ev-broken:#B23A2E; --ev-pause:#BF5711; --ev-commit:#2E7D4F; --ev-repair:#7A4FB0;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --ground:#0C0E12; --surface:#15181E; --surface-2:#1A1E25; --editor:#101318;
+    --ink:#E9EBEF; --ink-soft:#BBC1CB; --muted:#878F9C;
+    --line:#252A32; --line-strong:#333A44;
+    --accent:#F0842E; --accent-ink:#F5985A; --accent-soft:rgba(240,132,46,.13);
+    --signal:#54B6C3; --good:#5FBE86; --warn:#E0AA42; --bad:#E86A5C;
+    --ev-update:#7FA0E0; --ev-migrate:#54B6C3; --ev-broken:#E86A5C; --ev-pause:#F0842E; --ev-commit:#5FBE86; --ev-repair:#B99AE0;
+  }}
+  :root[data-theme="light"]{
+    --ground:#EEF0F3; --surface:#FBFBFD; --surface-2:#FFFFFF; --editor:#FCFCFD;
+    --ink:#15181E; --ink-soft:#3A404B; --muted:#697080; --line:#D8DCE3; --line-strong:#C4C9D2;
+    --accent:#BF5711; --accent-ink:#8C3F0B; --accent-soft:rgba(191,87,17,.09);
+    --signal:#1C6C79; --good:#2E7D4F; --warn:#B4790E; --bad:#B23A2E;
+    --ev-update:#3A5EA8; --ev-migrate:#1C6C79; --ev-broken:#B23A2E; --ev-pause:#BF5711; --ev-commit:#2E7D4F; --ev-repair:#7A4FB0;
+  }
+  :root[data-theme="dark"]{
+    --ground:#0C0E12; --surface:#15181E; --surface-2:#1A1E25; --editor:#101318;
+    --ink:#E9EBEF; --ink-soft:#BBC1CB; --muted:#878F9C; --line:#252A32; --line-strong:#333A44;
+    --accent:#F0842E; --accent-ink:#F5985A; --accent-soft:rgba(240,132,46,.13);
+    --signal:#54B6C3; --good:#5FBE86; --warn:#E0AA42; --bad:#E86A5C;
+    --ev-update:#7FA0E0; --ev-migrate:#54B6C3; --ev-broken:#E86A5C; --ev-pause:#F0842E; --ev-commit:#5FBE86; --ev-repair:#B99AE0;
+  }
+
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans); line-height:1.55; -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px; margin:0 auto; padding:34px 22px 90px;}
+
+  .eyebrow{font-family:var(--mono); font-size:11.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent-ink); font-weight:600; margin-bottom:12px;}
+  h1{font-size:clamp(28px,5vw,44px); line-height:1.06; letter-spacing:-.022em; margin:0 0 16px; font-weight:760; text-wrap:balance; max-width:20ch;}
+  .thesis{font-size:17px; color:var(--ink-soft); max-width:66ch; margin:0 0 8px;}
+  .thesis b{color:var(--ink); font-weight:640;}
+
+  .primer{margin:30px 0 8px; display:grid; grid-template-columns:repeat(4,1fr); gap:10px;}
+  @media (max-width:720px){ .primer{grid-template-columns:repeat(2,1fr);} }
+  .move{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 13px;}
+  .move .n{font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent-ink); font-weight:600;}
+  .move h3{margin:4px 0 3px; font-size:14px; letter-spacing:-.01em;}
+  .move p{margin:0; font-size:12.5px; color:var(--muted);}
+
+  .try{background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--signal); border-radius:0 10px 10px 0; padding:14px 18px; margin:22px 0 6px;}
+  .try .h{font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--signal); font-weight:600; margin-bottom:7px;}
+  .try ol{margin:0; padding-left:20px; font-size:13.5px; color:var(--ink-soft);}
+  .try li{margin:3px 0;}
+  .try code, .k{font-family:var(--mono); font-size:.92em; background:var(--accent-soft); color:var(--accent-ink); padding:0 5px; border-radius:4px;}
+
+  /* ---------- lab ---------- */
+  .lab{margin-top:22px; border:1px solid var(--line-strong); border-radius:16px; background:var(--surface); overflow:hidden;}
+  .labbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; padding:11px 14px; border-bottom:1px solid var(--line); background:var(--surface-2);}
+  .presets{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+  .presets .lbl{font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin-right:2px;}
+  .chip{font-family:var(--mono); font-size:11.5px; cursor:pointer; border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-soft); border-radius:20px; padding:4px 11px; transition:all .13s;}
+  .chip:hover{border-color:var(--accent); color:var(--accent-ink); background:var(--accent-soft);}
+
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:0;}
+  @media (max-width:820px){ .grid{grid-template-columns:1fr;} }
+  .col{padding:14px 16px; min-width:0;}
+  .col.defs{border-right:1px solid var(--line);}
+  @media (max-width:820px){ .col.defs{border-right:none; border-bottom:1px solid var(--line);} }
+  .panel-h{display:flex; align-items:center; gap:10px; font-weight:660; font-size:14px; letter-spacing:-.01em; margin:0 0 9px;}
+  .panel-h.small{font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-top:16px;}
+  .panel-h .hint{font-family:var(--mono); font-size:11px; font-weight:400; letter-spacing:0; text-transform:none; color:var(--muted);}
+
+  textarea{width:100%; font-family:var(--mono); font-size:12.5px; line-height:1.6; color:var(--ink); background:var(--editor); border:1px solid var(--line); border-radius:9px; padding:12px; resize:vertical; tab-size:2;}
+  textarea#src{min-height:250px;}
+  .btnrow{display:flex; flex-wrap:wrap; gap:8px; margin-top:9px;}
+  .btn{font-family:var(--mono); font-size:12.5px; cursor:pointer; border-radius:8px; padding:8px 14px; border:1px solid var(--line-strong); background:var(--surface); color:var(--ink); transition:all .13s;}
+  .btn:hover:not(:disabled){background:var(--surface-2); border-color:var(--muted);}
+  .btn:disabled{opacity:.4; cursor:not-allowed;}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff;}
+  :root[data-theme="dark"] .btn.primary{color:#0C0E12; font-weight:600;}
+  @media (prefers-color-scheme:dark){ .btn.primary{color:#0C0E12; font-weight:600;} }
+  .btn.primary:hover:not(:disabled){filter:brightness(1.07);}
+  .err{color:var(--bad); font-family:var(--mono); font-size:11.5px; margin-top:8px; white-space:pre-wrap; min-height:0;}
+
+  /* state inspector */
+  .tickbadge{font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted); border:1px solid var(--line); border-radius:20px; padding:2px 9px;}
+  .state{background:var(--editor); border:1px solid var(--line); border-radius:9px; padding:14px; min-height:56px; font-family:var(--mono); font-size:13px; line-height:1.7; display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  .state.paused{border-color:var(--accent); border-style:dashed;}
+  .v-tag{font-size:10px; letter-spacing:.04em; color:var(--signal); border:1px solid color-mix(in srgb,var(--signal) 35%,transparent); border-radius:5px; padding:0 5px; margin-right:3px;}
+  .v-int{color:var(--accent-ink);}
+  .badge{font-family:var(--mono); font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:20px;}
+  .badge.ok{color:var(--good); border:1px solid color-mix(in srgb,var(--good) 40%,transparent);}
+  .badge.bad{color:var(--bad); border:1px solid color-mix(in srgb,var(--bad) 40%,transparent);}
+
+  /* type versions */
+  .types{display:flex; flex-direction:column; gap:11px;}
+  .tv{background:var(--editor); border:1px solid var(--line); border-radius:9px; padding:10px 12px;}
+  .tv .name{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-bottom:6px;}
+  .tv .vers{display:flex; align-items:center; gap:2px; flex-wrap:wrap; margin-bottom:6px;}
+  .vchip{font-family:var(--mono); font-size:10.5px; border:1px solid var(--line-strong); border-radius:5px; padding:1px 7px; color:var(--muted);}
+  .vchip.live{border-color:var(--accent); color:var(--accent-ink); background:var(--accent-soft); font-weight:600;}
+  .arrow{font-family:var(--mono); font-size:10px; padding:0 4px; white-space:nowrap;}
+  .arrow.auto,.arrow.supplied{color:var(--good);}
+  .arrow.manual-pending{color:var(--warn);}
+  .tv .layout{font-family:var(--mono); font-size:11.5px; color:var(--muted);}
+
+  /* pause panel */
+  .pause{margin:0 16px 4px; border:1px solid var(--accent); border-radius:12px; background:var(--accent-soft); padding:16px; }
+  .pause.hidden{display:none;}
+  .pause .ph{font-family:var(--mono); font-size:12px; letter-spacing:.05em; text-transform:uppercase; color:var(--accent-ink); font-weight:700; display:flex; align-items:center; gap:8px; margin-bottom:8px;}
+  .pause .cond{font-family:var(--mono); font-size:12.5px; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:9px 11px; margin-bottom:8px;}
+  .pause .quar{font-size:12.5px; color:var(--ink-soft); margin-bottom:11px;}
+  .pause .quar b{color:var(--good);}
+  .pause label{font-family:var(--mono); font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:5px;}
+  .pause textarea{min-height:64px; background:var(--surface);}
+  .pause .repairerr{color:var(--bad); font-family:var(--mono); font-size:11.5px; margin-top:7px; white-space:pre-wrap;}
+
+  /* console */
+  .consolewrap{padding:0 16px 16px;}
+  .console{background:var(--editor); border:1px solid var(--line); border-radius:9px; padding:10px 12px; font-family:var(--mono); font-size:12px; line-height:1.65; max-height:230px; overflow-y:auto;}
+  .console .line{display:flex; gap:9px; padding:1px 0;}
+  .console .tk{color:var(--muted); flex:0 0 auto; min-width:44px;}
+  .console .tag{flex:0 0 auto; min-width:66px; font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:.04em; padding-top:1px;}
+  .console .msg{color:var(--ink-soft); min-width:0; word-break:break-word;}
+  .tag.update{color:var(--ev-update);} .tag.migrate{color:var(--ev-migrate);} .tag.broken{color:var(--ev-broken);}
+  .tag.pause{color:var(--ev-pause);} .tag.commit{color:var(--ev-commit);} .tag.repair{color:var(--ev-repair);} .tag.info{color:var(--muted);}
+
+  .closing{margin-top:32px; max-width:70ch;}
+  .closing h2{font-size:20px; letter-spacing:-.015em; margin:0 0 8px;}
+  .closing p{font-size:14.5px; color:var(--ink-soft); margin:0 0 12px;}
+  .closing .gap{font-family:var(--mono); font-size:12.5px; color:var(--muted); border-left:2px solid var(--line-strong); padding-left:12px; margin:6px 0;}
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">Live &amp; Typed · The Lab</div>
+  <h1>Hot-reload a running, statically-typed program.</h1>
+  <p class="thesis">A tiny language where you edit types and functions <b>while the program runs</b>. Consistent changes migrate live values automatically. When running code reaches something the update broke, it doesn't crash and the update isn't rejected — it <b>pauses, you repair it, and it resumes</b>. Every committed state is checked well-typed. This is the whole design, running in your browser.</p>
+
+  <div class="primer">
+    <div class="move"><div class="n">Move 1</div><h3>Update at a safe point</h3><p>Edits apply between ticks — never mid-computation.</p></div>
+    <div class="move"><div class="n">Move 2</div><h3>Migrate live values</h3><p>Old values convert lazily on first touch; auto-derived where possible.</p></div>
+    <div class="move"><div class="n">Move 3</div><h3>Pause on a condition</h3><p>A broken function or un-migratable value raises a condition and freezes.</p></div>
+    <div class="move"><div class="n">Move 4</div><h3>Repair &amp; resume</h3><p>You supply the missing code live; the tick re-runs. No restart.</p></div>
+  </div>
+
+  <div class="try">
+    <div class="h">Try this, in order</div>
+    <ol>
+      <li>Click <span class="k">▶ Step</span> twice — the account gets charged (still <span class="k">Account v1</span>).</li>
+      <li>Click preset <span class="k">v2: add fee</span>, then <span class="k">⚡ Hot-update</span>, then <span class="k">▶ Step</span> — the live value <b>auto-migrates</b> (a <span class="k">fee</span> appears). No pause.</li>
+      <li>Click preset <span class="k">v3: balance→Money</span>, then <span class="k">⚡ Hot-update</span>, then <span class="k">▶ Step</span> — now you hit <b>two pauses</b>: first repair <span class="k">charge</span>, then supply the <span class="k">Int→Money</span> transformer. Resume and keep running.</li>
+      <li>Now change anything yourself and <span class="k">⚡ Hot-update</span>. Break it on purpose and repair it.</li>
+    </ol>
+  </div>
+
+  <div class="lab">
+    <div class="labbar">
+      <div class="presets">
+        <span class="lbl">Load edit:</span>
+        <button class="chip" data-preset="v1">v1: start</button>
+        <button class="chip" data-preset="v2">v2: add fee</button>
+        <button class="chip" data-preset="v3">v3: balance→Money</button>
+      </div>
+      <div class="presets">
+        <button class="chip" id="btnResetAll">↺ Reset lab</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="col defs">
+        <div class="panel-h">Definitions <span class="hint">edit, then hot-update</span></div>
+        <textarea id="src" spellcheck="false"></textarea>
+        <div class="btnrow">
+          <button class="btn" id="btnReset">⤓ Reset from source</button>
+          <button class="btn primary" id="btnHot">⚡ Hot-update running program</button>
+        </div>
+        <div class="err" id="srcerr"></div>
+      </div>
+
+      <div class="col run">
+        <div class="panel-h">Running program <span class="tickbadge" id="tickbadge">tick 0</span></div>
+        <div class="state" id="state"></div>
+        <div class="btnrow">
+          <button class="btn primary" id="btnStep">▶ Step</button>
+          <button class="btn" id="btnRun">⏩ Run</button>
+          <button class="btn" id="btnReseed">↺ Reseed state</button>
+        </div>
+        <div class="panel-h small">Type versions <span class="hint" style="text-transform:none;letter-spacing:0">— live version highlighted, migrations labeled</span></div>
+        <div class="types" id="types"></div>
+      </div>
+    </div>
+
+    <div class="pause hidden" id="pause"></div>
+
+    <div class="consolewrap">
+      <div class="panel-h small">Console</div>
+      <div class="console" id="console"></div>
+    </div>
+  </div>
+
+  <div class="closing">
+    <h2>What this proves — and what it doesn't</h2>
+    <p>It shows the design is <b>coherent and runnable</b>: one primitive — a type condition raised at the point of use, with freeze → repair → resume — reconciles hot updates, lazy typed migration, and static soundness. The <span class="k">✓ well-typed</span> badge is an enforced check, not a claim: nothing ill-typed is ever committed, because a pause rolls the in-flight tick back.</p>
+    <p>It deliberately takes the easy version of the hard corners, so don't over-read it:</p>
+    <div class="gap">Single-threaded — quarantine is trivial here. The real test is two concurrent processes sharing a value mid-migration.</div>
+    <div class="gap">Pauses happen at call-entry, before effects — so "resume" is a clean frame restart. Mid-expression pauses after a side effect are the hard case.</div>
+    <div class="gap">Types change monotonically; identity is name+version, not content-addressed.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+(() => {
+// ══════════════════════ ENGINE (verified against the Python POC in Node) ══════════════════════
+const TInt = { k: 'Int' };
+const TRec = (name) => ({ k: 'Rec', name });
+const tyEq = (a,b)=> a.k==='Int'&&b.k==='Int'?true:(a.k==='Rec'&&b.k==='Rec'&&a.name===b.name);
+const tyStr = (t)=> t.k==='Int'?'Int':t.name;
+
+const PUNCT = new Set("{}(),:=+-*.");
+function lex(s){ let i=0; const toks=[];
+  while(i<s.length){ const c=s[i];
+    if(/\s/.test(c)){i++;continue;}
+    if(c==='-'&&s[i+1]==='>'){toks.push(['op','->']);i+=2;continue;}
+    if(PUNCT.has(c)){toks.push(['punct',c]);i++;continue;}
+    if(/[0-9]/.test(c)){let j=i;while(j<s.length&&/[0-9]/.test(s[j]))j++;toks.push(['int',parseInt(s.slice(i,j))]);i=j;continue;}
+    if(/[A-Za-z_]/.test(c)){let j=i;while(j<s.length&&/[A-Za-z0-9_]/.test(s[j]))j++;toks.push(['name',s.slice(i,j)]);i=j;continue;}
+    throw new SyntaxError(`bad char ${JSON.stringify(c)}`);
+  } toks.push(['eof',null]); return toks;
+}
+class Parser{
+  constructor(toks){this.t=toks;this.i=0;}
+  peek(){return this.t[this.i];} next(){return this.t[this.i++];}
+  eat(kind,val){const [k,v]=this.next(); if(k!==kind||(val!==undefined&&v!==val)) throw new SyntaxError(`expected ${kind} ${val??''}, got ${k} ${v}`); return v;}
+  is(kind,val){const [k,v]=this.peek(); return k===kind&&(val===undefined||v===val);}
+  parseType(){const n=this.eat('name'); return n==='Int'?TInt:TRec(n);}
+  parseExpr(){let e=this.parseMul(); while(this.is('punct','+')||this.is('punct','-')){const op=this.next()[1]; e={k:'bin',op,l:e,r:this.parseMul()};} return e;}
+  parseMul(){let e=this.parseTerm(); while(this.is('punct','*')){this.next(); e={k:'bin',op:'*',l:e,r:this.parseTerm()};} return e;}
+  parseTerm(){let e=this.parseAtom(); while(this.is('punct','.')){this.next(); const f=this.eat('name'); e={k:'field',obj:e,fname:f};} return e;}
+  parseAtom(){const [k,v]=this.peek();
+    if(k==='int'){this.next(); return {k:'lit',val:v};}
+    if(k==='punct'&&v==='('){this.next(); const e=this.parseExpr(); this.eat('punct',')'); return e;}
+    if(k==='name'){this.next();
+      if(this.is('punct','{')){this.eat('punct','{'); const flds=[];
+        if(!this.is('punct','}')) while(true){const fn=this.eat('name'); this.eat('punct',':'); flds.push([fn,this.parseExpr()]); if(this.is('punct',',')){this.next();continue;} break;}
+        this.eat('punct','}'); return {k:'cons',tname:v,fields:flds};}
+      if(this.is('punct','(')){this.eat('punct','('); const args=[];
+        if(!this.is('punct',')')) while(true){args.push(this.parseExpr()); if(this.is('punct',',')){this.next();continue;} break;}
+        this.eat('punct',')'); return {k:'call',fn:v,args};}
+      return {k:'var',name:v};
+    }
+    throw new SyntaxError(`unexpected ${k} ${v}`);
+  }
+  parseProgram(){const decls=[];
+    while(!this.is('eof')){
+      if(this.is('name','type')){this.next(); const name=this.eat('name'); this.eat('punct','=');
+        this.eat('punct','{'); const layout=[];
+        if(!this.is('punct','}')) while(true){const fn=this.eat('name'); this.eat('punct',':'); const ty=this.parseType();
+          let dflt=null; if(this.is('punct','=')){this.next(); dflt=this.parseExpr();}
+          layout.push({name:fn,ty,default:dflt}); if(this.is('punct',',')){this.next();continue;} break;}
+        this.eat('punct','}'); decls.push({kind:'type',name,layout});
+      } else if(this.is('name','fn')){this.next(); const name=this.eat('name'); this.eat('punct','(');
+        const params=[];
+        if(!this.is('punct',')')) while(true){const pn=this.eat('name'); this.eat('punct',':'); const pt=this.parseType(); params.push([pn,pt]); if(this.is('punct',',')){this.next();continue;} break;}
+        this.eat('punct',')'); this.eat('op','->'); const ret=this.parseType(); this.eat('punct','='); const body=this.parseExpr();
+        decls.push({kind:'fn',name,params,ret,body});
+      } else throw new SyntaxError(`expected 'type' or 'fn', got ${JSON.stringify(this.peek())}`);
+    }
+    return decls;
+  }
+}
+const parseExpr=(src)=> new Parser(lex(src)).parseExpr();
+const parseProgram=(src)=> new Parser(lex(src)).parseProgram();
+
+function unparse(e,prec=0){switch(e.k){
+  case 'lit': return String(e.val);
+  case 'var': return e.name;
+  case 'field': return `${unparse(e.obj,3)}.${e.fname}`;
+  case 'call': return `${e.fn}(${e.args.map(a=>unparse(a,0)).join(', ')})`;
+  case 'cons': return `${e.tname}{ ${e.fields.map(([f,x])=>`${f}: ${unparse(x,0)}`).join(', ')} }`;
+  case 'bin': {const p=e.op==='*'?2:1; const s=`${unparse(e.l,p)} ${e.op} ${unparse(e.r,p+1)}`; return p<prec?`(${s})`:s;}
+} return '?';}
+const unparseFn=(fn)=>`fn ${fn.name}(${fn.params.map(([n,t])=>`${n}: ${tyStr(t)}`).join(', ')}) -> ${tyStr(fn.ret)} = ${unparse(fn.body)}`;
+
+function newProgram(){return {typeVersions:new Map(),fns:new Map(),migrations:new Map(),migMeta:new Map()};}
+const curVer=(p,t)=>p.typeVersions.get(t).length;
+const layoutAt=(p,t,v)=>p.typeVersions.get(t)[v-1];
+const curLayout=(p,t)=>layoutAt(p,t,curVer(p,t));
+const fieldOf=(p,t,v,f)=>layoutAt(p,t,v).find(fs=>fs.name===f)||null;
+
+class TypeErr extends Error{}
+function check(p,e,env){switch(e.k){
+  case 'lit': return TInt;
+  case 'var': {if(!(e.name in env)) throw new TypeErr(`unbound variable '${e.name}'`); return env[e.name];}
+  case 'bin': {const lt=check(p,e.l,env),rt=check(p,e.r,env); if(!(lt.k==='Int'&&rt.k==='Int')) throw new TypeErr(`'${e.op}' needs Int, Int but got ${tyStr(lt)}, ${tyStr(rt)}`); return TInt;}
+  case 'field': {const ot=check(p,e.obj,env); if(ot.k!=='Rec') throw new TypeErr(`field '.${e.fname}' on non-record ${tyStr(ot)}`); const fs=fieldOf(p,ot.name,curVer(p,ot.name),e.fname); if(!fs) throw new TypeErr(`type '${ot.name}' has no field '${e.fname}'`); return fs.ty;}
+  case 'call': {if(!p.fns.has(e.fn)) throw new TypeErr(`unknown function '${e.fn}'`); const fn=p.fns.get(e.fn);
+    if(e.args.length!==fn.params.length) throw new TypeErr(`'${e.fn}' expects ${fn.params.length} args, got ${e.args.length}`);
+    for(let i=0;i<e.args.length;i++){const at=check(p,e.args[i],env),[pn,pt]=fn.params[i]; if(!tyEq(at,pt)) throw new TypeErr(`'${e.fn}' arg '${pn}' expects ${tyStr(pt)}, got ${tyStr(at)}`);} return fn.ret;}
+  case 'cons': {if(!p.typeVersions.has(e.tname)) throw new TypeErr(`unknown type '${e.tname}'`); const layout=curLayout(p,e.tname); const given=Object.fromEntries(e.fields);
+    for(const fs of layout){ if(fs.name in given){const at=check(p,given[fs.name],env); if(!tyEq(at,fs.ty)) throw new TypeErr(`field '${fs.name}' of ${e.tname} expects ${tyStr(fs.ty)}, got ${tyStr(at)}`);} else if(fs.default===null) throw new TypeErr(`missing field '${fs.name}' in ${e.tname}{...}`);}
+    for(const gn of Object.keys(given)) if(!layout.some(fs=>fs.name===gn)) throw new TypeErr(`${e.tname} has no field '${gn}'`); return TRec(e.tname);}
+} throw new TypeErr(`cannot type ${e.k}`);}
+function checkFn(p,fn){const env={}; for(const [pn,pt] of fn.params) env[pn]=pt;
+  try{const bt=check(p,fn.body,env); if(!tyEq(bt,fn.ret)) return `body has type ${tyStr(bt)}, declared return ${tyStr(fn.ret)}`; return null;}
+  catch(ex){if(ex instanceof TypeErr) return ex.message; throw ex;}}
+function recheckAll(p){const newly=[]; for(const fn of p.fns.values()){const err=checkFn(p,fn); const was=fn.broken; fn.broken=err; if(err&&!was) newly.push([fn.name,err]);} return newly;}
+
+let _idc=0;
+function mkRecord(tname,version,fields){return {_rec:true,_id:++_idc,tname,version,fields};}
+const isRec=(v)=>v&&v._rec;
+function show(v){if(isRec(v)) return `${v.tname}@v${v.version}{${Object.entries(v.fields).map(([k,x])=>`${k}=${show(x)}`).join(', ')}}`; return String(v);}
+class Pause extends Error{constructor(kind,key,message){super(message); this.kind=kind; this.key=key; this.msg=message;}}
+function migrateToCurrent(p,r,log){const cur=curVer(p,r.tname);
+  while(r.version<cur){const step=p.migrations.get(`${r.tname}:${r.version}`);
+    if(!step) throw new Pause('migration',[r.tname,r.version],`value ${r.tname}#${r._id} is at v${r.version} but no transformer v${r.version}->v${r.version+1} exists (change was not auto-derivable)`);
+    const nf=step(r); const from=r.version; r.fields=nf; r.version=from+1;
+    if(log) log({t:'migrate',text:`migrated ${r.tname}#${r._id} v${from}->v${from+1}`});
+  } return r;}
+function evl(p,e,env,mig=true,log=null){switch(e.k){
+  case 'lit': return e.val;
+  case 'var': return env[e.name];
+  case 'bin': {const a=evl(p,e.l,env,mig,log),b=evl(p,e.r,env,mig,log); return e.op==='+'?a+b:e.op==='-'?a-b:a*b;}
+  case 'field': {const o=evl(p,e.obj,env,mig,log); if(mig&&isRec(o)) migrateToCurrent(p,o,log); return o.fields[e.fname];}
+  case 'call': {const fn=p.fns.get(e.fn); if(fn.broken!==null) throw new Pause('function',e.fn,`function '${e.fn}' is inconsistent: ${fn.broken}`);
+    const args=e.args.map(a=>evl(p,a,env,mig,log)); const ce={}; fn.params.forEach(([pn],i)=>ce[pn]=args[i]); return evl(p,fn.body,ce,mig,log);}
+  case 'cons': {const layout=curLayout(p,e.tname); const given=Object.fromEntries(e.fields); const fields={};
+    for(const fs of layout) fields[fs.name]=(fs.name in given)?evl(p,given[fs.name],env,mig,log):evl(p,fs.default,{},mig,log);
+    return mkRecord(e.tname,curVer(p,e.tname),fields);}
+} throw new Error(`cannot eval ${e.k}`);}
+function valueOk(p,v,ty){
+  if(ty.k==='Int') return typeof v==='number';
+  if(ty.k==='Rec'){ if(!(isRec(v)&&v.tname===ty.name)) return false; const layout=layoutAt(p,v.tname,v.version);
+    const keys=new Set(Object.keys(v.fields)); if(keys.size!==layout.length||!layout.every(fs=>keys.has(fs.name))) return false;
+    return layout.every(fs=>valueOk(p,v.fields[fs.name],fs.ty)); }
+  return false;}
+
+const layoutSig=(layout)=>layout.map(fs=>`${fs.name}:${tyStr(fs.ty)}${fs.default?'='+unparse(fs.default):''}`).join(',');
+function tryAutoMigration(p,tname,fromV){const oldL=layoutAt(p,tname,fromV); const oldM=Object.fromEntries(oldL.map(fs=>[fs.name,fs]));
+  const newL=layoutAt(p,tname,fromV+1); const plan=[];
+  for(const fs of newL){ if(fs.name in oldM&&tyEq(oldM[fs.name].ty,fs.ty)) plan.push([fs.name,'copy']); else if(fs.default!==null) plan.push([fs.name,['default',fs.default]]); else return null; }
+  return (oldRec)=>{const f={}; for(const [fname,how] of plan) f[fname]=how==='copy'?oldRec.fields[fname]:evl(p,how[1],{},false); return f;};}
+function compileFn(d){return {name:d.name,params:d.params,ret:d.ret,body:d.body,broken:null};}
+function loadFresh(image){const p=newProgram();
+  for(const d of image) if(d.kind==='type') p.typeVersions.set(d.name,[d.layout]);
+  for(const d of image) if(d.kind==='fn') p.fns.set(d.name,compileFn(d));
+  recheckAll(p); return p;}
+function hotUpdate(p,image,log){
+  for(const d of image) if(d.kind==='type'){
+    if(!p.typeVersions.has(d.name)){p.typeVersions.set(d.name,[d.layout]); log&&log({t:'update',text:`new type ${d.name}`});}
+    else if(layoutSig(curLayout(p,d.name))!==layoutSig(d.layout)){
+      p.typeVersions.get(d.name).push(d.layout); const fromV=curVer(p,d.name)-1; const m=tryAutoMigration(p,d.name,fromV);
+      if(m){p.migrations.set(`${d.name}:${fromV}`,m); p.migMeta.set(`${d.name}:${fromV}`,'auto'); log&&log({t:'update',text:`type ${d.name} → v${fromV+1}  ·  migration v${fromV}→v${fromV+1} AUTO-DERIVED`});}
+      else {p.migMeta.set(`${d.name}:${fromV}`,'manual-pending'); log&&log({t:'update',text:`type ${d.name} → v${fromV+1}  ·  migration v${fromV}→v${fromV+1} needs a MANUAL transformer (will pause on first use)`});}
+    }
+  }
+  for(const d of image) if(d.kind==='fn') p.fns.set(d.name,compileFn(d));
+  const newly=recheckAll(p);
+  if(newly.length&&log) for(const [nm,err] of newly) log({t:'broken',text:`${nm} no longer typechecks: ${err}  (surfaced lazily when reached)`});
+  return newly;}
+function stepTick(p,state,stateType,log){
+  try{const ns=evl(p,{k:'call',fn:'tick',args:[{k:'var',name:'__s__'}]},{__s__:state},true,log);
+    if(!valueOk(p,ns,TRec(stateType))) throw new Error(`INVARIANT VIOLATED: ${show(ns)}`);
+    return {status:'ok',state:ns};
+  }catch(e){ if(e instanceof Pause) return {status:'paused',cond:e}; throw e; }}
+function repairFunction(p,src){const d=parseProgram(src)[0]; if(!d||d.kind!=='fn') return "expected a function definition"; const fn=compileFn(d); const err=checkFn(p,fn); if(err) return err; fn.broken=null; p.fns.set(fn.name,fn); return null;}
+function repairMigration(p,tname,fromV,exprSrc){const expr=parseExpr(exprSrc); p.migrations.set(`${tname}:${fromV}`,(oldRec)=>evl(p,expr,{old:oldRec},false).fields); p.migMeta.set(`${tname}:${fromV}`,'supplied');}
+
+// ══════════════════════ PRESETS ══════════════════════
+const SRC = {
+v1:`type Account = { id: Int, balance: Int }
+
+fn init() -> Account = Account{ id: 1, balance: 100 }
+
+fn charge(a: Account, amt: Int) -> Account = Account{ id: a.id, balance: a.balance - amt }
+
+fn tick(s: Account) -> Account = charge(s, 5)`,
+v2:`type Account = { id: Int, balance: Int, fee: Int = 0 }
+
+fn init() -> Account = Account{ id: 1, balance: 100 }
+
+fn charge(a: Account, amt: Int) -> Account = Account{ id: a.id, balance: a.balance - amt }
+
+fn tick(s: Account) -> Account = charge(s, 5)`,
+v3:`type Money = { cents: Int }
+
+type Account = { id: Int, balance: Money, fee: Int = 0 }
+
+fn init() -> Account = Account{ id: 1, balance: Money{ cents: 10000 } }
+
+fn charge(a: Account, amt: Int) -> Account = Account{ id: a.id, balance: a.balance - amt }
+
+fn tick(s: Account) -> Account = charge(s, 5)`,
+};
+
+// ══════════════════════ UI CONTROLLER ══════════════════════
+const $ = (id)=>document.getElementById(id);
+const S = { prog:null, state:null, stateType:'Account', tick:0, paused:null, running:false };
+
+function stateTypeName(p){ const t=p.fns.get('tick'); return (t&&t.ret.k==='Rec')?t.ret.name:'Account'; }
+
+function log(ev){
+  const line=document.createElement('div'); line.className='line';
+  const tk = ev.tick!==undefined?`t${ev.tick}`:'';
+  line.innerHTML=`<span class="tk">${tk}</span><span class="tag ${ev.t}">${ev.t}</span><span class="msg"></span>`;
+  line.querySelector('.msg').textContent=ev.text;
+  const c=$('console'); c.appendChild(line); c.scrollTop=c.scrollHeight;
+}
+const tlog = (ev)=>log({...ev, tick:S.tick});
+
+function renderValue(v){
+  if(isRec(v)){
+    const inner = Object.entries(v.fields).map(([k,x])=>`${k}: ${renderValue(x)}`).join(', ');
+    return `<span><span class="v-tag">${v.tname} v${v.version}</span>{ ${inner} }</span>`;
+  }
+  return `<span class="v-int">${v}</span>`;
+}
+function renderState(){
+  const el=$('state'); el.classList.toggle('paused',!!S.paused);
+  if(!S.state){ el.innerHTML='<span style="color:var(--muted)">no state — Reset from source</span>'; return; }
+  const ok = valueOk(S.prog,S.state,TRec(S.stateType));
+  el.innerHTML = `${renderValue(S.state)} <span class="badge ${ok?'ok':'bad'}">${ok?'✓ well-typed':'✗ ill-typed'}</span>`;
+  $('tickbadge').textContent = `tick ${S.tick}`+(S.paused?' · paused':'');
+}
+function renderTypes(){
+  const el=$('types'); el.innerHTML='';
+  for(const [name,vers] of S.prog.typeVersions){
+    const n=vers.length;
+    const tv=document.createElement('div'); tv.className='tv';
+    let chips='';
+    for(let v=1; v<=n; v++){
+      chips += `<span class="vchip ${v===n?'live':''}">v${v}${v===n?' · live':''}</span>`;
+      if(v<n){ const meta=S.prog.migMeta.get(`${name}:${v}`)||'manual-pending';
+        const sym = meta==='manual-pending'?'⇢ gap':'→';
+        chips += `<span class="arrow ${meta}">${sym}${meta==='auto'?' auto':meta==='supplied'?' fixed':''}</span>`; }
+    }
+    const L=vers[n-1];
+    const layout=L.map(fs=>`${fs.name}: ${tyStr(fs.ty)}${fs.default?` = ${unparse(fs.default)}`:''}`).join(', ');
+    tv.innerHTML=`<div class="name">${name}</div><div class="vers">${chips}</div><div class="layout">{ ${layout} }</div>`;
+    el.appendChild(tv);
+  }
+}
+function renderControls(){
+  const paused=!!S.paused;
+  $('btnStep').disabled=paused||!S.state; $('btnRun').disabled=paused||!S.state; $('btnReseed').disabled=paused;
+  $('btnHot').disabled=paused; $('btnReset').disabled=paused;
+  document.querySelectorAll('.chip[data-preset]').forEach(c=>c.disabled=paused);
+  $('btnRun').textContent = S.running?'⏹ Stop':'⏩ Run';
+}
+function renderAll(){ renderState(); renderTypes(); renderControls(); }
+
+function loadFromSource(reseed){
+  try{
+    const img=parseProgram($('src').value);
+    S.prog=loadFresh(img);
+    S.stateType=stateTypeName(S.prog);
+    if(reseed){ S.state=evl(S.prog,{k:'call',fn:'init',args:[]},{}); S.tick=0; }
+    S.paused=null; hidePause(); $('srcerr').textContent='';
+    log({t:'info',text:`loaded fresh — ${S.prog.typeVersions.size} type(s), ${S.prog.fns.size} function(s); state seeded from init()`});
+    renderAll();
+  }catch(e){ $('srcerr').textContent='parse/type error: '+e.message; }
+}
+function doHotUpdate(){
+  try{
+    const img=parseProgram($('src').value);
+    log({t:'info',text:'── hot-update at safe point (between ticks) ──', tick:S.tick});
+    hotUpdate(S.prog,img,(ev)=>tlog(ev));
+    S.stateType=stateTypeName(S.prog);
+    $('srcerr').textContent=''; renderAll();
+  }catch(e){ $('srcerr').textContent='hot-update failed: '+e.message; }
+}
+function doStep(){
+  if(S.paused||!S.state) return;
+  const r=stepTick(S.prog,S.state,S.stateType,(ev)=>tlog(ev));
+  if(r.status==='ok'){ S.state=r.state; tlog({t:'commit',text:`tick committed → ${show(S.state)}  ✓ well-typed`}); S.tick++; renderAll(); }
+  else { setPaused(r.cond); }
+}
+function runLoop(){
+  if(!S.running) return;
+  if(S.paused){ S.running=false; renderControls(); return; }
+  doStep();
+  if(S.running && !S.paused && S.tick<40) setTimeout(runLoop,750);
+  else { S.running=false; renderControls(); }
+}
+function toggleRun(){
+  if(S.running){ S.running=false; renderControls(); return; }
+  if(S.paused||!S.state) return;
+  S.running=true; renderControls(); runLoop();
+}
+
+function migrationTemplate(tname,fromV){
+  const oldL=layoutAt(S.prog,tname,fromV); const oldNames=new Set(oldL.map(f=>f.name));
+  const newL=layoutAt(S.prog,tname,fromV+1);
+  const fields=newL.map(fs=>{
+    const src = oldNames.has(fs.name) ? `old.${fs.name}` : (fs.ty.k==='Int'?'0':`${tyStr(fs.ty)}{ }`);
+    return `${fs.name}: ${src}`;
+  }).join(', ');
+  return `${tname}{ ${fields} }`;
+}
+function setPaused(cond){
+  S.paused=cond; S.running=false;
+  tlog({t:'pause',text:`⏸ PAUSE (${cond.kind}) — ${cond.msg}`});
+  const el=$('pause'); el.classList.remove('hidden');
+  let prefill, label, sub;
+  if(cond.kind==='function'){
+    prefill = unparseFn(S.prog.fns.get(cond.key));
+    label = `Repair function '${cond.key}' — edit so it typechecks against the new types`;
+    sub = '';
+  }else{
+    const [tname,fromV]=cond.key;
+    prefill = migrationTemplate(tname,fromV);
+    label = `Supply transformer ${tname} v${fromV} → v${fromV+1} — an expression with 'old' (the v${fromV} value) in scope`;
+    sub = `<code style="font-family:var(--mono);font-size:11px;color:var(--muted)">old : ${tname}@v${fromV} { ${layoutAt(S.prog,tname,fromV).map(f=>f.name+': '+tyStr(f.ty)).join(', ')} }</code>`;
+  }
+  el.innerHTML = `
+    <div class="ph">⏸ Paused — type condition · ${cond.kind}</div>
+    <div class="cond">${escapeHtml(cond.msg)}</div>
+    <div class="quar"><b>Quarantine:</b> the in-flight tick was discarded — the committed state is still <b>well-typed</b> and nothing running can observe a half-typed value. Fix it, and the tick re-runs.</div>
+    <label>${label}</label>
+    ${sub}
+    <textarea id="repairbox" spellcheck="false"></textarea>
+    <div class="btnrow"><button class="btn primary" id="btnRepair">✓ Repair &amp; Resume</button></div>
+    <div class="repairerr" id="repairerr"></div>`;
+  $('repairbox').value=prefill;
+  $('btnRepair').addEventListener('click',applyRepair);
+  renderAll();
+  el.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function hidePause(){ $('pause').classList.add('hidden'); $('pause').innerHTML=''; }
+function applyRepair(){
+  const cond=S.paused; const src=$('repairbox').value; const errEl=$('repairerr'); errEl.textContent='';
+  try{
+    if(cond.kind==='function'){
+      const err=repairFunction(S.prog,src);
+      if(err){ errEl.textContent='still ill-typed: '+err; return; }
+      tlog({t:'repair',text:`repaired '${cond.key}' — now typechecks`});
+      $('src').value = regenSource(S.prog);         // reflect the fix in the editor
+    }else{
+      const [tname,fromV]=cond.key;
+      repairMigration(S.prog,tname,fromV,src);
+      tlog({t:'repair',text:`registered transformer ${tname} v${fromV}→v${fromV+1}`});
+    }
+  }catch(e){ errEl.textContent='repair error: '+e.message; return; }
+  S.paused=null; hidePause();
+  tlog({t:'info',text:'↻ resume — re-running the tick from the top'});
+  renderAll();
+  doStep();                                          // re-run the same tick
+}
+function regenSource(p){
+  const lines=[];
+  for(const [name,vers] of p.typeVersions){ const L=vers[vers.length-1];
+    lines.push(`type ${name} = { ${L.map(fs=>`${fs.name}: ${tyStr(fs.ty)}${fs.default?` = ${unparse(fs.default)}`:''}`).join(', ')} }`); }
+  lines.push('');
+  for(const fn of p.fns.values()) lines.push(unparseFn(fn));
+  return lines.join('\n');
+}
+function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// wiring
+$('btnStep').addEventListener('click',doStep);
+$('btnRun').addEventListener('click',toggleRun);
+$('btnReseed').addEventListener('click',()=>{ S.state=evl(S.prog,{k:'call',fn:'init',args:[]},{}); S.tick=0; S.paused=null; hidePause(); tlog({t:'info',text:'state reseeded from init()'}); renderAll(); });
+$('btnReset').addEventListener('click',()=>loadFromSource(true));
+$('btnHot').addEventListener('click',doHotUpdate);
+$('btnResetAll').addEventListener('click',()=>{ $('src').value=SRC.v1; $('console').innerHTML=''; loadFromSource(true); });
+document.querySelectorAll('.chip[data-preset]').forEach(c=>c.addEventListener('click',()=>{ $('src').value=SRC[c.dataset.preset]; log({t:'info',text:`editor set to preset ${c.dataset.preset} — click ⚡ Hot-update to apply it live (or ⤓ Reset to start fresh)`}); }));
+
+// boot
+$('src').value = SRC.v1;
+loadFromSource(true);
+})();
+</script>

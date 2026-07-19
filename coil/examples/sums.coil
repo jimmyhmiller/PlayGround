@@ -1,0 +1,23 @@
+; Sum types (tagged unions) + match, including generic ones. Reuses the generics
+; machinery: (Option i64) monomorphizes to a concrete tagged union.
+;   coil run examples/sums.coil; echo $?   => 42
+
+(defsum Option [T] (None) (Some [(val T)]))
+
+(defn unwrap-or [T] [(o (Option T)) (default T)] (-> T)
+  (match o
+    (None [] default)        ; no fields
+    (Some [v] v)))           ; bind the payload
+
+(defsum Shape
+  (Circle [(r :i64)])
+  (Rect   [(w :i64) (h :i64)]))
+
+(defn area [(s Shape)] (-> :i64)
+  (match s
+    (Circle [r] (imul 3 (imul r r)))   ; ~pi r^2
+    (Rect [w h] (imul w h))))
+
+(defn main [] (-> :i64)
+  (iadd (unwrap-or [i64] (Some [i64] 30) 0)   ; 30
+        (area (Rect 4 3))))                    ; 12  -> 42

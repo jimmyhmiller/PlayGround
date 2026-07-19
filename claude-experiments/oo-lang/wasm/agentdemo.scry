@@ -1,0 +1,76 @@
+// agent-demo.scry — the browser demo program.
+//
+// Reuses the REAL agent core (agent/core.scry): the same Conversation/Message entity types,
+// the same Tool interface, and the offline ScriptedModel that examples/assistant.scry falls
+// back to when no API key is present. Nothing here is a stub — the only difference from the
+// native TUI is who drives the turns: in the browser the terminal calls
+// `Session.instances().get(0).ask("…")` through the eval channel, instead of a blocking
+// readLine loop (a synchronous wasm call cannot wait on browser input).
+//
+// Every Session / Conversation / Message / ToolCall it creates is a live arena instance, so
+// the viewer browses the agent's state as it runs.
+import agent.core.{Conversation, Message, Model, Tool, ScriptedModel, CalcTool, WeatherTool, runAgentLoop, mkTextMessage, strStartsWith, afterPrefix}
+
+// A background sub-agent. On native this is a real OS thread; on wasm there are no pthreads,
+// so Thread.spawn registers it and the green-thread scheduler drives it (one Clock.sleep-paced
+// step per host tick). Either way you keep typing while it works, and every Message it appends
+// shows up live in the viewer.
+class Researcher implements Runnable {
+  convo: Conversation
+  topic: String
+  steps: Int
+
+  fn run() {
+    var i = 0
+    while i < self.steps {
+      i = i + 1
+      self.convo.append(mkTextMessage("assistant",
+        "[research:${self.topic}] step ${i} of ${self.steps}"))
+      Clock.sleep(120)
+    }
+    self.convo.append(mkTextMessage("assistant", "[research:" + self.topic + "] done"))
+  }
+}
+
+class Session {
+  convo: Conversation
+  brain: ScriptedModel
+  tools: List<Tool>
+  workers: List<ThreadHandle>
+  turns: Int
+
+  fn init() {
+    self.convo = Conversation()
+    self.brain = ScriptedModel(persona: "scry")
+    self.tools = List<Tool>()
+    self.tools.push(CalcTool(label: "calc"))
+    self.tools.push(WeatherTool(source: "demo"))
+    self.workers = List<ThreadHandle>()
+    self.turns = 0
+  }
+
+  // One agent turn. The terminal calls this through eval; output goes to the terminal via
+  // Console.log, and the resulting Messages show up live in the viewer.
+  fn ask(text: String) -> String {
+    self.turns = self.turns + 1
+    if strStartsWith(text, "research ") {
+      let topic = afterPrefix(text, "research ")
+      let h = Thread.spawn(Researcher(convo: self.convo, topic: topic, steps: 5))
+      self.workers.push(h)
+      let ack = "spawned a background researcher on \"" + topic + "\" — keep typing, watch the viewer"
+      Console.log(ack)
+      return ack
+    }
+    let reply = runAgentLoop(self.convo, self.brain, self.tools, text, 4)
+    Console.log(reply)
+    reply
+  }
+
+  fn messageCount() -> Int { self.convo.count }
+}
+
+fn main() {
+  let s = Session()
+  Console.log("scry agent demo — the VM, the agent, and this terminal are all WebAssembly.")
+  Console.log("try:  hello  /  weather in Tokyo  /  research wasm")
+}

@@ -1,0 +1,73 @@
+(extern qsort :cc c [(ptr i8) i64 i64 (fnptr c [(ptr i8) (ptr i8)] i32)] (-> void))
+
+(extern sqrt :cc c [f64] (-> f64))
+
+(extern pow :cc c [f64 f64] (-> f64))
+
+(extern strtol :cc c [(ptr i8) (ptr i8) i32] (-> i64))
+
+(defstruct DivT [(quot i32) (rem i32)])
+
+(extern div :cc c [i32 i32] (-> DivT))
+
+(defn
+  i64-cmp
+  [(a (ptr i8)) (b (ptr i8))]
+  (-> i32)
+  (let
+    [x (load (cast (ptr i64) a)) y (load (cast (ptr i64) b))]
+    (if (icmp-lt x y) (cast i32 -1) (if (icmp-gt x y) (cast i32 1) (cast i32 0)))))
+
+(defn
+  sorted?
+  [(arr (ptr i64)) (n i64)]
+  (-> bool)
+  (let
+    [(mut i) 1 (mut ok) 1]
+    (loop
+      (if
+        (icmp-ge (load i) n)
+        (break)
+        (do
+          (if
+            (icmp-gt (load (index arr (isub (load i) 1))) (load (index arr (load i))))
+            (store! ok 0)
+            0)
+          (store! i (iadd (load i) 1)))))
+    (icmp-eq (load ok) 1)))
+
+(defn
+  main
+  []
+  (-> :i64)
+  (let
+    [arr (alloc-stack (array i64 6))]
+    (store! (index arr 0) 30)
+    (store! (index arr 1) 10)
+    (store! (index arr 2) 50)
+    (store! (index arr 3) 42)
+    (store! (index arr 4) 20)
+    (store! (index arr 5) 40)
+    (qsort (cast (ptr i8) (index arr 0)) 6 8 (fnptr-of i64-cmp))
+    (let
+      [s
+        (cast i64 (sqrt <1>))
+        p
+        (cast i64 (pow <1> <1>))
+        n
+        (strtol c"42" (cast (ptr i8) 0) 10)
+        d
+        (div 84 2)]
+      (if
+        (and
+          (sorted? (index arr 0) 6)
+          (and
+            (icmp-eq (load (index arr 4)) 42)
+            (and
+              (icmp-eq s 42)
+              (and
+                (icmp-eq (imul p 7) 42)
+                (and (icmp-eq n 42) (icmp-eq (cast i64 (load (field d quot))) 42))))))
+        42
+        0))))
+

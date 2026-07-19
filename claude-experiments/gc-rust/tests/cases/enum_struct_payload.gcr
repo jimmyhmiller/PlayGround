@@ -1,0 +1,4 @@
+struct P { x: i64, y: i64 }
+enum Shape { Dot(P), Pair(P, P) }
+fn area(s: Shape) -> i64 { match s { Shape::Dot(p) => p.x + p.y, Shape::Pair(a, b) => a.x + b.y } }
+fn main() -> i64 { area(Shape::Pair(P { x: 20, y: 1 }, P { x: 2, y: 22 })) }

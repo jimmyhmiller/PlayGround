@@ -1,0 +1,57 @@
+(defn some? [T] [(o (Option T))] (-> bool) (match o (None [] false) (Some [_] true)))
+
+(defn none? [T] [(o (Option T))] (-> bool) (match o (None [] true) (Some [_] false)))
+
+(defn ok? [T E] [(r (Result T E))] (-> bool) (match r (Ok [_] true) (Err [_] false)))
+
+(defn err? [T E] [(r (Result T E))] (-> bool) (match r (Ok [_] false) (Err [_] true)))
+
+(defn
+  unwrap-or
+  [T]
+  [(o (Option T)) (default T)]
+  (-> T)
+  (match o (None [] default) (Some [v] v)))
+
+(defn
+  unwrap-or-else
+  [T]
+  [(o (Option T)) (thunk (fnptr c [] T))]
+  (-> T)
+  (match o (None [] (call-ptr thunk)) (Some [v] v)))
+
+(defn
+  opt-map
+  [T U]
+  [(o (Option T)) (f (fnptr c [T] U))]
+  (-> (Option U))
+  (match o (None [] (None)) (Some [v] (Some (call-ptr f v)))))
+
+(defn
+  res-map
+  [T U E]
+  [(r (Result T E)) (f (fnptr c [T] U))]
+  (-> (Result U E))
+  (match r (Ok [v] (Ok (call-ptr f v))) (Err [e] (Err e))))
+
+(defn
+  map-err
+  [T E F]
+  [(r (Result T E)) (f (fnptr c [E] F))]
+  (-> (Result T F))
+  (match r (Ok [v] (Ok v)) (Err [e] (Err (call-ptr f e)))))
+
+(defn
+  and-then
+  [T U]
+  [(o (Option T)) (f (fnptr c [T] (Option U)))]
+  (-> (Option U))
+  (match o (None [] (None)) (Some [v] (call-ptr f v))))
+
+(defn
+  ok-or
+  [T E]
+  [(o (Option T)) (e E)]
+  (-> (Result T E))
+  (match o (None [] (Err e)) (Some [v] (Ok v))))
+

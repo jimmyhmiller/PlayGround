@@ -1,0 +1,14 @@
+enum ParseError { Bad(String) }
+fn parseIt(s: String) -> Result<Int, ParseError> {
+  if s.len() == 0 { Err(ParseError.Bad("empty")) } else { Ok(1) }
+}
+fn useIt(s: String) -> Result<Int, ParseError> {
+  let n = parseIt(s)?
+  Ok(n + 1)
+}
+fn main() {
+  match useIt("x") {
+    Ok(v) -> print(v)
+    Err(e) -> print(0)
+  }
+}

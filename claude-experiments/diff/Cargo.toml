@@ -1,0 +1,26 @@
+[package]
+name = "diffpack"
+version = "0.1.0"
+edition = "2024"
+description = "An experimental incremental JavaScript bundler built with Oxc"
+license = "MIT"
+
+[dependencies]
+oxc_allocator = "0.140.0"
+oxc_ast = "0.140.0"
+oxc_ast_visit = "0.140.0"
+oxc_codegen = "0.140.0"
+oxc_ecmascript = "0.140.0"
+oxc_parser = "0.140.0"
+oxc_resolver = "11.24.2"
+oxc_semantic = "0.140.0"
+oxc_sourcemap = "8.1.1"
+oxc_span = "0.140.0"
+oxc_syntax = "0.140.0"
+oxc_transformer = "0.140.0"
+serde_json = "1.0.150"
+notify = "8.2.0"
+rayon = "1.11.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"
