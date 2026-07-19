@@ -1175,12 +1175,21 @@
         params (fnsig-params cc-params-ret)
         retp   (fnsig-ret cc-params-ret)]
     (if (str-eq (fnsig-cc cc-params-ret) "c")
-        (do
-          ; the direct path rejects by-value views at the C boundary; so must this one
-          (cg-check-c-abi-types cg params retp "call-ptr")
-          (let [sig (c-signature cg params retp false)]
-            (emit-c-call-ty cg (tv-val fpv) (load (field sig fn_ty)) (cast i32 0)
-                            sig (emit-argtv cg args scp) (load retp) "callptr")))
+        ; NOT guarded by cg-check-c-abi-types, deliberately. The bug report suggested
+        ; it, reasoning that a by-value (slice u8) through a `c` fnptr slips past a
+        ; rejection the direct path raises. But `c` is the DEFAULT convention for an
+        ; ordinary defn, not a marker of an FFI boundary: driver.coil's whole backend
+        ; injection surface is (fnptr c [… (slice u8) …] i64) passing Coil to Coil, and
+        ; guarding here rejects the compiler's own source. A fnptr cannot tell us
+        ; whether its target is a C function or a Coil one — both are `c` — so the
+        ; guard has no way to fire only at real boundaries.
+        ; The LOWERING below still applies to every `c` fnptr, and that is correct:
+        ; fnptr-of hands back the function as declared, and a Coil defn with struct
+        ; params IS declared with the C-lowered signature. A slice is unaffected —
+        ; c-signature classifies it AAScalar, exactly the type the old path built.
+        (let [sig (c-signature cg params retp false)]
+          (emit-c-call-ty cg (tv-val fpv) (load (field sig fn_ty)) (cast i32 0)
+                          sig (emit-argtv cg args scp) (load retp) "callptr"))
       (let [fnty (cg-fn-type cg params retp)
             vals (emit-vals cg args scp)
             cs (LLVMBuildCall2 b fnty (tv-val fpv) (carr a vals) (cast i32 (al-len [(ptr i8)] vals)) (cg-bl cg "callptr"))]

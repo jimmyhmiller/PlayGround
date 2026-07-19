@@ -43,6 +43,21 @@ echo "=== FIXPOINT: stage2.o vs stage3.o ==="
 cmp /tmp/coil-rb2.o /tmp/coil-rb3.o || { echo "FIXPOINT FAIL — arm64 objects differ (nondeterminism)"; exit 2; }
 echo "  ok — byte-identical, the compiler reproduces itself"
 
+# The LLVM backend must be able to build the compiler too, and reach its own
+# fixpoint. Stages 1-3 above do NOT cover this: stage1 uses stage0 (the committed
+# seed, which predates whatever you just changed) and stages 2-3 both pass
+# --backend arm64. So a codegen.coil change that breaks the LLVM backend on the
+# compiler's own source passes every check above. One did: a C-ABI guard added to
+# call-ptr rejected driver.coil's (fnptr c [… (slice u8) …] i64) backend hooks, and
+# fixpoint + all three gates stayed green while `coil build main.coil` was broken.
+echo "=== LLVM-BACKEND SELF-BUILD: stage1 rebuilds the compiler, twice ==="
+/tmp/coil-rb1 build "$SRC" -o /tmp/coil-rl2 "${LF[@]}" >/dev/null \
+  || { echo "LLVM self-build FAIL — the new compiler cannot build the compiler with the LLVM backend"; exit 2; }
+/tmp/coil-rl2 build "$SRC" -o /tmp/coil-rl3 "${LF[@]}" >/dev/null \
+  || { echo "LLVM self-build FAIL — stage rl2 cannot rebuild the compiler"; exit 2; }
+cmp /tmp/coil-rl2.o /tmp/coil-rl3.o || { echo "LLVM FIXPOINT FAIL — LLVM-backend objects differ"; exit 2; }
+echo "  ok — byte-identical, the LLVM backend reproduces the compiler too"
+
 echo "=== GATES ==="
 ./selfhost/oracle/gate-full.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-full FAIL — not a faithful compiler"; exit 1; }
 echo "  gate-full:      PASS (IR byte-exact vs reference)"
