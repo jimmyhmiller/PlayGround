@@ -46,7 +46,13 @@ pub const REIMPORT_MARKER: &str = "__diffpack_hmr";
 /// Dynamic-import require for HMR ESM builds: version-aware so a re-emitted chunk
 /// (same path) is re-fetched with a fresh `?v=` query rather than served from the
 /// host's module cache.
-pub const REQUIRE_DYNAMIC_ESM_HMR: &str = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){const __v=__hmrVersions[chunk[0]];const __u=__v?chunk[0]+(chunk[0].indexOf("?")>=0?"&v=":"?v=")+__v:chunk[0];return import(__u).then(namespace=>namespace.default);}return __require(chunk[1]);};"#;
+///
+/// Like the production form in `bundler::render_runtime`, the chunk is imported
+/// only for its REGISTRATION side effect and the requested module is then resolved
+/// by runtime id out of the shared registry. Reading the chunk's default export
+/// instead would assume the chunk holds exactly the requested root, which stopped
+/// being true once chunks became a partition and started carrying shared code.
+pub const REQUIRE_DYNAMIC_ESM_HMR: &str = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){const __v=__hmrVersions[chunk[0]];const __u=__v?chunk[0]+(chunk[0].indexOf("?")>=0?"&v=":"?v=")+__v:chunk[0];return import(__u).then(()=>__require(chunk[1]));}return __require(chunk[1]);};"#;
 
 /// The HMR bookkeeping + apply/propagate/invalidate methods, injected into the
 /// singleton runtime IIFE (main chunk, HMR builds only) right before it returns.

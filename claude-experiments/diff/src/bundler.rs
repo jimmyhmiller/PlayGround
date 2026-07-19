@@ -459,6 +459,33 @@ pub struct HmrLocation {
     pub chunk_file: String,
 }
 
+/// One emitted non-main chunk in the partition [`Bundler::chunk_plan`] computes.
+///
+/// The plan's chunks are DISJOINT and, together with the main chunk, cover every
+/// live module exactly once. That is what makes the output a partition rather than
+/// a pile of overlapping closures: before this, each dynamic root emitted its
+/// entire static closure, so anything two routes shared (React, the router core)
+/// was duplicated into every chunk that reached it.
+#[derive(Debug, Clone)]
+struct ChunkPlan {
+    /// Members in the graph's canonical (id-sorted) order.
+    members: Vec<DenseModuleId>,
+    /// The dynamic-import roots whose own module landed in this chunk. A purely
+    /// shared chunk has none: no `import()` names it, it is only ever pulled in as
+    /// another chunk's prerequisite.
+    roots: Vec<DenseModuleId>,
+    /// Indices, into the plan vector, of the chunks that must be evaluated before
+    /// this one because a member statically depends on one of their members. The
+    /// main chunk is never listed: it always loads first (it builds the runtime).
+    prerequisites: Vec<usize>,
+    /// The chunk's emitted file name (`client.chunk-3.js`, `client.shared-1.js`).
+    file_name: String,
+    /// Whether every member's live static dependencies are themselves members.
+    /// Only a closed chunk can use the scope-hoisted flat render, which
+    /// concatenates bindings into one scope and has no cross-chunk lookup.
+    closed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct VisualizationGraph {
     pub entry: String,
@@ -903,58 +930,60 @@ impl Bundler {
         // chunk), so a module keeps the exports any chunk imports from it even
         // when the consumer lands in a different chunk than the definition.
         let global_demands = self.export_demands(&reachable_dense);
-        let dynamic_roots = self.dynamic_roots(&allowed);
-        // One chunk output path per dynamic root, computed once so the rewritten
-        // `import()` reference and the file on disk always agree. Most roots are
-        // `<stem>.chunk-<n>`; a build-generated virtual chunk (the manifest) keeps
-        // its own descriptive name.
-        let chunk_paths = dynamic_roots
-            .iter()
-            .enumerate()
-            .map(|(index, &root)| chunk_output_path(output, index + 1, self.ids[root].as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut chunk_names = HashMap::with_capacity(dynamic_roots.len());
-        for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
-            let chunk_file = chunk_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("chunk path is not UTF-8: {}", chunk_path.display()))?;
-            chunk_names.insert(root, format!("./{chunk_file}"));
-        }
-        for (root, chunk_path) in dynamic_roots.iter().copied().zip(&chunk_paths) {
-            let modules = self.static_closure(root, &allowed);
-            let chunk_name = chunk_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("<chunk>");
+        let entry_name = output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("output path is not UTF-8: {}", output.display()))?;
+        // The partition of everything outside the entry's static closure. Chunk
+        // membership, file names and load order all come from here, so the files
+        // on disk and the `import()` references rewritten into them agree by
+        // construction.
+        let plans = self.chunk_plan(&allowed, entry_name)?;
+        let chunk_names = Self::chunk_names(&plans);
+        // The scope-hoisted flat render concatenates a chunk's modules into one
+        // scope, which is only sound when the chunk carries every module its
+        // members statically reference. Splitting shared code out breaks that for
+        // any chunk with a cross-chunk edge, and a flat chunk cannot be mixed with
+        // a registry chunk either (a flat main chunk installs no runtime for a
+        // registry chunk to register into), so the choice is made once for the
+        // whole build. A single-chunk build has no cross-chunk edges and keeps the
+        // flat path.
+        let flat_allowed = plans.iter().all(|plan| plan.closed);
+        for plan in &plans {
+            let chunk_path = parent.join(&plan.file_name);
+            let prerequisites = plan
+                .prerequisites
+                .iter()
+                .map(|&index| format!("./{}", plans[index].file_name))
+                .collect::<Vec<_>>();
             let rendered = self.render_chunk_cached(
-                &modules,
-                root,
+                &plan.members,
+                &plan.roots,
                 &chunk_names,
                 &runtime_ids,
                 &global_demands,
+                &prerequisites,
                 false,
+                flat_allowed,
                 options.format,
                 options.minify,
                 options.source_map,
                 options.hmr,
-                chunk_name,
+                &plan.file_name,
                 &mut live_keys,
                 &mut stats.rendered_chunks,
             )?;
-            self.write_rendered(rendered, chunk_path, options, &mut stats.written)?;
+            self.write_rendered(rendered, &chunk_path, options, &mut stats.written)?;
         }
-        let entry_name = output
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("<entry>");
         let rendered = self.render_chunk_cached(
             &main_modules,
-            self.entry,
+            &[self.entry],
             &chunk_names,
             &runtime_ids,
             &global_demands,
+            &[],
             true,
+            flat_allowed,
             options.format,
             options.minify,
             options.source_map,
@@ -977,11 +1006,13 @@ impl Bundler {
     fn render_chunk_cached(
         &self,
         modules: &[DenseModuleId],
-        root: DenseModuleId,
+        roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
+        prerequisites: &[String],
         is_main: bool,
+        flat_allowed: bool,
         format: ModuleFormat,
         minify: bool,
         source_map: bool,
@@ -992,11 +1023,13 @@ impl Bundler {
     ) -> Result<RenderedBundle, String> {
         let key = self.chunk_render_key(
             modules,
-            root,
+            roots,
             is_main,
             chunk_names,
             runtime_ids,
             global_demands,
+            prerequisites,
+            flat_allowed,
             format,
             minify,
             source_map,
@@ -1008,11 +1041,13 @@ impl Bundler {
         }
         let mut bundle = self.render_best(
             modules,
-            root,
+            roots,
             chunk_names,
             runtime_ids,
             global_demands,
+            prerequisites,
             is_main,
+            flat_allowed,
             format,
             hmr,
         );
@@ -1085,11 +1120,13 @@ impl Bundler {
     fn chunk_render_key(
         &self,
         modules: &[DenseModuleId],
-        root: DenseModuleId,
+        roots: &[DenseModuleId],
         is_main: bool,
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
+        prerequisites: &[String],
+        flat_allowed: bool,
         format: ModuleFormat,
         minify: bool,
         source_map: bool,
@@ -1110,7 +1147,17 @@ impl Bundler {
         // cache entry from its plain-minified form (never a silent map mismatch).
         source_map.hash(&mut hasher);
         is_main.hash(&mut hasher);
-        root.hash(&mut hasher);
+        // Membership and load order are as much a part of this chunk's bytes as
+        // its modules are: which roots it owns decides its export demand and its
+        // tail, the prerequisite file names are literally emitted as imports at
+        // the top of the file, and `flat_allowed` picks between two entirely
+        // different renderers. Without these a re-partition (a route gaining a
+        // shared dependency, say) would silently serve the previous partition's
+        // bytes from the render cache. All three describe THIS chunk, so a leaf
+        // edit elsewhere still leaves the key — and the cached bytes — untouched.
+        roots.hash(&mut hasher);
+        prerequisites.hash(&mut hasher);
+        flat_allowed.hash(&mut hasher);
         modules.len().hash(&mut hasher);
         for &dense in modules {
             dense.hash(&mut hasher);
@@ -1177,6 +1224,180 @@ impl Bundler {
         roots
     }
 
+    /// The build's chunk partition: the single source of truth every consumer
+    /// (emit, the route manifest, HMR location) derives its chunk assignment from,
+    /// so all three describe the same files with the same contents.
+    ///
+    /// The main chunk holds `static_closure(entry)` and is never represented here;
+    /// its modules are excluded from every returned chunk, so nothing the entry
+    /// already carries is duplicated into a split chunk. Every remaining live
+    /// module is then labelled with the SET of dynamic roots that can reach it
+    /// statically, and modules sharing a label become one chunk. A module reachable
+    /// from a single root stays private to that root's chunk; a module two routes
+    /// share is extracted into one shared chunk that both routes list as a
+    /// prerequisite. This is what makes membership disjoint — the property the
+    /// runtime already assumed, since `runtime_ids` are global and `__require`
+    /// throws rather than re-running a second copy of a factory.
+    ///
+    /// Naming is deterministic because the render cache and the incremental thesis
+    /// key on bytes: a chunk that owns exactly one root and nothing else keeps the
+    /// historical `<stem>.chunk-<n>` name derived from that root's position in
+    /// [`Self::dynamic_roots`] (whose ordering is deliberately untouched), and
+    /// every other chunk is numbered `<stem>.shared-<n>` in label order.
+    fn chunk_plan(
+        &self,
+        allowed: &HashSet<DenseModuleId>,
+        entry_file: &str,
+    ) -> Result<Vec<ChunkPlan>, String> {
+        let (stem, extension) = split_file_name(entry_file)?;
+        let main_set = self
+            .static_closure(self.entry, allowed)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let roots = self.dynamic_roots(allowed);
+        let mut closures = Vec::with_capacity(roots.len());
+        for (index, &root) in roots.iter().enumerate() {
+            // A root outside the live set would give an empty closure, and the
+            // chunk named by every rewritten `import()` of it would hold no
+            // factory — `__require` would then throw "Module is not loaded" at
+            // runtime. Fail the build here, where the cause is still visible.
+            if !allowed.contains(&root) {
+                return Err(format!(
+                    "dynamic-import root {} (chunk {}) was dropped from the live module set; \
+                     its chunk would be empty and importing it would fail at runtime",
+                    self.ids[root],
+                    index + 1
+                ));
+            }
+            closures.push(
+                self.static_closure(root, allowed)
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+            );
+        }
+
+        // Label -> members. `BTreeMap` over the sorted root-index vector fixes both
+        // the grouping and the order chunks are numbered in, independent of hash
+        // iteration order, so repeated builds emit byte-identical files.
+        let mut groups: BTreeMap<Vec<usize>, Vec<DenseModuleId>> = BTreeMap::new();
+        let mut ordered = allowed.iter().copied().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+        for dense in ordered {
+            if main_set.contains(&dense) {
+                continue;
+            }
+            let label = closures
+                .iter()
+                .enumerate()
+                .filter(|(_, closure)| closure.contains(&dense))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            // Every live module is reachable from the entry, so it lies in the
+            // entry's static closure or in some dynamic root's. An empty label
+            // means it belongs to no chunk and would be silently dropped from the
+            // output; that is a graph bug, not something to paper over.
+            if label.is_empty() {
+                return Err(format!(
+                    "live module {} is in neither the entry closure nor any dynamic-import \
+                     closure, so no chunk would carry it",
+                    self.ids[dense]
+                ));
+            }
+            groups.entry(label).or_default().push(dense);
+        }
+
+        let mut plans = Vec::with_capacity(groups.len());
+        let mut shared_count = 0_usize;
+        for (label, members) in groups {
+            let member_set = members.iter().copied().collect::<HashSet<_>>();
+            let chunk_roots = label
+                .iter()
+                .copied()
+                .map(|index| roots[index])
+                .filter(|root| member_set.contains(root))
+                .collect::<Vec<_>>();
+            // The historical name survives only for the shape it described: a
+            // chunk that is exactly one root's private closure. Anything else — a
+            // set shared by several roots, or a single root's leftovers once the
+            // root module itself was pulled into a shared chunk — is a new kind of
+            // artifact and gets a name that says so.
+            let file_name = match (label.as_slice(), chunk_roots.as_slice()) {
+                ([index], [root]) => chunk_file_name(&stem, &extension, index + 1, self.ids[*root].as_ref()),
+                _ => {
+                    shared_count += 1;
+                    format!("{stem}.shared-{shared_count}{extension}")
+                }
+            };
+            plans.push(ChunkPlan {
+                members,
+                roots: chunk_roots,
+                prerequisites: Vec::new(),
+                file_name,
+                closed: true,
+            });
+        }
+
+        // Dense id -> owning chunk index; `None` is the main chunk (or a module
+        // outside the live set), which is always already loaded.
+        let mut chunk_of = vec![None::<usize>; self.ids.len()];
+        for (index, plan) in plans.iter().enumerate() {
+            for &member in &plan.members {
+                chunk_of[member] = Some(index);
+            }
+        }
+        let mut edges = Vec::with_capacity(plans.len());
+        for (index, plan) in plans.iter().enumerate() {
+            let mut prerequisites = Vec::new();
+            let mut closed = true;
+            for &member in &plan.members {
+                let Some(module) = self.modules[member].as_ref() else {
+                    continue;
+                };
+                for (_, target, demand) in &module.dependencies {
+                    if demand.dynamic || !allowed.contains(target) {
+                        continue;
+                    }
+                    match chunk_of[*target] {
+                        Some(other) if other != index => {
+                            closed = false;
+                            prerequisites.push(other);
+                        }
+                        Some(_) => {}
+                        // In the main chunk: a real cross-chunk edge (so the flat
+                        // render is out) but not a prerequisite, since the main
+                        // chunk is what installs the runtime in the first place.
+                        None => closed = false,
+                    }
+                }
+            }
+            prerequisites.sort_unstable();
+            prerequisites.dedup();
+            edges.push((prerequisites, closed));
+        }
+        // Only DIRECT edges are recorded. A prerequisite's own prerequisites are
+        // imported by that chunk's own header, and ESM/CJS both finish evaluating
+        // an import before the importer's body runs, so the direct edges close
+        // transitively at load time.
+        for (plan, (prerequisites, closed)) in plans.iter_mut().zip(edges) {
+            plan.prerequisites = prerequisites;
+            plan.closed = closed;
+        }
+        Ok(plans)
+    }
+
+    /// `dense id -> "./<chunk file>"` for every dynamic-import root, naming the
+    /// chunk that actually CONTAINS the root — which may be a shared chunk, since a
+    /// root reachable from another root is extracted like any other shared module.
+    fn chunk_names(plans: &[ChunkPlan]) -> HashMap<DenseModuleId, String> {
+        let mut names = HashMap::new();
+        for plan in plans {
+            for &root in &plan.roots {
+                names.insert(root, format!("./{}", plan.file_name));
+            }
+        }
+        names
+    }
+
     /// Derives the client build's route -> chunk mapping for the manifest.
     ///
     /// `entry_file` is the entry chunk name (`client.js`); `base` is the URL base
@@ -1196,26 +1417,39 @@ impl Bundler {
         entry_file: &str,
         base: &str,
     ) -> Result<crate::manifest::ClientRouteManifest, String> {
-        let (stem, extension) = split_file_name(entry_file)?;
         // The manifest must describe the SAME chunk set emit produces, so refine
-        // the reachable set through the identical dead-module elimination pass
-        // before deriving dynamic-import chunk roots.
+        // the reachable set through the identical dead-module elimination pass and
+        // then read the chunk assignment off the identical plan.
         let reachable = self.live_modules(reachable);
         let allowed = reachable
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
             .collect::<HashSet<_>>();
-        let dynamic_roots = self.dynamic_roots(&allowed);
+        let plans = self.chunk_plan(&allowed, entry_file)?;
         let mut routes: BTreeMap<String, Vec<String>> = BTreeMap::new();
         routes.insert(
             crate::manifest::ROOT_ROUTE_ID.to_string(),
             vec![entry_file.to_string()],
         );
-        for (index, root) in dynamic_roots.iter().copied().enumerate() {
-            let chunk_file = format!("{stem}.chunk-{}{extension}", index + 1);
-            let id = self.ids[root].as_ref();
-            if let Some(route_id) = split_chunk_route_id(id)? {
-                routes.entry(route_id).or_default().push(chunk_file);
+        for (index, plan) in plans.iter().enumerate() {
+            for &root in &plan.roots {
+                let Some(route_id) = split_chunk_route_id(self.ids[root].as_ref())? else {
+                    continue;
+                };
+                // Preloading the route's own chunk is no longer enough: its shared
+                // dependencies live in prerequisite chunks, and a browser that
+                // fetched only the route chunk would register factories whose
+                // dependencies are missing. List the prerequisite closure ahead of
+                // the chunk itself, in the order the runtime needs them.
+                let preloads = routes.entry(route_id).or_default();
+                let mut ordered = Vec::new();
+                let mut seen = HashSet::new();
+                chunk_load_order(&plans, index, &mut seen, &mut ordered);
+                for file in ordered {
+                    if !preloads.contains(&file) {
+                        preloads.push(file);
+                    }
+                }
             }
         }
         Ok(crate::manifest::ClientRouteManifest {
@@ -1236,7 +1470,6 @@ impl Bundler {
         changed: &BTreeSet<ModuleId>,
         entry_file: &str,
     ) -> Result<Vec<HmrLocation>, String> {
-        let (stem, extension) = split_file_name(entry_file)?;
         let reachable = self.live_modules(reachable);
         let reachable_dense = reachable
             .iter()
@@ -1247,24 +1480,17 @@ impl Bundler {
         for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
             runtime_ids[dense] = Some(runtime_id);
         }
-        let main_modules = self
-            .static_closure(self.entry, &allowed)
-            .into_iter()
-            .collect::<HashSet<_>>();
-        let dynamic_roots = self.dynamic_roots(&allowed);
-        // chunk index -> (chunk_file, member set), matching emit's ordering.
-        let chunks = dynamic_roots
-            .iter()
-            .enumerate()
-            .map(|(index, &root)| {
-                let file = format!("{stem}.chunk-{}{extension}", index + 1);
-                let members = self
-                    .static_closure(root, &allowed)
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                (file, members)
-            })
-            .collect::<Vec<_>>();
+        // The same partition emit used, so the chunk a module is reported in is
+        // the chunk whose bytes actually carry its factory. Membership is now
+        // disjoint, so this is a plain lookup rather than a preference order: a
+        // module is in exactly one plan chunk, or in the entry chunk.
+        let plans = self.chunk_plan(&allowed, entry_file)?;
+        let mut chunk_of: HashMap<DenseModuleId, &str> = HashMap::new();
+        for plan in &plans {
+            for &member in &plan.members {
+                chunk_of.insert(member, plan.file_name.as_str());
+            }
+        }
         let mut located = Vec::new();
         for module_id in changed {
             let Some(&dense) = self.indices.get(module_id.as_str()) else {
@@ -1273,14 +1499,9 @@ impl Bundler {
             let Some(runtime_id) = runtime_ids[dense] else {
                 continue;
             };
-            // Prefer a dynamic chunk that owns the module (a route-split component
-            // lives only in its own chunk); fall back to the entry chunk.
-            let chunk_file = chunks
-                .iter()
-                .find(|(_, members)| members.contains(&dense))
-                .map(|(file, _)| file.clone())
-                .filter(|_| !main_modules.contains(&dense))
-                .unwrap_or_else(|| entry_file.to_string());
+            let chunk_file = chunk_of
+                .get(&dense)
+                .map_or_else(|| entry_file.to_string(), |file| (*file).to_string());
             located.push(HmrLocation {
                 module_id: module_id.to_string(),
                 runtime_id,
@@ -1806,29 +2027,35 @@ impl Bundler {
     fn render_best(
         &self,
         reachable: &[DenseModuleId],
-        entry: DenseModuleId,
+        roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
+        prerequisites: &[String],
         is_main: bool,
+        flat_allowed: bool,
         format: ModuleFormat,
         hmr: bool,
     ) -> RenderedBundle {
         // The flat path emits a plain concatenation with no per-module factory
         // registry, so it has no place to install `module.hot`; a dev (hmr) build
         // always renders through the registry runtime so every module is HMR-capable.
-        if !hmr
+        // `flat_allowed` is the caller's build-wide verdict on whether the chunk
+        // partition is closed enough for scope hoisting at all (see `chunk_plan`).
+        if flat_allowed
+            && !hmr
             && let Some(flat) =
-                self.render_flat(reachable, entry, chunk_names, global_demands, is_main, format)
+                self.render_flat(reachable, roots, chunk_names, global_demands, is_main, format)
         {
             return flat;
         }
         self.render_runtime(
             reachable,
-            entry,
+            roots,
             chunk_names,
             runtime_ids,
             global_demands,
+            prerequisites,
             is_main,
             format,
             hmr,
@@ -1838,12 +2065,22 @@ impl Bundler {
     fn render_flat(
         &self,
         reachable: &[DenseModuleId],
-        entry: DenseModuleId,
+        roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
         global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
     ) -> Option<RenderedBundle> {
+        // A flat chunk's public surface is a single `export{...}` list taken from
+        // one module's flat exports, so it can only speak for a chunk with exactly
+        // one dynamic root. A shared chunk (no root) or a chunk two roots landed in
+        // has no such surface; those render through the registry runtime, which
+        // addresses modules by runtime id and needs no exports at all.
+        let entry = match (is_main, roots) {
+            (true, _) => self.entry,
+            (false, [root]) => *root,
+            (false, _) => return None,
+        };
         let reachable_set = reachable.iter().copied().collect::<HashSet<_>>();
         for &dense_index in reachable {
             let module = self.modules[dense_index].as_ref()?;
@@ -2032,19 +2269,24 @@ impl Bundler {
     fn render_runtime(
         &self,
         reachable: &[DenseModuleId],
-        entry: DenseModuleId,
+        roots: &[DenseModuleId],
         chunk_names: &HashMap<DenseModuleId, String>,
         runtime_ids: &[Option<usize>],
         global_demands: &[ExportDemand],
+        prerequisites: &[String],
         is_main: bool,
         format: ModuleFormat,
         hmr: bool,
     ) -> RenderedBundle {
-        // See `render_flat`: demand is aggregated globally across chunks. The
-        // entry keeps its full namespace (the main entry is required by the outer
-        // wrapper; a chunk root is read as a namespace after `import()`).
+        // See `render_flat`: demand is aggregated globally across chunks. Each of
+        // this chunk's entry points keeps its full namespace (the main entry is
+        // required by the outer wrapper; a dynamic root is read as a namespace
+        // after `import()`). A shared chunk has no roots and is described entirely
+        // by the global demand of the chunks that import from it.
         let mut export_demands = global_demands.to_vec();
-        export_demands[entry].all = true;
+        for &root in roots {
+            export_demands[root].all = true;
+        }
         let fragments = reachable
             .par_iter()
             .filter_map(|&dense_index| {
@@ -2106,6 +2348,46 @@ impl Bundler {
                 ))
             })
             .collect::<Vec<_>>();
+        // A split chunk's members can statically depend on modules that landed in
+        // a SIBLING chunk (shared code extracted out of both). Those factories
+        // must already be registered before this chunk's are used, so the chunk
+        // loads its prerequisites from its own header: ESM evaluates every import
+        // before the module body, and the CJS `require` runs before the registry
+        // literal is built. Only DIRECT prerequisites are listed — each of them
+        // loads its own in turn, so the closure is covered transitively. The main
+        // chunk has none: its members form a static closure, and it is what
+        // installs the runtime the others register into.
+        let prerequisite_loads = prerequisites
+            .iter()
+            .map(|file| {
+                if format.is_esm() {
+                    format!("import {};\n", quote(file))
+                } else {
+                    format!("require({});\n", quote(file))
+                }
+            })
+            .collect::<String>();
+        let prelude = match format {
+            ModuleFormat::Esm if is_main => {
+                // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE` at
+                // module-init time and caches it as the prefix it matches
+                // server-function requests against, so the default must be in
+                // place before any bundled module evaluates. This runs at the very
+                // top of the entry, before the module-graph IIFE. It is a `??=`
+                // default (never clobbers a real value) and a harmless no-op for a
+                // non-TanStack Node bundle.
+                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n"
+            }
+            ModuleFormat::BrowserEsm if is_main => BROWSER_GLOBALS_PRELUDE,
+            _ => "",
+        };
+        // Lines the chunk emits before `const __newModules={`: the format's
+        // prelude and one `import`/`require` per prerequisite chunk. The module
+        // fragments start after them, so the source map's generated lines must be
+        // shifted by exactly this much or every mapped position is off by the
+        // header's height.
+        let header_lines = prelude.matches('\n').count() as u32
+            + prerequisite_loads.matches('\n').count() as u32;
         let mut modules = String::new();
         let mut maps = String::new();
         let mut chunks = String::new();
@@ -2114,7 +2396,7 @@ impl Bundler {
         for (dense_index, module, map, chunk, generated_lines) in fragments {
             mappings.push(ModuleMapping {
                 dense_index,
-                generated_line: 3 + module_lines,
+                generated_line: 3 + header_lines + module_lines,
                 generated_lines: generated_lines as u32,
             });
             module_lines += module.matches('\n').count() as u32;
@@ -2127,11 +2409,17 @@ impl Bundler {
             "__diffpack_runtime:{}",
             self.ids[self.entry].as_ref()
         ));
-        let entry_runtime_id =
-            runtime_ids[entry].expect("a chunk entry must have a deterministic runtime ID");
-        // In ESM output (Node or browser) a split chunk is a real module, so its
-        // dynamic load is a native `import()` whose default export is the chunk's
-        // required target. Node ESM resolves external Node built-ins through
+        // Only the main chunk names a module in its tail (it evaluates the entry
+        // and returns its exports); a split chunk only registers factories, so it
+        // has no single "entry" to identify.
+        let entry_runtime_id = runtime_ids[self.entry]
+            .expect("the entry module must have a deterministic runtime ID");
+        // In ESM output (Node or browser) a split chunk is a real module, loaded
+        // for its REGISTRATION side effect: `require.dynamic` imports the file and
+        // then resolves the requested module by runtime id out of the shared
+        // registry, so one chunk can carry several roots (and shared code that is
+        // nobody's root) without any of them having to be its default export.
+        // Node ESM resolves external Node built-ins through
         // `createRequire`. Browser ESM has no `node:module`; `requireNative`
         // returns a load-safe throw-on-USE stub instead: dead server code that
         // leaked into the client graph via isomorphic imports may still `require`
@@ -2142,7 +2430,7 @@ impl Bundler {
         // value. Protocol probes (`then`/`Symbol.toPrimitive`/iterators) return
         // `undefined` so the stub is neither mistaken for a thenable nor silently
         // coerced. In CJS output both go through the host `require`, as before.
-        let require_dynamic_esm = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(namespace=>namespace.default);return __require(chunk[1]);};"#;
+        let require_dynamic_esm = r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(()=>__require(chunk[1]));return __require(chunk[1]);};"#;
         let (require_dynamic, require_native) = match format {
             ModuleFormat::Esm => (
                 require_dynamic_esm,
@@ -2153,7 +2441,7 @@ impl Bundler {
                 r#"const requireNative=specifier=>{const fail=()=>{throw new Error("node builtin "+specifier+" is not available in the browser");};const stub=new Proxy(function(){fail();},{get:(_,p)=>(p==="then"||p===Symbol.toPrimitive||p===Symbol.iterator||p===Symbol.asyncIterator)?undefined:stub,construct:()=>stub,apply:()=>fail()});return stub;};"#,
             ),
             ModuleFormat::Cjs => (
-                r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");return requireNative(chunk[0]);}return __require(chunk[1]);};"#,
+                r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");requireNative(chunk[0]);}return __require(chunk[1]);};"#,
                 r#"const requireNative=typeof require==="function"?require:null;"#,
             ),
         };
@@ -2233,12 +2521,17 @@ __runtime.register(__newModules,__newMaps,__newChunks);
 return __runtime.require({entry_runtime_id});"#
             )
         } else {
+            // A split chunk REGISTERS and stops. It deliberately does not evaluate
+            // anything: it may carry several dynamic roots plus shared code that is
+            // nobody's root, and importing it must not run a root the caller did
+            // not ask for. `require.dynamic` evaluates exactly the requested
+            // module by runtime id once this file has registered.
             format!(
                 r#"const __runtime=globalThis[{runtime_key}];
 if(!__runtime)throw new Error("Diffpack runtime is not initialized");
 __runtime.register(__newModules,__newMaps,__newChunks);
 {reimport_guard}
-return __runtime.require({entry_runtime_id});"#
+return __runtime;"#
             )
         };
         // The registry runtime is identical across formats; only the module
@@ -2250,22 +2543,8 @@ return __runtime.require({entry_runtime_id});"#
         // browser ESM main chunk omits that import (a browser cannot resolve
         // `node:module`), so the entry loads and runs in the browser.
         let code = if format.is_esm() {
-            let prelude = match format {
-                ModuleFormat::Esm if is_main => {
-                    // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE`
-                    // at module-init time and caches it as the prefix it matches
-                    // server-function requests against, so the default must be in
-                    // place before any bundled module evaluates. This runs at the
-                    // very top of the entry, before the module-graph IIFE. It is a
-                    // `??=` default (never clobbers a real value) and a harmless
-                    // no-op for a non-TanStack Node bundle.
-                    "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n"
-                }
-                ModuleFormat::BrowserEsm if is_main => BROWSER_GLOBALS_PRELUDE,
-                _ => "",
-            };
             format!(
-                r#"{prelude}const __diffpackEntry=(()=>{{
+                r#"{prelude}{prerequisite_loads}const __diffpackEntry=(()=>{{
 "use strict";
 const __newModules={{{modules}}};
 const __newMaps={{{maps}}};
@@ -2279,7 +2558,7 @@ export default __diffpackEntry;
             format!(
                 r#"module.exports=(()=>{{
 "use strict";
-const __newModules={{{modules}}};
+{prerequisite_loads}const __newModules={{{modules}}};
 const __newMaps={{{maps}}};
 const __newChunks={{{chunks}}};
 {tail}
@@ -3974,43 +4253,41 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn chunk_path(output: &Path, index: usize) -> Result<PathBuf, String> {
-    let parent = output
-        .parent()
-        .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
-    let stem = output
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| format!("output filename is not UTF-8: {}", output.display()))?;
-    let extension = output
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map_or(String::new(), |extension| format!(".{extension}"));
-    Ok(parent.join(format!("{stem}.chunk-{index}{extension}")))
+/// The chunk files a browser must evaluate, in order, to have `index` fully
+/// loaded: the transitive prerequisite closure first (post-order, so a chunk never
+/// precedes something it depends on), then the chunk itself. Used for the route
+/// manifest's preload lists, where the order IS the contract.
+fn chunk_load_order(
+    plans: &[ChunkPlan],
+    index: usize,
+    seen: &mut HashSet<usize>,
+    ordered: &mut Vec<String>,
+) {
+    if !seen.insert(index) {
+        return;
+    }
+    for &prerequisite in &plans[index].prerequisites {
+        chunk_load_order(plans, prerequisite, seen, ordered);
+    }
+    ordered.push(plans[index].file_name.clone());
 }
 
-/// The on-disk path for the chunk of a dynamic root. Most roots use the numbered
-/// `<stem>.chunk-<index>` name; the build-generated `tanstack-start-manifest:v`
-/// virtual module keeps a descriptive `_tanstack-start-manifest_v` name so the
-/// emitted artifact is identifiable (and matches TanStack's own manifest chunk
-/// naming convention).
-fn chunk_output_path(output: &Path, index: usize, id: &str) -> Result<PathBuf, String> {
+/// The emitted file name for the chunk that owns dynamic root `index` (1-based,
+/// its position in [`Bundler::dynamic_roots`]) and nothing else. Most roots use
+/// the numbered `<stem>.chunk-<index>` name; the build-generated
+/// `tanstack-start-manifest:v` virtual module keeps a descriptive
+/// `_tanstack-start-manifest_v` name so the emitted artifact is identifiable (and
+/// matches TanStack's own manifest chunk naming convention).
+fn chunk_file_name(stem: &str, extension: &str, index: usize, id: &str) -> String {
     if id == crate::manifest::START_MANIFEST_SPECIFIER {
-        let parent = output
-            .parent()
-            .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
-        let extension = output
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map_or(String::new(), |extension| format!(".{extension}"));
-        return Ok(parent.join(format!("_tanstack-start-manifest_v{extension}")));
+        return format!("_tanstack-start-manifest_v{extension}");
     }
-    chunk_path(output, index)
+    format!("{stem}.chunk-{index}{extension}")
 }
 
 /// Splits an entry file name (`client.js`) into its stem (`client`) and
-/// dotted extension (`.js`), mirroring how [`chunk_path`] names dynamic chunks so
-/// the manifest can reconstruct each chunk's file name.
+/// dotted extension (`.js`), the two halves every chunk name in
+/// [`Bundler::chunk_plan`] is built from.
 fn split_file_name(file: &str) -> Result<(String, String), String> {
     let path = Path::new(file);
     let stem = path

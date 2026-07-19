@@ -168,14 +168,20 @@
   (if (icmp-eq op 2) (Ok (CFloat (fmul x y)))
   (if (icmp-eq op 3) (Ok (CFloat (fdiv x y)))
       (Err [CtVal Diag] (derr "comptime: unsupported float operation")))))))
+; The one wording for "an integer div/rem had a zero divisor at comptime". Both the
+; INTERPRETER (ct-bin-int, below) and the COMPILED fold (comptime_eval.coil, which
+; instruments the compiled sub-program and reports the failure after the run) answer
+; with this, so the two engines cannot drift apart on the message.
+(defn ct-divzero-msg [(rem bool)] (-> (slice u8))
+  (if rem "comptime: remainder by zero" "comptime: division by zero"))
 (defn ct-bin-int [(op i64) (x i64) (y i64)] (-> (Result CtVal Diag))
   (if (icmp-eq op 0) (Ok (CInt (iadd x y)))
   (if (icmp-eq op 1) (Ok (CInt (isub x y)))
   (if (icmp-eq op 2) (Ok (CInt (imul x y)))
-  (if (icmp-eq op 3) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: division by zero")) (Ok (CInt (idiv x y))))
-  (if (icmp-eq op 4) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: remainder by zero")) (Ok (CInt (irem x y))))
-  (if (icmp-eq op 5) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: division by zero")) (Ok (CInt (udiv x y))))
-  (if (icmp-eq op 6) (if (icmp-eq y 0) (Err [CtVal Diag] (derr "comptime: remainder by zero")) (Ok (CInt (urem x y))))
+  (if (icmp-eq op 3) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg false))) (Ok (CInt (idiv x y))))
+  (if (icmp-eq op 4) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg true))) (Ok (CInt (irem x y))))
+  (if (icmp-eq op 5) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg false))) (Ok (CInt (udiv x y))))
+  (if (icmp-eq op 6) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg true))) (Ok (CInt (urem x y))))
   (if (icmp-eq op 7) (Ok (CInt (iand x y)))
   (if (icmp-eq op 8) (Ok (CInt (ior x y)))
   (if (icmp-eq op 9) (Ok (CInt (ixor x y)))

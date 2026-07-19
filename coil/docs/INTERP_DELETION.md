@@ -4,7 +4,7 @@ _Decision 7 of `docs/DECISIONS.md` ("delete the comptime interpreter"), written 
 remaining work can be executed as a focused session. This is the one reviewed item still
 open. Everything else from the roadmap and the wasm/scry work is landed._
 
-## The goal (and why it is only *aesthetic*, not a bug fix)
+## The goal (mostly aesthetic — but the hybrid has one real bug, see "The comptime-UB hole")
 
 Coil runs compile-time code (`(comptime E)`, `(const …)`, `(meta …)`, and macro bodies)
 two different ways:
@@ -18,14 +18,44 @@ two different ways:
   `dlopen`s it, and calls it as native code. Full language power.
 
 The point of the deletion is **one engine, no secretly-weaker path** (closes `mac-12` and
-`diag-4`). It is a purity/maintainability goal — **the interpreter is not broken**; it is a
-working fallback. Weigh that against the risk below before committing to it.
+`diag-4`). It is *largely* a purity/maintainability goal — the interpreter itself is not
+broken. But the **hybrid** is: the routing between the two engines has a live correctness
+hole (below), so this is not purely aesthetic. Weigh that against the risk before committing.
+
+## The comptime-UB hole (live bug, verified)
+
+The interpreter is currently the only thing that catches compile-time integer UB. `ct-bin-int`
+(`comptime.coil:174-178`) rejects div/rem by zero; the compiled fold has no such check, and
+arm64 `sdiv`-by-zero yields **0 with no trap**. The `comptime-cap-gap?` discriminator is
+supposed to keep semantic errors on the interpreter, but it keys off the *first* error the
+interpreter reports — so a site that is **both** a capability gap **and** a division by zero is
+routed to the compiled engine, which folds it silently.
+
+Verified against the shipped compiler (default settings, no flags):
+
+    (defn main [] (-> i64) (comptime (idiv (sizeof i64) 0)))   ; → exit 0, folds to 0, NO error
+    (defn main [] (-> i64) (comptime (idiv (sizeof i64) 2)))   ; → exit 4, correct
+    (const z (idiv 1 0))                                       ; → correctly errors (interp owns it)
+
+Consequence for the plan: **step 6 cannot be "flip `fold-expr` once readback is total."**
+Readback totality is necessary but not sufficient. Removing the interpreter removes the only
+comptime-UB check in the compiler, converting a diagnostic into a silently wrong constant.
+The compiled fold must carry its own div/rem-by-zero guard *before* step 6 flips.
+
+⚠ The guard must be **integer-only**. `EBin`'s `op` is ambiguous between int and float
+(`parser.coil:446`: `fdiv`=3, `frem`=4 collide with `idiv`=3, `irem`=4), and `ct-bin-float`
+(`comptime.coil:166-170`) has no zero check *by design* — comptime float division to infinity
+is legal and must stay legal. Classify by operand type, never by op number alone.
+
+A second, lesser gap: the interpreter has a **fuel budget** (`comptime.coil:458`, `:585`) that
+catches non-terminating comptime code. A compiled thunk simply hangs. Not a wrong answer, but
+it is coverage that disappears with the interpreter.
 
 ## What has already landed (do NOT redo)
 
 | Step | id | Commit(s) | What it did |
 |------|-----|-----------|-------------|
-| 1 | mac-8 | `433631b1e` | Route `(comptime E)`/`(const …)` through the compiled engine. `fold-expr`'s single `EComptime` seam tries the interpreter FIRST; only on a *capability gap* (the interp's own "…isn't supported yet" wording) does it route the site through the compiled engine via `ct-fold-hook` (wired by `main`/`main_a64`'s `register-comptime-fold!`). A genuine semantic error (div-by-zero) is left to stand — the discriminator is the interp's wording, so the compiled engine never masks a real bug. |
+| 1 | mac-8 | `433631b1e` | Route `(comptime E)`/`(const …)` through the compiled engine. `fold-expr`'s single `EComptime` seam tries the interpreter FIRST; only on a *capability gap* (the interp's own "…isn't supported yet" wording) does it route the site through the compiled engine via `ct-fold-hook` (wired by `main`/`main_a64`'s `register-comptime-fold!`). A genuine semantic error (div-by-zero) is *intended* to be left to stand, the discriminator being the interp's wording. ⚠ **This safety claim is false — see "The comptime-UB hole" below.** |
 | 2 | mac-12 | `ec0d40ecd` | `export-c` on the arm64 backend (`g-register-sigs!` / `g-export-c-sym`; by-value struct param is a located error via `g-export-needs-thunk`). `main_a64` registers `meta-build-obj-a64`, so the LLVM-free compiler builds metaprogram dylibs with the arm64 backend and the compiled engine is its default. |
 | 3a | — | `fa2ec42e7` | Aggregate/string comptime readback on the compiled engine: a write-through `(ptr T)` thunk entry + walk the C struct/`(slice u8)` layout by field offset (`comptime_eval.coil`). |
 
@@ -92,25 +122,41 @@ than it looks — do it as its own commit.
 
 ## Execution plan (dependency-ordered)
 
-**Phase 1 — bankable prerequisites (each independently green, commit each):**
-1. **Reconcile `type-bytes` / `g-type-bytes`.** Trace how each array/field result drives real
+**Phase 1 — bankable prerequisites — ✅ ALL LANDED.**
+`type-bytes` reconciliation `b115c4e03`; readback extended by `fa2ec42e7` (aggregates/strings)
+then `223fe8a06` (sums, `f32`, packed/explicit layouts); `CtVal`/`CtCtx` → `ctval.coil`
+`797b957b9`. Kept below for the record — do not redo.
+
+1. ✅ `b115c4e03` — **Reconcile `type-bytes` / `g-type-bytes`.** Trace how each array/field result drives real
    layout; make the two backends agree (likely: drop the array-element `align8` in
    `codegen.coil`, matching LLVM's native array layout — but VERIFY via a struct-with-array
    repro on both backends, and expect an oracle-ref change that you can explain line-by-line).
    Fixpoint + all 7 gates green.
-2. **Extend the readback** (`comptime_eval.coil` `read-value`/`comptime-fold-one`) to cover
+2. ✅ `fa2ec42e7` + `223fe8a06` — **Extend the readback** (`comptime_eval.coil` `read-value`/`comptime-fold-one`) to cover
    sums, `f32`, raw-ptr aggregates, non-`LC` structs, non-`u8` slices — additive, `fold-expr`
    still interp-first, so behaviour is unchanged and it is green. (It is dead until Phase 2's
    flip; unit-exercise it with a temporary hook or a targeted test to prove correctness.)
-3. **Relocate `CtVal`/`CtCtx`** to `ctval.coil`; add explicit imports to the 7 users. Green,
-   mechanical.
+3. ✅ `797b957b9` — **Relocate `CtVal`/`CtCtx`** to `ctval.coil`; add explicit imports. (It was
+   5 users, not the 7 estimated here.)
+
+**Phase 1b — the comptime-UB guard (new; independently green; do BEFORE step 6):**
+3b. **Guard div/rem-by-zero in the compiled fold.** Inject a status cell + a `coil.ct.nz`
+   divisor check into the comptime closure sub-program and rewrite every *integer* `idiv`/
+   `irem`/`udiv`/`urem` across **all** its function bodies (the interpreter evaluates the whole
+   call graph, so a division inside a callee counts) to guard the divisor only — single
+   evaluation, no `ELet` synthesis, no rhs duplication. `cte-run` reads the cell after the
+   thunk and returns the interpreter's exact wording. Fixes the live bug above and is a
+   prerequisite for step 6. Float behaviour must be provably unchanged.
 
 **Phase 2 — the entangled landing (must be coordinated; NOT independently green):**
 4. **Reroute `run-metas`** through the compiled engine (restructure `elaborate-metas` to the
    pre-check metashim-injection representation). Verify `meta_stage3.coil`.
 5. **Reroute `finish-macro`** — make the compiled fast-path total by building the engine
    on-demand/incrementally during the expansion tower; remove the `eval-seq` fallback.
-6. **Flip `fold-expr`** to compiled-only (readback now total).
+6. **Flip `fold-expr`** to compiled-only. Requires readback total **and** Phase 1b's UB guard
+   landed — otherwise this step converts every comptime div/rem-by-zero diagnostic into a
+   silently wrong constant. Deleting `comptime-cap-gap?` (and its "supported yet" string
+   match) is part of this step, not step 7.
 7. **Delete** `comptime.coil`'s `eval`/`eval-seq`/`eval-args` tree-walker, the `COIL_META`
    flag (18 refs — the driver plumbing, `metahost` reentry, gate hooks), `parity.sh`, and the
    `guide.coil` interp mention. Update `docs/DECISIONS.md` decision 7 to DONE.
