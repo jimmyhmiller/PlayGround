@@ -1,0 +1,31 @@
+workflow Test Fix Workout
+runner deepseek
+
+agent analyze-test-results
+title Analyze test results
+prompt You are a test analysis expert. Examine the file `test-results.log`. List every failing test, its error message, and your assessment of likely root causes. Keep your summary concise and actionable.
+after none
+
+agent pick-test-to-fix
+title Pick a test to fix
+prompt Using the output from analyze-test-results, select the single failing test that would give the greatest improvement when fixed. Justify your choice and outline a brief fix strategy.
+after analyze-test-results
+
+agent generate-fix
+title Generate a fix
+prompt You are an expert in Coil and Raylib. Given `test-results.log`, the file `src/main.coil`, and the selected test from pick-test-to-fix, write a concrete code patch that resolves the failure. Explain how your change addresses the root cause.
+after pick-test-to-fix
+
+agent review-fix
+title Review the fix
+prompt Review the proposed patch from generate-fix against `src/main.coil` and `src/workflow.coil`. Assess correctness, Coil style, and potential side effects. Suggest any necessary improvements.
+after generate-fix
+
+approval approve-fix
+title Approve the fix
+after review-fix
+
+agent verify-fix
+title Verify fix and reflect
+prompt After the fix is applied and tests re-run, read the new `test-results.log`. Confirm that all tests now pass. Reflect on the patterns that caused the failure and note any preventative measures for the future.
+after approve-fix

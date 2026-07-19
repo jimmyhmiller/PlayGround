@@ -143,24 +143,28 @@
   #message.err { background: rgba(255,107,107,.10); border: 1px solid rgba(255,107,107,.35); color: var(--bad); }
   #message.warn { background: rgba(255,180,84,.10); border: 1px solid rgba(255,180,84,.38); color: var(--warn); }
 
-  ol.scenarios { list-style: none; margin: 0; padding: 0; }
-  ol.scenarios li { border-bottom: 1px solid var(--edge); }
-  ol.scenarios li:last-child { border-bottom: 0; }
-  ol.scenarios .scenario-head {
-    width: 100%; text-align: left; background: none; border: 0; border-radius: 0;
-    padding: 9px 14px; display: flex; gap: 10px; align-items: baseline;
+  /* The walkthrough is one step at a time: the dots are where you are, not a
+     menu. Each step applies its own source, so it never disturbs the editor. */
+  ol.step-dots { list-style: none; display: flex; gap: 6px; margin: 0 0 12px; padding: 0; }
+  ol.step-dots li {
+    flex: 1; height: 4px; border-radius: 2px; background: var(--edge);
   }
-  ol.scenarios .scenario-head:hover { background: #1c222b; }
-  ol.scenarios .n {
-    color: var(--dim); font-family: var(--mono); font-size: 11px; min-width: 1.2em;
-  }
-  ol.scenarios .chev { margin-left: auto; color: var(--dim); font-size: 11px; }
-  ol.scenarios .scenario-head.active { background: rgba(98,176,255,.12); box-shadow: inset 2px 0 0 var(--accent); }
+  ol.step-dots li.done { background: var(--ok); }
+  ol.step-dots li.current { background: var(--accent); }
 
-  /* Each scenario carries its own source and applies from here, so opening one
-     never disturbs whatever you are working on in the editor. */
-  .scenario-body { display: none; padding: 0 14px 12px 40px; }
-  ol.scenarios li.open .scenario-body { display: block; }
+  .step-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .step-title .n {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: .07em; display: block; margin-bottom: 3px;
+  }
+  .step-watch { margin: 8px 0 12px; color: var(--dim); font-size: 13px; }
+  #step-status {
+    margin-top: 10px; font-size: 12.5px; min-height: 1.3em; overflow-wrap: anywhere;
+  }
+  #step-status.ok   { color: var(--ok); }
+  #step-status.err  { color: var(--bad); }
+  #step-status.warn { color: var(--warn); }
+
   pre.scenario-source {
     margin: 0 0 10px; padding: 10px 11px; background: #0b0f14;
     border: 1px solid var(--edge); border-radius: 7px;
@@ -228,11 +232,6 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>Scenarios — apply in order, your source untouched</h2>
-      <ol class="scenarios" id="scenarios"></ol>
-    </div>
-
-    <div class="panel" style="margin-top:18px">
       <h2>The live world</h2>
       <div class="body">
         <table>
@@ -247,7 +246,8 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section>
+    <div class="panel">
     <h2>Source — edit and apply while it runs</h2>
     <div class="body">
       <div class="editor-stack" id="editor-stack">
@@ -271,6 +271,25 @@
         <span class="hint">⌘/Ctrl + Enter to apply</span>
       </div>
       <div id="message"></div>
+    </div>
+    </div>
+
+    <div class="panel" id="walkthrough" style="margin-top:18px">
+    <h2>Walkthrough — six steps, in order</h2>
+    <div class="body">
+      <ol class="step-dots" id="step-dots"></ol>
+      <h3 class="step-title" id="step-title"></h3>
+      <p class="step-watch" id="step-watch"></p>
+      <pre class="scenario-source" id="step-source"></pre>
+      <div class="row">
+        <button class="primary" id="step-apply">Apply this step</button>
+        <button class="warn" id="step-resume" style="display:none">Thaw &amp; resume</button>
+        <button id="step-next">Next step →</button>
+        <button id="step-back">← Back</button>
+        <button id="step-restart">Start over</button>
+      </div>
+      <div id="step-status"></div>
+    </div>
     </div>
   </section>
 </main>
@@ -716,46 +735,87 @@ $("reset").addEventListener("click", () => {
 });
 
 // ── scenarios ──────────────────────────────────────────────────────────────
-// A scenario carries its own source and applies straight to the live world.
-// It deliberately does NOT load into the editor: the editor holds your work,
-// and the scenarios have to stay usable after you have been playing in it.
-const list = $("scenarios");
-for (let i = 0; i < Demo.scenario_count(); i++) {
-  const li = document.createElement("li");
+// ── the walkthrough ────────────────────────────────────────────────────────
+// One step at a time, in order. Each step applies its OWN source directly to
+// the live world and never loads into the editor: the editor holds your work,
+// and the walkthrough has to stay usable after you have been playing in it.
+//
+// What to watch for is UI narration, deliberately short — the reasoning lives
+// in the step's source, which is right there to read.
+const WATCH = [
+  "The particles resize on the very next frame. Frames keep climbing and the canvas is never reopened — the loop is not restarted.",
+  "The same particles gain colour. `Particle` becomes v2 in the live world and the objects already on screen migrate as they are read. No reseeding.",
+  "The edit is refused and the animation carries on with the last good `tint`. A bad edit cannot take down a running program.",
+  "Particles on the right half become rings: a `match` on `Kind` now chooses the size.",
+  "`radius` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
+  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped.",
+];
 
-  const head = document.createElement("button");
-  head.className = "scenario-head";
-  head.innerHTML =
-    `<span class="n">${i + 1}</span>` +
-    `<span>${escapeHtml(Demo.scenario_title(i))}</span>` +
-    `<span class="chev">▸</span>`;
+const STEP_COUNT = Demo.scenario_count();
+let step = 0;
+const applied = new Set();
 
-  const body = document.createElement("div");
-  body.className = "scenario-body";
-  const pre = document.createElement("pre");
-  pre.className = "scenario-source";
-  pre.innerHTML = highlightHtml(Demo.scenario_source(i));
-  const apply = document.createElement("button");
-  apply.className = "primary";
-  apply.textContent = "Apply this edit";
-  apply.addEventListener("click", () => {
-    applyEdit(Demo.scenario_source(i));
-    markActive(i);
-  });
-  body.append(pre, apply);
+function renderStep() {
+  $("step-dots").innerHTML = Array.from({ length: STEP_COUNT }, (_, i) =>
+    `<li class="${i === step ? "current" : applied.has(i) ? "done" : ""}"></li>`).join("");
+  $("step-title").innerHTML =
+    `<span class="n">Step ${step + 1} of ${STEP_COUNT}</span>${escapeHtml(Demo.scenario_title(step))}`;
+  $("step-watch").textContent = WATCH[step];
+  $("step-source").innerHTML = highlightHtml(Demo.scenario_source(step));
 
-  head.addEventListener("click", () => {
-    const open = li.classList.toggle("open");
-    head.querySelector(".chev").textContent = open ? "▾" : "▸";
-  });
-
-  li.append(head, body);
-  list.appendChild(li);
+  $("step-apply").textContent = applied.has(step) ? "Apply again" : "Apply this step";
+  $("step-back").disabled = step === 0;
+  // Linear: the next step only opens once this one has been applied.
+  $("step-next").disabled = !applied.has(step) || step === STEP_COUNT - 1;
+  $("step-next").classList.toggle("primary", applied.has(step) && step < STEP_COUNT - 1);
+  $("step-apply").classList.toggle("primary", !applied.has(step));
+  stepStatus("");
 }
-function markActive(index) {
-  [...list.querySelectorAll(".scenario-head")].forEach((b, i) =>
-    b.classList.toggle("active", i === index));
+
+function stepStatus(text, kind) {
+  $("step-status").textContent = text;
+  $("step-status").className = kind ?? "";
 }
+
+$("step-apply").addEventListener("click", () => {
+  const result = JSON.parse(demo.eval(Demo.scenario_source(step)));
+  lastWorld = "";
+  if (!result.ok) {
+    // Step 3 is *supposed* to be rejected — that is the lesson, not a failure.
+    stepStatus(`Refused, and the running program is untouched: ${result.error}`, "warn");
+  } else {
+    stepStatus(`Installed ${result.installed.join(", ") || "(no change)"}.`, "ok");
+  }
+  applied.add(step);
+  const wasLast = step === STEP_COUNT - 1;
+  const text = $("step-status").textContent;
+  const kind = $("step-status").className;
+  renderStep();
+  stepStatus(text, kind);
+  if (wasLast) stepStatus(text + " Now resume the frozen program.", kind);
+});
+
+$("step-next").addEventListener("click", () => {
+  if (step < STEP_COUNT - 1) { step += 1; renderStep(); }
+});
+$("step-back").addEventListener("click", () => {
+  if (step > 0) { step -= 1; renderStep(); }
+});
+$("step-resume").addEventListener("click", () => {
+  demo.thaw();
+  stepStatus("Thawed — resuming at the instruction that trapped.", "ok");
+});
+$("step-restart").addEventListener("click", () => {
+  demo = new Demo();
+  lastWorld = "";
+  document.body.classList.remove("frozen");
+  applied.clear();
+  step = 0;
+  renderStep();
+  stepStatus("Fresh world — start from step 1.", "ok");
+});
+
+renderStep();
 
 let lastLoadedSource = Demo.scene_source();
 setSource(lastLoadedSource);
