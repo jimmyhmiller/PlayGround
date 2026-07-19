@@ -100,9 +100,28 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             conditions,
             virtual_modules: Vec::new(),
             target,
+            // A TanStack/Vite app expects Vite's `import.meta.env`; supply it (this
+            // is the opt-in — generic bundling leaves `import.meta.env` untouched).
+            import_meta_env: Some(import_meta_env(root)),
         },
         entry,
     })
+}
+
+/// Builds the Vite `import.meta.env` values for a production `build-app`: `MODE`
+/// is `production` (so `DEV`/`PROD` fold to `false`/`true`), `BASE_URL` is the
+/// config `base` (default `/`), and every `VITE_*` process-env variable present at
+/// build time is captured. `SSR` is derived per-target by the rewrite, not here.
+fn import_meta_env(root: &Path) -> crate::import_meta_env::ImportMetaEnv {
+    let base = vite_config_string(root, "base").unwrap_or_else(|| "/".to_string());
+    let vite_vars = std::env::vars()
+        .filter(|(name, _)| name.starts_with("VITE_"))
+        .collect();
+    crate::import_meta_env::ImportMetaEnv {
+        base,
+        mode: "production".to_string(),
+        vite_vars,
+    }
 }
 
 /// Copies the app's static `public/` directory verbatim into the build's

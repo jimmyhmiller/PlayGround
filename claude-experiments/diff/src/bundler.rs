@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -104,6 +105,11 @@ struct ResolutionCache {
     /// resolves to itself and loads from the recorded source rather than the
     /// filesystem.
     virtual_modules: Arc<HashMap<String, String>>,
+    /// Vite `import.meta.env` values, when opted in. Shared read-only to both the
+    /// serial and parallel module-load paths, which apply the rewrite to a
+    /// module's source before it is transformed. `None` leaves `import.meta.env`
+    /// untouched (generic bundling).
+    import_meta_env: Arc<Option<crate::import_meta_env::ImportMetaEnv>>,
 }
 
 struct DirectoryResolutionCache {
@@ -120,11 +126,16 @@ struct ResolvedModule {
 }
 
 impl ResolutionCache {
-    fn new(aliases: Vec<(String, PathBuf)>, virtual_modules: Vec<(String, String)>) -> Self {
+    fn new(
+        aliases: Vec<(String, PathBuf)>,
+        virtual_modules: Vec<(String, String)>,
+        import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
+    ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::new(aliases),
             virtual_modules: Arc::new(virtual_modules.into_iter().collect()),
+            import_meta_env: Arc::new(import_meta_env),
         }
     }
 
@@ -132,6 +143,19 @@ impl ResolutionCache {
     /// registered.
     fn virtual_module_source(&self, id: &str) -> Option<&str> {
         self.virtual_modules.get(id).map(String::as_str)
+    }
+
+    /// Applies the opted-in Vite `import.meta.env` rewrite to a module's source
+    /// before it is transformed, returning the source unchanged when the feature
+    /// is off or the module has no `import.meta.env`. One choke point for both the
+    /// serial ([`Bundler::load_module`]) and parallel ([`load_uncached`]) paths.
+    fn apply_import_meta_env<'s>(&self, path: &Path, source: &'s str, target: Target) -> Cow<'s, str> {
+        match self.import_meta_env.as_ref() {
+            Some(options) => crate::import_meta_env::transform(path, source, options, target)
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed(source)),
+            None => Cow::Borrowed(source),
+        }
     }
 
     fn directory(&self, importer: &Path) -> Arc<DirectoryResolutionCache> {
@@ -522,6 +546,7 @@ impl Bundler {
                     .map(|(from, to)| (from.clone(), PathBuf::from(to)))
                     .collect(),
                 config.virtual_modules.clone(),
+                config.import_meta_env.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -1593,6 +1618,9 @@ impl Bundler {
         {
             return Ok(current.clone());
         }
+        let source = self
+            .resolution_cache
+            .apply_import_meta_env(path, &source, self.target);
         let transformed = transform_module(path, &source, self.target);
         diagnostics.extend(
             transformed
@@ -3062,6 +3090,7 @@ fn load_uncached(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
+    let source = resolution_cache.apply_import_meta_env(path, &source, target);
     let transformed = transform_module(path, &source, target);
     let code_hash = content_hash(transformed.code.as_bytes());
     let mut diagnostics = transformed
@@ -3796,6 +3825,10 @@ pub struct BuildConfig {
     /// specialization of directive helpers (see [`Target`]); defaults to the
     /// server (no transform).
     pub target: Target,
+    /// Vite's `import.meta.env` values, when the build opts into that convention
+    /// (the `build-app` path sets it). `None` for generic bundling, which leaves
+    /// `import.meta.env` untouched. See [`crate::import_meta_env`].
+    pub import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -4978,6 +5011,7 @@ mod tests {
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::Server,
+            import_meta_env: None,
         };
         (directory, entry, config)
     }
@@ -5041,6 +5075,7 @@ mod tests {
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
             target,
+            import_meta_env: None,
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -5116,6 +5151,7 @@ mod tests {
                 source.to_string(),
             )],
             target: Target::Server,
+            import_meta_env: None,
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
