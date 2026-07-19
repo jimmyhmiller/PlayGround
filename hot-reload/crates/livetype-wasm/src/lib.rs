@@ -212,16 +212,25 @@ impl Demo {
     /// ignored. It needs to say why nothing moved.
     pub fn eval(&mut self, source: &str) -> String {
         let before = self.current_versions();
+        let before_types = self.current_types();
         if let Err(error) = self.session.eval(source) {
             return format!("{{\"ok\":false,\"error\":{}}}", json_string(&error));
         }
         let after = self.current_versions();
 
-        let installed: Vec<(DefId, String)> = after
+        let changed: Vec<(DefId, String, bool)> = after
             .iter()
-            .filter(|(id, (version, _))| before.get(id).map(|(v, _)| v != version).unwrap_or(true))
-            .map(|(id, (_, name))| (*id, name.clone()))
+            .filter(|(id, (version, ..))| {
+                before.get(id).map(|(v, ..)| v != version).unwrap_or(true)
+            })
+            .map(|(id, (_, name, broken))| (*id, name.clone(), *broken))
             .collect();
+        // A function published Broken is not an installation, and calling it
+        // one hides the whole point of the breaking step.
+        let (broken, installed): (Vec<_>, Vec<_>) =
+            changed.iter().partition(|(_, _, is_broken)| *is_broken);
+        let installed: Vec<(DefId, String)> =
+            installed.iter().map(|(id, name, _)| (*id, name.clone())).collect();
 
         let unobservable: Vec<String> = self.session.engine.with_world(|w| {
             match reachable_from_entry(w) {
@@ -237,26 +246,53 @@ impl Demo {
             }
         });
 
-        format!(
-            "{{\"ok\":true,\"installed\":[{}],\"unobservable\":[{}]}}",
-            installed
+        let types: Vec<String> = {
+            let after_types = self.current_types();
+            after_types
                 .iter()
-                .map(|(_, n)| json_string(n))
-                .collect::<Vec<_>>()
-                .join(","),
-            unobservable.iter().map(|n| json_string(n)).collect::<Vec<_>>().join(","),
+                .filter(|(id, (version, _))| {
+                    before_types.get(id).map(|(v, _)| v != version).unwrap_or(true)
+                })
+                .map(|(_, (_, name))| name.clone())
+                .collect()
+        };
+
+        format!(
+            "{{\"ok\":true,\"installed\":[{}],\"broken\":[{}],\"types\":[{}],\"unobservable\":[{}]}}",
+            json_names(installed.iter().map(|(_, n)| n.as_str())),
+            json_names(broken.iter().map(|(_, n, _)| n.as_str())),
+            json_names(types.iter().map(|n| n.as_str())),
+            json_names(unobservable.iter().map(|n| n.as_str())),
         )
     }
 
-    /// Every current function as `id -> (version, name)`.
-    fn current_versions(&self) -> BTreeMap<DefId, (Version, String)> {
+    /// Every current function as `id -> (version, name, broken)`.
+    fn current_versions(&self) -> BTreeMap<DefId, (Version, String, bool)> {
         self.session.engine.with_world(|w| {
             w.current_functions
                 .iter()
                 .filter_map(|(id, version)| {
-                    w.functions
+                    w.functions.get(&(*id, *version)).map(|state| {
+                        let broken = matches!(state, FunctionState::Broken { .. });
+                        (*id, (*version, function_name(state), broken))
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Every current schema as `id -> (version, name)`. A struct or enum
+    /// evolving is as much a part of an edit as a function changing, and
+    /// reporting only functions makes a migration step look like it did less
+    /// than it did.
+    fn current_types(&self) -> BTreeMap<DefId, (Version, String)> {
+        self.session.engine.with_world(|w| {
+            w.current_schemas
+                .iter()
+                .filter_map(|(id, version)| {
+                    w.schemas
                         .get(&(*id, *version))
-                        .map(|state| (*id, (*version, function_name(state))))
+                        .map(|schema| (*id, (*version, schema.name.clone())))
                 })
                 .collect()
         })
@@ -518,6 +554,10 @@ fn describe(world: &World, condition: &Condition) -> String {
             names.humanize(message),
         ),
     }
+}
+
+fn json_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names.map(json_string).collect::<Vec<_>>().join(",")
 }
 
 /// Minimal JSON string escaping — enough for names and diagnostics, and it

@@ -349,6 +349,11 @@ function advanceOneFrame() {
 
 function refreshStats() {
   if (paused && !demo.frozen) $("stat-status").textContent = "paused";
+  // Resuming is offered only on the repair step. It is available a step
+  // earlier too — where it would simply re-trap, since nothing is fixed yet —
+  // but that is a detour from the walkthrough's one next thing to do.
+  $("step-resume").style.display =
+    demo.frozen && step === STEP_COUNT - 1 ? "" : "none";
   $("stat-frames").textContent = demo.frames;
   $("stat-canvas").textContent = demo.canvases_opened;
   $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
@@ -554,7 +559,7 @@ function applyLive(reason, at = $("editor").selectionStart) {
       "err",
     );
   } else {
-    liveStatus(`${reason}: installed ${result.installed.join(", ") || "(no change)"}`, "ok");
+    liveStatus(`${reason}: ${describeResult(result)}`, result.broken.length ? "err" : "ok");
   }
 }
 
@@ -660,7 +665,7 @@ function applyEdit(source = $("editor").value) {
       "warn",
     );
   } else {
-    message("Edit installed into the live world.", "ok");
+    message(`Into the live world: ${describeResult(result)}`, result.broken.length ? "warn" : "ok");
   }
   lastWorld = "";
 }
@@ -723,14 +728,13 @@ $("thaw").addEventListener("click", () => {
   message("Thawed — resuming at the instruction that trapped.", "ok");
 });
 $("reload-scene").addEventListener("click", () => {
-  if (replaceSource(Demo.scene_source())) markActive(-1);
+  replaceSource(Demo.scene_source());
 });
 $("reset").addEventListener("click", () => {
   if (!replaceSource(Demo.scene_source())) return;
   demo = new Demo();
   lastWorld = "";
   document.body.classList.remove("frozen");
-  markActive(-1);
   message("Fresh world booted from the original scene.", "ok");
 });
 
@@ -777,6 +781,17 @@ function stepStatus(text, kind) {
   $("step-status").className = kind ?? "";
 }
 
+// What an edit did, in the demo's own terms.
+function describeResult(result) {
+  const parts = [];
+  if (result.types.length) parts.push(`evolved ${result.types.join(", ")}`);
+  if (result.installed.length) parts.push(`installed ${result.installed.join(", ")}`);
+  // Being published Broken is not an installation, and calling it one hides
+  // exactly what the breaking step is demonstrating.
+  if (result.broken.length) parts.push(`BROKE ${result.broken.join(", ")}`);
+  return parts.length ? parts.join(", ") + "." : "No change.";
+}
+
 $("step-apply").addEventListener("click", () => {
   const result = JSON.parse(demo.eval(Demo.scenario_source(step)));
   lastWorld = "";
@@ -784,7 +799,7 @@ $("step-apply").addEventListener("click", () => {
     // Step 3 is *supposed* to be rejected — that is the lesson, not a failure.
     stepStatus(`Refused, and the running program is untouched: ${result.error}`, "warn");
   } else {
-    stepStatus(`Installed ${result.installed.join(", ") || "(no change)"}.`, "ok");
+    stepStatus(describeResult(result), result.broken.length ? "warn" : "ok");
   }
   applied.add(step);
   const wasLast = step === STEP_COUNT - 1;

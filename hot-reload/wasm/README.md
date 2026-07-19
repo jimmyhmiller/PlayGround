@@ -26,11 +26,18 @@ embedded with `include_str!`. `tests/demo_scene.rs` drives those same files
 headlessly, so the behaviour the page shows is pinned by the test suite rather
 than by eyeballing a canvas.
 
-## The scenarios
+## The walkthrough
 
-Each one carries its own source: expand it to read, then **Apply this edit** to
-install it straight into the live world. They never load into the editor, so
-they stay usable after you have been playing in it.
+Six steps in order, under the source on the right. Each step shows what to
+watch for and its own source, applies straight into the live world, and only
+unlocks the next step once applied. Nothing here loads into the editor — that
+holds your work, and the walkthrough has to stay usable after you have been
+playing in it.
+
+Each step reports what it did in the demo's own terms: what it *evolved* (a
+struct or enum version), what it *installed*, and what it **broke** — being
+published Broken is not an installation, and step 5 exists to show exactly that
+difference.
 
 
 | # | Edit | What it shows |
