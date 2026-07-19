@@ -51,7 +51,7 @@
   (match-else (load t)
     (TInt   [b s] 1)
     (TBool  []    2)
-    (TFloat [b]   (if (icmp-eq b 64) 3 0))
+    (TFloat [b]   (if (icmp-eq b 64) 3 (if (icmp-eq b 32) 4 0)))
     (_ 0)))
 
 ; the checked static type of the comptime inner expression: the type map by nid, with a
@@ -106,13 +106,17 @@
 
 ; run the compiled entry and read the scalar out of the return register.
 (defn cte-invoke [(fp (ptr i8)) (kind i64) (tp (ptr Type))] (-> CtVal)
+  (if (icmp-eq kind 4)
+      ; f32 comes back in the low half of the FP return register. Widening to f64 is
+      ; exact, and the literal is re-typed f32 by the site's own checked type.
+      (CFloat (cast f64 (call-ptr (cast (fnptr c [] f32) fp))))
   (if (icmp-eq kind 3)
       (CFloat (call-ptr (cast (fnptr c [] f64) fp)))
     (let [n (call-ptr (cast (fnptr c [] i64) fp))]
       (if (icmp-eq kind 2) (CBool (icmp-ne n 0))
         (match-else (load tp)
           (TInt [b s] (CInt (trunc n b s)))
-          (_ (CInt n)))))))
+          (_ (CInt n))))))))
 
 ; mono + build-obj + link + dlopen a self-contained comptime dylib. Unlike the macro
 ; engine's meta-build-dylib, a comptime program has NO code ops, so there is no metashim
@@ -202,6 +206,46 @@
 ; DECLINED (the reader returns None → the hook returns null → the interpreter's own
 ; "isn't supported yet" error stands, so nothing that folds today regresses).
 
+(defn cte-align8 [(x i64)] (-> i64) (imul (idiv (iadd x 7) 8) 8))
+
+; CONSERVATIVE payload sizing, mirroring codegen.coil::type-bytes and
+; codegen_a64.coil::g-type-bytes exactly. This is deliberately NOT cte-ty-size.
+; A sum's payload word count comes from the conservative per-field align8
+; accumulation, while the offsets of the fields INSIDE that payload are natural.
+; The two disagree the moment a variant carries a struct, so the reader needs both.
+(defn cte-tb [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
+  (match-else (load t)
+    (TInt   [b s]  (idiv (iadd b 7) 8))
+    (TFloat [b]    (idiv b 8))
+    (TBool  []     1)
+    (TPtr   [i]    8) (TRef [m i] 8) (TFn [c p r] 8)
+    (TSlice [el]   16)
+    (TArray [el n] (imul (cte-tb cx el) n))
+    (TStruct [nm]
+      (let [sd (ct-struct-find cx nm)]
+        (if (icmp-ne (cast i64 sd) 0)
+            (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut tot) 0]
+              (loop (if (icmp-ge (load i) n) (break)
+                (do (store! tot (iadd (load tot) (cte-align8 (cte-tb cx (field (al-elem [Field] fs (load i)) ty)))))
+                    (store! i (iadd (load i) 1)))))
+              (load tot))
+          (let [ud (ct-sum-find cx nm)]
+            (if (icmp-eq (cast i64 ud) 0) 8
+              (iadd 8 (imul 8 (cte-sum-words cx ud))))))))
+    (_ 8)))
+; payload words: max over variants of the conservative per-field accumulation.
+(defn cte-sum-words [(cx (ptr CtCtx)) (ud (ptr SumDef))] (-> i64)
+  (let [vs (load (field ud variants)) nv (al-len [Variant] (load vs)) (mut i) 0 (mut maxb) 0]
+    (loop (if (icmp-ge (load i) nv) (break)
+      (do (let [vp (al-elem [Variant] vs (load i))
+                fs (load (field vp fields)) nf (al-len [Field] (load fs)) (mut j) 0 (mut acc) 0]
+            (loop (if (icmp-ge (load j) nf) (break)
+              (do (store! acc (iadd (load acc) (cte-align8 (cte-tb cx (field (al-elem [Field] fs (load j)) ty)))))
+                  (store! j (iadd (load j) 1)))))
+            (if (icmp-gt (load acc) (load maxb)) (store! maxb (load acc)) 0))
+          (store! i (iadd (load i) 1)))))
+    (idiv (load maxb) 8)))
+
 ; natural alignment of `t` (the C ABI: TInt 1/2/4/8, everything pointer-shaped 8, a
 ; struct = its widest field). Only ever reached for a cte-readable? type.
 (defn cte-ty-align [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
@@ -214,7 +258,7 @@
     (TSlice [el]   8)
     (TStruct [nm]
       (let [sd (ct-struct-find cx nm)]
-        (if (icmp-eq (cast i64 sd) 0) 8
+        (if (icmp-eq (cast i64 sd) 0) 8        ; a sum (or unknown) is 8-aligned
           (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut mx) 1]
             (loop (if (icmp-ge (load i) n) (break)
               (do (let [al (cte-ty-align cx (field (al-elem [Field] fs (load i)) ty))]
@@ -243,21 +287,39 @@
     (TSlice [el]   16)
     (TStruct [nm]
       (let [sd (ct-struct-find cx nm)]
-        (if (icmp-eq (cast i64 sd) 0) 8 (cte-struct-size cx sd))))
+        (if (icmp-ne (cast i64 sd) 0) (cte-struct-size cx sd)
+          (let [ud (ct-sum-find cx nm)]
+            ; {tag, [words x i64]} — the tag occupies a whole 8-byte slot
+            (if (icmp-eq (cast i64 ud) 0) 8 (iadd 8 (imul 8 (cte-sum-words cx ud))))))))
     (_ 8)))
-; natural byte offset of field `fi` within struct `sd` (mirrors g-natural-off).
+; byte offset of field `fi` within struct `sd`, honouring the declared layout.
+; LC/LAligned mirror g-natural-off; LPacked is the same walk with the alignment
+; step removed; LExplicit reads the offsets it was given.
 (defn cte-field-off [(cx (ptr CtCtx)) (sd (ptr StructDef)) (fi i64)] (-> i64)
-  (let [fs (load (field sd fields)) (mut off) 0 (mut i) 0 (mut res) 0]
-    (loop (if (icmp-gt (load i) fi) (break)
-      (do (let [fty (field (al-elem [Field] fs (load i)) ty) al (cte-ty-align cx fty)]
-            (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-            (if (icmp-eq (load i) fi) (store! res (load off)) 0)
-            (store! off (iadd (load off) (cte-ty-size cx fty))))
-          (store! i (iadd (load i) 1)))))
-    (load res)))
-; is the struct laid out with the default C layout (the only one this reader walks)?
-(defn cte-lc-layout? [(sd (ptr StructDef))] (-> bool)
-  (match-else (load (field sd layout)) (LC [] true) (_ false)))
+  (match-else (load (field sd layout))
+    (LExplicit [offs size align] (al-get [i64] (load offs) fi))
+    (LPacked []
+      (let [fs (load (field sd fields)) (mut off) 0 (mut i) 0 (mut res) 0]
+        (loop (if (icmp-gt (load i) fi) (break)
+          (do (if (icmp-eq (load i) fi) (store! res (load off)) 0)
+              (store! off (iadd (load off) (cte-ty-size cx (field (al-elem [Field] fs (load i)) ty))))
+              (store! i (iadd (load i) 1)))))
+        (load res)))
+    (_
+      (let [fs (load (field sd fields)) (mut off) 0 (mut i) 0 (mut res) 0]
+        (loop (if (icmp-gt (load i) fi) (break)
+          (do (let [fty (field (al-elem [Field] fs (load i)) ty) al (cte-ty-align cx fty)]
+                (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
+                (if (icmp-eq (load i) fi) (store! res (load off)) 0)
+                (store! off (iadd (load off) (cte-ty-size cx fty))))
+              (store! i (iadd (load i) 1)))))
+        (load res)))))
+; Can this struct's fields be located by BYTE offset? Everything except LBits can:
+; LC and LAligned lay fields out naturally, LPacked drops the padding, LExplicit
+; states the offsets outright. LBits packs fields into a backing integer at BIT
+; positions, so there is no byte offset to read from — that one stays declined.
+(defn cte-walkable-layout? [(sd (ptr StructDef))] (-> bool)
+  (match-else (load (field sd layout)) (LBits [b o] false) (_ true)))
 ; can a value of `t` be read back into a CtVal? (int/bool/f64/array-of/string/LC-struct-of).
 (defn cte-struct-readable? [(cx (ptr CtCtx)) (sd (ptr StructDef))] (-> bool)
   (let [fs (load (field sd fields)) n (al-len [Field] (load fs)) (mut i) 0 (mut ok) true]
@@ -269,14 +331,29 @@
   (match-else (load t)
     (TInt   [b s]  true)
     (TBool  []     true)
-    (TFloat [b]    (icmp-eq b 64))
+    (TFloat [b]    (or (icmp-eq b 64) (icmp-eq b 32)))
     (TArray [el n] (cte-readable? cx el))
     (TSlice [el]   (match-else (load el) (TInt [b s] (icmp-eq b 8)) (_ false)))
     (TStruct [nm]
       (let [sd (ct-struct-find cx nm)]
-        (if (icmp-eq (cast i64 sd) 0) false
-          (if (not (cte-lc-layout? sd)) false (cte-struct-readable? cx sd)))))
+        (if (icmp-ne (cast i64 sd) 0)
+            (if (not (cte-walkable-layout? sd)) false (cte-struct-readable? cx sd))
+          (let [ud (ct-sum-find cx nm)]
+            (if (icmp-eq (cast i64 ud) 0) false (cte-sum-readable? cx ud))))))
     (_ false)))
+
+; every field of every variant must be readable — the tag selects one at run time,
+; so a sum is only foldable if the reader could handle whichever came back.
+(defn cte-sum-readable? [(cx (ptr CtCtx)) (ud (ptr SumDef))] (-> bool)
+  (let [vs (load (field ud variants)) nv (al-len [Variant] (load vs)) (mut i) 0 (mut ok) true]
+    (loop (if (or (not (load ok)) (icmp-ge (load i) nv)) (break)
+      (do (let [fs (load (field (al-elem [Variant] vs (load i)) fields))
+                nf (al-len [Field] (load fs)) (mut j) 0]
+            (loop (if (icmp-ge (load j) nf) (break)
+              (do (if (not (cte-readable? cx (field (al-elem [Field] fs (load j)) ty))) (store! ok false) 0)
+                  (store! j (iadd (load j) 1))))))
+          (store! i (iadd (load i) 1)))))
+    (load ok)))
 
 ; ---- native-memory readers -------------------------------------------------------
 ; assemble `nbytes` little-endian bytes at buf+off into a zero-extended i64.
@@ -289,6 +366,8 @@
     (load acc)))
 (defn cte-load-f64 [(buf (ptr i8)) (off i64)] (-> f64)
   (load (cast (ptr f64) (iadd (cast i64 buf) off))))
+(defn cte-load-f32 [(buf (ptr i8)) (off i64)] (-> f64)
+  (cast f64 (load (cast (ptr f32) (iadd (cast i64 buf) off)))))
 (defn cte-copy-bytes [(dst (ptr i8)) (src (ptr i8)) (n i64)] (-> i64)
   (let [(mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -318,12 +397,42 @@
               (Some [cv] (al-push! (mut cells) (new-cell cv)))))
           (store! i (iadd (load i) 1)))))
     (if (load bad) (None [CtVal]) (Some (CStruct nm (box-al [(ptr CtVal)] a (load cells)))))))
+; Read a sum at buf+off.
+;
+; Layout, verified against BOTH backends by dumping the bytes of a live value:
+;
+;   0..3   tag (i32) — the variant's declaration index
+;   4..7   padding   — NOT zeroed by the arm64 backend, so the tag must be read as
+;                      4 bytes; reading 8 picks up whatever was on the stack
+;   8..    payload   — the selected variant's fields at NATURAL offsets, exactly
+;                      the g-natural-off walk, independent of the conservative
+;                      per-field align8 that decides how many words the payload has
+(defn cte-read-sum [(cx (ptr CtCtx)) (ud (ptr SumDef)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
+  (let [vs (load (field ud variants)) nv (al-len [Variant] (load vs))
+        tag (cte-load-raw buf off 4)]
+    (if (or (icmp-lt tag 0) (icmp-ge tag nv)) (None [CtVal])
+      (let [vp (al-elem [Variant] vs tag)
+            fs (load (field vp fields)) nf (al-len [Field] (load fs))
+            (mut cells) (al-new [(ptr CtVal)] a) (mut i) 0 (mut foff) 0 (mut bad) false]
+        (loop (if (or (load bad) (icmp-ge (load i) nf)) (break)
+          (do (let [fty (field (al-elem [Field] fs (load i)) ty)
+                    al (cte-ty-align cx fty)]
+                (store! foff (imul (idiv (iadd (load foff) (isub al 1)) al) al))
+                (match (cte-read cx fty buf (iadd (iadd off 8) (load foff)) a)
+                  (None [] (store! bad true))
+                  (Some [cv] (al-push! (mut cells) (new-cell cv))))
+                (store! foff (iadd (load foff) (cte-ty-size cx fty))))
+              (store! i (iadd (load i) 1)))))
+        (if (load bad) (None [CtVal])
+          (Some (CSum (load (field vp name)) (box-al [(ptr CtVal)] a (load cells)))))))))
+
 ; read a value of type `t` at buf+off. None = a leaf this reader declines (no regression).
 (defn cte-read [(cx (ptr CtCtx)) (t (ptr Type)) (buf (ptr i8)) (off i64) (a (ptr Allocator))] (-> (Option CtVal))
   (match-else (load t)
     (TInt   [b s] (Some (CInt (trunc (cte-load-raw buf off (cte-ty-size cx t)) b s))))
     (TBool  []    (Some (CBool (icmp-ne (cte-load-raw buf off 1) 0))))
-    (TFloat [b]   (if (icmp-eq b 64) (Some (CFloat (cte-load-f64 buf off))) (None [CtVal])))
+    (TFloat [b]   (if (icmp-eq b 64) (Some (CFloat (cte-load-f64 buf off)))
+                    (if (icmp-eq b 32) (Some (CFloat (cte-load-f32 buf off))) (None [CtVal]))))
     (TArray [el n]
       (let [es (cte-ty-size cx el) (mut cells) (al-new [(ptr CtVal)] a) (mut i) 0 (mut bad) false]
         (loop (if (or (load bad) (icmp-ge (load i) n)) (break)
@@ -336,8 +445,11 @@
       (match-else (load el) (TInt [b s] (if (icmp-eq b 8) (cte-read-str buf off a) (None [CtVal]))) (_ (None [CtVal]))))
     (TStruct [nm]
       (let [sd (ct-struct-find cx nm)]
-        (if (icmp-eq (cast i64 sd) 0) (None [CtVal])
-          (if (not (cte-lc-layout? sd)) (None [CtVal]) (cte-read-struct cx sd nm buf off a)))))
+        (if (icmp-ne (cast i64 sd) 0)
+            (if (not (cte-walkable-layout? sd)) (None [CtVal]) (cte-read-struct cx sd nm buf off a))
+          ; the nominal may name a SUM rather than a struct
+          (let [ud (ct-sum-find cx nm)]
+            (if (icmp-eq (cast i64 ud) 0) (None [CtVal]) (cte-read-sum cx ud buf off a))))))
     (_ (None [CtVal]))))
 
 ; append (defn coil.ct.thunk [($ct$out (ptr T))] (-> i64) (do (store! $ct$out E) 0)) —

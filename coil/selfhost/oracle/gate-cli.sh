@@ -871,10 +871,21 @@ printf '(defstruct L [(sz i64) (al i64)])\n(defn main [] (-> i64) (let [s (compt
 expect_rc 16 "aggregate (struct) comptime via sizeof reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_sizeof.coil"
 printf '(module app)\n(import "slice.coil" :use *)\n(defn pick [T] [(s (slice u8))] (-> (slice u8)) s)\n(defn main [] (-> i64) (let [s (comptime (pick [i64] "hello"))] (+ (slice-len s) (cast i64 (load (index (slice-data s) 0))))))\n' > "$T/ct_agg_str.coil"
 expect_rc 109 "string comptime via a generic call reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_str.coil"
-# a SUM-returning comptime with a capability gap still DECLINES cleanly (the readback
-# refuses sums) — the interpreter's own error stands, never a silently-wrong fold.
+# interp deletion step 2: a SUM-returning comptime with a capability gap now reads back.
+# The reader takes the 4-byte tag at offset 0 (bytes 4..7 are padding the arm64 backend
+# leaves UNINITIALISED, so reading 8 would select a variant from stack garbage) and the
+# selected variant's fields at natural offsets from offset 8.
 printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (Yes (sizeof i64)))] (match o (Yes [v] v) (No [] 0))))\n' > "$T/ct_agg_sum.coil"
-expect_rc 1 "sum comptime with a capability gap declines (no silently-wrong fold)" "$COIL" run "$T/ct_agg_sum.coil"
+expect_rc 8 "sum comptime via sizeof reads back on the compiled engine (interp can't)" "$COIL" run "$T/ct_agg_sum.coil"
+# ...and the NULLARY variant, whose payload is unread — this is the case that reading an
+# 8-byte tag would corrupt, since nothing writes over the padding.
+printf '(defsum Opt (Yes [(v i64)]) (No []))\n(defn main [] (-> i64) (let [o (comptime (if (icmp-gt (sizeof i64) 0) (No) (Yes 1)))] (match o (Yes [v] v) (No [] 3))))\n' > "$T/ct_agg_sum0.coil"
+expect_rc 3 "nullary-variant sum comptime reads back (tag is 4 bytes, not 8)" "$COIL" run "$T/ct_agg_sum0.coil"
+# A shape the reader still refuses, and MUST: CtVal has no pointer variant, so a
+# compile-time address cannot become a literal. The interpreter cannot represent one
+# either, so nothing regresses — but it must fail loudly rather than fold something wrong.
+printf '(defstruct HasPtr [(p (ptr i8)) (n i64)])\n(defn main [] (-> i64) (let [h (comptime (let [q (alloc-stack HasPtr)] (store! (field q n) (sizeof i64)) (load q)))] (load (field h n))))\n' > "$T/ct_agg_ptr.coil"
+expect_rc 1 "raw-pointer aggregate comptime declines cleanly (no silently-wrong fold)" "$COIL" run "$T/ct_agg_ptr.coil"
 
 echo "== C size types are target-width: the prelude's size_t/ssize_t are i32 on wasm32 =="
 # `usize`/`isize` (a C machine word: size_t/ssize_t/long) are i32 on wasm32 (ILP32) and
