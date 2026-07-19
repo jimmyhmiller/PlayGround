@@ -165,6 +165,14 @@ fn run() -> Result<(), String> {
                     diffpack::manifest::START_MANIFEST_SPECIFIER.to_string(),
                     client_manifest.to_start_manifest_source(),
                 ));
+                // The sibling dev-only virtual module `loadVirtualModule.js`
+                // statically references (only used under TSS_DEV_SERVER, but its
+                // `import()` literal must still resolve). Register it too so the
+                // server build resolves cleanly on react-start versions that emit it.
+                config.build.virtual_modules.push((
+                    diffpack::manifest::INJECTED_HEAD_SCRIPTS_SPECIFIER.to_string(),
+                    diffpack::manifest::injected_head_scripts_module_source(),
+                ));
                 println!(
                     "loaded client route manifest ({} routes) from {}",
                     client_manifest.routes.len(),

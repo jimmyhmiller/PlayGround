@@ -37,6 +37,26 @@ pub const CLIENT_MANIFEST_FILE: &str = "client-manifest.json";
 /// The virtual module specifier TanStack Start's `router-manifest.js` imports.
 pub const START_MANIFEST_SPECIFIER: &str = "tanstack-start-manifest:v";
 
+/// The virtual module specifier `@tanstack/start-server-core`'s
+/// `loadVirtualModule.js` references for dev-time head scripts. `router-manifest.js`
+/// only reads it under `process.env.TSS_DEV_SERVER === "true"`, so it is never
+/// used at runtime in a production build; but the `import("...")` literal sits in
+/// the switch, so static resolution needs it to exist. (Some `react-start`
+/// versions reference it, e.g. 1.133, while others do not, e.g. 1.169.)
+pub const INJECTED_HEAD_SCRIPTS_SPECIFIER: &str = "tanstack-start-injected-head-scripts:v";
+
+/// The native source for `tanstack-start-injected-head-scripts:v`. A production
+/// build injects no head scripts (those are a dev-server concern, and Diffpack's
+/// own dev server does its live-reload injection separately), so the exported
+/// value is `undefined` — the consumer guards on `if (injectedHeadScripts)`.
+pub fn injected_head_scripts_module_source() -> String {
+    "// Generated natively by Diffpack. Injected head scripts are a dev-server-only\n\
+     // concern (TSS_DEV_SERVER); a production build injects none.\n\
+     export const injectedHeadScripts = undefined;\n\
+     export default { injectedHeadScripts };\n"
+        .to_string()
+}
+
 /// The route id TanStack uses for the root route (`createRootRoute`). Its
 /// preloads are the entry chunk, which statically bundles the root and all shared
 /// code in Diffpack's chunking model.
@@ -171,6 +191,16 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_head_scripts_module_exports_the_guarded_name() {
+        let source = injected_head_scripts_module_source();
+        // The consumer destructures `const { injectedHeadScripts } = await import(...)`
+        // and guards on `if (injectedHeadScripts)`, so a named `undefined` export is
+        // exactly what a production build needs.
+        assert!(source.contains("export const injectedHeadScripts = undefined;"), "{source}");
+        assert!(INJECTED_HEAD_SCRIPTS_SPECIFIER.ends_with(":v"));
+    }
 
     fn sample() -> ClientRouteManifest {
         let mut routes = BTreeMap::new();
