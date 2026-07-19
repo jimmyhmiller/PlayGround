@@ -3,6 +3,7 @@ pub mod bundler;
 pub mod config;
 pub mod dev_server;
 mod frontend_profile;
+pub mod js_reachability;
 pub mod manifest;
 pub mod memory;
 pub mod parser;

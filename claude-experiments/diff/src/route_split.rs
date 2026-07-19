@@ -34,12 +34,15 @@ use oxc_ast::ast::{
     BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
     ImportDeclarationSpecifier, ObjectExpression, ObjectPropertyKind, Program, Statement,
 };
-use oxc_ast_visit::{Visit, walk};
 use oxc_ecmascript::BoundNames;
 use oxc_parser::Parser;
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::symbol::SymbolId;
+
+use crate::js_reachability::{
+    collect_references, item_of, local_symbol, push_unique, top_level_items, within,
+};
 
 /// The `component` split property, kept as a named constant because the tests
 /// and the bundler's split loader speak in terms of it.
@@ -530,29 +533,6 @@ fn is_undefined(value: &Expression<'_>) -> bool {
     matches!(value, Expression::Identifier(identifier) if identifier.name == "undefined")
 }
 
-/// A top-level binding and the source span of the statement that introduces it.
-struct Item {
-    span: Span,
-    symbols: Vec<SymbolId>,
-}
-
-/// Every module-level statement that binds names, with the symbols it binds.
-fn top_level_items(program: &Program<'_>) -> Vec<Item> {
-    let mut items = Vec::new();
-    for statement in &program.body {
-        let span = statement.span();
-        let mut symbols = Vec::new();
-        collect_statement_bindings(statement, &mut symbols);
-        items.push(Item { span, symbols });
-    }
-    items
-}
-
-/// The index of the item that binds `symbol`, if any.
-fn item_of(items: &[Item], symbol: SymbolId) -> Option<usize> {
-    items.iter().position(|item| item.symbols.contains(&symbol))
-}
-
 /// Import statements paired with the symbols of their local bindings.
 fn import_statements(program: &Program<'_>) -> Vec<(Span, Vec<SymbolId>)> {
     program
@@ -573,47 +553,6 @@ fn import_statements(program: &Program<'_>) -> Vec<(Span, Vec<SymbolId>)> {
             Some((import.span, symbols))
         })
         .collect()
-}
-
-fn local_symbol(specifier: &ImportDeclarationSpecifier<'_>) -> Option<SymbolId> {
-    let local = match specifier {
-        ImportDeclarationSpecifier::ImportSpecifier(specifier) => &specifier.local,
-        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => &specifier.local,
-        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => &specifier.local,
-    };
-    local.symbol_id.get()
-}
-
-fn collect_statement_bindings(statement: &Statement<'_>, symbols: &mut Vec<SymbolId>) {
-    let mut push = |symbol: Option<SymbolId>| {
-        if let Some(symbol) = symbol {
-            symbols.push(symbol);
-        }
-    };
-    match statement {
-        Statement::ImportDeclaration(import) => {
-            if let Some(specifiers) = &import.specifiers {
-                for specifier in specifiers {
-                    push(local_symbol(specifier));
-                }
-            }
-        }
-        Statement::VariableDeclaration(declaration) => {
-            declaration.bound_names(&mut |identifier| push(identifier.symbol_id.get()));
-        }
-        Statement::FunctionDeclaration(declaration) => {
-            declaration.bound_names(&mut |identifier| push(identifier.symbol_id.get()));
-        }
-        Statement::ClassDeclaration(declaration) => {
-            declaration.bound_names(&mut |identifier| push(identifier.symbol_id.get()));
-        }
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(declaration) = &export.declaration {
-                declaration.bound_names(&mut |identifier| push(identifier.symbol_id.get()));
-            }
-        }
-        _ => {}
-    }
 }
 
 /// The span of a standalone, single-binding top-level declaration for `name`
@@ -661,33 +600,6 @@ fn removable_declaration_span(
         return Some(span);
     }
     None
-}
-
-/// All resolved identifier references in the program, each with its source span
-/// and the symbol it resolves to.
-fn collect_references(program: &Program<'_>, scoping: &Scoping) -> Vec<(Span, SymbolId)> {
-    let mut collector = ReferenceCollector {
-        scoping,
-        references: Vec::new(),
-    };
-    collector.visit_program(program);
-    collector.references
-}
-
-struct ReferenceCollector<'s> {
-    scoping: &'s Scoping,
-    references: Vec<(Span, SymbolId)>,
-}
-
-impl<'a> Visit<'a> for ReferenceCollector<'_> {
-    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
-        if let Some(reference_id) = identifier.reference_id.get()
-            && let Some(symbol) = self.scoping.get_reference(reference_id).symbol_id()
-        {
-            self.references.push((identifier.span, symbol));
-        }
-        walk::walk_identifier_reference(self, identifier);
-    }
 }
 
 /// The set of symbols with at least one reference outside every removed region.
@@ -773,19 +685,8 @@ fn binds_identifier(program: &Program<'_>, name: &str) -> bool {
     false
 }
 
-/// Whether `span` is fully contained within `region`.
-fn within(span: Span, region: Span) -> bool {
-    region.start <= span.start && span.end <= region.end
-}
-
 fn slice(source: &str, start: u32, end: u32) -> String {
     source[start as usize..end as usize].to_string()
-}
-
-fn push_unique(list: &mut Vec<SymbolId>, symbol: SymbolId) {
-    if !list.contains(&symbol) {
-        list.push(symbol);
-    }
 }
 
 /// A single edit to the source: a byte range and its replacement text (empty for

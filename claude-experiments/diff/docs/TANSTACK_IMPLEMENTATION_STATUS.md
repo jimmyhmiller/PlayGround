@@ -1,6 +1,44 @@
 # TanStack implementation status
 
-Updated: 2026-07-18 (native routeTree.gen.ts generation from src/routes/ landed)
+Updated: 2026-07-18 (second real app validated; client server-fn leak fixed)
+
+## Second real app + client server-function leak (landed)
+
+Validated diffpack against a **second, independent official Start app** (the
+`start-counter` example, not the pinned fixture): it builds and runs end to end
+(SSR loader via a GET server fn, a POST `.validator()` server fn mutating a file
+through `node:fs`, hydration, `router.invalidate()` re-render), which is the first
+evidence the pipeline generalizes beyond the fixture's exact routes.
+
+That test surfaced a real bug the fixture had hidden: **server-only code leaked into
+the client bundle**. `start-counter` defines its server functions inline in the
+route module with a top-level `import * as fs from 'node:fs'` and private helpers
+used only by the handlers. The client transform replaced each handler with an RPC
+stub but left those now-dead top-level imports/helpers in place, so the browser
+shipped the server logic and a `require("node:fs")` that only survived because the
+client runtime tolerated it. The fixture never hit this because its server fns just
+`fetch()` external URLs with no server-only imports.
+
+- **Fix: source-level tree shaking in the client server-fn transform.** After
+  stubbing handlers, `src/server_fn.rs` now sweeps every module-level declaration
+  the handlers were the sole users of. Reachability is computed by the shared
+  `src/js_reachability.rs` (`dead_declaration_spans`): live roots are the module's
+  exports and side-effect statements; a binding referenced only from inside a
+  removed handler argument is dead. Only side-effect-free declarations are swept
+  (function/class declarations and imports, or `const`s with pure initializers), so
+  a declaration whose initializer could have a side effect is conservatively kept,
+  and a bare side-effect import (`import './x.css'`) is always retained.
+- **One reachability implementation.** The generic module-level reachability
+  helpers were extracted from `route_split.rs` into `js_reachability.rs` and are now
+  shared by both the route splitter and the server-fn sweep, so the two cannot drift
+  on what "reachable" means.
+- **Verified.** start-counter's client bundle is clean (no `node:fs`, no server
+  logic) and the app still works end to end; the fixture stays 13/13 with its client
+  clean; full `cargo test` + clippy green. Regression is guarded at the unit level
+  by `client_build_sweeps_server_only_code_the_handler_orphaned` (and siblings) in
+  `src/server_fn.rs`, which encode the inline-server-fn shape directly.
+
+## Native route-tree generation from `src/routes/` (landed)
 
 ## Native route-tree generation from `src/routes/` (landed)
 

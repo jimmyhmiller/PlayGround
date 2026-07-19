@@ -37,8 +37,10 @@ use oxc_ast::ast::{
     Declaration, Expression, ImportDeclarationSpecifier, Program, Statement,
 };
 use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 
+use crate::js_reachability::dead_declaration_spans;
 use crate::transform::Target;
 
 /// TanStack Start's default server-fn HTTP base (`serverFns.base`), the path
@@ -122,7 +124,8 @@ pub fn transform_server_fns(
         match target {
             Target::Client => {
                 // Replace the whole handler argument with the client RPC stub;
-                // the real handler body (and its server imports) is dropped.
+                // the real handler body is dropped here, and any module-level
+                // imports/declarations it was the sole user of are swept below.
                 edits.push((server_fn.handler_arg, format!("createClientRpc({})", quote(&id))));
             }
             Target::Server => {
@@ -140,6 +143,22 @@ pub fn transform_server_fns(
                     ),
                 ));
             }
+        }
+    }
+
+    // On the client, replacing each handler with an RPC stub can orphan the
+    // module-level server-only code the handlers were the only users of (a
+    // `node:fs` import, a private helper, a config constant). The reference plugin
+    // relies on the bundler tree-shaking that away; diffpack does it here, at the
+    // source, so the browser never ships server code (and never a `node:fs`
+    // require that only survives because the client runtime tolerates it). The
+    // removed regions are the handler arguments: a binding referenced only from
+    // inside one is dead. Side-effectful declarations are conservatively kept.
+    if target == Target::Client {
+        let scoping = SemanticBuilder::new().build(program).semantic.into_scoping();
+        let removed: Vec<Span> = found.iter().map(|server_fn| server_fn.handler_arg).collect();
+        for span in dead_declaration_spans(program, &scoping, &removed) {
+            edits.push((span, String::new()));
         }
     }
 
@@ -652,6 +671,99 @@ mod tests {
         // The server handler body is gone from the client build.
         assert!(!rewritten.contains("example.com/posts"), "{rewritten}");
         assert!(!rewritten.contains("res.json()"), "{rewritten}");
+    }
+
+    #[test]
+    fn client_build_sweeps_server_only_code_the_handler_orphaned() {
+        // start-counter's shape: server fns defined inline in a route module, with
+        // a top-level `node:fs` import and helpers used ONLY by the handlers. Once
+        // the handlers become RPC stubs, that server-only code is dead and must not
+        // ship to the browser (previously it leaked, including `require("node:fs")`).
+        let source = "import * as fs from 'node:fs'\n\
+             import { useRouter, createFileRoute } from '@tanstack/react-router'\n\
+             import { createServerFn } from '@tanstack/react-start'\n\
+             const filePath = 'count.txt'\n\
+             async function readCount() {\n\
+               return parseInt(await fs.promises.readFile(filePath, 'utf-8').catch(() => '0'))\n\
+             }\n\
+             const getCount = createServerFn({ method: 'GET' }).handler(() => readCount())\n\
+             const updateCount = createServerFn({ method: 'POST' })\n\
+               .validator((addBy) => addBy)\n\
+               .handler(async ({ data }) => {\n\
+                 const count = await readCount()\n\
+                 await fs.promises.writeFile(filePath, `${count + data}`)\n\
+               })\n\
+             export const Route = createFileRoute('/')({\n\
+               component: Home,\n\
+               loader: async () => await getCount(),\n\
+             })\n\
+             function Home() {\n\
+               const router = useRouter()\n\
+               const state = Route.useLoaderData()\n\
+               return null\n\
+             }\n";
+        let path = Path::new("/app/src/routes/index.tsx");
+        let client = transform_server_fns(path, source, Target::Client)
+            .unwrap()
+            .expect("the module has server fns");
+
+        // The server-only import, helper, and constant are gone from the client.
+        assert!(!client.contains("node:fs"), "node:fs must not ship to the client:\n{client}");
+        assert!(!client.contains("readCount"), "the server helper must be swept:\n{client}");
+        assert!(!client.contains("count.txt"), "the server constant must be swept:\n{client}");
+        assert!(!client.contains("writeFile"), "the handler body must be gone:\n{client}");
+
+        // The client RPC surface and the live route code are kept intact.
+        assert!(client.contains("createClientRpc"), "{client}");
+        assert!(client.contains("createServerFn"), "the client server-fn wrapper stays:\n{client}");
+        assert!(client.contains(".validator("), "the validator runs client-side:\n{client}");
+        assert!(client.contains("createFileRoute"), "{client}");
+        assert!(client.contains("useRouter"), "the live component's imports stay:\n{client}");
+        assert!(client.contains("function Home"), "{client}");
+    }
+
+    #[test]
+    fn client_dce_keeps_server_only_code_still_used_by_client_code() {
+        // A binding referenced by BOTH a handler and live client code must NOT be
+        // swept: the reachability walk keeps it via the client reference.
+        let source = "import { format } from './fmt'\n\
+             import { createServerFn } from '@tanstack/react-start'\n\
+             export const load = createServerFn().handler(async () => format(1))\n\
+             export const label = format(2)\n";
+        let path = Path::new("/app/src/routes/x.tsx");
+        let client = transform_server_fns(path, source, Target::Client)
+            .unwrap()
+            .expect("the module has a server fn");
+        assert!(client.contains("import { format }"), "shared import must stay:\n{client}");
+        assert!(client.contains("export const label"), "{client}");
+    }
+
+    #[test]
+    fn client_dce_keeps_a_side_effect_import() {
+        // A bare side-effect import binds nothing and must always be retained, even
+        // when the module's only other content is a server fn.
+        let source = "import './styles.css'\n\
+             import { createServerFn } from '@tanstack/react-start'\n\
+             export const load = createServerFn().handler(async () => 1)\n";
+        let client = transform_server_fns(Path::new("/app/src/routes/y.tsx"), source, Target::Client)
+            .unwrap()
+            .expect("the module has a server fn");
+        assert!(client.contains("import './styles.css'"), "side-effect import must stay:\n{client}");
+    }
+
+    #[test]
+    fn server_build_does_not_sweep_server_only_code() {
+        // The server keeps the real handlers, so its server-only imports/helpers
+        // must survive untouched (the DCE is client-only).
+        let source = "import * as fs from 'node:fs'\n\
+             import { createServerFn } from '@tanstack/react-start'\n\
+             const filePath = 'count.txt'\n\
+             export const getCount = createServerFn().handler(async () => fs.promises.readFile(filePath))\n";
+        let server = transform_server_fns(Path::new("/app/src/routes/index.tsx"), source, Target::Server)
+            .unwrap()
+            .expect("the module has a server fn");
+        assert!(server.contains("node:fs"), "server keeps its imports:\n{server}");
+        assert!(server.contains("count.txt"), "server keeps its constants:\n{server}");
     }
 
     #[test]
