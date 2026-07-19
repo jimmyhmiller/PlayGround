@@ -54,9 +54,10 @@ resource, so edits change code and never the running world.
 
 ## Controls
 
-- **Drag any number** to scrub it. The value is rewritten in the source and
-  installed on every step, so the animation responds under the cursor. Shift
-  gives finer steps; a click that does not move places the caret instead, so
+- **Drag any number** to scrub it — in the editor *and* in a walkthrough step,
+  which keeps its own copy of its source. The value is rewritten and installed
+  on every step, so the animation responds under the cursor. Shift gives finer
+  steps; in the editor, a click that does not move places the caret instead, so
   numbers stay editable by typing.
 - **Apply as I type** — install on every keystroke, debounced.
 - **Apply edit** (⌘/Ctrl+Enter) — install the editor's contents into the *running*
