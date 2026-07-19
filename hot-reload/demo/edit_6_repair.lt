@@ -1,0 +1,16 @@
+// SCENARIO 6 — repair the frozen program; it resumes exactly where it stopped.
+//
+// Adding the missing arm publishes a valid `radius`, which un-breaks `on_frame`
+// with it. The frozen computation is not restarted and its frame is not
+// rebuilt: the same suspended `main` resumes at the precise instruction that
+// trapped — the call it could not make — and simply makes it. The particles
+// pick up exactly where they were, because they never stopped being the same
+// objects.
+
+fn radius(p: Particle) -> i64 {
+    match kind_of(p) {
+        Dot => 10,
+        Ring => 24,
+        Bar => 34,
+    }
+}

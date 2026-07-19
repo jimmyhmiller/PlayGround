@@ -33,6 +33,7 @@
 (import "expander.coil" :use *)
 (import "comptime_eval.coil" :use *)   ; compiled comptime/const fold (interp deletion step 1)
 (import "codegen_a64.coil" :use *)
+(import "macho.coil" :use *)     ; MObj — for the in-memory comptime builder below
 (import "driver.coil" :use *)
 (import "cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
 
@@ -71,8 +72,17 @@
                       (box-al [(slice u8)] a (al-new [(slice u8)] a))
                       false))
 
+; the same object, handed back in memory instead of written to a file. comptime_eval
+; loads this straight into executable pages (jit.coil) — no .o, no `cc`, no dlopen.
+(defn meta-build-mobj-a64 [(a (ptr Allocator)) (mp (ptr Program))] (-> MObj)
+  (cga64-build-mobj a mp "" ""
+                    (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                    (box-al [(slice u8)] a (al-new [(slice u8)] a))
+                    false))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-a64))
+  (set-meta-build-mobj! (fnptr-of meta-build-mobj-a64))
   (register-comptime-fold!)   ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
   (driver-main argc argv
                (fnptr-of no-llvm-build)

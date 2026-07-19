@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live &amp; Typed — editing a running program</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --edge: #262d38;
+    --ink: #d7dee8;
+    --dim: #7d8998;
+    --accent: #62b0ff;
+    --ok: #56d38a;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px 14px; border-bottom: 1px solid var(--edge);
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -0.01em; }
+  header p { margin: 5px 0 0; color: var(--dim); font-size: 13px; max-width: 78ch; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 18px; padding: 18px 24px 28px; align-items: start;
+  }
+  @media (max-width: 1040px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 10px; overflow: hidden;
+  }
+  .panel > h2 {
+    margin: 0; padding: 10px 14px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim);
+    border-bottom: 1px solid var(--edge);
+  }
+  .body { padding: 14px; }
+
+  canvas {
+    display: block; width: 100%; height: auto; background: #080b0f;
+    border-bottom: 1px solid var(--edge);
+  }
+
+  /* The frozen banner sits over the canvas: the last good frame stays visible. */
+  .stage { position: relative; }
+  .frozen-veil {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center; flex-direction: column;
+    gap: 8px; background: rgba(14, 17, 22, 0.72); backdrop-filter: blur(1.5px);
+    text-align: center; padding: 20px;
+  }
+  body.frozen .frozen-veil { display: flex; }
+  .frozen-veil strong { color: var(--warn); font-size: 15px; letter-spacing: 0.02em; }
+  .frozen-veil code {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+    background: rgba(0,0,0,.45); padding: 6px 9px; border-radius: 6px;
+    max-width: 90%; overflow-wrap: anywhere;
+  }
+
+  textarea {
+    width: 100%; min-height: 340px; resize: vertical;
+    background: #0b0f14; color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 8px; padding: 11px 12px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    tab-size: 4;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  button {
+    font: inherit; font-size: 13px; color: var(--ink); cursor: pointer;
+    background: #1e242d; border: 1px solid var(--edge);
+    border-radius: 7px; padding: 6px 12px;
+  }
+  button:hover { border-color: #3a4553; background: #232a34; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #07121f; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.warn { background: var(--warn); border-color: var(--warn); color: #241703; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--dim); font-size: 12px; }
+
+  #message {
+    margin-top: 10px; padding: 9px 11px; border-radius: 7px; display: none;
+    font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere;
+  }
+  #message.show { display: block; }
+  #message.ok  { background: rgba(86,211,138,.10); border: 1px solid rgba(86,211,138,.35); color: var(--ok); }
+  #message.err { background: rgba(255,107,107,.10); border: 1px solid rgba(255,107,107,.35); color: var(--bad); }
+
+  ol.scenarios { list-style: none; margin: 0; padding: 0; }
+  ol.scenarios li { border-bottom: 1px solid var(--edge); }
+  ol.scenarios li:last-child { border-bottom: 0; }
+  ol.scenarios button {
+    width: 100%; text-align: left; background: none; border: 0; border-radius: 0;
+    padding: 9px 14px; display: flex; gap: 10px; align-items: baseline;
+  }
+  ol.scenarios button:hover { background: #1c222b; }
+  ol.scenarios .n {
+    color: var(--dim); font-family: var(--mono); font-size: 11px; min-width: 1.2em;
+  }
+  ol.scenarios button.active { background: rgba(98,176,255,.12); box-shadow: inset 2px 0 0 var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th {
+    text-align: left; font-weight: 600; color: var(--dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .06em; padding: 0 0 6px;
+  }
+  td { padding: 3px 0; font-family: var(--mono); font-size: 12px; vertical-align: baseline; }
+  td.v { color: var(--dim); width: 3.2em; }
+  td.shape { color: var(--dim); overflow-wrap: anywhere; }
+  tr.broken td { color: var(--bad); }
+  .why { color: var(--bad); font-size: 11px; }
+
+  dl.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0; }
+  dl.stats div { background: #0b0f14; border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; }
+  dl.stats dt { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+  dl.stats dd { margin: 3px 0 0; font-family: var(--mono); font-size: 17px; }
+  dl.stats dd.pinned { color: var(--ok); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Live &amp; Typed — editing a program while it runs</h1>
+  <p>
+    The animation below is one long-running computation. Every edit you apply lands
+    between two instructions of that computation: it is never restarted, and the canvas
+    it draws to is opened exactly once and then never again. Types are enforced across
+    every edit — a change that breaks something is refused at install or freezes the
+    program at the point the stale assumption would be used, never silently.
+  </p>
+</header>
+
+<main>
+  <section>
+    <div class="panel stage">
+      <canvas id="stage" width="640" height="400"></canvas>
+      <div class="frozen-veil">
+        <strong>FROZEN</strong>
+        <code id="condition"></code>
+        <span class="hint">The last good frame is still on screen. Apply a repair, then resume.</span>
+        <button class="warn" id="thaw">Thaw &amp; resume</button>
+      </div>
+      <div class="body">
+        <dl class="stats">
+          <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
+          <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
+          <div><dt>Circles drawn</dt><dd id="stat-circles">0</dd></div>
+          <div><dt>Status</dt><dd id="stat-status">booting</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Scenarios — apply in order</h2>
+      <ol class="scenarios" id="scenarios"></ol>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>The live world</h2>
+      <div class="body">
+        <table>
+          <thead><tr><th>Function</th><th style="width:3.2em">v</th></tr></thead>
+          <tbody id="fns"></tbody>
+        </table>
+        <table style="margin-top:14px">
+          <thead><tr><th>Type</th><th style="width:3.2em">v</th><th>Shape</th></tr></thead>
+          <tbody id="types"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Source — edit and apply while it runs</h2>
+    <div class="body">
+      <textarea id="editor" spellcheck="false"></textarea>
+      <div class="row">
+        <button class="primary" id="apply">Apply edit</button>
+        <button id="reload-scene">Load full scene</button>
+        <button id="reset">Reset world</button>
+        <span class="hint">⌘/Ctrl + Enter to apply</span>
+      </div>
+      <div id="message"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import init, { Demo } from "./pkg/livetype_wasm.js";
+
+const STATUS_RUNNING = 0, STATUS_FROZEN = 1, STATUS_DONE = 2, STATUS_CAPPED = 3;
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("stage");
+const ctx = canvas.getContext("2d");
+
+await init();
+let demo = new Demo();
+
+// ── painting ───────────────────────────────────────────────────────────────
+function paint(ops) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < ops.length; i += 4) {
+    const [x, y, r, hue] = [ops[i], ops[i + 1], ops[i + 2], ops[i + 3]];
+    const h = ((hue % 360) + 360) % 360;
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(1, r), 0, Math.PI * 2);
+    ctx.fillStyle = `hsl(${h} 72% 62% / 0.85)`;
+    ctx.fill();
+  }
+}
+
+// ── the frame loop: one `yield` of the guest per animation frame ────────────
+let lastWorld = "";
+function tick() {
+  const status = demo.step_frame();
+
+  if (status === STATUS_RUNNING) {
+    paint(demo.draw_ops());
+    document.body.classList.remove("frozen");
+    $("stat-status").textContent = "running";
+  } else if (status === STATUS_FROZEN) {
+    // Deliberately do NOT repaint: the last completed frame stays on screen.
+    document.body.classList.add("frozen");
+    $("condition").textContent = demo.condition || "(frozen)";
+    $("stat-status").textContent = "frozen";
+  } else if (status === STATUS_DONE) {
+    $("stat-status").textContent = "completed";
+  } else if (status === STATUS_CAPPED) {
+    $("stat-status").textContent = "no yield reached";
+  }
+
+  $("stat-frames").textContent = demo.frames;
+  $("stat-canvas").textContent = demo.canvases_opened;
+  $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
+
+  // The inspector is read out of the engine; only redraw it when it changes.
+  const world = demo.world_json();
+  if (world !== lastWorld) {
+    lastWorld = world;
+    renderWorld(JSON.parse(world));
+  }
+  requestAnimationFrame(tick);
+}
+
+function renderWorld({ functions, types }) {
+  $("fns").innerHTML = functions.map((f) => {
+    const why = f.broken && f.why
+      ? `<tr class="broken"><td colspan="2" class="why">↳ ${escapeHtml(f.why)}</td></tr>`
+      : "";
+    return `<tr class="${f.broken ? "broken" : ""}">
+      <td>${escapeHtml(f.name)}${f.broken ? " — BROKEN" : ""}</td>
+      <td class="v">${f.version}</td></tr>${why}`;
+  }).join("");
+
+  $("types").innerHTML = types.map((t) => `<tr>
+      <td>${escapeHtml(t.name)}</td>
+      <td class="v">${t.version}</td>
+      <td class="shape">${escapeHtml(t.shape)}</td></tr>`).join("");
+}
+
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+// ── editing ────────────────────────────────────────────────────────────────
+function message(text, kind) {
+  const el = $("message");
+  el.textContent = text;
+  el.className = `show ${kind}`;
+}
+
+function applyEdit() {
+  const error = demo.eval($("editor").value);
+  if (error === "") {
+    message("Edit installed into the live world.", "ok");
+  } else {
+    // A refused edit changes nothing: the program keeps running the last good
+    // version. That is the point, so say so.
+    message(`Rejected — the running program is untouched:\n${error}`, "err");
+  }
+  lastWorld = "";
+}
+
+$("apply").addEventListener("click", applyEdit);
+$("editor").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); applyEdit(); }
+});
+$("thaw").addEventListener("click", () => {
+  demo.thaw();
+  message("Thawed — resuming at the instruction that trapped.", "ok");
+});
+$("reload-scene").addEventListener("click", () => {
+  $("editor").value = Demo.scene_source();
+  markActive(-1);
+});
+$("reset").addEventListener("click", () => {
+  demo = new Demo();
+  lastWorld = "";
+  document.body.classList.remove("frozen");
+  $("editor").value = Demo.scene_source();
+  markActive(-1);
+  message("Fresh world booted.", "ok");
+});
+
+// ── scenarios ──────────────────────────────────────────────────────────────
+const list = $("scenarios");
+for (let i = 0; i < Demo.scenario_count(); i++) {
+  const li = document.createElement("li");
+  const b = document.createElement("button");
+  b.innerHTML = `<span class="n">${i + 1}</span><span>${escapeHtml(Demo.scenario_title(i))}</span>`;
+  b.addEventListener("click", () => {
+    $("editor").value = Demo.scenario_source(i);
+    markActive(i);
+    message("Loaded — read it, then Apply edit.", "ok");
+  });
+  li.appendChild(b);
+  list.appendChild(li);
+}
+function markActive(index) {
+  [...list.querySelectorAll("button")].forEach((b, i) =>
+    b.classList.toggle("active", i === index));
+}
+
+$("editor").value = Demo.scene_source();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

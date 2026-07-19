@@ -455,6 +455,18 @@ fn lower_fn(f: &FnDef, ids: &IdEnv) -> Result<Function, String> {
     for s in &f.body {
         lo.stmt(s)?;
     }
+    // Only a *tail expression* lowers to a `Return`, so a body whose last
+    // statement is a `let`, `while`, or `if` falls off its end. A `-> ()`
+    // function terminates implicitly there — `fn f() -> () { ... }` needs no
+    // trailing `()`. Placing it before `patch_labels` means any block-end label
+    // already recorded at this offset (an `if`'s join point) resolves onto it.
+    // A non-unit body that falls off its end is a missing return, which the
+    // verifier reports against the offending instruction.
+    if result == Type::Unit && !matches!(lo.code.last(), Some(Instruction::Return { .. })) {
+        let r = lo.fresh_reg();
+        lo.code.push(Instruction::Const { dst: r, value: Value::Unit });
+        lo.code.push(Instruction::Return { value: r });
+    }
     lo.patch_labels()?;
     Ok(Function {
         id,

@@ -1,0 +1,7 @@
+// SCENARIO 3 — a breaking edit is refused, never silently accepted.
+//
+// `tint` must return i64. This version returns a string. The edit is rejected
+// at install time and the running program keeps executing the last good
+// version: a bad edit cannot take down a running system.
+
+fn tint(p: Particle) -> i64 { "cornflower" }

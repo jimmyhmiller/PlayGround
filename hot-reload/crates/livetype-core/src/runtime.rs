@@ -184,6 +184,10 @@ impl World {
             }
         }
         self.invalidate_functions(type_id);
+        // A schema edit cuts both ways: it can break functions, and it can just
+        // as well make previously-broken ones valid again (restoring a removed
+        // field, re-widening a type).
+        self.revalidate_functions();
         self.epoch += 1;
         Ok(())
     }
@@ -390,9 +394,15 @@ impl World {
         };
         let id = state.id();
         let version = state.version();
+        let published_ready = matches!(state, FunctionState::Ready(_));
         self.functions.insert((id, version), state);
         self.current_functions.insert(id, version);
         self.epoch += 1;
+        // Installing a good version can un-break whatever was broken only
+        // because *this* function was broken — the repair-the-root-cause path.
+        if published_ready {
+            self.revalidate_functions();
+        }
         Ok(())
     }
 
@@ -415,6 +425,8 @@ impl World {
             .insert((id, version), FunctionState::Ready(function));
         self.current_functions.insert(id, version);
         self.epoch += 1;
+        // Same as `install_function`: a good version can revive its callers.
+        self.revalidate_functions();
         Ok(())
     }
 
@@ -466,6 +478,68 @@ impl World {
             for caller in callers {
                 seen.insert(caller);
                 work.push(caller);
+            }
+        }
+    }
+
+    /// The most recent version of `id` that was published Ready, if any. A
+    /// Broken entry records only diagnostics, so this is where the code a
+    /// revival re-verifies comes from.
+    fn last_ready_code(&self, id: DefId) -> Option<Function> {
+        self.functions
+            .iter()
+            .filter_map(|((fid, version), state)| match state {
+                FunctionState::Ready(f) if *fid == id => Some((*version, f)),
+                _ => None,
+            })
+            .max_by_key(|(version, _)| *version)
+            .map(|(_, f)| f.clone())
+    }
+
+    /// The inverse of [`Self::invalidate_functions`]. A function is published
+    /// Broken when something it depends on stops type-checking — but that
+    /// verdict was about the *world*, not about its code, so repairing the
+    /// cause can make it valid again. Without this pass a repair would have to
+    /// re-state every transitive caller verbatim just to revive it, which is
+    /// the opposite of fixing the root cause.
+    ///
+    /// So: re-verify the last good code of every currently-Broken function and
+    /// republish the ones that now check out, looping to a fixpoint because
+    /// reviving a callee can in turn revive its callers. Code that is broken on
+    /// its own merits simply fails verification again and stays Broken.
+    fn revalidate_functions(&mut self) {
+        loop {
+            let broken: Vec<DefId> = self
+                .current_functions
+                .iter()
+                .filter(|(id, version)| {
+                    matches!(
+                        self.functions.get(&(**id, **version)),
+                        Some(FunctionState::Broken { .. })
+                    )
+                })
+                .map(|(id, _)| *id)
+                .collect();
+
+            let mut revived = false;
+            for id in broken {
+                let Some(mut function) = self.last_ready_code(id) else {
+                    continue;
+                };
+                let Ok(deps) = verify_function(&function, self) else {
+                    continue; // still invalid: it stays Broken
+                };
+                let version = Version(self.current_functions[&id].0 + 1);
+                function.version = version;
+                self.function_deps.insert(id, deps);
+                self.functions
+                    .insert((id, version), FunctionState::Ready(function));
+                self.current_functions.insert(id, version);
+                self.epoch += 1;
+                revived = true;
+            }
+            if !revived {
+                return;
             }
         }
     }

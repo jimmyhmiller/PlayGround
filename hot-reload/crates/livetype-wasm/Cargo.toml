@@ -1,0 +1,19 @@
+[package]
+name = "livetype-wasm"
+version = "0.1.0"
+edition = "2024"
+
+# The browser demo's host. Binds the LLVM-free core to a canvas: the same
+# `Session` the native `ffi-gui` demo drives, with the foreign toolkit recording
+# draw commands that JS paints. The LLVM tier is deliberately absent — inkwell
+# cannot target wasm — so this is the engine's cold (interpreted) tier, whose
+# semantics the differential fuzzer holds identical to the JIT's.
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+livetype-core = { path = "../livetype-core" }
+# Pinned to the installed `wasm-bindgen` CLI: the generated glue and the CLI
+# share a schema version and refuse to work across a mismatch.
+wasm-bindgen = "=0.2.114"

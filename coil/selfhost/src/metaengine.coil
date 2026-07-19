@@ -36,6 +36,7 @@
 (import "metalower.coil" :use *)
 (import "metahost.coil" :use *)
 (import "ffi.coil" :use *)
+(import "macho.coil" :use *)    ; MObj — the in-memory object handed to jit.coil
 
 (extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
 (extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
@@ -131,6 +132,21 @@
 (defn meta-build-box [] (-> (ptr MetaBuildBox)) (alloc-static MetaBuildBox))
 (defn set-meta-build-obj! [(fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))] (-> i64)
   (let [b (meta-build-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+
+; ---- in-memory object builder (the JIT path) --------------------------------------
+; A backend that can hand back the object as an MObj instead of a file lets
+; comptime_eval skip the whole serialize / fork `cc -dynamiclib` / dlopen round
+; trip and load it straight into executable memory (jit.coil). The arm64 backend
+; registers one (main_a64.coil); the LLVM backend has no MObj to give — it emits
+; through LLVMTargetMachineEmitToFile — so with LLVM this stays unset and the
+; dylib path below is used. Whichever runs, the CODEGEN is identical; only the way
+; the bytes reach memory differs.
+(defstruct MetaMobjBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))])
+(defn meta-mobj-box [] (-> (ptr MetaMobjBox)) (alloc-static MetaMobjBox))
+(defn set-meta-build-mobj! [(fp (fnptr c [(ptr Allocator) (ptr Program)] MObj))] (-> i64)
+  (let [b (meta-mobj-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+(defn meta-mobj-available? [] (-> bool)
+  (icmp-ne (load (field (meta-mobj-box) isset)) 0))
 
 ; ---- unique scratch paths ---------------------------------------------------------
 ; per-process uniqueness from the static box's (ASLR-randomized) address, plus a

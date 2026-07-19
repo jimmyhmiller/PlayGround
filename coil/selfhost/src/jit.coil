@@ -1,0 +1,379 @@
+; selfhost/src/jit.coil — load an arm64 MObj into executable memory, in-process.
+;
+; The compiled comptime/metaprogram engines used to reach native code the long way
+; round: serialize the MObj to a .o, fork `cc -dynamiclib`, dlopen the result. This
+; module skips all three. It lays the object's sections into one mmap'd region,
+; resolves symbols (defined ones by section+offset, undefined ones via dlsym against
+; the compiler process itself), applies the four arm64 relocations this backend
+; emits, then flips the text pages to R+X and invalidates the icache.
+;
+; LAYOUT: every __TEXT section first, then the veneer area, then a page boundary,
+; then everything else. Only the text half becomes read-execute — __DATA stays
+; writable, because Coil globals (alloc-static) live there and comptime code may
+; store through them. One region rather than two keeps text and data within adrp's
+; +/-4GB page-delta range by construction.
+;
+; VENEERS. A bl/b carries a signed 26-bit word offset: +/-128MB. Symbols resolved
+; through dlsym (libc, and the host hooks a metaprogram calls back into) live
+; wherever dyld put them, routinely gigabytes away, so a direct BRANCH26 to one
+; would silently truncate and jump into nothing. Every undefined symbol that is the
+; target of a branch therefore gets a 5-instruction absolute-jump veneer inside our
+; own text, and the branch is retargeted to it. x16 (IP0) is the ABI's
+; inter-procedural scratch register, so clobbering it at a call boundary is safe.
+;
+; __DWARF sections are not loaded (nothing executes debug info) and their
+; relocations — which target section ordinals rather than symbol indices — are
+; skipped. The metaprogram object builder passes emit-dwarf=false anyway.
+;
+; RELOCATIONS. Only the four the backend emits are handled; anything else is a
+; hard error rather than a silent no-op, because a skipped fixup would produce code
+; that jumps to a wild address.
+;   BRANCH26   (pcrel) bl/b            imm26 = (S - P) >> 2, range-checked
+;   PAGE21     (pcrel) adrp            imm21 = page(S) - page(P), split lo/hi
+;   PAGEOFF12         add :lo12:       imm12 = S & 0xfff
+;   UNSIGNED          8-byte pointer   *loc = S + <existing addend>
+; PAGEOFF12 is emitted at exactly one site (codegen_a64.coil emit-sym-addr!, always
+; adrp+add with a zero immediate), so there is no load/store scaling case to handle.
+(module jit)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+(import "a64.coil" :use *)      ; al-at, a64-movz/movk
+(import "macho.coil" :use *)    ; MObj/MSect/MSym/MReloc, reloc-*
+
+(extern mmap     :cc c [(ptr i8) i64 i32 i32 i32 i64] (-> (ptr i8)))
+(extern munmap   :cc c [(ptr i8) i64] (-> i32))
+(extern mprotect :cc c [(ptr i8) i64 i32] (-> i32))
+(extern sys_icache_invalidate :cc c [(ptr i8) i64] (-> i64))
+(extern dlsym    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+
+(defn prot-rw   [] (-> i64) 3)          ; PROT_READ|PROT_WRITE
+(defn prot-rx   [] (-> i64) 5)          ; PROT_READ|PROT_EXEC
+(defn map-priv  [] (-> i64) 4098)       ; MAP_PRIVATE|MAP_ANON (0x0002|0x1000)
+(defn page-size [] (-> i64) 16384)      ; arm64 macOS; only ever rounds UP, so a
+                                        ; 4K-page host stays correct.
+(defn veneer-bytes [] (-> i64) 20)      ; movz + movk*3 + br
+(defn branch26-max [] (-> i64) 134217728)  ; +/-128MB
+
+; br x16 — same encoding family as blr/ret, with op=0 and rn=16.
+(defn jit-br-x16 [] (-> i64) (ior (ishl 107 25) (ior (ishl 31 16) (ishl 16 5))))
+
+; dlsym(RTLD_DEFAULT, …) — search every image already loaded in this process, which
+; is how a comptime thunk reaches libc and how a metaprogram reaches the host hooks
+; the compiler exports. RTLD_DEFAULT is (void*)-2 on macOS.
+(defn jit-rtld-default [] (-> (ptr i8)) (cast (ptr i8) -2))
+
+(defstruct JitSym  [(name (slice u8)) (addr (ptr i8))])
+(defstruct JitImage
+  [(base (ptr i8))     ; start of the mapping
+   (size i64)          ; total mapped bytes
+   (syms (ArrayList JitSym))])
+
+(defn jit-align-up [(v i64) (al i64)] (-> i64)
+  (imul (idiv (iadd v (isub al 1)) al) al))
+
+; str.coil's str-concat, minus the Option — this module deliberately depends only on
+; the small libraries (sconcat lives in parser.coil, which has no business here).
+(defn jit-cat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (slice u8))
+  (match (str-concat a x y) (Some [s] s) (None [] x)))
+
+(defn jit-not [(m i64)] (-> i64) (ixor m -1))
+
+; ---- little-endian byte access ------------------------------------------------
+; Done a byte at a time, in i64 throughout, so there is no width or alignment
+; question at the patch sites.
+(defn jit-ld32 [(p (ptr u8))] (-> i64)
+  (ior (ior (cast i64 (load (index p 0)))
+            (ishl (cast i64 (load (index p 1))) 8))
+       (ior (ishl (cast i64 (load (index p 2))) 16)
+            (ishl (cast i64 (load (index p 3))) 24))))
+
+(defn jit-st32! [(p (ptr u8)) (v i64)] (-> i64)
+  (do (store! (index p 0) (cast u8 (iand v 255)))
+      (store! (index p 1) (cast u8 (iand (ishr v 8) 255)))
+      (store! (index p 2) (cast u8 (iand (ishr v 16) 255)))
+      (store! (index p 3) (cast u8 (iand (ishr v 24) 255)))
+      0))
+
+(defn jit-ld64 [(p (ptr u8))] (-> i64)
+  (ior (jit-ld32 p) (ishl (jit-ld32 (index p 4)) 32)))
+
+(defn jit-st64! [(p (ptr u8)) (v i64)] (-> i64)
+  (do (jit-st32! p (iand v 4294967295))
+      (jit-st32! (index p 4) (ishr v 32))
+      0))
+
+; a section is loaded unless it is debug info
+(defn jit-loadable? [(s (ptr MSect))] (-> bool)
+  (not (str-eq (load (field s segname)) "__DWARF")))
+
+(defn jit-is-text? [(s (ptr MSect))] (-> bool)
+  (str-eq (load (field s segname)) "__TEXT"))
+
+; NUL-terminate a name for dlsym, dropping the leading '_' the Mach-O symbol
+; carries (codegen_a64.coil:434 adds it; the C symbol libc knows has no underscore).
+(defn jit-sym-cstr [(a (ptr Allocator)) (name (slice u8))] (-> (ptr i8))
+  (let [raw (if (and (icmp-gt (slice-len name) 0)
+                     (icmp-eq (cast i64 (slice-get name 0)) \_))
+                (subslice name 1 (slice-len name))
+              name)
+        n (slice-len raw)
+        buf (unwrap-ptr [u8] (alloc-slice [u8] a (iadd n 1)))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (store! (index buf (load i)) (load (index (slice-data raw) (load i))))
+          (store! i (iadd (load i) 1)))))
+    (store! (index buf n) (cast u8 0))
+    (cast (ptr i8) buf)))
+
+; write an absolute-jump veneer to `tgt` at `vp`
+(defn jit-emit-veneer! [(vp (ptr u8)) (tgt i64)] (-> i64)
+  (do (jit-st32! (index vp 0)  (a64-movz 16 (iand tgt 65535) 0))
+      (jit-st32! (index vp 4)  (a64-movk 16 (iand (ishr tgt 16) 65535) 1))
+      (jit-st32! (index vp 8)  (a64-movk 16 (iand (ishr tgt 32) 65535) 2))
+      (jit-st32! (index vp 12) (a64-movk 16 (iand (ishr tgt 48) 65535) 3))
+      (jit-st32! (index vp 16) (jit-br-x16))
+      0))
+
+; ---- apply one relocation ------------------------------------------------------
+; loc = the fixup address, tgt = the resolved target address (already redirected to
+; a veneer where one was needed).
+(defn jit-patch! [(loc (ptr u8)) (tgt (ptr i8)) (rtype i64)] (-> (Result i64 (slice u8)))
+  (let [p (cast i64 loc) (mut s) (cast i64 tgt)]
+    (if (icmp-eq rtype (reloc-branch26))
+        (let [w (jit-ld32 loc)
+              delta (isub (load s) p)]
+          (if (or (icmp-ge delta (branch26-max))
+                  (icmp-lt delta (isub 0 (branch26-max))))
+              (Err [i64 (slice u8)] "jit: branch target out of range even after veneering (compiler bug)")
+            (let [imm (iand (ishr delta 2) 67108863)]        ; 0x3ffffff
+              (jit-st32! loc (ior (iand w (jit-not 67108863)) imm))
+              (Ok [i64 (slice u8)] 0))))
+      (if (icmp-eq rtype (reloc-page21))
+          (let [w (jit-ld32 loc)
+                delta (isub (iand (load s) (jit-not 4095)) (iand p (jit-not 4095)))
+                imm (ishr delta 12)]
+            ; adrp carries a signed 21-bit PAGE count: +/-4GB. Taking the ADDRESS of
+            ; an undefined symbol (rather than calling it) could land outside that,
+            ; and the veneer trick does not apply — a veneer redirects a branch, not
+            ; an address computation. Fail loudly; reaching this means the fix is a
+            ; GOT-style indirection, not a wider mask.
+            (if (or (icmp-gt imm 1048575) (icmp-lt imm -1048576))
+                (Err [i64 (slice u8)] "jit: adrp page offset out of +/-4GB range for an in-memory symbol")
+              (let [immlo (iand imm 3)
+                    immhi (iand (ishr imm 2) 524287)       ; 0x7ffff
+                    keep (iand w (jit-not (ior (ishl 3 29) (ishl 524287 5))))]
+                (jit-st32! loc (ior keep (ior (ishl immlo 29) (ishl immhi 5))))
+                (Ok [i64 (slice u8)] 0))))
+        (if (icmp-eq rtype (reloc-pageoff12))
+            (let [w (jit-ld32 loc)
+                  imm (iand (load s) 4095)]
+              (jit-st32! loc (ior (iand w (jit-not (ishl 4095 10))) (ishl imm 10)))
+              (Ok [i64 (slice u8)] 0))
+          (if (icmp-eq rtype (reloc-unsigned))
+              (do (jit-st64! loc (iadd (load s) (jit-ld64 loc)))
+                  (Ok [i64 (slice u8)] 0))
+            (Err [i64 (slice u8)] "jit: unhandled arm64 relocation type in the in-memory loader")))))))
+
+; ---- the loader ----------------------------------------------------------------
+(defn jit-load [(a (ptr Allocator)) (o (mut MObj))] (-> (Result JitImage (slice u8)))
+  (block :jit
+    (let [nsect (al-len [MSect]  (load (field o sects)))
+          nsym  (al-len [MSym]   (load (field o syms)))
+          nrel  (al-len [MReloc] (load (field o relocs)))
+          offs  (unwrap-ptr [i64] (alloc-slice [i64] a (if (icmp-gt nsect 0) nsect 1)))
+          vidx  (unwrap-ptr [i64] (alloc-slice [i64] a (if (icmp-gt nsym 0) nsym 1)))
+          addrs (unwrap-ptr [(ptr i8)] (alloc-slice [(ptr i8)] a (if (icmp-gt nsym 0) nsym 1)))
+          (mut cur) 0
+          (mut nven) 0
+          (mut i) 0]
+
+      ; nothing placed, nothing veneered yet
+      (loop (if (icmp-ge (load i) nsect) (break)
+        (do (store! (index offs (load i)) -1) (store! i (iadd (load i) 1)))))
+      (store! i 0)
+      (loop (if (icmp-ge (load i) nsym) (break)
+        (do (store! (index vidx (load i)) -1) (store! i (iadd (load i) 1)))))
+
+      ; plan a veneer for every undefined symbol that something branches to
+      (store! i 0)
+      (loop (if (icmp-ge (load i) nrel) (break)
+        (do (let [r (al-at [MReloc] (field o relocs) (load i))
+                  sym (load (field r sym))]
+              (if (and (icmp-eq (load (field r rtype)) (reloc-branch26))
+                       (and (icmp-ge sym 0) (icmp-lt sym nsym)))
+                  (let [sy (al-at [MSym] (field o syms) sym)]
+                    (if (and (icmp-eq (load (field sy sect)) 0)
+                             (icmp-lt (load (index vidx sym)) 0))
+                        (do (store! (index vidx sym) (load nven))
+                            (store! nven (iadd (load nven) 1)))
+                      0))
+                0))
+            (store! i (iadd (load i) 1)))))
+
+      ; pass 1 — __TEXT sections, in order
+      (store! i 0)
+      (loop (if (icmp-ge (load i) nsect) (break)
+        (do (let [s (al-at [MSect] (field o sects) (load i))]
+              (if (and (jit-loadable? s) (jit-is-text? s))
+                  (do (store! cur (jit-align-up (load cur) (ishl 1 (load (field s align)))))
+                      (store! (index offs (load i)) (load cur))
+                      (store! cur (iadd (load cur) (al-len [u8] (load (field s buf))))))
+                0))
+            (store! i (iadd (load i) 1)))))
+
+      ; the veneer area sits at the end of text, so it is covered by the same R+X flip
+      (store! cur (jit-align-up (load cur) 4))
+      (let [venbase (load cur)]
+        (store! cur (iadd (load cur) (imul (load nven) (veneer-bytes))))
+
+        ; the text/data boundary is a page boundary: mprotect works in whole pages,
+        ; and making a data page executable (or a text page writable) defeats W^X.
+        (let [textsz (jit-align-up (load cur) (page-size))]
+          (store! cur textsz)
+
+          ; pass 2 — everything else that is loadable
+          (store! i 0)
+          (loop (if (icmp-ge (load i) nsect) (break)
+            (do (let [s (al-at [MSect] (field o sects) (load i))]
+                  (if (and (jit-loadable? s) (not (jit-is-text? s)))
+                      (do (store! cur (jit-align-up (load cur) (ishl 1 (load (field s align)))))
+                          (store! (index offs (load i)) (load cur))
+                          (store! cur (iadd (load cur) (al-len [u8] (load (field s buf))))))
+                    0))
+                (store! i (iadd (load i) 1)))))
+
+          (let [total (jit-align-up (if (icmp-gt (load cur) 0) (load cur) 1) (page-size))
+                base (mmap (cast (ptr i8) 0) total
+                           (cast i32 (prot-rw)) (cast i32 (map-priv)) (cast i32 -1) 0)]
+            (if (or (icmp-eq (cast i64 base) 0) (icmp-eq (cast i64 base) -1))
+                (return-from :jit (Err [JitImage (slice u8)] "jit: mmap of the comptime image failed")) 0)
+
+            ; copy each placed section in
+            (store! i 0)
+            (loop (if (icmp-ge (load i) nsect) (break)
+              (do (let [off (load (index offs (load i)))]
+                    (if (icmp-ge off 0)
+                        (let [s (al-at [MSect] (field o sects) (load i))
+                              src (slice-data (al-slice [u8] (load (field s buf))))
+                              n (al-len [u8] (load (field s buf)))
+                              dst (cast (ptr u8) (index base off))
+                              (mut k) 0]
+                          (loop (if (icmp-ge (load k) n) (break)
+                            (do (store! (index dst (load k)) (load (index src (load k))))
+                                (store! k (iadd (load k) 1))))))
+                      0))
+                  (store! i (iadd (load i) 1)))))
+
+            ; resolve every symbol to a final address
+            (let [(mut syms) (al-new [JitSym] a)]
+              (store! i 0)
+              (loop (if (icmp-ge (load i) nsym) (break)
+                (do (let [sy (al-at [MSym] (field o syms) (load i))
+                          sect (load (field sy sect))]
+                      (if (icmp-eq sect 0)
+                          ; undefined: it must already be somewhere in this process
+                          (let [fp (dlsym (jit-rtld-default) (jit-sym-cstr a (load (field sy name))))]
+                            (if (icmp-eq (cast i64 fp) 0)
+                                (do (munmap base total)
+                                    (return-from :jit
+                                      (Err [JitImage (slice u8)]
+                                           (jit-cat a (jit-cat a "jit: undefined symbol '" (load (field sy name)))
+                                                    "' is not present in the compiler process"))))
+                              0)
+                            (store! (index addrs (load i)) fp))
+                        (let [off (load (index offs (isub sect 1)))]
+                          (if (icmp-lt off 0)
+                              (do (munmap base total)
+                                  (return-from :jit
+                                    (Err [JitImage (slice u8)]
+                                         (jit-cat a (jit-cat a "jit: symbol '" (load (field sy name)))
+                                                  "' lives in a section that was not loaded"))))
+                            0)
+                          (let [ad (index base (iadd off (load (field sy off))))]
+                            (store! (index addrs (load i)) ad)
+                            (let [js (alloc-stack JitSym)]
+                              (store! (field js name) (load (field sy name)))
+                              (store! (field js addr) ad)
+                              (al-push! [JitSym] (mut syms) (load js)))))))
+                    (store! i (iadd (load i) 1)))))
+
+              ; emit the veneers now that the far addresses are known
+              (store! i 0)
+              (loop (if (icmp-ge (load i) nsym) (break)
+                (do (let [v (load (index vidx (load i)))]
+                      (if (icmp-ge v 0)
+                          (jit-emit-veneer!
+                            (cast (ptr u8) (index base (iadd venbase (imul v (veneer-bytes)))))
+                            (cast i64 (load (index addrs (load i)))))
+                        0))
+                    (store! i (iadd (load i) 1)))))
+
+              ; apply relocations
+              (store! i 0)
+              (loop (if (icmp-ge (load i) nrel) (break)
+                (do (let [r (al-at [MReloc] (field o relocs) (load i))
+                          rsect (load (field r sect))
+                          sym (load (field r sym))]
+                      ; DWARF fixups encode a negative section ordinal in `sym`; those
+                      ; sections are never loaded, so there is nothing to patch.
+                      (if (or (icmp-lt sym 0) (icmp-ge sym nsym))
+                          0
+                        (let [soff (load (index offs (isub rsect 1)))]
+                          (if (icmp-lt soff 0) 0
+                            (let [loc (cast (ptr u8) (index base (iadd soff (load (field r off)))))
+                                  v (load (index vidx sym))
+                                  tgt (if (and (icmp-ge v 0)
+                                               (icmp-eq (load (field r rtype)) (reloc-branch26)))
+                                          (index base (iadd venbase (imul v (veneer-bytes))))
+                                        (load (index addrs sym)))]
+                              (match (jit-patch! loc tgt (load (field r rtype)))
+                                (Err [m] (do (munmap base total)
+                                             (return-from :jit (Err [JitImage (slice u8)] m))))
+                                (Ok [_] 0)))))))
+                    (store! i (iadd (load i) 1)))))
+
+              ; text becomes read-execute; data stays writable
+              (if (icmp-gt textsz 0)
+                  (do (if (icmp-ne (cast i64 (mprotect base textsz (cast i32 (prot-rx)))) 0)
+                          (do (munmap base total)
+                              (return-from :jit
+                                (Err [JitImage (slice u8)] "jit: mprotect of the comptime text pages failed")))
+                        0)
+                      (sys_icache_invalidate base textsz))
+                0)
+
+              (let [img (alloc-stack JitImage)]
+                (store! (field img base) base)
+                (store! (field img size) total)
+                (store! (field img syms) (load syms))
+                (Ok [JitImage (slice u8)] (load img))))))))))
+
+; look a symbol up in a loaded image; null when absent. Accepts the C name either
+; with or without the Mach-O leading underscore.
+(defn jit-lookup [(img (ptr JitImage)) (name (slice u8))] (-> (ptr i8))
+  (let [n (al-len [JitSym] (load (field img syms))) (mut i) 0 (mut r) (cast (ptr i8) 0)]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [sy (al-at [JitSym] (field img syms) (load i))
+                nm (load (field sy name))]
+            (if (or (str-eq nm name)
+                    (and (and (icmp-gt (slice-len nm) 0)
+                              (icmp-eq (cast i64 (slice-get nm 0)) \_))
+                         (str-eq (subslice nm 1 (slice-len nm)) name)))
+                (do (store! r (load (field sy addr))) (break))
+              0))
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; release an image. Only safe once nothing can call into it again.
+(defn jit-free! [(img (ptr JitImage))] (-> i64)
+  (do (if (icmp-ne (cast i64 (load (field img base))) 0)
+          (cast i64 (munmap (load (field img base)) (load (field img size))))
+        0)
+      (store! (field img base) (cast (ptr i8) 0))
+      0))

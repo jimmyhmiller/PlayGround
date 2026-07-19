@@ -39,5 +39,8 @@ name = "livetype-bench"
 path = "src/bench.rs"
 
 [workspace]
-members = ["crates/livetype-core"]
+# `livetype-wasm` is a member but is never built for the host: it targets
+# wasm32-unknown-unknown (see wasm/build.sh) and depends only on the LLVM-free
+# core, so a host `cargo test --workspace` neither needs nor builds it.
+members = ["crates/livetype-core", "crates/livetype-wasm"]
 

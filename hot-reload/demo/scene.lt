@@ -1,0 +1,65 @@
+// The scene the browser demo boots with — and the source you edit while it
+// runs. The foreign interface (`Canvas`, `open_canvas`, `clear`, `circle`) is
+// already declared and bound by the host.
+//
+// `cv` and `world` are `letonce` globals: the canvas and the particles are
+// created exactly once and survive every later edit. Everything else is code,
+// and all of it can be redefined while `main` is mid-flight.
+
+struct Particle { x: i64, y: i64, vx: i64, vy: i64 }
+
+fn seed() -> [Particle] {
+    let ps: [Particle] = [];
+    let i = 0;
+    while i < 18 {
+        let a = i - (i / 4) * 4;
+        let b = i - (i / 3) * 3;
+        push(ps, Particle { x: 40 + i * 31, y: 50 + i * 17, vx: 2 + a, vy: 2 + b });
+        i = i + 1;
+    }
+    ps
+}
+
+letonce cv = open_canvas();
+letonce world = seed();
+
+// The two knobs the demo edits first: how big a particle is, and what colour.
+// Both are ordinary functions, so redefining either lands on the next call.
+fn radius(p: Particle) -> i64 { 14 }
+
+fn tint(p: Particle) -> i64 { 205 }
+
+fn advance(p: Particle) -> Particle {
+    let nx = p.x + p.vx;
+    let ny = p.y + p.vy;
+    let nvx = p.vx;
+    let nvy = p.vy;
+    if nx < 14 { nx = 14; nvx = -nvx; }
+    if nx > 626 { nx = 626; nvx = -nvx; }
+    if ny < 14 { ny = 14; nvy = -nvy; }
+    if ny > 386 { ny = 386; nvy = -nvy; }
+    Particle { x: nx, y: ny, vx: nvx, vy: nvy }
+}
+
+fn on_frame() -> () {
+    clear(cv);
+    let i = 0;
+    while i < len(world) {
+        let p = advance(world[i]);
+        world[i] = p;
+        circle(cv, p.x, p.y, radius(p), tint(p));
+        i = i + 1;
+    }
+}
+
+// The animation is one long-running computation. The host steps it; `yield`
+// marks a frame boundary. Edits land between any two instructions of this
+// loop — the loop itself is never restarted.
+fn main() -> i64 {
+    let running = true;
+    while running {
+        on_frame();
+        yield;
+    }
+    0
+}

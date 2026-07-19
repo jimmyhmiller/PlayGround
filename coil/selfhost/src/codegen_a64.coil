@@ -2892,10 +2892,14 @@
   0)
 
 ; ============================ driver =========================================
-(defn cga64-build-object [(a (ptr Allocator)) (mp (ptr Program)) (objpath (ptr i8))
-                          (mainpath (slice u8)) (compdir (slice u8))
-                          (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))
-                          (emit-dwarf bool)] (-> i64)
+; Build the program's Mach-O object IN MEMORY. Serializing it to a file (the AOT
+; path) and loading it straight into executable memory (jit.coil, the comptime and
+; metaprogram path) are both thin wrappers over this — the codegen happens once,
+; here, so the two paths can never drift.
+(defn cga64-build-mobj [(a (ptr Allocator)) (mp (ptr Program))
+                        (mainpath (slice u8)) (compdir (slice u8))
+                        (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))
+                        (emit-dwarf bool)] (-> MObj)
   (let [g (alloc-stack Cga)]
     (store! (field g a) a)
     (store! (field g structs) (al-new [GStruct] a))
@@ -2976,18 +2980,26 @@
                                  (load (field r off)) (isub 0 (load (field g text)))
                                  (reloc-unsigned) false 3))
               (store! i (iadd (load i) 1))))))) 0)
-    (let [bytes (macho-write (mut (field g obj)))
-          fd (cga64.creat objpath 420)]
-      (if (icmp-lt fd 0) (cga-fail "cannot create object file") 0)
-      (let [total (al-len [u8] (load bytes)) (mut off) 0]
-        (loop (if (icmp-ge (load off) total) (break)
-          (do (let [wrote (cga64.write (cast i32 fd)
-                            (cast (ptr i8) (index (slice-data (al-slice [u8] (load bytes))) (load off)))
-                            (isub total (load off)))]
-                (if (icmp-le wrote 0) (cga-fail "object write failed") 0)
-                (store! off (iadd (load off) wrote)))))))
-      (cga64.close (cast i32 fd))
-      0)))
+    (load (field g obj))))
+
+; serialize a built object to disk — the AOT path.
+(defn cga64-build-object [(a (ptr Allocator)) (mp (ptr Program)) (objpath (ptr i8))
+                          (mainpath (slice u8)) (compdir (slice u8))
+                          (paths (ptr (ArrayList (slice u8)))) (texts (ptr (ArrayList (slice u8))))
+                          (emit-dwarf bool)] (-> i64)
+  (let [(mut o) (cga64-build-mobj a mp mainpath compdir paths texts emit-dwarf)
+        bytes (macho-write (mut o))
+        fd (cga64.creat objpath 420)]
+    (if (icmp-lt fd 0) (cga-fail "cannot create object file") 0)
+    (let [total (al-len [u8] (load bytes)) (mut off) 0]
+      (loop (if (icmp-ge (load off) total) (break)
+        (do (let [wrote (cga64.write (cast i32 fd)
+                          (cast (ptr i8) (index (slice-data (al-slice [u8] (load bytes))) (load off)))
+                          (isub total (load off)))]
+              (if (icmp-le wrote 0) (cga-fail "object write failed") 0)
+              (store! off (iadd (load off) wrote)))))))
+    (cga64.close (cast i32 fd))
+    0))
 
 ; ============================ DWARF collection ===============================
 ; rendered, memo-stable name for a type's DIE

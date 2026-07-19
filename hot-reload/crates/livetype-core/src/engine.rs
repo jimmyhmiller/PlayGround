@@ -206,8 +206,9 @@ pub enum Turn {
 /// Auto-spawned actors (trampolines, `letonce` initializers) take tids from
 /// here so they can never collide with the dense `0..n` tids
 /// [`Engine::run_threads`] hands its workers (which tests use as `Send`
-/// targets).
-const AUTO_TID_BASE: usize = 1 << 32;
+/// targets). On 32-bit targets (wasm) the gap is narrower but still far above
+/// any plausible worker count.
+const AUTO_TID_BASE: usize = if usize::BITS >= 64 { 1 << 32 } else { 1 << 24 };
 
 /// How many interpreted instructions may run under one world read guard before
 /// the engine lets pending edits and stop-the-world GC in. Explicit safe points

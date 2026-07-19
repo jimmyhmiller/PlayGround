@@ -1,0 +1,10 @@
+// SCENARIO 2 — evolve a struct under live data.
+//
+// `Particle` gains a field. The 18 particles already on screen were built
+// under version 1 and are still moving; because the new field has a default,
+// each one migrates automatically the next time a field of it is read. No
+// reseeding, no restart — the same objects gain a property.
+
+struct Particle { x: i64, y: i64, vx: i64, vy: i64, hue: i64 = 20 }
+
+fn tint(p: Particle) -> i64 { p.hue + p.x / 3 }

@@ -35,6 +35,20 @@ functions and publishes broken entries for invalid ones while retaining old code
 for pinned frames. Entering a broken function raises a condition before any of
 its instructions execute.
 
+Brokenness propagates through the call graph to a fixpoint: a caller of a broken
+function is itself published broken, so a frame traps at the outermost boundary
+*before* performing any of the effects beneath it, rather than half-executing and
+failing partway down.
+
+Revival is the exact inverse, and runs on every successful install. Being broken
+is a verdict about the *world*, not about a function's code, so repairing the
+cause makes its callers valid again: each currently-broken function has its last
+Ready code re-verified against the new world and is republished Ready if it now
+checks out, looping to a fixpoint because reviving a callee can revive its
+callers. Fixing the root cause is therefore sufficient — a repair never requires
+re-stating untouched callers just to un-break them. Code that is broken on its
+own merits fails verification again and stays broken.
+
 Old code can be reclaimed when no frame identifies its version. Later optimized
 direct calls must remain within one immutable code-version group; every call
 that may cross a live boundary goes through an entry slot.

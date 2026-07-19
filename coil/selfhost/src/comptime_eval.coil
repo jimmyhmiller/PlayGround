@@ -32,7 +32,9 @@
 (import "check.coil" :use *)        ; type-map-lookup, Diag, derr
 (import "comptime.coil" :use *)     ; CtCtx, fold-expr(-list), build-value, closure-*, CtVal, trunc, diag-some?, set-comptime-fold-hook!
 (import "mono.coil" :use *)         ; monomorphize, sort-mono-program, drop-code-funcs
-(import "metaengine.coil" :use *)   ; meta-build-box, me-unique, me-link-flags-str
+(import "metaengine.coil" :use *)   ; meta-build-box/meta-mobj-box, me-unique, me-link-flags-str
+(import "macho.coil" :use *)        ; MObj
+(import "jit.coil" :use *)          ; jit-load / jit-lookup — the in-memory path
 
 (extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
 (extern dlsym  :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
@@ -134,22 +136,57 @@
                   (let [h (dlopen (slice->cstr a tmp-s) 2)]
                     (if (icmp-eq (cast i64 h) 0)
                         (Err [(ptr i8) Diag] (derr "comptime: dlopen of the compiled comptime dylib failed"))
-                      (Ok [(ptr i8) Diag] h))))))))))))
+                      ; the image stays mapped for the life of the process, so the file
+                      ; itself is dead weight — drop it rather than litter /tmp with one
+                      ; dylib per comptime site. (Unlike the METAPROGRAM dylibs, which are
+                      ; deliberately kept: they are content-hashed into ~/.cache/coil.)
+                      (do (unlink (slice->cstr a tmp-s))
+                          (Ok [(ptr i8) Diag] h)))))))))))))
 
-; build the dylib, dlsym the entry, run it, reconstruct a literal.
-(defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
-  (do
+; ---- reaching the compiled entry ------------------------------------------------
+; When the backend can hand the object back IN MEMORY (the arm64 backend registers
+; meta-build-mobj), monomorphize and load it straight into executable pages — no
+; temp .o, no fork of `cc -dynamiclib`, no dlopen. The LLVM backend emits only via
+; LLVMTargetMachineEmitToFile and has no MObj to give, so under LLVM this falls back
+; to building a real dylib. The CODEGEN is the same either way; only the route into
+; memory differs.
+;
+; The image (or dylib) is deliberately left mapped. An aggregate readback can point
+; at bytes inside it — a string literal lives in the image's own data — so unmapping
+; here would dangle the value just folded.
+(defn cte-entry [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result (ptr i8) Diag))
+  (if (meta-mobj-available?)
+      (try (do
+        (let [mp (try! (monomorphize a sub))]
+          (sort-mono-program a mp)
+          (let [(mut o) (call-ptr (load (field (meta-mobj-box) fp)) a mp)]
+            (match (jit-load a (mut o))
+              (Err [m] (Err [(ptr i8) Diag] (derr m)))
+              (Ok [img0]
+                (let [img (alloc-stack JitImage)]
+                  (store! img img0)
+                  (let [fp (jit-lookup img "coil_ct_thunk")]
+                    (if (icmp-eq (cast i64 fp) 0)
+                        (Err [(ptr i8) Diag] (derr "comptime: compiled entry missing from the in-memory image (compiler bug)"))
+                      (Ok [(ptr i8) Diag] fp))))))))))
     (match (cte-build-dylib a sub)
-      (Err [d] (cte-box a (Err [Expr Diag] d)))
+      (Err [d] (Err [(ptr i8) Diag] d))
       (Ok [h]
         (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
           (if (icmp-eq (cast i64 fp) 0)
-              (cte-box a (Err [Expr Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)")))
-            (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
-                  cv (cte-invoke fp kind tp)]
-              (match (build-value a (new-cell cv) lo hi src ctxt cx)
-                (Err [d] (cte-box a (Err [Expr Diag] d)))
-                (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
+              (Err [(ptr i8) Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)"))
+            (Ok [(ptr i8) Diag] fp)))))))
+
+; run the entry, reconstruct a literal from the scalar it returns.
+(defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (match (cte-entry a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [fp]
+      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
+            cv (cte-invoke fp kind tp)]
+        (match (build-value a (new-cell cv) lo hi src ctxt cx)
+          (Err [d] (cte-box a (Err [Expr Diag] d)))
+          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))
 
 ; ============================ AGGREGATE readback (interp deletion step 3a) =========
 ; The scalar path above reads int/bool/f64 out of the return register. An AGGREGATE
@@ -331,27 +368,24 @@
     (store! (field e lo) -1) (store! (field e hi) -1) (store! (field e source) -1) (store! (field e ctxt) 0)
     (al-push! [ExportC] (load (field sub exports)) (load e)))
   0)
-; build the dylib, dlsym the entry, run it write-through into a heap buffer, read back.
+; run the entry write-through into a heap buffer, then read the aggregate back.
 (defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
-  (match (cte-build-dylib a sub)
+  (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
-    (Ok [h]
-      (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
-        (if (icmp-eq (cast i64 fp) 0)
-            (cte-box a (Err [Expr Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)")))
-          (let [tp (alloc-stack Type)] (store! tp t0)
-            (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
-              (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
-              (Some [buf]
-                (do
-                  (call-ptr (cast (fnptr c [(ptr i8)] i64) fp) buf)
-                  (match (cte-read cx tp buf 0 a)
-                    (None [] (cast (ptr i8) 0))
-                    (Some [cv]
-                      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
-                        (match (build-value a (new-cell cv) lo hi src ctxt cx)
-                          (Err [d] (cte-box a (Err [Expr Diag] d)))
-                          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
+    (Ok [fp]
+      (let [tp (alloc-stack Type)] (store! tp t0)
+        (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+          (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
+          (Some [buf]
+            (do
+              (call-ptr (cast (fnptr c [(ptr i8)] i64) fp) buf)
+              (match (cte-read cx tp buf 0 a)
+                (None [] (cast (ptr i8) 0))
+                (Some [cv]
+                  (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+                    (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                      (Err [d] (cte-box a (Err [Expr Diag] d)))
+                      (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))
 
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))

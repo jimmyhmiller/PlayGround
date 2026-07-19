@@ -175,3 +175,63 @@ fn edit_a_tight_loop_with_no_yields_between_steps() {
     assert_eq!(*out.last().unwrap(), Value::I64(142), "later iterations ran the edit");
     assert!(out.contains(&Value::I64(42)) && out.contains(&Value::I64(142)), "switched mid-loop");
 }
+
+#[test]
+fn a_repair_revives_transitive_callers_to_a_fixpoint() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        enum Kind { A, B }
+        fn leaf(k: Kind) -> i64 { match k { A => 1, B => 2 } }
+        fn mid(k: Kind) -> i64 { leaf(k) + 10 }
+        fn top() -> i64 {
+            let k = Kind::A;
+            mid(k) + 100
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.call("top", vec![]).unwrap(), Value::I64(111));
+
+    // Growing the enum breaks `leaf`'s match, and brokenness propagates up the
+    // chain: `mid` and `top` go Broken too.
+    s.eval("enum Kind { A, B, C }").unwrap();
+    assert!(s.call("top", vec![]).is_err(), "the whole chain is broken");
+
+    // Repair ONLY the root cause. `mid` and `top` are untouched — they were
+    // never wrong — so they must come back on their own.
+    s.eval("fn leaf(k: Kind) -> i64 { match k { A => 1, B => 2, C => 3 } }")
+        .unwrap();
+    assert_eq!(
+        s.call("top", vec![]).unwrap(),
+        Value::I64(111),
+        "fixing the callee revived its transitive callers"
+    );
+}
+
+#[test]
+fn a_function_broken_on_its_own_merits_is_not_revived() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        enum Kind { A, B }
+        fn leaf(k: Kind) -> i64 { match k { A => 1, B => 2 } }
+        fn top() -> i64 {
+            let k = Kind::A;
+            leaf(k)
+        }
+    "#,
+    )
+    .unwrap();
+    s.eval("enum Kind { A, B, C }").unwrap();
+    assert!(s.call("top", vec![]).is_err());
+
+    // An unrelated good install triggers revalidation, but `leaf` still fails
+    // verification on its own terms, so it — and its caller — stay broken.
+    s.eval("fn unrelated() -> i64 { 7 }").unwrap();
+    assert!(
+        s.call("top", vec![]).is_err(),
+        "a genuinely non-exhaustive match is not silently revived"
+    );
+    assert_eq!(s.call("unrelated", vec![]).unwrap(), Value::I64(7));
+}

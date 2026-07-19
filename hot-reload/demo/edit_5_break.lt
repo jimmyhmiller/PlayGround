@@ -1,0 +1,21 @@
+// SCENARIO 5 — add a variant; the stale match is marked Broken AT INSTALL.
+//
+// `Kind` gains `Bar`, so `radius`'s two-arm match no longer covers the enum.
+// It is not left to fail later and it does not silently fall through: the
+// engine re-verifies every function whose match covers `Kind` and publishes
+// `radius` as Broken — and brokenness propagates to its callers, so `on_frame`
+// is published Broken too.
+//
+// The running animation therefore FREEZES at `main`'s next call to `on_frame`:
+// at the boundary, before the frame performs a single effect. Nothing is drawn
+// half-way. The canvas keeps showing the last good frame, `main`'s loop is
+// suspended mid-iteration with its registers intact, and it stays that way
+// until a repair arrives.
+
+enum Kind { Dot, Ring, Bar }
+
+fn kind_of(p: Particle) -> Kind {
+    if p.x > 430 { return Kind::Bar; }
+    if p.x > 320 { return Kind::Ring; }
+    Kind::Dot
+}

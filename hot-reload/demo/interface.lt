@@ -1,0 +1,8 @@
+// The host's FFI header. Evaluated first, on its own: declaring the foreign
+// type and functions assigns their ids but runs nothing, which lets the host
+// bind the native implementations before any `letonce` initializer fires.
+
+foreign type Canvas;
+foreign fn open_canvas() -> Canvas;
+foreign fn clear(c: Canvas) -> ();
+foreign fn circle(c: Canvas, x: i64, y: i64, r: i64, hue: i64) -> ();
