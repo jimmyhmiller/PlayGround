@@ -71,6 +71,23 @@ resource, so edits change code and never the running world.
 - **Load full scene** / **Reset to original** — restore the shipped source.
   Both ask first if you have unsaved changes in the editor.
 
+### Two ways a program freezes, repaired differently
+
+A **Broken function** is repaired by editing: install a good version and thaw.
+Brokenness is a verdict about the world, so fixing the cause revives everything
+that depended on it (step 6 of the walkthrough).
+
+A **trapped operation** — `x / 0`, an index out of bounds — is not repairable
+that way. The suspended frame is pinned to the version it is already executing,
+so a new version only affects the *next* call and thawing simply re-runs the
+same division. What resumes it is supplying the value the instruction could not
+produce; the frame continues from that instruction with the value you gave it.
+Scrub a divisor to zero and the frozen panel switches to asking for one.
+
+Both halves are usually needed: the supplied value unsticks the frame that is
+already suspended, and the edit stops the next call from tripping over the same
+thing.
+
 ### The editor
 
 A transparent `<textarea>` over a syntax-highlighted `<pre>`, with no editor

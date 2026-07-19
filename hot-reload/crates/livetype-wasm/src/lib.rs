@@ -14,7 +14,7 @@
 //! observable behaviour.
 
 use livetype_core::{
-    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Value,
+    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Type, Value,
     Version, World,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -305,6 +305,58 @@ impl Demo {
         self.last_condition.clear();
     }
 
+    /// The type a frozen actor's trap wants handed back, or `""` if this pause
+    /// is not the value-resumable kind.
+    ///
+    /// This is the difference between the two ways a program freezes. A Broken
+    /// function is repaired by *editing*: install a good version and thaw. A
+    /// trapped operation — `x / 0`, an out-of-bounds index — cannot be repaired
+    /// that way, because the suspended frame is pinned to the version it is
+    /// already executing; a new version only affects the *next* call, and
+    /// thawing just re-runs the same division. What resumes it is supplying the
+    /// value the instruction failed to produce.
+    #[wasm_bindgen(getter)]
+    pub fn resumable_type(&self) -> String {
+        match self.session.engine.pause_expected(&self.actor) {
+            Some(Type::I64) => "i64".into(),
+            Some(Type::F64) => "f64".into(),
+            Some(Type::Bool) => "bool".into(),
+            // Anything else is resumable in principle, but this host has no way
+            // to build the value from a text box.
+            Some(_) | None => String::new(),
+        }
+    }
+
+    /// Supply the value the trapped instruction could not produce, and resume.
+    /// The frame continues from that instruction with `text` as its result.
+    /// Returns `""`, or why the value was refused.
+    pub fn resume_with(&mut self, text: &str) -> String {
+        let value = match self.session.engine.pause_expected(&self.actor) {
+            Some(Type::I64) => match text.trim().parse::<i64>() {
+                Ok(n) => Value::I64(n),
+                Err(_) => return format!("`{text}` is not an i64"),
+            },
+            Some(Type::F64) => match text.trim().parse::<f64>() {
+                Ok(n) => Value::F64(n),
+                Err(_) => return format!("`{text}` is not an f64"),
+            },
+            Some(Type::Bool) => match text.trim() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                _ => return format!("`{text}` is not a bool"),
+            },
+            Some(ty) => return format!("cannot build a {ty:?} here"),
+            None => return "this pause is not resumable with a value".into(),
+        };
+        match self.session.engine.resume_with(&mut self.actor, value) {
+            Ok(()) => {
+                self.last_condition.clear();
+                String::new()
+            }
+            Err(e) => e,
+        }
+    }
+
     /// Throw the whole world away and boot a fresh one.
     pub fn reset(&mut self) -> Result<(), JsError> {
         *self = Demo::new()?;
@@ -506,13 +558,16 @@ impl Names {
         out
     }
 
-    fn name_of(&self, id: DefId) -> String {
+    fn lookup(&self, id: DefId) -> Option<String> {
         let digits = id.to_string();
         self.ids
             .iter()
             .find(|(d, _)| *d == digits)
             .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| format!("fn#{id}"))
+    }
+
+    fn name_of(&self, id: DefId) -> String {
+        self.lookup(id).unwrap_or_else(|| format!("fn#{id}"))
     }
 }
 
@@ -548,11 +603,17 @@ fn describe(world: &World, condition: &Condition) -> String {
                 from.0, to.0
             )
         }
-        Condition::RuntimeTypeError { function, pc, message } => format!(
-            "`{}` trapped at pc {pc} — {}",
-            names.name_of(*function),
-            names.humanize(message),
-        ),
+        // Traps raised by shared arithmetic helpers carry no location — they
+        // report function/pc 0 so the interpreted and compiled tiers agree —
+        // so there is no name to print. Inventing `fn#0` was worse than
+        // saying nothing.
+        Condition::RuntimeTypeError { function, pc, message } => {
+            let where_ = names.lookup(*function);
+            match where_ {
+                Some(name) => format!("`{name}` trapped at pc {pc} — {}", names.humanize(message)),
+                None => names.humanize(message),
+            }
+        }
     }
 }
 

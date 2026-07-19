@@ -58,6 +58,11 @@
   }
   body.frozen .frozen-veil { display: flex; }
   .frozen-veil strong { color: var(--warn); font-size: 15px; letter-spacing: 0.02em; }
+  .value-input {
+    background: #0b0f14; color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 7px; padding: 6px 9px; font-family: var(--mono); font-size: 13px;
+  }
+  .value-input:focus { outline: none; border-color: var(--accent); }
   .frozen-veil code {
     font-family: var(--mono); font-size: 11.5px; color: var(--ink);
     background: rgba(0,0,0,.45); padding: 6px 9px; border-radius: 6px;
@@ -211,8 +216,12 @@
       <div class="frozen-veil">
         <strong>FROZEN</strong>
         <code id="condition"></code>
-        <span class="hint">The last good frame is still on screen. Apply a repair, then resume.</span>
-        <button class="warn" id="thaw">Thaw &amp; resume</button>
+        <span class="hint" id="frozen-hint"></span>
+        <div class="row" style="justify-content:center" id="frozen-actions">
+          <input id="resume-value" class="value-input" style="display:none" size="8">
+          <button class="warn" id="thaw">Thaw &amp; resume</button>
+        </div>
+        <span class="hint" id="resume-error" style="color: var(--bad)"></span>
       </div>
       <div class="body">
         <div class="row" style="margin: 0 0 12px">
@@ -342,6 +351,7 @@ function advanceOneFrame() {
     document.body.classList.add("frozen");
     $("condition").textContent = demo.condition || "(frozen)";
     $("stat-status").textContent = "frozen";
+    renderFrozenActions();
   } else if (status === STATUS_DONE) {
     $("stat-status").textContent = "completed";
   } else if (status === STATUS_CAPPED) {
@@ -740,9 +750,48 @@ $("live-typing").addEventListener("change", (e) => {
   liveStatus(e.target.checked ? "live typing on — edits install as you type" : "");
   if (e.target.checked) applyLive("live");
 });
+// A program freezes in one of two ways, and they are repaired differently.
+//
+// A Broken function is repaired by EDITING: install a good version, then thaw.
+// A trapped operation — `x / 0`, an index out of bounds — cannot be, because
+// the suspended frame is pinned to the version it is already executing. A new
+// version only affects the next call, so thawing re-runs the same division and
+// traps again. What resumes it is handing back the value the instruction could
+// not produce.
+function renderFrozenActions() {
+  const wants = demo.resumable_type;
+  $("resume-value").style.display = wants ? "" : "none";
+  if (wants) {
+    $("resume-value").placeholder = wants;
+    $("thaw").textContent = `Supply ${wants} & resume`;
+    $("frozen-hint").textContent =
+      `This frame is pinned to the version that trapped, so editing the code only ` +
+      `changes the NEXT call. Hand back the ${wants} the instruction could not ` +
+      `produce and this frame carries on — but fix the source too, or the next ` +
+      `call trips over the same thing.`;
+  } else {
+    $("thaw").textContent = "Thaw & resume";
+    $("frozen-hint").textContent =
+      "The last good frame is still on screen. Apply a repair, then resume.";
+  }
+}
+
 $("thaw").addEventListener("click", () => {
+  $("resume-error").textContent = "";
+  if (demo.resumable_type) {
+    const error = demo.resume_with($("resume-value").value);
+    if (error) {
+      $("resume-error").textContent = error;
+      return;
+    }
+    message("Resumed: the trapped instruction produced the value you supplied.", "ok");
+    return;
+  }
   demo.thaw();
   message("Thawed — resuming at the instruction that trapped.", "ok");
+});
+$("resume-value").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("thaw").click(); }
 });
 $("reload-scene").addEventListener("click", () => {
   replaceSource(Demo.scene_source());
