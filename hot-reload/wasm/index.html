@@ -146,15 +146,28 @@
   ol.scenarios { list-style: none; margin: 0; padding: 0; }
   ol.scenarios li { border-bottom: 1px solid var(--edge); }
   ol.scenarios li:last-child { border-bottom: 0; }
-  ol.scenarios button {
+  ol.scenarios .scenario-head {
     width: 100%; text-align: left; background: none; border: 0; border-radius: 0;
     padding: 9px 14px; display: flex; gap: 10px; align-items: baseline;
   }
-  ol.scenarios button:hover { background: #1c222b; }
+  ol.scenarios .scenario-head:hover { background: #1c222b; }
   ol.scenarios .n {
     color: var(--dim); font-family: var(--mono); font-size: 11px; min-width: 1.2em;
   }
-  ol.scenarios button.active { background: rgba(98,176,255,.12); box-shadow: inset 2px 0 0 var(--accent); }
+  ol.scenarios .chev { margin-left: auto; color: var(--dim); font-size: 11px; }
+  ol.scenarios .scenario-head.active { background: rgba(98,176,255,.12); box-shadow: inset 2px 0 0 var(--accent); }
+
+  /* Each scenario carries its own source and applies from here, so opening one
+     never disturbs whatever you are working on in the editor. */
+  .scenario-body { display: none; padding: 0 14px 12px 40px; }
+  ol.scenarios li.open .scenario-body { display: block; }
+  pre.scenario-source {
+    margin: 0 0 10px; padding: 10px 11px; background: #0b0f14;
+    border: 1px solid var(--edge); border-radius: 7px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    white-space: pre-wrap; overflow-wrap: break-word; color: var(--ink);
+    max-height: 260px; overflow: auto;
+  }
 
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th {
@@ -215,7 +228,7 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>Scenarios — apply in order</h2>
+      <h2>Scenarios — apply in order, your source untouched</h2>
       <ol class="scenarios" id="scenarios"></ol>
     </div>
 
@@ -371,6 +384,17 @@ const isIdentStart = (c) => /[A-Za-z_]/.test(c);
 const isIdent = (c) => /[A-Za-z0-9_]/.test(c);
 const isDigit = (c) => c >= "0" && c <= "9";
 
+// Is the `-` about to be scanned a sign rather than a subtraction? It is unless
+// something that ends a value sits before it — so `x: -3` and `return -5` are
+// signs, while `a - 1` and `f(n) - 1` are subtractions.
+function isUnaryMinus(previous, src) {
+  if (!previous) return true;
+  if (previous.cls === "number" || previous.cls === "string") return false;
+  const text = src.slice(previous.start, previous.end);
+  if (previous.cls === "plain" && /[A-Za-z0-9_)\]]/.test(text)) return false;
+  return true;
+}
+
 function tokenize(src) {
   const tokens = [];
   // The last token that was not whitespace, so `fn NAME` can be recognised
@@ -389,7 +413,11 @@ function tokenize(src) {
       while (i < src.length && src[i] !== '"') i += src[i] === "\\" ? 2 : 1;
       i++;
       tokens.push({ cls: "string", start, end: Math.min(i, src.length) });
-    } else if (isDigit(c)) {
+    } else if (isDigit(c) || (c === "-" && isDigit(src[i + 1]) && isUnaryMinus(previous, src))) {
+      // A unary minus belongs TO the number. Left out, `-5` scans as `-` plus
+      // `5`, so a drag reads the value as positive: dragging right past zero
+      // makes it more negative, and the sign can never be crossed.
+      if (c === "-") i++;
       while (i < src.length && isDigit(src[i])) i++;
       // A float keeps its fractional part in one token so scrubbing never
       // splits `1.5` into `1` and `5`.
@@ -424,18 +452,20 @@ function tokenize(src) {
   return tokens;
 }
 
-function renderHighlight() {
-  const src = $("editor").value;
-  const tokens = tokenize(src);
+function highlightHtml(src, { scrubbable = false } = {}) {
   let html = "";
-  for (const t of tokens) {
+  for (const t of tokenize(src)) {
     const text = escapeHtml(src.slice(t.start, t.end));
     html += t.cls === "plain"
       ? text
-      : `<span class="tok-${t.cls}" data-s="${t.start}" data-e="${t.end}">${text}</span>`;
+      : `<span class="tok-${t.cls}"${scrubbable ? ` data-s="${t.start}" data-e="${t.end}"` : ""}>${text}</span>`;
   }
+  return html;
+}
+
+function renderHighlight() {
   // A trailing newline needs a spare line or the two layers scroll apart.
-  $("highlight").innerHTML = html + "\n";
+  $("highlight").innerHTML = highlightHtml($("editor").value, { scrubbable: true }) + "\n";
   syncScroll();
 }
 
@@ -592,8 +622,8 @@ function message(text, kind) {
   el.className = `show ${kind}`;
 }
 
-function applyEdit() {
-  const result = JSON.parse(demo.eval($("editor").value));
+function applyEdit(source = $("editor").value) {
+  const result = JSON.parse(demo.eval(source));
   if (!result.ok) {
     // A refused edit changes nothing: the program keeps running the last good
     // version. That is the point, so say so.
@@ -648,7 +678,7 @@ function replaceSource(text, note) {
   return true;
 }
 
-$("apply").addEventListener("click", applyEdit);
+$("apply").addEventListener("click", () => applyEdit());
 $("restart").addEventListener("click", restartWithSource);
 $("pause").addEventListener("click", () => {
   paused = !paused;
@@ -686,21 +716,44 @@ $("reset").addEventListener("click", () => {
 });
 
 // ── scenarios ──────────────────────────────────────────────────────────────
+// A scenario carries its own source and applies straight to the live world.
+// It deliberately does NOT load into the editor: the editor holds your work,
+// and the scenarios have to stay usable after you have been playing in it.
 const list = $("scenarios");
 for (let i = 0; i < Demo.scenario_count(); i++) {
   const li = document.createElement("li");
-  const b = document.createElement("button");
-  b.innerHTML = `<span class="n">${i + 1}</span><span>${escapeHtml(Demo.scenario_title(i))}</span>`;
-  b.addEventListener("click", () => {
-    if (replaceSource(Demo.scenario_source(i), "Loaded — read it, then Apply edit.")) {
-      markActive(i);
-    }
+
+  const head = document.createElement("button");
+  head.className = "scenario-head";
+  head.innerHTML =
+    `<span class="n">${i + 1}</span>` +
+    `<span>${escapeHtml(Demo.scenario_title(i))}</span>` +
+    `<span class="chev">▸</span>`;
+
+  const body = document.createElement("div");
+  body.className = "scenario-body";
+  const pre = document.createElement("pre");
+  pre.className = "scenario-source";
+  pre.innerHTML = highlightHtml(Demo.scenario_source(i));
+  const apply = document.createElement("button");
+  apply.className = "primary";
+  apply.textContent = "Apply this edit";
+  apply.addEventListener("click", () => {
+    applyEdit(Demo.scenario_source(i));
+    markActive(i);
   });
-  li.appendChild(b);
+  body.append(pre, apply);
+
+  head.addEventListener("click", () => {
+    const open = li.classList.toggle("open");
+    head.querySelector(".chev").textContent = open ? "▾" : "▸";
+  });
+
+  li.append(head, body);
   list.appendChild(li);
 }
 function markActive(index) {
-  [...list.querySelectorAll("button")].forEach((b, i) =>
+  [...list.querySelectorAll(".scenario-head")].forEach((b, i) =>
     b.classList.toggle("active", i === index));
 }
 

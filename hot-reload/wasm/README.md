@@ -28,6 +28,11 @@ than by eyeballing a canvas.
 
 ## The scenarios
 
+Each one carries its own source: expand it to read, then **Apply this edit** to
+install it straight into the live world. They never load into the editor, so
+they stay usable after you have been playing in it.
+
+
 | # | Edit | What it shows |
 |---|---|---|
 | 1 | `edit_1_radius.lt` | Redefining a function takes effect at the next call. The loop is never restarted. |

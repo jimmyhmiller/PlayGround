@@ -1,22 +1,31 @@
-// The scene the browser demo boots with — and the source you edit while it
-// runs. The foreign interface (`Canvas`, `open_canvas`, `clear`, `circle`) is
-// already declared and bound by the host.
-//
-// `cv` and `world` are `letonce` globals: the canvas and the particles are
-// created exactly once and survive every later edit. Everything else is code,
-// and all of it can be redefined while `main` is mid-flight.
+// Drag any number. Definitions are order-independent, so the knobs sit first.
 
-struct Particle { x: i64, y: i64, vx: i64, vy: i64 }
+fn radius(p: Particle) -> i64 { 14 }
 
-// Change the loop bound and restart the world to get that many particles.
+fn tint(p: Particle) -> i64 { 205 }
+
+// Bounce. Drag a wall in and the particles turn around somewhere new, live —
+// the bounds are just numbers in a function that is called every frame.
+fn advance(p: Particle) -> Particle {
+    let nx = p.x + p.vx;
+    let ny = p.y + p.vy;
+    let nvx = p.vx;
+    let nvy = p.vy;
+    if nx < 14 { nx = 14; nvx = -nvx; }
+    if nx > 626 { nx = 626; nvx = -nvx; }
+    if ny < 14 { ny = 14; nvy = -nvy; }
+    if ny > 386 { ny = 386; nvy = -nvy; }
+    Particle { x: nx, y: ny, vx: nvx, vy: nvy }
+}
+
+// How many particles there are, and where they start. `seed` is called ONCE, by
+// the `letonce` below — so dragging these changes nothing until you press
+// "Restart world with this source". That is the point of `letonce`: your world
+// survives every edit to the code around it.
 //
 // Position wraps the canvas by a stride coprime to its size, so every particle
 // lands somewhere different (600 distinct spots before any repeat) and all of
-// them start ON screen. Two earlier layouts got this wrong in ways that made a
-// bigger count look like it had been ignored: a single diagonal put everything
-// past the first screenful off-canvas, where `advance` clamps it into a corner,
-// and a coarse grid gave only 48 slots with matching velocities, so the extras
-// sat exactly on top of each other forever.
+// them start on screen.
 fn seed() -> [Particle] {
     let ps: [Particle] = [];
     let i = 0;
@@ -34,26 +43,14 @@ fn seed() -> [Particle] {
     ps
 }
 
+struct Particle { x: i64, y: i64, vx: i64, vy: i64 }
+
+// The canvas and the particles are created exactly once and survive every later
+// edit. Everything else here is code, and all of it can be redefined while
+// `main` is mid-flight. (The foreign interface — `Canvas`, `open_canvas`,
+// `clear`, `circle` — is already declared and bound by the host.)
 letonce cv = open_canvas();
 letonce world = seed();
-
-// The two knobs the demo edits first: how big a particle is, and what colour.
-// Both are ordinary functions, so redefining either lands on the next call.
-fn radius(p: Particle) -> i64 { 14 }
-
-fn tint(p: Particle) -> i64 { 205 }
-
-fn advance(p: Particle) -> Particle {
-    let nx = p.x + p.vx;
-    let ny = p.y + p.vy;
-    let nvx = p.vx;
-    let nvy = p.vy;
-    if nx < 14 { nx = 14; nvx = -nvx; }
-    if nx > 626 { nx = 626; nvx = -nvx; }
-    if ny < 14 { ny = 14; nvy = -nvy; }
-    if ny > 386 { ny = 386; nvy = -nvy; }
-    Particle { x: nx, y: ny, vx: nvx, vy: nvy }
-}
 
 fn on_frame() -> () {
     clear(cv);

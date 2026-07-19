@@ -176,6 +176,29 @@ fn edit_a_tight_loop_with_no_yields_between_steps() {
     assert!(out.contains(&Value::I64(42)) && out.contains(&Value::I64(142)), "switched mid-loop");
 }
 
+/// Items in one `eval` are installed as a batch, so nothing has to be declared
+/// before it is used. The browser demo's scene leans on this to put the
+/// numbers worth dragging at the top of the file, above the definitions they
+/// depend on.
+#[test]
+fn definitions_in_one_eval_are_order_independent() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        fn top() -> i64 { mid() + shape().v }
+        letonce cached = mid();
+        fn mid() -> i64 { pick(Kind::B) }
+        fn pick(k: Kind) -> i64 { match k { A => 1, B => 40 } }
+        fn shape() -> Holder { Holder { v: 2 } }
+        struct Holder { v: i64 }
+        enum Kind { A, B }
+    "#,
+    )
+    .expect("forward references to fns, structs, enums and a letonce initializer");
+    assert_eq!(s.call("top", vec![]).unwrap(), Value::I64(42));
+    assert_eq!(s.call("mid", vec![]).unwrap(), Value::I64(40));
+}
+
 #[test]
 fn a_repair_revives_transitive_callers_to_a_fixpoint() {
     let mut s = Session::new();
