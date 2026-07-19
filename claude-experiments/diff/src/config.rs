@@ -108,7 +108,8 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         .as_ref()
         .and_then(|resolved| resolved.base.clone())
         .unwrap_or_else(|| "/".to_string());
-    let defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
+    let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
+    set_node_env(&mut defines, "production");
 
     Ok(AppConfig {
         environment: environment.to_string(),
@@ -127,6 +128,47 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         },
         entry,
     })
+}
+
+/// The `process.env.NODE_ENV` compile-time define, the switch every package that
+/// ships both a development and a production build dispatches on:
+///
+/// ```js
+/// if (process.env.NODE_ENV === 'production') module.exports = require('./cjs/react-dom-client.production.js');
+/// else module.exports = require('./cjs/react-dom-client.development.js');
+/// ```
+///
+/// Supplying it as a literal (rather than only as the runtime global
+/// `BROWSER_GLOBALS_PRELUDE` installs) is what lets [`crate::dead_branch`] delete
+/// the branch that cannot run. Without it BOTH builds are reachable and both are
+/// bundled: React's development build alone is over a megabyte, and shipping it to
+/// production users is a correctness problem, not just a size one.
+///
+/// A value the app's own Vite config already declares wins — this fills in the
+/// default Vite itself supplies, it does not override an explicit choice.
+fn set_node_env(defines: &mut Vec<(String, String)>, mode: &str) {
+    const KEY: &str = "process.env.NODE_ENV";
+    let value = format!("\"{mode}\"");
+    match defines.iter_mut().find(|(key, _)| key == KEY) {
+        Some(existing) => existing.1 = value,
+        None => defines.push((KEY.to_string(), value)),
+    }
+}
+
+/// Switches a derived config to development: HMR instrumentation on, and
+/// `process.env.NODE_ENV` defined as `"development"` so dependency dispatches
+/// select their development builds (React's hook warnings, Fast Refresh support).
+///
+/// The two travel together deliberately. A dev build that kept the production
+/// `NODE_ENV` would silently strip the very warnings the dev server exists to
+/// surface, so there is one function that means "development" rather than two
+/// flags a caller can set inconsistently.
+pub fn set_development_mode(config: &mut AppConfig) {
+    config.build.hmr = true;
+    set_node_env(&mut config.build.defines, "development");
+    if let Some(env) = config.build.import_meta_env.as_mut() {
+        env.mode = "development".to_string();
+    }
 }
 
 /// Builds the Vite `import.meta.env` values for a production `build-app`: `MODE`

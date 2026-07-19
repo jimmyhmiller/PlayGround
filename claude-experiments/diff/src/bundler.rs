@@ -151,10 +151,17 @@ impl ResolutionCache {
     }
 
     /// Applies the opted-in Vite compile-time rewrites (`import.meta.env`, then
-    /// `define`) to a module's source before it is transformed, returning the
-    /// source unchanged when both features are off or the module uses neither. One
-    /// choke point for both the serial ([`Bundler::load_module`]) and parallel
-    /// ([`load_uncached`]) paths.
+    /// `define`, then dead-branch elimination) to a module's source before it is
+    /// transformed, returning the source unchanged when the features are off or the
+    /// module uses none of them. One choke point for both the serial
+    /// ([`Bundler::load_module`]) and parallel ([`load_uncached`]) paths.
+    ///
+    /// Order matters: the two substitutions turn `process.env.NODE_ENV === 'production'`
+    /// into a comparison of literals, and only then can
+    /// [`crate::dead_branch`] resolve it and delete the branch that cannot run.
+    /// Running here — before the module is parsed for dependencies — is what makes
+    /// the dead branch's `require(...)` disappear from the graph entirely instead
+    /// of being bundled but never executed.
     fn apply_vite_replacements<'s>(&self, path: &Path, source: &'s str, target: Target) -> Cow<'s, str> {
         let mut current = Cow::Borrowed(source);
         if let Some(options) = self.import_meta_env.as_ref()
@@ -164,6 +171,13 @@ impl ResolutionCache {
         }
         if !self.defines.is_empty()
             && let Some(rewritten) = crate::vite_define::transform(path, &current, &self.defines)
+        {
+            current = Cow::Owned(rewritten);
+        }
+        // Only worth attempting when a substitution above could have made a test
+        // decidable; a module nobody rewrote keeps its branches untouched.
+        if !matches!(current, Cow::Borrowed(_))
+            && let Some(rewritten) = crate::dead_branch::transform(path, &current)
         {
             current = Cow::Owned(rewritten);
         }
@@ -480,10 +494,6 @@ struct ChunkPlan {
     prerequisites: Vec<usize>,
     /// The chunk's emitted file name (`client.chunk-3.js`, `client.shared-1.js`).
     file_name: String,
-    /// Whether every member's live static dependencies are themselves members.
-    /// Only a closed chunk can use the scope-hoisted flat render, which
-    /// concatenates bindings into one scope and has no cross-chunk lookup.
-    closed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -944,11 +954,21 @@ impl Bundler {
         // scope, which is only sound when the chunk carries every module its
         // members statically reference. Splitting shared code out breaks that for
         // any chunk with a cross-chunk edge, and a flat chunk cannot be mixed with
-        // a registry chunk either (a flat main chunk installs no runtime for a
-        // registry chunk to register into), so the choice is made once for the
-        // whole build. A single-chunk build has no cross-chunk edges and keeps the
-        // flat path.
-        let flat_allowed = plans.iter().all(|plan| plan.closed);
+        // a registry chunk either: the two speak different protocols. A flat chunk
+        // publishes bindings (`export{a,b}` / `module.exports=`), while
+        // `require.dynamic` resolves a registry id through `__require`, so a flat
+        // chunk consumed by a registry main chunk registers no factory and fails
+        // with "Module is not loaded". Per-chunk eligibility cannot express that,
+        // because the MAIN chunk independently falls back to the registry whenever
+        // flat rendering bails (an external binding, a duplicate top-level
+        // declaration). So the protocol is decided for the whole build by whether
+        // any split chunk exists at all: a single-chunk build keeps scope hoisting,
+        // and any split build uses the registry everywhere.
+        //
+        // This forgoes scope hoisting for split builds. Recovering it needs
+        // cross-chunk binding imports (what Rollup emits), which is a real feature,
+        // not a tweak of this flag.
+        let flat_allowed = plans.is_empty();
         for plan in &plans {
             let chunk_path = parent.join(&plan.file_name);
             let prerequisites = plan
@@ -1333,7 +1353,6 @@ impl Bundler {
                 roots: chunk_roots,
                 prerequisites: Vec::new(),
                 file_name,
-                closed: true,
             });
         }
 
@@ -1348,7 +1367,6 @@ impl Bundler {
         let mut edges = Vec::with_capacity(plans.len());
         for (index, plan) in plans.iter().enumerate() {
             let mut prerequisites = Vec::new();
-            let mut closed = true;
             for &member in &plan.members {
                 let Some(module) = self.modules[member].as_ref() else {
                     continue;
@@ -1357,30 +1375,26 @@ impl Bundler {
                     if demand.dynamic || !allowed.contains(target) {
                         continue;
                     }
-                    match chunk_of[*target] {
-                        Some(other) if other != index => {
-                            closed = false;
-                            prerequisites.push(other);
-                        }
-                        Some(_) => {}
-                        // In the main chunk: a real cross-chunk edge (so the flat
-                        // render is out) but not a prerequisite, since the main
-                        // chunk is what installs the runtime in the first place.
-                        None => closed = false,
+                    // A target in the main chunk needs no prerequisite: the main
+                    // chunk is what installs the runtime, so it has always been
+                    // evaluated before any split chunk loads.
+                    if let Some(other) = chunk_of[*target]
+                        && other != index
+                    {
+                        prerequisites.push(other);
                     }
                 }
             }
             prerequisites.sort_unstable();
             prerequisites.dedup();
-            edges.push((prerequisites, closed));
+            edges.push(prerequisites);
         }
         // Only DIRECT edges are recorded. A prerequisite's own prerequisites are
         // imported by that chunk's own header, and ESM/CJS both finish evaluating
         // an import before the importer's body runs, so the direct edges close
         // transitively at load time.
-        for (plan, (prerequisites, closed)) in plans.iter_mut().zip(edges) {
+        for (plan, prerequisites) in plans.iter_mut().zip(edges) {
             plan.prerequisites = prerequisites;
-            plan.closed = closed;
         }
         Ok(plans)
     }
@@ -2521,17 +2535,36 @@ __runtime.register(__newModules,__newMaps,__newChunks);
 return __runtime.require({entry_runtime_id});"#
             )
         } else {
-            // A split chunk REGISTERS and stops. It deliberately does not evaluate
-            // anything: it may carry several dynamic roots plus shared code that is
-            // nobody's root, and importing it must not run a root the caller did
-            // not ask for. `require.dynamic` evaluates exactly the requested
-            // module by runtime id once this file has registered.
+            // A split chunk always REGISTERS; whether it also evaluates depends on
+            // how it can be consumed, and there are two ways.
+            //
+            // `require.dynamic` evaluates the requested module by runtime id, so
+            // registration alone is enough for it. But a chunk is ALSO imported
+            // directly as an ES module: the generated SSR router does
+            // `import manifest from "./_tanstack-start-manifest_v.mjs"` and reads
+            // the factory off the default export. That consumer needs the default
+            // export to BE the root's namespace, so a chunk with exactly one root
+            // evaluates it and returns its exports.
+            //
+            // A chunk with several roots, or a purely shared chunk with none, has
+            // no single namespace that could stand for it. Nothing imports those
+            // directly (only `require.dynamic` and prerequisite headers name them),
+            // and evaluating a root the caller did not ask for would run its side
+            // effects early, so they register and return the runtime.
+            let evaluate = match roots {
+                [only] => {
+                    let root_runtime_id = runtime_ids[*only]
+                        .expect("a chunk root must have a deterministic runtime ID");
+                    format!("return __runtime.require({root_runtime_id});")
+                }
+                _ => "return __runtime;".to_string(),
+            };
             format!(
                 r#"const __runtime=globalThis[{runtime_key}];
 if(!__runtime)throw new Error("Diffpack runtime is not initialized");
 __runtime.register(__newModules,__newMaps,__newChunks);
 {reimport_guard}
-return __runtime;"#
+{evaluate}"#
             )
         };
         // The registry runtime is identical across formats; only the module
@@ -5246,7 +5279,12 @@ mod tests {
         let harness = public_dir.join("harness.mjs");
         fs::write(
             &harness,
-            "import(process.argv[2]).then(() => { if (globalThis.__diffpack_client_ran !== true) { console.error('entry top-level did not run'); process.exit(3); } console.log('LOADED'); }).catch((e) => { console.error('LOAD_ERROR:' + e.message); process.exit(4); });\n",
+            // The `setTimeout` lets the entry's `import('./lazy.js')` settle before
+            // the split chunk's value is asserted. Loading is not enough: a flat
+            // chunk consumed through the registry protocol resolves to `undefined`
+            // rather than throwing, so a load-only assertion passes while the
+            // dynamic import silently yields nothing.
+            "import(process.argv[2]).then(() => new Promise((done) => setTimeout(done, 0))).then(() => { if (globalThis.__diffpack_client_ran !== true) { console.error('entry top-level did not run'); process.exit(3); } if (globalThis.__diffpack_lazy !== 'lazy-value') { console.error('SPLIT_CHUNK_VALUE:' + String(globalThis.__diffpack_lazy)); process.exit(5); } console.log('LOADED'); }).catch((e) => { console.error('LOAD_ERROR:' + e.message); process.exit(4); });\n",
         )
         .unwrap();
         let output = Command::new("node")

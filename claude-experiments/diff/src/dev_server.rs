@@ -749,8 +749,9 @@ fn build_client(
     options: EmitOptions,
 ) -> Result<EnvBuild, String> {
     let mut config = config::derive_config(project_root, "client")?;
-    // DEV-ONLY: instrument the client graph for HMR / React Fast Refresh.
-    config.build.hmr = true;
+    // DEV-ONLY: instrument the client graph for HMR / React Fast Refresh, and
+    // select the dependencies' development builds.
+    config::set_development_mode(&mut config);
     let entry = config
         .entry
         .clone()
@@ -802,7 +803,7 @@ fn build_server(
     let mut config = config::derive_config(project_root, "ssr")?;
     // DEV-ONLY: emit the version-aware dynamic import + in-process control endpoint
     // so a server edit hot-reloads without restarting Node.
-    config.build.hmr = true;
+    config::set_development_mode(&mut config);
     register_server_virtual_modules(&mut config, project_root, output_root)?;
     let entry = config
         .entry

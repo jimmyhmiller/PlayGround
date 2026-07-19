@@ -81,6 +81,211 @@
           (store! i (iadd (load i) 1)))))
     (match (load err) (Some [d] (Err [i64 Diag] d)) (None [] (Ok [i64 Diag] 0)))))
 
+; ======================= integer div/rem by zero in the COMPILED fold ==============
+; The interpreter (comptime.coil::ct-bin-int) REFUSES a zero divisor. The compiled fold
+; used to inherit the HARDWARE's answer instead: arm64 `sdiv` by zero yields 0 and does
+; not trap, so `(comptime (idiv (sizeof i64) 0))` folded silently to 0 — a wrong answer
+; with no diagnostic, and only because `(sizeof i64)` pushed the site onto this engine.
+;
+; The fix INSTRUMENTS the sub-program rather than pre-evaluating anything (this engine
+; exists precisely because the expression is beyond the interpreter, so there is nothing
+; to pre-evaluate with). Every INTEGER divisor is wrapped in a call to a synthesized
+; `coil.ct.nz`, which records a code in a static cell and substitutes 1 when the divisor
+; is zero — substituting keeps the run going with no trap, and the computed value is
+; discarded. After the run `coil_ct_status` reads AND CLEARS that cell, so a reused JIT
+; image or dylib can never leak a stale failure into the next fold.
+;
+; ⚠ EBin's op tag is AMBIGUOUS between the integer and float families (parser.coil::
+; binop-of: fdiv=3 collides with idiv=3, frem=4 with irem=4), so the tag ALONE cannot
+; tell an integer division from a float one. Comptime float division by zero is LEGAL —
+; it yields an infinity, and ct-bin-float deliberately carries no zero check — so the
+; classification below is by OPERAND TYPE, never by tag.
+
+; classify one operand from its checked type: 0 = float, 1 = integer, 2 = indeterminate.
+(defn cte-operand-class [(e (ptr Expr))] (-> i64)
+  (match (cte-node-type e)
+    (None [] 2)
+    (Some [t] (let [tp (alloc-stack Type)] (store! tp t)
+      (match-else (load tp) (TInt [b s] 1) (TFloat [b] 0) (_ 2))))))
+
+; classify a div/rem NODE from its operands: 0 = float (leave it completely alone),
+; 1 = integer (guard the divisor), 2 = indeterminate (neither operand has a recoverable
+; type). Float is decided FIRST so that a half-known float node is never guarded.
+(defn cte-div-class [(l (ptr Expr)) (r (ptr Expr))] (-> i64)
+  (if (or (icmp-eq (cte-operand-class r) 0) (icmp-eq (cte-operand-class l) 0)) 0
+    (if (or (icmp-eq (cte-operand-class r) 1) (icmp-eq (cte-operand-class l) 1)) 1 2)))
+
+; the integer type the guarded divisor is cast back to: the divisor's own type when it
+; has one, else the dividend's — a CHECKED div/rem has matching operand types, and this
+; is only reached when cte-div-class already said "integer", so one of the two resolves.
+(defn cte-div-int-ty [(l (ptr Expr)) (r (ptr Expr))] (-> (Option Type))
+  (if (icmp-eq (cte-operand-class r) 1) (cte-node-type r)
+    (if (icmp-eq (cte-operand-class l) 1) (cte-node-type l) (None [Type]))))
+
+; ⚠ The sub-program does NOT own its function bodies. closure-subprogram copies each
+; Func by VALUE, but `body` is a `(ptr (ArrayList Expr))` still SHARED with the real
+; program — so rewriting a divisor in place edits the program being compiled. Left
+; unchecked that is fatal: the first fold rewrote a helper the real program also calls,
+; and codegen then died on "unknown callable coil.ct.nz" because the guard functions live
+; only in the sub-program. Every wrap is therefore RECORDED here and undone after the run
+; (this also matters when the fold declines, since the site's own expression survives).
+(defstruct CtSaved [(slot (ptr Expr)) (orig Expr)])
+(defn mk-ct-saved [(slot (ptr Expr)) (orig Expr)] (-> CtSaved)
+  (let [p (alloc-stack CtSaved)] (store! (field p slot) slot) (store! (field p orig) orig) (load p)))
+(defn cte-restore! [(saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [n (al-len [CtSaved] (load saved)) (mut i) n]
+    ; reverse order, so a divisor that itself contained a guarded division unwinds cleanly
+    (loop (if (icmp-le (load i) 0) (break)
+      (do (store! i (isub (load i) 1))
+          (let [sv (al-elem [CtSaved] saved (load i))]
+            (store! (load (field sv slot)) (load (field sv orig)))))))) 0)
+
+; wrap ONLY the divisor, in place:
+;   (idiv lhs rhs) → (idiv lhs (cast T (coil.ct.nz (cast i64 rhs) CODE)))
+; The original rhs is MOVED into the call, so it is still evaluated EXACTLY ONCE and no
+; side effect is duplicated — which is why there is no ELet and no copy of the rhs here.
+(defn cte-wrap-divisor! [(a (ptr Allocator)) (r (ptr Expr)) (dty Type) (code i64) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (al-push! [CtSaved] saved (mk-ct-saved r (load r)))
+  (let [lo (load (field r lo)) hi (load (field r hi)) src (load (field r source)) ctxt (load (field r ctxt))
+        orig (box-expr a (load r)) (mut args) (al-new [Expr] a)]
+    (al-push! (mut args) (mk-expr (ECast (TInt 64 true) orig) lo hi src ctxt))
+    (al-push! (mut args) (mk-expr (EInt code) lo hi src ctxt))
+    (store! r (mk-expr (ECast dty (box-expr a (mk-expr (ECall "coil.ct.nz" (box-al [Type] a (al-new [Type] a)) (box-al [Expr] a (load args))) lo hi src ctxt))) lo hi src ctxt)))
+  0)
+
+; `bad` is raised when a div/rem's operands are BOTH indeterminate. Guarding such a node
+; could corrupt a float divide; leaving it could silently fold a bad integer one. Neither
+; is acceptable, so the whole compiled fold DECLINES and the interpreter's error stands.
+(defn cte-guard-list! [(a (ptr Allocator)) (es (ptr (ArrayList Expr))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [n (al-len [Expr] (load es)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (cte-guard-expr! a (al-elem [Expr] es (load i)) bad saved) (store! i (iadd (load i) 1)))))) 0)
+(defn cte-guard-opt! [(a (ptr Allocator)) (o (Option (ptr Expr))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (match o (Some [e] (cte-guard-expr! a e bad saved)) (None [] 0)))
+(defn cte-guard-binds! [(a (ptr Allocator)) (bs (ptr (ArrayList Bind))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [n (al-len [Bind] (load bs)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (cte-guard-expr! a (field (al-elem [Bind] bs (load i)) value) bad saved) (store! i (iadd (load i) 1)))))) 0)
+(defn cte-guard-arms! [(a (ptr Allocator)) (as (ptr (ArrayList Arm))) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [n (al-len [Arm] (load as)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (cte-guard-expr! a (field (al-elem [Arm] as (load i)) body) bad saved) (store! i (iadd (load i) 1)))))) 0)
+; A div/rem tagged 3/4/5/6. Children are rewritten FIRST, so the divisor this wraps has
+; already been walked and the freshly built wrapper is never re-entered.
+(defn cte-guard-bin! [(a (ptr Allocator)) (op i64) (l (ptr Expr)) (r (ptr Expr)) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [cls (cte-div-class l r)]
+    (if (icmp-eq cls 0) 0
+      (if (icmp-eq cls 2) (do (store! bad 1) 0)
+        (match (cte-div-int-ty l r)
+          (None [] (do (store! bad 1) 0))
+          ; code 1 = division by zero (idiv/udiv), 2 = remainder by zero (irem/urem).
+          (Some [dty] (cte-wrap-divisor! a r dty (if (or (icmp-eq op 4) (icmp-eq op 6)) 2 1) saved)))))))
+(defn cte-guard-expr! [(a (ptr Allocator)) (e (ptr Expr)) (bad (ptr i64)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (match-else (load (field e kind))
+    (EBin     [op l r] (do (cte-guard-expr! a l bad saved) (cte-guard-expr! a r bad saved)
+                           (if (or (icmp-eq op 3) (or (icmp-eq op 4) (or (icmp-eq op 5) (icmp-eq op 6))))
+                               (cte-guard-bin! a op l r bad saved) 0)))
+    (ECall    [func ta args] (cte-guard-list! a args bad saved))
+    (EBorrow  [m place] (cte-guard-expr! a place bad saved))
+    (ESpillRef [x] (cte-guard-expr! a x bad saved))
+    (ENot     [x] (cte-guard-expr! a x bad saved))
+    (ELoad    [x] (cte-guard-expr! a x bad saved))
+    (EFree    [x] (cte-guard-expr! a x bad saved))
+    (EComptime [x] (cte-guard-expr! a x bad saved))
+    (EErase   [tn inner] (cte-guard-expr! a inner bad saved))
+    (EMakeDyn [ds vs ms inner] (cte-guard-expr! a inner bad saved))
+    (EDynDispatch [ds vs mi cc ps rt recv args] (do (cte-guard-expr! a recv bad saved) (cte-guard-list! a args bad saved)))
+    (ECast    [ty x] (cte-guard-expr! a x bad saved))
+    (EAscribe [ty x] (cte-guard-expr! a x bad saved))
+    (ECmp     [op l r] (do (cte-guard-expr! a l bad saved) (cte-guard-expr! a r bad saved)))
+    (EIf      [c t el] (do (cte-guard-expr! a c bad saved) (cte-guard-expr! a t bad saved) (cte-guard-expr! a el bad saved)))
+    (EDo      [es] (cte-guard-list! a es bad saved))
+    (ELoop    [lbl es] (cte-guard-list! a es bad saved))
+    (EBreak   [lbl v] (cte-guard-opt! a v bad saved))
+    (ELet     [bs body] (do (cte-guard-binds! a bs bad saved) (cte-guard-list! a body bad saved)))
+    (EField   [p fn] (cte-guard-expr! a p bad saved))
+    (EBitGet  [p fn] (cte-guard-expr! a p bad saved))
+    (EStore   [p v] (do (cte-guard-expr! a p bad saved) (cte-guard-expr! a v bad saved)))
+    (EIndex   [p idx] (do (cte-guard-expr! a p bad saved) (cte-guard-expr! a idx bad saved)))
+    (EBitSet  [p fn v] (do (cte-guard-expr! a p bad saved) (cte-guard-expr! a v bad saved)))
+    (EConstruct [sm vr args] (cte-guard-list! a args bad saved))
+    (ECodeOp  [op args] (cte-guard-list! a args bad saved))
+    (ETraitCall [tn m stp args] (cte-guard-list! a args bad saved))
+    (ELlvmIr  [rt args body] (cte-guard-list! a args bad saved))
+    (ECallPtr [fp args] (do (cte-guard-expr! a fp bad saved) (cte-guard-list! a args bad saved)))
+    (EMatch   [scrut arms] (do (cte-guard-expr! a scrut bad saved) (cte-guard-arms! a arms bad saved)))
+    (EFieldMeta [meta ty idx] (cte-guard-expr! a idx bad saved))
+    (EFieldIndex [ty nm] (cte-guard-expr! a nm bad saved))
+    (_ 0)))
+
+; append the three guard functions. `coil.ct.nzcell` is the one static cell; `coil.ct.nz`
+; is the divisor guard; `coil.ct.status` reads AND CLEARS the cell and is exported as the
+; C symbol `coil_ct_status`. status is written as a chain of literal comparisons rather
+; than a let-bound temporary so that the whole guard needs no synthesized local.
+(defn cte-nzcell-call [(a (ptr Allocator))] (-> Expr)
+  (mk-expr (ECall "coil.ct.nzcell" (box-al [Type] a (al-new [Type] a)) (box-al [Expr] a (al-new [Expr] a))) -1 -1 -1 0))
+(defn cte-add-fn! [(a (ptr Allocator)) (sub (ptr Program)) (name (slice u8)) (cc (slice u8)) (ret Type) (ps (ArrayList Param)) (body (ArrayList Expr))] (-> i64)
+  (let [f (alloc-stack Func)]
+    (store! (field f name) name)
+    (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+    (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+    (store! (field f cc) cc)
+    (store! (field f params) (box-al [Param] a ps))
+    (store! (field f ret) ret)
+    (store! (field f body) (box-al [Expr] a body))
+    (store! (field f macro_variadic) false)
+    (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0)
+    (al-push! [Func] (load (field sub funcs)) (load f)))
+  0)
+(defn cte-add-guard-fns! [(a (ptr Allocator)) (sub (ptr Program))] (-> i64)
+  ; (defn coil.ct.nzcell [] (-> (ptr i64)) (alloc-static i64))
+  (let [(mut body) (al-new [Expr] a)]
+    (al-push! (mut body) (mk-expr (EAlloc 1 (TInt 64 true)) -1 -1 -1 0))
+    (cte-add-fn! a sub "coil.ct.nzcell" "coil" (TPtr (box-type a (TInt 64 true))) (al-new [Param] a) (load body)))
+  ; (defn coil.ct.nz [(x i64) (code i64)] (-> i64)
+  ;   (if (icmp-eq x 0) (do (store! (coil.ct.nzcell) code) 1) x))
+  (let [(mut ps) (al-new [Param] a) p1 (alloc-stack Param) p2 (alloc-stack Param) (mut body) (al-new [Expr] a) (mut thn) (al-new [Expr] a)]
+    (store! (field p1 name) "x") (store! (field p1 ty) (TInt 64 true)) (al-push! (mut ps) (load p1))
+    (store! (field p2 name) "code") (store! (field p2 ty) (TInt 64 true)) (al-push! (mut ps) (load p2))
+    (al-push! (mut thn) (mk-expr (EStore (box-expr a (cte-nzcell-call a)) (box-expr a (mk-expr (EVar "code") -1 -1 -1 0))) -1 -1 -1 0))
+    (al-push! (mut thn) (mk-expr (EInt 1) -1 -1 -1 0))
+    (al-push! (mut body)
+      (mk-expr (EIf (box-expr a (mk-expr (ECmp 4 (box-expr a (mk-expr (EVar "x") -1 -1 -1 0)) (box-expr a (mk-expr (EInt 0) -1 -1 -1 0))) -1 -1 -1 0))
+                    (box-expr a (mk-expr (EDo (box-al [Expr] a (load thn))) -1 -1 -1 0))
+                    (box-expr a (mk-expr (EVar "x") -1 -1 -1 0))) -1 -1 -1 0))
+    (cte-add-fn! a sub "coil.ct.nz" "coil" (TInt 64 true) (load ps) (load body)))
+  ; (defn coil.ct.status [] (-> i64)
+  ;   (if (icmp-eq (load (coil.ct.nzcell)) 1) (do (store! (coil.ct.nzcell) 0) 1)
+  ;   (if (icmp-eq (load (coil.ct.nzcell)) 2) (do (store! (coil.ct.nzcell) 0) 2) 0)))
+  (let [(mut body) (al-new [Expr] a) (mut t1) (al-new [Expr] a) (mut t2) (al-new [Expr] a)]
+    (al-push! (mut t1) (mk-expr (EStore (box-expr a (cte-nzcell-call a)) (box-expr a (mk-expr (EInt 0) -1 -1 -1 0))) -1 -1 -1 0))
+    (al-push! (mut t1) (mk-expr (EInt 1) -1 -1 -1 0))
+    (al-push! (mut t2) (mk-expr (EStore (box-expr a (cte-nzcell-call a)) (box-expr a (mk-expr (EInt 0) -1 -1 -1 0))) -1 -1 -1 0))
+    (al-push! (mut t2) (mk-expr (EInt 2) -1 -1 -1 0))
+    (al-push! (mut body)
+      (mk-expr (EIf (box-expr a (mk-expr (ECmp 4 (box-expr a (mk-expr (ELoad (box-expr a (cte-nzcell-call a))) -1 -1 -1 0)) (box-expr a (mk-expr (EInt 1) -1 -1 -1 0))) -1 -1 -1 0))
+                    (box-expr a (mk-expr (EDo (box-al [Expr] a (load t1))) -1 -1 -1 0))
+                    (box-expr a (mk-expr (EIf (box-expr a (mk-expr (ECmp 4 (box-expr a (mk-expr (ELoad (box-expr a (cte-nzcell-call a))) -1 -1 -1 0)) (box-expr a (mk-expr (EInt 2) -1 -1 -1 0))) -1 -1 -1 0))
+                                              (box-expr a (mk-expr (EDo (box-al [Expr] a (load t2))) -1 -1 -1 0))
+                                              (box-expr a (mk-expr (EInt 0) -1 -1 -1 0))) -1 -1 -1 0))) -1 -1 -1 0))
+    (cte-add-fn! a sub "coil.ct.status" "c" (TInt 64 true) (al-new [Param] a) (load body)))
+  (let [e (alloc-stack ExportC)]
+    (store! (field e name) "coil.ct.status")
+    (store! (field e symbol) (Some "coil_ct_status"))
+    (store! (field e params) (box-al [Type] a (al-new [Type] a)))
+    (store! (field e lo) -1) (store! (field e hi) -1) (store! (field e source) -1) (store! (field e ctxt) 0)
+    (al-push! [ExportC] (load (field sub exports)) (load e)))
+  0)
+
+; instrument the WHOLE sub-program: a division inside a callee is just as fatal as one in
+; the thunk, and the engine runs the entire call graph. Returns 0 on success, 1 when some
+; div/rem was indeterminate and the caller must decline.
+(defn cte-guard-divzero! [(a (ptr Allocator)) (sub (ptr Program)) (saved (ptr (ArrayList CtSaved)))] (-> i64)
+  (let [bad (alloc-stack i64)]
+    (store! bad 0)
+    (let [fs (load (field sub funcs)) n (al-len [Func] (load fs)) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (cte-guard-list! a (load (field (al-elem [Func] fs (load i)) body)) bad saved)
+            (store! i (iadd (load i) 1))))))
+    (if (icmp-eq (load bad) 0) (do (cte-add-guard-fns! a sub) 0) 1)))
+
 ; append (defn coil.ct.thunk [] (-> T) E) to the sub-program's funcs and export it as
 ; the C symbol `coil_ct_thunk` (a zero-param scalar return needs no C-ABI thunk).
 (defn cte-add-entry [(a (ptr Allocator)) (sub (ptr Program)) (inner (ptr Expr)) (rty Type)] (-> i64)
@@ -159,39 +364,57 @@
 ; The image (or dylib) is deliberately left mapped. An aggregate readback can point
 ; at bytes inside it — a string literal lives in the image's own data — so unmapping
 ; here would dangle the value just folded.
-(defn cte-entry [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result (ptr i8) Diag))
+; Both entry points the fold needs out of one image: the thunk, and the div-by-zero
+; status reader the guard pass exported alongside it.
+(defstruct CtEntry [(thunk (ptr i8)) (status (ptr i8))])
+(defn mk-ct-entry [(t (ptr i8)) (s (ptr i8))] (-> CtEntry)
+  (let [p (alloc-stack CtEntry)] (store! (field p thunk) t) (store! (field p status) s) (load p)))
+
+(defn cte-entry [(a (ptr Allocator)) (sub (ptr Program))] (-> (Result CtEntry Diag))
   (if (meta-mobj-available?)
       (try (do
         (let [mp (try! (monomorphize a sub))]
           (sort-mono-program a mp)
           (let [(mut o) (call-ptr (load (field (meta-mobj-box) fp)) a mp)]
             (match (jit-load a (mut o))
-              (Err [m] (Err [(ptr i8) Diag] (derr m)))
+              (Err [m] (Err [CtEntry Diag] (derr m)))
               (Ok [img0]
                 (let [img (alloc-stack JitImage)]
                   (store! img img0)
                   (let [fp (jit-lookup img "coil_ct_thunk")]
                     (if (icmp-eq (cast i64 fp) 0)
-                        (Err [(ptr i8) Diag] (derr "comptime: compiled entry missing from the in-memory image (compiler bug)"))
-                      (Ok [(ptr i8) Diag] fp))))))))))
+                        (Err [CtEntry Diag] (derr "comptime: compiled entry missing from the in-memory image (compiler bug)"))
+                      (Ok [CtEntry Diag] (mk-ct-entry fp (jit-lookup img "coil_ct_status"))))))))))))
     (match (cte-build-dylib a sub)
-      (Err [d] (Err [(ptr i8) Diag] d))
+      (Err [d] (Err [CtEntry Diag] d))
       (Ok [h]
         (let [fp (dlsym h (slice->cstr a "coil_ct_thunk"))]
           (if (icmp-eq (cast i64 fp) 0)
-              (Err [(ptr i8) Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)"))
-            (Ok [(ptr i8) Diag] fp)))))))
+              (Err [CtEntry Diag] (derr "comptime: compiled entry missing from the metaprogram dylib (compiler bug)"))
+            (Ok [CtEntry Diag] (mk-ct-entry fp (dlsym h (slice->cstr a "coil_ct_status"))))))))))
+
+; read AND CLEAR the guard cell after a run: 0 = clean, 1 = division by zero, 2 =
+; remainder by zero. A missing symbol means the guard pass declined to instrument this
+; sub-program, which only happens when it contains no integer div/rem at all.
+(defn cte-status-of [(en (ptr CtEntry))] (-> i64)
+  (let [sp (load (field en status))]
+    (if (icmp-eq (cast i64 sp) 0) 0 (call-ptr (cast (fnptr c [] i64) sp)))))
 
 ; run the entry, reconstruct a literal from the scalar it returns.
 (defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
-    (Ok [fp]
-      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
-            cv (cte-invoke fp kind tp)]
-        (match (build-value a (new-cell cv) lo hi src ctxt cx)
-          (Err [d] (cte-box a (Err [Expr Diag] d)))
-          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))
+    (Ok [en0]
+      (let [en (alloc-stack CtEntry)] (store! en en0)
+        (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))
+              cv (cte-invoke (load (field en thunk)) kind tp)
+              st (cte-status-of en)]
+          ; a zero divisor makes the computed value meaningless — DISCARD it and answer
+          ; with exactly the interpreter's wording (comptime.coil::ct-divzero-msg).
+          (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+            (match (build-value a (new-cell cv) lo hi src ctxt cx)
+              (Err [d] (cte-box a (Err [Expr Diag] d)))
+              (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))
 
 ; ============================ AGGREGATE readback (interp deletion step 3a) =========
 ; The scalar path above reads int/bool/f64 out of the return register. An AGGREGATE
@@ -485,20 +708,23 @@
 (defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
-    (Ok [fp]
+    (Ok [en0]
       (let [tp (alloc-stack Type)] (store! tp t0)
-        (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
-          (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
-          (Some [buf]
-            (do
-              (call-ptr (cast (fnptr c [(ptr i8)] i64) fp) buf)
-              (match (cte-read cx tp buf 0 a)
-                (None [] (cast (ptr i8) 0))
-                (Some [cv]
-                  (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
-                    (match (build-value a (new-cell cv) lo hi src ctxt cx)
-                      (Err [d] (cte-box a (Err [Expr Diag] d)))
-                      (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))
+        (let [en (alloc-stack CtEntry)] (store! en en0)
+          (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+            (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
+            (Some [buf]
+              (do
+                (call-ptr (cast (fnptr c [(ptr i8)] i64) (load (field en thunk))) buf)
+                (let [st (cte-status-of en)]
+                  (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                    (match (cte-read cx tp buf 0 a)
+                      (None [] (cast (ptr i8) 0))
+                      (Some [cv]
+                        (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+                          (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                            (Err [d] (cte-box a (Err [Expr Diag] d)))
+                            (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))))))))
 
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))
@@ -525,13 +751,21 @@
                         (match (cte-fold-closure sub cx)
                           (Err [_] (cast (ptr i8) 0))
                           (Ok [_]
-                            (if (icmp-eq kind 0)
-                                (do (cte-add-entry-agg a sub inner t0)
-                                    (drop-code-funcs a sub)
-                                    (cte-run-agg a sub cx inner t0))
-                              (do (cte-add-entry a sub inner t0)
-                                  (drop-code-funcs a sub)
-                                  (cte-run a sub cx inner kind tp)))))))))))))))))
+                            (do
+                              (if (icmp-eq kind 0) (cte-add-entry-agg a sub inner t0) (cte-add-entry a sub inner t0))
+                              (drop-code-funcs a sub)
+                              ; instrument AFTER the entry exists, so the synthetic thunk
+                              ; body — which holds the user's expression — is guarded too,
+                              ; and BEFORE the run. An indeterminate div/rem declines.
+                              ; The rewrite is UNDONE either way: the bodies it edits are
+                              ; shared with the real program (see cte-restore!).
+                              (let [saved (box-al [CtSaved] a (al-new [CtSaved] a))
+                                    bad (cte-guard-divzero! a sub saved)
+                                    res (if (icmp-ne bad 0) (cast (ptr i8) 0)
+                                          (if (icmp-eq kind 0)
+                                              (cte-run-agg a sub cx inner t0)
+                                            (cte-run a sub cx inner kind tp)))]
+                                (do (cte-restore! saved) res)))))))))))))))))
 
 ; wire the hook into the interpreter's fold pass (called by main / main_a64 at startup).
 (defn register-comptime-fold! [] (-> i64)

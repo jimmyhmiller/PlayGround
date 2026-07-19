@@ -7,14 +7,17 @@
 //! a local binding of the same name shadows it, exactly as esbuild/Vite behave, so
 //! the rewrite is scope-aware rather than a blind text substitution.
 //!
-//! Only bare-identifier define keys are handled here; dotted keys such as
-//! `process.env.NODE_ENV` are a member-expression form not yet supported (they are
-//! simply left in place, never mis-replaced).
+//! Both bare-identifier keys (`__OC_WEB_VERSION__`) and dotted member-expression
+//! keys (`process.env.NODE_ENV`) are handled. The dotted form is what lets a
+//! package's `if (process.env.NODE_ENV === 'production')` dispatch fold to a
+//! literal comparison, which [`crate::dead_branch`] then resolves — the mechanism
+//! that keeps React's development build out of a production bundle.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::Expression;
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
@@ -23,16 +26,18 @@ use oxc_span::{SourceType, Span};
 /// Replaces free references to any `defines` key in `source` with its replacement
 /// text, returning the rewritten source, or `None` when nothing is replaced.
 pub fn transform(path: &Path, source: &str, defines: &[(String, String)]) -> Option<String> {
-    // Only bare-identifier keys apply here; skip any dotted key.
     let simple: Vec<(&str, &str)> = defines
         .iter()
-        .filter(|(key, _)| !key.contains('.'))
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     if simple.is_empty() {
         return None;
     }
-    // Cheap gate: no key even appears as a substring.
+    // Cheap gate: no key even appears as a substring. A dotted key is matched
+    // against the source verbatim, so `process . env . NODE_ENV` (whitespace
+    // inside the member chain) is not gated in. That form does not occur in
+    // published packages, and missing it only forgoes a substitution — it never
+    // produces a wrong one.
     if !simple.iter().any(|(key, _)| source.contains(key)) {
         return None;
     }
@@ -64,19 +69,73 @@ struct DefineCollector<'a> {
     edits: Vec<(Span, String)>,
 }
 
-impl<'a> Visit<'a> for DefineCollector<'_> {
-    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
-        if let Some(&replacement) = self.map.get(identifier.name.as_str()) {
-            // A define replaces only a free (unbound) reference; a resolved
-            // reference is a local binding that shadows the define.
-            let is_free = identifier
-                .reference_id
-                .get()
-                .and_then(|reference| self.scoping.get_reference(reference).symbol_id())
-                .is_none();
-            if is_free {
-                self.edits.push((identifier.span, replacement.to_string()));
+impl<'a> DefineCollector<'a> {
+    /// Whether `identifier` is a free (unbound) reference. A resolved reference is
+    /// a local binding that shadows the define.
+    fn is_free(&self, identifier: &oxc_ast::ast::IdentifierReference<'a>) -> bool {
+        identifier
+            .reference_id
+            .get()
+            .and_then(|reference| self.scoping.get_reference(reference).symbol_id())
+            .is_none()
+    }
+
+    /// The dotted path a static member chain spells (`process.env.NODE_ENV`), or
+    /// `None` when the chain is not rooted in a plain identifier — which is what
+    /// excludes `a.process.env.NODE_ENV` and any computed access. Only the ROOT of
+    /// the chain is an identifier reference at all: `env` and `NODE_ENV` are
+    /// property names, which can never be bound, so shadowing is decided entirely
+    /// by whether that root identifier is free.
+    fn member_path(&self, member: &oxc_ast::ast::StaticMemberExpression<'a>) -> Option<String> {
+        let mut parts = vec![member.property.name.as_str()];
+        let mut object = &member.object;
+        loop {
+            match object {
+                Expression::StaticMemberExpression(inner) => {
+                    parts.push(inner.property.name.as_str());
+                    object = &inner.object;
+                }
+                Expression::Identifier(identifier) => {
+                    if !self.is_free(identifier) {
+                        return None;
+                    }
+                    parts.push(identifier.name.as_str());
+                    parts.reverse();
+                    return Some(parts.join("."));
+                }
+                _ => return None,
             }
+        }
+    }
+}
+
+impl<'a> Visit<'a> for DefineCollector<'_> {
+    /// Matches a dotted key against the LONGEST member chain first, which is what
+    /// esbuild and Vite do: with both `process.env` and `process.env.NODE_ENV`
+    /// defined, the longer key wins. Because the visit runs outermost-in and
+    /// returns without walking children on a hit, the outer (longer) chain is
+    /// always tested before any prefix of it.
+    fn visit_static_member_expression(
+        &mut self,
+        member: &oxc_ast::ast::StaticMemberExpression<'a>,
+    ) {
+        if let Some(path) = self.member_path(member)
+            && let Some(&replacement) = self.map.get(path.as_str())
+        {
+            // Replace the WHOLE chain and stop descending, so the inner nodes are
+            // never independently rewritten and the recorded spans never nest —
+            // which `apply_edits` requires.
+            self.edits.push((member.span, replacement.to_string()));
+            return;
+        }
+        walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        if let Some(&replacement) = self.map.get(identifier.name.as_str())
+            && self.is_free(identifier)
+        {
+            self.edits.push((identifier.span, replacement.to_string()));
         }
         walk::walk_identifier_reference(self, identifier);
     }
@@ -140,9 +199,77 @@ mod tests {
         assert!(transform(Path::new("m.ts"), "const x = 1;", &defines()).is_none());
     }
 
+    fn node_env() -> Vec<(String, String)> {
+        vec![(
+            "process.env.NODE_ENV".to_string(),
+            "\"production\"".to_string(),
+        )]
+    }
+
     #[test]
-    fn dotted_keys_are_skipped() {
-        let defines = vec![("process.env.NODE_ENV".to_string(), "\"production\"".to_string())];
-        assert!(transform(Path::new("m.ts"), "const e = process.env.NODE_ENV;", &defines).is_none());
+    fn a_dotted_key_replaces_the_whole_member_chain() {
+        let out = transform(
+            Path::new("m.ts"),
+            "const e = process.env.NODE_ENV;",
+            &node_env(),
+        )
+        .unwrap();
+        assert_eq!(out, "const e = \"production\";");
+    }
+
+    #[test]
+    fn a_dotted_key_folds_the_package_dispatch_condition() {
+        // The shape every React-style package uses to pick its build. The point of
+        // the substitution is that the result is a literal comparison the
+        // dead-branch pass can resolve.
+        let out = transform(
+            Path::new("m.ts"),
+            "if (process.env.NODE_ENV === 'production') { a(); } else { b(); }",
+            &node_env(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "if (\"production\" === 'production') { a(); } else { b(); }"
+        );
+    }
+
+    #[test]
+    fn a_local_process_binding_shadows_a_dotted_define() {
+        // Only the chain ROOT can be bound, so shadowing is decided there.
+        let source = "function f(process) { return process.env.NODE_ENV; }";
+        assert!(
+            transform(Path::new("m.ts"), source, &node_env()).is_none(),
+            "a local `process` must shadow the define"
+        );
+    }
+
+    #[test]
+    fn a_dotted_key_does_not_match_a_longer_chain_it_is_only_a_suffix_of() {
+        // `a.process.env.NODE_ENV` is a property of `a`, not the global `process`.
+        let out = transform(
+            Path::new("m.ts"),
+            "const e = a.process.env.NODE_ENV;",
+            &node_env(),
+        );
+        assert!(out.is_none(), "suffix of a longer chain must not match: {out:?}");
+    }
+
+    #[test]
+    fn the_longest_matching_dotted_key_wins() {
+        let defines = vec![
+            ("process.env".to_string(), "{}".to_string()),
+            (
+                "process.env.NODE_ENV".to_string(),
+                "\"production\"".to_string(),
+            ),
+        ];
+        let out = transform(
+            Path::new("m.ts"),
+            "const e = process.env.NODE_ENV;",
+            &defines,
+        )
+        .unwrap();
+        assert_eq!(out, "const e = \"production\";");
     }
 }
