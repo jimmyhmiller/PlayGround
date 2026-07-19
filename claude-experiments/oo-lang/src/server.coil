@@ -506,8 +506,28 @@
       (> newfc oldfc) 1
       0)))
 
+; `action "L" for T { … }` is desugared by inject-actions into a hidden `__action_<i>` method
+; ON T, so the class as RUNNING has members no source file contains. Editing T's source and
+; re-applying it would therefore look like those methods were REMOVED and be rejected (M4) —
+; and an eval cannot parse `action` blocks, so the editor can't carry them either. Instead we
+; carry the live synthetic members over onto the incoming node: the actions are generated from
+; `action` decls that the class edit did not touch, they keep their names/indices (so the
+; viewer's `T.at(…).__action_<i>()` invoke still resolves), and their bodies are unchanged.
+(defn carry-over-actions [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (let [ms (load (field d members)) n (al-len ms) (mut i) 0]
+    (loop (if (< (load i) n)
+            (let [m (al-get ms (load i))]
+              (if (and (= (nkind m) NK_FN) (is-action-method-name (nm m) (nlen m)))
+                (if (= (cast i64 (node-fn-by-name node (nm m) (nlen m))) 0)
+                  (do (add-kid! node m) 0) 0)
+                0)
+              (store! i (+ (load i) 1)) 0)
+            (break))))
+  0)
+
 ; method-set validation (returns 1 = ok, 0 = rejected). Uses the OLD (still-live) members.
 (defn check-methods-match [(d (ptr Decl)) (node (ptr Node))] (-> i64)
+  (carry-over-actions d node)
   (block :m
     ; every NEW method must exist in OLD with a matching signature (no adds, no sig changes)
     (let [n (kid-count node) (mut i) 0]

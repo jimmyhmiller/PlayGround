@@ -419,9 +419,13 @@ export class ScryWasm {
       if (sp) sp.value = savedSp;                        // unwind the shadow stack
       else this._spLeaked = (this._spLeaked || 0) + 1;   // no export → frames leak; see README
       return this.readCstr(Number(this.exports.scry_eval_recover()));
-    } finally {
-      this._free(p);
     }
+    // NOTE: the source buffer is deliberately NOT freed. A definition eval makes the VM
+    // RETAIN pointers into it — a redefined class's field and method names are token
+    // `start` pointers into this very buffer (set-name!). Freeing it returns the block to
+    // the allocator, and the next eval overwrites those names, after which the type still
+    // *lists* its fields but no longer resolves them ("no field 'n' on Plain") while the
+    // instance data itself looks fine. Native leaks these buffers for the same reason.
   }
 
   // feedLine(text): queue a line of terminal input for Console.readLine(). Appends a

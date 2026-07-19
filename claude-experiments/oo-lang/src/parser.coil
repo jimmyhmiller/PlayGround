@@ -343,6 +343,7 @@
   (and (and (check TK_IDENT) (tok-eq (load (field (cur-ptr) start)) (load (field (cur-ptr) len)) c"section"))
        (= (peek-kind 1) TK_STR_BEGIN)))
 (defn parse-view [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'view'
   (let [t (cur-ptr) nd (mk-node NK_VIEW (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -358,13 +359,15 @@
         (check TK_IDENT) (do (add-kid! nd (parse-view-clause)) 0)
         (perror c"expected a view clause (title/size/badge/section ...)")))
     (expect TK_RBRACE)
-    nd))
+    (span-end! nd span0)
+    nd)))
 
 ; ---- program-declared actions (DECISIONS #17) -----------------------------
 ; action "<Label>" for <Type> [(<param>: <T>, ...)] { <body> }
 ; Slot layout mirrors an NK_FN so check-fn-body / compile-method drive it directly:
 ;   s-name = label, a = NK_TYPE target, b = NK_PARAMS, c = null (ret; Void), d = NK_BLOCK body.
 (defn parse-action [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'action'
   (let [nd (mk-node NK_ACTION (cur-line) (cur-col))]
     (if (check TK_STR_BEGIN)
@@ -378,7 +381,8 @@
     (store! (field nd a) (parse-type))
     (if (check TK_LPAREN) (do (store! (field nd b) (parse-params)) 0) 0)
     (store! (field nd d) (parse-block))
-    nd))
+    (span-end! nd span0)
+    nd)))
 
 ; module NAME (dotted, contiguous in source)
 (defn parse-module [] (-> (ptr Node))

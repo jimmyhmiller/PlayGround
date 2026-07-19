@@ -385,6 +385,11 @@
       (jb-cstr b c",\"module\":") (jb-str b (load (field d qmod)) (load (field d qmod-len)))
       (jb-cstr b c",\"file\":") (jb-cstr-quoted b (load (field d file)))
       (jb-cstr b c",\"source\":")
+      ; The declaration's own text only. `view`/`action` blocks that target this type are
+      ; deliberately NOT bundled in: an eval cannot parse them ("expected an expression"), so
+      ; including them would make the editor's contents impossible to apply. The synthetic
+      ; `__action_<i>` methods the compiler injects from those blocks are preserved across a
+      ; redefinition by re-injecting them (server.coil), not by round-tripping their source.
       (let [nd (load (field d node))]
         (if (= (cast i64 nd) 0) (jb-cstr b c"\"\"")
           (let [sp (load (field nd src-start)) sl (load (field nd src-len))]
@@ -392,6 +397,8 @@
               (jb-str b sp sl)))))
       (jb-byte b \}) 0)))
 
+; emit one JSON string: the decl's own span, then every view/action whose target names
+; `tn`, each separated by a blank line.
 (defn reflect-methods [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
   (if (= (cast i64 m) 0) (jb-cstr b c"[]") (emit-methods-array b (load (field m base)))))
 
