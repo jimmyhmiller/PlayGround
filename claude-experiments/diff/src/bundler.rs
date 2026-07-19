@@ -375,6 +375,11 @@ pub struct EmitOptions {
     /// The target module system. Defaults to [`ModuleFormat::Cjs`]; the server
     /// build forces [`ModuleFormat::Esm`] so its `.mjs` output truly executes.
     pub format: ModuleFormat,
+    /// Emit the dev-only Hot Module Replacement runtime (accept/dispose tracking,
+    /// per-module `module.hot`, factory `replace`, and cache invalidation with
+    /// chunk cache-busting). ALWAYS `false` for `build-app` production output, so
+    /// production bundles are byte-for-byte unaffected; the dev server sets it.
+    pub hmr: bool,
 }
 
 /// A count of what an environment build wrote to disk: JavaScript modules
@@ -439,6 +444,19 @@ impl EmitSummary {
         }
         Ok(summary)
     }
+}
+
+/// DEV-ONLY: where a changed module lives in the current emit, for pushing a
+/// targeted HMR update. See [`Bundler::hmr_locate`].
+#[derive(Debug, Clone)]
+pub struct HmrLocation {
+    /// The changed module's canonical id (path / virtual id).
+    pub module_id: String,
+    /// Its stable dense runtime id in the emitted registry.
+    pub runtime_id: usize,
+    /// The chunk file whose re-import re-registers this module's factory
+    /// (`client.js` for entry-bundled code, `client.chunk-<n>.js` for a split).
+    pub chunk_file: String,
 }
 
 #[derive(Debug, Clone)]
@@ -511,6 +529,9 @@ pub struct Bundler {
     frontend_pool: ThreadPool,
     modules: Vec<Option<ModuleState>>,
     target: Target,
+    /// DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation flag (mirrors
+    /// [`BuildConfig::hmr`]). Always `false` for `build-app`.
+    hmr: bool,
     /// Per-chunk render cache (interior-mutable so emit stays `&self`). Persists
     /// across incremental re-emits within one bundler, so a leaf edit re-renders
     /// only the chunk that changed and reuses every other chunk's bytes.
@@ -568,6 +589,7 @@ impl Bundler {
                 .map_err(|error| format!("cannot create frontend worker pool: {error}"))?,
             modules: Vec::new(),
             target: config.target,
+            hmr: config.hmr,
             render_cache: Mutex::new(RenderCache::default()),
         };
         bundler.entry = bundler.intern(entry_id.clone());
@@ -816,7 +838,7 @@ impl Bundler {
         // SSR/router runtime modules on top of the module graph. Their paths join
         // the kept set so the stale-file prune never deletes them, and `EmitSummary`
         // is recomputed afterwards so it counts the runtime files too.
-        stats.written.extend(write_server_runtime_entry(&server_dir)?);
+        stats.written.extend(write_server_runtime_entry(&server_dir, options.hmr)?);
         prune_stale_files(&server_dir, &stats.written)?;
         let mut summary = EmitSummary::of(&server_dir)?;
         summary.rendered_chunks = stats.rendered_chunks;
@@ -915,6 +937,7 @@ impl Bundler {
                 options.format,
                 options.minify,
                 options.source_map,
+                options.hmr,
                 chunk_name,
                 &mut live_keys,
                 &mut stats.rendered_chunks,
@@ -935,6 +958,7 @@ impl Bundler {
             options.format,
             options.minify,
             options.source_map,
+            options.hmr,
             entry_name,
             &mut live_keys,
             &mut stats.rendered_chunks,
@@ -961,6 +985,7 @@ impl Bundler {
         format: ModuleFormat,
         minify: bool,
         source_map: bool,
+        hmr: bool,
         chunk_name: &str,
         live_keys: &mut HashSet<u64>,
         rendered: &mut usize,
@@ -975,6 +1000,7 @@ impl Bundler {
             format,
             minify,
             source_map,
+            hmr,
         );
         live_keys.insert(key);
         if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
@@ -988,6 +1014,7 @@ impl Bundler {
             global_demands,
             is_main,
             format,
+            hmr,
         );
         // Whitespace/syntax minification of the FINISHED chunk. The chunk's `code`
         // is already clean, valid JS (markers were consumed during render; it
@@ -1066,9 +1093,14 @@ impl Bundler {
         format: ModuleFormat,
         minify: bool,
         source_map: bool,
+        hmr: bool,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         (format as u8).hash(&mut hasher);
+        // The HMR runtime shape (register-only guard, per-module `module.hot`,
+        // `replace`/cache invalidation) changes the emitted bytes, so a dev (hmr)
+        // chunk is a distinct cache entry from its production form.
+        hmr.hash(&mut hasher);
         // `minify` shapes the emitted bytes (a minified chunk differs from its
         // readable form), so it is part of the cache key: a leaf edit that changes
         // one chunk re-minifies exactly that chunk and reuses the rest byte-for-byte.
@@ -1191,6 +1223,71 @@ impl Bundler {
             entry: entry_file.to_string(),
             routes,
         })
+    }
+
+    /// DEV-ONLY: for each changed module id, its stable runtime id and the chunk
+    /// file that (re-)registers its factory, so the dev server can push a targeted
+    /// HMR update. Reproduces [`Self::emit_with_options`]'s runtime-id and chunk
+    /// assignment exactly, so the ids/chunks match the bytes just emitted. A module
+    /// not in the live set (e.g. tree-shaken away) is skipped.
+    pub fn hmr_locate(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        changed: &BTreeSet<ModuleId>,
+        entry_file: &str,
+    ) -> Result<Vec<HmrLocation>, String> {
+        let (stem, extension) = split_file_name(entry_file)?;
+        let reachable = self.live_modules(reachable);
+        let reachable_dense = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        let mut runtime_ids = vec![None; self.ids.len()];
+        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
+            runtime_ids[dense] = Some(runtime_id);
+        }
+        let main_modules = self
+            .static_closure(self.entry, &allowed)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let dynamic_roots = self.dynamic_roots(&allowed);
+        // chunk index -> (chunk_file, member set), matching emit's ordering.
+        let chunks = dynamic_roots
+            .iter()
+            .enumerate()
+            .map(|(index, &root)| {
+                let file = format!("{stem}.chunk-{}{extension}", index + 1);
+                let members = self
+                    .static_closure(root, &allowed)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                (file, members)
+            })
+            .collect::<Vec<_>>();
+        let mut located = Vec::new();
+        for module_id in changed {
+            let Some(&dense) = self.indices.get(module_id.as_str()) else {
+                continue;
+            };
+            let Some(runtime_id) = runtime_ids[dense] else {
+                continue;
+            };
+            // Prefer a dynamic chunk that owns the module (a route-split component
+            // lives only in its own chunk); fall back to the entry chunk.
+            let chunk_file = chunks
+                .iter()
+                .find(|(_, members)| members.contains(&dense))
+                .map(|(file, _)| file.clone())
+                .filter(|_| !main_modules.contains(&dense))
+                .unwrap_or_else(|| entry_file.to_string());
+            located.push(HmrLocation {
+                module_id: module_id.to_string(),
+                runtime_id,
+                chunk_file,
+            });
+        }
+        Ok(located)
     }
 
     /// Copies every content-hashed asset referenced by a reachable module into
@@ -1489,6 +1586,7 @@ impl Bundler {
                             &self.resolution_cache,
                             Path::new(path.as_ref()),
                             self.target,
+                            self.hmr,
                         );
                         (path, result)
                     })
@@ -1590,7 +1688,20 @@ impl Bundler {
         // A loader (query, stylesheet, or asset) may claim this id before it is
         // ever read as JavaScript.
         if let Some(special) = load_special_module(&id, path, self.target) {
-            let special = special?;
+            let mut special = special?;
+            // DEV-ONLY: a `?tsr-split=<component>` module is the extracted route
+            // component — a React Fast Refresh boundary. Append the self-accept
+            // footer (keyed by the split id, stable across edits and unique per
+            // split) so an edit swaps the component type while preserving state.
+            // `build-app` never sets `hmr`, so production splits are unaffected.
+            if self.hmr
+                && self.target == Target::Client
+                && crate::hmr::is_refresh_boundary(Path::new(id.as_ref()), &[], "")
+            {
+                special
+                    .code
+                    .push_str(&crate::hmr::fast_refresh_footer(id.as_ref()));
+            }
             let resolved = resolve_special_dependencies(
                 &self.resolver,
                 &self.resolution_cache,
@@ -1634,13 +1745,30 @@ impl Bundler {
         let source = self
             .resolution_cache
             .apply_vite_replacements(path, &source, self.target);
-        let transformed = transform_module(path, &source, self.target);
+        let mut transformed = transform_module(path, &source, self.target);
         diagnostics.extend(
             transformed
                 .diagnostics
                 .iter()
                 .map(|diagnostic| format!("{}: {diagnostic}", path.display())),
         );
+
+        // DEV-ONLY: install `import.meta.hot` -> `module.hot`, and append the React
+        // Fast Refresh self-accept footer to client component modules. Gated on the
+        // bundler's HMR flag, which `build-app` never sets, so production output is
+        // untouched. Runs on the lowered factory body, where `module`/`exports` and
+        // the runtime-installed `module.hot` are in scope.
+        if self.hmr {
+            transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, self.target);
+            if self.target == Target::Client
+                && crate::hmr::is_refresh_boundary(path, &transformed.liveness.exports, &source)
+            {
+                let module_key = path.to_string_lossy();
+                transformed
+                    .code
+                    .push_str(&crate::hmr::fast_refresh_footer(&module_key));
+            }
+        }
 
         let resolved_dependencies = resolve_dependencies(
             &self.resolver,
@@ -1684,19 +1812,27 @@ impl Bundler {
         global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
+        hmr: bool,
     ) -> RenderedBundle {
-        self.render_flat(reachable, entry, chunk_names, global_demands, is_main, format)
-            .unwrap_or_else(|| {
-                self.render_runtime(
-                    reachable,
-                    entry,
-                    chunk_names,
-                    runtime_ids,
-                    global_demands,
-                    is_main,
-                    format,
-                )
-            })
+        // The flat path emits a plain concatenation with no per-module factory
+        // registry, so it has no place to install `module.hot`; a dev (hmr) build
+        // always renders through the registry runtime so every module is HMR-capable.
+        if !hmr
+            && let Some(flat) =
+                self.render_flat(reachable, entry, chunk_names, global_demands, is_main, format)
+        {
+            return flat;
+        }
+        self.render_runtime(
+            reachable,
+            entry,
+            chunk_names,
+            runtime_ids,
+            global_demands,
+            is_main,
+            format,
+            hmr,
+        )
     }
 
     fn render_flat(
@@ -1902,6 +2038,7 @@ impl Bundler {
         global_demands: &[ExportDemand],
         is_main: bool,
         format: ModuleFormat,
+        hmr: bool,
     ) -> RenderedBundle {
         // See `render_flat`: demand is aggregated globally across chunks. The
         // entry keeps its full namespace (the main entry is required by the outer
@@ -2020,6 +2157,38 @@ impl Bundler {
                 r#"const requireNative=typeof require==="function"?require:null;"#,
             ),
         };
+        // DEV-ONLY HMR wiring (never emitted for production `build-app`). A
+        // version-aware dynamic import re-fetches a re-emitted chunk; `module.hot`
+        // is installed per module; the runtime gains apply/invalidate methods and a
+        // register-only guard; the ESM (Node) main chunk also starts a control
+        // endpoint so the dev server hot-reloads the server in-process.
+        let require_dynamic = if hmr && format.is_esm() {
+            crate::hmr::REQUIRE_DYNAMIC_ESM_HMR
+        } else {
+            require_dynamic
+        };
+        let hot_install = if hmr { "module.hot=__makeHot(id);" } else { "" };
+        // The entry-id declaration + HMR methods are emitted only in HMR builds
+        // (never in production `build-app` output).
+        let hmr_methods = if hmr {
+            format!("const __entryId={entry_runtime_id};{}", crate::hmr::RUNTIME_METHODS)
+        } else {
+            String::new()
+        };
+        let runtime_return = if hmr {
+            format!(
+                "const __exports={{register:__register,require:__require,replace:__replace,hmrApply:__hmrApply,serverInvalidate:__hmrServerInvalidate,bumpVersion:__bumpVersion}};globalThis[{}]=__exports;return __exports;",
+                quote(crate::hmr::RUNTIME_GLOBAL)
+            )
+        } else {
+            "return {register:__register,require:__require};".to_string()
+        };
+        let reimport_guard = if hmr { crate::hmr::REIMPORT_GUARD } else { "" };
+        let server_control = if hmr && format == ModuleFormat::Esm {
+            crate::hmr::SERVER_CONTROL
+        } else {
+            ""
+        };
         let tail = if is_main {
             format!(
                 r#"const __runtime=globalThis[{runtime_key}]??=(()=>{{
@@ -2048,15 +2217,19 @@ function __require(id){{
   if(!factory)throw new Error("Module is not loaded: "+id);
   const module={{exports:{{}}}};
   __cache[id]=module;
+  {hot_install}
   const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined){{if(requireNative)return requireNative(specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}}return __require(target);}};
   {require_dynamic}
   factory(module,module.exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal);
   return module.exports;
 }}
 {require_native}
-return {{register:__register,require:__require}};
+{hmr_methods}
+{runtime_return}
 }})();
+{server_control}
 __runtime.register(__newModules,__newMaps,__newChunks);
+{reimport_guard}
 return __runtime.require({entry_runtime_id});"#
             )
         } else {
@@ -2064,6 +2237,7 @@ return __runtime.require({entry_runtime_id});"#
                 r#"const __runtime=globalThis[{runtime_key}];
 if(!__runtime)throw new Error("Diffpack runtime is not initialized");
 __runtime.register(__newModules,__newMaps,__newChunks);
+{reimport_guard}
 return __runtime.require({entry_runtime_id});"#
             )
         };
@@ -2627,7 +2801,7 @@ const SERVER_RUNTIME_FILES: &[(&str, &str)] = &[
 /// incremental hot path); each file is a static template that references its
 /// siblings (`server.mjs`, `_tanstack-start-manifest_v.mjs`, `../public`) by
 /// relative path, so no per-build interpolation is required.
-fn write_server_runtime_entry(server_dir: &Path) -> Result<Vec<PathBuf>, String> {
+fn write_server_runtime_entry(server_dir: &Path, hmr: bool) -> Result<Vec<PathBuf>, String> {
     let mut written = Vec::with_capacity(SERVER_RUNTIME_FILES.len());
     for (relative, contents) in SERVER_RUNTIME_FILES {
         let path = server_dir.join(relative);
@@ -2635,11 +2809,45 @@ fn write_server_runtime_entry(server_dir: &Path) -> Result<Vec<PathBuf>, String>
             fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         }
+        // DEV-ONLY: the HMR SSR entry resolves the app fetch handler from a global
+        // the control endpoint refreshes on each server edit (soft in-process
+        // reload), so a server change is served without restarting Node. Production
+        // uses the static template unchanged.
+        let contents = if hmr && *relative == "_ssr/ssr.mjs" {
+            HMR_SSR_ENTRY
+        } else {
+            contents
+        };
         write_if_changed(&path, contents.as_bytes())?;
         written.push(path);
     }
     Ok(written)
 }
+
+/// DEV-ONLY replacement for `_ssr/ssr.mjs`: resolves the SSR fetch handler from
+/// `globalThis.__diffpack_ssr_entry` (republished by the HMR control endpoint after
+/// an in-process soft reload) so each request uses the latest app graph, falling
+/// back to the boot handler before the first edit.
+const HMR_SSR_ENTRY: &str = r#"import serverEntry from "../server.mjs";
+
+export function resolveFetch(entry) {
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    if (candidate == null || seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (typeof candidate === "function") return candidate;
+    if (typeof candidate.fetch === "function") return candidate.fetch.bind(candidate);
+    if (typeof candidate === "object") queue.push(candidate.default);
+  }
+  throw new Error("diffpack ssr: ./server.mjs default export exposes no fetch handler");
+}
+
+export const fetch = (request) =>
+  resolveFetch(globalThis.__diffpack_ssr_entry || serverEntry)(request);
+export default { fetch };
+"#;
 
 /// Writes `bytes` to `path` only when the file's current contents differ, so an
 /// unchanged output (a cache-reused chunk, an already-copied asset) is never
@@ -3040,6 +3248,7 @@ fn load_uncached(
     resolution_cache: &ResolutionCache,
     path: &Path,
     target: Target,
+    hmr: bool,
 ) -> Result<LoadedModule, String> {
     let id = path.to_string_lossy();
     // A build-generated virtual module (its source is not on disk) claims this id
@@ -3073,7 +3282,17 @@ fn load_uncached(
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
     // read as JavaScript.
     if let Some(special) = load_special_module(&id, path, target) {
-        let special = special?;
+        let mut special = special?;
+        // DEV-ONLY: instrument a `?tsr-split=<component>` route component with the
+        // Fast Refresh footer (see [`crate::hmr`]). Never runs for `build-app`.
+        if hmr
+            && target == Target::Client
+            && crate::hmr::is_refresh_boundary(Path::new(id.as_ref()), &[], "")
+        {
+            special
+                .code
+                .push_str(&crate::hmr::fast_refresh_footer(id.as_ref()));
+        }
         let mut diagnostics = Vec::new();
         let resolved = resolve_special_dependencies(
             resolver,
@@ -3104,7 +3323,18 @@ fn load_uncached(
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
     let source = resolution_cache.apply_vite_replacements(path, &source, target);
-    let transformed = transform_module(path, &source, target);
+    let mut transformed = transform_module(path, &source, target);
+    // DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation (client only).
+    if hmr {
+        transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, target);
+        if target == Target::Client
+            && crate::hmr::is_refresh_boundary(path, &transformed.liveness.exports, &source)
+        {
+            transformed
+                .code
+                .push_str(&crate::hmr::fast_refresh_footer(&path.to_string_lossy()));
+        }
+    }
     let code_hash = content_hash(transformed.code.as_bytes());
     let mut diagnostics = transformed
         .diagnostics
@@ -3845,6 +4075,10 @@ pub struct BuildConfig {
     /// Vite `define` entries as `(identifier, replacement_source)`, evaluated once
     /// from the config. Empty for generic bundling. See [`crate::vite_define`].
     pub defines: Vec<(String, String)>,
+    /// DEV-ONLY: instrument client component modules with React Fast Refresh and
+    /// rewrite `import.meta.hot`. Set only by the dev server; `build-app` leaves it
+    /// `false` so production output is unaffected. See [`crate::hmr`].
+    pub hmr: bool,
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -4959,7 +5193,7 @@ mod tests {
         .unwrap();
         fs::write(public_dir.join("static.txt"), "STATIC-ASSET-OK").unwrap();
 
-        write_server_runtime_entry(&server_dir).unwrap();
+        write_server_runtime_entry(&server_dir, false).unwrap();
         assert!(server_dir.join("index.mjs").is_file());
         assert!(server_dir.join("_ssr/ssr.mjs").is_file());
         assert!(server_dir.join("_ssr/router.mjs").is_file());
@@ -5029,6 +5263,7 @@ mod tests {
             target: Target::Server,
             import_meta_env: None,
             defines: Vec::new(),
+            hmr: false,
         };
         (directory, entry, config)
     }
@@ -5094,6 +5329,7 @@ mod tests {
             target,
             import_meta_env: None,
             defines: Vec::new(),
+            hmr: false,
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -5171,6 +5407,7 @@ mod tests {
             target: Target::Server,
             import_meta_env: None,
             defines: Vec::new(),
+            hmr: false,
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.

@@ -121,6 +121,9 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // is the opt-in — generic bundling leaves `import.meta.env` untouched).
             import_meta_env: Some(import_meta_env(base)),
             defines,
+            // Off by default; the dev server flips it on per environment. `build-app`
+            // uses this config path with `hmr` false, so production is unaffected.
+            hmr: false,
         },
         entry,
     })

@@ -3,6 +3,7 @@ pub mod bundler;
 pub mod config;
 pub mod dev_server;
 mod frontend_profile;
+pub mod hmr;
 pub mod import_meta_env;
 pub mod js_reachability;
 pub mod manifest;

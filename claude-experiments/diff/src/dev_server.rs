@@ -94,6 +94,7 @@ impl EnvBuild {
         Ok(Rebuilt {
             transformed,
             changed,
+            changed_ids: update.delta.changed.clone(),
         })
     }
 }
@@ -125,26 +126,147 @@ struct Rebuilt {
     /// signal: a route-component edit changes exactly the one split chunk's
     /// module, not the reference module that no longer holds the body).
     changed: usize,
+    /// The canonical ids of the modules whose content changed, so the dev server
+    /// can push a targeted HMR update for exactly them.
+    changed_ids: BTreeSet<String>,
 }
 
-/// The reload broadcast fan-out. Each connected SSE client's socket is held here;
-/// a reload writes one `data: reload` event to every one, pruning any that error.
+/// The HMR broadcast fan-out over WebSocket. Each connected browser's upgraded
+/// socket is held here; an update or reload writes one text frame to every one,
+/// pruning any that error (a closed tab).
 #[derive(Clone, Default)]
-struct ReloadHub {
+struct HmrHub {
     clients: Arc<Mutex<Vec<TcpStream>>>,
 }
 
-impl ReloadHub {
+impl HmrHub {
     fn register(&self, stream: TcpStream) {
         self.clients.lock().unwrap().push(stream);
     }
 
-    /// Push a full-page reload to every connected browser. Sockets that error
-    /// (the tab was closed) are dropped.
-    fn broadcast_reload(&self) {
+    /// Send one JSON message to every connected browser as a WebSocket text frame.
+    fn send(&self, json: &str) {
+        let frame = ws_text_frame(json.as_bytes());
         let mut clients = self.clients.lock().unwrap();
-        clients.retain_mut(|stream| stream.write_all(b"data: reload\n\n").and_then(|()| stream.flush()).is_ok());
+        clients.retain_mut(|stream| {
+            stream
+                .write_all(&frame)
+                .and_then(|()| stream.flush())
+                .is_ok()
+        });
     }
+
+    /// Push a full-page reload to every connected browser.
+    fn broadcast_reload(&self) {
+        self.send(r#"{"type":"reload"}"#);
+    }
+
+    fn client_count(&self) -> usize {
+        self.clients.lock().unwrap().len()
+    }
+}
+
+/// Frame a server->client WebSocket text message (RFC 6455): FIN + text opcode,
+/// unmasked, with the minimal length encoding.
+fn ws_text_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x81); // FIN=1, opcode=0x1 (text)
+    let len = payload.len();
+    if len < 126 {
+        frame.push(len as u8);
+    } else if len < 65536 {
+        frame.push(126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// The RFC 6455 `Sec-WebSocket-Accept` value for a client key.
+fn ws_accept(key: &str) -> String {
+    let mut input = key.to_string();
+    input.push_str("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    base64_encode(&sha1(input.as_bytes()))
+}
+
+/// Minimal SHA-1 (RFC 3174), enough for the WebSocket handshake.
+fn sha1(message: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let ml = (message.len() as u64).wrapping_mul(8);
+    let mut data = message.to_vec();
+    data.push(0x80);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&ml.to_be_bytes());
+    for block in data.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for (index, word) in block.chunks_exact(4).enumerate() {
+            w[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for index in 16..80 {
+            w[index] = (w[index - 3] ^ w[index - 8] ^ w[index - 14] ^ w[index - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (index, &word) in w.iter().enumerate() {
+            let (f, k) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+    let mut out = [0u8; 20];
+    for (index, word) in h.iter().enumerate() {
+        out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// Standard base64 encoding (no line wrapping).
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Run the dev server. Blocks, serving until the filesystem watcher stops or an
@@ -156,8 +278,12 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         .map_err(|error| format!("cannot open project root {}: {error}", options.project_root.display()))?;
     let output_root = project_root.join(".diffpack-output");
     let emit_options = EmitOptions {
-        minify: options.minify,
+        // Dev builds are never minified: HMR re-imports a chunk and reads
+        // `import.meta.url`, and Fast Refresh instrumentation is appended as
+        // readable JS. (Production `build-app` keeps its default-on minify.)
+        minify: false,
         source_map: options.source_map,
+        hmr: true,
         ..EmitOptions::default()
     };
 
@@ -175,22 +301,34 @@ pub fn run(options: DevOptions) -> Result<(), String> {
     println!("[dev] building server...");
     let mut server = build_server(&project_root, &output_root, emit_options)?;
 
-    // 2. Boot the emitted Node SSR runtime on an internal loopback port.
+    // 2. Boot the emitted Node SSR runtime on an internal loopback port, with a
+    // sibling control port so a server edit hot-reloads the runtime in-process
+    // (Increment A) instead of restarting the Node child.
     let node_port = free_port()?;
+    let control_port = free_port()?;
     let index_mjs = output_root.join("server/index.mjs");
-    let mut node = spawn_node(&index_mjs, node_port)?;
+    let mut node = spawn_node(&index_mjs, node_port, control_port)?;
     wait_for_node(node_port)?;
-    println!("[dev] node SSR runtime listening on 127.0.0.1:{node_port}");
+    println!(
+        "[dev] node SSR runtime listening on 127.0.0.1:{node_port} (hmr control :{control_port})"
+    );
 
-    // 3. Reverse proxy on the public dev port, injecting the SSE reload client.
-    let hub = ReloadHub::default();
+    // The React Fast Refresh runtime (bundled by @vitejs/plugin-react); served to
+    // the browser. Loaded once at startup so a missing dep is a clear hard error
+    // now, not a broken update later.
+    let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(&project_root)?);
+
+    // 3. Reverse proxy on the public dev port. It serves the HMR client assets,
+    // upgrades the WebSocket HMR channel, and injects the Fast Refresh preamble.
+    let hub = HmrHub::default();
     let proxy_listener = TcpListener::bind(("127.0.0.1", options.port))
         .map_err(|error| format!("cannot bind dev port {}: {error}", options.port))?;
     {
         let hub = hub.clone();
+        let refresh_runtime = Arc::clone(&refresh_runtime);
         std::thread::Builder::new()
             .name("diffpack-dev-proxy".into())
-            .spawn(move || serve_proxy(proxy_listener, node_port, hub))
+            .spawn(move || serve_proxy(proxy_listener, node_port, hub, refresh_runtime))
             .map_err(|error| format!("cannot start proxy thread: {error}"))?;
     }
     println!(
@@ -209,6 +347,7 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         &output_root,
         &index_mjs,
         node_port,
+        control_port,
         &mut node,
         &mut client,
         &mut server,
@@ -231,10 +370,11 @@ fn watch_loop(
     output_root: &Path,
     index_mjs: &Path,
     node_port: u16,
+    control_port: u16,
     node: &mut Child,
     client_env: &mut EnvBuild,
     server_env: &mut EnvBuild,
-    hub: &ReloadHub,
+    hub: &HmrHub,
 ) -> Result<(), String> {
     loop {
         // Block for the first event, then coalesce a short burst (atomic saves
@@ -277,7 +417,10 @@ fn watch_loop(
             crate::route_tree::generate_for_project(project_root)?;
             *client_env = build_client(project_root, output_root, client_env.options)?;
             *server_env = build_server(project_root, output_root, server_env.options)?;
-            restart_node(node, index_mjs, node_port)?;
+            // A route-tree mutation re-derives both graphs from scratch; the module
+            // ids shift, so this class cannot be hot-patched — restart the Node
+            // child (rare, only on add/rename/remove) and full-reload the browser.
+            restart_node(node, index_mjs, node_port, control_port)?;
             hub.broadcast_reload();
             let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
             println!(
@@ -295,6 +438,10 @@ fn watch_loop(
         let mut client = EnvCounters::default();
         let mut server_c = EnvCounters::default();
         let mut touched = false;
+        // Accumulate the changed module ids per environment so, after re-emit, one
+        // targeted HMR update covers the whole coalesced batch.
+        let mut client_changed_ids: BTreeSet<String> = BTreeSet::new();
+        let mut server_changed_ids: BTreeSet<String> = BTreeSet::new();
 
         for path in &changed {
             // Rebuild whichever environment(s) actually own the module. A route
@@ -303,6 +450,7 @@ fn watch_loop(
             if client_env.bundler.is_known_module(path) {
                 let rebuilt = client_env.rebuild(path)?;
                 let summary = emit_client(client_env, project_root, output_root)?;
+                client_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
                 client.add(&rebuilt, summary.rendered_chunks);
                 touched = true;
             }
@@ -313,6 +461,7 @@ fn watch_loop(
                     output_root,
                     server_env.options,
                 )?;
+                server_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
                 server_c.add(&rebuilt, summary.rendered_chunks);
                 touched = true;
             }
@@ -322,10 +471,26 @@ fn watch_loop(
             continue;
         }
 
-        // Restart the Node SSR child so the new server chunks are loaded, then
-        // push a full-page reload to every connected browser.
-        restart_node(node, index_mjs, node_port)?;
-        hub.broadcast_reload();
+        // INCREMENT A: hot-reload the server in-process (no Node restart) by
+        // POSTing the changed server module ids + chunks to the live runtime's
+        // control endpoint, which invalidates their cache and bumps the chunk
+        // versions so the next SSR request re-evaluates them.
+        let server_reload = hmr_reload_server(server_env, &server_changed_ids, control_port);
+
+        // INCREMENTS B/C: push a targeted client HMR update over WebSocket. The
+        // browser re-imports the changed chunk (register-only) and applies the
+        // accept/Fast-Refresh protocol, preserving state. If no browser is
+        // connected there is nothing to push.
+        let client_update = hmr_push_client(client_env, &client_changed_ids, hub);
+
+        // Fall back to a full page reload only when the server change could not be
+        // hot-applied (e.g. a statically-bundled server module), so the browser
+        // still reflects it — correct, not a crash.
+        let mut server_note = server_reload.summary;
+        if server_reload.needs_reload {
+            hub.broadcast_reload();
+            server_note.push_str(" (fell back to full reload)");
+        }
 
         let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
         // Per-edit incremental instrumentation, exercised live from a long-lived
@@ -335,7 +500,7 @@ fn watch_loop(
         // re-rendered). Printed as a stable, parseable line the browser oracle
         // asserts on.
         println!(
-            "[dev] rebuilt {} file(s) in {elapsed_ms:.1}ms | client transformed={} changed={} rendered_chunks={} | server transformed={} changed={} rendered_chunks={} | reload pushed",
+            "[dev] rebuilt {} file(s) in {elapsed_ms:.1}ms | client transformed={} changed={} rendered_chunks={} | server transformed={} changed={} rendered_chunks={} | {client_update} | server: {server_note}",
             changed.len(),
             client.transformed,
             client.changed,
@@ -344,6 +509,169 @@ fn watch_loop(
             server_c.changed,
             server_c.rendered_chunks,
         );
+    }
+}
+
+/// Outcome of a server hot-reload attempt.
+struct ServerReload {
+    summary: String,
+    needs_reload: bool,
+}
+
+/// INCREMENT A: hot-reload the server in-process. POSTs the changed server module
+/// ids and their chunk files to the emitted server's control endpoint, which
+/// invalidates the runtime cache and bumps chunk versions so the next SSR request
+/// re-evaluates the changed subtree. The Node process (PID) is never restarted.
+fn hmr_reload_server(
+    server_env: &EnvBuild,
+    changed_ids: &BTreeSet<String>,
+    control_port: u16,
+) -> ServerReload {
+    if changed_ids.is_empty() {
+        return ServerReload {
+            summary: "no server change".to_string(),
+            needs_reload: false,
+        };
+    }
+    let located = match server_env.bundler.hmr_locate(
+        &reachable_ids(server_env),
+        changed_ids,
+        "server.mjs",
+    ) {
+        Ok(located) => located,
+        Err(error) => {
+            return ServerReload {
+                summary: format!("locate failed: {error}"),
+                needs_reload: true,
+            };
+        }
+    };
+    if located.is_empty() {
+        return ServerReload {
+            summary: "no located server modules".to_string(),
+            needs_reload: true,
+        };
+    }
+    let ids = located.iter().map(|l| l.runtime_id).collect::<Vec<_>>();
+    // Chunk version keys match the runtime's `__chunks` map, which stores relative
+    // `./server.chunk-N.mjs` names. The entry (`server.mjs`) has no dynamic-import
+    // version to bump; only real split chunks are versioned.
+    let chunks = located
+        .iter()
+        .filter(|l| l.chunk_file != "server.mjs")
+        .map(|l| format!("./{}", l.chunk_file))
+        .collect::<BTreeSet<_>>();
+    let entry_touched = located.iter().any(|l| l.chunk_file == "server.mjs");
+    let payload = format!(
+        "{{\"ids\":[{}],\"chunks\":[{}]}}",
+        ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
+        chunks
+            .iter()
+            .map(|chunk| json_string(chunk))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    match post_control(control_port, &payload) {
+        Ok(_) => ServerReload {
+            summary: format!(
+                "hot-reloaded {} module(s) in-process{}",
+                ids.len(),
+                if entry_touched {
+                    " (entry module changed; a full reload will pick it up)"
+                } else {
+                    ""
+                }
+            ),
+            // A statically-bundled entry module cannot be re-imported per request,
+            // so pair it with a browser reload to stay correct.
+            needs_reload: entry_touched,
+        },
+        Err(error) => ServerReload {
+            summary: format!("control POST failed: {error}"),
+            needs_reload: true,
+        },
+    }
+}
+
+/// INCREMENTS B/C: push a targeted client HMR update over the WebSocket channel.
+/// Returns a short log fragment describing what was pushed.
+fn hmr_push_client(
+    client_env: &EnvBuild,
+    changed_ids: &BTreeSet<String>,
+    hub: &HmrHub,
+) -> String {
+    if changed_ids.is_empty() {
+        return "client: no change".to_string();
+    }
+    let located = match client_env.bundler.hmr_locate(
+        &reachable_ids(client_env),
+        changed_ids,
+        "client.js",
+    ) {
+        Ok(located) => located,
+        Err(error) => {
+            hub.broadcast_reload();
+            return format!("client: locate failed ({error}); reloaded");
+        }
+    };
+    if located.is_empty() {
+        return "client: no located modules".to_string();
+    }
+    let ids = located.iter().map(|l| l.runtime_id).collect::<Vec<_>>();
+    let chunks = located
+        .iter()
+        .map(|l| format!("/{}", l.chunk_file))
+        .collect::<BTreeSet<_>>();
+    let message = format!(
+        "{{\"type\":\"update\",\"ids\":[{}],\"chunks\":[{}]}}",
+        ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
+        chunks
+            .iter()
+            .map(|chunk| json_string(chunk))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    hub.send(&message);
+    format!(
+        "client: hmr update -> {} module(s) in {} chunk(s), {} browser(s)",
+        ids.len(),
+        chunks.len(),
+        hub.client_count()
+    )
+}
+
+/// JSON-encode a string as a JS/JSON string literal.
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Minimal HTTP POST to the emitted server's loopback control endpoint.
+fn post_control(control_port: u16, json: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", control_port))
+        .map_err(|error| format!("cannot reach hmr control on :{control_port}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .ok();
+    let request = format!(
+        "POST /__diffpack_hmr HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+        json.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("cannot send control request: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("cannot read control response: {error}"))?;
+    let head = String::from_utf8_lossy(&response);
+    if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err(format!(
+            "control endpoint returned: {}",
+            head.lines().next().unwrap_or("<no status>")
+        ))
     }
 }
 
@@ -420,7 +748,9 @@ fn build_client(
     output_root: &Path,
     options: EmitOptions,
 ) -> Result<EnvBuild, String> {
-    let config = config::derive_config(project_root, "client")?;
+    let mut config = config::derive_config(project_root, "client")?;
+    // DEV-ONLY: instrument the client graph for HMR / React Fast Refresh.
+    config.build.hmr = true;
     let entry = config
         .entry
         .clone()
@@ -470,6 +800,9 @@ fn build_server(
     options: EmitOptions,
 ) -> Result<EnvBuild, String> {
     let mut config = config::derive_config(project_root, "ssr")?;
+    // DEV-ONLY: emit the version-aware dynamic import + in-process control endpoint
+    // so a server edit hot-reloads without restarting Node.
+    config.build.hmr = true;
     register_server_virtual_modules(&mut config, project_root, output_root)?;
     let entry = config
         .entry
@@ -531,22 +864,26 @@ fn free_port() -> Result<u16, String> {
         .map_err(|error| format!("cannot read reserved port: {error}"))
 }
 
-/// Spawn the emitted `server/index.mjs` under Node on `port` (loopback only).
-fn spawn_node(index_mjs: &Path, port: u16) -> Result<Child, String> {
+/// Spawn the emitted `server/index.mjs` under Node on `port` (loopback only). The
+/// `control_port` is passed through `DIFFPACK_HMR_CONTROL_PORT` so the emitted
+/// server starts its in-process HMR control endpoint (dev builds only).
+fn spawn_node(index_mjs: &Path, port: u16, control_port: u16) -> Result<Child, String> {
     Command::new("node")
         .arg(index_mjs)
         .env("PORT", port.to_string())
         .env("HOST", "127.0.0.1")
+        .env("DIFFPACK_HMR_CONTROL_PORT", control_port.to_string())
         .spawn()
         .map_err(|error| format!("cannot start node SSR runtime ({}): {error}", index_mjs.display()))
 }
 
-/// Kill the current Node child, spawn a fresh one on the same port, and wait for
-/// it to accept connections.
-fn restart_node(node: &mut Child, index_mjs: &Path, port: u16) -> Result<(), String> {
+/// Kill the current Node child, spawn a fresh one on the same ports, and wait for
+/// it to accept connections. Used only for edit classes that cannot be hot-swapped
+/// in-process (a route-tree mutation / full rebuild), never for a normal edit.
+fn restart_node(node: &mut Child, index_mjs: &Path, port: u16, control_port: u16) -> Result<(), String> {
     let _ = node.kill();
     let _ = node.wait();
-    *node = spawn_node(index_mjs, port)?;
+    *node = spawn_node(index_mjs, port, control_port)?;
     wait_for_node(port)
 }
 
@@ -563,17 +900,18 @@ fn wait_for_node(port: u16) -> Result<(), String> {
 }
 
 /// Accept loop for the diffpack-native reverse proxy. Each connection is handled
-/// on its own thread: SSE reload subscribers are held open in the hub; every
-/// other request is forwarded to the Node child with a live-reload script injected
-/// into any HTML response.
-fn serve_proxy(listener: TcpListener, node_port: u16, hub: ReloadHub) {
+/// on its own thread: it serves the HMR client assets, upgrades the WebSocket HMR
+/// channel (held open in the hub), and forwards every other request to the Node
+/// child with the Fast Refresh preamble injected into any HTML response.
+fn serve_proxy(listener: TcpListener, node_port: u16, hub: HmrHub, refresh_runtime: Arc<String>) {
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
         let hub = hub.clone();
+        let refresh_runtime = Arc::clone(&refresh_runtime);
         let _ = std::thread::Builder::new()
             .name("diffpack-dev-conn".into())
             .spawn(move || {
-                if let Err(error) = handle_connection(stream, node_port, &hub) {
+                if let Err(error) = handle_connection(stream, node_port, &hub, &refresh_runtime) {
                     // A dropped browser connection is normal; log at a low volume.
                     let _ = error;
                 }
@@ -581,17 +919,17 @@ fn serve_proxy(listener: TcpListener, node_port: u16, hub: ReloadHub) {
     }
 }
 
-// The injected script SELF-REMOVES synchronously (like TanStack Start's own
-// inline bootstrap scripts) so it leaves no foreign DOM node in the React-hydrated
-// document — the EventSource closure keeps running after the node is gone, but
-// React sees a head/body identical to what it server-rendered, so there is no
-// hydration mismatch.
-const RELOAD_SNIPPET: &str = "<script>(function(){var s=document.currentScript;try{var es=new EventSource(\"/__diffpack_dev/events\");es.onmessage=function(e){if(e.data===\"reload\"){es.close();location.reload();}};}catch(_){}if(s)s.remove();})();</script>";
+/// The served path for the React Fast Refresh runtime (imported by the preamble).
+const REFRESH_RUNTIME_PATH: &str = "/__diffpack_hmr/refresh-runtime.js";
+/// The WebSocket HMR channel path.
+const WS_PATH: &str = "/__diffpack_hmr/ws";
 
-/// The SSE endpoint the injected client subscribes to for reload events.
-const EVENTS_PATH: &str = "/__diffpack_dev/events";
-
-fn handle_connection(mut stream: TcpStream, node_port: u16, hub: &ReloadHub) -> Result<(), String> {
+fn handle_connection(
+    mut stream: TcpStream,
+    node_port: u16,
+    hub: &HmrHub,
+    refresh_runtime: &str,
+) -> Result<(), String> {
     let mut reader = BufReader::new(
         stream
             .try_clone()
@@ -599,29 +937,66 @@ fn handle_connection(mut stream: TcpStream, node_port: u16, hub: &ReloadHub) -> 
     );
     let (request_line, headers) = read_head(&mut reader)?;
     let (method, target) = parse_request_line(&request_line)?;
+    let path = target.split('?').next().unwrap_or(&target);
 
-    if target == EVENTS_PATH {
-        // Establish the SSE stream and hand the socket to the reload hub. The
-        // handler returns; the hub keeps the socket alive and writes to it on the
-        // next reload.
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n: connected\n\n";
-        stream
-            .write_all(response.as_bytes())
-            .map_err(|error| format!("cannot open SSE stream: {error}"))?;
-        stream.flush().ok();
-        hub.register(stream);
+    // The WebSocket HMR channel: complete the RFC 6455 handshake and hand the
+    // upgraded socket to the hub, which pushes update/reload frames.
+    if path == WS_PATH {
+        if let Some((_, key)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+        {
+            let accept = ws_accept(key.trim());
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|()| stream.flush())
+                .map_err(|error| format!("cannot complete websocket handshake: {error}"))?;
+            hub.send_to(&stream, r#"{"type":"connected"}"#);
+            hub.register(stream);
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    // The Fast Refresh runtime, served as an ES module the preamble imports.
+    if path == REFRESH_RUNTIME_PATH {
+        write_js(&mut stream, refresh_runtime)?;
         return Ok(());
     }
 
     // Read the request body (for server-fn POSTs) so it forwards intact.
     let body = read_body(&mut reader, &headers)?;
     let upstream = forward_to_node(node_port, &method, &target, &headers, &body)?;
-    let response = maybe_inject_reload(upstream);
+    let response = maybe_inject_hmr(upstream);
     stream
         .write_all(&response)
         .map_err(|error| format!("cannot write response to client: {error}"))?;
     stream.flush().ok();
     Ok(())
+}
+
+/// Write a JavaScript module response (dev; no caching).
+fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .and_then(|()| stream.write_all(body.as_bytes()))
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("cannot write js response: {error}"))
+}
+
+impl HmrHub {
+    /// Send one JSON message to a single socket (used right after the handshake).
+    fn send_to(&self, mut stream: &TcpStream, json: &str) {
+        let frame = ws_text_frame(json.as_bytes());
+        let _ = stream.write_all(&frame).and_then(|()| stream.flush());
+    }
 }
 
 /// Forward a request to the Node child (forcing `Connection: close` and stripping
@@ -715,10 +1090,10 @@ fn parse_response(raw: Vec<u8>) -> Result<UpstreamResponse, String> {
     })
 }
 
-/// If the upstream response is HTML, inject the SSE reload client before the last
-/// `</body>` (or append it), then re-serialize with a correct `Content-Length`,
-/// no chunked framing, and `Connection: close`.
-fn maybe_inject_reload(mut response: UpstreamResponse) -> Vec<u8> {
+/// If the upstream response is HTML, inject the Fast Refresh preamble + WebSocket
+/// HMR client, then re-serialize with a correct `Content-Length`, no chunked
+/// framing, and `Connection: close`.
+fn maybe_inject_hmr(mut response: UpstreamResponse) -> Vec<u8> {
     let is_html = response
         .headers
         .iter()
@@ -750,33 +1125,46 @@ fn maybe_inject_reload(mut response: UpstreamResponse) -> Vec<u8> {
     out
 }
 
-/// Insert the reload snippet into HTML. Placed inside `<head>` (immediately after
-/// the opening tag) because React 19 hydration is tolerant of extra hoistable
-/// `<head>` script nodes, so the injection does not cause a hydration mismatch.
-/// Falls back to before `</body>`, then to appending, if there is no `<head>`.
+/// Insert the Fast Refresh preamble + WebSocket HMR client at the TOP of `<head>`.
+/// It is a blocking classic `<script src>` (loading the Refresh runtime as
+/// `window.$RefreshRuntime$`) followed by an inline classic `<script>` that injects
+/// the DevTools hook and sets the Refresh globals — both run synchronously during
+/// parse, before the app's deferred/async entry module, and both remove themselves
+/// so React 19 hydrates a `<head>` identical to what it server-rendered.
 fn inject_into_html(body: &[u8]) -> Vec<u8> {
     let Ok(html) = std::str::from_utf8(body) else {
         // Non-utf8 HTML is not something we produce; leave it untouched.
         return body.to_vec();
     };
+    let snippet = hmr_preamble();
     if let Some(position) = find_case_insensitive(html, "<head>") {
         let at = position + "<head>".len();
-        let mut out = String::with_capacity(html.len() + RELOAD_SNIPPET.len());
+        let mut out = String::with_capacity(html.len() + snippet.len());
         out.push_str(&html[..at]);
-        out.push_str(RELOAD_SNIPPET);
+        out.push_str(&snippet);
         out.push_str(&html[at..]);
         return out.into_bytes();
     }
     if let Some(position) = rfind_case_insensitive(html, "</body>") {
-        let mut out = String::with_capacity(html.len() + RELOAD_SNIPPET.len());
+        let mut out = String::with_capacity(html.len() + snippet.len());
         out.push_str(&html[..position]);
-        out.push_str(RELOAD_SNIPPET);
+        out.push_str(&snippet);
         out.push_str(&html[position..]);
         return out.into_bytes();
     }
     let mut out = html.to_string();
-    out.push_str(RELOAD_SNIPPET);
+    out.push_str(&snippet);
     out.into_bytes()
+}
+
+/// The blocking `<script src>` for the Fast Refresh runtime plus the inline classic
+/// preamble/WS client. Both are classic scripts so they run in document order,
+/// synchronously, before the async entry module.
+fn hmr_preamble() -> String {
+    format!(
+        "<script src=\"{REFRESH_RUNTIME_PATH}\"></script><script>{}</script>",
+        crate::hmr::client_script(WS_PATH)
+    )
 }
 
 // --- small HTTP helpers (std-only; no dependency needed for a dev proxy) ------
@@ -961,16 +1349,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injects_reload_client_into_head() {
+    fn injects_hmr_client_into_head() {
         let html = b"<!doctype html><html><head><title>x</title></head><body><div id=\"root\"></div></body></html>";
         let out = inject_into_html(html);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("EventSource"));
-        // Injected inside <head>, before the title.
+        assert!(text.contains("$RefreshRuntime$"));
+        assert!(text.contains("WebSocket"));
+        // Injected inside <head>, before the title, so it runs before app modules.
         let head = text.find("<head>").unwrap();
-        let snippet = text.find("EventSource").unwrap();
+        let snippet = text.find("$RefreshRuntime$").unwrap();
         let title = text.find("<title>").unwrap();
         assert!(head < snippet && snippet < title, "snippet must sit at the top of <head>: {text}");
+    }
+
+    #[test]
+    fn preamble_is_a_blocking_runtime_script_before_the_inline_client() {
+        let html = b"<!doctype html><html><head><title>x</title></head><body></body></html>";
+        let out = inject_into_html(html);
+        let text = String::from_utf8(out).unwrap();
+        let runtime = text.find(REFRESH_RUNTIME_PATH).unwrap();
+        let inline = text.find("WebSocket").unwrap();
+        // The blocking runtime <script src> precedes the inline client, both classic
+        // (no type=module) so they run in order before the async app entry.
+        assert!(runtime < inline, "runtime script must precede the inline client");
+        assert!(!text.contains("type=\"module\">"), "preamble scripts must be classic");
     }
 
     #[test]
@@ -978,9 +1380,15 @@ mod tests {
         let html = b"<html><body><p>hi</p></body></html>";
         let out = inject_into_html(html);
         let text = String::from_utf8(out).unwrap();
-        let snippet = text.find("EventSource").unwrap();
+        let snippet = text.find("$RefreshRuntime$").unwrap();
         let close_body = text.find("</body>").unwrap();
         assert!(snippet < close_body);
+    }
+
+    #[test]
+    fn websocket_accept_matches_rfc6455_example() {
+        // The canonical example from RFC 6455 section 1.3.
+        assert_eq!(ws_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
@@ -1005,9 +1413,9 @@ mod tests {
             headers: vec![("Content-Type".to_string(), "application/javascript".to_string())],
             body: b"console.log(1)".to_vec(),
         };
-        let out = maybe_inject_reload(response);
+        let out = maybe_inject_hmr(response);
         let text = String::from_utf8(out).unwrap();
-        assert!(!text.contains("EventSource"));
+        assert!(!text.contains("$RefreshRuntime$"));
         assert!(text.contains("Content-Length: 14"));
     }
 }
