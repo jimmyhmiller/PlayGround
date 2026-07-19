@@ -675,6 +675,64 @@ impl Heap {
 
     /// Internal collection logic — caller must hold `gc_lock`.
     unsafe fn collect_inner<P: PtrPolicy>(&self, extra_roots: &[&dyn RootSource]) {
+        // GCRUST_TRACEGC=1: per-collection accounting. FROM-used at entry must
+        // be >= the survivors left by the previous collection — if it ever
+        // goes BACKWARDS, the mutator's bump cursor was reset/misplaced and
+        // new allocations OVERLAPPED survivors (the clobbered-slot class).
+        if std::env::var_os("GCRUST_TRACEGC").is_some() {
+            static LAST_SURVIVORS: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let fu = self.from_space().used();
+            let last = LAST_SURVIVORS.load(Ordering::Relaxed);
+            eprintln!("[gc] #{} from-used {} (prev survivors {})",
+                      self.collections(), fu, last);
+            if fu < last {
+                eprintln!("[gc] !!! CURSOR WENT BACKWARDS: from-used {} < prev survivors {} — OVERLAP!", fu, last);
+                std::process::abort();
+            }
+            // record survivors AFTER this collection via a deferred read: we
+            // can't easily hook post-collect here, so read to_space().used()
+            // at the END of collect_inner (see the paired store below).
+        }
+        // PREWALK (GCRUST_PREWALK=1): before touching anything, linearly parse
+        // FROM-space up to the bump cursor and validate every object header —
+        // a garbage/invalid type_id here means a mutator (e.g. a JIT inline
+        // allocation) corrupted the heap BEFORE this collection; abort loudly
+        // at the first bad object instead of crashing mysteriously later.
+        if std::env::var_os("GCRUST_PREWALK").is_some() {
+            let base = self.from_space().base();
+            let used = self.from_space().used();
+            let ntypes = self.type_table_len();
+            let mut off = 0usize;
+            let mut n = 0usize;
+            while off < used {
+                let obj = unsafe { base.add(off) };
+                let tid = unsafe { *(obj.add(8) as *const u16) };
+                if (tid as usize) >= ntypes {
+                    eprintln!(
+                        "[gcrust PREWALK] INVALID type_id {} at from-space offset {} (obj #{}, used {}) — heap corrupted pre-GC",
+                        tid, off, n, used
+                    );
+                    std::process::abort();
+                }
+                let info = self.type_info_by_id(tid);
+                let varlen_len = match info.varlen {
+                    VarLenKind::None => 0,
+                    _ => unsafe { read_varlen_count(obj, info) },
+                };
+                let obj_size = info.allocation_size(varlen_len);
+                if obj_size == 0 || obj_size > used - off {
+                    eprintln!(
+                        "[gcrust PREWALK] BAD size {} (tid {}) at offset {} (obj #{}, used {})",
+                        obj_size, tid, off, n, used
+                    );
+                    std::process::abort();
+                }
+                let align = 1usize << info.align_log2;
+                off = (off + obj_size + align - 1) & !(align - 1);
+                n += 1;
+            }
+        }
         // Phase 1: scan all roots → copy/forward targets into to-space
 
         self.globals.scan_roots(&mut |slot| {
@@ -748,9 +806,66 @@ impl Heap {
             scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
         }
 
+        if std::env::var_os("GCRUST_TRACEGC").is_some() {
+            static LAST_SURVIVORS2: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let su = self.to_space().used();
+            eprintln!("[gc] #{} survivors {}", self.collections(), su);
+        }
+        // VERIFY (GCRUST_VERIFY=1): re-walk to-space; every traced slot must
+        // be null/immediate or point INSIDE to-space (a from-space pointer
+        // here is exactly the dangling-ref class behind the jsir bench-mode
+        // SIGSEGVs — catch it AT THE COLLECTION, with the object identified).
+        if std::env::var_os("GCRUST_VERIFY").is_some() {
+            let base = self.to_space().base() as usize;
+            let end = base + self.to_space().used();
+            let mut off = 0usize;
+            while off < self.to_space().used() {
+                let obj = unsafe { self.to_space().base().add(off) };
+                let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+                assert!(
+                    (type_id as usize) < self.type_table.len(),
+                    "GC VERIFY: bad type_id {} at to-space+{:#x}",
+                    type_id, off
+                );
+                let info = &self.type_table[type_id as usize];
+                unsafe {
+                    scan_object(obj, info, |slot| {
+                        let bits = *slot;
+                        if let Some(p) = P::try_decode_ptr(bits) {
+                            let pa = p as usize;
+                            assert!(
+                                pa >= base && pa < end,
+                                "GC VERIFY: object type_id={} at to-space+{:#x} holds                                  out-of-space ref {:#x} (slot {:p}); to-space [{:#x},{:#x})",
+                                type_id, off, pa, slot, base, end
+                            );
+                        }
+                    });
+                }
+                let varlen_len = match info.varlen {
+                    VarLenKind::None => 0,
+                    _ => unsafe { read_varlen_count(obj, info) },
+                };
+                let obj_size = info.allocation_size(varlen_len);
+                let align = 1usize << info.align_log2;
+                off = (off + obj_size + align - 1) & !(align - 1);
+            }
+        }
+
         // Phase 3: swap spaces (flip atomic index — no UB, no ptr::swap)
         self.swap_spaces();
         self.to_space().reset();
+        // POISON (GCRUST_POISON=1): fill the just-evacuated space with a
+        // pattern so STALE POINTERS read garbage immediately instead of
+        // plausible zeros from later reuse (the jsir navier divergence read
+        // an all-zero 16900-slot array through a stale ref ~14 iterations
+        // after the collection that moved it).
+        if std::env::var_os("GCRUST_POISON").is_some() {
+            let sp = self.to_space();
+            unsafe {
+                std::ptr::write_bytes(sp.base(), 0xBF, sp.space_size());
+            }
+        }
         self.collections.fetch_add(1, Ordering::Relaxed);
 
         // Clear card table for new from-space after swap
