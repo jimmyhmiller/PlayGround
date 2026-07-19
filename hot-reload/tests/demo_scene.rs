@@ -127,6 +127,55 @@ fn particles_stay_on_the_canvas() {
     }
 }
 
+/// Changing the seed count and restarting is the demo's "Restart world with
+/// this source" path. The particles have to actually land ON the canvas: an
+/// earlier layout put everything past the first screenful off-canvas, where
+/// `advance` clamped it into a corner, so 200 particles looked like 18 and the
+/// edit looked ignored even though it had taken effect.
+#[test]
+fn a_bigger_seed_count_spreads_across_the_canvas() {
+    let scene = SCENE.replace("while i < 18", "while i < 200");
+    let tk = Arc::new(Mutex::new(Toolkit::default()));
+    let mut session = Session::new();
+    session.eval(INTERFACE).expect("interface compiles");
+    bind(&mut session, &tk);
+    session.eval(&scene).expect("resized scene compiles");
+    let main = session.fn_id("main").expect("main");
+    let mut actor = session.engine.spawn(main, vec![]).expect("spawn main");
+
+    frame(&mut session, &mut actor);
+    let first = {
+        let t = tk.lock().unwrap();
+        assert_eq!(t.circles.len(), 200, "all 200 particles are drawn");
+        t.circles.clone()
+    };
+
+    // Spread, not a pile. Every particle must be individually visible: distinct
+    // positions, not merely distinct columns — a coarse grid passed a
+    // per-axis check while stacking four particles per slot.
+    let positions: std::collections::BTreeSet<(i64, i64)> =
+        first.iter().map(|c| (c.0, c.1)).collect();
+    assert_eq!(positions.len(), 200, "every particle is at its own spot");
+    let cornered = first.iter().filter(|c| c.0 >= 620 && c.1 >= 380).count();
+    assert!(cornered < 10, "{cornered} particles piled into the corner");
+
+    // And they stay individually visible: identical velocities would make
+    // co-located particles move as one for the rest of the run.
+    for _ in 0..40 {
+        frame(&mut session, &mut actor);
+    }
+    let latest: Vec<(i64, i64)> = {
+        let t = tk.lock().unwrap();
+        t.circles[t.circles.len() - 200..].iter().map(|c| (c.0, c.1)).collect()
+    };
+    let distinct: std::collections::BTreeSet<(i64, i64)> = latest.iter().copied().collect();
+    assert!(
+        distinct.len() > 150,
+        "particles stayed distinct while moving, got {}",
+        distinct.len()
+    );
+}
+
 #[test]
 fn scenario_1_redefining_a_function_lands_on_the_next_frame() {
     let (mut session, mut actor, tk) = boot();

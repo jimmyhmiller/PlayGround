@@ -8,13 +8,27 @@
 
 struct Particle { x: i64, y: i64, vx: i64, vy: i64 }
 
+// Change the loop bound and restart the world to get that many particles.
+//
+// Position wraps the canvas by a stride coprime to its size, so every particle
+// lands somewhere different (600 distinct spots before any repeat) and all of
+// them start ON screen. Two earlier layouts got this wrong in ways that made a
+// bigger count look like it had been ignored: a single diagonal put everything
+// past the first screenful off-canvas, where `advance` clamps it into a corner,
+// and a coarse grid gave only 48 slots with matching velocities, so the extras
+// sat exactly on top of each other forever.
 fn seed() -> [Particle] {
     let ps: [Particle] = [];
     let i = 0;
     while i < 18 {
-        let a = i - (i / 4) * 4;
-        let b = i - (i / 3) * 3;
-        push(ps, Particle { x: 40 + i * 31, y: 50 + i * 17, vx: 2 + a, vy: 2 + b });
+        let sx = i * 37;
+        let sy = i * 53;
+        push(ps, Particle {
+            x: 20 + (sx - (sx / 600) * 600),
+            y: 20 + (sy - (sy / 360) * 360),
+            vx: 2 + (i - (i / 5) * 5),
+            vy: 2 + (i - (i / 7) * 7),
+        });
         i = i + 1;
     }
     ps
