@@ -64,14 +64,62 @@
     max-width: 90%; overflow-wrap: anywhere;
   }
 
-  textarea {
-    width: 100%; min-height: 340px; resize: vertical;
-    background: #0b0f14; color: var(--ink); border: 1px solid var(--edge);
-    border-radius: 8px; padding: 11px 12px;
+  /* The editor is a transparent textarea over a highlighted <pre>. Both must
+     lay text out identically or the caret drifts from the glyphs. */
+  .editor-stack {
+    position: relative; background: #0b0f14;
+    border: 1px solid var(--edge); border-radius: 8px;
+    height: 420px; overflow: hidden;
+  }
+  .editor-stack:focus-within { border-color: var(--accent); }
+  .editor-stack textarea,
+  .editor-stack pre {
+    margin: 0; position: absolute; inset: 0; width: 100%; height: 100%;
+    padding: 11px 12px; border: 0; overflow: auto;
     font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
     tab-size: 4;
   }
-  textarea:focus { outline: none; border-color: var(--accent); }
+  /* The highlight layer sits ON TOP so number tokens can be grabbed, but is
+     click-through everywhere else, so all other input reaches the textarea
+     beneath it. The textarea's text is transparent, so what you read is this
+     layer and what you type into is the one below. */
+  .editor-stack pre { z-index: 2; pointer-events: none; color: var(--ink); }
+  .editor-stack textarea {
+    z-index: 1; resize: none; background: transparent;
+    color: transparent; caret-color: var(--ink);
+  }
+  .editor-stack textarea:focus { outline: none; }
+  .editor-stack textarea::selection { background: rgba(98,176,255,.30); }
+
+  .tok-comment { color: #5b6675; font-style: italic; }
+  .tok-keyword { color: #ff9ecd; }
+  .tok-type    { color: #7fd6c1; }
+  .tok-string  { color: #ffb454; }
+  .tok-number  { color: #c4a6ff; }
+  .tok-fn      { color: #62b0ff; }
+
+  /* Every number is draggable. The dotted underline is the affordance; a plain
+     click still falls through to the caret, so numbers stay editable by hand. */
+  .tok-number {
+    pointer-events: auto; cursor: ew-resize;
+    border-bottom: 1px dashed rgba(196,166,255,.5); border-radius: 2px;
+  }
+  .tok-number:hover {
+    background: rgba(196,166,255,.28);
+    box-shadow: 0 0 0 2px rgba(196,166,255,.28);
+  }
+  .editor-stack.scrubbing, .editor-stack.scrubbing * { cursor: ew-resize; }
+  .editor-stack.scrubbing .tok-number.active { background: rgba(196,166,255,.38); }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 12.5px; }
+  #live-status {
+    font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+    margin-top: 8px; min-height: 1.3em; overflow-wrap: anywhere;
+  }
+  #live-status.ok  { color: var(--ok); }
+  #live-status.err { color: var(--dim); }
 
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
   button {
@@ -189,7 +237,19 @@
   <section class="panel">
     <h2>Source — edit and apply while it runs</h2>
     <div class="body">
-      <textarea id="editor" spellcheck="false"></textarea>
+      <div class="editor-stack" id="editor-stack">
+        <pre id="highlight" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" autocomplete="off"
+                  autocapitalize="off" autocorrect="off" wrap="soft"></textarea>
+      </div>
+      <div class="toolbar">
+        <label class="toggle">
+          <input type="checkbox" id="live-typing">
+          Apply as I type
+        </label>
+        <span class="hint">Drag any number to scrub it live · Shift for fine steps</span>
+      </div>
+      <div id="live-status"></div>
       <div class="row">
         <button class="primary" id="apply">Apply edit</button>
         <button id="restart">Restart world with this source</button>
@@ -296,6 +356,235 @@ function renderWorld({ functions, types }) {
 const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// ── syntax highlighting ────────────────────────────────────────────────────
+// A scanner rather than a pile of regexes over the whole text: comments and
+// strings have to win over everything inside them, and every token needs its
+// character offsets so a number can be spliced back into the source when
+// scrubbed.
+const KEYWORDS = new Set([
+  "fn", "let", "letonce", "while", "if", "else", "return", "struct", "enum",
+  "match", "foreign", "type", "emit", "yield", "push", "len", "true", "false",
+]);
+const TYPES = new Set(["i64", "f64", "bool", "str"]);
+
+const isIdentStart = (c) => /[A-Za-z_]/.test(c);
+const isIdent = (c) => /[A-Za-z0-9_]/.test(c);
+const isDigit = (c) => c >= "0" && c <= "9";
+
+function tokenize(src) {
+  const tokens = [];
+  // The last token that was not whitespace, so `fn NAME` can be recognised
+  // across the space between them.
+  let previous = null;
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const start = i;
+
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      tokens.push({ cls: "comment", start, end: i });
+    } else if (c === '"') {
+      i++;
+      while (i < src.length && src[i] !== '"') i += src[i] === "\\" ? 2 : 1;
+      i++;
+      tokens.push({ cls: "string", start, end: Math.min(i, src.length) });
+    } else if (isDigit(c)) {
+      while (i < src.length && isDigit(src[i])) i++;
+      // A float keeps its fractional part in one token so scrubbing never
+      // splits `1.5` into `1` and `5`.
+      let isFloat = false;
+      if (src[i] === "." && isDigit(src[i + 1])) {
+        isFloat = true;
+        i++;
+        while (i < src.length && isDigit(src[i])) i++;
+      }
+      tokens.push({ cls: "number", start, end: i, float: isFloat });
+    } else if (isIdentStart(c)) {
+      while (i < src.length && isIdent(src[i])) i++;
+      const word = src.slice(start, i);
+      // `fn NAME` — colour the definition's name, not the keyword only.
+      const afterFn = previous && previous.word === "fn";
+      const cls = KEYWORDS.has(word)
+        ? "keyword"
+        : TYPES.has(word)
+          ? "type"
+          : afterFn
+            ? "fn"
+            : "plain";
+      tokens.push({ cls, start, end: i, word });
+    } else {
+      i++;
+      tokens.push({ cls: "plain", start, end: i });
+    }
+
+    const token = tokens[tokens.length - 1];
+    if (src.slice(token.start, token.end).trim() !== "") previous = token;
+  }
+  return tokens;
+}
+
+function renderHighlight() {
+  const src = $("editor").value;
+  const tokens = tokenize(src);
+  let html = "";
+  for (const t of tokens) {
+    const text = escapeHtml(src.slice(t.start, t.end));
+    html += t.cls === "plain"
+      ? text
+      : `<span class="tok-${t.cls}" data-s="${t.start}" data-e="${t.end}">${text}</span>`;
+  }
+  // A trailing newline needs a spare line or the two layers scroll apart.
+  $("highlight").innerHTML = html + "\n";
+  syncScroll();
+}
+
+function syncScroll() {
+  $("highlight").scrollTop = $("editor").scrollTop;
+  $("highlight").scrollLeft = $("editor").scrollLeft;
+}
+
+/// Replace the editor's contents while keeping the caret where it was.
+function setSource(text, { keepCaret = false } = {}) {
+  const editor = $("editor");
+  const at = editor.selectionStart;
+  editor.value = text;
+  if (keepCaret) editor.setSelectionRange(at, at);
+  renderHighlight();
+}
+
+// ── live typing ────────────────────────────────────────────────────────────
+// Applying the WHOLE source on every keystroke would reinstall every
+// definition in it — versions climbing 60x/second and a struct migration
+// churn behind them. Only the definition under the caret is applied.
+const ITEM_START = /^(fn|struct|enum|letonce|foreign)\b/;
+
+function enclosingItem(src, offset) {
+  const lines = src.split("\n");
+  let lineStart = 0;
+  const bounds = [];
+  for (const line of lines) {
+    if (ITEM_START.test(line)) bounds.push(lineStart);
+    lineStart += line.length + 1;
+  }
+  if (bounds.length === 0) return { start: 0, end: src.length };
+
+  let start = bounds[0];
+  for (const b of bounds) if (b <= offset) start = b;
+  const next = bounds.find((b) => b > start);
+  return { start, end: next === undefined ? src.length : next };
+}
+
+function liveStatus(text, kind) {
+  const el = $("live-status");
+  el.textContent = text;
+  el.className = kind ?? "";
+}
+
+// Apply quietly — a half-typed definition failing to parse is the normal
+// state while typing, not an error worth shouting about.
+//
+// `at` is which definition to install. Typing means the caret; scrubbing means
+// the number being dragged, which is NOT where the caret is — using the caret
+// for both installs whichever definition the caret happens to sit in and
+// silently leaves the scrubbed one untouched.
+function applyLive(reason, at = $("editor").selectionStart) {
+  const src = $("editor").value;
+  const { start, end } = enclosingItem(src, at);
+  const item = src.slice(start, end).trim();
+  if (item === "") return;
+
+  const result = JSON.parse(demo.eval(item));
+  lastWorld = "";
+  if (!result.ok) {
+    liveStatus(`${reason}: not yet — ${result.error}`, "err");
+  } else if (result.unobservable.length > 0) {
+    liveStatus(
+      `${reason}: installed ${result.unobservable.join(", ")}, but only a letonce ` +
+      `initializer calls it — restart to see it`,
+      "err",
+    );
+  } else {
+    liveStatus(`${reason}: installed ${result.installed.join(", ") || "(no change)"}`, "ok");
+  }
+}
+
+let liveTimer = null;
+function scheduleLive() {
+  if (!$("live-typing").checked) return;
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => applyLive("live"), 300);
+}
+
+// ── scrubbing numbers ──────────────────────────────────────────────────────
+// Drag any number to change it; the edit applies on every step, so the
+// animation responds under the cursor.
+//
+// Dragging and clicking share the same gesture, so nothing happens until the
+// pointer actually moves. A click that never moves is forwarded to the caret,
+// which keeps numbers editable by typing.
+const DRAG_THRESHOLD = 3;
+let scrub = null;
+
+$("highlight").addEventListener("pointerdown", (e) => {
+  const span = e.target.closest(".tok-number");
+  if (!span || e.button !== 0) return;
+  e.preventDefault();
+  const src = $("editor").value;
+  const start = +span.dataset.s;
+  const end = +span.dataset.e;
+  const box = span.getBoundingClientRect();
+  scrub = {
+    span,
+    start,
+    value: parseFloat(src.slice(start, end)),
+    float: src.slice(start, end).includes("."),
+    x: e.clientX,
+    length: end - start,
+    moved: false,
+    // Where in the number the click landed, for placing the caret if this
+    // turns out to be a click rather than a drag.
+    caret: start + Math.round(((e.clientX - box.left) / box.width) * (end - start)),
+  };
+  $("highlight").setPointerCapture(e.pointerId);
+});
+
+$("highlight").addEventListener("pointermove", (e) => {
+  if (!scrub) return;
+  const dx = e.clientX - scrub.x;
+  if (!scrub.moved) {
+    if (Math.abs(dx) < DRAG_THRESHOLD) return;
+    scrub.moved = true;
+    $("editor-stack").classList.add("scrubbing");
+  }
+  e.preventDefault();
+
+  // Shift for fine control, as in every other scrubber.
+  const perPixel = e.shiftKey ? 1 / 12 : 1 / 3;
+  const next = scrub.float
+    ? Math.round((scrub.value + dx * perPixel) * 10) / 10
+    : Math.round(scrub.value + dx * perPixel);
+  const text = String(next);
+  const src = $("editor").value;
+  setSource(src.slice(0, scrub.start) + text + src.slice(scrub.start + scrub.length));
+  scrub.length = text.length;
+  applyLive("scrub", scrub.start);
+});
+
+function endScrub() {
+  if (!scrub) return;
+  if (!scrub.moved) {
+    // A click, not a drag: hand the caret to the textarea underneath.
+    const editor = $("editor");
+    editor.focus();
+    editor.setSelectionRange(scrub.caret, scrub.caret);
+  }
+  scrub = null;
+  $("editor-stack").classList.remove("scrubbing");
+}
+$("highlight").addEventListener("pointerup", endScrub);
+$("highlight").addEventListener("pointercancel", endScrub);
+
 // ── editing ────────────────────────────────────────────────────────────────
 function message(text, kind) {
   const el = $("message");
@@ -353,7 +642,7 @@ function replaceSource(text, note) {
   if (edited && !confirm("Replace the source in the editor? Your changes there will be lost.")) {
     return false;
   }
-  $("editor").value = text;
+  setSource(text);
   lastLoadedSource = text;
   if (note) message(note, "ok");
   return true;
@@ -373,6 +662,12 @@ $("step").addEventListener("click", () => {
 });
 $("editor").addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); applyEdit(); }
+});
+$("editor").addEventListener("input", () => { renderHighlight(); scheduleLive(); });
+$("editor").addEventListener("scroll", syncScroll);
+$("live-typing").addEventListener("change", (e) => {
+  liveStatus(e.target.checked ? "live typing on — edits install as you type" : "");
+  if (e.target.checked) applyLive("live");
 });
 $("thaw").addEventListener("click", () => {
   demo.thaw();
@@ -410,7 +705,7 @@ function markActive(index) {
 }
 
 let lastLoadedSource = Demo.scene_source();
-$("editor").value = lastLoadedSource;
+setSource(lastLoadedSource);
 requestAnimationFrame(tick);
 </script>
 </body>

@@ -42,6 +42,11 @@ resource, so edits change code and never the running world.
 
 ## Controls
 
+- **Drag any number** to scrub it. The value is rewritten in the source and
+  installed on every step, so the animation responds under the cursor. Shift
+  gives finer steps; a click that does not move places the caret instead, so
+  numbers stay editable by typing.
+- **Apply as I type** — install on every keystroke, debounced.
 - **Apply edit** (⌘/Ctrl+Enter) — install the editor's contents into the *running*
   world. This is the live path: the program is never restarted.
 - **Pause / Resume** and **Step 1 frame** — the host declining to step the
@@ -52,6 +57,24 @@ resource, so edits change code and never the running world.
   contents. Needs a whole scene, not a fragment.
 - **Load full scene** / **Reset to original** — restore the shipped source.
   Both ask first if you have unsaved changes in the editor.
+
+### The editor
+
+A transparent `<textarea>` over a syntax-highlighted `<pre>`, with no editor
+dependency: the language has no existing mode, so a grammar had to be written
+either way, and this keeps the page self-contained and offline. It also makes
+scrubbing straightforward — every number is a real element in the highlight
+layer, so it can be hit-tested directly rather than measured out of a textarea.
+
+The highlight layer sits on top so number tokens can be grabbed, but is
+click-through everywhere else, so all other input reaches the textarea beneath.
+The two layers must lay text out identically or the caret drifts from the
+glyphs; that is what the shared padding/font/wrapping rules are for.
+
+**Scrubbing and live typing install only the definition under the point being
+edited**, not the whole buffer. Re-evaluating the entire scene per keystroke
+would reinstall every definition in it — versions climbing 60×/second with a
+struct-migration churn behind them.
 
 ### Editing `seed` (and why "Apply" looks like it does nothing)
 
