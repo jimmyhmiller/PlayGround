@@ -26,6 +26,7 @@
 (import "reader.coil" :use *)
 (import "parser.coil" :use *)
 (import "ast.coil" :use *)
+(import "ctval.coil" :use *)   ; CtVal / EnvBind / CtCtx (was reached via comptime.coil)
 (import "resolve.coil" :use *)
 (import "comptime.coil" :use *)
 (import "diag.coil" :use *)

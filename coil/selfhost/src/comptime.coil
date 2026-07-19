@@ -11,6 +11,7 @@
 (import "try.coil" :use *)
 (import "match.coil" :use *)
 (import "ast.coil" :use *)
+(import "ctval.coil" :use *)   ; CtVal / EnvBind / CtCtx — the value model, now on its own
 (import "check.coil" :use *)
 (import "expander.coil" :use *)
 (import "loader.coil" :use *)
@@ -18,18 +19,6 @@
 (import "reader.coil" :use *)
 (import "resolve.coil" :use *)
 
-(defsum CtVal
-  (CInt    [(v i64)])
-  (CBool   [(b bool)])
-  (CFloat  [(x f64)])
-  (CStr    [(s (slice u8))])
-  (CCode   [(form Sexp)])
-  (CStruct [(name (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
-  (CArray  [(elem Type) (cells (ptr (ArrayList (ptr CtVal))))])
-  (CSum    [(variant (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
-  (CRef    [(cell (ptr CtVal))]))
-(defn new-cell [(c CtVal)] (-> (ptr CtVal))
-  (let [p (unwrap-ptr [CtVal] (create [CtVal] (malloc-allocator)))] (store! p c) p))
 (defn is-aggregate [(c (ptr CtVal))] (-> bool)
   (match (load c)
     (CStruct [name fields]    true)
@@ -75,7 +64,6 @@
   (FVal  [(v CtVal)])
   (FBrk  [(value (Option CtVal)) (label (Option (slice u8)))])
   (FCont [(label (Option (slice u8)))]))
-(defstruct EnvBind [(name (slice u8)) (val CtVal)])
 (defn env-clone [(a (ptr Allocator)) (env (ptr (ArrayList EnvBind)))] (-> (ptr (ArrayList EnvBind)))
   (let [n (al-len [EnvBind] (load env)) (mut out) (al-new [EnvBind] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -99,26 +87,6 @@
             (if (str-eq (load (field p name)) name) (do (store! r (Some (load (field p val)))) 0) 0))
           (store! i (iadd (load i) 1)))))
     (load r)))
-(defstruct CtCtx
-  [(a (ptr Allocator))
-   (fns      (ptr (ArrayList Func)))
-   (structs  (ptr (ArrayList StructDef)))
-   (sums     (ptr (ArrayList SumDef)))
-   (variants (ptr (ArrayList (slice u8))))
-   (traits   (ptr (ArrayList TraitDef)))
-   (fuel i64)
-   (depth i64)
-   (gensym i64)
-   ; ---- referential-hygiene fields (driver chunk; null/None when not expanding)
-   (qmodule  (Option (slice u8)))
-   (module_fns      (ptr (ArrayList (slice u8))))
-   (qimports (ptr ModImports))
-   (qexports (ptr (ArrayList ExpEntry)))
-   ; the whole checked Program (the fold pass sets it; null in the expander/macro
-   ; contexts). The compiled-comptime fold hook needs it to build a dylib of the
-   ; program + a synthetic `() -> T` entry per comptime site (interp deletion step 1).
-   (prog (ptr Program))])
-
 ; ---- compiled-comptime fold hook (mac-8) ----------------------------------------
 ; The tree-walk interpreter is a WEAKER sublanguage than a macro body: no generics,
 ; no sizeof/alignof/offsetof, no strings. When `eval` rejects a `(comptime E)` / a

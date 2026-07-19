@@ -1,0 +1,62 @@
+; selfhost/src/ctval.coil — the compile-time VALUE MODEL, on its own.
+;
+; `CtVal` (a compile-time value), `EnvBind` (a name bound to one), and `CtCtx`
+; (the context a compile-time evaluation runs against) used to live in
+; comptime.coil next to the tree-walking interpreter. Six other modules —
+; metalower, comptime_eval, expander, metaengine, metahost, metashim — need these
+; types but not the interpreter, and were reaching them THROUGH comptime.coil.
+; `:use *` does not re-export, so that only worked because comptime.coil happened
+; to define them. Deleting the interpreter (docs/DECISIONS.md decision 7) would
+; have taken the type definitions with it.
+;
+; This module is types plus their immediate constructors, nothing else. It imports
+; only what those definitions name, so it sits BELOW every module that uses it and
+; introduces no cycle: comptime.coil ← ctval.coil, never the reverse.
+(module ctval)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)      ; Option
+(import "slice.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)         ; Type, Func, StructDef, SumDef, TraitDef, Program
+(import "reader.coil" :use *)      ; Sexp
+(import "loader.coil" :use *)      ; ModImports, ExpEntry
+
+; A value the compiler can hold at compile time. CRef is a cell rather than a copy
+; so a comptime `store!` through a reference is visible to the binding it came from.
+(defsum CtVal
+  (CInt    [(v i64)])
+  (CBool   [(b bool)])
+  (CFloat  [(x f64)])
+  (CStr    [(s (slice u8))])
+  (CCode   [(form Sexp)])
+  (CStruct [(name (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
+  (CArray  [(elem Type) (cells (ptr (ArrayList (ptr CtVal))))])
+  (CSum    [(variant (slice u8)) (fields (ptr (ArrayList (ptr CtVal))))])
+  (CRef    [(cell (ptr CtVal))]))
+
+(defn new-cell [(c CtVal)] (-> (ptr CtVal))
+  (let [p (unwrap-ptr [CtVal] (create [CtVal] (malloc-allocator)))] (store! p c) p))
+
+(defstruct EnvBind [(name (slice u8)) (val CtVal)])
+
+(defstruct CtCtx
+  [(a (ptr Allocator))
+   (fns      (ptr (ArrayList Func)))
+   (structs  (ptr (ArrayList StructDef)))
+   (sums     (ptr (ArrayList SumDef)))
+   (variants (ptr (ArrayList (slice u8))))
+   (traits   (ptr (ArrayList TraitDef)))
+   (fuel i64)
+   (depth i64)
+   (gensym i64)
+   ; ---- referential-hygiene fields (driver chunk; null/None when not expanding)
+   (qmodule  (Option (slice u8)))
+   (module_fns      (ptr (ArrayList (slice u8))))
+   (qimports (ptr ModImports))
+   (qexports (ptr (ArrayList ExpEntry)))
+   ; the whole checked Program (the fold pass sets it; null in the expander/macro
+   ; contexts). The compiled-comptime fold hook needs it to build a sub-program of
+   ; the program + a synthetic `() -> T` entry per comptime site.
+   (prog (ptr Program))])

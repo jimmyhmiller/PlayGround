@@ -27,6 +27,7 @@
 (import "control.coil" :use *)
 (import "try.coil" :use *)
 (import "ast.coil" :use *)
+(import "ctval.coil" :use *)   ; CtVal / EnvBind / CtCtx (was reached via comptime.coil)
 (import "parser.coil" :use *)       ; box-al
 (import "resolve.coil" :use *)      ; SBox, set-contains
 (import "check.coil" :use *)        ; type-map-lookup, Diag, derr
