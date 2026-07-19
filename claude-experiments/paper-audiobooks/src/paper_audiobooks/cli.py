@@ -65,6 +65,33 @@ DEFAULT_VOICE_REF = Path(
     )
 )
 
+# Named voice clones live here as <name>.wav. Refer to one by bare name
+# (`--voice ludwig`) or let it be picked from the source filename (a
+# `voice-<name>` token anywhere in the stem, e.g. `Sapiens.voice-ludwig.pdf`).
+VOICES_DIR = Path(
+    os.environ.get(
+        "PAPER_AUDIOBOOKS_VOICES_DIR",
+        os.path.expanduser("~/.config/paper-audiobooks/voices"),
+    )
+)
+_CLONE_BACKENDS = {"chatterbox", "chatterbox-mojo", "f5", "higgs"}
+
+import re
+
+_VOICE_TOKEN_RE = re.compile(r"voice-([a-z0-9_]+)", re.IGNORECASE)
+
+
+def _voice_ref_for_name(name: str) -> Path | None:
+    """Map a bare voice name to its registry wav, if present."""
+    cand = VOICES_DIR / f"{name}.wav"
+    return cand if cand.is_file() else None
+
+
+def _voice_name_from_source(source: Path) -> str | None:
+    """Pull a `voice-<name>` token out of the source filename stem, if any."""
+    m = _VOICE_TOKEN_RE.search(source.stem)
+    return m.group(1).lower() if m else None
+
 
 @click.group()
 def cli() -> None:
@@ -77,7 +104,7 @@ def cli() -> None:
 @click.option("--llm-base-url", default="http://127.0.0.1:8080", help="llama.cpp server base URL")
 @click.option("--tts-backend", default=DEFAULT_BACKEND, show_default=True,
               help="TTS backend: kokoro, chatterbox, f5, higgs (must be installed)")
-@click.option("--voice", default=None, help="Voice id or reference wav path; default = configured user voice")
+@click.option("--voice", default=None, help="Voice: a registry name (e.g. ludwig), a wav path, or a backend voice id. Default: voice-<name> token in the filename, else the configured user voice. List names with the 'voices' command.")
 @click.option("--skip-extract", is_flag=True, help="Reuse existing .md")
 @click.option("--skip-rewrite", is_flag=True, help="Reuse existing .chapters.json")
 @click.option("--no-auto-llm", is_flag=True, help="Don't start llama-server")
@@ -101,7 +128,7 @@ def one(source: Path, out_dir: Path, llm_base_url: str, tts_backend: str, voice:
         raise click.UsageError("--first-chapter and --all-chapters are mutually exclusive")
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = paths_for(source, out_dir, fmt)
-    voice = _resolve_voice(tts_backend, voice)
+    voice = _resolve_voice(tts_backend, voice, source=source)
 
     if first_chapter and max_pages is None:
         max_pages = 60
@@ -134,15 +161,41 @@ def one(source: Path, out_dir: Path, llm_base_url: str, tts_backend: str, voice:
     stage_tts(paths, rewritten, voice=voice, workers=tts_workers, fmt=fmt, backend=tts_backend)
 
 
-def _resolve_voice(backend_name: str, voice: str | None) -> str:
+def _resolve_voice(backend_name: str, voice: str | None,
+                   source: Path | None = None) -> str:
     """Voice resolution order:
-    1. explicit --voice flag
-    2. configured DEFAULT_VOICE_REF wav (only used by voice-cloning backends)
-    3. backend's built-in default voice
+    1. explicit --voice flag — a registry name (`ludwig`), a wav path, or
+       a backend voice id; a name is mapped to ~/.config/.../voices/<name>.wav
+    2. a `voice-<name>` token in the source filename → registry wav
+    3. configured DEFAULT_VOICE_REF wav (clone backends only)
+    4. backend's built-in default voice
     """
+    is_clone = backend_name in _CLONE_BACKENDS
+
     if voice:
+        # An existing path or "default" passes through untouched; otherwise
+        # try to resolve a bare name against the voice registry.
+        if Path(voice).expanduser().is_file() or voice == "default":
+            return voice
+        ref = _voice_ref_for_name(voice)
+        if ref is not None:
+            click.echo(f"[voice] using clone '{voice}' -> {ref}")
+            return str(ref)
+        # Not a file, not a registry name — hand to the backend as a voice id.
         return voice
-    if backend_name in {"chatterbox", "f5", "higgs"} and DEFAULT_VOICE_REF.is_file():
+
+    if is_clone and source is not None:
+        name = _voice_name_from_source(source)
+        if name:
+            ref = _voice_ref_for_name(name)
+            if ref is not None:
+                click.echo(f"[voice] filename selected clone '{name}' -> {ref}")
+                return str(ref)
+            click.echo(f"[voice] filename requested '{name}' but "
+                       f"{VOICES_DIR / (name + '.wav')} not found; "
+                       f"falling back to default voice")
+
+    if is_clone and DEFAULT_VOICE_REF.is_file():
         return str(DEFAULT_VOICE_REF)
     from .tts import get_backend
     return get_backend(backend_name).info.default_voice
@@ -271,13 +324,35 @@ def backends_cmd() -> None:
         click.echo(f"  {info.name:12s}  default-voice={info.default_voice:12s}  {info.description}")
 
 
+@cli.command("voices")
+def voices_cmd() -> None:
+    """List named voice clones in the voice registry.
+
+    Each <name>.wav under the registry can be selected with `--voice <name>`
+    or by putting a `voice-<name>` token in the source filename (clone
+    backends only), e.g. `Sapiens.voice-ludwig.pdf`.
+    """
+    click.echo(f"voice registry: {VOICES_DIR}")
+    if not VOICES_DIR.is_dir():
+        click.echo("  (directory does not exist — create it and drop <name>.wav files in)")
+        return
+    wavs = sorted(VOICES_DIR.glob("*.wav"))
+    if not wavs:
+        click.echo("  (no voices found)")
+        return
+    for w in wavs:
+        click.echo(f"  {w.stem:16s}  {w}")
+    if DEFAULT_VOICE_REF.is_file():
+        click.echo(f"default voice (no token / no --voice): {DEFAULT_VOICE_REF}")
+
+
 @cli.command("batch")
 @click.argument("sources", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("-o", "--out-dir", type=click.Path(file_okay=False, path_type=Path), default=Path("output"))
 @click.option("--llm-base-url", default="http://127.0.0.1:8080", help="llama.cpp server base URL")
 @click.option("--tts-backend", default=DEFAULT_BACKEND, show_default=True,
               help="TTS backend: kokoro, chatterbox, f5, higgs")
-@click.option("--voice", default=None, help="Voice id or reference wav path; default = configured user voice")
+@click.option("--voice", default=None, help="Voice: a registry name (e.g. ludwig), a wav path, or a backend voice id. Default: voice-<name> token in the filename, else the configured user voice. List names with the 'voices' command.")
 @click.option("--skip-existing", is_flag=True, help="Skip papers whose audio already exists")
 @click.option("--no-auto-llm", is_flag=True, help="Don't start llama-server")
 @click.option("--format", "fmt", type=click.Choice(["m4b", "mp3"]), default="m4b")
@@ -308,7 +383,9 @@ def batch(sources: tuple[Path, ...], out_dir: Path, llm_base_url: str, tts_backe
         click.echo("no source files given")
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    voice = _resolve_voice(tts_backend, voice)
+    # Voice is resolved per-source inside the loop so each file can carry its
+    # own `voice-<name>` token in its filename; --voice still overrides all.
+    voice_flag = voice
 
     if first_chapter and max_pages is None:
         max_pages = 60
@@ -356,6 +433,7 @@ def batch(sources: tuple[Path, ...], out_dir: Path, llm_base_url: str, tts_backe
                     click.echo(f"[all-chapters] kept {len(raw_chapters)}/{before} chapters")
                 announce_chapters(raw_chapters)
                 rewritten = stage_rewrite(paths, raw_chapters, llm_base_url=llm_base_url)
+                voice = _resolve_voice(tts_backend, voice_flag, source=paths.source)
                 stage_tts(paths, rewritten, voice=voice, workers=1, fmt=fmt, backend=tts_backend)
             except Exception as exc:
                 click.echo(f"[batch] FAILED rewrite/tts {paths.source.name}: {exc}")
@@ -368,7 +446,7 @@ def main() -> None:
     """Entrypoint that auto-routes: `paper-audiobooks foo.pdf` -> `one foo.pdf`."""
     import sys
     argv = sys.argv[1:]
-    subcommands = {"one", "batch", "corpus", "backends", "--help", "-h"}
+    subcommands = {"one", "batch", "corpus", "backends", "voices", "--help", "-h"}
     if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
         sys.argv = [sys.argv[0], "one", *argv]
     cli()

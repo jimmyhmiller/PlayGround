@@ -83,9 +83,26 @@ Registered lazily (missing optional deps are skipped silently). `info.name`:
 - **`f5`**, **`higgs`** — flow-matching / audiobook-trained voice clones.
 
 Pick with `--tts-backend` or `PAPER_AUDIOBOOKS_BACKEND`. Voice resolution
-(`_resolve_voice`): explicit `--voice` → `PAPER_AUDIOBOOKS_VOICE` wav (clone
-backends only) → backend's built-in default. Default clone voice lives at
-`~/.config/paper-audiobooks/default-voice.wav`.
+(`_resolve_voice`), in order: explicit `--voice` (a registry name like
+`ludwig`, a wav path, or a backend voice id) → a `voice-<name>` token in the
+**source filename** (clone backends only) → `PAPER_AUDIOBOOKS_VOICE` wav
+(clone backends only) → backend's built-in default.
+
+### Named voice registry
+
+Named clones live as `<name>.wav` under `~/.config/paper-audiobooks/voices/`
+(override with `PAPER_AUDIOBOOKS_VOICES_DIR`). Select one three ways:
+
+- `--voice ludwig` — bare name, any command.
+- a `voice-<name>` token anywhere in the source stem, e.g.
+  `Sapiens.voice-ludwig.pdf` — auto-selected per file (works in `batch` too,
+  so each book can request its own voice). `--voice` overrides the token.
+- `paper-audiobooks voices` lists what's registered.
+
+To add a voice, drop a clean ~10–60s mono 24kHz wav at
+`~/.config/paper-audiobooks/voices/<name>.wav` (extract from any media with
+`ffmpeg -i in.mp4 -ac 1 -ar 24000 -af loudnorm out.wav`). The legacy default
+clone still lives at `~/.config/paper-audiobooks/default-voice.wav`.
 
 ## The "thump" problem (chatterbox)
 

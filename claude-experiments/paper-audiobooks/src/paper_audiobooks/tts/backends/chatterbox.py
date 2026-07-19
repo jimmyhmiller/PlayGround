@@ -45,9 +45,22 @@ class ChatterboxAnomalyHalt(RuntimeError):
     includes paths to the dumped wav and the input text."""
 
 
+# Mid-band (300Hz-2kHz) energy floor. The Winograd muffling bug collapses the
+# vocal mid-band into sub-300Hz rumble, so a real anomaly has very little energy
+# here. A *naturally deep* voice (e.g. the "ludwig" clone) is bass-dominant —
+# below_300>0.5, centroid<700 — yet keeps healthy mid-band energy (~0.4) and a
+# normal RMS, and is perfectly intelligible. Requiring the mid-band to ALSO be
+# depleted distinguishes the bug from a deep voice and stops the false halts.
+ANOMALY_MIN_MIDBAND = 0.25
+
+
 def _is_anomalous(audio: np.ndarray, sr: int) -> tuple[bool, dict]:
-    """Same detector rule used throughout CHATTERBOX_DEBUG.md: a chunk is
-    flagged when (centroid<700Hz AND <300Hz energy>0.5) OR rms<0.04."""
+    """Muffled-output detector (CHATTERBOX_DEBUG.md). A chunk is flagged when
+    it is spectrally collapsed into the low end — bass-dominant (centroid<700Hz,
+    <300Hz energy>0.5) AND a depleted vocal mid-band (300Hz-2kHz energy below
+    ANOMALY_MIN_MIDBAND) — OR near-silent (rms<0.04). The mid-band condition is
+    what lets a genuinely deep but intelligible voice through; the real bug
+    crushes the mid-band, a deep voice does not."""
     from scipy.signal import welch
     if audio.ndim > 1:
         audio = audio.mean(axis=-1)
@@ -60,7 +73,12 @@ def _is_anomalous(audio: np.ndarray, sr: int) -> tuple[bool, dict]:
         "rms": float(np.sqrt(np.mean(audio ** 2))),
         "duration_s": float(len(audio) / sr),
     }
-    bad = (s["centroid_hz"] < 700 and s["below_300hz"] > 0.5) or s["rms"] < 0.04
+    muffled = (
+        s["centroid_hz"] < 700
+        and s["below_300hz"] > 0.5
+        and s["300_to_2k"] < ANOMALY_MIN_MIDBAND
+    )
+    bad = muffled or s["rms"] < 0.04
     return bad, s
 
 
