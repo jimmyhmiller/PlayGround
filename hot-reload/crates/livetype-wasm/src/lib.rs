@@ -14,8 +14,10 @@
 //! observable behaviour.
 
 use livetype_core::{
-    Actor, ActorStatus, Condition, DefId, FunctionState, Session, Turn, Value, World,
+    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Value,
+    Version, World,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use wasm_bindgen::prelude::*;
 
@@ -67,11 +69,27 @@ pub struct Demo {
 
 #[wasm_bindgen]
 impl Demo {
-    /// Boot the scene: declare the foreign interface, bind the canvas
-    /// implementations, then load the program. The order matters — a `letonce`
-    /// initializer calls `open_canvas` while the scene is being evaluated.
+    /// Boot the demo's own scene.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<Demo, JsError> {
+        Demo::boot(SCENE)
+    }
+
+    /// Boot a fresh world from arbitrary scene source.
+    ///
+    /// This is how an edit to something only a `letonce` initializer calls —
+    /// `seed`, here — can be observed at all. Installing a new `seed` into the
+    /// *running* world is a no-op by design: the initializer already ran and
+    /// will never run again, which is exactly what `letonce` is for. To see a
+    /// different `seed`, the world has to start over with it already in place.
+    pub fn restart_with(scene: &str) -> Result<Demo, JsError> {
+        Demo::boot(scene)
+    }
+
+    /// Declare the foreign interface, bind the canvas implementations, then
+    /// load the program. The order matters — a `letonce` initializer calls
+    /// `open_canvas` while the scene is being evaluated.
+    fn boot(scene: &str) -> Result<Demo, JsError> {
         let toolkit = Arc::new(Mutex::new(Toolkit::default()));
         let mut session = Session::new();
         session
@@ -133,8 +151,8 @@ impl Demo {
         }
 
         session
-            .eval(SCENE)
-            .map_err(|e| JsError::new(&format!("scene: {e}")))?;
+            .eval(scene)
+            .map_err(|e| JsError::new(&e))?;
         let main = session
             .fn_id("main")
             .ok_or_else(|| JsError::new("the scene has no `main`"))?;
@@ -184,13 +202,64 @@ impl Demo {
         self.toolkit.lock().unwrap().committed.clone()
     }
 
-    /// Apply an edit to the live world. Returns an empty string on success, or
-    /// the rejection message — a refused edit leaves the running program alone.
+    /// Apply an edit to the live world, reporting as JSON what it did:
+    /// `{ok, error, installed, unobservable}`.
+    ///
+    /// `unobservable` names functions the edit installed that the running
+    /// program can no longer reach — `seed`, whose only caller is a `letonce`
+    /// initializer that already ran. Such an edit really is installed, and the
+    /// old message said so and stopped there, which reads as the edit being
+    /// ignored. It needs to say why nothing moved.
     pub fn eval(&mut self, source: &str) -> String {
-        match self.session.eval(source) {
-            Ok(()) => String::new(),
-            Err(e) => e,
+        let before = self.current_versions();
+        if let Err(error) = self.session.eval(source) {
+            return format!("{{\"ok\":false,\"error\":{}}}", json_string(&error));
         }
+        let after = self.current_versions();
+
+        let installed: Vec<(DefId, String)> = after
+            .iter()
+            .filter(|(id, (version, _))| before.get(id).map(|(v, _)| v != version).unwrap_or(true))
+            .map(|(id, (_, name))| (*id, name.clone()))
+            .collect();
+
+        let unobservable: Vec<String> = self.session.engine.with_world(|w| {
+            match reachable_from_entry(w) {
+                // Reachability is only knowable when nothing on the live path
+                // calls through a function *value*; stay quiet rather than
+                // guess.
+                None => Vec::new(),
+                Some(live) => installed
+                    .iter()
+                    .filter(|(id, _)| !live.contains(id))
+                    .map(|(_, name)| name.clone())
+                    .collect(),
+            }
+        });
+
+        format!(
+            "{{\"ok\":true,\"installed\":[{}],\"unobservable\":[{}]}}",
+            installed
+                .iter()
+                .map(|(_, n)| json_string(n))
+                .collect::<Vec<_>>()
+                .join(","),
+            unobservable.iter().map(|n| json_string(n)).collect::<Vec<_>>().join(","),
+        )
+    }
+
+    /// Every current function as `id -> (version, name)`.
+    fn current_versions(&self) -> BTreeMap<DefId, (Version, String)> {
+        self.session.engine.with_world(|w| {
+            w.current_functions
+                .iter()
+                .filter_map(|(id, version)| {
+                    w.functions
+                        .get(&(*id, *version))
+                        .map(|state| (*id, (*version, function_name(state))))
+                })
+                .collect()
+        })
     }
 
     /// Mark a frozen program runnable again. The next step re-executes the
@@ -325,6 +394,47 @@ impl Demo {
     pub fn scenario_source(index: usize) -> String {
         SCENARIOS.get(index).map(|(_, s)| s.to_string()).unwrap_or_default()
     }
+}
+
+/// The functions the running program can still reach, walking direct calls from
+/// `main`. `None` means "cannot say": something reachable calls through a
+/// function *value*, whose callee is resolved at call time.
+///
+/// This is what separates "your edit is live" from "your edit is installed but
+/// nothing will ever call it" — the case a `letonce`-only function like `seed`
+/// lands in once its initializer has run.
+fn reachable_from_entry(world: &World) -> Option<BTreeSet<DefId>> {
+    let entry = world.current_functions.iter().find(|(id, version)| {
+        world
+            .functions
+            .get(&(**id, **version))
+            .is_some_and(|s| function_name(s) == "main")
+    })?;
+
+    let mut seen = BTreeSet::new();
+    let mut work = vec![*entry.0];
+    while let Some(id) = work.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(version) = world.current_functions.get(&id) else {
+            continue;
+        };
+        // A Broken function has no code to walk; its callees stay unvisited,
+        // which is conservative in the safe direction (fewer "unobservable"
+        // claims, never a false one).
+        let Some(FunctionState::Ready(f)) = world.functions.get(&(id, *version)) else {
+            continue;
+        };
+        for instruction in &f.code {
+            match instruction {
+                Instruction::Call { function, .. } => work.push(*function),
+                Instruction::IndirectCall { .. } => return None,
+                _ => {}
+            }
+        }
+    }
+    Some(seen)
 }
 
 /// Resolves the `DefId`s the engine speaks in — correct for a runtime, useless

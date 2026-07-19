@@ -40,6 +40,32 @@ than by eyeballing a canvas.
 Throughout, the "canvas opened" counter stays at 1: `letonce` holds the native
 resource, so edits change code and never the running world.
 
+## Controls
+
+- **Apply edit** (⌘/Ctrl+Enter) — install the editor's contents into the *running*
+  world. This is the live path: the program is never restarted.
+- **Pause / Resume** and **Step 1 frame** — the host declining to step the
+  program, which is unrelated to the engine. A *paused* program is healthy and
+  simply is not being asked to run; a *frozen* one trapped on its own. Edits
+  install while paused either way.
+- **Restart world with this source** — boot a fresh world from the editor's
+  contents. Needs a whole scene, not a fragment.
+- **Load full scene** / **Reset to original** — restore the shipped source.
+  Both ask first if you have unsaved changes in the editor.
+
+### Editing `seed` (and why "Apply" looks like it does nothing)
+
+`seed` is called once, by `letonce world = seed()`. Applying a new `seed` to the
+running world installs it and changes nothing on screen — the initializer already
+ran and never runs again, which is precisely what makes the particles survive
+every other edit. The demo says so rather than reporting a bare success: after an
+edit it reports which installed functions the running program can no longer
+reach (walking direct calls from `main`; it stays quiet if anything on that path
+calls through a function *value*, since the callee is only known at call time).
+
+To actually see a different `seed`: **Load full scene**, change it there, then
+**Restart world with this source** — the initializer re-runs with your version.
+
 ## What this configuration does not cover
 
 The engine here is the interpreted (cold) tier, single-threaded:

@@ -93,6 +93,7 @@
   #message.show { display: block; }
   #message.ok  { background: rgba(86,211,138,.10); border: 1px solid rgba(86,211,138,.35); color: var(--ok); }
   #message.err { background: rgba(255,107,107,.10); border: 1px solid rgba(255,107,107,.35); color: var(--bad); }
+  #message.warn { background: rgba(255,180,84,.10); border: 1px solid rgba(255,180,84,.38); color: var(--warn); }
 
   ol.scenarios { list-style: none; margin: 0; padding: 0; }
   ol.scenarios li { border-bottom: 1px solid var(--edge); }
@@ -149,6 +150,13 @@
         <button class="warn" id="thaw">Thaw &amp; resume</button>
       </div>
       <div class="body">
+        <div class="row" style="margin: 0 0 12px">
+          <button id="pause">Pause</button>
+          <button id="step">Step 1 frame</button>
+          <span class="hint" id="pause-hint">
+            Pausing stops the host from stepping the program. Edits still install while paused.
+          </span>
+        </div>
         <dl class="stats">
           <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
           <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
@@ -184,8 +192,9 @@
       <textarea id="editor" spellcheck="false"></textarea>
       <div class="row">
         <button class="primary" id="apply">Apply edit</button>
+        <button id="restart">Restart world with this source</button>
         <button id="reload-scene">Load full scene</button>
-        <button id="reset">Reset world</button>
+        <button id="reset">Reset to original</button>
         <span class="hint">⌘/Ctrl + Enter to apply</span>
       </div>
       <div id="message"></div>
@@ -220,7 +229,13 @@ function paint(ops) {
 
 // ── the frame loop: one `yield` of the guest per animation frame ────────────
 let lastWorld = "";
-function tick() {
+
+// Paused is the HOST declining to step the program — nothing to do with the
+// engine. A frozen program trapped on its own; a paused one is perfectly
+// healthy and simply is not being asked to run. Edits install either way.
+let paused = false;
+
+function advanceOneFrame() {
   const status = demo.step_frame();
 
   if (status === STATUS_RUNNING) {
@@ -237,7 +252,11 @@ function tick() {
   } else if (status === STATUS_CAPPED) {
     $("stat-status").textContent = "no yield reached";
   }
+  refreshStats();
+}
 
+function refreshStats() {
+  if (paused && !demo.frozen) $("stat-status").textContent = "paused";
   $("stat-frames").textContent = demo.frames;
   $("stat-canvas").textContent = demo.canvases_opened;
   $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
@@ -248,6 +267,13 @@ function tick() {
     lastWorld = world;
     renderWorld(JSON.parse(world));
   }
+}
+
+function tick() {
+  // Keep the loop alive while paused so edits, the inspector, and Step still
+  // respond — the host simply does not advance the program.
+  if (paused) refreshStats();
+  else advanceOneFrame();
   requestAnimationFrame(tick);
 }
 
@@ -278,18 +304,73 @@ function message(text, kind) {
 }
 
 function applyEdit() {
-  const error = demo.eval($("editor").value);
-  if (error === "") {
-    message("Edit installed into the live world.", "ok");
-  } else {
+  const result = JSON.parse(demo.eval($("editor").value));
+  if (!result.ok) {
     // A refused edit changes nothing: the program keeps running the last good
     // version. That is the point, so say so.
-    message(`Rejected — the running program is untouched:\n${error}`, "err");
+    message(`Rejected — the running program is untouched:\n${result.error}`, "err");
+  } else if (result.unobservable.length > 0) {
+    // Installed, but nothing running will ever call it. Saying only
+    // "installed" here reads as the edit having been ignored.
+    const names = result.unobservable.map((n) => `\`${n}\``).join(", ");
+    message(
+      `Installed ${names} — but the running program can no longer reach it. ` +
+      `It is only called by a \`letonce\` initializer, which ran once at boot and ` +
+      `never runs again; that is what keeps your world alive across edits. ` +
+      `To see this change: "Load full scene", make the same edit there, then ` +
+      `"Restart world with this source" — the initializer re-runs with your version.`,
+      "warn",
+    );
+  } else {
+    message("Edit installed into the live world.", "ok");
   }
   lastWorld = "";
 }
 
+// Boot a fresh world from whatever is in the editor, so an edit to something
+// only a `letonce` initializer calls can actually be observed.
+function restartWithSource() {
+  try {
+    demo = Demo.restart_with($("editor").value);
+    lastWorld = "";
+    document.body.classList.remove("frozen");
+    message("Fresh world booted from this source — initializers re-ran.", "ok");
+  } catch (e) {
+    // A whole-program restart needs a whole program: a bare fragment has no
+    // `main` and no types. The running world is left alone either way.
+    message(
+      `Could not boot this source — the running world is untouched:\n${e.message ?? e}\n` +
+      `(Restart needs the full scene, not just one function.)`,
+      "err",
+    );
+  }
+}
+
+// The editor holds work the viewer typed; replacing it silently loses that.
+function replaceSource(text, note) {
+  const current = $("editor").value;
+  const edited = current !== lastLoadedSource && current.trim() !== "";
+  if (edited && !confirm("Replace the source in the editor? Your changes there will be lost.")) {
+    return false;
+  }
+  $("editor").value = text;
+  lastLoadedSource = text;
+  if (note) message(note, "ok");
+  return true;
+}
+
 $("apply").addEventListener("click", applyEdit);
+$("restart").addEventListener("click", restartWithSource);
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("primary", paused);
+  refreshStats();
+});
+$("step").addEventListener("click", () => {
+  // One frame regardless of pause state — the natural companion to pausing.
+  advanceOneFrame();
+});
 $("editor").addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); applyEdit(); }
 });
@@ -298,16 +379,15 @@ $("thaw").addEventListener("click", () => {
   message("Thawed — resuming at the instruction that trapped.", "ok");
 });
 $("reload-scene").addEventListener("click", () => {
-  $("editor").value = Demo.scene_source();
-  markActive(-1);
+  if (replaceSource(Demo.scene_source())) markActive(-1);
 });
 $("reset").addEventListener("click", () => {
+  if (!replaceSource(Demo.scene_source())) return;
   demo = new Demo();
   lastWorld = "";
   document.body.classList.remove("frozen");
-  $("editor").value = Demo.scene_source();
   markActive(-1);
-  message("Fresh world booted.", "ok");
+  message("Fresh world booted from the original scene.", "ok");
 });
 
 // ── scenarios ──────────────────────────────────────────────────────────────
@@ -317,9 +397,9 @@ for (let i = 0; i < Demo.scenario_count(); i++) {
   const b = document.createElement("button");
   b.innerHTML = `<span class="n">${i + 1}</span><span>${escapeHtml(Demo.scenario_title(i))}</span>`;
   b.addEventListener("click", () => {
-    $("editor").value = Demo.scenario_source(i);
-    markActive(i);
-    message("Loaded — read it, then Apply edit.", "ok");
+    if (replaceSource(Demo.scenario_source(i), "Loaded — read it, then Apply edit.")) {
+      markActive(i);
+    }
   });
   li.appendChild(b);
   list.appendChild(li);
@@ -329,7 +409,8 @@ function markActive(index) {
     b.classList.toggle("active", i === index));
 }
 
-$("editor").value = Demo.scene_source();
+let lastLoadedSource = Demo.scene_source();
+$("editor").value = lastLoadedSource;
 requestAnimationFrame(tick);
 </script>
 </body>
