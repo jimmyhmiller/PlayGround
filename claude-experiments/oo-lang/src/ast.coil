@@ -68,6 +68,11 @@
 
 (defstruct Node
   [(kind i64) (line i64) (col i64)
+   ; Source span of a DECLARATION node (class/interface/enum/object/fn), so the viewer can
+   ; show and re-edit the code that is actually running instead of a regenerated skeleton.
+   ; Tokens point directly into the file buffer read by try-read (never freed), so this is
+   ; just that pointer plus a length — no copying at parse time.
+   (src-start (ptr u8)) (src-len i64)
    (s-name (ptr u8)) (s-len i64)
    (ival i64) (fval f64)
    (a (ptr Node)) (b (ptr Node)) (c (ptr Node)) (d (ptr Node))

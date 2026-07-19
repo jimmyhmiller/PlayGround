@@ -373,6 +373,25 @@
 
 (defn reflect-fields [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
   (if (= (cast i64 m) 0) (jb-cstr b c"{\"type\":\"list\",\"elementType\":\"FieldDescriptor\",\"length\":0,\"truncated\":false,\"items\":[]}") (emit-fields-array b m)))
+; The real source of a declaration, straight out of the file buffer the parser tokenised
+; (Node.src-start/src-len, captured at parse time). This is what the viewer's "edit source"
+; shows, so you edit the code that is ACTUALLY running rather than a skeleton regenerated
+; from the schema. Empty `source` means the span wasn't recorded (e.g. a builtin).
+(defn reflect-source [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
+  (jb-cstr b c"{\"type\":\"SourceText\"")
+  (if (= (cast i64 m) 0) (jb-cstr b c",\"found\":false,\"source\":\"\"}")
+    (let [d (load (field m base))]
+      (jb-cstr b c",\"found\":true,\"name\":") (jb-str b (load (field d name)) (load (field d name-len)))
+      (jb-cstr b c",\"module\":") (jb-str b (load (field d qmod)) (load (field d qmod-len)))
+      (jb-cstr b c",\"file\":") (jb-cstr-quoted b (load (field d file)))
+      (jb-cstr b c",\"source\":")
+      (let [nd (load (field d node))]
+        (if (= (cast i64 nd) 0) (jb-cstr b c"\"\"")
+          (let [sp (load (field nd src-start)) sl (load (field nd src-len))]
+            (if (or (= (cast i64 sp) 0) (<= sl 0)) (jb-cstr b c"\"\"")
+              (jb-str b sp sl)))))
+      (jb-byte b \}) 0)))
+
 (defn reflect-methods [(b (ptr JBuf)) (m (ptr MonoType))] (-> i64)
   (if (= (cast i64 m) 0) (jb-cstr b c"[]") (emit-methods-array b (load (field m base)))))
 

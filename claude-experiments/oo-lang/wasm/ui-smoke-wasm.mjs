@@ -131,6 +131,40 @@ async function main() {
     if (!/"value":2|"value":\{"type":"Int","value":2\}/.test(after)) fail("VM did not survive the panic: " + after);
     console.log("  ok  eval panic returned typed error; VM still live afterwards");
 
+    // ---- the viewer's own editing affordances ----
+    // "edit source" must show the code that is actually running, not a regenerated skeleton.
+    await evalPage(`(()=>{const e=[...document.querySelectorAll('*')].find(x=>x.children.length===0&&x.textContent.trim()==='Project');e&&e.click();return 1})()`);
+    await sleep(700);
+    await evalPage(`(()=>{const b=document.querySelector('.edit-src'); b&&b.click(); return !!b})()`);
+    await sleep(1000);
+    const code = await evalPage(`(()=>{const t=document.querySelector('.code-panel textarea, textarea'); return t?t.value:""})()`);
+    if (/edit this body/.test(code)) fail("edit source still shows the placeholder skeleton");
+    if (!/openCount|self\.tasks\.push/.test(code)) fail("edit source did not show real method bodies: " + JSON.stringify(code.slice(0,160)));
+    console.log("  ok  'edit source' shows the REAL running source (not a skeleton)");
+
+    // clicking a field value must let you SET it on the live object
+    await evalPage(`(()=>{const c=document.querySelector('.code-panel .close, .code-panel button'); c&&c.click(); return 1})()`);
+    await sleep(300);
+    await evalPage(`(()=>{const e=[...document.querySelectorAll('*')].find(x=>x.children.length===0&&x.textContent.trim()==='Task');e&&e.click();return 1})()`);
+    await sleep(700);
+    await evalPage(`(()=>{const r=document.querySelector('.inst-row, tbody tr, .row'); r&&r.click(); return 1})()`);
+    await sleep(900);
+    const nEditable = await evalPage(`document.querySelectorAll('.field-grid .fval.editable').length`);
+    if (!nEditable) fail("no editable field cells in the instance inspector");
+    await evalPage(`document.querySelector('.field-grid .fval.editable').click()`);
+    await sleep(300);
+    const opened = await evalPage(`!!document.querySelector('.field-editor')`);
+    if (!opened) fail("clicking a field value did not open an editor");
+    await evalPage(`(()=>{const i=document.querySelector('.field-editor input, .field-editor select'); if(!i) return 0;
+      const set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; set.call(i,'SET FROM VIEWER');
+      i.dispatchEvent(new Event('input',{bubbles:true})); return 1})()`);
+    await sleep(200);
+    await evalPage(`[...document.querySelectorAll('.field-editor-actions .ghost-btn')].find(b=>b.textContent.trim()==='set').click()`);
+    await sleep(800);
+    const titles = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("Task.instances().get(0).title"))`);
+    if (!/SET FROM VIEWER/.test(titles)) fail("field edit did not reach the live heap: " + titles);
+    console.log("  ok  edited an instance field from the viewer -> live heap updated");
+
     // ---- phase 2: the agent demo page (xterm terminal + viewer, all in-page) ----
     await send("Page.navigate", { url: `http://127.0.0.1:${port}/wasm/demo.html` });
     let dstatus = "";

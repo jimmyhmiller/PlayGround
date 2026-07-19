@@ -226,6 +226,10 @@
                     (let [s (str-arg e 0)]
                       (if (= (cast i64 s) 0) 0
                         (resolve-entity-lookup-fields (load (field s s-name)) (load (field s s-len)))))
+                  (and (node-name-eq callee c"source") (= (arg-count e) 1))
+                    (let [s (str-arg e 0)]
+                      (if (= (cast i64 s) 0) 0
+                        (resolve-entity-lookup-source (load (field s s-name)) (load (field s s-len)))))
                   (and (node-name-eq callee c"methods") (= (arg-count e) 1))
                     (let [s (str-arg e 0)]
                       (if (= (cast i64 s) 0) 0
@@ -256,6 +260,11 @@
     (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
       (do (fail-ambiguous-entity nm0 len cand) 1)
       (do (reflect-fields (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
+(defn resolve-entity-lookup-source [(nm0 (ptr u8)) (len i64)] (-> i64)
+  (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
+    (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))
+      (do (fail-ambiguous-entity nm0 len cand) 1)
+      (do (reflect-source (load (ev-valbuf)) m) (store! (ev-outcome) 0) 1))))
 (defn resolve-entity-lookup-methods [(nm0 (ptr u8)) (len i64)] (-> i64)
   (let [cand (sb-new) m (resolve-entity-mono-named nm0 len cand)]
     (if (and (= (cast i64 m) 0) (> (load (field cand len)) 0))

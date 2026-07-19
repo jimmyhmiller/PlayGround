@@ -157,6 +157,17 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
 .field-grid .fname .ftype { color: var(--fg-faint); font-size: 11px; margin-left: 6px; }
 .field-grid .fval { font-family: var(--mono); font-size: 12.5px; }
 .fval.flash { animation: flash 1.1s ease-out; }
+
+/* editable instance fields: click a value to set it on the live object */
+.field-grid .fval.editable { cursor: text; position: relative; }
+.field-grid .fval.editable:hover { background: var(--bg-soft, rgba(255,255,255,.04)); }
+.fedit-hint { opacity: 0; margin-left: 8px; font-size: 11px; color: var(--fg-faint); }
+.field-grid .fval.editable:hover .fedit-hint { opacity: .8; }
+.field-grid .fval.editing { padding: 6px 10px; }
+.field-editor .arg-row { margin: 0; }
+.field-editor .arg-row label { display: none; }
+.field-editor-actions { display: flex; gap: 6px; margin-top: 6px; }
+.field-editor-err { margin-top: 6px; font-size: 11.5px; color: var(--c-err, #f87171); font-family: var(--mono); }
 @keyframes flash { 0% { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); } 100% { background: transparent; } }
 
 /* value tokens */

@@ -583,7 +583,8 @@ function DetailPane({ cls, slot, gen, schema, onEditSource }) {
             return html`
               <${React.Fragment} key=${k}>
                 <div class="fcell fname">${k}<span class="ftype">${typeOf(k) || ""}</span></div>
-                <div class=${"fcell fval" + (fk ? " flash" : "")} key=${"v" + fk}><${ValueView} v=${val} /></div>
+                <${FieldValue} key=${"v" + k} cls=${cls} sc=${sc} slot=${slot} gen=${gen}
+                               name=${k} type=${typeOf(k)} val=${val} schema=${schema} flashKey=${fk} />
               <//>`;
           })}
         </div>
@@ -790,6 +791,61 @@ function argValid(param, value, schema) {
 
 // The type-aware widget for ONE param. `onChange` stores a STRING literalFor turns into valid
 // source; `active` gates the entity instance poll to open cards only; `onEnter` invokes.
+// ===================== editable instance field =====================
+// A field cell you can click to edit. Committing evaluates
+// `Type.at(slot, gen).field = <literal>` — plain assignment against the live heap, the same
+// wire op everything else uses (DECISIONS #8), so the mutation is immediately visible to
+// running code and to every other pane. Reuses ArgInput/literalFor, so a field gets the same
+// typed widget a method parameter does (enum dropdown, bool toggle, instance picker).
+function FieldValue({ cls, sc, slot, gen, name, type, val, schema, flashKey }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [err, setErr] = useState(null);
+  const param = { name, type: type || "" };
+  const editable = !!type;               // no declared type (shouldn't happen) -> read-only
+
+  const begin = () => {
+    if (!editable) return;
+    // seed the draft from the current value, in the same shape ArgInput/literalFor expect
+    const v = val && typeof val === "object" ? val : { value: val };
+    const seed = v.ref ? String(v.ref)
+      : v.value !== undefined && v.value !== null ? String(v.value)
+      : v.type === "String" ? "" : "";
+    setDraft(seed); setErr(null); setEditing(true);
+  };
+
+  const commit = useCallback(async () => {
+    if (!argValid(param, draft, schema)) { setErr({ kind: "Invalid", message: `not a valid ${cleanType(type)}` }); return; }
+    const bare = sc ? sc.name : cls;
+    const src = moduleHeader(sc && sc.module) + `${bare}.at(${slot}, ${gen}).${name} = ${literalFor(draft, type)}`;
+    const r = await evalSource(src);
+    if (r.error) { setErr(r.error); return; }
+    setEditing(false); setErr(null);
+    setTimeout(bumpDetail, 40);          // read the mutation straight back
+  }, [draft, cls, sc && sc.module, sc && sc.name, slot, gen, name, type, schema]);
+
+  if (!editing) {
+    return html`<div class=${"fcell fval" + (flashKey ? " flash" : "") + (editable ? " editable" : "")}
+                     key=${"v" + flashKey}
+                     title=${editable ? "click to edit" : ""}
+                     onClick=${begin}>
+      <${ValueView} v=${val} />
+      ${editable ? html`<span class="fedit-hint">✎</span>` : ""}
+    </div>`;
+  }
+  return html`<div class="fcell fval editing">
+    <div class="field-editor">
+      <${ArgInput} param=${param} value=${draft} onChange=${setDraft} schema=${schema}
+                   active=${true} onEnter=${commit} depth=${1} />
+      <div class="field-editor-actions">
+        <button class="ghost-btn" onClick=${commit}>set</button>
+        <button class="ghost-btn" onClick=${() => { setEditing(false); setErr(null); }}>cancel</button>
+      </div>
+      ${err ? html`<div class="field-editor-err">${err.kind}: ${err.message}</div>` : ""}
+    </div>
+  </div>`;
+}
+
 function ArgInput({ param, value, onChange, schema, active, onEnter, depth }) {
   const info = classifyParam(param.type, schema);
   const label = html`<label>${param.name}: ${cleanType(param.type)}</label>`;
@@ -2563,9 +2619,18 @@ function App({ onBack, programName } = {}) {
     else if (target.kind === "detail") openDetail(target.cls, target.slot, target.gen, false);
   }, [goIndex, openTable, openDetail]);
 
-  const openCodePanel = useCallback((cls, sc) => {
-    if (codeDraftCls.current !== cls) { setCodeText(classSkeleton(cls, sc)); codeDraftCls.current = cls; }
+  const openCodePanel = useCallback(async (cls, sc) => {
     setCodeSession({ cls, sc });
+    if (codeDraftCls.current === cls) return;          // keep an in-progress draft
+    // Show the code that is ACTUALLY running. source("X") returns the declaration's real text,
+    // sliced from the buffer the parser tokenised. Only fall back to the generated skeleton if
+    // the span is missing (a builtin, or an older VM that doesn't answer source()).
+    const bare = (sc && sc.name) || cls;
+    const r = await evalSource(moduleHeader(sc && sc.module) + `source(${JSON.stringify(bare)})`);
+    const real = !r.error && r.value && r.value.found ? r.value.source : "";
+    const header = sc && sc.module ? `module ${sc.module}\n\n` : "";
+    setCodeText(real ? header + real : classSkeleton(cls, sc));
+    codeDraftCls.current = cls;
   }, []);
 
   // Search scopes to the current focus unless "everywhere" is on (07-modules.md §7 item 4).

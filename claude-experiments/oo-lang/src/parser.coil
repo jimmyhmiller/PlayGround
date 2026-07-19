@@ -34,6 +34,18 @@
 (defn tok-end [(i i64)] (-> i64)
   (+ (cast i64 (load (field (tok-ptr i) start))) (load (field (tok-ptr i) len))))
 (defn check [(k i64)] (-> bool) (= (cur-kind) k))
+
+; ---- declaration source spans ----
+; span-begin is read BEFORE consuming the leading keyword; span-end! is called after the
+; declaration's last token has been consumed, and measures to the end of that token.
+(defn span-begin [] (-> (ptr u8)) (load (field (cur-ptr) start)))
+(defn span-end! [(nd (ptr Node)) (from (ptr u8))] (-> i64)
+  (let [pt (tok-ptr (- (cur-idx) 1))]
+    (if (or (= (cast i64 from) 0) (= (cast i64 pt) 0)) 0
+      (do (store! (field nd src-start) from)
+          (store! (field nd src-len)
+                  (- (+ (cast i64 (load (field pt start))) (load (field pt len))) (cast i64 from)))
+          0))))
 (defn advance [] (-> i64)
   (if (< (cur-idx) (- (load (field (ps) tlen)) 1))
     (do (store! (field (ps) idx) (+ (cur-idx) 1)) 0)
@@ -162,6 +174,7 @@
     (store! (field nd a) (parse-type))
     nd))
 (defn parse-fn [(allow-body bool)] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'fn'
   (let [t (cur-ptr) nd (mk-node NK_FN (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -174,7 +187,8 @@
         (do (store! (field nd d) (parse-block)) 0)
         (perror c"interface methods must not have a body (default methods are not supported in this PoC)"))
       0)
-    nd))
+    (span-end! nd span0)
+    nd)))
 
 ; ---- declarations ----------------------------------------------------------
 (defn parse-field [] (-> (ptr Node))
@@ -188,6 +202,7 @@
     (if (check TK_EQ) (do (advance) (store! (field nd b) (parse-expr)) 0) 0)
     nd))
 (defn parse-class [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'class'
   (let [t (cur-ptr) nd (mk-node NK_CLASS (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -203,8 +218,10 @@
         (check TK_IDENT) (do (add-kid! nd (parse-field)) 0)
         (perror c"expected a field or method inside class body")))
     (expect TK_RBRACE)
-    nd))
+    (span-end! nd span0)
+    nd)))
 (defn parse-interface [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'interface'
   (let [t (cur-ptr) nd (mk-node NK_INTERFACE (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -218,7 +235,8 @@
         (check TK_FN) (do (add-kid! nd (parse-fn false)) 0)
         (perror c"expected a method signature inside interface body")))
     (expect TK_RBRACE)
-    nd))
+    (span-end! nd span0)
+    nd)))
 (defn parse-variant [] (-> (ptr Node))
   (let [t (cur-ptr) nd (mk-node NK_VARIANT (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -231,6 +249,7 @@
       0)
     nd))
 (defn parse-enum [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'enum'
   (let [t (cur-ptr) nd (mk-node NK_ENUM (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -244,8 +263,10 @@
         (check TK_IDENT) (do (add-kid! nd (parse-variant)) 0)
         (perror c"expected an enum variant")))
     (expect TK_RBRACE)
-    nd))
+    (span-end! nd span0)
+    nd)))
 (defn parse-object [] (-> (ptr Node))
+  (let [span0 (span-begin)]
   (advance) ; 'object'
   (let [t (cur-ptr) nd (mk-node NK_OBJECT (load (field t line)) (load (field t col)))]
     (set-name! nd (load (field t start)) (load (field t len)))
@@ -259,7 +280,8 @@
         (check TK_IDENT) (do (add-kid! nd (parse-field)) 0)
         (perror c"expected a field or method inside object body")))
     (expect TK_RBRACE)
-    nd))
+    (span-end! nd span0)
+    nd)))
 
 ; ---- program-declared views (DECISIONS #15b) -------------------------------
 ; view <Name> for <Type> { <clause>* }
