@@ -1,4 +1,13 @@
 /*
+ * Copyright 2026 Jimmy Miller
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0. See LICENSE at the
+ * repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+ * derives from.
+ */
+
+/*
  * A reference nw_backend implemented on raylib 5.
  *
  * This is the whole adapter: ~10 short functions. Writing a backend for any

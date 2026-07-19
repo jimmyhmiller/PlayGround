@@ -1,4 +1,13 @@
 (module native)
+
+;; The components in this file are adapted from the Vercel Labs Native SDK
+;; canvas widgets (https://github.com/vercel-labs/native), provided under the
+;; Apache License 2.0. This file has been modified: rewritten in Coil against
+;; Raylib, with composition and geometry followed from the upstream dark
+;; reference renders.
+;;
+;; See licenses/native-sdk-Apache-2.0.txt and THIRD_PARTY_NOTICES.md.
+
 (import "raylib.coil" :as raylib)
 
 (const NATIVE_KEY_SPACE 32)

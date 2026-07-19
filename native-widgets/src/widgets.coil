@@ -1,3 +1,10 @@
+;; Copyright 2026 Jimmy Miller
+;; SPDX-License-Identifier: Apache-2.0
+;;
+;; Licensed under the Apache License, Version 2.0. See LICENSE at the
+;; repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+;; derives from.
+
 (module widgets)
 
 ;; native-widgets — a render-agnostic widget library.
@@ -6,6 +13,16 @@
 ;; Every pixel a widget wants goes through the Backend vtable the caller
 ;; supplies, so the same widget code drives raylib, a software rasterizer, a
 ;; PDF writer, or a test recorder.
+;;
+;; ---------------------------------------------------------------------------
+;; The component designs in this file are adapted from the Vercel Labs Native
+;; SDK canvas widgets (https://github.com/vercel-labs/native), provided under
+;; the Apache License 2.0. This file has been modified: rewritten in Coil, with
+;; the renderer replaced by the Backend vtable below, widget state moved out to
+;; the caller, and application copy replaced by parameters.
+;;
+;; See THIRD_PARTY_NOTICES.md and licenses/native-sdk-Apache-2.0.txt.
+;; ---------------------------------------------------------------------------
 
 ;; ---------------------------------------------------------------------------
 ;; Types
@@ -39,8 +56,8 @@
    (line (fnptr c [(ptr i8) f64 f64 f64 f64 f64 Color] i64))
    ;; ctx, centerHorizontal, centerVertical, radius, tint
    (fillCircle (fnptr c [(ptr i8) f64 f64 f64 Color] i64))
-   ;; ctx, centerHorizontal, centerVertical, radius, tint
-   (strokeCircle (fnptr c [(ptr i8) f64 f64 f64 Color] i64))
+   ;; ctx, centerHorizontal, centerVertical, radius, thickness, tint
+   (strokeCircle (fnptr c [(ptr i8) f64 f64 f64 f64 Color] i64))
    ;; ctx, centerHorizontal, centerVertical, innerRadius, outerRadius, startDegrees, endDegrees, tint
    (ring (fnptr c [(ptr i8) f64 f64 f64 f64 f64 f64 Color] i64))
    ;; ctx, font, text, left, top, size, tint
@@ -156,8 +173,14 @@
 (defn fill-circle [(backend (ptr Backend)) (centerHorizontal f64) (centerVertical f64) (radius f64) (tint Color)] (-> i64)
   (call-ptr (load (field backend fillCircle)) (load (field backend ctx)) centerHorizontal centerVertical radius tint))
 
-(defn stroke-circle [(backend (ptr Backend)) (centerHorizontal f64) (centerVertical f64) (radius f64) (tint Color)] (-> i64)
-  (call-ptr (load (field backend strokeCircle)) (load (field backend ctx)) centerHorizontal centerVertical radius tint))
+(defn stroke-circle [(backend (ptr Backend))
+                     (centerHorizontal f64)
+                     (centerVertical f64)
+                     (radius f64)
+                     (thickness f64)
+                     (tint Color)] (-> i64)
+  (call-ptr (load (field backend strokeCircle)) (load (field backend ctx))
+            centerHorizontal centerVertical radius thickness tint))
 
 (defn draw-ring [(backend (ptr Backend))
                  (centerHorizontal f64)
@@ -330,10 +353,10 @@
         (rounded-fill backend (frame (load (field bounds left)) trackTop activeWidth 4.0) 2.0 (accent))
         0)
       (fill-circle backend knobHorizontal knobVertical 6.0 (color 255 255 255))
-      (stroke-circle backend knobHorizontal knobVertical 6.0 (focus-ring))
+      (stroke-circle backend knobHorizontal knobVertical 6.0 1.0 (focus-ring))
       (if (= (load (field state focused)) 1)
         (do
-          (stroke-circle backend knobHorizontal knobVertical 9.0 (focus-ring))
+          (stroke-circle backend knobHorizontal knobVertical 9.0 1.0 (focus-ring))
           0)
         0)
       0)))
@@ -361,12 +384,12 @@
         centerVertical (+ (load (field bounds top)) (/ (load (field bounds height)) 2.0))]
     (do
       (fill-circle backend centerHorizontal centerVertical 8.0 (surface))
-      (stroke-circle backend centerHorizontal centerVertical 8.0 (border))
+      (stroke-circle backend centerHorizontal centerVertical 8.0 1.0 (border))
       (if (= selected 1)
         (do (fill-circle backend centerHorizontal centerVertical 4.0 (accent)) 0)
         0)
       (if (= (load (field state focused)) 1)
-        (do (stroke-circle backend centerHorizontal centerVertical 11.0 (focus-ring)) 0)
+        (do (stroke-circle backend centerHorizontal centerVertical 11.0 1.0 (focus-ring)) 0)
         0)
       (draw-label backend font label (+ (load (field bounds left)) 24.0) (+ (load (field bounds top)) 5.0) 14.0 (text))
       0)))

@@ -706,32 +706,75 @@ impl<'a> MetaTracker<'a> {
 
 /// Convert a recording into a Perfetto / Chrome JSON trace.
 ///
-/// By default this is a **counter** trace: live heap bytes (overall and per type)
-/// sampled over time. That's what the UI can actually render — a churn-heavy real
-/// program allocates tens of millions of times, and one async slice per
-/// allocation produces a multi-GB trace that Perfetto won't open. Pass `--slices`
-/// when you want individual allocation lifetimes (alloc -> free, named by
-/// recovered type); it's capped by `--max-slices` and reports what it dropped.
+/// Emits **everything** by default: an async slice for every allocation's
+/// lifetime (alloc -> free, named by recovered type), plus live-byte counters for
+/// the total and for *every* type. Nothing is capped, sampled, or truncated.
+///
+/// Counters are written **only when a value changes**. A Perfetto counter track
+/// holds its value between samples, so re-stating an unchanged number is pure
+/// redundancy — and it is the expensive kind: an allocation touches exactly one
+/// type, so writing every type on every event costs `events × types` where the
+/// information content is `events`. On a 41M-event recording that was 95 GB of
+/// which ~99.5% was the same numbers restated. Skipping unchanged values
+/// reconstructs a bit-identical curve (`tests/perfetto_counters.rs` pins that).
+///
+/// Opt out only if you deliberately want a smaller artifact: `--no-slices` drops
+/// per-allocation lifetimes, `--max-slices N` caps them, `--top-types N` keeps
+/// only the N largest-peaking types. All three *lose data* and say so on stderr.
 ///
 /// Open the result at https://ui.perfetto.dev.
+// `flush_counters!` writes back the values it emitted; on the final flush those
+// write-backs are dead, which is inherent to the macro rather than a mistake.
+#[allow(unused_assignments)]
 fn cmd_perfetto(args: &[String]) -> Result<(), String> {
-    let file = positional(args)
-        .ok_or("usage: memscope perfetto <FILE> [--out trace.json] [--slices] [--max-slices N] [--top-types N]")?;
+    let file = positional(args).ok_or(
+        "usage: memscope perfetto <FILE> [--out trace.json] [--no-slices] [--max-slices N] [--top-types N]",
+    )?;
     let out = flag(args, "--out").unwrap_or("trace.json").to_string();
-    let want_slices = args.iter().any(|a| a == "--slices");
-    let max_slices: usize =
-        flag(args, "--max-slices").and_then(|s| s.parse().ok()).unwrap_or(100_000);
-    let top_types: usize = flag(args, "--top-types").and_then(|s| s.parse().ok()).unwrap_or(10);
+    let want_slices = !args.iter().any(|a| a == "--no-slices");
+    let max_slices: Option<usize> = flag(args, "--max-slices").and_then(|s| s.parse().ok());
+    let top_types: Option<usize> = flag(args, "--top-types").and_then(|s| s.parse().ok());
 
     let mut rec = read_recording_raw(file)?;
     rec.resolve_sites_compact();
 
-    // Which types get their own counter track: the ones that peak largest. Found
-    // in a first streaming pass, because a counter track has to be chosen before
-    // its samples are written.
-    let top: Vec<u32> = top_sites_by_peak_bytes(file, top_types)?;
-    let tracked: std::collections::HashMap<u32, String> =
-        top.iter().map(|&s| (s, rec.site_label(s).to_string())).collect();
+    // Counter tracks are keyed by *type label*, not by site: many call sites
+    // allocate the same type, and Perfetto merges same-named tracks, so emitting
+    // one track per site makes co-named tracks fight over a single curve. Intern
+    // labels and fold every site of a type into one counter.
+    let mut labels: Vec<String> = Vec::new();
+    let mut label_id: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut label_of_site: HashMap<u32, u32> = HashMap::new();
+    for (&site, info) in &rec.sites {
+        let id = match label_id.get(info.label.as_str()) {
+            Some(&id) => id,
+            None => {
+                let id = labels.len() as u32;
+                labels.push(info.label.clone());
+                label_id.insert(info.label.as_str(), id);
+                id
+            }
+        };
+        label_of_site.insert(site, id);
+    }
+
+    // Every type gets a counter unless --top-types asks for fewer. When it does,
+    // rank by each type's peak live bytes (a first streaming pass — a counter
+    // track has to be chosen before its samples are written).
+    let dropped_types = match top_types {
+        None => 0,
+        Some(n) => {
+            let keep = top_labels_by_peak_bytes(file, &label_of_site, labels.len(), n)?;
+            let dropped = labels.len().saturating_sub(keep.len());
+            let keep: std::collections::HashSet<u32> = keep.into_iter().collect();
+            for id in 0..labels.len() as u32 {
+                if !keep.contains(&id) {
+                    labels[id as usize].clear(); // empty label == not tracked
+                }
+            }
+            dropped
+        }
+    };
 
     use std::io::Write as _;
     let f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
@@ -751,7 +794,6 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
         slice: Option<u64>,
     }
     let mut live: HashMap<u64, LiveEntry> = HashMap::new();
-    let mut per_type: HashMap<u32, u64> = HashMap::new();
     let mut seen_threads: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let mut total: u64 = 0;
     let mut slice_id: u64 = 0;
@@ -759,12 +801,68 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     let mut slices_dropped = 0usize;
     let mut events = 0u64;
     let mut last_ts = 0u64;
-    let mut last_ctr_ts = u64::MAX; // dedup counter samples to one per timestamp
+
+    // Counter state, indexed by label id. `emitted` is the value last *written*
+    // to the trace; a label is written only when `cur` diverges from it. u64::MAX
+    // is the "never written" sentinel, so every track opens with a real sample.
+    let mut cur: Vec<u64> = vec![0; labels.len()];
+    let mut emitted: Vec<u64> = vec![u64::MAX; labels.len()];
+    let mut total_emitted: u64 = u64::MAX;
+    // Labels touched since the last flush. Bounded by the events in one
+    // timestamp, so a flush costs the changes rather than a scan of all labels.
+    let mut dirty: Vec<u32> = Vec::new();
+    let mut is_dirty: Vec<bool> = vec![false; labels.len()];
+    let mut samples = 0u64;
+    // The timestamp whose accumulated state is pending. Counters flush when the
+    // clock advances, so a sample is the value at the *end* of its timestamp;
+    // the format can hold one point per track per ts, so that is full fidelity.
+    let mut pending: Option<u64> = None;
+
+    // Write every counter whose value moved since it was last written, at `ts`.
+    // Unchanged tracks are skipped: Perfetto holds a counter's value until the
+    // next sample, so re-stating it adds bytes and no information.
+    macro_rules! flush_counters {
+        ($ts:expr) => {{
+            let ts = $ts;
+            if total != total_emitted {
+                write!(
+                    w,
+                    ",\n{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
+                    us(ts), total
+                )
+                .map_err(|e| e.to_string())?;
+                total_emitted = total;
+                samples += 1;
+            }
+            for id in dirty.drain(..) {
+                let i = id as usize;
+                is_dirty[i] = false;
+                if labels[i].is_empty() || cur[i] == emitted[i] {
+                    continue; // untracked (--top-types), or value did not move
+                }
+                write!(
+                    w,
+                    ",\n{{\"ph\":\"C\",\"name\":\"live: {}\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
+                    esc(&labels[i]), us(ts), cur[i]
+                )
+                .map_err(|e| e.to_string())?;
+                emitted[i] = cur[i];
+                samples += 1;
+            }
+        }};
+    }
 
     let mut stream = stream_events(file)?;
     for e in stream.by_ref() {
         events += 1;
         last_ts = e.ts_nanos.max(last_ts);
+        // The clock advanced, so everything accumulated at the previous
+        // timestamp is final — write it before this event mutates the state.
+        match pending {
+            Some(ts) if ts != e.ts_nanos => flush_counters!(ts),
+            _ => {}
+        }
+        pending = Some(e.ts_nanos);
         if seen_threads.insert(e.thread) {
             write!(
                 w,
@@ -776,10 +874,14 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
         match e.kind {
             memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
                 total += e.size;
-                if tracked.contains_key(&e.site) {
-                    *per_type.entry(e.site).or_default() += e.size;
+                if let Some(&id) = label_of_site.get(&e.site) {
+                    cur[id as usize] += e.size;
+                    if !is_dirty[id as usize] {
+                        is_dirty[id as usize] = true;
+                        dirty.push(id);
+                    }
                 }
-                let slice = if want_slices && slices_emitted < max_slices {
+                let slice = if want_slices && max_slices.is_none_or(|m| slices_emitted < m) {
                     let id = slice_id;
                     slice_id += 1;
                     slices_emitted += 1;
@@ -801,8 +903,13 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
             memscope_proto::EventKind::Dealloc => {
                 if let Some(entry) = live.remove(&e.addr) {
                     total = total.saturating_sub(entry.size);
-                    if let Some(b) = per_type.get_mut(&entry.site) {
-                        *b = b.saturating_sub(entry.size);
+                    if let Some(&id) = label_of_site.get(&entry.site) {
+                        let c = &mut cur[id as usize];
+                        *c = c.saturating_sub(entry.size);
+                        if !is_dirty[id as usize] {
+                            is_dirty[id as usize] = true;
+                            dirty.push(id);
+                        }
                     }
                     if let Some(id) = entry.slice {
                         write!(
@@ -818,30 +925,13 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
             | memscope_proto::EventKind::MetaExit
             | memscope_proto::EventKind::Mark => {}
         }
-        // One counter sample per distinct timestamp (the clock is ms-granular, so
-        // this collapses a within-ms burst to one point).
-        if e.ts_nanos != last_ctr_ts {
-            write!(
-                w,
-                ",\n{{\"ph\":\"C\",\"name\":\"live_bytes\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
-                us(e.ts_nanos), total
-            )
-            .map_err(|e| e.to_string())?;
-            for (site, label) in &tracked {
-                write!(
-                    w,
-                    ",\n{{\"ph\":\"C\",\"name\":\"live: {}\",\"ts\":{:.3},\"pid\":1,\"args\":{{\"bytes\":{}}}}}",
-                    esc(label),
-                    us(e.ts_nanos),
-                    per_type.get(site).copied().unwrap_or(0)
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            last_ctr_ts = e.ts_nanos;
-        }
     }
     if let Some(err) = stream.error() {
         return Err(err.to_string());
+    }
+    // The final timestamp's state never saw a clock advance to flush it.
+    if let Some(ts) = pending {
+        flush_counters!(ts);
     }
 
     // Close out slices for allocations still live at the end of the trace.
@@ -859,53 +949,67 @@ fn cmd_perfetto(args: &[String]) -> Result<(), String> {
     write!(w, "\n]}}").map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
 
+    let tracked = labels.iter().filter(|l| !l.is_empty()).count();
     println!("wrote Perfetto trace: {out}");
     println!(
-        "  {events} events  ->  live_bytes counter + {} per-type counter(s)  ({} threads)",
-        tracked.len(),
+        "  {events} events  ->  {slices_emitted} allocation slices + live_bytes counter \
+         + {tracked} per-type counter(s), {samples} counter samples  ({} threads)",
         seen_threads.len()
     );
-    if want_slices {
-        println!("  {slices_emitted} allocation slices");
-        if slices_dropped > 0 {
-            println!(
-                "  NOTE: {slices_dropped} allocations had no slice emitted (--max-slices {max_slices}); raise it to include more"
-            );
-        }
-    } else {
-        println!("  (counters only — pass --slices for per-allocation lifetime slices)");
+    // Anything lost is stated loudly: a trace that silently dropped most of the
+    // data reads exactly like one that covered it.
+    if dropped_types > 0 {
+        println!(
+            "  WARNING: --top-types kept {tracked} of {} types; {dropped_types} type(s) have NO counter \
+             and their bytes are absent from the per-type tracks (live_bytes is still exact). \
+             Drop the flag to emit every type.",
+            labels.len()
+        );
+    }
+    if slices_dropped > 0 {
+        println!(
+            "  WARNING: {slices_dropped} allocations have NO slice (--max-slices); drop the flag for all of them"
+        );
+    }
+    if !want_slices {
+        println!("  WARNING: --no-slices — per-allocation lifetimes omitted, counters only");
     }
     println!("  open it at https://ui.perfetto.dev  (Open trace file)");
     Ok(())
 }
 
-/// The `n` sites whose live bytes peak highest, via one streaming pass.
+/// The `n` type labels whose live bytes peak highest, via one streaming pass.
 ///
-/// Perfetto needs its counter tracks named before any sample is written, and a
-/// real recording has far too many sites to give each one a track — so pick the
-/// ones that actually move the heap.
-fn top_sites_by_peak_bytes(file: &str, n: usize) -> Result<Vec<u32>, String> {
+/// Only used when `--top-types` explicitly asks for a truncated trace. Ranking is
+/// per *label*, not per site: a type allocated from a thousand call sites holds
+/// its bytes across a thousand site ids, so site-ranking buries exactly the types
+/// that dominate the heap. Peaks are per label for the same reason.
+fn top_labels_by_peak_bytes(
+    file: &str,
+    label_of_site: &HashMap<u32, u32>,
+    n_labels: usize,
+    n: usize,
+) -> Result<Vec<u32>, String> {
     if n == 0 {
         return Ok(Vec::new());
     }
     let mut live: HashMap<u64, (u64, u32)> = HashMap::new();
-    let mut cur: HashMap<u32, u64> = HashMap::new();
-    let mut peak: HashMap<u32, u64> = HashMap::new();
+    let mut cur: Vec<u64> = vec![0; n_labels];
+    let mut peak: Vec<u64> = vec![0; n_labels];
     let mut stream = stream_events(file)?;
     for e in stream.by_ref() {
         match e.kind {
             memscope_proto::EventKind::Alloc | memscope_proto::EventKind::ReallocGrow => {
-                let c = cur.entry(e.site).or_default();
-                *c += e.size;
-                let p = peak.entry(e.site).or_default();
-                *p = (*p).max(*c);
-                live.insert(e.addr, (e.size, e.site));
+                if let Some(&id) = label_of_site.get(&e.site) {
+                    cur[id as usize] += e.size;
+                    peak[id as usize] = peak[id as usize].max(cur[id as usize]);
+                    live.insert(e.addr, (e.size, id));
+                }
             }
             memscope_proto::EventKind::Dealloc => {
-                if let Some((size, site)) = live.remove(&e.addr) {
-                    if let Some(c) = cur.get_mut(&site) {
-                        *c = c.saturating_sub(size);
-                    }
+                if let Some((size, id)) = live.remove(&e.addr) {
+                    let c = &mut cur[id as usize];
+                    *c = c.saturating_sub(size);
                 }
             }
             _ => {}
@@ -914,11 +1018,13 @@ fn top_sites_by_peak_bytes(file: &str, n: usize) -> Result<Vec<u32>, String> {
     if let Some(err) = stream.error() {
         return Err(err.to_string());
     }
-    let mut rows: Vec<(u32, u64)> = peak.into_iter().collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut rows: Vec<(u32, u64)> =
+        peak.into_iter().enumerate().map(|(i, p)| (i as u32, p)).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     rows.truncate(n);
-    Ok(rows.into_iter().map(|(site, _)| site).collect())
+    Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
+
 
 /// Build a site's root→leaf path: cleaned frames (recorded innermost-first, so
 /// reversed to put the outermost/app frame at the root), then the recovered type

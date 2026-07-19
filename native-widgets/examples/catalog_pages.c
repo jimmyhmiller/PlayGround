@@ -1,74 +1,20 @@
 /*
- * The component catalog, drawn entirely through the public C API.
+ * Copyright 2026 Jimmy Miller
+ * SPDX-License-Identifier: Apache-2.0
  *
- * This is both the demo and the parity fixture: `catalog --snapshot <prefix>`
- * renders each page to a PNG so the extracted library can be compared against
- * the renders of the code it was extracted from.
+ * Licensed under the Apache License, Version 2.0. See LICENSE at the
+ * repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+ * derives from.
  */
 
-#include "native_widgets.h"
-#include "nw_raylib.h"
+#include "catalog_pages.h"
 
-#include <raylib.h>
-#include <stdio.h>
 #include <string.h>
 
-#define SCREEN_WIDTH 960.0
-#define SCREEN_HEIGHT 700.0
+const char *const catalog_page_names[CATALOG_PAGE_COUNT] = {
+    "controls", "surfaces", "navigation", "overlays"};
 
-#define PAGE_CONTROLS 0
-#define PAGE_SURFACES 1
-#define PAGE_NAVIGATION 2
-#define PAGE_OVERLAYS 3
-
-/* Focusable controls on the controls page, in tab order. */
-enum {
-  CONTROL_BUTTON = 0,
-  CONTROL_INPUT,
-  CONTROL_TEXTAREA,
-  CONTROL_CHECKBOX,
-  CONTROL_SWITCH,
-  CONTROL_SLIDER,
-  CONTROL_TOGGLE,
-  CONTROL_RADIO_FIRST,
-  CONTROL_RADIO_SECOND,
-  CONTROL_COUNT
-};
-
-typedef struct {
-  int64_t page;
-  int64_t focused_control;
-  int64_t button_count;
-  int64_t checkbox_checked;
-  int64_t switch_checked;
-  double slider_value;
-  int64_t slider_dragging;
-  int64_t toggle_checked;
-  int64_t radio_value;
-  int64_t accordion_open;
-  int64_t tab_value;
-  int64_t group_value;
-  int64_t pagination_value;
-  int64_t select_open;
-  int64_t combobox_open;
-  int64_t overlay;
-  double resizable_split;
-  Font mono;
-  Font sans;
-} catalog_state;
-
-typedef struct {
-  double pointer_x;
-  double pointer_y;
-  int64_t pointer_pressed;
-  int64_t pointer_down;
-  int64_t tab_pressed;
-  int64_t space_pressed;
-  int64_t left_pressed;
-  int64_t right_pressed;
-} catalog_input;
-
-static catalog_state initial_state(void) {
+catalog_state catalog_initial_state(void) {
   catalog_state state;
   memset(&state, 0, sizeof state);
   state.slider_value = 0.42;
@@ -134,7 +80,7 @@ static int64_t segment_at(double coordinate, double origin, double width) {
   return (int64_t)index;
 }
 
-static void apply_input(catalog_state *state, catalog_input in) {
+void catalog_apply_input(catalog_state *state, catalog_input in) {
   double x = in.pointer_x;
   double y = in.pointer_y;
   int pressed = in.pointer_pressed == 1;
@@ -224,21 +170,6 @@ static void apply_input(catalog_state *state, catalog_input in) {
   }
 }
 
-static catalog_input capture_input(void) {
-  catalog_input in;
-  memset(&in, 0, sizeof in);
-  Vector2 mouse = GetMousePosition();
-  in.pointer_x = mouse.x;
-  in.pointer_y = mouse.y;
-  in.pointer_pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-  in.pointer_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-  in.tab_pressed = IsKeyPressed(KEY_TAB);
-  in.space_pressed = IsKeyPressed(KEY_SPACE);
-  in.left_pressed = IsKeyPressed(KEY_LEFT);
-  in.right_pressed = IsKeyPressed(KEY_RIGHT);
-  return in;
-}
-
 static nw_interaction control_state(const catalog_state *state,
                                     catalog_input in, int64_t identifier,
                                     nw_frame bounds) {
@@ -251,8 +182,8 @@ static nw_interaction control_state(const catalog_state *state,
 
 static void draw_controls(const nw_backend *b, const catalog_state *s,
                           catalog_input in) {
-  nw_font mono = (nw_font)&s->mono;
-  nw_font sans = (nw_font)&s->sans;
+  nw_font mono = s->mono;
+  nw_font sans = s->sans;
   nw_color muted = nw_color_text_muted();
 
   nw_draw_text(b, mono, "BUTTON", 100.0, 132.0, 11.0, muted);
@@ -295,8 +226,8 @@ static void draw_controls(const nw_backend *b, const catalog_state *s,
 }
 
 static void draw_surfaces(const nw_backend *b, const catalog_state *s) {
-  nw_font mono = (nw_font)&s->mono;
-  nw_font sans = (nw_font)&s->sans;
+  nw_font mono = s->mono;
+  nw_font sans = s->sans;
   nw_color muted = nw_color_text_muted();
 
   nw_alert(b, sans, "Workflow paused",
@@ -326,7 +257,7 @@ static void draw_surfaces(const nw_backend *b, const catalog_state *s) {
   nw_draw_text(b, mono, "SKELETON + SPINNER", 520.0, 420.0, 11.0, muted);
   nw_skeleton(b, nw_frame_make(520.0, 454.0, 280.0, 16.0));
   nw_skeleton(b, nw_frame_make(520.0, 480.0, 220.0, 16.0));
-  nw_spinner(b, nw_frame_make(824.0, 458.0, 28.0, 28.0), GetTime());
+  nw_spinner(b, nw_frame_make(824.0, 458.0, 28.0, 28.0), s->time);
 
   nw_separator(b, nw_frame_make(520.0, 536.0, 372.0, 1.0));
   nw_alert(b, sans, "Creation failed", "The workflow file could not be parsed.",
@@ -334,8 +265,8 @@ static void draw_surfaces(const nw_backend *b, const catalog_state *s) {
 }
 
 static void draw_navigation(const nw_backend *b, const catalog_state *s) {
-  nw_font mono = (nw_font)&s->mono;
-  nw_font sans = (nw_font)&s->sans;
+  nw_font mono = s->mono;
+  nw_font sans = s->sans;
   nw_color muted = nw_color_text_muted();
   nw_interaction idle = nw_interaction_make(0, 0, 0, 0);
 
@@ -396,8 +327,8 @@ static void draw_navigation(const nw_backend *b, const catalog_state *s) {
 }
 
 static void draw_overlays(const nw_backend *b, const catalog_state *s) {
-  nw_font mono = (nw_font)&s->mono;
-  nw_font sans = (nw_font)&s->sans;
+  nw_font mono = s->mono;
+  nw_font sans = s->sans;
   nw_color muted = nw_color_text_muted();
   nw_interaction idle = nw_interaction_make(0, 0, 0, 0);
 
@@ -417,16 +348,16 @@ static void draw_overlays(const nw_backend *b, const catalog_state *s) {
   case 1:
     nw_dialog(b, sans, "Build this workflow?",
               "The creator agent will write an executable workflow.",
-              "Build workflow", SCREEN_WIDTH, SCREEN_HEIGHT);
+              "Build workflow", CATALOG_WIDTH, CATALOG_HEIGHT);
     break;
   case 2:
     nw_drawer(b, sans, "Run history",
               "Inspect events and agent output from the latest run.",
-              SCREEN_WIDTH, SCREEN_HEIGHT);
+              CATALOG_WIDTH, CATALOG_HEIGHT);
     break;
   case 3:
     nw_sheet(b, sans, "Workflow settings", "Configure approvals and execution.",
-             SCREEN_WIDTH, SCREEN_HEIGHT);
+             CATALOG_WIDTH, CATALOG_HEIGHT);
     break;
   default:
     break;
@@ -434,7 +365,7 @@ static void draw_overlays(const nw_backend *b, const catalog_state *s) {
 }
 
 static void draw_page_bar(const nw_backend *b, const catalog_state *s) {
-  nw_font sans = (nw_font)&s->sans;
+  nw_font sans = s->sans;
   const char *names[] = {"Controls", "Surfaces", "Navigation", "Overlays"};
   nw_interaction idle = nw_interaction_make(0, 0, 0, 0);
   for (int64_t index = 0; index < 4; index++) {
@@ -443,15 +374,15 @@ static void draw_page_bar(const nw_backend *b, const catalog_state *s) {
   }
 }
 
-static void draw_catalog(const nw_backend *b, const catalog_state *s,
-                         catalog_input in) {
+void catalog_draw(const nw_backend *b, const catalog_state *s,
+                  catalog_input in) {
   const char *titles[] = {"Native controls", "Native surfaces",
                           "Native navigation", "Native overlays"};
 
   nw_clear(b, nw_color_background());
-  nw_draw_text(b, (nw_font)&s->sans, titles[s->page], 64.0, 38.0, 28.0,
+  nw_draw_text(b, s->sans, titles[s->page], 64.0, 38.0, 28.0,
                nw_color_text());
-  nw_draw_text(b, (nw_font)&s->mono,
+  nw_draw_text(b, s->mono,
                "HOUSE DARK / APACHE-2.0 ADAPTATION / POINTER + KEYBOARD", 64.0,
                78.0, 11.0, nw_color_text_muted());
 
@@ -468,78 +399,12 @@ static void draw_catalog(const nw_backend *b, const catalog_state *s,
   }
 }
 
-/* ---- entry ------------------------------------------------------------- */
 
-static void load_fonts(catalog_state *state) {
-  state->mono = LoadFontEx("assets/fonts/IBMPlexMono-Regular.ttf", 42, 0, 0);
-  state->sans = LoadFontEx("assets/fonts/IBMPlexSans-Regular.ttf", 42, 0, 0);
-  SetTextureFilter(state->mono.texture, TEXTURE_FILTER_BILINEAR);
-  SetTextureFilter(state->sans.texture, TEXTURE_FILTER_BILINEAR);
-}
+/* ---- headless interaction check ---------------------------------------- */
 
-static int run_snapshot(const char *prefix) {
-  const char *pages[] = {"controls", "surfaces", "navigation", "overlays"};
-
-  SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT |
-                 FLAG_WINDOW_HIGHDPI);
-  InitWindow((int)SCREEN_WIDTH, (int)SCREEN_HEIGHT, "native widgets - snapshot");
-
-  catalog_state state = initial_state();
-  load_fonts(&state);
-
-  nw_backend backend = nw_raylib_backend();
+int catalog_interaction_check(void) {
+  catalog_state state = catalog_initial_state();
   catalog_input in;
-  memset(&in, 0, sizeof in);
-
-  for (int64_t page = 0; page < 4; page++) {
-    state.page = page;
-    /* Shapes reach the framebuffer only when EndDrawing flushes the batch, so
-     * capture after a completed frame rather than inside one. */
-    for (int warm = 0; warm < 3; warm++) {
-      BeginDrawing();
-      draw_catalog(&backend, &state, in);
-      EndDrawing();
-    }
-    char path[256];
-    snprintf(path, sizeof path, "%s%s.png", prefix, pages[page]);
-    TakeScreenshot(path);
-  }
-
-  UnloadFont(state.mono);
-  UnloadFont(state.sans);
-  CloseWindow();
-  return 0;
-}
-
-static int run_interactive(void) {
-  SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT |
-                 FLAG_WINDOW_HIGHDPI);
-  InitWindow((int)SCREEN_WIDTH, (int)SCREEN_HEIGHT, "native widgets - catalog");
-  SetTargetFPS(60);
-
-  catalog_state state = initial_state();
-  load_fonts(&state);
-  nw_backend backend = nw_raylib_backend();
-
-  while (!WindowShouldClose()) {
-    catalog_input in = capture_input();
-    apply_input(&state, in);
-    BeginDrawing();
-    draw_catalog(&backend, &state, in);
-    EndDrawing();
-  }
-
-  UnloadFont(state.mono);
-  UnloadFont(state.sans);
-  CloseWindow();
-  return 0;
-}
-
-/* Headless interaction check: the same sequence the original catalog asserted. */
-static int run_check(void) {
-  catalog_state state = initial_state();
-  catalog_input in;
-  memset(&in, 0, sizeof in);
 
   struct { double x, y; int64_t pressed, down; } steps[] = {
       {200.0, 182.0, 1, 0}, {600.0, 180.0, 1, 0}, {600.0, 264.0, 1, 0},
@@ -553,25 +418,10 @@ static int run_check(void) {
     in.pointer_y = steps[step].y;
     in.pointer_pressed = steps[step].pressed;
     in.pointer_down = steps[step].down;
-    apply_input(&state, in);
+    catalog_apply_input(&state, in);
   }
 
-  int ok = state.button_count == 1 && state.checkbox_checked == 1 &&
-           state.switch_checked == 1 && state.slider_value > 0.49 &&
-           state.toggle_checked == 1 && state.radio_value == 1;
-  printf("%s\n", ok ? "interaction check passed" : "interaction check FAILED");
-  return ok ? 0 : 1;
-}
-
-int main(int argc, char **argv) {
-  if (argc >= 2 && strcmp(argv[1], "--check") == 0) {
-    return run_check();
-  }
-  if (argc >= 3 && strcmp(argv[1], "--snapshot") == 0) {
-    return run_snapshot(argv[2]);
-  }
-  if (argc >= 2 && strcmp(argv[1], "--snapshot") == 0) {
-    return run_snapshot("catalog-");
-  }
-  return run_interactive();
+  return state.button_count == 1 && state.checkbox_checked == 1 &&
+         state.switch_checked == 1 && state.slider_value > 0.49 &&
+         state.toggle_checked == 1 && state.radio_value == 1;
 }

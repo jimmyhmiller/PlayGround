@@ -320,11 +320,34 @@ memscope perfetto allocs.mscope --out trace.json   # convert a recording
 # then open trace.json at https://ui.perfetto.dev
 ```
 
-Produces a Chrome/Perfetto trace: a **`live_bytes` counter** over time plus an
-**async slice for every allocation's lifetime** (alloc → free), named by
-recovered type and grouped by thread — so you can scrub the timeline, see the
-heap grow/shrink, and inspect when each typed object was alive. Every allocation
-is emitted (no caps).
+Produces a Chrome/Perfetto trace: a **`live_bytes` counter** over time, a
+**per-type live-bytes counter for every recovered type**, and an **async slice
+for every allocation's lifetime** (alloc → free), named by recovered type and
+grouped by thread — so you can scrub the timeline, see the heap grow/shrink, and
+inspect when each typed object was alive. Every allocation is emitted, every type
+gets a track, nothing is capped or sampled.
+
+Counters are written only when a value *changes*. A Perfetto counter track holds
+its value until the next sample, so re-stating an unchanged number is pure
+redundancy — and an allocation touches exactly one type, so writing every type on
+every event would cost `events × types` to carry `events` worth of information.
+Step-hold replay of the emitted samples reproduces the curve exactly;
+`crates/memscope-cli/tests/perfetto_counters.rs` pins that.
+
+On a 50M-event / 1.7 GB recording: 5.3 GB trace with all 25M allocation slices,
+or 402 KB with `--no-slices` (counters alone, still every type), both in 13 MB of
+RSS. Three flags trade data away for a smaller artifact, and each one warns about
+exactly what it dropped:
+
+| flag | what it costs you |
+|---|---|
+| `--no-slices` | no per-allocation lifetimes; counters only |
+| `--max-slices N` | slices only for the first N allocations |
+| `--top-types N` | only the N largest-peaking types get a counter |
+
+Reach for these when you want a smaller file, not by default. In particular
+`--top-types` makes the per-type tracks stop summing to `live_bytes`, so peak
+composition can no longer be read off the trace.
 
 ### Tag allocations with your own metadata (`meta!`)
 

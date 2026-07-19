@@ -1,3 +1,12 @@
+/*
+ * Copyright 2026 Jimmy Miller
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0. See LICENSE at the
+ * repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+ * derives from.
+ */
+
 #include "nw_raylib.h"
 
 #include <raylib.h>
@@ -75,9 +84,20 @@ static int64_t rl_fill_circle(void *ctx, double center_x, double center_y,
 }
 
 static int64_t rl_stroke_circle(void *ctx, double center_x, double center_y,
-                                double radius, nw_color tint) {
+                                double radius, double thickness,
+                                nw_color tint) {
   (void)ctx;
-  DrawCircleLines((int)center_x, (int)center_y, (float)radius, to_color(tint));
+  /* raylib's circle outline is always hairline, so anything thicker has to be
+   * drawn as a ring band. */
+  if (thickness <= 1.0) {
+    DrawCircleLines((int)center_x, (int)center_y, (float)radius,
+                    to_color(tint));
+    return 0;
+  }
+  Vector2 center = {(float)center_x, (float)center_y};
+  DrawRing(center, (float)(radius - thickness / 2.0),
+           (float)(radius + thickness / 2.0), 0.0f, 360.0f, 36,
+           to_color(tint));
   return 0;
 }
 

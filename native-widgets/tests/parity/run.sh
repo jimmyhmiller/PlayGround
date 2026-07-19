@@ -26,9 +26,9 @@ coil build reference.coil -o "$OUT/reference" -lraylib -lm >/dev/null
 echo "building catalog (extracted library)"
 cd "$ROOT"
 coil build src/widgets.coil --lib -o libnativewidgets.a >/dev/null
-cc -Wall -Wextra -Iinclude -Ibackends/raylib \
+cc -Wall -Wextra -Iinclude -Ibackends/raylib -Iexamples \
   $(pkg-config --cflags raylib 2>/dev/null || echo -I/opt/homebrew/include) \
-  backends/raylib/nw_raylib.c examples/catalog.c libnativewidgets.a \
+  backends/raylib/nw_raylib.c examples/catalog_pages.c examples/catalog_raylib.c libnativewidgets.a \
   -o "$OUT/catalog" \
   $(pkg-config --libs raylib 2>/dev/null || echo "-L/opt/homebrew/lib -lraylib") -lm
 

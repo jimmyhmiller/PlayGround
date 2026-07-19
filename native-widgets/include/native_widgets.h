@@ -1,5 +1,19 @@
 /*
+ * Copyright 2026 Jimmy Miller
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0. See LICENSE at the
+ * repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+ * derives from.
+ */
+
+/*
  * native_widgets.h — a render-agnostic widget library.
+ *
+ * The component designs are adapted from the Vercel Labs Native SDK canvas
+ * widgets (https://github.com/vercel-labs/native), provided under the Apache
+ * License 2.0, and have been modified. See THIRD_PARTY_NOTICES.md and
+ * licenses/native-sdk-Apache-2.0.txt.
  *
  * The library draws nothing itself. You give it an nw_backend of function
  * pointers and it calls back into your renderer, so the same widgets run on
@@ -67,14 +81,29 @@ typedef struct nw_backend {
   int64_t (*fill_circle)(void *ctx, double center_x, double center_y,
                          double radius, nw_color tint);
   int64_t (*stroke_circle)(void *ctx, double center_x, double center_y,
-                           double radius, nw_color tint);
+                           double radius, double thickness, nw_color tint);
+  /*
+   * Angles are degrees, increasing clockwise, with zero at three o'clock —
+   * the same sense as the y-down coordinate space. The band runs between
+   * inner_radius and outer_radius.
+   */
   int64_t (*ring)(void *ctx, double center_x, double center_y,
                   double inner_radius, double outer_radius,
                   double start_degrees, double end_degrees, nw_color tint);
 
+  /*
+   * `top` is the top of the line box, not the baseline: a backend whose text
+   * API positions by baseline must add the ascent back. `size` is the em size
+   * in pixels, and glyphs are laid out with no extra letter spacing.
+   */
   int64_t (*draw_text)(void *ctx, nw_font font, const char *text, double left,
                        double top, double size, nw_color tint);
-  /* Advance width of `text` in pixels at `size`. */
+  /*
+   * Advance width of `text` in pixels at `size`. Widgets use this to centre
+   * labels, so centring is exactly as good as this measurement: a backend with
+   * no font metrics can estimate, and its labels will be off by a pixel or two
+   * rather than wrong.
+   */
   double (*measure_text)(void *ctx, nw_font font, const char *text,
                          double size);
 } nw_backend;

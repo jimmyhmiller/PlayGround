@@ -1,4 +1,13 @@
 /*
+ * Copyright 2026 Jimmy Miller
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0. See LICENSE at the
+ * repository root, and THIRD_PARTY_NOTICES.md for the upstream work this
+ * derives from.
+ */
+
+/*
  * Checks that the C ABI the header promises is the one the library actually
  * has: struct arguments and struct returns in both directions, and widgets
  * calling back through the vtable in the expected order.
@@ -88,10 +97,11 @@ static int64_t rec_fill_circle(void *ctx, double x, double y, double radius,
   return 0;
 }
 static int64_t rec_stroke_circle(void *ctx, double x, double y, double radius,
-                                 nw_color t) {
+                                 double thickness, nw_color t) {
   (void)x;
   (void)y;
   (void)radius;
+  (void)thickness;
   (void)t;
   record(ctx, "stroke_circle");
   return 0;
