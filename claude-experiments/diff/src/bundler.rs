@@ -110,6 +110,9 @@ struct ResolutionCache {
     /// module's source before it is transformed. `None` leaves `import.meta.env`
     /// untouched (generic bundling).
     import_meta_env: Arc<Option<crate::import_meta_env::ImportMetaEnv>>,
+    /// Vite `define` replacements, when opted in. Applied alongside
+    /// `import_meta_env` on both load paths.
+    defines: Arc<Vec<(String, String)>>,
 }
 
 struct DirectoryResolutionCache {
@@ -130,12 +133,14 @@ impl ResolutionCache {
         aliases: Vec<(String, PathBuf)>,
         virtual_modules: Vec<(String, String)>,
         import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
+        defines: Vec<(String, String)>,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::new(aliases),
             virtual_modules: Arc::new(virtual_modules.into_iter().collect()),
             import_meta_env: Arc::new(import_meta_env),
+            defines: Arc::new(defines),
         }
     }
 
@@ -145,17 +150,24 @@ impl ResolutionCache {
         self.virtual_modules.get(id).map(String::as_str)
     }
 
-    /// Applies the opted-in Vite `import.meta.env` rewrite to a module's source
-    /// before it is transformed, returning the source unchanged when the feature
-    /// is off or the module has no `import.meta.env`. One choke point for both the
-    /// serial ([`Bundler::load_module`]) and parallel ([`load_uncached`]) paths.
-    fn apply_import_meta_env<'s>(&self, path: &Path, source: &'s str, target: Target) -> Cow<'s, str> {
-        match self.import_meta_env.as_ref() {
-            Some(options) => crate::import_meta_env::transform(path, source, options, target)
-                .map(Cow::Owned)
-                .unwrap_or(Cow::Borrowed(source)),
-            None => Cow::Borrowed(source),
+    /// Applies the opted-in Vite compile-time rewrites (`import.meta.env`, then
+    /// `define`) to a module's source before it is transformed, returning the
+    /// source unchanged when both features are off or the module uses neither. One
+    /// choke point for both the serial ([`Bundler::load_module`]) and parallel
+    /// ([`load_uncached`]) paths.
+    fn apply_vite_replacements<'s>(&self, path: &Path, source: &'s str, target: Target) -> Cow<'s, str> {
+        let mut current = Cow::Borrowed(source);
+        if let Some(options) = self.import_meta_env.as_ref()
+            && let Some(rewritten) = crate::import_meta_env::transform(path, &current, options, target)
+        {
+            current = Cow::Owned(rewritten);
         }
+        if !self.defines.is_empty()
+            && let Some(rewritten) = crate::vite_define::transform(path, &current, &self.defines)
+        {
+            current = Cow::Owned(rewritten);
+        }
+        current
     }
 
     fn directory(&self, importer: &Path) -> Arc<DirectoryResolutionCache> {
@@ -547,6 +559,7 @@ impl Bundler {
                     .collect(),
                 config.virtual_modules.clone(),
                 config.import_meta_env.clone(),
+                config.defines.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -1620,7 +1633,7 @@ impl Bundler {
         }
         let source = self
             .resolution_cache
-            .apply_import_meta_env(path, &source, self.target);
+            .apply_vite_replacements(path, &source, self.target);
         let transformed = transform_module(path, &source, self.target);
         diagnostics.extend(
             transformed
@@ -3090,7 +3103,7 @@ fn load_uncached(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
-    let source = resolution_cache.apply_import_meta_env(path, &source, target);
+    let source = resolution_cache.apply_vite_replacements(path, &source, target);
     let transformed = transform_module(path, &source, target);
     let code_hash = content_hash(transformed.code.as_bytes());
     let mut diagnostics = transformed
@@ -3829,6 +3842,9 @@ pub struct BuildConfig {
     /// (the `build-app` path sets it). `None` for generic bundling, which leaves
     /// `import.meta.env` untouched. See [`crate::import_meta_env`].
     pub import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
+    /// Vite `define` entries as `(identifier, replacement_source)`, evaluated once
+    /// from the config. Empty for generic bundling. See [`crate::vite_define`].
+    pub defines: Vec<(String, String)>,
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -5012,6 +5028,7 @@ mod tests {
             virtual_modules: Vec::new(),
             target: Target::Server,
             import_meta_env: None,
+            defines: Vec::new(),
         };
         (directory, entry, config)
     }
@@ -5076,6 +5093,7 @@ mod tests {
             virtual_modules: Vec::new(),
             target,
             import_meta_env: None,
+            defines: Vec::new(),
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -5152,6 +5170,7 @@ mod tests {
             )],
             target: Target::Server,
             import_meta_env: None,
+            defines: Vec::new(),
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.

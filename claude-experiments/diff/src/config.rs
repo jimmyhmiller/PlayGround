@@ -93,6 +93,23 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         _ => Target::Server,
     };
 
+    // Evaluate the Vite config once (in a short-lived `node`, like Vite itself) for
+    // its computed values — `define` entries and `base` — which cannot be read as
+    // text. Failure is non-fatal: warn and fall back to conventions, so a build
+    // without node, or with a config node cannot evaluate, still proceeds.
+    let resolved = match crate::vite_config::resolve(root, "production") {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            eprintln!("warning: could not evaluate vite config ({error}); continuing with defaults");
+            None
+        }
+    };
+    let base = resolved
+        .as_ref()
+        .and_then(|resolved| resolved.base.clone())
+        .unwrap_or_else(|| "/".to_string());
+    let defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
+
     Ok(AppConfig {
         environment: environment.to_string(),
         build: BuildConfig {
@@ -102,7 +119,8 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             target,
             // A TanStack/Vite app expects Vite's `import.meta.env`; supply it (this
             // is the opt-in — generic bundling leaves `import.meta.env` untouched).
-            import_meta_env: Some(import_meta_env(root)),
+            import_meta_env: Some(import_meta_env(base)),
+            defines,
         },
         entry,
     })
@@ -110,10 +128,9 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
 
 /// Builds the Vite `import.meta.env` values for a production `build-app`: `MODE`
 /// is `production` (so `DEV`/`PROD` fold to `false`/`true`), `BASE_URL` is the
-/// config `base` (default `/`), and every `VITE_*` process-env variable present at
+/// resolved config `base`, and every `VITE_*` process-env variable present at
 /// build time is captured. `SSR` is derived per-target by the rewrite, not here.
-fn import_meta_env(root: &Path) -> crate::import_meta_env::ImportMetaEnv {
-    let base = vite_config_string(root, "base").unwrap_or_else(|| "/".to_string());
+fn import_meta_env(base: String) -> crate::import_meta_env::ImportMetaEnv {
     let vite_vars = std::env::vars()
         .filter(|(name, _)| name.starts_with("VITE_"))
         .collect();
