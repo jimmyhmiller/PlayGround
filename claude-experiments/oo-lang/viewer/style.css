@@ -891,3 +891,23 @@ td.col-id { color: var(--c-ref); font-weight: 600; }
   border-radius: 5px; padding: 2px 7px; font-family: var(--mono); font-size: 11px; outline: none;
   text-transform: none; letter-spacing: 0; max-width: 220px; }
 .repl-mod-select:focus { border-color: var(--accent); }
+
+
+/* ===== structured value inspector (ValueTree) =====
+   A parsed JSON blob is a deep enum/list tree; rendered inline it was one run-on line.
+   These rows give it shape: caret + key + type + value, children indented. */
+.vt-node { display: block; }
+.vt-row { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); font-size: 12.5px;
+          line-height: 1.65; white-space: nowrap; }
+.vt-row.composite { cursor: pointer; border-radius: 3px; }
+.vt-row.composite:hover { background: rgba(255,255,255,.05); }
+.vt-caret { display: inline-block; width: 10px; flex: none; color: var(--fg-faint); font-size: 10px; }
+.vt-key { color: var(--c-key); flex: none; }
+.vt-key:not(:empty)::after { content: ":"; color: var(--fg-faint); }
+.vt-tag { color: var(--fg-faint); font-size: 11px; flex: none; }
+.vt-chain { color: var(--c-key); flex: none; opacity: .75; }
+.vt-kids { margin-left: 11px; padding-left: 9px; border-left: 1px solid var(--line-soft); }
+.vt-val { overflow: hidden; text-overflow: ellipsis; }
+.vt-val.v-enum, .vt-val.v-list, .vt-val.v-map { color: var(--fg-faint); }
+.v-sum { color: var(--fg-faint); }
+.v-map { color: var(--fg-faint); }

@@ -149,6 +149,111 @@ function usePoll(fn, ms, deps) {
 const NavContext = createContext(null);
 
 // ===================== shared value renderer =====================
+// ===================== structured value inspector =====================
+// The wire is fully recursive — enums are {type, case, payload:[…]}, lists {items:[…]}, maps
+// {entries:[…]}, instances {ref, fields:{…}} — so a parsed JSON blob is a deep tree. Rendering
+// that inline produced one unreadable run-on line ("Result.Ok JsonValue.JObj {6 entries} …"),
+// which is exactly the sort of value this language exists to let you SEE. ValueTree renders it
+// as a collapsible tree; ValueView stays the compact one-liner for tables and trace nodes.
+
+const vKind = (v) =>
+  v == null ? "null"
+  : v.type === "list" ? "list"
+  : v.type === "map" ? "map"
+  : v.case !== undefined ? "enum"
+  : (v.ref !== undefined && v.fields) ? "instance"
+  : v.type === "ref" ? "ref"
+  : "scalar";
+
+// children as [label, value] pairs — the one place the wire shapes are decoded
+function vChildren(v) {
+  switch (vKind(v)) {
+    case "enum": {
+      const pl = v.payload || [];
+      // JStr("x") / Circle(9) are leaves — the summary already carries the value.
+      if (pl.length === 1 && !vIsComposite(pl[0])) return [];
+      return pl.map((p, i) => [(pl.length > 1 ? String(i) : ""), p]);
+    }
+    case "list": return (v.items || []).map((it, i) => [String(i), it]);
+    case "map": return (v.entries || []).map(([k, val]) => [vSummary(k, 24), val]);
+    case "instance": return Object.entries(v.fields || {});
+    default: return [];
+  }
+}
+const vIsComposite = (v) => {
+  switch (vKind(v)) {
+    case "list": return (v.items || []).length > 0;
+    case "map": return (v.entries || []).length > 0;
+    case "instance": return Object.keys(v.fields || {}).length > 0;
+    case "enum": return (v.payload || []).length > 0;
+    default: return false;
+  }
+};
+const vHasChildren = (v) => vChildren(v).length > 0;
+
+// a bounded one-line preview — never dumps a whole tree
+function vSummary(v, budget = 48) {
+  if (v == null) return "null";
+  switch (vKind(v)) {
+    case "scalar":
+      if (v.type === "String") { const s = JSON.stringify(v.value); return s.length > budget ? s.slice(0, budget - 1) + '…"' : s; }
+      if (v.type === "Void") return "void";
+      return String(v.value);
+    case "ref": return v.ref || "ref";
+    case "instance": return v.ref || v.type;
+    case "list": return `[${v.length}${v.elementType ? " × " + cleanType(v.elementType) : ""}]`;
+    case "map": return `{${v.length} entries}`;
+    case "enum": {
+      const head = v.case;
+      if (!v.payload || !v.payload.length) return head;
+      // one payload -> fold it into the header so Ok(JObj{6}) reads as one thing
+      const inner = v.payload.map((p) => vSummary(p, Math.max(8, budget - head.length - 4))).join(", ");
+      return `${head}(${inner})`;
+    }
+    default: return "";
+  }
+}
+
+// A row: caret + label + type + summary; children indented when open.
+function ValueTree({ v, label, depth = 0, defaultOpen }) {
+  // Fold single-payload enum chains. `Result.Ok(JsonValue.JObj{…})` is conceptually ONE thing
+  // wrapping an object, but naively it renders as three rows that each restate the wrapper
+  // before you reach the entries you actually came to read. Collapse the chain into one
+  // header (`Ok › JObj`) and hang the real children off it.
+  const chain = [];
+  while (vKind(v) === "enum" && v.payload && v.payload.length === 1 && vHasChildren(v.payload[0])) {
+    chain.push(v.case);
+    v = v.payload[0];
+  }
+  const kids = vChildren(v);
+  const composite = kids.length > 0;
+  // show structure immediately for small/shallow values; keep big ones folded
+  const auto = defaultOpen !== undefined ? defaultOpen : (depth < 2 && kids.length <= 12);
+  const [open, setOpen] = useState(auto);
+  const kind = vKind(v);
+
+  const head = html`
+    <div class=${"vt-row" + (composite ? " composite" : "")} onClick=${composite ? (e) => { e.stopPropagation(); setOpen(!open); } : undefined}>
+      <span class="vt-caret">${composite ? (open ? "▾" : "▸") : ""}</span>
+      ${label !== "" && label !== undefined ? html`<span class="vt-key">${label}</span>` : ""}
+      ${chain.length ? html`<span class="vt-chain">${chain.join(" › ")} ›</span>` : ""}
+      ${kind === "enum" && depth === 0 ? html`<span class="vt-tag">${v.type}</span>` : ""}
+      ${kind === "instance" || kind === "ref"
+        ? html`<${RefLink} v=${kind === "ref" ? v : { ...v, class: v.type, summary: v.ref }} />`
+        : html`<span class=${"vt-val v-" + (kind === "scalar" ? (v.type || "").toLowerCase() : kind)}
+                     title=${kind === "scalar" ? String(v.value) : ""}>${vSummary(v, composite && open ? 0 : 64)}</span>`}
+    </div>`;
+
+  if (!composite || !open) return head;
+  return html`<div class="vt-node">
+    ${head}
+    <div class="vt-kids">
+      ${kids.map(([k, child], i) => html`<${ValueTree} key=${i} v=${child} label=${k} depth=${depth + 1} />`)}
+      ${v.truncated ? html`<div class="vt-row"><span class="vt-caret"></span><span class="list-more">+${v.length - kids.length} more (truncated)</span></div>` : ""}
+    </div>
+  </div>`;
+}
+
 function ValueView({ v, inline }) {
   if (v == null) return html`<span class="v-void">null</span>`;
   switch (v.type) {
@@ -172,10 +277,12 @@ function RefLink({ v }) {
     onClick=${(e) => { e.stopPropagation(); nav.navigateRef(v); }}>${label}</span>`;
 }
 function EnumView({ v }) {
-  const payload = v.payload && v.payload.length
-    ? v.payload.map((p, i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${p} /><//>`)
-    : null;
-  return html`<span><span class="pill">${v.type + "." + v.case}</span>${payload ? html` ${payload}` : ""}</span>`;
+  // nullary -> just the pill; with payload -> pill + a BOUNDED preview (the full structure is
+  // available in ValueTree). Previously this recursed inline and a nested JSON value rendered
+  // as one unreadable line.
+  const hasPayload = v.payload && v.payload.length;
+  return html`<span><span class="pill">${v.type + "." + v.case}</span>${
+    hasPayload ? html` <span class="v-sum">${v.payload.map((p) => vSummary(p, 32)).join(", ")}</span>` : ""}</span>`;
 }
 function CollectionView({ v, inline }) {
   const items = v.items || [];
@@ -197,10 +304,11 @@ function CollectionView({ v, inline }) {
   return html`<span>${body}${more}</span>`;
 }
 function MapView({ v }) {
-  const entries = (v.entries || []).slice(0, 8);
-  const more = v.truncated
-    ? html`<span class="list-more"> (+${v.length - (v.entries || []).length} more)</span>` : "";
-  return html`<span>${`{${v.length} entries} `}${entries.map(([k, val], i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${k} />: <${ValueView} v=${val} /><//>`)}${more}</span>`;
+  // compact by design: the expandable rendering is ValueTree (used wherever there is room).
+  const entries = (v.entries || []).slice(0, 3);
+  const shown = (v.entries || []).length;
+  const rest = v.length - Math.min(shown, 3);
+  return html`<span><span class="v-map">{${v.length} entries}</span>${entries.length ? " " : ""}${entries.map(([k, val], i) => html`<${React.Fragment} key=${i}>${i ? ", " : ""}<${ValueView} v=${k} />: <span class="v-sum">${vSummary(val, 28)}</span><//>`)}${rest > 0 ? html`<span class="list-more"> +${rest}</span>` : ""}</span>`;
 }
 
 // ===================== module identity + focus mode helpers (Phase 3) =====================
@@ -829,7 +937,7 @@ function FieldValue({ cls, sc, slot, gen, name, type, val, schema, flashKey }) {
                      key=${"v" + flashKey}
                      title=${editable ? "click to edit" : ""}
                      onClick=${begin}>
-      <${ValueView} v=${val} />
+      ${vHasChildren(val) ? html`<${ValueTree} v=${val} />` : html`<${ValueView} v=${val} />`}
       ${editable ? html`<span class="fedit-hint">✎</span>` : ""}
     </div>`;
   }
@@ -1080,7 +1188,9 @@ function ReplDock({ open, setOpen, route, modTree, schema }) {
           <div class="repl-entry" key=${i}>
             <div class="repl-expr">${e.expr}</div>
             <div class=${"repl-out" + (e.error ? " err" : "")}>
-              ${e.pending ? "…" : e.error ? `${e.error.kind}: ${e.error.message}` : html`<${ValueView} v=${e.value} inline=${false} />`}
+              ${e.pending ? "…" : e.error ? `${e.error.kind}: ${e.error.message}`
+                  : vHasChildren(e.value) ? html`<${ValueTree} v=${e.value} defaultOpen=${true} />`
+                  : html`<${ValueView} v=${e.value} inline=${false} />`}
             </div>
           </div>`)}
       </div>

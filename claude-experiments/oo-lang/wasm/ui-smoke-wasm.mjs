@@ -165,6 +165,17 @@ async function main() {
     if (!/SET FROM VIEWER/.test(titles)) fail("field edit did not reach the live heap: " + titles);
     console.log("  ok  edited an instance field from the viewer -> live heap updated");
 
+    // a nested value must render as a TREE (rows you can expand), not one run-on line
+    await evalPage(`(()=>{const e=[...document.querySelectorAll('*')].find(x=>x.children.length===0&&x.textContent.trim()==='Project');e&&e.click();return 1})()`);
+    await sleep(700);
+    await evalPage(`(()=>{const r=document.querySelector('.inst-row, tbody tr, .row'); r&&r.click(); return 1})()`);
+    await sleep(900);
+    const rows = await evalPage(`document.querySelectorAll('.field-grid .vt-row').length`);
+    if (!rows) fail("nested value did not render as a ValueTree (no .vt-row rows)");
+    const carets = await evalPage(`[...document.querySelectorAll('.field-grid .vt-caret')].filter(c=>c.textContent.trim()).length`);
+    if (!carets) fail("ValueTree rendered no expandable nodes");
+    console.log(`  ok  nested values render as an expandable tree (${rows} rows, ${carets} expandable)`);
+
     // ---- phase 2: the agent demo page (xterm terminal + viewer, all in-page) ----
     await send("Page.navigate", { url: `http://127.0.0.1:${port}/wasm/demo.html` });
     let dstatus = "";
