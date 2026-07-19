@@ -13,7 +13,9 @@
 //! the core, and `tests/differential_fuzz.rs` holds the two tiers to identical
 //! observable behaviour.
 
-use livetype_core::{Actor, ActorStatus, Session, Turn, Value};
+use livetype_core::{
+    Actor, ActorStatus, Condition, DefId, FunctionState, Session, Turn, Value, World,
+};
 use std::sync::{Arc, Mutex};
 use wasm_bindgen::prelude::*;
 
@@ -164,7 +166,9 @@ impl Demo {
                 Turn::Done => return STATUS_DONE,
                 Turn::Paused => {
                     self.last_condition = match &self.actor.status {
-                        ActorStatus::Paused(c) => format!("{c:?}"),
+                        ActorStatus::Paused(c) => {
+                            self.session.engine.with_world(|w| describe(w, c))
+                        }
                         _ => String::new(),
                     };
                     return STATUS_FROZEN;
@@ -234,6 +238,7 @@ impl Demo {
     /// engine, not tracked alongside it.
     pub fn world_json(&self) -> String {
         self.session.engine.with_world(|w| {
+            let names = Names::of(w);
             let mut out = String::from("{\"functions\":[");
             let mut first = true;
             for (id, version) in &w.current_functions {
@@ -241,11 +246,19 @@ impl Demo {
                     continue;
                 };
                 let (name, broken, diagnostics) = match state {
-                    livetype_core::FunctionState::Ready(f) => (f.name.clone(), false, Vec::new()),
-                    livetype_core::FunctionState::Broken { name, diagnostics, .. } => {
-                        (name.clone(), true, diagnostics.clone())
-                    }
+                    FunctionState::Ready(f) => (f.name.clone(), false, Vec::new()),
+                    FunctionState::Broken { name, diagnostics, .. } => (
+                        name.clone(),
+                        true,
+                        diagnostics.iter().map(|d| names.humanize(d)).collect(),
+                    ),
                 };
+                // `letonce` lowers to a synthetic initializer function per
+                // global. They are real definitions, but they are the
+                // compiler's bookkeeping, not the program the viewer is reading.
+                if name.starts_with("__") {
+                    continue;
+                }
                 if !first {
                     out.push(',');
                 }
@@ -311,6 +324,89 @@ impl Demo {
 
     pub fn scenario_source(index: usize) -> String {
         SCENARIOS.get(index).map(|(_, s)| s.to_string()).unwrap_or_default()
+    }
+}
+
+/// Resolves the `DefId`s the engine speaks in — correct for a runtime, useless
+/// on screen — into names, including the ids the verifier embeds inside its
+/// diagnostic strings ("callee 1000001 is broken").
+struct Names {
+    /// `(id as text, name)`, longest id first so one id can never be rewritten
+    /// inside another.
+    ids: Vec<(String, String)>,
+}
+
+impl Names {
+    fn of(world: &World) -> Names {
+        let mut ids: Vec<(String, String)> = world
+            .current_functions
+            .iter()
+            .filter_map(|(id, version)| {
+                world
+                    .functions
+                    .get(&(*id, *version))
+                    .map(|state| (id.to_string(), function_name(state)))
+            })
+            .collect();
+        ids.sort_by_key(|(digits, _)| std::cmp::Reverse(digits.len()));
+        Names { ids }
+    }
+
+    fn humanize(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for (digits, name) in &self.ids {
+            out = out.replace(digits.as_str(), name);
+        }
+        out
+    }
+
+    fn name_of(&self, id: DefId) -> String {
+        let digits = id.to_string();
+        self.ids
+            .iter()
+            .find(|(d, _)| *d == digits)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| format!("fn#{id}"))
+    }
+}
+
+fn function_name(state: &FunctionState) -> String {
+    match state {
+        FunctionState::Ready(f) => f.name.clone(),
+        FunctionState::Broken { name, .. } => name.clone(),
+    }
+}
+
+/// Render a condition for a human.
+fn describe(world: &World, condition: &Condition) -> String {
+    let names = Names::of(world);
+    match condition {
+        Condition::BrokenFunction { function, diagnostics } => format!(
+            "`{}` is broken — {}",
+            names.name_of(*function),
+            diagnostics
+                .iter()
+                .map(|d| names.humanize(d))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        Condition::MissingMigration { type_id, from, to, .. } => {
+            let name = world
+                .current_schemas
+                .get(type_id)
+                .and_then(|v| world.schemas.get(&(*type_id, *v)))
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| format!("type#{type_id}"));
+            format!(
+                "no migration for `{name}` v{} → v{} — install one and it resumes",
+                from.0, to.0
+            )
+        }
+        Condition::RuntimeTypeError { function, pc, message } => format!(
+            "`{}` trapped at pc {pc} — {}",
+            names.name_of(*function),
+            names.humanize(message),
+        ),
     }
 }
 
