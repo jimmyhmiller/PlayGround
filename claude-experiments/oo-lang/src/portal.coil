@@ -254,7 +254,13 @@
 
 ; ---- transient dump + cache ----
 ; run a shell command, capturing its stdout into a fresh growable buffer. sets *outlen. null on fail.
+; The portal shells `scry schema-json` to inspect a project statically. There is no portal
+; hub (and no subprocess) in a browser, so on wasm this yields nothing — split out so the
+; popen path stays UNREFERENCED and its imports leave the module.
 (defn run-capture [(cmd (ptr i8)) (outlen (ptr i64))] (-> (ptr u8))
+  (when-wasm (do (store! outlen 0) (cast (ptr u8) 0)) (run-capture-popen cmd outlen)))
+
+(defn run-capture-popen [(cmd (ptr i8)) (outlen (ptr i64))] (-> (ptr u8))
   (let [f (popen cmd c"r")]
     (if (= (cast i64 f) 0) (do (store! outlen 0) (cast (ptr u8) 0))
       (let [(mut cap) 65536 (mut buf) (xalloc 65536) (mut len) 0]

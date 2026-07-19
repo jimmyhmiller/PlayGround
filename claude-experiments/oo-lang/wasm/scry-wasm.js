@@ -249,6 +249,18 @@ export class ScryWasm {
       abort: () => { throw new Error("scry: abort()"); },
       exit: (code) => { throw new ScryExit(Number(code)); },
 
+      // host_proc_run: Process.run in a browser. Runs the command against the in-memory VFS
+      // via a small mock shell (see mockShell) and returns combined output, matching the
+      // native contract (`<cmd> 2>&1`). This is what makes the agent's ShellTool/SearchTool
+      // do real work in the demo instead of trapping on popen.
+      host_proc_run: (cmdP, cmdLen) => {
+        const cmd = rd(cmdP, cmdLen);
+        let out;
+        try { out = self.mockShell(cmd); }
+        catch (e) { out = `sh: ${String(e && e.message || e)}\n`; }
+        return self.writeStr(out);
+      },
+
       // ---- curl: benign no-ops. The demo never makes an HTTP request (the fake
       // ScriptedModel is selected because getenv returns null), but http.coil's
       // init path is still reachable until the when-wasm guard (docs §5b) lands.
@@ -323,6 +335,67 @@ export class ScryWasm {
     return bytes.length;             // C snprintf returns would-be length
   }
 
+  // ---- mock shell over the in-memory VFS ----
+  // Enough of a shell for the agent's tools to do REAL work offline: ShellTool runs whatever
+  // the model asks for, SearchTool runs `grep -rnI -- 'q' . | head -40`. Unknown commands say
+  // so plainly rather than pretending to succeed — a silent "" would make the agent think an
+  // empty result was a real answer. Override wholesale with `opts.shell`.
+  mockShell(cmdline) {
+    if (this.opts.shell) return this.opts.shell(cmdline, this.vfs);
+    // strip the trailing `2>&1` the VM appends, then handle a single `| head -N` stage
+    let cmd = cmdline.replace(/\s*2>&1\s*$/, "").trim();
+    let headN = null;
+    const pipe = cmd.split("|");
+    if (pipe.length > 1) {
+      const last = pipe.pop().trim();
+      const m = /^head(?:\s+-n)?\s*-?(\d+)?/.exec(last);
+      if (m) headN = m[1] ? +m[1] : 10; else return `sh: unsupported pipeline: ${last}\n`;
+      cmd = pipe.join("|").trim();
+    }
+    const paths = () => [...this.vfs.keys()].sort();
+    const text = (p) => this.dec.decode(this.vfs.get(p) || new Uint8Array(0));
+    const argv = cmd.match(/'[^']*'|"[^"]*"|\S+/g) || [];
+    const unq = (a) => a.replace(/^['"]|['"]$/g, "");
+    const bin = argv[0];
+    let out = "";
+
+    if (bin === "ls") {
+      const long = argv.includes("-la") || argv.includes("-l") || argv.includes("-al");
+      out = paths().map((p) => long
+        ? `-rw-r--r--  1 scry  wasm  ${String(this.vfs.get(p).length).padStart(6)}  ${p}`
+        : p).join("\n") + "\n";
+    } else if (bin === "cat") {
+      const want = argv.slice(1).map(unq).filter((a) => !a.startsWith("-"));
+      out = want.map((f) => this.vfs.has(f) ? text(f)
+                    : this.vfs.has("/" + f) ? text("/" + f)
+                    : `cat: ${f}: No such file or directory\n`).join("");
+    } else if (bin === "grep") {
+      const flags = argv.slice(1).filter((a) => a.startsWith("-") && a !== "--");
+      const rest = argv.slice(1).filter((a) => !a.startsWith("-") && a !== "--").map(unq);
+      const needle = rest[0] || "";
+      const nocase = flags.some((f) => f.includes("i"));
+      const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), nocase ? "i" : "");
+      const hits = [];
+      for (const p of paths()) text(p).split("\n").forEach((ln, i) => { if (re.test(ln)) hits.push(`${p}:${i + 1}:${ln}`); });
+      out = hits.length ? hits.join("\n") + "\n" : "";
+    } else if (bin === "echo") {
+      out = argv.slice(1).map(unq).join(" ") + "\n";
+    } else if (bin === "pwd") {
+      out = "/\n";
+    } else if (bin === "wc") {
+      const f = unq(argv[argv.length - 1] || "");
+      if (!this.vfs.has(f)) out = `wc: ${f}: No such file or directory\n`;
+      else { const t = text(f); out = `${t.split("\n").length - 1} ${t.split(/\s+/).filter(Boolean).length} ${t.length} ${f}\n`; }
+    } else if (bin === "find") {
+      out = paths().join("\n") + "\n";
+    } else {
+      out = `sh: ${bin || "(empty)"}: command not available in the in-page shell\n` +
+            `available: ls, cat, grep, echo, pwd, wc, find (over the in-memory filesystem)\n`;
+    }
+    if (headN !== null) out = out.split("\n").slice(0, headN).join("\n") + "\n";
+    return out;
+  }
+
   // ---- the fake Anthropic-compatible API ----
   // Receives the PARSED request the agent built (model, system, messages[], tools[]) and
   // returns a response object shaped exactly like /v1/messages: {stop_reason, content:[…]}
@@ -367,6 +440,8 @@ export class ScryWasm {
     const w = lower.match(/weather (?:in|for) ([a-z ]+)/);
     if (w && toolNames.has("get_weather")) return useTool("get_weather", { location: w[1].trim() });
     if (/^(list files|ls)\b/.test(lower) && toolNames.has("shell")) return useTool("shell", { cmd: "ls -la" });
+    const sq = lower.match(/^(?:search|find|grep)\s+(.+)$/);
+    if (sq && toolNames.has("search")) return useTool("search", { query: sq[1].trim() });
     if (/^run /.test(lower) && toolNames.has("shell")) return useTool("shell", { cmd: q.slice(4) });
     if (/^read /.test(lower) && toolNames.has("read_file")) return useTool("read_file", { path: q.slice(5) });
 

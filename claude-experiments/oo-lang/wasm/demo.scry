@@ -1,3 +1,5 @@
+enum Lookup { Found(List<Task>)  Empty }
+
 class Task {
   title: String
   done: Bool
@@ -8,6 +10,11 @@ class Project {
   name: String
   tasks: List<Task>
   fn add(t: Task) { self.tasks.push(t) }
+  fn findOpen() -> Lookup {
+    var out = List<Task>()
+    for t in self.tasks { if !t.done { out.push(t) } }
+    if out.len() == 0 { Lookup.Empty } else { Lookup.Found(out) }
+  }
   fn openCount() -> Int {
     var n = 0
     for t in self.tasks { if !t.done { n = n + 1 } }

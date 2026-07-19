@@ -511,7 +511,18 @@
 ; Process.run(cmd): run `/bin/sh -c "<cmd> 2>&1"` (popen), returning combined stdout+stderr. The
 ; pipe fd is read COOPERATIVELY — poll(20ms) + safepoint-poll each pass — so a long-running command
 ; never stalls a global stop: the viewer stays live and evals answer while a tool executes.
+; wasm: the host serves the command from its mock shell + VFS. Kept in its own defn so the
+; popen/fileno/pclose path below is NOT REFERENCED there (a stub that still called popen would
+; keep those imports, and they trap).
+(defn vm-proc-run-host [(cmd (ptr StringObj))] (-> (ptr StringObj))
+  (let [out (host_proc_run (load (field cmd data)) (load (field cmd len)))]
+    (if (= (cast i64 out) 0) (str-copy (cast (ptr u8) c"") 0)
+      (str-copy out (s-len (cast (ptr i8) out))))))
+
 (defn vm-proc-run [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
+  (when-wasm (vm-proc-run-host cmd) (vm-proc-run-exec vt cmd)))
+
+(defn vm-proc-run-exec [(vt (ptr VMThread)) (cmd (ptr StringObj))] (-> (ptr StringObj))
   (let [clen (load (field cmd len)) full (xalloc (+ clen 6))]
     (if (> clen 0) (do (xmemcpy (cast (ptr i8) full) (cast (ptr i8) (load (field cmd data))) clen) 0) 0)
     (xmemcpy (cast (ptr i8) (index full clen)) (cast (ptr i8) c" 2>&1") 5)
@@ -811,6 +822,12 @@
 (defn vm-eval-invoke [(m (ptr MethodInfo)) (argc i64)] (-> i64)
   (let [vt (vm-thread-eval)]
     (store! (field vt stack-top) 0) (store! (field vt frame-count) 0)
+    ; An eval must ALWAYS run to completion — it is not a scheduled green thread. The budget
+    ; is global, and a language thread that suspended (e.g. main blocking on Console.readLine)
+    ; leaves it at 0, so without this reset the very next eval would hit the yield seam on its
+    ; first instruction and return nothing — silently answering `1+1` with 0 and then reading
+    ; garbage. (Only visible on wasm; when-wasm compiles the seam out natively.)
+    (store! (sched-budget) SCHED_UNBOUNDED)
     (push-frame vt m argc)
     (run-to vt 0)))
 

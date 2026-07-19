@@ -808,9 +808,15 @@ class RenderBoundary extends React.Component {
 }
 // ValueView guarded by the boundary: a throw anywhere in the (possibly deep) value render
 // degrades to a plain safe string rather than crashing the viewer.
-function SafeValue({ v }) {
+function SafeValue({ v, inline }) {
+  // Invoke/action results land here, and a result like Result.Ok(JsonValue.JObj{…}) is exactly
+  // the value you want to open up — so composite values get the expandable tree, not the
+  // one-line summary. `inline` forces the compact form for tight spots.
+  const body = (!inline && vHasChildren(v))
+    ? html`<${ValueTree} v=${v} defaultOpen=${true} />`
+    : html`<${ValueView} v=${v} />`;
   return html`<${RenderBoundary} fallback=${() => html`<span class="v-void">${safeStringify(v)}</span>`}>
-    <${ValueView} v=${v} />
+    ${body}
   <//>`;
 }
 // Render an invoke's result or error. Bulletproof: no error/value shape (missing kind/message,

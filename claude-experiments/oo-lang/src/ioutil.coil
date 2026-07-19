@@ -111,6 +111,11 @@
 ; runs for real instead of being short-circuited. Undefined on native — never referenced there.
 (extern host_http :cc c [(ptr u8) i64 (ptr u8) i64 (ptr u8) i64 (ptr i64)] (-> (ptr u8)))
 
+; Process.run on wasm: there is no fork/exec in a browser, so the host runs the command
+; against its in-memory filesystem (a small mock shell) and returns the combined output as a
+; malloc'd NUL-terminated string — the same contract Process.run has natively (stdout+stderr).
+(extern host_proc_run :cc c [(ptr u8) i64] (-> (ptr u8)))
+
 ; ---- compile-time target branch ----
 ; `(when-wasm A B)` compiles to A on wasm32 and to B everywhere else — the branch not taken
 ; is never emitted, so a wasm-only code path costs the native build NOTHING (not even a
