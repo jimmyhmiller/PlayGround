@@ -70,6 +70,9 @@ pub struct Route {
 #[derive(Debug, Clone)]
 pub struct RouteTree {
     pub routes: Vec<Route>,
+    /// Import specifier for the root route (`createRootRoute`), under the routes
+    /// directory's name (e.g. `./routes/__root` or `./app/__root`).
+    root_import: String,
     /// Indices (into `routes`) of the direct children of `__root__`.
     root_children: Vec<usize>,
     /// `children[i]` = indices of the direct children of `routes[i]`.
@@ -109,15 +112,91 @@ pub const ROOT_ID: &str = "__root__";
 /// tree, closing the last build-path dependency on Vite tooling.
 pub fn generate_for_project(project_root: &Path) -> Result<Option<usize>, String> {
     let source_dir = source_dir(project_root);
-    let routes_dir = source_dir.join("routes");
+    // The routes directory is `router.routesDirectory` (relative to the source
+    // directory), defaulting to `routes` — TanStack Start apps that set it (e.g.
+    // `routesDirectory: "app"`) keep their routes elsewhere, and hardcoding
+    // `routes` silently produced no route tree for them.
+    let routes_name =
+        crate::config::vite_config_string(project_root, "routesDirectory")
+            .unwrap_or_else(|| DEFAULT_ROUTES_DIR.to_string());
+    let routes_dir = source_dir.join(&routes_name);
     if !routes_dir.is_dir() {
         return Ok(None);
     }
-    let tree = generate_from_routes_dir(&routes_dir)?;
+    let ignore = RouteIgnore::parse(
+        crate::config::vite_config_string(project_root, "routeFileIgnorePattern").as_deref(),
+    )?;
+    let tree = generate_from_routes_dir_with(&routes_dir, &routes_name, &ignore)?;
     let source = tree.emit();
     let output = source_dir.join(ROUTE_TREE_FILE);
     write_if_changed(&output, source.as_bytes())?;
     Ok(Some(tree.routes.len()))
+}
+
+/// The default `router.routesDirectory`, relative to the source directory.
+const DEFAULT_ROUTES_DIR: &str = "routes";
+
+/// TanStack Router's non-route file filter: the built-in `-`/`.` prefix
+/// colocation convention plus the configurable `routeFileIgnorePattern`.
+///
+/// `routeFileIgnorePattern` is a JavaScript regular expression tested (unanchored)
+/// against each route file path. Diffpack does not embed a regex engine, so it
+/// supports the literal-alternation form real apps use (`(_components|api)`,
+/// `admin`, `foo|bar`) and hard-errors on anything using regex metacharacters
+/// rather than silently mis-matching — a loud, specific pointer at the next gap.
+#[derive(Debug)]
+struct RouteIgnore {
+    /// Literal substrings; a path matching any is not a route (unanchored, exactly
+    /// as `new RegExp(pattern).test(path)` would behave for these forms).
+    substrings: Vec<String>,
+}
+
+impl RouteIgnore {
+    /// No configured pattern: only the built-in `-`/`.` prefix convention applies.
+    fn none() -> Self {
+        Self { substrings: Vec::new() }
+    }
+
+    fn parse(pattern: Option<&str>) -> Result<Self, String> {
+        let Some(pattern) = pattern else {
+            return Ok(Self::none());
+        };
+        // Strip one optional wrapping group so `(_components|api)` and
+        // `_components|api` are handled identically, then split the alternation.
+        let trimmed = pattern.trim();
+        let inner = trimmed
+            .strip_prefix('(')
+            .and_then(|body| body.strip_suffix(')'))
+            .unwrap_or(trimmed);
+        let mut substrings = Vec::new();
+        for alternative in inner.split('|') {
+            let alternative = alternative.trim();
+            if alternative.is_empty() {
+                continue;
+            }
+            let literal = alternative.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/')
+            });
+            if !literal {
+                return Err(format!(
+                    "routeFileIgnorePattern {pattern:?} uses regex features Diffpack does not yet \
+                     support: only literal alternation like \"(_components|api)\" is handled. \
+                     Extend RouteIgnore in src/route_tree.rs to support this pattern."
+                ));
+            }
+            substrings.push(alternative.to_string());
+        }
+        Ok(Self { substrings })
+    }
+
+    /// Whether a directory/file entry named `name` at route-relative `rel` is a
+    /// non-route file. `name` catches the `-`/`.` prefix convention (checked per
+    /// path component); `rel` is matched against the ignore substrings.
+    fn excludes(&self, name: &str, rel: &str) -> bool {
+        name.starts_with('-')
+            || name.starts_with('.')
+            || self.substrings.iter().any(|needle| rel.contains(needle))
+    }
 }
 
 /// The app source directory (`src` if present, else the project root itself),
@@ -131,11 +210,25 @@ fn source_dir(project_root: &Path) -> PathBuf {
     }
 }
 
-/// Parse every route file under `routes_dir` and assemble the route graph. The
-/// public core, exercised directly by tests against the pinned fixture.
+/// Parse every route file under `routes_dir` (the default `routes` directory,
+/// with no ignore pattern) and assemble the route graph. Kept for the tests and
+/// callers that use the convention default; [`generate_from_routes_dir_with`] is
+/// the configurable core.
 pub fn generate_from_routes_dir(routes_dir: &Path) -> Result<RouteTree, String> {
+    generate_from_routes_dir_with(routes_dir, DEFAULT_ROUTES_DIR, &RouteIgnore::none())
+}
+
+/// Parse every route file under `routes_dir` and assemble the route graph.
+/// `import_prefix` is the routes directory's name relative to the source
+/// directory (`routes`, `app`, ...) and becomes the `./<prefix>/...` specifier in
+/// the generated imports; `ignore` filters non-route files.
+fn generate_from_routes_dir_with(
+    routes_dir: &Path,
+    import_prefix: &str,
+    ignore: &RouteIgnore,
+) -> Result<RouteTree, String> {
     let mut files = Vec::new();
-    collect_route_files(routes_dir, routes_dir, &mut files)?;
+    collect_route_files(routes_dir, routes_dir, ignore, &mut files)?;
     files.sort();
 
     let mut routes: Vec<Route> = Vec::new();
@@ -147,7 +240,7 @@ pub fn generate_from_routes_dir(routes_dir: &Path) -> Result<RouteTree, String> 
             has_root = true;
             continue;
         }
-        routes.push(parse_route(routes_dir, relative)?);
+        routes.push(parse_route(routes_dir, import_prefix, relative)?);
     }
     if !has_root {
         return Err(format!(
@@ -162,18 +255,22 @@ pub fn generate_from_routes_dir(routes_dir: &Path) -> Result<RouteTree, String> 
     let (root_children, children) = build_child_lists(&routes);
     Ok(RouteTree {
         routes,
+        root_import: format!("./{import_prefix}/__root"),
         root_children,
         children,
     })
 }
 
 /// Recursively collect route files under `dir`, as paths relative to `root` with
-/// the extension stripped (e.g. `api/users.$userId`, `_pathlessLayout`). A
-/// non-route extension under the routes tree is a hard error rather than a silent
+/// the extension stripped (e.g. `api/users.$userId`, `_pathlessLayout`). Non-route
+/// files filtered by `ignore` (the `-`/`.` colocation convention and the
+/// configured ignore pattern) are skipped before classification. A non-route
+/// extension under the routes tree is otherwise a hard error rather than a silent
 /// skip, so an unexpected file cannot vanish from the build.
 fn collect_route_files(
     root: &Path,
     dir: &Path,
+    ignore: &RouteIgnore,
     out: &mut Vec<String>,
 ) -> Result<(), String> {
     let entries = fs::read_dir(dir)
@@ -185,27 +282,34 @@ fn collect_route_files(
         let file_type = entry
             .file_type()
             .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("cannot relativize {}: {error}", path.display()))?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        // A colocation dir/file (`-components`, `.DS_Store`) or an ignore-pattern
+        // match (`_components`, `api`) is not a route: skip it (and, for a
+        // directory, everything under it) before it can trip classification.
+        if ignore.excludes(&name, &relative) {
+            continue;
+        }
         if file_type.is_dir() {
-            collect_route_files(root, &path, out)?;
+            collect_route_files(root, &path, ignore, out)?;
             continue;
         }
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or("");
+        // Only the configured route extensions are routes. A colocated asset
+        // (`favicon.ico`, a `.css`, an image, a `.md`) in the routes directory is
+        // not a route and is skipped, exactly as TanStack's generator ignores it —
+        // real apps colocate such files next to the routes that use them.
         if !ROUTE_EXTENSIONS.contains(&extension) {
-            return Err(format!(
-                "cannot classify route file {}: unexpected extension {:?} under the routes directory (expected one of {:?})",
-                path.display(),
-                extension,
-                ROUTE_EXTENSIONS
-            ));
+            continue;
         }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| format!("cannot relativize {}: {error}", path.display()))?;
         // Relative path without extension, forward-slash normalized.
-        let mut stem = relative.to_string_lossy().replace('\\', "/");
+        let mut stem = relative;
         let dot = stem.len() - extension.len() - 1;
         stem.truncate(dot);
         out.push(stem);
@@ -216,7 +320,7 @@ fn collect_route_files(
 /// Parse one route file (relative path, no extension) into a [`Route`], deriving
 /// `full_id`. Parent/path/local_id are filled by a later pass once all routes are
 /// known.
-fn parse_route(routes_dir: &Path, relative: &str) -> Result<Route, String> {
+fn parse_route(routes_dir: &Path, import_prefix: &str, relative: &str) -> Result<Route, String> {
     let source_file_display = routes_dir.join(relative);
     // `segments` already excludes a terminal `index` (folded into full_id), so
     // downstream parent matching is uniform.
@@ -230,8 +334,10 @@ fn parse_route(routes_dir: &Path, relative: &str) -> Result<Route, String> {
     let full_id = full_id_of(&segments, is_index);
 
     // The import specifier keeps the ORIGINAL filename (escapes and params
-    // intact), which is what the emitted `import ... from '<here>'` must resolve.
-    let import_path = format!("./routes/{relative}");
+    // intact) under the routes directory's name (`routes`, `app`, ...), which is
+    // what the emitted `import ... from '<here>'` must resolve relative to the
+    // generated route tree in the source directory.
+    let import_path = format!("./{import_prefix}/{relative}");
 
     Ok(Route {
         import_path,
@@ -484,7 +590,10 @@ impl RouteTree {
         );
 
         // Imports: the root first, then every route.
-        out.push_str("import { Route as rootRouteImport } from './routes/__root'\n");
+        out.push_str(&format!(
+            "import {{ Route as rootRouteImport }} from '{}'\n",
+            self.root_import
+        ));
         for route in &self.routes {
             out.push_str(&format!(
                 "import {{ Route as {base}RouteImport }} from '{path}'\n",
@@ -842,5 +951,65 @@ mod tests {
         fs::write(routes.join("index.tsx"), "export const Route = {}\n").unwrap();
         let error = generate_from_routes_dir(&routes).unwrap_err();
         assert!(error.contains("no root route"), "got: {error}");
+    }
+
+    #[test]
+    fn route_ignore_parses_literal_alternation_and_rejects_regex() {
+        // The literal-alternation forms real apps use, wrapped or bare.
+        assert!(RouteIgnore::parse(Some("(_components|api)"))
+            .unwrap()
+            .excludes("_components", "_components/ui/x"));
+        assert!(RouteIgnore::parse(Some("_components|api"))
+            .unwrap()
+            .excludes("x", "app/api/handler"));
+        assert!(!RouteIgnore::parse(Some("(_components|api)"))
+            .unwrap()
+            .excludes("index", "index"));
+        // The `-`/`.` colocation convention always applies, even with no pattern.
+        assert!(RouteIgnore::none().excludes("-components", "settings/-components"));
+        assert!(RouteIgnore::none().excludes(".DS_Store", ".DS_Store"));
+        assert!(!RouteIgnore::none().excludes("index", "index"));
+        // A pattern with real regex metacharacters is a hard, specific error, not a
+        // silent mis-match.
+        let error = RouteIgnore::parse(Some(r"\.stories\.")).unwrap_err();
+        assert!(error.contains("regex features"), "got: {error}");
+    }
+
+    #[test]
+    fn custom_routes_directory_drives_the_import_prefix_and_ignore() {
+        // oc-web's shape: routesDirectory "app", an ignore pattern, colocated assets
+        // and a `-` colocation dir. Imports must point at `./app/...` (including the
+        // root), the ignored/colocated files must not become routes, and a
+        // non-route asset in the routes dir must be skipped, not error.
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        fs::create_dir_all(app.join("settings/-components")).unwrap();
+        fs::create_dir_all(app.join("_components/ui")).unwrap();
+        fs::create_dir_all(app.join("api")).unwrap();
+        fs::write(app.join("__root.tsx"), "export const Route = {}\n").unwrap();
+        fs::write(app.join("index.tsx"), "export const Route = {}\n").unwrap();
+        fs::write(app.join("settings/configuration.tsx"), "export const Route = {}\n").unwrap();
+        fs::write(app.join("favicon.ico"), "not a route").unwrap();
+        fs::write(app.join("settings/-components/Panel.tsx"), "export default 1\n").unwrap();
+        fs::write(app.join("_components/ui/button.tsx"), "export default 1\n").unwrap();
+        fs::write(app.join("api/health.tsx"), "export default 1\n").unwrap();
+
+        let ignore = RouteIgnore::parse(Some("(_components|api)")).unwrap();
+        let tree = generate_from_routes_dir_with(&app, "app", &ignore).unwrap();
+
+        // Exactly the two real routes (root is separate), nothing from the ignored
+        // or colocated dirs, no error on favicon.ico.
+        let ids: Vec<&str> = tree.routes.iter().map(|route| route.full_id.as_str()).collect();
+        assert_eq!(tree.routes.len(), 2, "got routes: {ids:?}");
+        assert!(ids.contains(&"/"), "{ids:?}");
+        assert!(ids.iter().any(|id| id.contains("settings/configuration")), "{ids:?}");
+
+        // Imports resolve under `./app/...`, including the root.
+        let emitted = tree.emit();
+        assert!(emitted.contains("from './app/__root'"), "{emitted}");
+        assert!(emitted.contains("from './app/index'"), "{emitted}");
+        assert!(emitted.contains("from './app/settings/configuration'"), "{emitted}");
+        assert!(!emitted.contains("./routes/"), "no hardcoded routes dir: {emitted}");
+        assert!(!emitted.contains("_components") && !emitted.contains("/api/") && !emitted.contains("-components"), "{emitted}");
     }
 }

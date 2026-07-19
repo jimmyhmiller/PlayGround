@@ -144,7 +144,7 @@ fn run() -> Result<(), String> {
                 diffpack::route_tree::generate_for_project(Path::new(&project_root))?
             {
                 println!(
-                    "generated src/{} natively ({route_count} route(s) from src/routes/)",
+                    "generated src/{} natively ({route_count} route(s))",
                     diffpack::route_tree::ROUTE_TREE_FILE,
                 );
             }

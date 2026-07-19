@@ -146,20 +146,30 @@ fn copy_dir_into(source: &Path, destination: &Path) -> Result<usize, String> {
 /// `src`. This is a plain text read of a value, independent of Vite itself; a
 /// native Diffpack config format supersedes it later.
 fn src_directory(root: &Path) -> String {
-    let Ok(text) = std::fs::read_to_string(root.join("vite.config.ts")) else {
-        return "src".to_string();
-    };
-    let Some(marker) = text.find("srcDirectory:") else {
-        return "src".to_string();
-    };
-    let rest = &text[marker + "srcDirectory:".len()..];
-    let Some(open) = rest.find(['\'', '"']) else {
-        return "src".to_string();
-    };
-    let quote = rest.as_bytes()[open] as char;
-    let after = &rest[open + 1..];
-    match after.find(quote) {
-        Some(close) => after[..close].to_string(),
-        None => "src".to_string(),
+    vite_config_string(root, "srcDirectory").unwrap_or_else(|| "src".to_string())
+}
+
+/// Reads the string value of a `key: '<value>'` (or `"<value>"`) option out of
+/// `vite.config.ts`, if present. The single reader for every scalar option
+/// Diffpack derives from the Vite config (`srcDirectory`, `routesDirectory`,
+/// `routeFileIgnorePattern`, ...), so the parse lives in exactly one place. It is
+/// a plain text read of a quoted literal, not a dependency on Vite: it does not
+/// evaluate the config, so a value built from an expression is simply not found
+/// (the caller falls back to the convention default).
+pub fn vite_config_string(root: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("vite.config.ts")).ok()?;
+    let marker = format!("{key}:");
+    let start = text.find(&marker)?;
+    let rest = &text[start + marker.len()..];
+    // Only accept a quote that starts the value (allowing whitespace after the
+    // colon); anything else means the value is not a plain string literal.
+    let lead = rest.len() - rest.trim_start().len();
+    let rest = &rest[lead..];
+    let quote = *rest.as_bytes().first()? as char;
+    if quote != '\'' && quote != '"' {
+        return None;
     }
+    let after = &rest[1..];
+    let close = after.find(quote)?;
+    Some(after[..close].to_string())
 }
