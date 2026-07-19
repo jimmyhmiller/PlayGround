@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use memscope_proto::EventKind;
 
-use crate::Recording;
+use crate::{RecEvent, Recording};
 
 /// Per-`(type, site)` aggregate stats, computed in one pass over the stream.
 #[derive(Clone, Debug)]
@@ -81,7 +81,17 @@ const LIFETIME_SAMPLE_CAP: usize = 1024;
 /// One pass over the stream: aggregate per-site allocation/free/realloc stats and
 /// reconstruct the final live set. Frees (which carry no site) are attributed by
 /// tracking `addr -> (site, size, alloc-ts)` as allocations happen.
-pub fn site_stats(rec: &Recording) -> Vec<SiteStats> {
+///
+/// Takes the events as an iterator so it can run straight off
+/// [`crate::stream_events`] — peak memory is `O(sites + live set)`, not
+/// `O(events)`:
+///
+/// ```no_run
+/// let rec = memscope_replay::read_recording("big.mscope")?;
+/// let stats = memscope_replay::site_stats(memscope_replay::stream_events("big.mscope")?, &rec);
+/// # Ok::<(), String>(())
+/// ```
+pub fn site_stats(events: impl IntoIterator<Item = RecEvent>, rec: &Recording) -> Vec<SiteStats> {
     struct Live {
         site: u32,
         size: u64,
@@ -90,7 +100,7 @@ pub fn site_stats(rec: &Recording) -> Vec<SiteStats> {
     let mut live: HashMap<u64, Live> = HashMap::new();
     let mut stats: HashMap<u32, SiteStats> = HashMap::new();
 
-    for e in &rec.events {
+    for e in events {
         match e.kind {
             EventKind::Alloc | EventKind::ReallocGrow => {
                 let s = stats
@@ -191,8 +201,8 @@ fn merge_into(s: &mut SiteStats, other: &SiteStats) {
 /// (so loop-unrolled call sites that share a source line collapse into one
 /// finding) and sites whose allocation originates *inside* the profiler/DWARF
 /// machinery are dropped (they're measurement overhead, not the program).
-pub fn analyze(rec: &Recording) -> Vec<Finding> {
-    let stats = site_stats(rec);
+pub fn analyze(events: impl IntoIterator<Item = RecEvent>, rec: &Recording) -> Vec<Finding> {
+    let stats = site_stats(events, rec);
 
     // key: (boundary location, type label) -> (merged stats, location string)
     let mut merged: HashMap<(String, String), (SiteStats, String)> = HashMap::new();
@@ -380,18 +390,18 @@ fn human(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FrameMeta, RecEvent, SiteInfo};
+    use crate::{FrameMeta, SiteInfo};
 
     fn ev(kind: EventKind, addr: u64, size: u64, ts: u64, site: u32) -> RecEvent {
         RecEvent { kind, addr, size, ts_nanos: ts, site, thread: 1 }
     }
 
-    fn rec_with(sites: &[(u32, &str)], events: Vec<RecEvent>) -> Recording {
+    fn rec_with(sites: &[(u32, &str)]) -> Recording {
         let mut s = HashMap::new();
         for (id, label) in sites {
             s.insert(*id, SiteInfo { label: (*label).to_string(), frames: vec![] });
         }
-        Recording { sites: s, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() }
+        Recording { sites: s, ..Default::default() }
     }
 
     #[test]
@@ -401,8 +411,8 @@ mod tests {
         for i in 0..100u64 {
             events.push(ev(EventKind::Alloc, 0x1000 + i, 1024, i, 1));
         }
-        let rec = rec_with(&[(1, "Boxed<Session>")], events);
-        let f = analyze(&rec);
+        let rec = rec_with(&[(1, "Boxed<Session>")]);
+        let f = analyze(events, &rec);
         let leak = f.iter().find(|f| f.detector == "monotonic-growth").unwrap();
         assert_eq!(leak.fix_class, "leak");
         assert_eq!(leak.site, 1);
@@ -416,8 +426,8 @@ mod tests {
             events.push(ev(EventKind::Alloc, 0x10, 1024, i * 2, 2));
             events.push(ev(EventKind::Dealloc, 0x10, 1024, i * 2 + 1, 0));
         }
-        let rec = rec_with(&[(2, "Vec<u8>")], events);
-        let f = analyze(&rec);
+        let rec = rec_with(&[(2, "Vec<u8>")]);
+        let f = analyze(events, &rec);
         let churn = f.iter().find(|f| f.detector == "churn-storm").unwrap();
         assert_eq!(churn.fix_class, "reuse-buffer");
         // Nothing live -> no leak finding for this site.
@@ -431,8 +441,8 @@ mod tests {
         for i in 0..40u64 {
             events.push(ev(EventKind::ReallocGrow, 0x100 + i, 64 * (i + 1), i, 3));
         }
-        let rec = rec_with(&[(3, "Vec<u8>")], events);
-        let f = analyze(&rec);
+        let rec = rec_with(&[(3, "Vec<u8>")]);
+        let f = analyze(events, &rec);
         assert!(f.iter().any(|f| f.detector == "realloc-thrash" && f.site == 3));
     }
 
@@ -463,8 +473,8 @@ mod tests {
             events.push(ev(EventKind::Alloc, 0x90000 + i, 1024, i * 2, 2));
             events.push(ev(EventKind::Dealloc, 0x90000 + i, 1024, i * 2 + 1, 0));
         }
-        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() };
-        let f = analyze(&rec);
+        let rec = Recording { sites, ..Default::default() };
+        let f = analyze(events, &rec);
         let churn: Vec<_> = f.iter().filter(|f| f.detector == "churn-storm").collect();
         assert_eq!(churn.len(), 1, "two unrolled sites should merge into one finding");
         assert_eq!(churn[0].location, "app::work (app.rs:12)");
@@ -485,8 +495,8 @@ mod tests {
         for i in 0..5_000u64 {
             events.push(ev(EventKind::Alloc, 0x10 + i, 1024, i, 5));
         }
-        let rec = Recording { sites, meta: HashMap::new(), marks: HashMap::new(), events, ..Default::default() };
-        assert!(analyze(&rec).is_empty(), "profiler-origin site must be filtered out");
+        let rec = Recording { sites, ..Default::default() };
+        assert!(analyze(events, &rec).is_empty(), "profiler-origin site must be filtered out");
     }
 
     #[test]
@@ -496,8 +506,8 @@ mod tests {
         for i in 0..13u64 {
             events.push(ev(EventKind::ReallocGrow, 0x200 + i, 64 * (i + 1), i, 4));
         }
-        let rec = rec_with(&[(4, "Vec<u8>")], events);
-        let f = analyze(&rec);
+        let rec = rec_with(&[(4, "Vec<u8>")]);
+        let f = analyze(events, &rec);
         assert!(!f.iter().any(|f| f.detector == "realloc-thrash"));
     }
 }

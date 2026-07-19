@@ -10,18 +10,33 @@
 //! It's the shared substrate for posthoc tooling — `memscope diff`, `marks`, and
 //! (later) `analyze` all build on the same reconstruction rather than each
 //! re-implementing event replay.
+//!
+//! # Memory contract
+//!
+//! Everything here is **constant in the event count**. A [`Recording`] holds only
+//! the recording's *definitions* (sites, metadata, mark labels) — its events are
+//! never a field, only an [`EventStream`] you fold over once. Peak memory for any
+//! analysis is `O(sites + live set)`, both of which are properties of the program
+//! being measured, not of how long it ran.
+//!
+//! This matters because full-mode recordings of real programs are dominated by
+//! short-lived allocation *churn*: a `next build` emits ~50M events, of which a
+//! few hundred thousand are live at any instant. Materializing that stream cost
+//! ~3× the recording size and OOM-killed the analyzers.
 
 use std::collections::HashMap;
 
-use memscope_proto::{recfmt, AllocShape, EventKind};
+use memscope_proto::{AllocShape, EventKind};
 
 mod analysis;
 mod frames;
+mod stream;
 pub use analysis::{analyze, site_stats, Finding, SiteStats};
 pub use frames::{
     boundary_frame, clean_frame, frame_location, is_profiler_frame, is_profiler_origin,
     is_std_frame,
 };
+pub use stream::{stream_events, EventStream, Record, RecordReader};
 
 // --- parsed recording --------------------------------------------------------
 
@@ -55,8 +70,13 @@ pub struct SiteInfo {
     pub frames: Vec<FrameMeta>,
 }
 
-/// A parsed recording: per-site info, per-context metadata, mark labels, and the
-/// ordered event stream.
+/// A parsed recording's **definitions**: per-site info, per-context metadata, and
+/// mark labels.
+///
+/// Deliberately *not* the events. Events are orders of magnitude more numerous
+/// than definitions and are only ever consumed as a fold, so they're reached via
+/// [`stream_events`] (or [`Timeline`], which layers live-set reconstruction on
+/// top). A `Recording` is small enough to keep around; the stream is not.
 ///
 /// Sites can be carried **unresolved** (`raw_sites` populated, `sites` empty)
 /// when read via [`read_recording_raw`], so a caller can symbolicate only the
@@ -70,13 +90,14 @@ pub struct Recording {
     pub meta: HashMap<u32, Vec<(String, String)>>,
     /// mark label id -> human label (from `memscope::mark`).
     pub marks: HashMap<u32, String>,
-    pub events: Vec<RecEvent>,
     /// Unresolved sites: interned id -> raw return addresses. Populated by
     /// [`read_recording_raw`]; empty once resolved into `sites`.
     pub raw_sites: HashMap<u32, Vec<u64>>,
     /// Binary path + load slide for symbolicating `raw_sites` (read-time).
     pub exe: String,
     pub slide: u64,
+    /// Pid of the recorded process.
+    pub pid: u32,
 }
 
 impl Recording {
@@ -163,9 +184,13 @@ impl Recording {
                     line: fr.line.unwrap_or(0),
                 })
                 .collect();
-            // Keep only the boundary frame (first non-runtime) — all `analyze`
-            // and `diff` need beyond the type label.
-            let boundary = boundary_frame(&frames).cloned();
+            // Keep only one frame: the boundary (first non-runtime), or the
+            // innermost frame when the whole stack is runtime — which is the
+            // fallback `site_loc` reports, so a pure-runtime site still gets a
+            // location instead of an empty string. Callers that ask for the
+            // boundary still get `None` for those, since the retained frame is
+            // itself a runtime frame.
+            let boundary = boundary_frame(&frames).or_else(|| frames.first()).cloned();
             self.sites.insert(
                 *id,
                 SiteInfo {
@@ -177,285 +202,50 @@ impl Recording {
     }
 }
 
-/// Read a recording (binary `.mscope` or JSON) into sites, metadata, marks, and
-/// the event stream. Sites are fully symbolicated (may be expensive for large
-/// recordings — see [`read_recording_raw`] for the constant-memory path).
+/// Read a recording's definitions (binary `.mscope` or JSON) with sites fully
+/// symbolicated. Events are **not** read — fold over [`stream_events`] for those.
+///
+/// Symbolicating every site can be expensive on a recording with many distinct
+/// sites; see [`read_recording_raw`] + [`Recording::resolve_sites_compact`] for
+/// the bounded path.
 pub fn read_recording(file: &str) -> Result<Recording, String> {
     let mut rec = read_recording_raw(file)?;
-    let raw = std::mem::take(&mut rec.raw_sites);
-    let all: Vec<u32> = raw.keys().copied().collect();
-    rec.raw_sites = raw;
+    let all: Vec<u32> = rec.raw_sites.keys().copied().collect();
     rec.resolve_sites(&all);
     Ok(rec)
 }
 
-/// Read a recording **without symbolicating sites** — `raw_sites`/`exe`/`slide`
-/// are populated and `sites` is left empty. Callers resolve only what they need
-/// via [`Recording::resolve_sites`]. This keeps memory bounded for huge
-/// recordings (e.g. ranking allocation sites needs no symbols).
+/// Read a recording's definitions **without symbolicating sites** —
+/// `raw_sites`/`exe`/`slide` are populated and `sites` is left empty. Callers
+/// resolve only what they need via [`Recording::resolve_sites`].
+///
+/// Event payloads are seeked past, not decoded, so this costs one scan of the
+/// definition records regardless of how many events the recording holds.
 pub fn read_recording_raw(file: &str) -> Result<Recording, String> {
-    use std::io::Read;
-    let mut magic = [0u8; 4];
-    {
-        let mut f = std::fs::File::open(file).map_err(|e| e.to_string())?;
-        let _ = f.read(&mut magic);
-    }
-    if recfmt::is_binary(&magic) {
-        read_recording_binary(file)
-    } else {
-        read_recording_json(file)
-    }
-}
-
-fn read_recording_binary(file: &str) -> Result<Recording, String> {
-    use std::io::Read;
-    let mut f = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
-    let mut b1 = [0u8; 1];
-    let mut b2 = [0u8; 2];
-    let mut b4 = [0u8; 4];
-    let rd_str = |f: &mut std::io::BufReader<std::fs::File>| -> Option<String> {
-        let mut l = [0u8; 2];
-        f.read_exact(&mut l).ok()?;
-        let n = u16::from_le_bytes(l) as usize;
-        let mut s = vec![0u8; n];
-        f.read_exact(&mut s).ok()?;
-        Some(String::from_utf8_lossy(&s).into_owned())
-    };
-    if f.read_exact(&mut b4).is_err() || b4 != recfmt::MAGIC {
-        return Err("not a memscope binary recording".into());
-    }
-    let _ = f.read_exact(&mut b2); // version
-    let _ = f.read_exact(&mut b2); // flags
-    let _ = f.read_exact(&mut b4); // pid
-    let exe = rd_str(&mut f).unwrap_or_default();
-    // v2+ carries the load slide (for read-time symbolication of raw sites).
-    let mut b8 = [0u8; 8];
-    let slide = if f.read_exact(&mut b8).is_ok() {
-        u64::from_le_bytes(b8)
-    } else {
-        0
-    };
-
-    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
-    // Raw sites (TAG_RSITE): interned id -> captured return addresses, resolved
-    // against the binary's dSYM after the stream is read (off the hot path).
-    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
-    let mut events: Vec<RecEvent> = Vec::new();
-    let mut key_names: HashMap<u32, String> = HashMap::new();
-    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
-    let mut marks: HashMap<u32, String> = HashMap::new();
-    while f.read_exact(&mut b1).is_ok() {
-        match b1[0] {
-            recfmt::TAG_KEY => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let id = u32::from_le_bytes(b4);
-                let name = rd_str(&mut f).unwrap_or_default();
-                key_names.insert(id, name);
+    let mut r = RecordReader::open(file)?.skipping_events();
+    let mut rec = Recording::default();
+    while let Some(record) = r.next_record()? {
+        match record {
+            Record::Site(id, info) => {
+                rec.sites.insert(id, info);
             }
-            recfmt::TAG_META => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let id = u32::from_le_bytes(b4);
-                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
-                let mut kvs = Vec::new();
-                for _ in 0..u16::from_le_bytes(b2) {
-                    f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                    let kid = u32::from_le_bytes(b4);
-                    let val = read_meta_value(&mut f).unwrap_or_default();
-                    let key = key_names.get(&kid).cloned().unwrap_or_else(|| kid.to_string());
-                    kvs.push((key, val));
-                }
-                meta.insert(id, kvs);
+            Record::RawSite(id, ips) => {
+                rec.raw_sites.insert(id, ips);
             }
-            recfmt::TAG_MARK => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let id = u32::from_le_bytes(b4);
-                let label = rd_str(&mut f).unwrap_or_default();
-                marks.insert(id, label);
+            Record::Meta(id, kvs) => {
+                rec.meta.insert(id, kvs);
             }
-            recfmt::TAG_SITE => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let site = u32::from_le_bytes(b4);
-                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
-                let ty = if b1[0] == 1 { rd_str(&mut f) } else { None };
-                f.read_exact(&mut b1).map_err(|e| e.to_string())?;
-                let shape = recfmt::shape_from_code(b1[0]);
-                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
-                let mut frames = Vec::new();
-                for _ in 0..u16::from_le_bytes(b2) {
-                    let func = rd_str(&mut f).unwrap_or_default();
-                    let file = rd_str(&mut f).unwrap_or_default();
-                    f.read_exact(&mut b4).ok();
-                    let line = u32::from_le_bytes(b4);
-                    let _ = f.read_exact(&mut b1); // inlined
-                    frames.push(FrameMeta { func, file, line });
-                }
-                labels.insert(
-                    site,
-                    SiteInfo {
-                        label: label_for(shape, ty),
-                        frames,
-                    },
-                );
+            Record::MarkLabel(id, label) => {
+                rec.marks.insert(id, label);
             }
-            recfmt::TAG_RSITE => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let site = u32::from_le_bytes(b4);
-                f.read_exact(&mut b2).map_err(|e| e.to_string())?;
-                let n = u16::from_le_bytes(b2) as usize;
-                let mut ips = Vec::with_capacity(n);
-                let mut b8 = [0u8; 8];
-                for _ in 0..n {
-                    f.read_exact(&mut b8).map_err(|e| e.to_string())?;
-                    ips.push(u64::from_le_bytes(b8));
-                }
-                raw_sites.insert(site, ips);
-            }
-            recfmt::TAG_EVENTS => {
-                f.read_exact(&mut b4).map_err(|e| e.to_string())?;
-                let count = u32::from_le_bytes(b4);
-                let mut rec = vec![0u8; recfmt::EVENT_BYTES * count as usize];
-                f.read_exact(&mut rec).map_err(|e| e.to_string())?;
-                let mut r = recfmt::Reader::new(&rec);
-                for _ in 0..count {
-                    let Some(e) = r.decode_event() else { break };
-                    events.push(RecEvent {
-                        kind: e.kind,
-                        addr: e.addr,
-                        size: e.size,
-                        ts_nanos: e.ts_nanos,
-                        site: e.site.0,
-                        thread: e.thread,
-                    });
-                }
-            }
-            other => return Err(format!("corrupt recording: unknown tag {other}")),
+            // `skipping_events` means these never arrive.
+            Record::Event(_) => {}
         }
     }
-
-    // Carry sites unresolved; the caller symbolicates the subset it needs (see
-    // `Recording::resolve_sites`). Legacy `TAG_SITE` recordings already have
-    // resolved entries in `labels`.
-    Ok(Recording {
-        sites: labels,
-        meta,
-        marks,
-        events,
-        raw_sites,
-        exe,
-        slide,
-    })
-}
-
-fn read_recording_json(file: &str) -> Result<Recording, String> {
-    use std::io::BufRead;
-    let rdr = std::io::BufReader::new(std::fs::File::open(file).map_err(|e| e.to_string())?);
-    let mut labels: HashMap<u32, SiteInfo> = HashMap::new();
-    let mut raw_sites: HashMap<u32, Vec<u64>> = HashMap::new();
-    let mut events: Vec<RecEvent> = Vec::new();
-    let mut meta: HashMap<u32, Vec<(String, String)>> = HashMap::new();
-    let mut marks: HashMap<u32, String> = HashMap::new();
-    let mut exe = String::new();
-    let mut slide = 0u64;
-    for line in rdr.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("v").is_some() {
-            // Header: {"v":2,"pid":…,"exe":…,"slide":…}
-            exe = v.get("exe").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            slide = v.get("slide").and_then(|x| x.as_u64()).unwrap_or(0);
-            continue;
-        }
-        // Raw site: {"rsite":id,"ips":[…]} — resolved after the stream is read.
-        if let Some(id) = v.get("rsite").and_then(|x| x.as_u64()) {
-            let ips = v
-                .get("ips")
-                .and_then(|x| x.as_array())
-                .map(|arr| arr.iter().filter_map(|n| n.as_u64()).collect())
-                .unwrap_or_default();
-            raw_sites.insert(id as u32, ips);
-            continue;
-        }
-        // Mark label definition: {"mark_def":id,"label":"…"}
-        if let Some(id) = v.get("mark_def").and_then(|x| x.as_u64()) {
-            let label = v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            marks.insert(id as u32, label);
-            continue;
-        }
-        // Metadata context definition: {"meta":id,"kv":{k:v,...}}
-        if let Some(id) = v.get("meta").and_then(|x| x.as_u64()) {
-            if let Some(obj) = v.get("kv").and_then(|x| x.as_object()) {
-                let kvs = obj
-                    .iter()
-                    .map(|(k, val)| {
-                        let vs = match val {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        (k.clone(), vs)
-                    })
-                    .collect();
-                meta.insert(id as u32, kvs);
-            }
-            continue;
-        }
-        if let Some(site) = v.get("site").and_then(|x| x.as_u64()) {
-            let ty = v.get("ty").and_then(|x| x.as_str()).map(String::from);
-            let shape = v.get("shape").and_then(|x| x.as_str());
-            let label = match (shape, &ty) {
-                (Some(sh), Some(t)) => format!("{sh}<{t}>"),
-                (Some(sh), None) => format!("{sh}<?>"),
-                (None, Some(t)) => t.clone(),
-                (None, None) => "<no type>".into(),
-            };
-            let frames = v
-                .get("frames")
-                .and_then(|f| f.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|fr| {
-                            let a = fr.as_array()?;
-                            Some(FrameMeta {
-                                func: a.first()?.as_str()?.to_string(),
-                                file: a.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                line: a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            labels.insert(site as u32, SiteInfo { label, frames });
-            continue;
-        }
-        let kind = match v.get("k").and_then(|x| x.as_str()) {
-            Some("A") => EventKind::Alloc,
-            Some("R") => EventKind::ReallocGrow,
-            Some("D") => EventKind::Dealloc,
-            Some("M") => EventKind::MetaEnter,
-            Some("m") => EventKind::MetaExit,
-            Some("MK") => EventKind::Mark,
-            _ => continue,
-        };
-        events.push(RecEvent {
-            kind,
-            addr: v.get("a").and_then(|x| x.as_u64()).unwrap_or(0),
-            size: v.get("sz").and_then(|x| x.as_u64()).unwrap_or(0),
-            ts_nanos: v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0),
-            site: v.get("s").and_then(|x| x.as_u64()).unwrap_or(u32::MAX as u64) as u32,
-            thread: v.get("t").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        });
-    }
-    Ok(Recording {
-        sites: labels,
-        meta,
-        marks,
-        events,
-        raw_sites,
-        exe,
-        slide,
-    })
+    rec.exe = r.exe().to_string();
+    rec.slide = r.slide();
+    rec.pid = r.pid();
+    Ok(rec)
 }
 
 /// Read one encoded `MetaValue` from a stream, returning its display string
@@ -512,7 +302,7 @@ pub struct MarkPoint {
     pub label: String,
     pub label_id: u32,
     pub ts_nanos: u64,
-    /// Index into `Recording::events` where this mark sits.
+    /// Position of this mark in the event stream.
     pub index: usize,
 }
 
@@ -526,32 +316,152 @@ pub struct LiveAlloc {
     pub thread: u32,
 }
 
+/// The set of allocations live at a point in the stream, keyed by address.
+///
+/// This is the one structure a replay is allowed to grow: it holds the *live
+/// set*, which is what you're trying to inspect, and drops freed allocations as
+/// it goes. Feed it events in causal order with [`LiveSet::apply`].
+#[derive(Default, Clone, Debug)]
+pub struct LiveSet {
+    map: HashMap<u64, LiveAlloc>,
+    bytes: u64,
+}
+
+impl LiveSet {
+    pub fn new() -> LiveSet {
+        LiveSet::default()
+    }
+
+    /// Apply one event, inserting or removing a live allocation.
+    ///
+    /// Returns the allocation that **left** the live set, if any — the one a
+    /// `Dealloc` freed, or the one an address-reusing allocation displaced.
+    /// Frees carry no site id of their own, so this is how a caller attributes
+    /// one back to the site that allocated it without keeping a second
+    /// `addr -> site` map alongside.
+    pub fn apply(&mut self, e: &RecEvent) -> Option<LiveAlloc> {
+        match e.kind {
+            EventKind::Alloc | EventKind::ReallocGrow => {
+                let prev = self.map.insert(
+                    e.addr,
+                    LiveAlloc {
+                        addr: e.addr,
+                        size: e.size,
+                        site: e.site,
+                        ts_nanos: e.ts_nanos,
+                        thread: e.thread,
+                    },
+                );
+                if let Some(p) = &prev {
+                    self.bytes = self.bytes.saturating_sub(p.size);
+                }
+                self.bytes += e.size;
+                prev
+            }
+            EventKind::Dealloc => {
+                let prev = self.map.remove(&e.addr);
+                if let Some(p) = &prev {
+                    self.bytes = self.bytes.saturating_sub(p.size);
+                }
+                prev
+            }
+            // Markers carry no allocation.
+            EventKind::MetaEnter | EventKind::MetaExit | EventKind::Mark => None,
+        }
+    }
+
+    /// Total bytes currently live.
+    pub fn total_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Number of live allocations.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// The live allocations, in arbitrary order.
+    pub fn iter(&self) -> impl Iterator<Item = &LiveAlloc> {
+        self.map.values()
+    }
+
+    /// The site of the allocation live at `addr`, if any.
+    pub fn site_of(&self, addr: u64) -> Option<u32> {
+        self.map.get(&addr).map(|a| a.site)
+    }
+
+    /// Aggregate by site id -> `(count, bytes)`.
+    pub fn agg_by_site(&self) -> HashMap<u32, (u64, u64)> {
+        let mut m: HashMap<u32, (u64, u64)> = HashMap::new();
+        for a in self.map.values() {
+            let e = m.entry(a.site).or_default();
+            e.0 += 1;
+            e.1 += a.size;
+        }
+        m
+    }
+
+    /// Snapshot as a sorted `Vec` (address order).
+    pub fn to_sorted_vec(&self) -> Vec<LiveAlloc> {
+        let mut v: Vec<LiveAlloc> = self.map.values().copied().collect();
+        v.sort_by_key(|a| a.addr);
+        v
+    }
+}
+
 /// The reconstructed live set at a point in the stream.
 #[derive(Clone, Debug)]
 pub struct LiveState {
     /// The checkpoint this state was taken at, or `None` for end-of-stream.
     pub at: Option<MarkPoint>,
-    /// Exclusive end index in `Recording::events` that was replayed to here.
+    /// Exclusive end index in the event stream that was replayed to here.
     pub upto: usize,
     pub live: Vec<LiveAlloc>,
     pub total_live_bytes: u64,
 }
 
-/// A view over a [`Recording`] that locates marks and reconstructs the live set
-/// at any of them (or at end-of-stream).
+/// What one scan of a recording's event stream learns about its shape: where the
+/// checkpoints are, how many events there are, and when the last one happened.
+///
+/// All of it is `O(marks)` — a recording with 50M events yields a `StreamIndex`
+/// of a few hundred bytes.
+#[derive(Default, Clone, Debug)]
+pub struct StreamIndex {
+    pub marks: Vec<MarkPoint>,
+    pub event_count: usize,
+    pub last_ts: u64,
+}
+
+/// A view over a recording that locates marks and reconstructs the live set at
+/// any of them (or at end-of-stream).
+///
+/// Each reconstruction re-streams the file rather than indexing into a retained
+/// event list — trading a re-read (sequential, page-cache friendly) for memory
+/// that doesn't scale with the recording. Prefer the methods that answer your
+/// whole question in one pass ([`Timeline::for_each_mark`], [`Timeline::window`])
+/// over calling [`Timeline::state_at`] in a loop.
 pub struct Timeline<'a> {
     rec: &'a Recording,
-    marks: Vec<MarkPoint>,
+    file: String,
+    index: StreamIndex,
 }
 
 impl<'a> Timeline<'a> {
-    /// Scan the event stream for mark checkpoints.
-    pub fn new(rec: &'a Recording) -> Self {
-        let mut marks = Vec::new();
-        for (i, e) in rec.events.iter().enumerate() {
+    /// Scan the event stream once for checkpoints, event count, and end time.
+    pub fn open(file: &str, rec: &'a Recording) -> Result<Timeline<'a>, String> {
+        let mut index = StreamIndex::default();
+        let mut stream = stream_events(file)?;
+        for (i, e) in stream.by_ref().enumerate() {
+            index.event_count = i + 1;
+            index.last_ts = index.last_ts.max(e.ts_nanos);
             if e.kind == EventKind::Mark {
-                let label = rec.marks.get(&e.site).cloned().unwrap_or_else(|| e.site.to_string());
-                marks.push(MarkPoint {
+                let label =
+                    rec.marks.get(&e.site).cloned().unwrap_or_else(|| e.site.to_string());
+                index.marks.push(MarkPoint {
                     label,
                     label_id: e.site,
                     ts_nanos: e.ts_nanos,
@@ -559,183 +469,365 @@ impl<'a> Timeline<'a> {
                 });
             }
         }
-        Timeline { rec, marks }
+        if let Some(err) = stream.error() {
+            return Err(err.to_string());
+        }
+        Ok(Timeline { rec, file: file.to_string(), index })
     }
 
     /// All checkpoints, in stream order.
     pub fn marks(&self) -> &[MarkPoint] {
-        &self.marks
+        &self.index.marks
+    }
+
+    /// Total events in the recording.
+    pub fn event_count(&self) -> usize {
+        self.index.event_count
+    }
+
+    /// Timestamp of the last event.
+    pub fn last_ts(&self) -> u64 {
+        self.index.last_ts
+    }
+
+    /// The recording whose definitions back this timeline.
+    pub fn recording(&self) -> &'a Recording {
+        self.rec
     }
 
     /// The first checkpoint with this label, if any. (Labels are usually unique;
     /// callers that re-`mark` the same label get the earliest occurrence.)
     pub fn find(&self, label: &str) -> Option<&MarkPoint> {
-        self.marks.iter().find(|m| m.label == label)
+        self.index.marks.iter().find(|m| m.label == label)
     }
 
-    /// Reconstruct the live set by replaying events `[0, upto)`.
-    pub fn state_at_index(&self, upto: usize, at: Option<MarkPoint>) -> LiveState {
-        let upto = upto.min(self.rec.events.len());
-        let mut live: HashMap<u64, LiveAlloc> = HashMap::new();
-        for e in &self.rec.events[..upto] {
-            match e.kind {
-                EventKind::Alloc | EventKind::ReallocGrow => {
-                    live.insert(
-                        e.addr,
-                        LiveAlloc {
-                            addr: e.addr,
-                            size: e.size,
-                            site: e.site,
-                            ts_nanos: e.ts_nanos,
-                            thread: e.thread,
-                        },
-                    );
-                }
-                EventKind::Dealloc => {
-                    live.remove(&e.addr);
-                }
-                // Markers carry no allocation.
-                EventKind::MetaEnter | EventKind::MetaExit | EventKind::Mark => {}
+    /// Stream the events, calling `f` after each one is applied, and return the
+    /// live set at the point the scan stopped.
+    ///
+    /// The building block the other methods share: `f` sees the live set as of
+    /// event `i`, plus whatever allocation that event removed (see
+    /// [`LiveSet::apply`]), and can accumulate whatever aggregate it needs.
+    /// Returning `false` stops the scan early.
+    pub fn replay<F>(&self, mut f: F) -> Result<LiveSet, String>
+    where
+        F: FnMut(usize, &RecEvent, Option<&LiveAlloc>, &LiveSet) -> bool,
+    {
+        let mut live = LiveSet::new();
+        let mut stream = stream_events(&self.file)?;
+        for (i, e) in stream.by_ref().enumerate() {
+            let removed = live.apply(&e);
+            if !f(i, &e, removed.as_ref(), &live) {
+                return Ok(live);
             }
         }
-        let total_live_bytes = live.values().map(|a| a.size).sum();
-        let mut live: Vec<LiveAlloc> = live.into_values().collect();
-        live.sort_by_key(|a| a.addr);
-        LiveState { at, upto, live, total_live_bytes }
+        match stream.error() {
+            Some(err) => Err(err.to_string()),
+            None => Ok(live),
+        }
     }
 
-    /// The live set at a named checkpoint (inclusive of the mark's position),
-    /// or `None` if no such mark exists.
-    pub fn state_at(&self, label: &str) -> Option<LiveState> {
-        let m = self.find(label)?.clone();
+    /// Reconstruct the live set by replaying events `[0, upto)`. An `upto` past
+    /// the end of the stream yields the final state.
+    pub fn state_at_index(&self, upto: usize, at: Option<MarkPoint>) -> Result<LiveState, String> {
+        if upto == 0 {
+            return Ok(LiveState { at, upto, live: Vec::new(), total_live_bytes: 0 });
+        }
+        let mut snapshot: Option<LiveSet> = None;
+        let final_live = self.replay(|i, _e, _removed, live| {
+            if i + 1 == upto {
+                snapshot = Some(live.clone());
+                return false;
+            }
+            true
+        })?;
+        let live = snapshot.unwrap_or(final_live);
+        let total_live_bytes = live.total_bytes();
+        Ok(LiveState { at, upto, live: live.to_sorted_vec(), total_live_bytes })
+    }
+
+    /// The live set at a named checkpoint (inclusive of the mark's position), or
+    /// `None` if no such mark exists.
+    pub fn state_at(&self, label: &str) -> Result<Option<LiveState>, String> {
+        let Some(m) = self.find(label).cloned() else { return Ok(None) };
         // The mark itself is a no-op; replaying through its index is exact.
-        Some(self.state_at_index(m.index + 1, Some(m)))
+        self.state_at_index(m.index + 1, Some(m)).map(Some)
     }
 
     /// The live set at the end of the recording.
-    pub fn state_at_end(&self) -> LiveState {
-        self.state_at_index(self.rec.events.len(), None)
+    pub fn state_at_end(&self) -> Result<LiveState, String> {
+        self.state_at_index(self.index.event_count, None)
     }
 
-    /// Per-site `(born, freed)` counts for allocations within the window
-    /// `[from.upto, to_upto)`.
+    /// Stream once, invoking `f` at every checkpoint with the live set as of that
+    /// mark.
     ///
-    /// Dealloc events carry no site id, so frees are attributed by seeding
-    /// `addr -> site` from the window's start state (`from`) and tracking each
-    /// allocation made through the window. A site with `born > 0 && freed == 0`
-    /// is the canonical "born and never died" leak fingerprint.
-    pub fn window_born_freed(&self, from: &LiveState, to_upto: usize) -> HashMap<u32, (u64, u64)> {
-        let to_upto = to_upto.min(self.rec.events.len());
-        let mut addr_site: HashMap<u64, u32> =
-            from.live.iter().map(|a| (a.addr, a.site)).collect();
-        // (born, freed) per site.
-        let mut counts: HashMap<u32, (u64, u64)> = HashMap::new();
-        let start = from.upto.min(to_upto);
-        for e in &self.rec.events[start..to_upto] {
-            match e.kind {
-                EventKind::Alloc | EventKind::ReallocGrow => {
-                    addr_site.insert(e.addr, e.site);
-                    counts.entry(e.site).or_default().0 += 1;
+    /// This is how to summarize *all* the marks: calling [`Timeline::state_at`]
+    /// per mark would re-stream the file once per mark.
+    pub fn for_each_mark<F>(&self, mut f: F) -> Result<(), String>
+    where
+        F: FnMut(&MarkPoint, &LiveSet),
+    {
+        let mut next = 0usize;
+        self.replay(|i, e, _removed, live| {
+            // Marks were indexed in stream order, so this walks them in step.
+            if e.kind == EventKind::Mark {
+                if let Some(m) = self.index.marks.get(next).filter(|m| m.index == i) {
+                    f(m, live);
+                    next += 1;
                 }
-                EventKind::Dealloc => {
-                    if let Some(s) = addr_site.remove(&e.addr) {
-                        counts.entry(s).or_default().1 += 1;
-                    }
-                }
-                EventKind::MetaEnter | EventKind::MetaExit | EventKind::Mark => {}
             }
-        }
-        counts
+            true
+        })?;
+        Ok(())
     }
+
+    /// Everything a two-checkpoint comparison needs, from **one** pass over the
+    /// stream: the live set aggregated by site at each endpoint, and per-site
+    /// born/freed counts within the window `[a_upto, b_upto)`.
+    ///
+    /// Frees carry no site id, so they're attributed via the allocation the live
+    /// set drops (see [`LiveSet::apply`]) — exact for anything the replay saw
+    /// allocated, including allocations born before `a_upto`.
+    pub fn window(&self, a_upto: usize, b_upto: usize) -> Result<Window, String> {
+        let a_upto = a_upto.min(b_upto);
+        let mut w = Window::default();
+        let (mut got_a, mut got_b) = (a_upto == 0, false);
+        let final_live = self.replay(|i, e, removed, live| {
+            let n = i + 1; // events applied so far
+            if n > a_upto && n <= b_upto {
+                match e.kind {
+                    EventKind::Alloc | EventKind::ReallocGrow => {
+                        w.born_freed.entry(e.site).or_default().0 += 1;
+                    }
+                    EventKind::Dealloc => {
+                        if let Some(freed) = removed {
+                            w.born_freed.entry(freed.site).or_default().1 += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if n == a_upto {
+                w.a_by_site = live.agg_by_site();
+                w.a_bytes = live.total_bytes();
+                got_a = true;
+            }
+            if n == b_upto {
+                w.b_by_site = live.agg_by_site();
+                w.b_bytes = live.total_bytes();
+                got_b = true;
+                return false;
+            }
+            true
+        })?;
+        // An endpoint at or past end-of-stream never hit its `n ==` check; the
+        // stream ran out first, so the final state is what it meant.
+        if !got_b {
+            w.b_by_site = final_live.agg_by_site();
+            w.b_bytes = final_live.total_bytes();
+        }
+        if !got_a {
+            w.a_by_site = w.b_by_site.clone();
+            w.a_bytes = w.b_bytes;
+        }
+        Ok(w)
+    }
+}
+
+/// The result of comparing two points in a stream — see [`Timeline::window`].
+#[derive(Default, Clone, Debug)]
+pub struct Window {
+    /// Live set at endpoint A, aggregated site -> `(count, bytes)`.
+    pub a_by_site: HashMap<u32, (u64, u64)>,
+    pub a_bytes: u64,
+    /// Live set at endpoint B, aggregated site -> `(count, bytes)`.
+    pub b_by_site: HashMap<u32, (u64, u64)>,
+    pub b_bytes: u64,
+    /// Per-site `(born, freed)` within the window. A site with `born > 0 &&
+    /// freed == 0` is the canonical "born and never died" leak fingerprint.
+    pub born_freed: HashMap<u32, (u64, u64)>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memscope_proto::{recfmt, RawEvent, SiteId};
 
     fn ev(kind: EventKind, addr: u64, size: u64, ts: u64, site: u32) -> RecEvent {
         RecEvent { kind, addr, size, ts_nanos: ts, site, thread: 1 }
     }
 
-    fn recording_with_marks() -> Recording {
-        let mut sites = HashMap::new();
-        sites.insert(7, SiteInfo { label: "Boxed<Particle>".into(), frames: vec![] });
-        let mut marks = HashMap::new();
-        marks.insert(0, "warmup".to_string());
-        marks.insert(1, "end".to_string());
-        let events = vec![
+    /// Write a real `.mscope` file so the tests exercise the streaming reader
+    /// rather than a hand-built in-memory struct.
+    struct TempRec {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRec {
+        fn write(name: &str, marks: &[(u32, &str)], events: &[RecEvent]) -> TempRec {
+            let mut b = Vec::new();
+            recfmt::encode_header(&mut b, 1, "/tmp/test-exe", 0);
+            for (id, label) in marks {
+                recfmt::encode_mark(&mut b, *id, label);
+            }
+            recfmt::encode_events_header(&mut b, events.len() as u32);
+            for e in events {
+                recfmt::encode_event(
+                    &mut b,
+                    &RawEvent {
+                        kind: e.kind,
+                        addr: e.addr,
+                        size: e.size,
+                        ts_nanos: e.ts_nanos,
+                        site: SiteId(e.site),
+                        thread: e.thread,
+                        align: 8,
+                        seq: 0,
+                    },
+                );
+            }
+            let path = std::env::temp_dir().join(format!("memscope-replay-test-{name}.mscope"));
+            std::fs::write(&path, &b).expect("write test recording");
+            TempRec { path }
+        }
+
+        fn file(&self) -> &str {
+            self.path.to_str().unwrap()
+        }
+    }
+
+    impl Drop for TempRec {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn events_with_marks() -> Vec<RecEvent> {
+        vec![
             ev(EventKind::Alloc, 0x10, 64, 1, 7),
             ev(EventKind::Alloc, 0x20, 64, 2, 7),
             ev(EventKind::Mark, 0, 0, 3, 0), // "warmup": 2 live (0x10,0x20)
             ev(EventKind::Dealloc, 0x10, 64, 4, 7),
             ev(EventKind::Alloc, 0x30, 128, 5, 7),
             ev(EventKind::Mark, 1, 0, 6, 1), // "end": 0x20,0x30 live = 192 bytes
-        ];
-        Recording { sites, meta: HashMap::new(), marks, events, ..Default::default() }
+        ]
+    }
+
+    fn recording_with_marks(name: &str) -> (TempRec, Recording) {
+        let tmp = TempRec::write(name, &[(0, "warmup"), (1, "end")], &events_with_marks());
+        let mut rec = read_recording_raw(tmp.file()).expect("read recording");
+        rec.sites.insert(7, SiteInfo { label: "Boxed<Particle>".into(), frames: vec![] });
+        (tmp, rec)
+    }
+
+    #[test]
+    fn reader_round_trips_marks_and_events() {
+        let (tmp, rec) = recording_with_marks("roundtrip");
+        assert_eq!(rec.marks.get(&0).map(String::as_str), Some("warmup"));
+        assert_eq!(rec.exe, "/tmp/test-exe");
+        let streamed: Vec<RecEvent> = stream_events(tmp.file()).unwrap().collect();
+        assert_eq!(streamed.len(), 6);
+        assert_eq!(streamed[0].addr, 0x10);
+        assert_eq!(streamed[4].size, 128);
     }
 
     #[test]
     fn timeline_finds_marks_in_order() {
-        let rec = recording_with_marks();
-        let tl = Timeline::new(&rec);
+        let (tmp, rec) = recording_with_marks("marks-order");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
         let labels: Vec<&str> = tl.marks().iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["warmup", "end"]);
+        assert_eq!(tl.event_count(), 6);
+        assert_eq!(tl.last_ts(), 6);
     }
 
     #[test]
     fn state_at_warmup_has_two_live() {
-        let rec = recording_with_marks();
-        let tl = Timeline::new(&rec);
-        let s = tl.state_at("warmup").unwrap();
+        let (tmp, rec) = recording_with_marks("warmup");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        let s = tl.state_at("warmup").unwrap().unwrap();
         assert_eq!(s.live.len(), 2);
         assert_eq!(s.total_live_bytes, 128);
     }
 
     #[test]
     fn state_at_end_reflects_free_and_new_alloc() {
-        let rec = recording_with_marks();
-        let tl = Timeline::new(&rec);
-        let s = tl.state_at("end").unwrap();
+        let (tmp, rec) = recording_with_marks("end");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        let s = tl.state_at("end").unwrap().unwrap();
         // 0x10 freed, 0x20 + 0x30 live.
         let addrs: Vec<u64> = s.live.iter().map(|a| a.addr).collect();
         assert_eq!(addrs, [0x20, 0x30]);
         assert_eq!(s.total_live_bytes, 192);
+        // Replaying past the end of the stream means "the final state".
+        let past = tl.state_at_index(usize::MAX, None).unwrap();
+        assert_eq!(past.total_live_bytes, 192);
     }
 
     #[test]
     fn missing_mark_is_none() {
-        let rec = recording_with_marks();
-        let tl = Timeline::new(&rec);
-        assert!(tl.state_at("nope").is_none());
+        let (tmp, rec) = recording_with_marks("missing");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        assert!(tl.state_at("nope").unwrap().is_none());
     }
 
     #[test]
-    fn window_born_freed_attributes_frees_by_seeded_site() {
-        let rec = recording_with_marks();
-        let tl = Timeline::new(&rec);
-        let warmup = tl.state_at("warmup").unwrap();
-        let end = tl.state_at("end").unwrap();
-        // Window warmup->end: free 0x10 (site 7, seeded from warmup) + alloc 0x30 (site 7).
-        let bf = tl.window_born_freed(&warmup, end.upto);
-        assert_eq!(bf.get(&7).copied(), Some((1, 1)));
+    fn for_each_mark_visits_every_checkpoint_in_one_pass() {
+        let (tmp, rec) = recording_with_marks("each-mark");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        let mut seen: Vec<(String, u64)> = Vec::new();
+        tl.for_each_mark(|m, live| seen.push((m.label.clone(), live.total_bytes()))).unwrap();
+        assert_eq!(
+            seen,
+            vec![("warmup".to_string(), 128u64), ("end".to_string(), 192u64)]
+        );
     }
 
     #[test]
-    fn window_born_freed_flags_pure_leak() {
+    fn window_attributes_frees_by_the_allocation_that_left() {
+        let (tmp, rec) = recording_with_marks("window");
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        let a = tl.find("warmup").unwrap().index + 1;
+        let b = tl.find("end").unwrap().index + 1;
+        // Window warmup->end: free 0x10 (site 7, allocated before the window) +
+        // alloc 0x30 (site 7).
+        let w = tl.window(a, b).unwrap();
+        assert_eq!(w.born_freed.get(&7).copied(), Some((1, 1)));
+        assert_eq!(w.a_bytes, 128);
+        assert_eq!(w.b_bytes, 192);
+        assert_eq!(w.a_by_site.get(&7).copied(), Some((2, 128)));
+        assert_eq!(w.b_by_site.get(&7).copied(), Some((2, 192)));
+    }
+
+    #[test]
+    fn window_flags_pure_leak() {
         // Two allocs after the start mark, never freed -> born=2, freed=0.
-        let mut sites = HashMap::new();
-        sites.insert(9, SiteInfo { label: "Leak".into(), frames: vec![] });
         let events = vec![
             ev(EventKind::Mark, 0, 0, 1, 0),
             ev(EventKind::Alloc, 0x10, 32, 2, 9),
             ev(EventKind::Alloc, 0x20, 32, 3, 9),
         ];
-        let mut marks = HashMap::new();
-        marks.insert(0, "start".to_string());
-        let rec = Recording { sites, meta: HashMap::new(), marks, events, ..Default::default() };
-        let tl = Timeline::new(&rec);
-        let start = tl.state_at("start").unwrap();
-        let bf = tl.window_born_freed(&start, rec.events.len());
-        assert_eq!(bf.get(&9).copied(), Some((2, 0)));
+        let tmp = TempRec::write("leak", &[(0, "start")], &events);
+        let rec = read_recording_raw(tmp.file()).unwrap();
+        let tl = Timeline::open(tmp.file(), &rec).unwrap();
+        let start = tl.find("start").unwrap().index + 1;
+        let w = tl.window(start, tl.event_count()).unwrap();
+        assert_eq!(w.born_freed.get(&9).copied(), Some((2, 0)));
+        assert_eq!(w.b_bytes, 64);
+    }
+
+    #[test]
+    fn live_set_charges_address_reuse_exactly() {
+        // An address reallocated without an intervening free replaces the entry;
+        // total bytes must reflect the new size, not the sum.
+        let mut live = LiveSet::new();
+        live.apply(&ev(EventKind::Alloc, 0x10, 64, 1, 1));
+        let displaced = live.apply(&ev(EventKind::ReallocGrow, 0x10, 256, 2, 1));
+        assert_eq!(displaced.map(|a| a.size), Some(64));
+        assert_eq!(live.total_bytes(), 256);
+        assert_eq!(live.len(), 1);
+        let freed = live.apply(&ev(EventKind::Dealloc, 0x10, 256, 3, 0));
+        assert_eq!(freed.map(|a| a.site), Some(1));
+        assert_eq!(live.total_bytes(), 0);
     }
 }
