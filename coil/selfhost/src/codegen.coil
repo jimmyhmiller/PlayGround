@@ -207,7 +207,13 @@
     (TFn    [c p r]  8)
     (TRef   [m i]    8)
     (TSlice [el]     16)
-    (TArray [el n]   (imul (align8 (type-bytes cg el)) n))
+    ; An array does NOT pad its elements to 8 — LLVM's own [N x iM] packs them, and
+    ; so does the arm64 backend (codegen_a64.coil g-type-bytes). Padding here made a
+    ; sum carrying an array a DIFFERENT SIZE in the two backends: a sum wrapping
+    ; (array i32 4) measured 40 bytes under LLVM and 24 under arm64. The per-field
+    ; align8 below stays — it is what keeps the accumulated payload a whole number of
+    ; i64 words, which `udiv … 8` then relies on.
+    (TArray [el n]   (imul (type-bytes cg el) n))
     (TVec   [el n]   (imul (type-bytes cg el) n))
     (TStruct [nm]    (cg-type-bytes-nominal cg nm))
     (TNever []       (do (unimplemented "codegen/type_bytes: Never has no size") 0))

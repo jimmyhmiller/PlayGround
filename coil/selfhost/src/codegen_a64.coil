@@ -139,6 +139,13 @@
 ; Natural (C) layout, mirroring LLVM's data layout for the same types.
 ; Sum payload sizing mirrors codegen.coil's conservative type-bytes/align8
 ; word count exactly (the payload is [words x i64]).
+;
+; That "exactly" is load-bearing and was once false: codegen.coil used to align-8
+; each ARRAY ELEMENT while g-type-bytes packed them, so a sum wrapping
+; (array i32 4) was 40 bytes under LLVM and 24 under arm64 — the same type with two
+; sizes depending on which backend built it. Both now pack array elements. If you
+; touch either sizing function, change BOTH, and re-check with a sum whose variant
+; carries an array.
 
 (defn ty-align [(g (ptr Cga)) (t (ptr Type))] (-> i64)
   (match (load t)
