@@ -1,6 +1,69 @@
 # TanStack implementation status
 
-Updated: 2026-07-18 (dev server: long-lived live-rebuild + full-page browser reload landed)
+Updated: 2026-07-18 (native routeTree.gen.ts generation from src/routes/ landed)
+
+## Native route-tree generation from `src/routes/` (landed)
+
+Diffpack now **natively generates `routeTree.gen.ts` from `src/routes/`**, removing
+the last TanStack-Vite-plugin-produced build-path input. Before this slice the
+committed plugin-generated route tree was consumed as-is; the file-route convention
+itself was never owned by Diffpack, and a route-file add/rename/remove in the dev
+server was a hard-error crash.
+
+- **A native file-route classifier + tree builder.** `src/route_tree.rs` walks
+  `src/routes`, classifies every filename against the full file-route convention
+  (index, flat dot-nesting, directory nesting, pathless `_layout`, dynamic `$param`,
+  escaped `[.]`, trailing-`_` nesting opt-out), builds the parent/child graph
+  (`full_id`/`path`/parent edges matching the reference exactly), and emits a
+  runtime-complete `routeTree.gen.ts`: imports + the
+  `Import.update({ id, path, getParentRoute })` chain + `_addFileChildren` assembly
+  + the exported `routeTree`. The type-only `declare module` blocks are omitted
+  because they are stripped at build.
+- **Hard errors name the file.** An unclassifiable filename, a missing `__root`, and
+  a missing pathless-layout parent are each a hard, file-naming error, never a
+  silent skip or a wrong-valued placeholder.
+- **Wired as a build-emit step, off the incremental hot path.** Route-tree
+  generation runs in `build-app` (before discovery, for both the client and the ssr
+  build) and at dev startup, so the thesis guards are unaffected and stay green.
+- **Dev server: the route-tree crash becomes a real path.** A route-file
+  add/rename/remove now natively regenerates the tree, fully rebuilds both envs, and
+  full-page reloads (state-preserving HMR still deferred). The diffpack-owned
+  `routeTree.gen.ts` is filtered as self-output so it cannot self-trigger the
+  watcher.
+
+Verified (all six gate groups reproduced independently, green):
+
+1. `cargo test --release`: 95 lib tests incl. 6 new `route_tree` (including a
+   semantic-equivalence test parsed from the committed reference — non-gameable —
+   and the unclassifiable-filename hard error), 4 `oracle_incremental` (1
+   `#[ignore]`d), 2 tailwind, 1 thesis_memory — all pass.
+2. `cargo clippy --release --all-targets -- -D warnings`: clean.
+3. `build-app` client + ssr, strict `npm run acceptance:diffpack`: **13/13**.
+   Verified diffpack GENUINELY regenerates `routeTree.gen.ts` (output differs from
+   the committed TanStack file in ordering + one var name) and the build consumes
+   the regenerated file.
+4. Thesis guards: `thesis_memory` PASS, `bundle_benchmark::thesis_guards` 3/3 PASS
+   (leaf edit = 1 module/chunk), `oracle_incremental` byte parity PASS;
+   `bundle-scale-memory` `transformed_per_edit_max`=1, `bytes_per_module`=3464.5,
+   flat.
+5. Browser (real headless Chrome): hydration 7/7, routes-check 60/60, dev-check
+   10/10, `async_hooks` leak empty. Independently reproduced a LIVE route-add in
+   dev: adding `smoke.tsx` took the server 14 -> 15 routes with
+   `route tree changed... regenerated + full rebuild + reload pushed` and no crash.
+6. Benchmark non-regression: diffpack incremental content-edit **7.75 ms** vs
+   Rolldown **150 ms**; cold 168 ms vs 144 ms — no meaningful regression (this slice
+   is off the incremental hot path).
+
+No test/oracle files were modified; no vite/rolldown/node in the diffpack build
+path (`route_tree.rs` is pure Rust; the only vite mentions are comments); no stubs
+returning wrong values (four hard errors name the missing files); no server-only
+leak.
+
+**Next remaining gap.** State-preserving HMR for a route-file change: today an
+add/rename/remove regenerates the tree and full-page reloads rather than swapping
+the route in place. That, plus the other still-deferred dev increments (React Fast
+Refresh, CSS hot-swap without reload, WebSocket-driven partial updates, an
+in-browser error overlay), remain the open dev-experience surface.
 
 ## Dev server: long-lived live-rebuild + full-page browser reload (landed)
 

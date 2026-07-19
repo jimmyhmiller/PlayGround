@@ -161,6 +161,13 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         ..EmitOptions::default()
     };
 
+    // 0. Natively generate `src/routeTree.gen.ts` from `src/routes/` so dev — like
+    // build-app — consumes a diffpack-generated route tree, not one produced by
+    // TanStack Router's Vite plugin.
+    if let Some(route_count) = crate::route_tree::generate_for_project(&project_root)? {
+        println!("[dev] generated route tree ({route_count} routes)");
+    }
+
     // 1. Initial full build: client then server (order is load-bearing — the
     // server manifest reads the client's finished chunk map).
     println!("[dev] building client...");
@@ -245,8 +252,38 @@ fn watch_loop(
         let changed = paths
             .into_iter()
             .filter(|path| is_module_path(path))
+            // The generated route tree is diffpack-owned now: it is regenerated
+            // from `src/routes`, so an event on it is transient self-output, never
+            // a user edit to react to.
+            .filter(|path| {
+                path.file_name().and_then(|name| name.to_str())
+                    != Some(crate::route_tree::ROUTE_TREE_FILE)
+            })
             .collect::<BTreeSet<_>>();
         if changed.is_empty() {
+            continue;
+        }
+
+        // A route-file add/rename/remove mutates the route tree. Regenerate it
+        // natively and fully rebuild both environments (re-discovering the graph
+        // from the new tree), then push a full-page reload. State-preserving graph
+        // extension / partial HMR is still deferred, but this replaces the prior
+        // hard-error crash with a correct full reload.
+        let route_mutation = changed
+            .iter()
+            .any(|path| is_route_tree_mutation(path, project_root, client_env, server_env));
+        if route_mutation {
+            let started = Instant::now();
+            crate::route_tree::generate_for_project(project_root)?;
+            *client_env = build_client(project_root, output_root, client_env.options)?;
+            *server_env = build_server(project_root, output_root, server_env.options)?;
+            restart_node(node, index_mjs, node_port)?;
+            hub.broadcast_reload();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            println!(
+                "[dev] route tree changed ({} file(s)) in {elapsed_ms:.1}ms | regenerated + full rebuild + reload pushed",
+                changed.len(),
+            );
             continue;
         }
 
@@ -336,29 +373,44 @@ fn classify_edit(
         ));
     }
 
-    // The generated route tree changes when routes are added/removed/renamed;
-    // regenerating it (and its virtual route modules) is deferred.
-    if name == "routeTree.gen.ts" {
-        return Err(format!(
-            "unsupported dev edit: {} changed. Route-tree regeneration (add/rename/remove a route) is not implemented by the full-page-reload dev slice.",
-            display_relative(path, project_root)
-        ));
-    }
+    // (Route-file add/rename/remove is handled earlier in the loop by native
+    // route-tree regeneration + full rebuild, and the diffpack-generated
+    // `routeTree.gen.ts` is filtered out as self-output — so neither reaches
+    // here.)
 
-    // A module in neither graph is a NEW file (or a file the build never
-    // reached). Handling it needs route-tree regeneration / graph extension from
-    // a new root, which this slice defers.
+    // A NON-route module in neither graph is a new/deleted file the build never
+    // reached. A route file here is handled earlier (route-tree mutation); a
+    // non-route new file needs graph extension from a new root, still deferred.
     if !client.bundler.is_known_module(path) && !server.bundler.is_known_module(path) {
-        // A deleted file also lands here (canonicalize fails / not in graph). Both
-        // add and remove are the deferred route-tree-mutation class.
         let what = if path.exists() { "new file" } else { "deleted file" };
         return Err(format!(
-            "unsupported dev edit: {what} {} is not in the client or server module graph. New-file / route-tree add/rename/remove handling is not implemented by the full-page-reload dev slice (edits to existing modules only).",
+            "unsupported dev edit: {what} {} is not in the client or server module graph. Non-route new-file / graph-extension handling is not implemented by the full-page-reload dev slice (route-file add/rename/remove IS handled via native route-tree regeneration; edits to existing modules only otherwise).",
             display_relative(path, project_root)
         ));
     }
 
     Ok(())
+}
+
+/// Whether `path` is a route-tree-mutating change: a route-extension file under
+/// `<src>/routes` that is NOT a known module in either graph (a new file, or a
+/// deleted/renamed one). An edit to an existing route module is a normal
+/// incremental edit, not a mutation.
+fn is_route_tree_mutation(
+    path: &Path,
+    project_root: &Path,
+    client: &EnvBuild,
+    server: &EnvBuild,
+) -> bool {
+    let routes_dir = project_root.join(src_dir(project_root)).join("routes");
+    if !path.starts_with(&routes_dir) {
+        return false;
+    }
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+    if !["tsx", "ts", "jsx", "js"].contains(&extension) {
+        return false;
+    }
+    !client.bundler.is_known_module(path) && !server.bundler.is_known_module(path)
 }
 
 /// Build the client environment fresh (mirrors `build-app <root> client`) and

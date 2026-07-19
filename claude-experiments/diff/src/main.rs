@@ -134,6 +134,21 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| format!("no {environment} entry found for the app"))?;
             let output_root = Path::new(&project_root).join(".diffpack-output");
 
+            // Natively generate `src/routeTree.gen.ts` from `src/routes/` BEFORE
+            // discovery, so the bundler consumes a diffpack-generated route tree
+            // instead of one produced by TanStack Router's Vite plugin. This is a
+            // build-emit step off the incremental hot path (mirroring native
+            // manifest generation), so the thesis guards are unaffected. A
+            // non-file-routed project (no `src/routes`) is a no-op.
+            if let Some(route_count) =
+                diffpack::route_tree::generate_for_project(Path::new(&project_root))?
+            {
+                println!(
+                    "generated src/{} natively ({route_count} route(s) from src/routes/)",
+                    diffpack::route_tree::ROUTE_TREE_FILE,
+                );
+            }
+
             // A server build's TanStack manifest module (`tanstack-start-manifest:v`)
             // maps each route to the CLIENT build's emitted chunk URLs, so it is
             // generated natively from the client build's persisted route/chunk
