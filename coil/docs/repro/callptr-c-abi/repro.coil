@@ -1,0 +1,32 @@
+(module repro)
+
+;; Passes one struct of each size class to a C callback through `call-ptr`,
+;; and the 4-byte one through a direct `extern` for comparison.
+
+(defstruct S4  [(a u8) (b u8) (c u8) (d u8)])
+(defstruct S8  [(a i32) (b i32)])
+(defstruct S16 [(a i64) (b i64)])
+(defstruct S32 [(a f64) (b f64) (c f64) (d f64)])
+
+(defstruct Table
+  [(f4  (fnptr c [S4]  i64))
+   (f8  (fnptr c [S8]  i64))
+   (f16 (fnptr c [S16] i64))
+   (f32 (fnptr c [S32] i64))])
+
+(extern sink_direct :cc c [S4] (-> i64))
+
+(defn via-callptr [(t (ptr Table)) (s4 S4) (s8 S8) (s16 S16) (s32 S32)] (-> i64)
+  (do
+    (call-ptr (load (field t f4))  s4)
+    (call-ptr (load (field t f8))  s8)
+    (call-ptr (load (field t f16)) s16)
+    (call-ptr (load (field t f32)) s32)
+    0))
+
+(defn via-direct [(s4 S4)] (-> i64)
+  (sink_direct s4))
+
+(export-c
+  [via-callptr :as "via_callptr"]
+  [via-direct  :as "via_direct"])

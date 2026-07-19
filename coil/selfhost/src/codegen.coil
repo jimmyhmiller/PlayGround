@@ -1156,19 +1156,41 @@
         (if (icmp-lt si 0) (cg-bug (sconcat a "codegen: no signature for " name))
           (let [sp (al-elem [CgSig] (field cg sigs) si)]
             (mk-tv fv (TFn (load (field sp cc)) (load (field sp params)) (box-type a (load (field sp ret)))))))))))
+; An indirect call through a `(fnptr cc …)`.
+;
+; ⚠ A `c` fnptr must go through the SAME C-ABI lowering a direct extern gets. It
+; used to build a plain call from the declared parameter types, so a by-value
+; struct was passed as the raw LLVM aggregate while the callee — declared with the
+; C-lowered signature — expected packed i64 slots. Structs of 16 and 32 bytes
+; happened to agree; 4- and 8-byte ones arrived corrupt, silently
+; (docs/BUG_CALLPTR_C_ABI.md). c-signature takes params/ret directly rather than a
+; callee name, so the indirect case can use it with no registry entry.
+;
+; Only the `c` convention is lowered. A non-`c` fnptr keeps the plain call it has
+; always had — its convention is Coil-internal, not an ABI boundary.
 (defn emit-callptr [(cg (ptr Cg)) (fp (ptr Expr)) (args (ptr (ArrayList Expr))) (scp (ptr Scope))] (-> Tv)
   (let [a (load (field cg a)) b (cg-bld cg)
         fpv (emit-expr cg fp scp)
         cc-params-ret (match-else (tv-ty fpv) (TFn [c p r] (mk-fnsig c p r)) (_ (do (unimplemented "codegen: call-ptr on non-fnptr") (mk-fnsig "" (box-al [Type] a (al-new [Type] a)) (box-type a (TInt 64 true))))))
-        fnty (cg-fn-type cg (fnsig-params cc-params-ret) (fnsig-ret cc-params-ret))
-        vals (emit-vals cg args scp)
-        cs (LLVMBuildCall2 b fnty (tv-val fpv) (carr a vals) (cast i32 (al-len [(ptr i8)] vals)) (cg-bl cg "callptr"))]
-    (mk-tv cs (load (fnsig-ret cc-params-ret)))))
+        params (fnsig-params cc-params-ret)
+        retp   (fnsig-ret cc-params-ret)]
+    (if (str-eq (fnsig-cc cc-params-ret) "c")
+        (do
+          ; the direct path rejects by-value views at the C boundary; so must this one
+          (cg-check-c-abi-types cg params retp "call-ptr")
+          (let [sig (c-signature cg params retp false)]
+            (emit-c-call-ty cg (tv-val fpv) (load (field sig fn_ty)) (cast i32 0)
+                            sig (emit-argtv cg args scp) (load retp) "callptr")))
+      (let [fnty (cg-fn-type cg params retp)
+            vals (emit-vals cg args scp)
+            cs (LLVMBuildCall2 b fnty (tv-val fpv) (carr a vals) (cast i32 (al-len [(ptr i8)] vals)) (cg-bl cg "callptr"))]
+        (mk-tv cs (load retp))))))
 (defstruct FnSig [(cc (slice u8)) (params (ptr (ArrayList Type))) (ret (ptr Type))])
 (defn mk-fnsig [(c (slice u8)) (p (ptr (ArrayList Type))) (r (ptr Type))] (-> FnSig)
   (let [x (alloc-stack FnSig)] (store! (field x cc) c) (store! (field x params) p) (store! (field x ret) r) (load x)))
 (defn fnsig-params [(s FnSig)] (-> (ptr (ArrayList Type))) (let [x (alloc-stack FnSig)] (store! x s) (load (field x params))))
 (defn fnsig-ret [(s FnSig)] (-> (ptr Type)) (let [x (alloc-stack FnSig)] (store! x s) (load (field x ret))))
+(defn fnsig-cc [(s FnSig)] (-> (slice u8)) (let [x (alloc-stack FnSig)] (store! x s) (load (field x cc))))
 
 (defn emit-llvm-ir [(cg (ptr Cg)) (result (ptr Type)) (args (ptr (ArrayList Expr))) (body (slice u8)) (scp (ptr Scope))] (-> Tv)
   (let [a (load (field cg a)) b (cg-bld cg)
@@ -1910,9 +1932,22 @@
 (defn cg-struct-slot [(cg (ptr Cg)) (sa (ptr StructAbi)) (name (slice u8))] (-> (ptr i8))
   (let [p (cg-entry-alloca cg (load (field sa llvm_ty)) (cg-bl cg name)) al (load (field sa align))]
     (LLVMSetAlignment p (if (icmp-gt al 8) al 8)) p))
+; A spill slot for an aggregate that is about to be read back as whole i64 ABI
+; slots. Its size must be rounded UP to a multiple of 8: an ACDirect argument is
+; passed by loading one i64 per slot, so a 4-byte struct sitting in an exactly
+; 4-byte alloca would have that load reach 4 bytes past the end of the object.
+; LLVM treats the out-of-bounds load as poison and folds it, which is how a
+; (4x u8) struct arrived at a C callee as 0,0,0,0. The padding bytes are never
+; read by the callee — it only looks at the struct's own fields.
+(defn cg-struct-slot-padded [(cg (ptr Cg)) (sa (ptr StructAbi)) (name (slice u8))] (-> (ptr i8))
+  (let [ctx (cg-ctx cg)
+        ty (LLVMArrayType2 (LLVMInt8TypeInContext ctx) (align8 (load (field sa size))))
+        p (cg-entry-alloca cg ty (cg-bl cg name))
+        al (load (field sa align))]
+    (LLVMSetAlignment p (if (icmp-gt al 8) al 8)) p))
 (defn cg-struct-arg-ptr [(cg (ptr Cg)) (v (ptr i8)) (sa (ptr StructAbi))] (-> (ptr i8))
   (if (icmp-eq (LLVMGetTypeKind (LLVMTypeOf v)) 12) v
-    (let [slot (cg-struct-slot cg sa "abi.arg")] (LLVMBuildStore (cg-bld cg) v slot) slot)))
+    (let [slot (cg-struct-slot-padded cg sa "abi.arg")] (LLVMBuildStore (cg-bld cg) v slot) slot)))
 (defn cg-copy-struct [(cg (ptr Cg)) (dst (ptr i8)) (src (ptr i8)) (sa (ptr StructAbi))] (-> i64)
   (LLVMBuildMemCpy (cg-bld cg) dst (load (field sa align)) src (load (field sa align)) (cg-const-uoff cg (load (field sa size)))) 0)
 (defn cg-gep-i8 [(cg (ptr Cg)) (base (ptr i8)) (off i64)] (-> (ptr i8))
@@ -1956,7 +1991,18 @@
     (loop (if (icmp-ge (load i) n) (break)
       (do (al-push! (mut out) (emit-expr cg (al-elem [Expr] args (load i)) scp)) (store! i (iadd (load i) 1)))))
     (load out)))
-(defn emit-c-call [(cg (ptr Cg)) (callee (ptr i8)) (sig (ptr CSig)) (argtv (ArrayList Tv)) (ret-ty Type)] (-> Tv)
+; Emit a C-ABI call given the callee VALUE plus its function type and calling
+; convention explicitly. A direct extern derives both from the global (emit-c-call
+; below); an indirect `call-ptr` has neither — a raw function-pointer value has no
+; global value type and no function callconv — so it passes the CSig's own fn_ty
+; and the C convention id. Everything else here (classification, sret slot, byval
+; copies, ACDirect slot loads, csig attrs) is shared verbatim.
+; `label` names the call's SSA value. It is threaded through rather than fixed so
+; an indirect call keeps its historic "callptr" name: a `c` fnptr whose args need
+; no struct lowering emits exactly the instruction it always did, and the IR gate
+; stays sensitive to real changes instead of drowning in a rename.
+(defn emit-c-call-ty [(cg (ptr Cg)) (callee (ptr i8)) (fnty (ptr i8)) (ccid i32)
+                      (sig (ptr CSig)) (argtv (ArrayList Tv)) (ret-ty Type) (label (slice u8))] (-> Tv)
   (let [a (load (field cg a)) b (cg-bld cg) ctx (cg-ctx cg)
         (mut meta) (al-new [(ptr i8)] a)
         sret-sa (load (field sig sret))
@@ -1995,8 +2041,8 @@
                   (do (unimplemented "codegen: passing a struct by value in a variadic argument is not supported") 0)
                 (al-push! (mut meta) v)))
             (store! i (iadd (load i) 1))))))
-    (let [cs (LLVMBuildCall2 b (LLVMGlobalGetValueType callee) callee (carr a (load meta)) (cast i32 (al-len [(ptr i8)] (load meta))) (cg-call-name cg (LLVMGlobalGetValueType callee) "ccall"))]
-      (LLVMSetInstructionCallConv cs (LLVMGetFunctionCallConv callee))
+    (let [cs (LLVMBuildCall2 b fnty callee (carr a (load meta)) (cast i32 (al-len [(ptr i8)] (load meta))) (cg-call-name cg fnty label))]
+      (LLVMSetInstructionCallConv cs ccid)
       (cg-apply-csig-attrs cg sig cs true)
       (if (icmp-ne (cast i64 sret-sa) 0)
           (mk-tv (LLVMBuildLoad2 b (load (field sret-sa llvm_ty)) (load sret-slot) (cg-bl cg "abi.ret")) ret-ty)
@@ -2006,6 +2052,11 @@
                 (LLVMBuildStore b cs slot)
                 (mk-tv (LLVMBuildLoad2 b (load (field rd llvm_ty)) slot (cg-bl cg "abi.ret.val")) ret-ty))
             (if (ty-is-void (box-type a ret-ty)) (mk-tv (cg-zero-i64 cg) (TVoid)) (mk-tv cs ret-ty))))))))
+
+; a DIRECT call to a named C function: the global carries both its type and its cc.
+(defn emit-c-call [(cg (ptr Cg)) (callee (ptr i8)) (sig (ptr CSig)) (argtv (ArrayList Tv)) (ret-ty Type)] (-> Tv)
+  (emit-c-call-ty cg callee (LLVMGlobalGetValueType callee) (LLVMGetFunctionCallConv callee)
+                  sig argtv ret-ty "ccall"))
 
 ; Two `(extern …)` declarations that resolve to the same C symbol must agree on
 ; their LLVM function type. A module holds ONE function per symbol, so the second
@@ -2159,7 +2210,12 @@
             (do (match (al-get [ArgAbiK] (load args) (load i))
                   (AAScalar [] (do (al-push! (mut meta) (LLVMGetParam thunk (cast i32 (load idx)))) (store! idx (iadd (load idx) 1))))
                   (AADirect [sa]
-                    (let [slot (cg-struct-slot cg sa "thunk.arg")]
+                    ; padded for the same reason the call side is: the loop below
+                    ; STORES one whole i64 per ABI slot, so a 4-byte struct in a
+                    ; 4-byte alloca would be written 4 bytes past its end. LLVM
+                    ; folded that to poison and the argument reached the callee as
+                    ; zero — with `mov x0, xzr` right there in the disassembly.
+                    (let [slot (cg-struct-slot-padded cg sa "thunk.arg")]
                       (match-else (load (field sa arg))
                         (ACDirect [slots]
                           (let [ns (al-len [(ptr i8)] (load slots)) (mut k) 0]

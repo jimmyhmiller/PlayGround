@@ -15,6 +15,10 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %shapes.Point = type { i64, i64 }
 
+%shapes.Sink = type { ptr }
+
+%shapes.Tiny = type { i8, i8, i8, i8 }
+
 @g.0 = global %io.Writer zeroinitializer
 
 @g.1 = global %io.Writer zeroinitializer
@@ -1532,9 +1536,21 @@ entry:
   ret i64 %add
 }
 
+define internal i64 @shapes.via-fnptr(ptr %s, ptr %t) {
+entry:
+  %abi.arg = alloca [8 x i8], align 8
+  %field = getelementptr inbounds nuw %shapes.Sink, ptr %s, i32 0, i32 0
+  %load = load ptr, ptr %field, align 8
+  %load1 = load %shapes.Tiny, ptr %t, align 1
+  store %shapes.Tiny %load1, ptr %abi.arg, align 1
+  %abi.slot = load i64, ptr %abi.arg, align 8
+  %callptr = call i64 %load(i64 %abi.slot)
+  ret i64 %callptr
+}
+
 define i64 @shapes_dist2([2 x i64] %0) {
 entry:
-  %thunk.arg = alloca %shapes.Point, align 8
+  %thunk.arg = alloca [16 x i8], align 8
   store [2 x i64] %0, ptr %thunk.arg, align 8
   %thunk.call = call i64 @shapes.dist2(ptr %thunk.arg)
   ret i64 %thunk.call
@@ -1554,6 +1570,14 @@ entry:
   store %shapes.Point %load, ptr %ret.spill, align 8
   %abi.ret.coerce = load [2 x i64], ptr %ret.spill, align 8
   ret [2 x i64] %abi.ret.coerce
+}
+
+define i64 @shapes_via_fnptr(ptr %0, i64 %1) {
+entry:
+  %thunk.arg = alloca [8 x i8], align 8
+  store i64 %1, ptr %thunk.arg, align 8
+  %thunk.call = call i64 @shapes.via-fnptr(ptr %0, ptr %thunk.arg)
+  ret i64 %thunk.call
 }
 
 define internal ptr @slice.slice-data__u8({ ptr, i64 } %s) {
