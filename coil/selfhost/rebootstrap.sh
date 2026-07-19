@@ -24,7 +24,31 @@ set -uo pipefail
 cd "$(dirname "$0")/.."                 # repo root
 SRC=selfhost/src/main.coil
 SEED=selfhost/seed/coil-seed
-LF=(--link-flag -L/opt/homebrew/opt/llvm/lib --link-flag -lLLVM)
+# ---- THE THREE BUILDS --------------------------------------------------------
+#
+#   flavour        script                            LLVM            links
+#   -------------  --------------------------------  --------------  -------------------------
+#   dynamic-LLVM   rebootstrap.sh                    libLLVM.dylib   + Homebrew libLLVM  ~3.5MB
+#   static-LLVM    COIL_LLVM_LINK=static  ditto      linked in       macOS /usr/lib only  ~92MB
+#   no-LLVM        rebootstrap-nollvm.sh             none            libSystem only       ~3.2MB
+#
+# DYNAMIC is the default: it is what the committed seed expects and it is what you
+# want while developing. The compiler it produces will NOT run without Homebrew's
+# libLLVM.dylib.
+#
+# STATIC is for shipping a compiler to someone else. rustc and zig both take this
+# route — a rustup toolchain has no system libLLVM anywhere, it is statically
+# linked into a ~200MB librustc_driver — and the trade is the same one they make:
+# ~26x the binary for a compiler that runs on a bare machine.
+#
+# NO-LLVM is the most self-contained of the three (only libSystem, needs only `cc`)
+# and is verified as such by its own gate. Its arm64 backend still has gaps the
+# LLVM backend does not — notably `export-c` with a by-value struct parameter — so
+# it cannot yet build every program the other two can.
+#
+# The link line lives in ONE place, selfhost/llvm-link-flags.sh.
+LF=($(./selfhost/llvm-link-flags.sh "${COIL_LLVM_LINK:-dynamic}")) \
+  || { echo "cannot compute LLVM link flags"; exit 1; }
 
 if   [ -n "${STAGE0:-}" ];        then :
 elif [ -x "$SEED" ];              then STAGE0="$SEED"
