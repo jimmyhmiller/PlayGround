@@ -157,6 +157,13 @@ async function main() {
     if (!/391/.test(out)) fail("agent turn produced no tool use / reply: " + JSON.stringify(out.slice(-300)));
     console.log("  ok  typed a turn -> real tool call computed 17 * 23 = 391 in the terminal");
 
+    // the turn must have gone through the REAL protocol: buildBody -> host_http (the in-page
+    // fake API) -> parseAnthropic. HttpResponse instances are the proof it was a round trip.
+    const hr = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("HttpResponse.instances().len()"))`);
+    const hrn = JSON.parse(hr).value?.value ?? 0;
+    if (hrn < 1) fail("no HttpResponse instances — the agent short-circuited the HTTP/JSON path: " + hr);
+    console.log(`  ok  went through the real HTTP+JSON protocol (${hrn} live HttpResponse instances)`);
+
     // the viewer must see the live agent state the turn just created
     const msgs = await evalPage(`JSON.stringify(globalThis.__scryWasm.eval("Message.instances().len()"))`);
     if (!/"value"/.test(msgs)) fail("viewer-side eval of Message.instances() failed: " + msgs);

@@ -85,6 +85,11 @@
 ; the main thread at startup via http-init).
 (defn http-inited [] (-> (ptr i64)) (alloc-static i64))
 (defn http-init [] (-> i64)
+  ; no libcurl in a browser — and the guard must skip the CALL, not just its effect, or
+  ; curl_global_init stays in the module's imports.
+  (when-wasm 0 (http-init-curl)))
+
+(defn http-init-curl [] (-> i64)
   (if (= (load (http-inited)) 0) (do (curl_global_init CURL_GLOBAL_ALL) (store! (http-inited) 1) 0) 0))
 
 ; The cooperative multi-perform loop. Drives `mh` (which already has the easy handle added) to
@@ -115,7 +120,31 @@
 ; Perform one HTTP(S) request cooperatively and return an HttpResult. method/url/body are Scry
 ; Strings; headers a Scry List<String>. On transport failure returns { status:0, body:<curl error
 ; text>, err:1 } — status 0 is the sentinel the agent layer checks; we NEVER fabricate success.
+; wasm: hand the request to the host. Keeping this in its own defn means the curl path below
+; is NOT REFERENCED on wasm, so the whole libcurl import block disappears from the module.
+(defn http-request-host [(method (ptr StringObj)) (url (ptr StringObj))
+                         (body (ptr StringObj))] (-> (ptr HttpResult))
+  (let [res (cast (ptr HttpResult) (xalloc (sizeof HttpResult)))
+        st (alloc-stack i64)]
+    (store! st 0)
+    (let [resp (host_http (load (field method data)) (load (field method len))
+                          (load (field url data))    (load (field url len))
+                          (load (field body data))   (load (field body len))
+                          st)]
+      (store! (field res status) (load st))
+      (if (= (cast i64 resp) 0)
+        (do (store! (field res err) 1) (store! (field res body) (str-copy (cast (ptr u8) c"host http failed") 16)) 0)
+        (do (store! (field res err) 0)
+            (store! (field res body) (str-copy resp (s-len (cast (ptr i8) resp)))) 0))
+      res)))
+
 (defn http-request [(parked (ptr i64))
+                    (method (ptr StringObj)) (url (ptr StringObj))
+                    (headers (ptr ListObj)) (body (ptr StringObj))] (-> (ptr HttpResult))
+  (when-wasm (http-request-host method url body)
+             (http-request-curl parked method url headers body)))
+
+(defn http-request-curl [(parked (ptr i64))
                     (method (ptr StringObj)) (url (ptr StringObj))
                     (headers (ptr ListObj)) (body (ptr StringObj))] (-> (ptr HttpResult))
   (http-init)

@@ -48,7 +48,13 @@
 ; `blen` bytes (0 = no body). Returns the HTTP status (0 = transport failure: e.g. the peer is
 ; not listening). On success the response body is left in `outbuf` (a fresh PcBuf). `timeout-ms`
 ; bounds the whole call so a dead/hung peer never stalls the portal thread.
+; There is no portal hub (and no libcurl) in a browser, so on wasm this is a no-op. Splitting
+; it out keeps the curl path UNREFERENCED there, which is what actually drops the libcurl
+; imports from the module — a stub that still called curl would keep them all.
 (defn pc-request [(method (ptr i8)) (url (ptr i8)) (body (ptr u8)) (blen i64) (timeout-ms i64) (outbuf (ptr PcBuf))] (-> i64)
+  (when-wasm 0 (pc-request-curl method url body blen timeout-ms outbuf)))
+
+(defn pc-request-curl [(method (ptr i8)) (url (ptr i8)) (body (ptr u8)) (blen i64) (timeout-ms i64) (outbuf (ptr PcBuf))] (-> i64)
   (pc-init)
   (let [eh (curl_easy_init)]
     (if (= (cast i64 eh) 0) 0

@@ -60,6 +60,13 @@
     onStdout: write,
     // boot-time diagnostics go to the console, not the terminal, so the demo stays clean
     onStderr: (t) => console.warn("[scry]", t),
+    // A fake API key makes chooseBrain() pick the REAL AnthropicModel path, so the agent
+    // builds a request body, "sends" it, and parses the reply with std.json. host_http (in
+    // scry-wasm.js) is the server: it parses that request and answers with Anthropic-shaped
+    // JSON. Entirely offline — the base URL says so.
+    env: { DEEPSEEK_API_KEY: "in-page-demo",
+           ANTHROPIC_BASE_URL: "http://fake-api.in-page/v1",
+           SCRY_MODEL: "fake-1 (in-page)" },
     vfs: { "/assistant.scry": demoSrc, "/agent/core.scry": coreSrc, "/std/json.scry": jsonSrc },
   });
 

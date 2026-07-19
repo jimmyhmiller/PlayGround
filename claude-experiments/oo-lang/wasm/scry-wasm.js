@@ -151,7 +151,32 @@ export class ScryWasm {
       host_write: (fd, ptr, len) => { const t = rd(ptr, len); (Number(fd) === 2 ? self.opts.onStderr : self.opts.onStdout)?.(t); return Number(len) | 0; },
       write:      (fd, ptr, len) => { const t = rd(ptr, len); (Number(fd) === 2 ? self.opts.onStderr : self.opts.onStdout)?.(t); return Number(len) | 0; },  // isize
       host_now_ms: () => (self.opts.now ? self.opts.now() : Date.now()),
-      getenv: (_p) => 0,             // no env in the browser → fake model auto-selected
+
+      // getenv: the demo supplies a fake API key so chooseBrain() picks the REAL
+      // AnthropicModel path (buildBody -> Http.request -> parseAnthropic) instead of the
+      // shortcut ScriptedModel. Everything still runs offline — host_http answers.
+      getenv: (p) => {
+        const name = cstr(p);
+        const v = (self.opts.env || {})[name];
+        return v === undefined ? 0 : self.writeStr(v);
+      },
+
+      // host_http: the fake API server. It PARSES the request JSON the agent built and
+      // RESPONDS with a real Anthropic-shaped JSON body, which the agent then parses with
+      // std.json — so buildBody, Json.parse, Json.stringify, the content-block walk and the
+      // tool-use protocol all execute for real, with no network.
+      host_http: (mp, ml, up, ul, bp, bl, outStatus) => {
+        const method = rd(mp, ml), url = rd(up, ul), body = rd(bp, bl);
+        let status = 200, respBody;
+        try {
+          respBody = JSON.stringify(self.fakeApi(JSON.parse(body), { method, url }));
+        } catch (e) {
+          status = 400;
+          respBody = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: String(e) } });
+        }
+        self.dv.setBigInt64(Number(outStatus), BigInt(status), true);
+        return self.writeStr(respBody);
+      },
 
       // ---- snprintf (wasm variadic ABI: hidden trailing arg = ptr to promoted args) ----
       snprintf: (dst, cap, fmt, va) => self._snprintf(Number(dst), Number(cap), Number(fmt), Number(va)),
@@ -296,6 +321,59 @@ export class ScryWasm {
     const n = Math.min(bytes.length, cap - 1);
     if (cap > 0) { u.set(bytes.subarray(0, n), dst); u[dst + n] = 0; }
     return bytes.length;             // C snprintf returns would-be length
+  }
+
+  // ---- the fake Anthropic-compatible API ----
+  // Receives the PARSED request the agent built (model, system, messages[], tools[]) and
+  // returns a response object shaped exactly like /v1/messages: {stop_reason, content:[…]}
+  // with `text` and `tool_use` blocks. The VM serialises the request and parses this reply
+  // with std.json, so the real protocol path is exercised end to end — offline, and
+  // deterministic enough to demo. Override with `opts.api` to script a different brain.
+  fakeApi(req, meta) {
+    if (this.opts.api) return this.opts.api(req, meta);
+    const msgs = Array.isArray(req.messages) ? req.messages : [];
+    const last = msgs[msgs.length - 1];
+    const toolNames = new Set((req.tools || []).map((t) => t.name));
+
+    // Flatten a content field (a bare string, or an array of blocks) to plain text.
+    const textOf = (c) => typeof c === "string" ? c
+      : Array.isArray(c) ? c.map((b) => b?.type === "text" ? (b.text || "")
+                                      : b?.type === "tool_result" ? (typeof b.content === "string" ? b.content : "")
+                                      : "").join(" ")
+      : "";
+    const isToolResult = (m) => Array.isArray(m?.content) && m.content.some((b) => b?.type === "tool_result");
+    const reply = (text) => ({ id: "msg_fake", type: "message", role: "assistant",
+                               model: req.model || "fake-1", stop_reason: "end_turn",
+                               content: [{ type: "text", text }] });
+    const useTool = (name, input) => ({ id: "msg_fake", type: "message", role: "assistant",
+                               model: req.model || "fake-1", stop_reason: "tool_use",
+                               content: [{ type: "tool_use", id: "call_" + (++this._callSeq || (this._callSeq = 1)),
+                                           name, input }] });
+
+    // A tool already answered -> fold its output into a final reply.
+    if (isToolResult(last)) return reply("Here you go: " + textOf(last.content).trim());
+
+    const q = textOf(last?.content).trim();
+    const lower = q.toLowerCase();
+
+    // arithmetic -> the calculate tool (mirrors what a real model would decide)
+    const m = lower.match(/(-?\d+)\s*(?:\*|x|times)\s*(-?\d+)/) || lower.match(/(-?\d+)\s*(\+|plus|-|minus|\/|over)\s*(-?\d+)/);
+    if (m && toolNames.has("calculate")) {
+      const a = parseInt(m[1], 10), b = parseInt(m[m.length - 1], 10);
+      const op = /\*|x|times/.test(m[0]) ? "mul" : /\+|plus/.test(m[0]) ? "add"
+               : /\/|over/.test(m[0]) ? "div" : "sub";
+      return useTool("calculate", { a, b, op });
+    }
+    const w = lower.match(/weather (?:in|for) ([a-z ]+)/);
+    if (w && toolNames.has("get_weather")) return useTool("get_weather", { location: w[1].trim() });
+    if (/^(list files|ls)\b/.test(lower) && toolNames.has("shell")) return useTool("shell", { cmd: "ls -la" });
+    if (/^run /.test(lower) && toolNames.has("shell")) return useTool("shell", { cmd: q.slice(4) });
+    if (/^read /.test(lower) && toolNames.has("read_file")) return useTool("read_file", { path: q.slice(5) });
+
+    if (/^(hi|hello|hey)\b/.test(lower)) return reply("Hi there - I'm a fake model served by the page. Ask me to calculate something, or try 'weather in Tokyo'.");
+    if (lower.includes("thank")) return reply("You're welcome!");
+    if (lower.includes("?")) return reply("Good question - " + q);
+    return reply("You said: " + q);
   }
 
   // ---- the viewer wire op ----

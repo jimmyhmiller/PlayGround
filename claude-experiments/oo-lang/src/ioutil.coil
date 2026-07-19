@@ -103,6 +103,14 @@
 (defn xmemcpy  [(d (ptr i8)) (s (ptr i8)) (n i64)] (-> (ptr i8)) (memcpy d s (cast isize n)))
 (defn xmemset  [(d (ptr i8)) (c i64) (n i64)] (-> (ptr i8)) (memset d c (cast isize n)))
 
+; ---- wasm host HTTP ----
+; On wasm there is no libcurl. The host serves the request instead: it gets method/url/body
+; as (ptr,len) pairs, writes the status through `out-status`, and returns a malloc'd
+; NUL-terminated response body. The browser demo answers with a real Anthropic-shaped JSON
+; body, so the agent's normal buildBody -> HTTP -> parseAnthropic path (and std.json with it)
+; runs for real instead of being short-circuited. Undefined on native — never referenced there.
+(extern host_http :cc c [(ptr u8) i64 (ptr u8) i64 (ptr u8) i64 (ptr i64)] (-> (ptr u8)))
+
 ; ---- compile-time target branch ----
 ; `(when-wasm A B)` compiles to A on wasm32 and to B everywhere else — the branch not taken
 ; is never emitted, so a wasm-only code path costs the native build NOTHING (not even a
