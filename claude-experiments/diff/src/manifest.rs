@@ -154,7 +154,14 @@ impl ClientRouteManifest {
         source.push_str(
             "// Generated natively by Diffpack from the client build's route/chunk graph.\n",
         );
-        source.push_str("const tsrStartManifest = () => ({ routes: {\n");
+        // `clientEntry` is how some react-start versions (e.g. 1.133) inject the
+        // browser entry: `import('${startManifest.clientEntry}')`. Others (e.g.
+        // 1.169) use the per-route `scripts` array below instead. Emit both so the
+        // manifest drives hydration across versions; an unused field is ignored.
+        let client_entry = json_string(&self.url_of(&self.entry));
+        source.push_str(&format!(
+            "const tsrStartManifest = () => ({{ clientEntry: {client_entry}, routes: {{\n"
+        ));
         for (route_id, chunks) in &self.routes {
             let key = json_string(route_id);
             let preloads = chunks
@@ -241,8 +248,12 @@ mod tests {
     #[test]
     fn generates_the_tsr_start_manifest_contract() {
         let source = sample().to_start_manifest_source();
-        // The exact export the server's router-manifest.js consumes.
-        assert!(source.contains("const tsrStartManifest = () => ({ routes: {"), "{source}");
+        // The exact export the server's router-manifest.js consumes, with the
+        // top-level `clientEntry` some versions inject via `import(...)`.
+        assert!(
+            source.contains("const tsrStartManifest = () => ({ clientEntry: \"/client.js\", routes: {"),
+            "{source}"
+        );
         assert!(source.contains("export { tsrStartManifest };"), "{source}");
         // The root route preloads and scripts the entry chunk URL.
         assert!(

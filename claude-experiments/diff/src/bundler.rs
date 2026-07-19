@@ -5144,7 +5144,7 @@ mod tests {
 
         // The generated manifest source is the exact contract the server consumes.
         let source = manifest.to_start_manifest_source();
-        assert!(source.contains("const tsrStartManifest = () => ({ routes: {"), "{source}");
+        assert!(source.contains("const tsrStartManifest = () => ({ clientEntry: \"/client.js\", routes: {"), "{source}");
         assert!(source.contains(&format!("\"/foo\": {{ preloads: [\"/{}\"] }}", foo[0])), "{source}");
     }
 
