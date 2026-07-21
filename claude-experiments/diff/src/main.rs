@@ -448,7 +448,12 @@ fn run() -> Result<(), String> {
                 },
                 None => diffpack::bundler::ModuleFormat::Cjs,
             };
+            let profile = env::var_os("DIFFPACK_PROFILE_FRONTEND").is_some();
+            let discover_started = Instant::now();
             let (bundler, update) = Bundler::discover_direct(Path::new(&entry))?;
+            if profile {
+                eprintln!("discover: {:.1} ms", discover_started.elapsed().as_secs_f64() * 1000.0);
+            }
             if !update.diagnostics.is_empty() {
                 return Err(format!(
                     "bundle produced {} diagnostic(s); first: {}",
@@ -456,8 +461,16 @@ fn run() -> Result<(), String> {
                     update.diagnostics[0]
                 ));
             }
+            let phase_started = Instant::now();
             let reachable = bundler.reachable_modules_direct();
+            if profile {
+                eprintln!("reachability: {:.1} ms", phase_started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let phase_started = Instant::now();
             bundler.emit_with_options(&reachable, &output, EmitOptions { source_map, minify, format, ..Default::default() })?;
+            if profile {
+                eprintln!("emit: {:.1} ms", phase_started.elapsed().as_secs_f64() * 1000.0);
+            }
             println!(
                 "bundled {} modules to {} (transformed {})",
                 reachable.len(),

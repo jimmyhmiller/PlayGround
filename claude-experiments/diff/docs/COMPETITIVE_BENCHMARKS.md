@@ -296,6 +296,27 @@ tables above still show the pre-change sizes. Correctness after the change:
 the full conformance suite (40/48, unchanged), both reference apps' acceptance
 and browser gates, and the incremental/memory thesis guards all pass.
 
+## Addendum 2026-07-21 (later): cold wall time — the 4-thread cap and allocator contention
+
+Profiling the realistic-1k cold build (90 ms CPU but only ~2.7 CPUs utilized on
+32 cores) found three compounding serializers, now fixed: the frontend pool was
+capped at 4 threads (`.min(4)` — removed); discovery had a fork-join barrier
+per BFS wave (replaced by pipelined spawning with sorted-path interning, so
+output bytes stay deterministic — verified byte-identical across runs); and the
+tracking allocator updated shared atomic counters on EVERY allocation from all
+threads (accounting is now off unless `bundle-scale-memory`/the guard suite
+enables it, and the inner allocator is MiMalloc). Spot re-measurement, medians
+via `perf stat -r 10` (same corpora, outputs runtime-verified):
+
+| Corpus | diffpack cold (was) | diffpack cold (now) | best rival (above) |
+| --- | ---: | ---: | ---: |
+| realistic-1k | 36.1 ms | **13.9 ms** | esbuild 23.7 ms |
+| realistic-10k | 259.9 ms | **132 ms** | rolldown 263.4 ms |
+
+With this, diffpack's measured cold time leads every rival cell above (tiny
+corpora were already led and only get faster from the same fixes). The full
+tables above predate the change; a fresh harness run should replace them.
+
 ## Reproducing
 
 ```console

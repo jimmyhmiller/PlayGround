@@ -644,9 +644,11 @@ impl Bundler {
             .map_err(|error| format!("cannot open entry {}: {error}", entry.display()))?;
         let entry_id = module_id(&entry_path);
         let resolver = Resolver::new(resolve_options(config));
-        let frontend_threads = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(4);
+        // Use every core: parse/transform dominates cold-build CPU and scales
+        // near-linearly (each module is independent). The old `.min(4)` cap
+        // held a 32-core machine to ~2.7 CPUs utilized on a 1000-module cold
+        // build — the single largest cold-wall-time cost found by profiling.
+        let frontend_threads = std::thread::available_parallelism().map_or(1, usize::from);
         let mut bundler = Self {
             entry: 0,
             ids: Vec::new(),
@@ -1962,33 +1964,95 @@ impl Bundler {
         diagnostics: &mut Vec<String>,
         record_delta: bool,
     ) -> Result<usize, String> {
-        let mut frontier = paths.into_iter().collect::<BTreeSet<_>>();
-        let mut transformed = 0;
-        while !frontier.is_empty() {
-            let paths = frontier
-                .into_iter()
-                .filter(|path| {
-                    self.indices
-                        .get(path.as_ref())
-                        .is_none_or(|index| self.modules[*index].is_none())
-                })
-                .collect::<Vec<_>>();
-            let loaded = self.frontend_pool.install(|| {
-                paths
-                    .into_par_iter()
-                    .map(|path| {
-                        let result = load_uncached(
-                            &self.resolver,
-                            &self.resolution_cache,
-                            Path::new(path.as_ref()),
-                            self.target,
-                            self.hmr,
-                        );
-                        (path, result)
-                    })
-                    .collect::<Vec<_>>()
+        // Pipelined discovery: a module's dependencies are spawned the moment
+        // its own load finishes — no wave barrier, so workers never idle while
+        // a breadth-first frontier drains (the previous fork-join-per-wave
+        // structure capped a 32-core machine at ~3x parallelism on a fan-out
+        // graph, because early waves have 1-4 modules and every wave ends in a
+        // full join). A shared seen-set dedups spawns; results are interned
+        // afterwards in sorted-path order, so dense ids — and therefore every
+        // downstream byte — stay deterministic run to run.
+        type LoadResults = Vec<(SharedModuleId, Result<LoadedModule, String>)>;
+        struct DiscoverShared<'bundler> {
+            resolver: &'bundler Resolver,
+            resolution_cache: &'bundler ResolutionCache,
+            target: Target,
+            hmr: bool,
+            indices: &'bundler HashMap<SharedModuleId, DenseModuleId>,
+            modules: &'bundler Vec<Option<ModuleState>>,
+            state: std::sync::Mutex<(HashSet<SharedModuleId>, LoadResults)>,
+        }
+        impl DiscoverShared<'_> {
+            fn already_loaded(&self, path: &str) -> bool {
+                self.indices
+                    .get(path)
+                    .is_some_and(|index| self.modules[*index].is_some())
+            }
+        }
+        fn spawn_load<'scope>(
+            scope: &rayon::Scope<'scope>,
+            shared: &'scope DiscoverShared<'scope>,
+            path: SharedModuleId,
+        ) {
+            scope.spawn(move |scope| {
+                let result = load_uncached(
+                    shared.resolver,
+                    shared.resolution_cache,
+                    Path::new(path.as_ref()),
+                    shared.target,
+                    shared.hmr,
+                );
+                let mut next = Vec::new();
+                {
+                    let mut guard = shared.state.lock().unwrap();
+                    if let Ok(loaded) = &result {
+                        for (_, target, _) in &loaded.dependencies {
+                            if !shared.already_loaded(target)
+                                && guard.0.insert(target.clone())
+                            {
+                                next.push(target.clone());
+                            }
+                        }
+                    }
+                    guard.1.push((path, result));
+                }
+                for target in next {
+                    spawn_load(scope, shared, target);
+                }
             });
-            frontier = BTreeSet::new();
+        }
+
+        let initial = paths
+            .into_iter()
+            .filter(|path| {
+                self.indices
+                    .get(path.as_ref())
+                    .is_none_or(|index| self.modules[*index].is_none())
+            })
+            .collect::<BTreeSet<_>>();
+        let shared = DiscoverShared {
+            resolver: &self.resolver,
+            resolution_cache: &self.resolution_cache,
+            target: self.target,
+            hmr: self.hmr,
+            indices: &self.indices,
+            modules: &self.modules,
+            state: std::sync::Mutex::new((initial.iter().cloned().collect(), Vec::new())),
+        };
+        self.frontend_pool.install(|| {
+            rayon::scope(|scope| {
+                for path in initial {
+                    spawn_load(scope, &shared, path);
+                }
+            });
+        });
+        let mut loaded = shared.state.into_inner().unwrap().1;
+        // Sorted-path interning keeps dense-id assignment independent of
+        // completion order (the parallel schedule is nondeterministic).
+        loaded.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut transformed = 0;
+        {
             for (path, result) in loaded {
                 if self
                     .indices
@@ -2008,9 +2072,6 @@ impl Bundler {
                         delta
                             .edge_updates
                             .push(((path.to_string(), target.to_string()), 1));
-                    }
-                    if self.modules[target_index].is_none() {
-                        frontier.insert(target.clone());
                     }
                     dependencies.push((specifier, target_index, demand));
                 }
@@ -2368,38 +2429,55 @@ impl Bundler {
         } else {
             demands[entry].all = true;
         }
+        // Per-module shake + dynamic-import rewrite is independent work; run it
+        // across the pool (order preserved by the indexed collect) and keep only
+        // the concatenation serial. On a 1000-module cold build the serial
+        // version of this loop was a measurable slice of total wall time.
+        let shaken = self.frontend_pool.install(|| {
+            order
+                .par_iter()
+                .map(|&dense_index| -> Option<String> {
+                    let module = self.modules[dense_index].as_ref()?;
+                    let flat = module.flat_module.as_ref()?;
+                    let mut module_code = shake_module_code(
+                        &flat.code,
+                        &demands[dense_index],
+                        &module.pruned_imports,
+                    );
+                    for (specifier, target, demand) in &module.dependencies {
+                        if !demand.dynamic {
+                            continue;
+                        }
+                        let chunk = chunk_names.get(target)?;
+                        let import = format!("import({})", quote(specifier));
+                        let lowered_import = format!("__dynamic(require, {})", quote(specifier));
+                        // In ESM output the split chunk is a real `.mjs`, so a
+                        // native dynamic `import()` of the chunk path loads it
+                        // and resolves to its namespace. In CJS output the chunk
+                        // is `module.exports`, so the load goes through the host
+                        // `require`.
+                        let replacement = if format.is_esm() {
+                            format!("import({})", quote(chunk))
+                        } else {
+                            format!("Promise.resolve().then(()=>require({}))", quote(chunk))
+                        };
+                        if module_code.contains(&import) {
+                            module_code = module_code.replace(&import, &replacement);
+                        } else if module_code.contains(&lowered_import) {
+                            module_code = module_code.replace(&lowered_import, &replacement);
+                        } else {
+                            return None;
+                        }
+                    }
+                    Some(module_code)
+                })
+                .collect::<Vec<_>>()
+        });
         let mut code = String::new();
         let mut mappings = Vec::with_capacity(order.len());
         let mut generated_line = 0_u32;
-        for dense_index in order {
-            let module = self.modules[dense_index].as_ref()?;
-            let flat = module.flat_module.as_ref()?;
-            let mut module_code =
-                shake_module_code(&flat.code, &demands[dense_index], &module.pruned_imports);
-            for (specifier, target, demand) in &module.dependencies {
-                if !demand.dynamic {
-                    continue;
-                }
-                let chunk = chunk_names.get(target)?;
-                let import = format!("import({})", quote(specifier));
-                let lowered_import = format!("__dynamic(require, {})", quote(specifier));
-                // In ESM output the split chunk is a real `.mjs`, so a native
-                // dynamic `import()` of the chunk path loads it and resolves to
-                // its namespace. In CJS output the chunk is `module.exports`, so
-                // the load goes through the host `require`.
-                let replacement = if format.is_esm() {
-                    format!("import({})", quote(chunk))
-                } else {
-                    format!("Promise.resolve().then(()=>require({}))", quote(chunk))
-                };
-                if module_code.contains(&import) {
-                    module_code = module_code.replace(&import, &replacement);
-                } else if module_code.contains(&lowered_import) {
-                    module_code = module_code.replace(&lowered_import, &replacement);
-                } else {
-                    return None;
-                }
-            }
+        for (&dense_index, module_code) in order.iter().zip(&shaken) {
+            let module_code = module_code.as_ref()?;
             if !module_code.is_empty() {
                 let generated_lines = module_code.lines().count() as u32;
                 mappings.push(ModuleMapping {
@@ -2408,7 +2486,7 @@ impl Bundler {
                     generated_lines,
                 });
                 generated_line += generated_lines;
-                code.push_str(&module_code);
+                code.push_str(module_code);
             }
         }
         if !is_main {

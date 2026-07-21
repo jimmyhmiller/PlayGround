@@ -9,7 +9,14 @@
 //! starts retaining every AST, leaking per-edit revisions, or ballooning peak
 //! memory.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
+
+/// The real allocator underneath the accounting layer. MiMalloc replaces the
+/// glibc allocator because the parallel frontend allocates heavily from 32
+/// threads at once, where glibc's arena locking measurably serializes the
+/// build; the accounting layer above it is unchanged, so the deterministic
+/// byte counts the thesis guards assert are identical.
+static INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -17,12 +24,32 @@ static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
-/// A `System`-backed global allocator that tallies live, peak, and cumulative
+/// A MiMalloc-backed global allocator that tallies live, peak, and cumulative
 /// allocation so the guard suite can measure memory deterministically.
 pub struct TrackingAllocator;
 
+/// Accounting is OFF unless a measurement explicitly enables it
+/// ([`enable_accounting`]). The counters are shared atomics, and updating them
+/// from every allocation on a 32-thread build is real cache-line contention —
+/// profiling showed hundreds of microseconds of added CPU per module on the
+/// parallel frontend. A relaxed load of a read-only `false` is effectively
+/// free, so production builds pay nothing; the guard suite and
+/// `bundle-scale-memory` turn accounting on before measuring and keep their
+/// deterministic, exact counts.
+static ACCOUNTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns allocation accounting on for the rest of the process. Counters start
+/// from zero at this point; measurements must snapshot a baseline afterwards
+/// and compare deltas (which the guard suite already does).
+pub fn enable_accounting() {
+    ACCOUNTING.store(true, Ordering::Relaxed);
+}
+
 impl TrackingAllocator {
     fn on_alloc(size: usize) {
+        if !ACCOUNTING.load(Ordering::Relaxed) {
+            return;
+        }
         TOTAL_BYTES.fetch_add(size, Ordering::Relaxed);
         TOTAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
         let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
@@ -30,7 +57,14 @@ impl TrackingAllocator {
     }
 
     fn on_free(size: usize) {
-        LIVE_BYTES.fetch_sub(size, Ordering::Relaxed);
+        if !ACCOUNTING.load(Ordering::Relaxed) {
+            return;
+        }
+        // Saturating: an allocation made before accounting was enabled may be
+        // freed after, and must not wrap the live counter.
+        let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+            Some(live.saturating_sub(size))
+        });
     }
 }
 
@@ -39,7 +73,7 @@ impl TrackingAllocator {
 // reads and updates counters and never touches the returned memory.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
+        let ptr = unsafe { INNER.alloc(layout) };
         if !ptr.is_null() {
             Self::on_alloc(layout.size());
         }
@@ -47,12 +81,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
+        unsafe { INNER.dealloc(ptr, layout) };
         Self::on_free(layout.size());
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc_zeroed(layout) };
+        let ptr = unsafe { INNER.alloc_zeroed(layout) };
         if !ptr.is_null() {
             Self::on_alloc(layout.size());
         }
@@ -60,7 +94,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        let new_ptr = unsafe { INNER.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             let old_size = layout.size();
             if new_size >= old_size {

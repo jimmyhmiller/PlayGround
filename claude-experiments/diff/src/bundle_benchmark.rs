@@ -385,6 +385,9 @@ pub fn run_bundle_scale_memory(
     let entry = workspace.path.join(module_name(0));
     let output = workspace.path.join("dist/bundle.js");
 
+    // Accounting is off by default (it costs real contention on the parallel
+    // frontend); this measurement is what it exists for.
+    crate::memory::enable_accounting();
     // Baseline after generation, before any graph exists.
     let baseline = crate::memory::snapshot().live_bytes;
     crate::memory::reset_peak();
