@@ -1,6 +1,7 @@
 pub mod bundle_benchmark;
 pub mod bundler;
 pub mod config;
+pub mod css;
 pub mod dead_branch;
 pub mod dev_server;
 pub mod env_file;

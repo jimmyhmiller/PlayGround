@@ -44,6 +44,16 @@ struct ModuleState {
     /// (`import "./app.css"`). Extracted and concatenated into the output
     /// stylesheet in module execution order; `None` for a normal JS module.
     css: Option<String>,
+    /// Physical CSS files (other than this module's own path) whose content was
+    /// INLINED into this module's `css` — a media-qualified `@import`'s nested
+    /// imports. An edit to any of them must re-derive this module
+    /// ([`Bundler::rebuild_path`] scans for dependents); empty everywhere else.
+    css_source_files: Vec<PathBuf>,
+    /// Remote/absolute `@import` statements this module's CSS carried
+    /// (`@import url(https://...)`). Hoisted verbatim, deduped, to the top of
+    /// the emitted stylesheet by [`Bundler::emit_css`], because an `@import` is
+    /// only valid before all rules.
+    css_external_imports: Vec<String>,
     /// External specifiers (Node built-ins) this module imports. Left in the
     /// output for the runtime to resolve; a module with externals renders through
     /// the runtime path, since the flat path cannot bind an external.
@@ -83,6 +93,8 @@ struct LoadedModule {
     diagnostics: Vec<String>,
     assets: Vec<AssetEmit>,
     css: Option<String>,
+    css_source_files: Vec<PathBuf>,
+    css_external_imports: Vec<String>,
     externals: Vec<String>,
     droppable: bool,
     liveness: ModuleLiveness,
@@ -665,57 +677,62 @@ impl Bundler {
     pub fn is_known_module(&self, path: &Path) -> bool {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let id = module_id(&path);
+        // A physical file is "known" when it is a module itself, when a
+        // query-derived virtual module reads from it (`x.css?media=screen`,
+        // `logo.png?url`), or when a media-qualified CSS module inlined its
+        // content — in every case [`Self::rebuild_path`] can meaningfully apply
+        // an edit to it.
         self.indices
             .get(id.as_ref())
             .and_then(|&index| self.modules[index].as_ref())
             .is_some()
+            || !self.derived_virtual_siblings(id.as_ref()).is_empty()
+            || !self.css_inline_dependents(&path).is_empty()
     }
 
     pub fn rebuild_path(&mut self, path: &Path) -> Result<BuildUpdate, String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let id = module_id(&path);
-        let Some(&index) = self.indices.get(id.as_ref()) else {
-            return Ok(BuildUpdate {
-                delta: GraphDelta::default(),
-                transformed_modules: 0,
-                diagnostics: Vec::new(),
-            });
-        };
-        let Some(old) = self.modules[index].clone() else {
-            return Ok(BuildUpdate {
-                delta: GraphDelta::default(),
-                transformed_modules: 0,
-                diagnostics: Vec::new(),
-            });
-        };
-
         let mut delta = GraphDelta::default();
         let mut diagnostics = Vec::new();
-        if !path.is_file() {
-            delta.changed.insert(id.to_string());
-            for (_, target, _) in &old.dependencies {
-                delta
-                    .edge_updates
-                    .push(((id.to_string(), self.ids[*target].to_string()), -1));
-            }
-            self.modules[index] = None;
-            return Ok(BuildUpdate {
-                delta,
-                transformed_modules: 0,
-                diagnostics,
-            });
-        }
+        let mut transformed_modules = 0;
 
-        let mut transformed_modules =
-            self.reload_known_module(index, id.as_ref(), &path, &mut delta, &mut diagnostics)?;
+        let known = self
+            .indices
+            .get(id.as_ref())
+            .copied()
+            .filter(|&index| self.modules[index].is_some());
+        if let Some(index) = known {
+            let Some(old) = self.modules[index].clone() else {
+                unreachable!("known index always holds a module");
+            };
+            if !path.is_file() {
+                delta.changed.insert(id.to_string());
+                for (_, target, _) in &old.dependencies {
+                    delta
+                        .edge_updates
+                        .push(((id.to_string(), self.ids[*target].to_string()), -1));
+                }
+                self.modules[index] = None;
+                return Ok(BuildUpdate {
+                    delta,
+                    transformed_modules: 0,
+                    diagnostics,
+                });
+            }
+            transformed_modules +=
+                self.reload_known_module(index, id.as_ref(), &path, &mut delta, &mut diagnostics)?;
+        }
 
         // Derived virtual modules read their source from this same physical file —
         // notably the route `?tsr-split=<target>` chunks, whose actual component /
-        // loader bodies live in the file that just changed. A physical-file edit
-        // must therefore re-derive every such sibling, or the split chunk on disk
-        // would keep the pre-edit body while the reference module (which does NOT
-        // contain the body) reports "unchanged". Each sibling is loaded from its
-        // full id string (which carries the loader query).
+        // loader bodies live in the file that just changed, and the CSS
+        // `?media=<query>` modules built from it. A physical-file edit must
+        // re-derive every such sibling, or the derived module on disk would keep
+        // the pre-edit content. Each sibling is loaded from its full id string
+        // (which carries the loader query). This runs even when the bare path is
+        // not a module itself (e.g. a CSS file only ever imported with a media
+        // query).
         for (sibling_index, sibling_id) in self.derived_virtual_siblings(id.as_ref()) {
             transformed_modules += self.reload_known_module(
                 sibling_index,
@@ -726,11 +743,43 @@ impl Bundler {
             )?;
         }
 
+        // Modules whose emitted CSS INLINED this file's content (a
+        // media-qualified `@import`'s nested imports) must also re-derive, or
+        // their stylesheet text would keep the pre-edit bytes. The recorded
+        // `css_source_files` lists are transitively flattened at load time, so
+        // one pass suffices.
+        for (dependent_index, dependent_id) in self.css_inline_dependents(&path) {
+            transformed_modules += self.reload_known_module(
+                dependent_index,
+                &dependent_id,
+                Path::new(&dependent_id),
+                &mut delta,
+                &mut diagnostics,
+            )?;
+        }
+
         Ok(BuildUpdate {
             delta,
             transformed_modules,
             diagnostics,
         })
+    }
+
+    /// Every currently-loaded module whose emitted CSS inlined the content of
+    /// the physical file at `path` (recorded in `css_source_files`). These must
+    /// be re-derived when that file changes. Returns `(dense index, full id)`
+    /// pairs.
+    fn css_inline_dependents(&self, path: &Path) -> Vec<(DenseModuleId, String)> {
+        self.ids
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                self.modules[*index]
+                    .as_ref()
+                    .is_some_and(|module| module.css_source_files.iter().any(|file| file == path))
+            })
+            .map(|(index, id)| (index, id.to_string()))
+            .collect()
     }
 
     /// Reload one already-known module (dense `index`, string `id`, and the
@@ -1683,12 +1732,27 @@ impl Bundler {
             ids.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
             ids
         });
+        // Remote `@import`s (scheme URLs that cannot be inlined) are hoisted,
+        // deduped, to the very top: an @import is only valid before all rules,
+        // so leaving one at its source position in the concatenation would be
+        // silently ignored by the browser.
         let mut stylesheet = String::new();
+        let mut hoisted = BTreeSet::new();
+        for dense in &order {
+            if let Some(module) = self.modules[*dense].as_ref() {
+                for external in &module.css_external_imports {
+                    if hoisted.insert(external.clone()) {
+                        stylesheet.push_str(external);
+                        stylesheet.push('\n');
+                    }
+                }
+            }
+        }
         for dense in order {
             if let Some(module) = self.modules[dense].as_ref()
                 && let Some(css) = &module.css
             {
-                if !stylesheet.is_empty() {
+                if !stylesheet.is_empty() && !stylesheet.ends_with('\n') {
                     stylesheet.push('\n');
                 }
                 stylesheet.push_str(css);
@@ -1940,6 +2004,8 @@ impl Bundler {
                     code: loaded.code,
                     assets: loaded.assets,
                     css: loaded.css,
+                    css_source_files: loaded.css_source_files,
+                    css_external_imports: loaded.css_external_imports,
                     externals: loaded.externals,
                     droppable: loaded.droppable,
                     liveness: loaded.liveness,
@@ -1995,6 +2061,8 @@ impl Bundler {
                 code: special.code,
                 assets: special.assets,
                 css: special.css,
+                css_source_files: special.css_source_files,
+                css_external_imports: special.css_external_imports,
                 externals: resolved.externals,
                 droppable: false,
                 liveness: ModuleLiveness::default(),
@@ -2042,6 +2110,8 @@ impl Bundler {
                 code: special.code,
                 assets: special.assets,
                 css: special.css,
+                css_source_files: special.css_source_files,
+                css_external_imports: special.css_external_imports,
                 externals: resolved.externals,
                 droppable: false,
                 liveness: ModuleLiveness::default(),
@@ -2117,6 +2187,8 @@ impl Bundler {
             code: transformed.code,
             assets: Vec::new(),
             css: None,
+            css_source_files: Vec::new(),
+            css_external_imports: Vec::new(),
             externals: resolved_dependencies.externals,
             droppable,
             liveness: transformed.liveness,
@@ -3718,6 +3790,8 @@ fn load_uncached(
             diagnostics,
             assets: special.assets,
             css: special.css,
+            css_source_files: special.css_source_files,
+            css_external_imports: special.css_external_imports,
             externals: resolved.externals,
             droppable: false,
             liveness: ModuleLiveness::default(),
@@ -3759,6 +3833,8 @@ fn load_uncached(
             diagnostics,
             assets: special.assets,
             css: special.css,
+            css_source_files: special.css_source_files,
+            css_external_imports: special.css_external_imports,
             externals: resolved.externals,
             droppable: false,
             liveness: ModuleLiveness::default(),
@@ -3811,6 +3887,8 @@ fn load_uncached(
         diagnostics,
         assets: Vec::new(),
         css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
         externals: dependencies.externals,
         droppable,
         liveness: transformed.liveness,
@@ -3843,6 +3921,10 @@ struct SpecialModule {
     flat_module: Option<FlatModule>,
     assets: Vec<AssetEmit>,
     css: Option<String>,
+    /// See [`ModuleState::css_source_files`].
+    css_source_files: Vec<PathBuf>,
+    /// See [`ModuleState::css_external_imports`].
+    css_external_imports: Vec<String>,
     /// Import specifiers and per-specifier demand the synthesized code carries.
     /// Empty for a leaf synthetic module (an asset URL, a `?raw` string, an
     /// extracted stylesheet). A route-split (`?tsr-split`) module, by contrast, is
@@ -3870,6 +3952,9 @@ fn load_special_module(
     if resource.query.is_some() {
         return Some(synthesize_query_module(&resource, target));
     }
+    if crate::css::is_css_module_path(path) {
+        return Some(load_css_module(path, target));
+    }
     if is_css_path(path) {
         return Some(load_stylesheet(path));
     }
@@ -3892,8 +3977,262 @@ fn synthesize_query_module(
         Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path)),
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
         Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
+        Some(LoaderKind::CssMedia) => synthesize_css_media(resource),
         None => Err(resource.unimplemented_loader_error()),
     }
+}
+
+/// A `?media=<query>` module: a CSS file imported under a media query
+/// (`@import './x.css' screen;`). Its emitted stylesheet text is the file's
+/// content — imports inlined recursively, `url(...)`s resolved relative to each
+/// contributing file, CSS Modules scoped — wrapped in `@media <query> { ... }`.
+/// The module id carries the query, so `(file, media)` pairs dedup naturally
+/// and the physical file's edits re-derive it via the derived-sibling scan.
+fn synthesize_css_media(resource: &ResourceId) -> Result<SpecialModule, String> {
+    let path = Path::new(&resource.path);
+    if !is_css_path(path) {
+        return Err(format!(
+            "loader `?media` applies only to CSS files (requested for {})",
+            resource.path
+        ));
+    }
+    let media = resource
+        .query
+        .as_deref()
+        .and_then(|query| query.strip_prefix("media="))
+        .filter(|media| !media.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "loader `?media` requires a media query value (requested for {})",
+                resource.path
+            )
+        })?;
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let processed = crate::css::process_media_import(path, &text, media)?;
+    Ok(SpecialModule {
+        hash: content_hash(processed.css.as_bytes()),
+        code: String::new(),
+        flat_module: None,
+        assets: css_assets_to_emits(processed.assets),
+        css: Some(processed.css),
+        css_source_files: processed.inlined_files,
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    })
+}
+
+/// Converts CSS-referenced assets into the shared emit records; they join the
+/// same content-hashed `assets/` pipeline (and public-name dedup) as `?url`.
+fn css_assets_to_emits(assets: Vec<crate::css::CssAsset>) -> Vec<AssetEmit> {
+    assets
+        .into_iter()
+        .map(|asset| AssetEmit {
+            source: asset.source,
+            public_name: asset.public_name,
+            tailwind_source: None,
+        })
+        .collect()
+}
+
+/// The resolver specifier for one CSS `@import` edge: the target as written for
+/// a plain import, or the target with the media query folded into a `?media=`
+/// loader query for a media-qualified one.
+fn css_import_specifier(import: &crate::css::CssImport) -> String {
+    match &import.media {
+        None => import.specifier.clone(),
+        Some(media) => format!("{}?media={media}", import.specifier),
+    }
+}
+
+/// The dependency demand for a stylesheet-to-stylesheet `@import` edge. The
+/// target exports nothing; `all` keeps the edge (and the target's CSS) alive.
+fn css_import_demand(specifier: String) -> DependencyDemand {
+    DependencyDemand {
+        specifier,
+        all: true,
+        names: Vec::new(),
+        dynamic: false,
+    }
+}
+
+/// Whether `name` can be a JavaScript named export (`export const <name> = …`):
+/// a valid identifier that is not a reserved word.
+fn is_valid_js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return false;
+    }
+    !matches!(
+        name,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+            | "let"
+            | "static"
+            | "await"
+            | "implements"
+            | "interface"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "arguments"
+            | "eval"
+    )
+}
+
+/// A CSS Module (`*.module.css`) imported from JavaScript: the stylesheet is
+/// scoped (deterministic `_<local>_<hash>` names) and joins the emitted CSS
+/// concatenation, and the module's JavaScript is a synthesized mapping —
+/// matching Vite's default CSS Modules behavior: the DEFAULT export is the
+/// `original local -> scoped name(s)` object, plus a named export for every
+/// mapping key that is a valid JS identifier. Cross-file `composes` become real
+/// import edges resolved from the other module's mapping AT RUNTIME (with an
+/// explicit throw if the composed name is not exported — never a silent
+/// `undefined`), so editing the composed file invalidates through the ordinary
+/// module graph without re-deriving the composer.
+fn load_css_module(path: &Path, target: Target) -> Result<SpecialModule, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let processed = crate::css::process_css_module(path, &text)?;
+    let mut js = String::new();
+    for (index, specifier) in processed.compose_imports.iter().enumerate() {
+        js.push_str(&format!(
+            "import __composed_{index} from {};\n",
+            quote(specifier)
+        ));
+    }
+    let has_foreign = processed.mapping.iter().any(|(_, segments)| {
+        segments
+            .iter()
+            .any(|segment| matches!(segment, crate::css::MappingSegment::Foreign { .. }))
+    });
+    if has_foreign {
+        js.push_str(concat!(
+            "const __compose = (mapping, name, from) => {\n",
+            "  const value = mapping[name];\n",
+            "  if (value === undefined) {\n",
+            "    throw new Error(\"composes target \\\"\" + name + \"\\\" is not exported by \" + from);\n",
+            "  }\n",
+            "  return value;\n",
+            "};\n",
+        ));
+    }
+    js.push_str("const __styles = {\n");
+    for (name, segments) in &processed.mapping {
+        let mut parts: Vec<String> = Vec::new();
+        let mut literal_run: Option<String> = None;
+        for segment in segments {
+            match segment {
+                crate::css::MappingSegment::Literal(literal) => match &mut literal_run {
+                    Some(run) => {
+                        run.push(' ');
+                        run.push_str(literal);
+                    }
+                    None => literal_run = Some(literal.clone()),
+                },
+                crate::css::MappingSegment::Foreign { import, name } => {
+                    if let Some(run) = literal_run.take() {
+                        parts.push(quote(&run));
+                    }
+                    parts.push(format!(
+                        "__compose(__composed_{import}, {}, {})",
+                        quote(name),
+                        quote(&processed.compose_imports[*import])
+                    ));
+                }
+            }
+        }
+        if let Some(run) = literal_run.take() {
+            parts.push(quote(&run));
+        }
+        js.push_str(&format!(
+            "  {}: {},\n",
+            quote(name),
+            parts.join(" + \" \" + ")
+        ));
+    }
+    js.push_str("};\nexport default __styles;\n");
+    for (name, _) in &processed.mapping {
+        if is_valid_js_identifier(name) {
+            js.push_str(&format!("export const {name} = __styles[{}];\n", quote(name)));
+        }
+    }
+    let transformed = transform_module(Path::new("diffpack-css-module.js"), &js, target);
+    // The synthesized mapping module's own imports (the cross-file composes)
+    // plus the stylesheet's `@import` edges all become real graph dependencies,
+    // resolved relative to the CSS file.
+    let mut dependency_specifiers = transformed.dependencies;
+    let mut dependency_demands = transformed.dependency_demands;
+    for import in &processed.imports {
+        let specifier = css_import_specifier(import);
+        if !dependency_specifiers.contains(&specifier) {
+            dependency_specifiers.push(specifier.clone());
+            dependency_demands.push(css_import_demand(specifier));
+        }
+    }
+    // The module's identity folds in everything it emits: the scoped CSS, the
+    // mapping JavaScript, and the hoisted external imports.
+    let mut identity = processed.css.clone();
+    identity.push('\0');
+    identity.push_str(&transformed.code);
+    for external in &processed.external_imports {
+        identity.push('\0');
+        identity.push_str(external);
+    }
+    Ok(SpecialModule {
+        hash: content_hash(identity.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: css_assets_to_emits(processed.assets),
+        css: Some(processed.css),
+        css_source_files: processed.inlined_files,
+        css_external_imports: processed.external_imports,
+        dependency_specifiers,
+        dependency_demands,
+    })
 }
 
 /// A `?tsr-split=<target>` virtual module: the route property extracted from the
@@ -3922,6 +4261,8 @@ fn synthesize_tsr_split(
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
         // The split module imports React and the route's own module-level deps;
         // carry them so the load paths resolve them into real graph edges.
         dependency_specifiers: transformed.dependencies,
@@ -3940,6 +4281,8 @@ fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
         // A virtual module may itself import real modules — the native server-fn
         // resolver dynamically `import()`s each server-fn module by absolute path.
         // Those specifiers MUST become graph edges (like a `?tsr-split` module's),
@@ -3984,6 +4327,8 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
             tailwind_source,
         }],
         css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
         dependency_specifiers: Vec::new(),
         dependency_demands: Vec::new(),
     })
@@ -4001,24 +4346,58 @@ fn synthesize_raw(source_path: &Path) -> Result<SpecialModule, String> {
         flat_module: transformed.flat_module,
         assets: Vec::new(),
         css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
         dependency_specifiers: Vec::new(),
         dependency_demands: Vec::new(),
     })
 }
 
 /// A global stylesheet import: an empty JavaScript module (the import has no
-/// bindings) whose text is extracted into the output stylesheet.
+/// bindings) whose text is extracted into the output stylesheet. Its top-level
+/// `@import`s become real graph dependency edges (the imported file's CSS is
+/// emitted before the importer's, deduped once per graph) and its relative
+/// `url(...)`s are rewritten to content-hashed public asset URLs.
 fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    // A Tailwind v4 entry's `@import 'tailwindcss'` is a COMPILER invocation,
+    // not a stylesheet import; resolving it through the module resolver would
+    // inline the wrong thing. The supported path (which the reference app uses)
+    // imports the entry as `?url`, where the emit step compiles it natively.
+    if crate::tailwind::is_tailwind_entry(&text) {
+        return Err(format!(
+            "{} is a Tailwind v4 CSS entry; importing it as a global stylesheet is not \
+             supported — import it with `?url` so the emit step compiles it",
+            path.display()
+        ));
+    }
+    let processed = crate::css::process_global_css(path, &text)?;
+    let mut identity = processed.css.clone();
+    for external in &processed.external_imports {
+        identity.push('\0');
+        identity.push_str(external);
+    }
+    let dependency_specifiers = processed
+        .imports
+        .iter()
+        .map(css_import_specifier)
+        .collect::<Vec<_>>();
+    let dependency_demands = dependency_specifiers
+        .iter()
+        .cloned()
+        .map(css_import_demand)
+        .collect();
     Ok(SpecialModule {
-        hash: content_hash(text.as_bytes()),
+        hash: content_hash(identity.as_bytes()),
         code: String::new(),
         flat_module: None,
-        assets: Vec::new(),
-        css: Some(text),
-        dependency_specifiers: Vec::new(),
-        dependency_demands: Vec::new(),
+        assets: css_assets_to_emits(processed.assets),
+        css: Some(processed.css),
+        css_source_files: processed.inlined_files,
+        css_external_imports: processed.external_imports,
+        dependency_specifiers,
+        dependency_demands,
     })
 }
 
@@ -4077,7 +4456,7 @@ fn is_asset_path(path: &Path) -> bool {
 }
 
 /// The content-hashed public filename for an asset, e.g. `app-1a2b3c4d5e6f7080.css`.
-fn asset_public_name(path: &Path, hash: u64) -> String {
+pub(crate) fn asset_public_name(path: &Path, hash: u64) -> String {
     let stem = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -4606,7 +4985,7 @@ fn module_id_with_resource(path: &Path, resource: &ResourceId) -> SharedModuleId
     SharedModuleId::from(reattached.to_id())
 }
 
-fn content_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn content_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -4955,6 +5334,527 @@ mod tests {
             );
             assert_eq!(String::from_utf8_lossy(&executed.stdout), "ok\n");
         }
+    }
+
+    /// The first `/assets/...` URL with the given stem referenced by `css`.
+    fn asset_url_in<'c>(css: &'c str, stem: &str) -> &'c str {
+        let start = css
+            .find(&format!("/assets/{stem}-"))
+            .unwrap_or_else(|| panic!("no /assets/{stem}- reference in: {css}"));
+        css[start..]
+            .split(['"', ')'])
+            .next()
+            .expect("the url is terminated")
+    }
+
+    #[test]
+    fn css_module_import_exports_scoped_mapping_with_vite_default_and_named_exports() {
+        // Vite's default CSS Modules behavior (no `css.modules` config): the
+        // default export is the locals -> scoped-names object, AND every
+        // identifier-safe local is also a named export. Non-identifier locals
+        // (`btn-primary`) appear only in the default object.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("button.module.css"),
+            ".btn { color: red; }\n\
+             .btn:hover { color: blue; }\n\
+             .btn-primary > .icon, .btn-primary::before { color: green; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles, { btn, icon } from './button.module.css';\n\
+             console.log(styles.btn === btn, styles.icon === icon);\n\
+             console.log(JSON.stringify(styles));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        // The stylesheet carries the scoped selectors and no unscoped local.
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("._btn_"), "{css}");
+        assert!(css.contains(":hover"), "{css}");
+        assert!(css.contains("._btn-primary_"), "{css}");
+        assert!(!css.contains(".btn "), "unscoped local leaked: {css}");
+        assert!(!css.contains(".btn:"), "unscoped local leaked: {css}");
+        assert!(!css.contains(".icon"), "unscoped local leaked: {css}");
+
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&executed.stdout);
+            let mut lines = stdout.lines();
+            assert_eq!(
+                lines.next(),
+                Some("true true"),
+                "named exports must alias the default mapping: {stdout}"
+            );
+            let mapping: serde_json::Value =
+                serde_json::from_str(lines.next().expect("mapping line")).unwrap();
+            let btn = mapping["btn"].as_str().expect("btn mapping");
+            assert!(
+                btn.starts_with("_btn_") && btn.len() == "_btn_".len() + 8,
+                "scoped name format `_btn_<hash8>`: {btn}"
+            );
+            let primary = mapping["btn-primary"].as_str().expect("btn-primary mapping");
+            assert!(primary.starts_with("_btn-primary_"), "{primary}");
+            // The scoped selector in the emitted CSS is exactly the exported name.
+            assert!(css.contains(&format!(".{btn}")), "{css}");
+        }
+    }
+
+    #[test]
+    fn css_module_global_escape_hatch_and_same_file_composes() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("card.module.css"),
+            ":global(.theme-dark) .card { color: white; }\n\
+             .base { padding: 4px; }\n\
+             .fancy { composes: base; color: blue; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles from './card.module.css';\n\
+             console.log(styles.fancy);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        // The :global(...) contents are unscoped and the wrapper is gone.
+        assert!(css.contains(".theme-dark ._card_"), "{css}");
+        assert!(!css.contains(":global"), "{css}");
+        // composes never reaches the emitted CSS.
+        assert!(!css.contains("composes"), "{css}");
+
+        if Command::new("node").arg("--version").output().is_ok() {
+            let executed = Command::new("node").arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&executed.stdout);
+            let names = stdout.trim().split(' ').collect::<Vec<_>>();
+            assert_eq!(names.len(), 2, "self + composed: {stdout}");
+            assert!(names[0].starts_with("_fancy_"), "{stdout}");
+            assert!(names[1].starts_with("_base_"), "{stdout}");
+            // Both classes exist in the emitted stylesheet.
+            assert!(css.contains(&format!(".{}", names[0])), "{css}");
+            assert!(css.contains(&format!(".{}", names[1])), "{css}");
+        }
+    }
+
+    #[test]
+    fn cross_file_composes_adds_a_dependency_edge_and_tracks_edits_incrementally() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let other = directory.path().join("other.module.css");
+        fs::write(&other, ".bar { color: green; }").unwrap();
+        fs::write(
+            directory.path().join("main.module.css"),
+            ".foo { composes: bar from './other.module.css'; color: red; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles from './main.module.css';\nconsole.log(styles.foo);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (mut bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        // The composes source is a real graph module (the dependency edge).
+        let reachable = bundler.reachable_modules_direct();
+        assert!(
+            reachable.iter().any(|id| id.ends_with("other.module.css")),
+            "composes must create a dependency edge: {reachable:?}"
+        );
+        bundler.emit(&reachable, &output).unwrap();
+        let first = String::from_utf8(
+            Command::new("node").arg(&output).output().unwrap().stdout,
+        )
+        .unwrap();
+        let first_names = first.trim().split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(first_names.len(), 2, "{first}");
+        assert!(first_names[0].starts_with("_foo_"), "{first}");
+        assert!(first_names[1].starts_with("_bar_"), "{first}");
+
+        // Editing the COMPOSED file re-derives through the incremental path:
+        // its scoped name (content-hashed) changes, and the composer — whose
+        // mapping resolves the foreign name at runtime through the module graph
+        // — picks the new name up without itself being re-derived.
+        fs::write(&other, ".bar { color: purple; }").unwrap();
+        let update = bundler.rebuild_path(&other).unwrap();
+        assert!(
+            update.delta.changed.iter().any(|id| id.ends_with("other.module.css")),
+            "{update:?}"
+        );
+        bundler.emit(&bundler.reachable_modules_direct(), &output).unwrap();
+        let second = String::from_utf8(
+            Command::new("node").arg(&output).output().unwrap().stdout,
+        )
+        .unwrap();
+        let second_names = second.trim().split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            first_names[0], second_names[0],
+            "the composer's own scoped name is unchanged"
+        );
+        assert_ne!(
+            first_names[1], second_names[1],
+            "the composed file's scoped name must move with its content"
+        );
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains(&format!(".{}", second_names[1])), "{css}");
+        assert!(css.contains("color: purple"), "{css}");
+    }
+
+    #[test]
+    fn a_missing_cross_file_composes_target_throws_at_runtime_instead_of_undefined() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("other.module.css"), ".present { color: green; }")
+            .unwrap();
+        fs::write(
+            directory.path().join("main.module.css"),
+            ".foo { composes: missing from './other.module.css'; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles from './main.module.css';\nconsole.log(styles.foo);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, _) = Bundler::discover_direct(&entry).unwrap();
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let executed = Command::new("node").arg(&output).output().unwrap();
+        assert!(
+            !executed.status.success(),
+            "a missing composes target must not silently yield undefined"
+        );
+        let stderr = String::from_utf8_lossy(&executed.stderr);
+        assert!(
+            stderr.contains("composes target \"missing\" is not exported by"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn css_import_statements_become_edges_with_dedup_ordering_and_media_wrap() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("base.css"), ".base { color: red; }\n").unwrap();
+        fs::write(directory.path().join("cond.css"), ".cond { color: blue; }\n").unwrap();
+        fs::write(
+            directory.path().join("a.css"),
+            "@import './base.css';\n@import './cond.css' screen;\n.a { color: black; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("b.css"),
+            "@import './base.css';\n.b { color: white; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './a.css';\nimport './b.css';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (mut bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        // entry, a.css, b.css, base.css (deduped once), cond.css?media=screen.
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 5, "{reachable:?}");
+        assert!(
+            reachable.iter().any(|id| id.ends_with("cond.css?media=screen")),
+            "{reachable:?}"
+        );
+        bundler.emit(&reachable, &output).unwrap();
+
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(!css.contains("@import"), "no unresolved @import: {css}");
+        assert_eq!(
+            css.matches(".base ").count(),
+            1,
+            "the shared import is inlined exactly once: {css}"
+        );
+        // Imported-before-importer ordering.
+        let base = css.find(".base").unwrap();
+        let a = css.find(".a ").unwrap();
+        let b = css.find(".b ").unwrap();
+        assert!(base < a && base < b, "{css}");
+        // The media-qualified import is wrapped.
+        let media = css.find("@media screen").unwrap();
+        let cond = css.find(".cond").unwrap();
+        let close = css[media..].find('}').unwrap() + media;
+        assert!(media < cond && cond < close, "{css}");
+
+        // Editing the media-imported file re-derives its `?media` module even
+        // though the bare path is not itself a module.
+        fs::write(directory.path().join("cond.css"), ".cond { color: teal; }\n").unwrap();
+        let cond_path = directory.path().join("cond.css");
+        assert!(bundler.is_known_module(&cond_path));
+        let update = bundler.rebuild_path(&cond_path).unwrap();
+        assert_eq!(update.transformed_modules, 1, "{update:?}");
+        bundler.emit(&bundler.reachable_modules_direct(), &output).unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("color: teal"), "{css}");
+    }
+
+    #[test]
+    fn css_url_references_are_rewritten_to_hashed_assets_relative_to_each_file() {
+        let directory = tempdir().unwrap();
+        let sub = directory.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("img.png"), b"png-bytes").unwrap();
+        fs::write(
+            sub.join("inner.css"),
+            ".inner { background: url(./img.png); }\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("photo.jpg"), b"jpg-bytes").unwrap();
+        fs::write(
+            directory.path().join("top.css"),
+            "@import './sub/inner.css';\n\
+             .top { background: url('./photo.jpg'); }\n\
+             .keep { fill: url(#gradient); background: url(data:image/gif;base64,R0); }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './top.css';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        // The nested @import's url resolved relative to THAT file (sub/img.png),
+        // and both references were rewritten to hashed public URLs.
+        let img_url = asset_url_in(&css, "img");
+        let photo_url = asset_url_in(&css, "photo");
+        assert!(img_url.ends_with(".png"), "{img_url}");
+        assert!(photo_url.ends_with(".jpg"), "{photo_url}");
+        assert!(!css.contains("./img.png"), "{css}");
+        assert!(!css.contains("./photo.jpg"), "{css}");
+        // Skipped forms survive verbatim.
+        assert!(css.contains("url(#gradient)"), "{css}");
+        assert!(css.contains("url(data:image/gif;base64,R0)"), "{css}");
+        // The assets landed on disk with the referenced bytes.
+        let assets = directory.path().join("dist/assets");
+        assert_eq!(
+            fs::read(assets.join(img_url.trim_start_matches("/assets/"))).unwrap(),
+            b"png-bytes"
+        );
+        assert_eq!(
+            fs::read(assets.join(photo_url.trim_start_matches("/assets/"))).unwrap(),
+            b"jpg-bytes"
+        );
+    }
+
+    #[test]
+    fn a_nested_media_import_inlines_relative_urls_and_reacts_to_nested_edits() {
+        let directory = tempdir().unwrap();
+        let sub = directory.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("icon.png"), b"icon-bytes").unwrap();
+        fs::write(
+            sub.join("deep.css"),
+            ".deep { background: url(./icon.png); }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("wrapped.css"),
+            "@import './sub/deep.css';\n.wrapped { color: red; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("app.css"),
+            "@import './wrapped.css' print;\n.app { color: blue; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './app.css';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (mut bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        // The whole wrapped file (including its nested import) is inside the
+        // media block, and the nested file's url resolved relative to ITSELF.
+        let media = css.find("@media print").unwrap();
+        assert!(media < css.find(".deep").unwrap(), "{css}");
+        assert!(media < css.find(".wrapped").unwrap(), "{css}");
+        let icon_url = asset_url_in(&css, "icon");
+        assert_eq!(
+            fs::read(
+                directory
+                    .path()
+                    .join("dist/assets")
+                    .join(icon_url.trim_start_matches("/assets/"))
+            )
+            .unwrap(),
+            b"icon-bytes"
+        );
+
+        // An edit to the transitively INLINED nested file re-derives the media
+        // module (tracked via css_source_files), even though neither deep.css
+        // nor wrapped.css is a bare module.
+        fs::write(sub.join("deep.css"), ".deep { color: orange; }\n").unwrap();
+        let deep = sub.join("deep.css");
+        assert!(bundler.is_known_module(&deep));
+        let update = bundler.rebuild_path(&deep).unwrap();
+        assert_eq!(update.transformed_modules, 1, "{update:?}");
+        bundler.emit(&bundler.reachable_modules_direct(), &output).unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("color: orange"), "{css}");
+        let media = css.find("@media print").unwrap();
+        assert!(media < css.find(".deep").unwrap(), "the edit stays wrapped: {css}");
+    }
+
+    #[test]
+    fn remote_css_imports_are_hoisted_to_the_top_of_the_emitted_stylesheet() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("fonts.css"),
+            "@import url(https://example.com/font.css);\n.fonts { font-family: X; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './fonts.css';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(
+            css.starts_with("@import url(https://example.com/font.css);"),
+            "a remote @import is only valid before all rules, so it must be hoisted: {css}"
+        );
+        assert!(css.contains(".fonts"), "{css}");
+    }
+
+    #[test]
+    fn unsupported_css_constructs_fail_the_build_with_specific_errors() {
+        // A CSS module with an at-rule the scoper cannot handle confidently.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("odd.module.css"),
+            "@tailwind base;\n.foo { color: red; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles from './odd.module.css';\nconsole.log(styles);\n",
+        )
+        .unwrap();
+        let error = Bundler::discover_direct(&directory.path().join("entry.js"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains("unsupported at-rule `@tailwind`"), "{error}");
+        assert!(error.contains("odd.module.css"), "{error}");
+
+        // An @import form we do not support.
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("x.css"), ".x{}").unwrap();
+        fs::write(
+            directory.path().join("layered.css"),
+            "@import './x.css' layer(base);\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './layered.css';\n",
+        )
+        .unwrap();
+        let error = Bundler::discover_direct(&directory.path().join("entry.js"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error.contains("layer(...) condition is not supported"),
+            "{error}"
+        );
+        assert!(error.contains("layered.css"), "{error}");
+
+        // A url() that resolves to nothing names the CSS file and the reference.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("broken.css"),
+            ".a { background: url(./missing.png); }\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("entry.js"), "import './broken.css';\n").unwrap();
+        let error = Bundler::discover_direct(&directory.path().join("entry.js"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains("url(./missing.png)"), "{error}");
+        assert!(error.contains("broken.css"), "{error}");
+
+        // A Tailwind v4 entry imported as a global stylesheet (instead of ?url).
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("tw.css"),
+            "@import 'tailwindcss';\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("entry.js"), "import './tw.css';\n").unwrap();
+        let error = Bundler::discover_direct(&directory.path().join("entry.js"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains("Tailwind v4 CSS entry"), "{error}");
+        assert!(error.contains("?url"), "{error}");
     }
 
     #[test]

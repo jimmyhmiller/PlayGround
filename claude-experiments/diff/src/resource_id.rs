@@ -39,6 +39,12 @@ pub enum LoaderKind {
     Raw,
     /// `?tsr-split=…` — TanStack Router server/client route splitting.
     TsrSplit,
+    /// `?media=…` — a CSS file imported under a media query
+    /// (`@import './x.css' screen;`): its stylesheet text wrapped in
+    /// `@media <query> { ... }`. Synthesized by the CSS `@import` loader; the
+    /// query keys a distinct module per `(file, media)` pair so identical
+    /// media-qualified imports dedup and distinct ones stay distinct.
+    CssMedia,
 }
 
 impl LoaderKind {
@@ -48,6 +54,7 @@ impl LoaderKind {
             LoaderKind::Url => "url",
             LoaderKind::Raw => "raw",
             LoaderKind::TsrSplit => "tsr-split",
+            LoaderKind::CssMedia => "media",
         }
     }
 }
@@ -120,6 +127,7 @@ impl ResourceId {
             "url" => Some(LoaderKind::Url),
             "raw" => Some(LoaderKind::Raw),
             "tsr-split" => Some(LoaderKind::TsrSplit),
+            "media" => Some(LoaderKind::CssMedia),
             _ => None,
         }
     }
