@@ -957,6 +957,114 @@
     (store! (load (field s check_diags)) (load out))
     0))
 
+; ---- (meta …) on the COMPILED engine (interp deletion step 4) ---------------------
+; Mirrors comptime.coil::elaborate-metas / run-metas, but the generator sub-program
+; is built at the PRE-CHECK form level — metashim forms injected via meta-sub-forms,
+; exactly like the macro engine — and each meta expression is wrapped as a synthetic
+; zero-parameter Code-returning entry (`coil.meta.<i>`) that meta-engine-setup
+; compiles and meta-engine-run-env executes as native code. Result handling (splice
+; a returned `(do …)`, else push the form) and the final splice + strict re-resolve
+; + check are byte-for-byte the interpreter path's semantics.
+(defn elaborate-metas-compiled [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
+  (try (do
+    (let [out-forms (box-al [TaggedForm] a (load (field s out)))
+          sub-forms (try! (meta-sub-forms a (mut s) out-forms))
+          subls (alloc-stack LS)]
+      (store! (field subls a) a)
+      (store! (field subls out) (load sub-forms))
+      (store! (field subls loaded) (al-new [(slice u8)] a))
+      (store! (field subls imports) (load (field s imports)))
+      (store! (field subls exports) (load (field s exports)))
+      (match (resolve-program a (mut subls) false true)
+        (Err [d] (Err [(ptr Program) Diag] d))
+        (Ok [mctx]
+          (let [ms (load (field mctx metas)) nmet (al-len [Expr] (load ms))
+                (mut names) (al-new [(slice u8)] a) (mut i) 0]
+            ; one synthetic entry per (meta …) expression
+            (loop (if (icmp-ge (load i) nmet) (break)
+              (do (let [f (alloc-stack Func)
+                        fname (sconcat a "coil.meta." (i64->str a (load i)))]
+                    (store! (field f name) fname)
+                    (store! (field f type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                    (store! (field f bounds) (box-al [Bound] a (al-new [Bound] a)))
+                    (store! (field f cc) "c")
+                    (store! (field f params) (box-al [Param] a (al-new [Param] a)))
+                    (store! (field f ret) (TCode))
+                    (let [(mut bl) (al-new [Expr] a)]
+                      (al-push! (mut bl) (al-get [Expr] (load ms) (load i)))
+                      (store! (field f body) (box-al [Expr] a (load bl))))
+                    (store! (field f macro_variadic) false)
+                    (store! (field f lo) -1) (store! (field f hi) -1)
+                    (store! (field f source) -1) (store! (field f ctxt) 0)
+                    (al-push! (mut (load (field mctx funcs))) (load f))
+                    (al-push! (mut names) fname))
+                  (store! i (iadd (load i) 1)))))
+            (let [qb (box-al [(slice u8)] a (load names))
+                  seeds (meta-shim-seeds a mctx qb)
+                  wanted (closure-funcs mctx seeds a)
+                  sub (closure-subprogram mctx wanted a)
+                  checkls (alloc-stack LS)]
+              (store! (field checkls a) a)
+              (store! (field checkls out) (al-new [TaggedForm] a))
+              (store! (field checkls loaded) (al-new [(slice u8)] a))
+              (store! (field checkls imports) (al-new [ImpEntry] a))
+              (store! (field checkls exports) (al-new [ExpEntry] a))
+              (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
+              (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
+              (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+              (let [checked (try! (check-program a sub (mut checkls)))]
+                (match (meta-engine-setup a checked qb)
+                  (Some [d] (Err [(ptr Program) Diag] d))
+                  (None []
+                    ; run each entry; cx mirrors run-metas' (the metahost shims read it)
+                    (let [cx (alloc-stack CtCtx) (mut gen) (al-new [Sexp] a)
+                          (mut j) 0 (mut errf) (None [Diag])]
+                      (store! (field cx a) a)
+                      (store! (field cx fns) (load (field checked funcs)))
+                      (store! (field cx structs) (load (field checked structs)))
+                      (store! (field cx sums) (load (field checked sums)))
+                      (store! (field cx variants) (all-variant-names (load (field checked sums)) a))
+                      (store! (field cx traits) (load (field checked traits)))
+                      (store! (field cx fuel) 50000000)
+                      (store! (field cx depth) 0)
+                      (store! (field cx gensym) 0)
+                      (store! (field cx qmodule) (None [(slice u8)]))
+                      (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
+                      (store! (field cx qimports) (cast (ptr ModImports) 0))
+                      (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
+                      (store! (field cx prog) checked)
+                      (loop (if (or (diag-some? (load errf)) (icmp-ge (load j) nmet)) (break)
+                        (do (let [e (meta-engine-entry (al-get [(slice u8)] (load qb) (load j)))]
+                              (if (icmp-eq (cast i64 e) 0)
+                                  (do (store! errf (Some (derr "meta: entry missing from the metaprogram engine (compiler bug)"))) 0)
+                                (match (meta-engine-run-env a e cx (box-al [EnvBind] a (al-new [EnvBind] a)))
+                                  (Err [d] (do (store! errf (Some d)) 0))
+                                  (Ok [sexp]
+                                    ; a returned `(do …)` splices its items; anything else is one form
+                                    (if (and (icmp-eq (sx-tag sexp) 6)
+                                             (let [it (sx-items sexp)] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "do")))))
+                                        (let [it (sx-items sexp) m (sx-len it) (mut k) 1]
+                                          (loop (if (icmp-ge (load k) m) (break) (do (al-push! (mut gen) (sx-at it (load k))) (store! k (iadd (load k) 1))))) 0)
+                                      (do (al-push! (mut gen) sexp) 0))))))
+                            (store! j (iadd (load j) 1)))))
+                      (match (load errf)
+                        (Some [d] (Err [(ptr Program) Diag] d))
+                        (None []
+                          (do (splice-metas (mut s) (box-al [Sexp] a (load gen)) a)
+                              (match (resolve-program a (mut s) true false)
+                                (Err [d] (Err [(ptr Program) Diag] d))
+                                (Ok [prog2] (check-program a prog2 (mut s)))))))))))))))))))
+
+; route the (meta …) elaboration: compiled engine when it is the active engine
+; (default), the interpreter path otherwise (COIL_META=interp / COIL_STAGE_MACROS=0
+; keep the oracle and the soak kill switch alive until step 7).
+(defn frontend-check-routed [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
+  (if (icmp-eq (al-len [Expr] (load (field prog metas))) 0)
+      (frontend-check a (mut s) prog)
+    (if (and (meta-compiled?) (meta-staged?))
+        (elaborate-metas-compiled a (mut s) prog)
+      (frontend-check a (mut s) prog))))
+
 (defn strict-resolve-check [(a (ptr Allocator)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (match (resolve-program a (mut s) (not (ls-has-meta (mut s))) false)
     ; a FATAL resolve error (parse / signature / struct / sum) aborts as before.
@@ -966,7 +1074,7 @@
       ; its errors are collected too, then report both. The build FAILS whenever resolve
       ; had any error, even if the type check of the rest happened to pass — otherwise a
       ; program with a half-resolved body would sail into mono/codegen.
-      (let [cres (frontend-check a (mut s) prog)
+      (let [cres (frontend-check-routed a (mut s) prog)
             nrd  (al-len [Diag] (load (field s resolve_diags)))]
         (if (icmp-eq nrd 0) cres
           (do (merge-resolve-diags a (mut s))

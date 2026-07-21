@@ -378,10 +378,23 @@ today regresses.
    gate-full needs `COIL_SELF_ARGS="--target <snapshot triple>"` (the default
    triple embeds the host Darwin version), brew LLVM must be pinned to 21 (the 22
    printer spells IR differently), and `timeout` comes from coreutils' gnubin.
-5. **Step 5, Phase C** — remove `finish-macro`'s `eval-seq` fallback (`expander.coil:291`); a miss
-   becomes a hard error, not a silent reroute.
-6. **Step 4** — reroute `run-metas`. Contained: `(meta …)` appears ONLY in
-   `oracle/features/meta_stage3.coil`, zero bootstrap risk. Can be done before or after step 5.
+5. ✅ **Step 5, Phase C — LANDED 2026-07-21.** Under the compiled engine with staging
+   on (the default), a `finish-macro` engine miss is a HARD ERROR naming the macro;
+   `COIL_META=interp` / `COIL_STAGE_MACROS=0` keep the interpreter path (oracle +
+   kill switch) until step 7. The staging prepass now runs EVERY tower round (not
+   just round 0), so a macro whose pruned closure held an unexpanded call in round
+   N stages in round N+1 — the engine converges toward total and the corpus builds
+   entirely without `eval-seq`.
+6. ✅ **Step 4 — LANDED 2026-07-21.** `(meta …)` runs on the compiled engine:
+   `expander.coil::elaborate-metas-compiled` builds the generator sub-program at
+   the PRE-CHECK form level (metashim injected via `meta-sub-forms`, like the macro
+   engine), wraps each meta expression as a synthetic zero-param Code-returning
+   entry `coil.meta.<i>`, compiles them through `meta-engine-setup`, runs each via
+   `meta-engine-run-env`, and splices with the interpreter path's exact semantics
+   (`(do …)` splice, then strict re-resolve + check). Routed by
+   `frontend-check-routed`; the interp path remains behind the same two flags.
+   **Verified:** `meta_stage3.coil` — identical stdout, exit code, and BYTE-IDENTICAL
+   emitted IR, compiled vs interp; fixpoint + all gates + parity green.
 7. **Step 6** — flip `fold-expr` compiled-only. Requires Phase 1b (done) plus closing the
    remaining readback declines (`comptime_eval.coil:330-344`, `:430-453`: raw ptrs, `TVec`, `TCode`,
    non-`u8` slices, `LBits` layouts). Deleting `comptime-cap-gap?` belongs to this step.
