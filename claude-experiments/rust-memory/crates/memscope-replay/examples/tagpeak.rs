@@ -18,25 +18,26 @@ fn mb(b: u64) -> f64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let file = args.get(1).expect("usage: tagpeak <file.mscope> [tag]");
+    let file = args.get(1).expect("usage: tagpeak <file.mscope> [tag1,tag2,...]");
     let tag = args.get(2).map(|s| s.as_str()).unwrap_or("parse_ast");
+    let wanted: Vec<&str> = tag.split(',').map(|s| s.trim()).collect();
 
-    // Which meta-context ids carry region=<tag>.
+    // Which meta-context ids carry region=<one of the wanted tags>.
     let rec = read_recording_raw(file).expect("read_recording_raw");
     let tag_ids: HashSet<u32> = rec
         .meta
         .iter()
         .filter(|(_, kvs)| {
             kvs.iter()
-                .any(|(k, v)| k == "region" && v == tag)
+                .any(|(k, v)| k == "region" && wanted.contains(&v.as_str()))
         })
         .map(|(id, _)| *id)
         .collect();
     eprintln!(
-        "meta contexts: {} total, {} carry region={}",
+        "meta contexts: {} total, {} carry region in {:?}",
         rec.meta.len(),
         tag_ids.len(),
-        tag
+        wanted
     );
 
     struct L {

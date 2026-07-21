@@ -141,6 +141,7 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_codegen",
  "oxc_ecmascript",
+ "oxc_minifier",
  "oxc_parser",
  "oxc_resolver",
  "oxc_semantic",
@@ -684,6 +685,52 @@ checksum = "191884bee6c3744909a51acc7d78d4ae370d817b25875b10642f632327b6296e"
 dependencies = [
  "nonmax",
  "serde",
+]
+
+[[package]]
+name = "oxc_mangler"
+version = "0.140.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36d1d94fe4f93a223dbe83495d0dbd2c3a45d37f2b9ec8c68310fa326b17bef0"
+dependencies = [
+ "itertools",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_data_structures",
+ "oxc_ecmascript",
+ "oxc_index",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "rustc-hash",
+]
+
+[[package]]
+name = "oxc_minifier"
+version = "0.140.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eccb88c5cd783ad1595494b078822a2e335bdd42c2b551f185e86603ee9641b"
+dependencies = [
+ "bitflags",
+ "cow-utils",
+ "itoa",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_compat",
+ "oxc_data_structures",
+ "oxc_ecmascript",
+ "oxc_index",
+ "oxc_mangler",
+ "oxc_parser",
+ "oxc_regular_expression",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "oxc_traverse",
+ "rustc-hash",
 ]
 
 [[package]]

@@ -208,9 +208,36 @@ unexpanded call poisons the batch and nobody gets compiled.
 
 **Dependency depth is ~0.** `or`/`and` are compiler builtins, not lib macros, so the
 `dbg-slice-*` bodies have no macro dependencies; `while` (`control.coil:66`) and `for` (`:78`)
-use only builtins plus code-ops the engine handles natively. These are wave-0 macros: buildable
-the moment they are needed. So step 5 is a topological staging of the macro DAG, not an
-incremental-compilation architecture.
+use only builtins plus code-ops the engine handles natively.
+
+### ⚠ BUT: per-macro staging alone does NOT work — PROTOTYPED AND FALSIFIED
+
+The obvious fix ("check each qual's closure in isolation, stand up a partial engine for the ones
+that check standalone") was built and measured. **Result: zero effect.** Identical CTINTERP
+output with staging on vs off — same 2 fallbacks on `examples/fib.coil`, engine still inactive.
+
+**Root cause — the isolation does not isolate.** `closure-funcs` does not merely take the
+transitive callees of the seeds: it *additionally* seeds the callees of **every impl method and
+every const value in the whole program** (`comptime.coil` ~1757-1775), because
+`closure-subprogram` retains every impl and const unconditionally. So `slice.slice-get` — whose
+body is the unexpanded `(dbg-slice-get s i)` — is dragged into **every** sub-program no matter
+how narrow the seed. Checking `dbg-slice-get` "in isolation" still checks `slice-get`, which
+still fails, so no macro ever qualifies as standalone.
+
+So the batching is not the (only) problem; the **sub-program construction** is. A working step 5
+must additionally prune impls/consts from macro sub-programs, or make the check tolerate an
+unexpanded macro call in a function the macro doesn't actually call.
+
+**Not yet measured:** the headroom if impls/consts are also pruned. A diagnostic for exactly this
+(`stage-check-noimpl`) is written in the scratch prototype but was never run — the agent stalled
+first. **That number is the next thing to get**, since it decides whether pruning is sufficient
+or whether step 5 needs a different shape entirely.
+
+Prototype location (throwaway, not in the repo):
+`<scratchpad>/coilm/selfhost/src/expander.coil` — `stage-macros-prepass` (~:792), gated by
+`COIL_STAGE_MACROS=1`, with `stage-check-noimpl` (~:746) as the unrun diagnostic. Binary at
+`/tmp/coil-stage`. Instrumentation (`ctinterp-log`, `ctmark`, `ctstage`) is measurement-only and
+must never be committed.
 
 ## Landmines
 
@@ -270,12 +297,20 @@ today regresses.
    which is too costly per round. Use the in-memory MObj/JIT route instead — `comptime_eval.coil:163-178`
    already does exactly this (`jit-load` → `jit-lookup`, no fork, no dlopen), and `main.coil:141-146`
    registers an arm64 mobj builder even in the LLVM build, so both builds can take it.
-4. **Step 5, Phase B — stage the macro DAG.** Before the whole-sub-program check in `stage3-round`,
-   check each qual's own closure in isolation and build an engine for those that stand alone; then
-   proceed as today. Hook it in before BOTH tower entries — `stage3-parse-recover` (`expander.coil:340`)
-   and `tower-pass` (`:449`) — since `macroctx` and `quals` are already in hand at both
-   (`expander.coil:709`). Success metric: corpus fallback count drops 418 → ~112, and the emitted
-   IR must be **byte-identical** with staging on vs off.
+4. **Step 5, Phase B — fix sub-program construction FIRST, then stage.** ⚠ Naive per-qual staging
+   was prototyped and had **zero effect** (see above): `closure-funcs` drags every impl and const
+   into every sub-program, so `slice-get` and its unexpanded macro call are always present and no
+   macro ever checks standalone. **Next action: run the `stage-check-noimpl` diagnostic** (already
+   written in the scratch prototype, never executed) to measure how many quals check standalone
+   once impls/consts are pruned. That number decides the design:
+   - *If most quals then check standalone* → prune impls/consts from macro sub-programs, then the
+     per-qual staging works as originally planned. Hook it before BOTH tower entries,
+     `stage3-parse-recover` (`expander.coil:340`) and `tower-pass` (`:449`); `macroctx` and `quals`
+     are in hand at both (`:709`).
+   - *If not* → step 5 needs a different shape; do not proceed on the DAG-staging assumption.
+   Success metric either way: corpus fallback count drops 418 → ~112 **and** emitted IR is
+   **byte-identical** with staging on vs off (this IR check was never run — the agent stalled at
+   exactly that step).
 5. **Step 5, Phase C** — remove `finish-macro`'s `eval-seq` fallback (`expander.coil:291`); a miss
    becomes a hard error, not a silent reroute.
 6. **Step 4** — reroute `run-metas`. Contained: `(meta …)` appears ONLY in

@@ -43,8 +43,10 @@ const MAX_PASSES: usize = 8;
 /// Deletes every statically-dead `if` branch in `source`, returning the rewritten
 /// source, or `None` when nothing is decidable.
 pub fn transform(path: &Path, source: &str) -> Option<String> {
-    // Cheap gate: a decidable test needs a comparison or a bare boolean literal.
-    if !source.contains("if") {
+    // Cheap gate: nothing to decide without a branch to decide. `?` covers the
+    // conditional-expression form (and harmlessly over-admits optional chaining
+    // and nullish coalescing, which the pass then simply finds nothing to fold in).
+    if !source.contains("if") && !source.contains('?') {
         return None;
     }
     let mut current: Option<String> = None;
@@ -120,6 +122,39 @@ impl<'a> Visit<'a> for BranchCollector<'_> {
             }
         }
         walk::walk_statement(self, statement);
+    }
+
+    /// The expression form of the same dispatch. Packages that swap an
+    /// implementation for a no-op in production use a ternary rather than an `if`:
+    ///
+    /// ```js
+    /// var TanStackRouterDevtools = process.env.NODE_ENV !== "development" ? function () { return null; } : RealDevtools;
+    /// ```
+    ///
+    /// Folding it is what makes the discarded arm's import unreferenced, so the
+    /// module-level DCE can drop the entire devtools tree from the GRAPH. Left
+    /// unfolded, the chunk minifier still collapses the ternary, but far too late:
+    /// the module is already linked in, and its bytes ship.
+    fn visit_conditional_expression(
+        &mut self,
+        conditional: &oxc_ast::ast::ConditionalExpression<'a>,
+    ) {
+        if let Some(test) = evaluate(&conditional.test) {
+            let taken = if test {
+                &conditional.consequent
+            } else {
+                &conditional.alternate
+            };
+            let span = taken.span();
+            // Parenthesized so the spliced text is valid in every expression
+            // position it could land in (a bare `function`/`object` literal would
+            // otherwise be misread at the start of a statement).
+            let text = &self.source[span.start as usize..span.end as usize];
+            self.edits
+                .push((conditional.span, format!("({text})")));
+            return;
+        }
+        walk::walk_conditional_expression(self, conditional);
     }
 }
 
@@ -350,6 +385,31 @@ mod tests {
         // `"true" === true` is false in JS; the kind tag must preserve that.
         let out = run("if (\"true\" === true) { drop(); } else { keep(); }").unwrap();
         assert!(out.contains("keep()") && !out.contains("drop()"), "{out}");
+    }
+
+    #[test]
+    fn a_ternary_dispatch_drops_the_unused_arm() {
+        // The devtools shape: the real implementation becomes unreferenced, which
+        // is what lets module-level DCE drop it from the graph.
+        let source = "var D = \"production\" !== \"development\" ? function () { return null; } : RealDevtools;";
+        let out = run(source).unwrap();
+        assert!(
+            !out.contains("RealDevtools"),
+            "the discarded arm must be gone so its import goes unreferenced: {out}"
+        );
+        assert!(out.contains("return null"), "{out}");
+    }
+
+    #[test]
+    fn a_folded_ternary_stays_valid_in_expression_position() {
+        let out = run("call(\"a\" === \"a\" ? {k: 1} : other);").unwrap();
+        assert!(out.contains("({k: 1})"), "must be parenthesized: {out}");
+        assert!(!out.contains("other"), "{out}");
+    }
+
+    #[test]
+    fn an_undecidable_ternary_is_left_alone() {
+        assert!(run("var x = flag ? a : b;").is_none());
     }
 
     #[test]
