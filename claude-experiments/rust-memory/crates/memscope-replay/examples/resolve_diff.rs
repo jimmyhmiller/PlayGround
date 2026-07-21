@@ -28,6 +28,7 @@ fn main() {
     let b = resolve_raw_sites_targeted(exe, rec.slide, &sites).expect("targeted");
 
     let (mut total, mut shape_mm, mut type_mm, mut bound_mm, mut frames_mm) = (0, 0, 0, 0, 0);
+    let mut improved = 0;
     let mut shown = 0;
     let frame_sig = |f: &memscope_proto::Frame| {
         (f.function.clone().unwrap_or_default(), f.file.clone().unwrap_or_default(), f.line.unwrap_or(0))
@@ -47,7 +48,17 @@ fn main() {
             continue;
         };
         let shape_bad = ra.shape != rb.shape;
-        let type_bad = ra.element_type != rb.element_type;
+        // The oracle joins by mangled name and can miss template params the
+        // covering-DIE walk reads directly; the new path recovering a type the
+        // oracle lacks is an improvement, not a divergence. Only disagreement
+        // between two present values (or the new path LOSING a type) fails.
+        let type_bad = match (&ra.element_type, &rb.element_type) {
+            (None, Some(_)) => {
+                improved += 1;
+                false
+            }
+            (a, b) => a != b,
+        };
         let bound_bad = boundary(&ra.frames) != boundary(&rb.frames);
         let frames_bad = ra.frames.iter().map(frame_sig).collect::<Vec<_>>()
             != rb.frames.iter().map(frame_sig).collect::<Vec<_>>();
@@ -82,6 +93,7 @@ fn main() {
     println!("shape mismatches:     {shape_mm}");
     println!("element_type mism.:   {type_mm}");
     println!("boundary mismatches:  {bound_mm}");
+    println!("types only new found: {improved}  (oracle None, new Some — accepted improvement)");
     println!("full-frame mismatches:{frames_mm}  ({:.2}% of sites)", 100.0 * frames_mm as f64 / total.max(1) as f64);
     let critical = shape_mm + type_mm + bound_mm;
     println!("\nCRITICAL (shape+type+boundary): {critical}  -> {}", if critical == 0 { "PASS" } else { "FAIL" });

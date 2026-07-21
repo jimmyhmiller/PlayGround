@@ -322,16 +322,19 @@ pub(crate) struct SymFrame {
 impl TypeOracle {
     /// Build an oracle from the current process's binary + DWARF.
     pub fn for_current_process() -> Result<Self, DynErr> {
-        let bytes = load::dwarf_bytes_for_current_exe()?;
-        let (index, layout) = dwarf::build(&bytes)?;
-        Ok(TypeOracle { index, layout })
+        let exe = std::env::current_exe()?;
+        Self::from_binary(&exe)
     }
 
     /// Build an oracle from a specific binary path (for posthoc exploration of a
     /// heap dump produced by another process).
     pub fn from_binary(path: &std::path::Path) -> Result<Self, DynErr> {
-        let bytes = load::dwarf_bytes_for(path)?;
-        let (index, layout) = dwarf::build(&bytes)?;
+        // mmap rather than `fs::read`: the dSYM can be ~1 GB, and the oracle is
+        // often built *inside the traced process* (live agent, preload heap
+        // dump), where a resident copy of the whole file is exactly the kind of
+        // overhead we exist to find.
+        let mmap = load::dwarf_mmap_for(path)?;
+        let (index, layout) = dwarf::build(&mmap)?;
         Ok(TypeOracle { index, layout })
     }
 

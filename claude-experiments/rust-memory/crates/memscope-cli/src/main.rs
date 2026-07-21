@@ -17,9 +17,9 @@ use std::os::unix::net::UnixStream;
 
 use memscope_proto::{ClientMsg, HeapGraph, ServerMsg, Snapshot};
 use memscope_replay::{
-    analyze, boundary_frame, clean_frame, frame_location, is_std_frame, label_for,
-    read_recording, read_recording_raw, site_stats, stream_events, Finding, FrameMeta,
-    RecEvent, Recording,
+    analyze, boundary_frame, clean_frame, clean_type_name, frame_location, is_std_frame,
+    label_for, read_recording, read_recording_raw, site_stats, stream_events, Finding,
+    FrameMeta, RecEvent, Recording,
     SiteStats, Timeline,
 };
 
@@ -112,7 +112,9 @@ fn positional(args: &[String]) -> Option<&str> {
 }
 
 /// Find the socket: explicit --sock, else $MEMSCOPE_SOCK, else the single
-/// `/tmp/memscope-*.sock` if exactly one exists.
+/// **live** `/tmp/memscope-*.sock`. Agents name their socket after their pid;
+/// a socket whose process is gone is a leftover (nothing unlinks it on crash or
+/// kill), so it's skipped — and removed, so it can't shadow the next session.
 fn resolve_sock(args: &[String]) -> Result<String, String> {
     if let Some(s) = flag(args, "--sock") {
         return Ok(s.to_string());
@@ -120,24 +122,59 @@ fn resolve_sock(args: &[String]) -> Result<String, String> {
     if let Ok(s) = std::env::var("MEMSCOPE_SOCK") {
         return Ok(s);
     }
-    let mut found = Vec::new();
+    let mut live = Vec::new();
+    let mut stale = Vec::new();
     if let Ok(rd) = std::fs::read_dir("/tmp") {
         for e in rd.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
             if name.starts_with("memscope-") && name.ends_with(".sock") {
-                found.push(e.path().to_string_lossy().into_owned());
+                let path = e.path().to_string_lossy().into_owned();
+                // Keep sockets we can't attribute to a pid (custom names): we
+                // can't prove them dead, and we must never delete those.
+                match socket_pid(&name) {
+                    Some(pid) if !pid_alive(pid) => stale.push(path),
+                    _ => live.push(path),
+                }
             }
         }
     }
-    match found.len() {
-        1 => Ok(found.pop().unwrap()),
-        0 => Err("no agent socket found; pass --sock <path> (agent prints it on start)".into()),
+    for s in &stale {
+        let _ = std::fs::remove_file(s);
+    }
+    if !stale.is_empty() {
+        eprintln!(
+            "[cleaned up {} stale socket(s) from exited processes: {}]",
+            stale.len(),
+            stale.join(", ")
+        );
+    }
+    match live.len() {
+        1 => Ok(live.pop().unwrap()),
+        0 => Err(
+            "no live agent socket found; is the traced process running? \
+             (pass --sock <path> — the agent prints it on start)"
+                .into(),
+        ),
         _ => Err(format!(
-            "multiple agent sockets found, pass --sock <path>:\n  {}",
-            found.join("\n  ")
+            "multiple live agent sockets found, pass --sock <path>:\n  {}",
+            live.join("\n  ")
         )),
     }
+}
+
+/// The pid embedded in an agent's default socket name, `memscope-<pid>.sock`.
+fn socket_pid(name: &str) -> Option<i32> {
+    name.strip_prefix("memscope-")?.strip_suffix(".sock")?.parse().ok()
+}
+
+/// Does a process with this pid exist? (`kill(pid, 0)`: EPERM still means it
+/// exists, just isn't ours.)
+fn pid_alive(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 // --- protocol client ---------------------------------------------------------
@@ -148,7 +185,16 @@ struct Client {
 }
 
 impl Client {
-    fn connect(path: &str) -> std::io::Result<Self> {
+    fn connect(path: &str) -> Result<Self, String> {
+        Self::connect_io(path).map_err(|e| {
+            format!(
+                "could not connect to agent socket {path}: {e} \
+                 (is the traced process still running?)"
+            )
+        })
+    }
+
+    fn connect_io(path: &str) -> std::io::Result<Self> {
         let stream = UnixStream::connect(path)?;
         let reader = BufReader::new(stream.try_clone()?);
         let mut c = Client { reader, writer: stream };
@@ -248,9 +294,9 @@ fn by_type(snap: &Snapshot) -> Vec<(String, u64, u64)> {
         let label = if let Some((s,)) = site.get(&l.site.0) {
             let ty = type_name.get(&s.ty.0).copied();
             match (s.shape, ty) {
-                (Some(shape), Some(ty)) => format!("{shape:?}<{ty}>"),
+                (Some(shape), Some(ty)) => format!("{shape:?}<{}>", clean_type_name(ty)),
                 (Some(shape), None) => format!("{shape:?}<?>"),
-                (None, Some(ty)) => ty.to_string(),
+                (None, Some(ty)) => clean_type_name(ty),
                 (None, None) => format!("<site {}>", l.site.0),
             }
         } else {
@@ -293,7 +339,7 @@ fn cmd_monitor(args: &[String]) -> Result<(), String> {
     let interval_ms: u64 = flag(args, "--interval")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
 
     loop {
         let stats = client.stats().map_err(|e| e.to_string())?;
@@ -325,7 +371,7 @@ fn cmd_monitor(args: &[String]) -> Result<(), String> {
 
 fn cmd_dump(args: &[String]) -> Result<(), String> {
     let sock = resolve_sock(args)?;
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
     let snap = client.snapshot().map_err(|e| e.to_string())?;
     render_dump(&snap);
     if let Some(out) = flag(args, "--out") {
@@ -338,8 +384,16 @@ fn cmd_dump(args: &[String]) -> Result<(), String> {
 
 fn cmd_show(args: &[String]) -> Result<(), String> {
     let file = positional(args).ok_or("usage: memscope show <FILE>")?;
-    let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
-    let snap: Snapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    if bytes.starts_with(b"MSCP") {
+        return Err(format!(
+            "{file} is a .mscope recording, not a heap dump — use `memscope replay {file}` \
+             (show reads the JSON written by `memscope dump --out`)"
+        ));
+    }
+    let snap: Snapshot = serde_json::from_slice(&bytes).map_err(|e| {
+        format!("{file}: not a heap dump written by `memscope dump --out` ({e})")
+    })?;
     render_dump(&snap);
     Ok(())
 }
@@ -377,14 +431,14 @@ fn render_dump(snap: &Snapshot) {
 
     for (s, c, b) in site_rows.iter().take(12) {
         let label = match (s.shape, type_name.get(&s.ty.0)) {
-            (Some(shape), Some(ty)) => format!("{shape:?}<{ty}>"),
+            (Some(shape), Some(ty)) => format!("{shape:?}<{}>", clean_type_name(ty)),
             (Some(shape), None) => format!("{shape:?}<?>"),
-            (None, Some(ty)) => ty.to_string(),
+            (None, Some(ty)) => clean_type_name(ty),
             (None, None) => "<unknown>".to_string(),
         };
         println!("\n  {label}  —  {c} live, {}", human_bytes(*b));
         for f in s.frames.iter().take(6) {
-            let func = f.function.as_deref().unwrap_or("?");
+            let func = f.function.as_deref().map(clean_frame).unwrap_or_else(|| "?".into());
             let loc = match (&f.file, f.line) {
                 (Some(file), Some(line)) => format!("  ({}:{})", short_path(file), line),
                 _ => String::new(),
@@ -406,7 +460,7 @@ fn short_path(p: &str) -> &str {
 
 fn cmd_events(args: &[String]) -> Result<(), String> {
     let sock = resolve_sock(args)?;
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
     eprintln!("[streaming raw events — Ctrl-C to quit]");
     loop {
         client
@@ -438,9 +492,9 @@ fn cmd_events(args: &[String]) -> Result<(), String> {
 
 fn node_label(n: &memscope_proto::GraphNode) -> String {
     match (n.shape, n.ty.as_deref()) {
-        (Some(shape), Some(ty)) => format!("{shape:?}<{ty}>"),
+        (Some(shape), Some(ty)) => format!("{shape:?}<{}>", clean_type_name(ty)),
         (Some(shape), None) => format!("{shape:?}<?>"),
-        (None, Some(ty)) => ty.to_string(),
+        (None, Some(ty)) => clean_type_name(ty),
         (None, None) => "<unknown>".to_string(),
     }
 }
@@ -448,7 +502,7 @@ fn node_label(n: &memscope_proto::GraphNode) -> String {
 fn cmd_graph(args: &[String]) -> Result<(), String> {
     let sock = resolve_sock(args)?;
     let limit: usize = flag(args, "--limit").and_then(|s| s.parse().ok()).unwrap_or(25);
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
     let g = client.graph().map_err(|e| e.to_string())?;
     render_graph(&g, limit);
     Ok(())
@@ -511,7 +565,7 @@ fn cmd_paths(args: &[String]) -> Result<(), String> {
     let addr_s = positional(args).ok_or("usage: memscope paths <hexaddr>")?;
     let addr = parse_hex(addr_s).ok_or_else(|| format!("bad address '{addr_s}' (use hex, e.g. 0x10abc)"))?;
     let sock = resolve_sock(args)?;
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
     let g = client.graph().map_err(|e| e.to_string())?;
 
     let Some(i) = g.nodes.iter().position(|nd| nd.addr == addr) else {
@@ -1113,7 +1167,14 @@ impl Interner {
 fn cmd_flamegraph(args: &[String]) -> Result<(), String> {
     let file_path = positional(args).ok_or("usage: memscope flamegraph <FILE> [--out F] [--format chrome|folded] [--by bytes|count] [--live] [--no-std] [--group-by KEY] [--filter KEY=VAL]")?;
     let format = flag(args, "--format").unwrap_or("chrome");
-    let by_count = flag(args, "--by") == Some("count");
+    if format != "chrome" && format != "folded" {
+        return Err(format!("unknown --format {format:?} (chrome|folded)"));
+    }
+    let by = flag(args, "--by").unwrap_or("bytes");
+    if by != "bytes" && by != "count" {
+        return Err(format!("unknown --by {by:?} (bytes|count)"));
+    }
+    let by_count = by == "count";
     let live_only = args.iter().any(|a| a == "--live");
     let no_std = args.iter().any(|a| a == "--no-std" || a == "--exclude-std");
     let group_by = flag(args, "--group-by").map(|s| s.to_string());
@@ -1539,7 +1600,7 @@ fn cmd_mode(args: &[String]) -> Result<(), String> {
         other => return Err(format!("unknown mode '{other}' (off|full|sampled)")),
     };
     let sock = resolve_sock(args)?;
-    let mut client = Client::connect(&sock).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(&sock)?;
     if let Some(rate) = flag(args, "--rate").and_then(|s| s.parse::<u32>().ok()) {
         client.send(&ClientMsg::SetSampleRate(rate)).map_err(|e| e.to_string())?;
         let _ = client.recv();
@@ -1989,6 +2050,22 @@ fn preload_lib() -> Result<String, String> {
 }
 
 /// Parse a duration like `2s`, `500ms`, or a bare number of seconds.
+/// Mirrors memscope-preload's `MEMSCOPE_HPROF_AT_BYTES` parser, so a value the
+/// CLI accepts is exactly one the preload will honor.
+fn parse_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, mult) = if let Some(n) = s.strip_suffix("GB").or_else(|| s.strip_suffix("G")) {
+        (n, 1u64 << 30)
+    } else if let Some(n) = s.strip_suffix("MB").or_else(|| s.strip_suffix("M")) {
+        (n, 1 << 20)
+    } else if let Some(n) = s.strip_suffix("KB").or_else(|| s.strip_suffix("K")) {
+        (n, 1 << 10)
+    } else {
+        (s, 1)
+    };
+    num.trim().parse::<f64>().ok().map(|v| (v * mult as f64) as u64)
+}
+
 fn parse_dur(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     if let Some(ms) = s.strip_suffix("ms") {
@@ -2015,6 +2092,17 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let on_exit = opts.iter().any(|a| a == "--on-exit");
     let after = flag(opts, "--after");
     let at_bytes = flag(opts, "--at-bytes");
+    // Validate trigger values *before* spawning the target — a bad flag must not
+    // launch (and fully run) the program with no trigger armed.
+    let after_dur = match after {
+        Some(d) => {
+            Some(parse_dur(d).ok_or_else(|| format!("bad --after duration {d:?} (e.g. 2s, 500ms)"))?)
+        }
+        None => None,
+    };
+    if let Some(n) = at_bytes {
+        parse_bytes(n).ok_or_else(|| format!("bad --at-bytes value {n:?} (e.g. 5MB, 200KB, 1048576)"))?;
+    }
     // Default trigger: dump at exit if nothing else was requested.
     let default_on_exit = !on_exit && after.is_none() && at_bytes.is_none();
 
@@ -2074,8 +2162,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let pid = handle.id();
 
     // Timed trigger: signal the child after the delay (it stays running).
-    if let Some(d) = after {
-        let dur = parse_dur(d).ok_or_else(|| format!("bad --after duration {d:?}"))?;
+    if let Some(dur) = after_dur {
         std::thread::spawn(move || {
             std::thread::sleep(dur);
             eprintln!("[memscope] --after elapsed — signalling pid {pid} for a dump");
@@ -2165,7 +2252,7 @@ fn cmd_query(args: &[String]) -> Result<(), String> {
     let stats = site_stats(stream_events(file)?, &rec);
 
     // The matching per-site stats (one for --site, all of a type for --type).
-    let matched: Vec<&SiteStats> = stats
+    let mut matched: Vec<&SiteStats> = stats
         .iter()
         .filter(|s| match (site_arg, type_arg) {
             (Some(id), _) => s.site == id,
@@ -2173,10 +2260,40 @@ fn cmd_query(args: &[String]) -> Result<(), String> {
             _ => false,
         })
         .collect();
+    // `--type` falls back to substring match when nothing matches exactly, so
+    // `--type StringBuf` finds `StringBuf<u8>` (the labels other commands print
+    // are generic — nobody should have to retype them character-perfect).
+    if matched.is_empty() {
+        if let (None, Some(ty)) = (site_arg, type_arg) {
+            let sub: Vec<&SiteStats> =
+                stats.iter().filter(|s| s.label.contains(ty)).collect();
+            let mut labels: Vec<&str> = sub.iter().map(|s| s.label.as_str()).collect();
+            labels.sort_unstable();
+            labels.dedup();
+            match labels.len() {
+                0 => {}
+                1 => matched = sub,
+                _ => {
+                    return Err(format!(
+                        "--type {ty:?} is ambiguous in {file}; it matches:\n  {}",
+                        labels.join("\n  ")
+                    ))
+                }
+            }
+        }
+    }
     if matched.is_empty() {
         return Err(match (site_arg, type_arg) {
             (Some(id), _) => format!("no site {id} in {file}"),
-            (_, Some(ty)) => format!("no allocations of type {ty:?} in {file}"),
+            (_, Some(ty)) => {
+                let mut labels: Vec<&str> = stats.iter().map(|s| s.label.as_str()).collect();
+                labels.sort_unstable();
+                labels.dedup();
+                format!(
+                    "no allocations of type {ty:?} in {file}; types present:\n  {}",
+                    labels.join("\n  ")
+                )
+            }
             _ => unreachable!(),
         });
     }

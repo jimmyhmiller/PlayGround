@@ -72,7 +72,7 @@ impl RecordReader {
         if recfmt::is_binary(&magic) {
             let (bin, exe, slide, pid) = Bin::open(f)?;
             Ok(RecordReader { inner: Inner::Bin(bin), exe, slide, pid, skip_events: false })
-        } else {
+        } else if magic[0] == b'{' {
             let json = Json::new(BufReader::with_capacity(READ_BUF, f));
             Ok(RecordReader {
                 inner: Inner::Json(json),
@@ -81,6 +81,11 @@ impl RecordReader {
                 pid: 0,
                 skip_events: false,
             })
+        } else {
+            Err(format!(
+                "{file}: not a memscope recording (expected binary `.mscope` or \
+                 JSON-lines `.jsonl` written by memscope::record_to_file)"
+            ))
         }
     }
 
@@ -122,6 +127,30 @@ impl RecordReader {
             }
         }
     }
+
+    /// True when the stream ended mid-record. A recording is written live, so a
+    /// killed (or still-running) recorder leaves a clean prefix and a torn tail;
+    /// the prefix is fully usable and truncation is reported, not fatal.
+    pub fn truncated(&self) -> bool {
+        match &self.inner {
+            Inner::Bin(b) => b.truncated,
+            Inner::Json(_) => false, // a torn JSON line just fails to parse
+        }
+    }
+}
+
+/// Warn (once per process) that a recording has a torn tail. Emitted from the
+/// readers themselves so every command inherits it without each call site
+/// having to remember to check.
+pub(crate) fn warn_truncated(file: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[{file}: recording ends mid-record (recorder still running, or killed \
+             mid-write) — analyzing the readable prefix]"
+        );
+    }
 }
 
 // --- binary format -----------------------------------------------------------
@@ -132,6 +161,8 @@ struct Bin {
     pending: u32,
     /// Interned metadata key names, needed to resolve `TAG_META` records.
     key_names: HashMap<u32, String>,
+    /// The stream ended mid-record (torn tail of a live/killed recording).
+    truncated: bool,
 }
 
 impl Bin {
@@ -151,7 +182,20 @@ impl Bin {
         // v2+ carries the load slide (for read-time symbolication of raw sites).
         let mut b8 = [0u8; 8];
         let slide = if f.read_exact(&mut b8).is_ok() { u64::from_le_bytes(b8) } else { 0 };
-        Ok((Bin { f, pending: 0, key_names: HashMap::new() }, exe, slide, pid))
+        Ok((Bin { f, pending: 0, key_names: HashMap::new(), truncated: false }, exe, slide, pid))
+    }
+
+    /// Read exactly `buf`, treating a mid-record EOF as a torn tail: mark the
+    /// stream truncated and report "no more data" instead of an error.
+    fn fill(&mut self, buf: &mut [u8]) -> Result<bool, String> {
+        match self.f.read_exact(buf) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                self.truncated = true;
+                Ok(false)
+            }
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn next_record(&mut self, skip_events: bool) -> Result<Option<Record>, String> {
@@ -159,7 +203,9 @@ impl Bin {
             if self.pending > 0 {
                 self.pending -= 1;
                 let mut buf = [0u8; recfmt::EVENT_BYTES];
-                self.f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+                if !self.fill(&mut buf)? {
+                    return Ok(None);
+                }
                 let e = recfmt::Reader::new(&buf)
                     .decode_event()
                     .ok_or("corrupt recording: truncated event")?;
@@ -181,18 +227,18 @@ impl Bin {
             let mut b4 = [0u8; 4];
             match b1[0] {
                 recfmt::TAG_KEY => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let id = u32::from_le_bytes(b4);
                     let name = read_str(&mut self.f).unwrap_or_default();
                     self.key_names.insert(id, name);
                 }
                 recfmt::TAG_META => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let id = u32::from_le_bytes(b4);
-                    self.f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b2)? { return Ok(None); }
                     let mut kvs = Vec::new();
                     for _ in 0..u16::from_le_bytes(b2) {
-                        self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                        if !self.fill(&mut b4)? { return Ok(None); }
                         let kid = u32::from_le_bytes(b4);
                         let val = crate::read_meta_value(&mut self.f).unwrap_or_default();
                         let key =
@@ -202,19 +248,19 @@ impl Bin {
                     return Ok(Some(Record::Meta(id, kvs)));
                 }
                 recfmt::TAG_MARK => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let id = u32::from_le_bytes(b4);
                     let label = read_str(&mut self.f).unwrap_or_default();
                     return Ok(Some(Record::MarkLabel(id, label)));
                 }
                 recfmt::TAG_SITE => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let site = u32::from_le_bytes(b4);
-                    self.f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b1)? { return Ok(None); }
                     let ty = if b1[0] == 1 { read_str(&mut self.f) } else { None };
-                    self.f.read_exact(&mut b1).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b1)? { return Ok(None); }
                     let shape = recfmt::shape_from_code(b1[0]);
-                    self.f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b2)? { return Ok(None); }
                     let mut frames = Vec::new();
                     for _ in 0..u16::from_le_bytes(b2) {
                         let func = read_str(&mut self.f).unwrap_or_default();
@@ -230,20 +276,20 @@ impl Bin {
                     )));
                 }
                 recfmt::TAG_RSITE => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let site = u32::from_le_bytes(b4);
-                    self.f.read_exact(&mut b2).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b2)? { return Ok(None); }
                     let n = u16::from_le_bytes(b2) as usize;
                     let mut ips = Vec::with_capacity(n);
                     let mut b8 = [0u8; 8];
                     for _ in 0..n {
-                        self.f.read_exact(&mut b8).map_err(|e| e.to_string())?;
+                        if !self.fill(&mut b8)? { return Ok(None); }
                         ips.push(u64::from_le_bytes(b8));
                     }
                     return Ok(Some(Record::RawSite(site, ips)));
                 }
                 recfmt::TAG_EVENTS => {
-                    self.f.read_exact(&mut b4).map_err(|e| e.to_string())?;
+                    if !self.fill(&mut b4)? { return Ok(None); }
                     let count = u32::from_le_bytes(b4);
                     if skip_events {
                         let bytes = recfmt::EVENT_BYTES as i64 * count as i64;
@@ -400,6 +446,7 @@ impl Json {
 /// valid); [`EventStream::error`] reports it afterwards.
 pub struct EventStream {
     reader: RecordReader,
+    file: String,
     error: Option<String>,
     done: bool,
 }
@@ -424,6 +471,9 @@ impl Iterator for EventStream {
                 Ok(Some(_)) => continue,
                 Ok(None) => {
                     self.done = true;
+                    if self.reader.truncated() {
+                        warn_truncated(&self.file);
+                    }
                     return None;
                 }
                 Err(e) => {
@@ -447,5 +497,10 @@ impl Iterator for EventStream {
 /// # Ok::<(), String>(())
 /// ```
 pub fn stream_events(file: &str) -> Result<EventStream, String> {
-    Ok(EventStream { reader: RecordReader::open(file)?, error: None, done: false })
+    Ok(EventStream {
+        reader: RecordReader::open(file)?,
+        file: file.to_string(),
+        error: None,
+        done: false,
+    })
 }
