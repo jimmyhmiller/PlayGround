@@ -364,9 +364,20 @@ today regresses.
      staging on, `eval-seq` never fires anywhere in the corpus;
    - fixpoint + linux gate-full/gate-run + gate-cli green in BOTH modes; parity.sh
      unchanged (114/116, the 2 known pre-existing divergences).
-   **Remaining for step 5:** verify on macOS (`rebootstrap.sh` + parity + gates with
-   and without the gate), then flip the default ON (delete the env gate), then
-   Phase C.
+   **macOS verification: DONE via CI (2026-07-21).** `.github/workflows/coil.yml`
+   runs the full battery on a macos-15 arm64 runner (rebootstrap incl. both
+   fixpoints + gate-full byte-exact + arm64 gate-run + gate-cli, parity in both
+   modes with the 2 known divergences PINNED, staged-vs-default self-build .o
+   byte-identical) and an ubuntu runner (rebootstrap-linux + same parity/staging
+   matrix). Both green → **staging is DEFAULT ON** (`meta-staged?` defaults true;
+   `COIL_STAGE_MACROS=0` is the soak kill switch, deleted with step 7). Every
+   future push touching coil/ re-proves all of this on both platforms.
+   **Remaining for step 5:** Phase C, after a soak — the corpus shows 0 interp
+   fallbacks with staging on, but Phase C converts any unforeseen miss into a hard
+   error, so let CI + real use watch the soak first. CI runner facts worth knowing:
+   gate-full needs `COIL_SELF_ARGS="--target <snapshot triple>"` (the default
+   triple embeds the host Darwin version), brew LLVM must be pinned to 21 (the 22
+   printer spells IR differently), and `timeout` comes from coreutils' gnubin.
 5. **Step 5, Phase C** — remove `finish-macro`'s `eval-seq` fallback (`expander.coil:291`); a miss
    becomes a hard error, not a silent reroute.
 6. **Step 4** — reroute `run-metas`. Contained: `(meta …)` appears ONLY in

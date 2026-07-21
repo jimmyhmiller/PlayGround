@@ -498,7 +498,10 @@
       (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))
 
 ; ---- per-qual macro STAGING (interp deletion step 5, Phase B) --------------------
-; Gated by COIL_STAGE_MACROS=1 while it soaks: default behavior is byte-identical.
+; DEFAULT ON since 2026-07-21: emitted IR proven byte-identical staging on/off over
+; the whole corpus, the staged self-build .o byte-identical, and fixpoint + gates +
+; parity green on BOTH platforms (macOS arm64 via CI, Linux x86-64 locally + CI).
+; COIL_STAGE_MACROS=0 is the soak-period kill switch; it goes away with step 7.
 (defn meta-staged? [] (-> bool)
   (let [v (getenv c"COIL_STAGE_MACROS")]
-    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
+    (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))
