@@ -6138,11 +6138,11 @@ mod tests {
         let directory = tempdir().unwrap();
         fs::write(directory.path().join("tw.css"), "@import 'tailwindcss';\n").unwrap();
         fs::write(
-            directory.path().join("entry.jsx"),
-            "import './tw.css';\nexport const app = <div className=\"underline\">x</div>;\n",
+            directory.path().join("entry.js"),
+            "import './tw.css';\nexport const html = '<div class=\"underline\">x</div>';\n",
         )
         .unwrap();
-        let entry = directory.path().join("entry.jsx");
+        let entry = directory.path().join("entry.js");
         let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
         let reachable = bundler.reachable_modules_direct();
