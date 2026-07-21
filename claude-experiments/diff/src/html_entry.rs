@@ -329,3 +329,52 @@ mod tests {
         assert_eq!(entry.module_scripts[0].src, "/src/app.ts");
     }
 }
+
+/// Prefixes public-rooted `src="/..."` / `href="/..."` attribute references
+/// with the configured base (Vite's behavior for `index.html` under a non-root
+/// `base`). Protocol-relative (`//...`) references are untouched. A root base
+/// returns the document unchanged.
+pub fn apply_base(html: &str, base: &str) -> String {
+    if base == "/" {
+        return html.to_string();
+    }
+    let mut out = html.to_string();
+    for attribute in ["src=\"/", "href=\"/"] {
+        let mut rebuilt = String::with_capacity(out.len());
+        let mut cursor = 0;
+        while let Some(found) = out[cursor..].find(attribute) {
+            let at = cursor + found;
+            let value_start = at + attribute.len();
+            rebuilt.push_str(&out[cursor..at]);
+            if out[value_start..].starts_with('/')
+                || out[value_start..].starts_with(&base[1..])
+            {
+                // Protocol-relative, or already under the base (the injected
+                // entry/stylesheet tags carry it) — leave as written.
+                rebuilt.push_str(&out[at..value_start]);
+            } else {
+                rebuilt.push_str(&attribute[..attribute.len() - 1]);
+                rebuilt.push_str(base);
+            }
+            cursor = value_start;
+        }
+        rebuilt.push_str(&out[cursor..]);
+        out = rebuilt;
+    }
+    out
+}
+
+#[cfg(test)]
+mod base_tests {
+    #[test]
+    fn public_rooted_references_gain_the_base_and_protocol_relative_do_not() {
+        let html = "<link href=\"/favicon.png\"><script src=\"/app.js\"></script><script src=\"//cdn.example.com/x.js\"></script>";
+        let rebased = super::apply_base(html, "/sub/");
+        assert!(rebased.contains("href=\"/sub/favicon.png\""), "{rebased}");
+        // Idempotent: a second pass (or an already-based injected tag) is unchanged.
+        assert_eq!(super::apply_base(&rebased, "/sub/"), rebased);
+        assert!(rebased.contains("src=\"/sub/app.js\""), "{rebased}");
+        assert!(rebased.contains("src=\"//cdn.example.com/x.js\""), "{rebased}");
+        assert_eq!(super::apply_base(html, "/"), html);
+    }
+}

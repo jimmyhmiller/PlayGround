@@ -633,12 +633,20 @@ fn rewrite_urls(css: &str, file: &Path, assets: &mut Vec<CssAsset>) -> Result<St
                     .unwrap_or(raw);
                 if target.is_empty()
                     || target.starts_with('#')
-                    || target.starts_with('/')
+                    || target.starts_with("//")
                     || has_url_scheme(target)
                 {
-                    // Left as written: fragment-only, public-rooted, or
-                    // absolute (including data: and //) URLs.
+                    // Left as written: fragment-only, protocol-relative, or
+                    // absolute (including data:) URLs.
                     out.extend_from_slice(&bytes[index..close + 1]);
+                } else if let Some(public_rooted) = target.strip_prefix('/') {
+                    // A public-rooted reference (`/fonts/x.ttf` served from the
+                    // `public/` passthrough) becomes stylesheet-relative, which
+                    // is correct under ANY public base — Vite instead prefixes
+                    // its configured base, and both resolve identically because
+                    // the emitted stylesheet sits at the site root.
+                    let rewritten = format!("url(\"{public_rooted}\")");
+                    out.extend_from_slice(rewritten.as_bytes());
                 } else {
                     // A `?query` / `#fragment` suffix survives onto the
                     // rewritten URL (fonts commonly carry `#iefix`).
@@ -1725,6 +1733,21 @@ mod tests {
     }
 
     #[test]
+    fn public_rooted_urls_become_stylesheet_relative_for_any_base() {
+        // `/fonts/x.ttf` is served from the `public/` passthrough at the site
+        // root, exactly where the emitted stylesheet sits — the relative form
+        // is correct under any configured base (Vite base-prefixes instead;
+        // both resolve identically).
+        let processed = process_global_css(
+            Path::new("/project/app.css"),
+            "@font-face { src: url(/fonts/x.ttf); }\n",
+        )
+        .unwrap();
+        assert!(processed.css.contains("url(\"fonts/x.ttf\")"), "{}", processed.css);
+        assert!(processed.assets.is_empty(), "{:?}", processed.assets);
+    }
+
+    #[test]
     fn url_rewriting_skips_absolute_data_fragment_and_public_urls() {
         let file = Path::new("/project/app.css");
         let processed = process_global_css(
@@ -1732,7 +1755,6 @@ mod tests {
             ".a { background: url(https://example.com/x.png); }\n\
              .b { background: url(data:image/png;base64,AAAA); }\n\
              .c { fill: url(#gradient); }\n\
-             .d { background: url(/public/logo.png); }\n\
              .e { background: url(//cdn.example.com/x.png); }\n\
              /* url(./commented.png) */\n\
              .f { content: \"url(./quoted.png)\"; }\n",
@@ -1743,7 +1765,6 @@ mod tests {
             "url(https://example.com/x.png)",
             "url(data:image/png;base64,AAAA)",
             "url(#gradient)",
-            "url(/public/logo.png)",
             "url(//cdn.example.com/x.png)",
             "url(./commented.png)",
             "\"url(./quoted.png)\"",

@@ -233,7 +233,10 @@ fn run() -> Result<(), String> {
             if summary.css_files > 0 {
                 injection.stylesheet_urls.push(format!("{}index.css", config.base));
             }
-            let built_html = html.rewrite(&html_origin, &injection)?;
+            let built_html = diffpack::html_entry::apply_base(
+                &html.rewrite(&html_origin, &injection)?,
+                &config.base,
+            );
             let html_out = out_dir.join("index.html");
             std::fs::write(&html_out, built_html)
                 .map_err(|error| format!("cannot write {}: {error}", html_out.display()))?;

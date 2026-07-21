@@ -49,4 +49,6 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 
 Also flagged: one NONDETERMINISTIC `Unexpected token` on a valid ESM file
 (rc-virtual-list) that vanished on 30+ reruns — possible parse/ingest race;
-keep an eye out, add stress coverage when reproducible.
+keep an eye out, add stress coverage when reproducible. UPDATE: not
+reproducible in 150 consecutive builds of the 1002-module redux app on the
+current binary (post-ordering-fix); left open but downgraded.
