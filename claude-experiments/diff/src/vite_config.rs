@@ -35,6 +35,11 @@ pub struct ResolvedViteConfig {
     /// evaluator counts them and [`resolve`] surfaces a warning, never a
     /// silent drop.
     pub alias: Vec<(String, String)>,
+    /// `css.preprocessorOptions.scss.additionalData` when it is a string:
+    /// prepended to every compiled `.scss` root, exactly as Vite does. A
+    /// function value cannot be expressed natively; the evaluator counts it
+    /// and [`resolve`] surfaces a warning, never a silent drop.
+    pub scss_additional_data: Option<String>,
 }
 
 /// The candidate config filenames, in Vite's resolution order.
@@ -140,6 +145,25 @@ fn parse(stdout: &[u8]) -> Result<ResolvedViteConfig, String> {
             if skipped == 1 { "y" } else { "ies" }
         );
     }
+    let scss_additional_data = value
+        .get("scssAdditionalData")
+        .and_then(|data| data.as_str())
+        .map(str::to_string);
+    if value
+        .get("scssAdditionalDataSkipped")
+        .and_then(|value| value.as_u64())
+        .is_some_and(|skipped| skipped > 0)
+    {
+        eprintln!(
+            "warning: vite config sets css.preprocessorOptions.scss.additionalData to a \
+             non-string value, which diffpack cannot apply"
+        );
+    }
 
-    Ok(ResolvedViteConfig { base, define, alias })
+    Ok(ResolvedViteConfig {
+        base,
+        define,
+        alias,
+        scss_additional_data,
+    })
 }

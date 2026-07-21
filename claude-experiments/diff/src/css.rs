@@ -276,13 +276,13 @@ fn scope_hash(file: &Path, text: &str) -> String {
 // Low-level tokenizer helpers (strings/comments/paren aware).
 // ---------------------------------------------------------------------------
 
-fn is_ident_byte(byte: u8) -> bool {
+pub(crate) fn is_ident_byte(byte: u8) -> bool {
     byte == b'-' || byte == b'_' || byte.is_ascii_alphanumeric() || byte >= 0x80
 }
 
 /// End index of the identifier starting at `start` (may equal `start` when no
 /// identifier is present).
-fn ident_end(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn ident_end(bytes: &[u8], start: usize) -> usize {
     let mut index = start;
     while index < bytes.len() && is_ident_byte(bytes[index]) {
         index += 1;
@@ -290,7 +290,7 @@ fn ident_end(bytes: &[u8], start: usize) -> usize {
     index
 }
 
-fn skip_ws(bytes: &[u8], mut index: usize) -> usize {
+pub(crate) fn skip_ws(bytes: &[u8], mut index: usize) -> usize {
     while index < bytes.len() && bytes[index].is_ascii_whitespace() {
         index += 1;
     }
@@ -300,7 +300,7 @@ fn skip_ws(bytes: &[u8], mut index: usize) -> usize {
 /// Index past the closing quote of the string starting at `index` (which must
 /// hold a quote). Backslash escapes are honoured; an unterminated string ends at
 /// EOF.
-fn skip_string(bytes: &[u8], index: usize) -> usize {
+pub(crate) fn skip_string(bytes: &[u8], index: usize) -> usize {
     let quote = bytes[index];
     let mut cursor = index + 1;
     while cursor < bytes.len() {
@@ -315,7 +315,7 @@ fn skip_string(bytes: &[u8], index: usize) -> usize {
 
 /// Index past the `*/` of the comment starting at `index` (which must hold
 /// `/*`). An unterminated comment ends at EOF.
-fn skip_comment(bytes: &[u8], index: usize) -> usize {
+pub(crate) fn skip_comment(bytes: &[u8], index: usize) -> usize {
     let mut cursor = index + 2;
     while cursor + 1 < bytes.len() {
         if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
@@ -326,11 +326,11 @@ fn skip_comment(bytes: &[u8], index: usize) -> usize {
     bytes.len()
 }
 
-fn at_comment(bytes: &[u8], index: usize) -> bool {
+pub(crate) fn at_comment(bytes: &[u8], index: usize) -> bool {
     bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*')
 }
 
-fn skip_ws_and_comments(bytes: &[u8], mut index: usize) -> usize {
+pub(crate) fn skip_ws_and_comments(bytes: &[u8], mut index: usize) -> usize {
     loop {
         let advanced = skip_ws(bytes, index);
         if advanced < bytes.len() && at_comment(bytes, advanced) {
@@ -343,7 +343,7 @@ fn skip_ws_and_comments(bytes: &[u8], mut index: usize) -> usize {
 
 /// Index of the `close` byte matching the `open` byte at `index`, skipping
 /// strings and comments and honouring nesting.
-fn find_matching(
+pub(crate) fn find_matching(
     bytes: &[u8],
     index: usize,
     open: u8,
@@ -376,7 +376,7 @@ fn find_matching(
     ))
 }
 
-fn starts_with_ci(bytes: &[u8], index: usize, prefix: &str) -> bool {
+pub(crate) fn starts_with_ci(bytes: &[u8], index: usize, prefix: &str) -> bool {
     let prefix = prefix.as_bytes();
     bytes.len() >= index + prefix.len()
         && bytes[index..index + prefix.len()]

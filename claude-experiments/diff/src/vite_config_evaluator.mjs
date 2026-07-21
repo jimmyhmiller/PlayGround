@@ -76,11 +76,27 @@ if (Array.isArray(aliasConfig)) {
   }
 }
 
+// `css.preprocessorOptions.scss.additionalData`: only the string form can be
+// expressed to the native Sass compiler; a function is counted, never
+// silently dropped.
+let scssAdditionalData = null;
+let scssAdditionalDataSkipped = 0;
+const scssOptions = config.css?.preprocessorOptions?.scss;
+if (scssOptions && scssOptions.additionalData !== undefined) {
+  if (typeof scssOptions.additionalData === 'string') {
+    scssAdditionalData = scssOptions.additionalData;
+  } else {
+    scssAdditionalDataSkipped = 1;
+  }
+}
+
 process.stdout.write(
   JSON.stringify({
     base: typeof config.base === 'string' ? config.base : null,
     define,
     alias,
     aliasSkipped,
+    scssAdditionalData,
+    scssAdditionalDataSkipped,
   }),
 );

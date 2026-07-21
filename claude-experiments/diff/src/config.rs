@@ -112,6 +112,12 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         .as_ref()
         .map(|resolved| resolved.alias.clone())
         .unwrap_or_default();
+    let scss = crate::sass::ScssOptions {
+        additional_data: resolved
+            .as_ref()
+            .and_then(|resolved| resolved.scss_additional_data.clone()),
+        root: Some(root.to_path_buf()),
+    };
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
     aliases.extend(alias);
@@ -135,6 +141,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // Off by default; the dev server flips it on per environment. `build-app`
             // uses this config path with `hmr` false, so production is unaffected.
             hmr: false,
+            scss,
         },
         entry,
     })
@@ -179,6 +186,13 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            // Even a generic build knows the project root, so root-relative
+            // `@use "/src/..."` targets resolve; additionalData stays a
+            // Vite-mode opt-in below.
+            scss: crate::sass::ScssOptions {
+                additional_data: None,
+                root: Some(root.to_path_buf()),
+            },
         },
         base: "/".to_string(),
         vite: false,
@@ -204,6 +218,11 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         .as_ref()
         .map(|resolved| resolved.alias.clone())
         .unwrap_or_default();
+    // `css.preprocessorOptions.scss.additionalData` (string form), threaded to
+    // the native Sass compiler exactly like `base` and `define`.
+    config.build.scss.additional_data = resolved
+        .as_ref()
+        .and_then(|resolved| resolved.scss_additional_data.clone());
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
     // Vite resolves with the mode condition alongside the browser ones.

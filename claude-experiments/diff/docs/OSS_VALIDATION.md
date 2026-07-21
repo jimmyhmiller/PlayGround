@@ -18,10 +18,10 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 | App | Status | Gap(s) |
 | --- | --- | --- |
 | markpad (CodeMirror markdown editor) | **WORKING** — builds + browser-parity vs reference (13/13 computed properties, zero console errors) | was: Tailwind v4 global entry (wired) + engine coverage (~30 utility families, before/after/focus/breakpoint/group-hover variants, class-candidate dataflow scanner — all landed with 16 new pattern tests) |
-| chebyshev-calculator (antd math tool) | ONE gap, proven (517 modules build with scss bypassed) | Sass compilation |
+| chebyshev-calculator (antd math tool) | **WORKING** — builds (518 modules) + browser-parity vs reference (1600/1600 computed properties across 40 elements, zero diffpack-only console errors) | was: Sass compilation (native `src/sass.rs` landed: variables, nesting/`&`, mixins, `@use`, arithmetic/`calc()` simplification) |
 | swift-calc | silent-fallback BUG + out-of-scope gap | raw `@tailwind` v3 directives shipped uncompiled with exit 0 — must be a hard error; PostCSS/Tailwind-v3 pipeline itself likely not worth building |
 | app-fire-calculator | 2 gaps | Tailwind v4 global entry; `virtual:pwa-register/react` (vite-plugin-pwa) |
-| the-last-pawn | 2 gaps | non-root `base`; sass + CSS-modules composed (`*.module.scss`, `additionalData`) |
+| the-last-pawn | ONE gap left (sass landed: 11 `*.module.scss` + `additionalData` `@use` theme compile; 479/480 computed properties match the reference) | public-rooted URLs (`/fonts/...` in css `url()`, `/favicon-*.png` in index.html) are not rewritten with the non-root `base` the way Vite does — the remaining 404s and the single 2px style delta (font fallback) all trace to it |
 | wall-go | 4 gaps | non-root base; Tailwind v4 entry; root-relative alias target `/src/*` not resolved against project root; `new Worker(new URL(...))` |
 
 ## Fix queue (ordered)
@@ -33,7 +33,18 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
    randomly-drawn apps; GitHub Pages is ubiquitous).
 4. Root-relative alias/tsconfig targets (`/src/*`) resolved against the
    project root.
-5. Sass (fully unlocks chebyshev; composes with CSS modules for the-last-pawn).
+5. DONE — native Sass subset (`src/sass.rs`): variables (+scopes, `!default`),
+   nesting with `&` everywhere, nested `@media` bubbling, `@mixin`/`@include`
+   (args + defaults), `@use` (namespaces, `as *`, root-relative `/src/...`,
+   `_partial` convention), scss `@import` in importer scope with url rebasing,
+   arithmetic/`sqrt`, dart-sass `calc()` simplification, Vite
+   `css.preprocessorOptions.scss.additionalData` (string form) evaluated from
+   vite.config. `.scss` compiles to CSS first, then flows through the existing
+   global/module CSS loaders; partials are recorded in `css_source_files` so
+   edits invalidate. Everything else (control flow, `@extend`, interpolation,
+   placeholders, Sass-only functions, `with (...)`, indented syntax) is a hard
+   error naming file + construct. Unlocked chebyshev fully; the-last-pawn now
+   only lacks base-prefixing of public-rooted URLs (see table).
 6. Module workers (`new Worker(new URL(...), {type:"module"})`).
 
 Also flagged: one NONDETERMINISTIC `Unexpected token` on a valid ESM file

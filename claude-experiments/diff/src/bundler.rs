@@ -143,6 +143,9 @@ struct ResolutionCache {
     defines: Arc<Vec<(String, String)>>,
     /// Public base for minted asset URLs (always `/`-terminated).
     base: Arc<str>,
+    /// SCSS compile options (Vite `additionalData` + project root), threaded
+    /// to the `.scss` loaders.
+    scss: Arc<crate::sass::ScssOptions>,
 }
 
 struct DirectoryResolutionCache {
@@ -166,6 +169,7 @@ impl ResolutionCache {
         import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
         defines: Vec<(String, String)>,
         base: &str,
+        scss: crate::sass::ScssOptions,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
@@ -175,6 +179,7 @@ impl ResolutionCache {
             import_meta_glob: Arc::new(import_meta_glob),
             defines: Arc::new(defines),
             base: Arc::from(base),
+            scss: Arc::new(scss),
         }
     }
 
@@ -678,6 +683,7 @@ impl Bundler {
                 config.import_meta_glob.clone(),
                 config.defines.clone(),
                 &config.base,
+                config.scss.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -2177,7 +2183,7 @@ impl Bundler {
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
         // ever read as JavaScript.
-        if let Some(special) = load_special_module(&id, path, self.target, &self.resolution_cache.base) {
+        if let Some(special) = load_special_module(&id, path, self.target, &self.resolution_cache) {
             let mut special = special?;
             // DEV-ONLY: a `?tsr-split=<component>` module is the extracted route
             // component — a React Fast Refresh boundary. Append the self-accept
@@ -4039,7 +4045,7 @@ fn load_uncached(
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
     // read as JavaScript.
-    if let Some(special) = load_special_module(&id, path, target, &resolution_cache.base) {
+    if let Some(special) = load_special_module(&id, path, target, resolution_cache) {
         let mut special = special?;
         // DEV-ONLY: instrument a `?tsr-split=<component>` route component with the
         // Fast Refresh footer (see [`crate::hmr`]). Never runs for `build-app`.
@@ -4184,11 +4190,11 @@ fn load_special_module(
     id: &str,
     path: &Path,
     target: Target,
-    base: &str,
+    cache: &ResolutionCache,
 ) -> Option<Result<SpecialModule, String>> {
     let resource = ResourceId::parse(id);
     if resource.query.is_some() {
-        return Some(synthesize_query_module_impl(&resource, target, base));
+        return Some(synthesize_query_module_impl(&resource, target, &cache.base));
     }
     if crate::css::is_css_module_path(path) {
         return Some(load_css_module(path, target));
@@ -4196,10 +4202,33 @@ fn load_special_module(
     if is_css_path(path) {
         return Some(load_stylesheet(path));
     }
+    if crate::sass::is_scss_path(path) {
+        return Some(load_scss(path, target, &cache.scss));
+    }
     if is_asset_path(path) {
-        return Some(synthesize_asset_url(path.to_path_buf(), base));
+        return Some(synthesize_asset_url(path.to_path_buf(), &cache.base));
     }
     None
+}
+
+/// A Sass source (`.scss`): compiled natively to plain CSS first, then handed
+/// to the SAME pipeline a hand-written CSS file takes — `.module.scss` through
+/// the CSS Modules scoper, everything else through the global-stylesheet
+/// loader. Every `@use`/`@import`ed partial (and the `additionalData` theme)
+/// is recorded in `css_source_files`, so editing one re-derives this module.
+fn load_scss(
+    path: &Path,
+    target: Target,
+    options: &crate::sass::ScssOptions,
+) -> Result<SpecialModule, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let compiled = crate::sass::compile_scss(path, &text, options)?;
+    if crate::sass::is_scss_module_path(path) {
+        load_css_module_from_text(path, &compiled.css, compiled.loaded_files, target)
+    } else {
+        load_stylesheet_from_text(path, &compiled.css, compiled.loaded_files)
+    }
 }
 
 /// Builds the module for a query-bearing id. `?url` emits a content-hashed asset
@@ -4375,7 +4404,20 @@ fn is_valid_js_identifier(name: &str) -> bool {
 fn load_css_module(path: &Path, target: Target) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let processed = crate::css::process_css_module(path, &text)?;
+    load_css_module_from_text(path, &text, Vec::new(), target)
+}
+
+/// The body of [`load_css_module`], parameterized over the stylesheet text so
+/// a compiled-from-Sass module reuses the identical scoping/mapping pipeline.
+/// `extra_source_files` are additional physical files the text was derived
+/// from (Sass partials); they join `css_source_files` for invalidation.
+fn load_css_module_from_text(
+    path: &Path,
+    text: &str,
+    extra_source_files: Vec<PathBuf>,
+    target: Target,
+) -> Result<SpecialModule, String> {
+    let processed = crate::css::process_css_module(path, text)?;
     let mut js = String::new();
     for (index, specifier) in processed.compose_imports.iter().enumerate() {
         js.push_str(&format!(
@@ -4461,13 +4503,15 @@ fn load_css_module(path: &Path, target: Target) -> Result<SpecialModule, String>
         identity.push('\0');
         identity.push_str(external);
     }
+    let mut css_source_files = processed.inlined_files;
+    css_source_files.extend(extra_source_files);
     Ok(SpecialModule {
         hash: content_hash(identity.as_bytes()),
         code: transformed.code,
         flat_module: transformed.flat_module,
         assets: css_assets_to_emits(processed.assets),
         css: Some(processed.css),
-        css_source_files: processed.inlined_files,
+        css_source_files,
         css_external_imports: processed.external_imports,
         dependency_specifiers,
         dependency_demands,
@@ -4631,7 +4675,20 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
             path.display()
         ));
     }
-    let processed = crate::css::process_global_css(path, &text)?;
+    load_stylesheet_from_text(path, &text, Vec::new())
+}
+
+/// The body of [`load_stylesheet`], parameterized over the stylesheet text so
+/// a compiled-from-Sass global stylesheet reuses the identical import/url
+/// pipeline. `extra_source_files` are additional physical files the text was
+/// derived from (Sass partials); they join `css_source_files` for
+/// invalidation.
+fn load_stylesheet_from_text(
+    path: &Path,
+    text: &str,
+    extra_source_files: Vec<PathBuf>,
+) -> Result<SpecialModule, String> {
+    let processed = crate::css::process_global_css(path, text)?;
     let mut identity = processed.css.clone();
     for external in &processed.external_imports {
         identity.push('\0');
@@ -4647,13 +4704,15 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
         .cloned()
         .map(css_import_demand)
         .collect();
+    let mut css_source_files = processed.inlined_files;
+    css_source_files.extend(extra_source_files);
     Ok(SpecialModule {
         hash: content_hash(identity.as_bytes()),
         code: String::new(),
         flat_module: None,
         assets: css_assets_to_emits(processed.assets),
         css: Some(processed.css),
-        css_source_files: processed.inlined_files,
+        css_source_files,
         css_external_imports: processed.external_imports,
         dependency_specifiers,
         dependency_demands,
@@ -5196,6 +5255,10 @@ pub struct BuildConfig {
     /// rewrite `import.meta.hot`. Set only by the dev server; `build-app` leaves it
     /// `false` so production output is unaffected. See [`crate::hmr`].
     pub hmr: bool,
+    /// SCSS compile options: Vite's `css.preprocessorOptions.scss.additionalData`
+    /// (when a string) and the project root for root-relative `@use "/src/..."`
+    /// targets. Default (empty) compiles `.scss` files with no injected prelude.
+    pub scss: crate::sass::ScssOptions,
 }
 
 impl Default for BuildConfig {
@@ -5212,6 +5275,7 @@ impl Default for BuildConfig {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            scss: crate::sass::ScssOptions::default(),
         }
     }
 }
@@ -5833,6 +5897,145 @@ mod tests {
         let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
         assert!(css.contains(&format!(".{}", second_names[1])), "{css}");
         assert!(css.contains("color: purple"), "{css}");
+    }
+
+    #[test]
+    fn scss_global_stylesheet_compiles_through_the_css_pipeline() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("app.scss"),
+            "$pad: 12px;\n#bar {\n  padding: $pad;\n  &:hover { color: red; }\n  \
+             @media (min-width: 2 * 400px) { flex: 1; }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './app.scss';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("#bar {\n  padding: 12px;\n}"), "{css}");
+        assert!(css.contains("#bar:hover {\n  color: red;\n}"), "{css}");
+        assert!(
+            css.contains("@media (min-width: 800px) {"),
+            "nested media must bubble with the evaluated prelude: {css}"
+        );
+    }
+
+    #[test]
+    fn scss_module_scopes_compiled_css_and_exports_the_mapping() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("_theme.scss"),
+            "$clr: #e6a459;\n@mixin pulse { animation: pulse 1s infinite; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("card.module.scss"),
+            "@use './theme';\n.card { color: theme.$clr; @include theme.pulse; }\n\
+             @keyframes pulse { 0% { opacity: 0.5; } }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import styles from './card.module.scss';\nconsole.log(styles.card);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let printed = String::from_utf8(
+            Command::new("node").arg(&output).output().unwrap().stdout,
+        )
+        .unwrap();
+        let scoped = printed.trim();
+        assert!(scoped.starts_with("_card_"), "{printed}");
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains(&format!(".{scoped}")), "{css}");
+        assert!(css.contains("color: #e6a459"), "{css}");
+        // The keyframes name AND the mixin-injected animation reference are
+        // scoped consistently by the CSS Modules pass.
+        assert!(css.contains("@keyframes _pulse_"), "{css}");
+        assert!(css.contains("animation: _pulse_"), "{css}");
+    }
+
+    #[test]
+    fn editing_a_used_scss_partial_rederives_the_importing_module() {
+        let directory = tempdir().unwrap();
+        let partial = directory.path().join("_theme.scss");
+        fs::write(&partial, "$clr: red;\n").unwrap();
+        fs::write(
+            directory.path().join("app.scss"),
+            "@use './theme';\n.x { color: theme.$clr; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './app.scss';\nconsole.log('ok');\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (mut bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("color: red"), "{css}");
+        // The partial is not a graph module itself, but it IS a recorded css
+        // source: editing it must re-derive the importing .scss module.
+        assert!(bundler.is_known_module(&partial), "partial must be known");
+        fs::write(&partial, "$clr: blue;\n").unwrap();
+        let update = bundler.rebuild_path(&partial).unwrap();
+        assert!(
+            update.delta.changed.iter().any(|id| id.ends_with("app.scss")),
+            "{update:?}"
+        );
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        let css = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(css.contains("color: blue"), "{css}");
+        assert!(!css.contains("color: red"), "{css}");
+    }
+
+    #[test]
+    fn scss_unsupported_construct_is_a_hard_build_error() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("app.scss"),
+            ".a { @extend .b; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './app.scss';\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Err(error) => error,
+            Ok(_) => panic!("@extend must fail the build"),
+        };
+        assert!(
+            error.contains("@extend") && error.contains("app.scss"),
+            "the error must name the construct and the file: {error}"
+        );
     }
 
     #[test]
@@ -7192,6 +7395,7 @@ mod tests {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            scss: crate::sass::ScssOptions::default(),
         };
         (directory, entry, config)
     }
@@ -7260,6 +7464,7 @@ mod tests {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            scss: crate::sass::ScssOptions::default(),
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -7340,6 +7545,7 @@ mod tests {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            scss: crate::sass::ScssOptions::default(),
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
