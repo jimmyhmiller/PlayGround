@@ -506,7 +506,8 @@ This identified the next implementation slice:
 2. Implement `?url` asset modules. (done)
 3. Copy content-hashed assets and return their public URL from the synthetic
    JavaScript module. (done)
-4. Add global CSS and CSS-module loaders. (global CSS done; CSS modules next)
+4. Add global CSS and CSS-module loaders. (done, including `@import`/`url()`
+   rewriting)
 5. Carry emitted CSS/assets into the client and SSR manifests.
 
 ## Query-aware module identity and the `?url` loader (landed)
@@ -561,8 +562,79 @@ asset URL, handled by the `?url` loader), and that CSS is Tailwind source that
 the reference build compiles via `@tailwindcss/vite`. So Tailwind compilation is
 a framework-plugin (host) concern; the generic global-CSS and (next) CSS-module
 loaders are core pipeline capabilities the checklist requires independently.
-Remaining CSS work: CSS Modules (scoped names + export map), `@import`/`url()`
-rewriting, and carrying CSS into route manifests.
+Remaining CSS work: carrying CSS into route manifests.
+
+## CSS Modules and `@import`/`url()` rewriting (landed)
+
+`src/css.rs` is a small hand-rolled, strings/comments/paren-aware CSS tokenizer
+(owned native code, no CSS crate dependency) shared by three loaders in
+`src/bundler.rs`:
+
+- **CSS Modules** (`*.module.css`, `load_css_module`): every local class/id
+  selector and `@keyframes` name (plus `animation`/`animation-name` references
+  to them) is scoped to a deterministic `_<local>_<hash8>` (hash of file name +
+  content, stable for unchanged content). `:global(...)` passes its contents
+  through unscoped, `:local(...)` scopes explicitly, both wrappers removed.
+  Selector coverage includes combinators, pseudo-classes/elements, comma lists,
+  attribute selectors, and recursion into `:not(...)`/`:is(...)`-style pseudo
+  arguments. The synthesized JavaScript matches Vite's default behavior: the
+  DEFAULT export is the locals -> scoped-names object plus a named export per
+  identifier-safe local, and it runs through the real transformer so linking and
+  tree-shaking treat it like any module. `composes: a;` chains resolve
+  transitively (self first, then composed, declaration order); `composes: a
+  from './other.module.css';` becomes a real graph dependency edge whose value
+  is looked up from the other module's mapping AT RUNTIME (throwing specifically
+  on a missing name, never yielding `undefined`), so editing the composed file
+  invalidates through the ordinary incremental path without re-deriving the
+  composer. `composes: a from global;` appends the literal name. Anything the
+  scoper cannot handle confidently — unknown at-rules (`@tailwind`), CSS
+  nesting, bare `:global`, escaped selectors, compound-selector `composes`,
+  unknown/circular composes targets, non-utf-8 `@charset` — is a hard error
+  naming the file and construct.
+- **`@import` for all CSS** (`process_global_css`, also inside modules): a
+  plain `@import './x.css';` / `@import url('./x.css');` becomes a graph edge;
+  the imported file is its own stylesheet module emitted BEFORE the importer in
+  execution order and deduped once per graph (CSS spec order), so the emitted
+  stylesheet contains no unresolved relative `@import`. Bare specifiers prefer
+  the CSS-native relative file when it exists, else resolve as packages through
+  `oxc_resolver`. A media-qualified `@import './x.css' screen;` becomes an edge
+  to the derived module `x.css?media=screen` (`LoaderKind::CssMedia`), whose CSS
+  is the target's content — nested imports inlined recursively, nested media as
+  nested `@media` blocks — wrapped in `@media screen { ... }`; the transitively
+  inlined file paths are recorded (`css_source_files`) and `rebuild_path`
+  re-derives dependents when any of them changes (the derived-sibling scan also
+  now runs for physical files that are not bare modules themselves). Remote
+  imports (`@import url(https://...)`) are hoisted verbatim, deduped, to the top
+  of the emitted stylesheet where an `@import` is valid. `layer(...)` /
+  `supports(...)` conditions, root-relative targets, and remote-or-bare imports
+  inside a media-qualified import are hard errors naming the statement. A
+  Tailwind v4 entry imported as a global stylesheet is a hard error directing to
+  `?url` (where the native compiler runs).
+- **`url()` rewriting for all CSS** (`rewrite_urls`): every literal relative
+  `url(...)` resolves against ITS OWN file (nested imports included), the asset
+  joins the same content-hashed `assets/` emit + public-name dedup as `?url`,
+  and the reference is rewritten to `/assets/<stem>-<hash>.<ext>` (a
+  `?query`/`#fragment` suffix survives). Skipped verbatim: scheme URLs
+  (http/https/data/...), `//`, `#fragment`-only, `/`-rooted public paths, and
+  anything inside strings/comments (so `var()` indirection is never touched). A
+  reference that resolves to no file is a hard error naming the CSS file and
+  reference.
+
+Scoping/import extraction happen per-module at load time (module-granular);
+concatenation, hoisting, and asset copying stay in the `emit_css`/`emit_assets`
+build-emit step, so the thesis guards are unaffected (re-measured:
+~3.5 KB/module, 1 module re-transformed per leaf edit). Tests:
+`css::tests::*` (unit) and, in `bundler::tests`,
+`css_module_import_exports_scoped_mapping_with_vite_default_and_named_exports`,
+`css_module_global_escape_hatch_and_same_file_composes`,
+`cross_file_composes_adds_a_dependency_edge_and_tracks_edits_incrementally`,
+`a_missing_cross_file_composes_target_throws_at_runtime_instead_of_undefined`,
+`css_import_statements_become_edges_with_dedup_ordering_and_media_wrap`,
+`css_url_references_are_rewritten_to_hashed_assets_relative_to_each_file`,
+`a_nested_media_import_inlines_relative_urls_and_reacts_to_nested_edits`,
+`remote_css_imports_are_hoisted_to_the_top_of_the_emitted_stylesheet`, and
+`unsupported_css_constructs_fail_the_build_with_specific_errors` (several
+execute the emitted output under node).
 
 ## Plugin host: config bridge (landed)
 
