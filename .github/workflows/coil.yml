@@ -41,14 +41,16 @@ jobs:
         run: |
           brew install llvm@21
           ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm || sudo ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm
-      - name: DEBUG gate-full verbose (temporary)
-        continue-on-error: true
-        run: |
-          LF=$(./selfhost/llvm-link-flags.sh dynamic)
-          ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-dbg $LF
-          VERBOSE=1 ./selfhost/oracle/gate-full.sh /tmp/coil-dbg | grep -A 14 "FAIL" | head -80
       - name: Rebootstrap (seed -> stage3, fixpoint, gate-full + arm64 gate-run + gate-cli)
-        run: ./selfhost/rebootstrap.sh /tmp/coil-ci
+        # gate-full's snapshot is byte-exact textual IR, and the triple line embeds
+        # the Darwin version of the host that blessed it (LLVMGetDefaultTargetTriple).
+        # Pin emit-ir to the snapshot's own triple so the compare is host-independent;
+        # this self-maintains if the snapshot is ever re-blessed on a newer macOS.
+        run: |
+          REF_TRIPLE=$(grep -m1 -h 'target triple' selfhost/oracle/full/reference/*.dump | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "snapshot triple: $REF_TRIPLE"
+          export COIL_SELF_ARGS="--target $REF_TRIPLE"
+          ./selfhost/rebootstrap.sh /tmp/coil-ci
       - name: Engine parity (default) — pinned to the 2 known divergences
         run: |
           ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity.txt || true
