@@ -34,6 +34,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install LLVM (Homebrew)
         run: brew install llvm
+      - name: DEBUG gate-full verbose (temporary)
+        continue-on-error: true
+        run: |
+          LF=$(./selfhost/llvm-link-flags.sh dynamic)
+          ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-dbg $LF
+          VERBOSE=1 ./selfhost/oracle/gate-full.sh /tmp/coil-dbg | grep -A 14 "FAIL" | head -80
       - name: Rebootstrap (seed -> stage3, fixpoint, gate-full + arm64 gate-run + gate-cli)
         run: ./selfhost/rebootstrap.sh /tmp/coil-ci
       - name: Engine parity (default) — pinned to the 2 known divergences
