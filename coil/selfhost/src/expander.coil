@@ -289,13 +289,20 @@
   (let [e (meta-engine-entry fn-name)]
     (if (icmp-ne (cast i64 e) 0)
         (meta-engine-run-env a e cx env)
+      ; step 5 Phase C: under the compiled engine with staging on, an engine miss is
+      ; a HARD ERROR, not a silent reroute to the interpreter — the staging prepass
+      ; (re-run every tower round) is expected to have compiled every macro that is
+      ; actually called. COIL_META=interp and COIL_STAGE_MACROS=0 both keep the
+      ; interpreter path (parity.sh's oracle and the soak kill switch).
+      (if (and (meta-compiled?) (meta-staged?))
+          (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' is not compiled into the metaprogram engine (staging could not build it standalone; COIL_STAGE_MACROS=0 restores the interpreter fallback while this is investigated)")))
       (match (eval-seq (load (field callee body)) env cx)
         (Err [d] (Err [Sexp Diag] d))
         (Ok [fl]
           (match fl
             (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
             (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
-            (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))))))))
+            (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow")))))))))))
 ; A macro-BODY error comes back with a dummy span — the code-op derrs (`str-bytes
 ; expects a string`, `error …`, arity mismatches) carry none, so it renders as a bare
 ; internal message that names, e.g., `str-bytes`, with no source. Point it at the macro
@@ -755,10 +762,14 @@
       (Err [d] (Err [i64 Diag] d))
       (Ok [macroctx]
         (let [quals (code-sig-funcs macroctx a)]
-          ; staged engine construction (gated): compile every standalone-checkable
-          ; macro BEFORE the all-or-nothing batch check, so the tower's recovery
-          ; expansions run compiled instead of falling back to eval-seq.
-          (if (and (meta-staged?) (and (meta-compiled?) (icmp-eq round 0)))
+          ; staged engine construction: compile every standalone-checkable macro
+          ; BEFORE the all-or-nothing batch check, so the tower's recovery
+          ; expansions run compiled instead of falling back to eval-seq. Runs every
+          ; ROUND (not just round 0): a macro whose pruned closure still held an
+          ; unexpanded macro call in round N often checks clean in round N+1, after
+          ; the tower expanded that call — so the engine converges toward total.
+          ; Already-compiled quals are skipped, so later rounds are cheap.
+          (if (and (meta-staged?) (meta-compiled?))
               (stage-macros-prepass (mut s) sub-forms a)
             0)
           (if (icmp-eq (al-len [(slice u8)] (load quals)) 0) (Ok [i64 Diag] 0)
