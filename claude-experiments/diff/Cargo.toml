@@ -5,6 +5,12 @@ edition = "2024"
 description = "An experimental incremental JavaScript bundler built with Oxc"
 license = "MIT"
 
+[features]
+# Compiles in the deterministic allocation-accounting layer (a tracking global
+# allocator) used ONLY by `bundle-scale-memory` and the memory thesis guards.
+# Production/default builds have NO allocator override: plain system malloc.
+memory-accounting = []
+
 [dependencies]
 oxc_allocator = "0.140.0"
 oxc_ast = "0.140.0"
@@ -22,7 +28,6 @@ serde_json = "1.0.150"
 notify = "8.2.0"
 rayon = "1.11.0"
 oxc_minifier = "0.140.0"
-mimalloc = "0.1.52"
 
 [dev-dependencies]
 tempfile = "3.23.0"

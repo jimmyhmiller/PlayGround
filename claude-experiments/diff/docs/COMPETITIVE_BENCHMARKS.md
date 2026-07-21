@@ -310,12 +310,23 @@ via `perf stat -r 10` (same corpora, outputs runtime-verified):
 
 | Corpus | diffpack cold (was) | diffpack cold (now) | best rival (above) |
 | --- | ---: | ---: | ---: |
-| realistic-1k | 36.1 ms | **13.9 ms** | esbuild 23.7 ms |
-| realistic-10k | 259.9 ms | **132 ms** | rolldown 263.4 ms |
+| realistic-1k | 36.1 ms | **17.4 ms** | esbuild 23.7 ms |
+| realistic-10k | 259.9 ms | **183 ms** | rolldown 263.4 ms |
 
 With this, diffpack's measured cold time leads every rival cell above (tiny
 corpora were already led and only get faster from the same fixes). The full
 tables above predate the change; a fresh harness run should replace them.
+
+**Measurement + shipping policy (final form):** production/default builds
+carry NO allocator override of any kind — plain system malloc, zero wrapper.
+The tracking allocator is compiled in only under the `memory-accounting`
+cargo feature, which exists solely for `bundle-scale-memory` and the memory
+thesis guards (`cargo test --release --features memory-accounting`). Wall
+time and memory are therefore measured in separate runs of separately built
+binaries; the wall numbers above are from the clean default build. (An
+earlier draft of this addendum reported 13.9/132 ms using MiMalloc plus a
+dormant tracking wrapper; that configuration was rejected for production, and
+the numbers here are the honest no-override measurements.)
 
 ## Reproducing
 

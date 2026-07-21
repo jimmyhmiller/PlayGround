@@ -76,9 +76,11 @@ docs.
    took the realistic corpora from ~2.7x larger than esbuild to ~1.9x
    SMALLER, runtime-verified (see the benchmarks doc addendum). Cold wall time then
    fell 2-2.6x on 2026-07-21 (4-thread pool cap removed, pipelined discovery,
-   allocation accounting off-by-default + MiMalloc): realistic-1k 13.9 ms vs
-   esbuild's 23.7, realistic-10k 132 ms vs rolldown's 263 — every measured
-   cold cell now leads. Pending: a full harness re-run to replace the old
+   allocation accounting moved behind the `memory-accounting` cargo feature
+   so production builds have NO allocator override at all): realistic-1k
+   17.4 ms vs esbuild's 23.7, realistic-10k 183 ms vs rolldown's 263 — every
+   measured cold cell leads, measured on the clean default binary; memory is
+   measured in separate feature-built runs. Pending: a full harness re-run to replace the old
    tables.
 2. **Incremental edits far below competitors** — *holds everywhere measured*:
    2.5–3.4x vs the best rival per corpus (diffpack's number even includes

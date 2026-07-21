@@ -1,3 +1,4 @@
+#![cfg(feature = "memory-accounting")]
 //! Low-memory thesis guards, isolated in their own test binary.
 //!
 //! These read process-wide allocation counters ([`diffpack::memory`]), so they

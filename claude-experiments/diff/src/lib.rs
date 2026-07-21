@@ -12,6 +12,7 @@ pub mod import_meta_env;
 pub mod import_meta_glob;
 pub mod js_reachability;
 pub mod manifest;
+#[cfg(feature = "memory-accounting")]
 pub mod memory;
 pub mod parser;
 pub mod resource_id;
@@ -28,5 +29,9 @@ pub mod vite_define;
 /// Track every allocation so the guard suite can assert on peak/retained memory
 /// deterministically. Relaxed atomics keep the overhead negligible and uniform,
 /// so speed measurements stay representative.
+// The accounting allocator exists only in `memory-accounting` builds (the
+// memory benchmark and its guards). A default build overrides nothing: the
+// system allocator, no wrapper, no measurement layer.
+#[cfg(feature = "memory-accounting")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: memory::TrackingAllocator = memory::TrackingAllocator;

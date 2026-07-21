@@ -355,6 +355,7 @@ pub struct MemoryScaleResult {
 
 /// Builds a synthetic graph, edits one leaf module `edits` times, and reports
 /// deterministic allocation deltas for the build, the edit run, and teardown.
+#[cfg(feature = "memory-accounting")]
 pub fn run_bundle_scale_memory(
     module_count: usize,
     imports_per_module: usize,
@@ -641,7 +642,9 @@ mod thesis_guards {
     //! `tests/thesis_memory.rs` because they read process-wide allocation
     //! counters and must run isolated from other tests' allocations.
 
-    use super::{run_bundle_scale_direct, run_bundle_scale_memory};
+    use super::run_bundle_scale_direct;
+    #[cfg(feature = "memory-accounting")]
+    use super::run_bundle_scale_memory;
 
     #[test]
     fn a_leaf_edit_retransforms_exactly_one_module() {
@@ -654,6 +657,7 @@ mod thesis_guards {
     }
 
     #[test]
+    #[cfg(feature = "memory-accounting")]
     fn a_leaf_edit_rerenders_exactly_one_chunk_with_a_bounded_cache() {
         // Mirrors the transform guard for the emit stage: a leaf edit must
         // re-render exactly one chunk (not the whole bundle), and the render
@@ -676,6 +680,7 @@ mod thesis_guards {
     }
 
     #[test]
+    #[cfg(feature = "memory-accounting")]
     fn a_leaf_edit_reminifies_exactly_one_chunk_with_a_bounded_cache() {
         // Same emit-incrementality guard, but with `minify: true`: production
         // minification is keyed into the per-chunk render cache, so a leaf edit
