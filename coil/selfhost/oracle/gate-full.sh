@@ -23,7 +23,11 @@ pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   ref="$REF/$(echo "$f" | tr '/' '_').dump"
-  got=$("$BIN" ${COIL_SELF_ARGS:-} emit-ir "$f" 2>/tmp/coil_self_full_err); rc=$?
+  # COIL_SELF_ARGS goes AFTER the file: the self-host CLI takes the subcommand at
+  # argv[1], so flags in front of `emit-ir` are rejected as an unknown command.
+  # (Used by CI to pin --target to the snapshot's triple — the default triple
+  # embeds the HOST's Darwin version and differs across macOS releases.)
+  got=$("$BIN" emit-ir "$f" ${COIL_SELF_ARGS:-} 2>/tmp/coil_self_full_err); rc=$?
   if [ $rc -ne 0 ]; then
     fail=$((fail+1)); [ -z "$first_fail" ] && first_fail="$f (exit $rc): $(head -1 /tmp/coil_self_full_err)"
     [ "${VERBOSE:-}" = 1 ] && echo "FAIL(crash) $f: $(head -1 /tmp/coil_self_full_err)"
