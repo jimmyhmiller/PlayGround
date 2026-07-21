@@ -6114,19 +6114,52 @@ mod tests {
         assert!(error.contains("url(./missing.png)"), "{error}");
         assert!(error.contains("broken.css"), "{error}");
 
-        // A Tailwind v4 entry imported as a global stylesheet (instead of ?url).
+        // Tailwind v3 `@tailwind` directives need the PostCSS pipeline diffpack
+        // does not run; shipping them raw would be a silently unstyled page.
         let directory = tempdir().unwrap();
         fs::write(
-            directory.path().join("tw.css"),
-            "@import 'tailwindcss';\n",
+            directory.path().join("v3.css"),
+            "@tailwind base;\n@tailwind utilities;\n",
         )
         .unwrap();
-        fs::write(directory.path().join("entry.js"), "import './tw.css';\n").unwrap();
+        fs::write(directory.path().join("entry.js"), "import './v3.css';\n").unwrap();
         let error = Bundler::discover_direct(&directory.path().join("entry.js"))
             .map(|_| ())
             .unwrap_err();
-        assert!(error.contains("Tailwind v4 CSS entry"), "{error}");
-        assert!(error.contains("?url"), "{error}");
+        assert!(error.contains("@tailwind"), "{error}");
+        assert!(error.contains("v3.css"), "{error}");
+    }
+
+    /// A Tailwind v4 entry imported as a plain global stylesheet compiles
+    /// through the native engine at emit time (previously a hard error that
+    /// demanded `?url` — real apps, e.g. markpad, import it directly).
+    #[test]
+    fn a_globally_imported_tailwind_entry_is_compiled_at_emit() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("tw.css"), "@import 'tailwindcss';\n").unwrap();
+        fs::write(
+            directory.path().join("entry.jsx"),
+            "import './tw.css';\nexport const app = <div className=\"underline\">x</div>;\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.jsx");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("dist/bundle.js");
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        let stylesheet = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        assert!(
+            !stylesheet.contains("@import 'tailwindcss'"),
+            "the compiler invocation must not survive: {stylesheet}"
+        );
+        assert!(
+            stylesheet.contains("underline") && stylesheet.contains("text-decoration"),
+            "the scanned utility is generated: {}",
+            &stylesheet[..stylesheet.len().min(400)]
+        );
     }
 
     #[test]
