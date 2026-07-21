@@ -273,6 +273,29 @@ corpus. A fair comparison needs a pinned Next.js fixture benchmarked
 Next-vs-Next (e.g. `next build --turbopack` vs `next build` with webpack, and
 a diffpack build of the equivalent app). Listed as future work.
 
+## Addendum 2026-07-21: transitive statement-level shaking landed
+
+After the tables above were recorded, diffpack's per-module shake became
+transitive (`shake_module_code` liveness fixpoint): non-exported pure helpers
+referenced only by dead exports now fall with them, and all obviously-pure
+top-level declarations (object/array/template literal initializers included)
+are removal candidates. Spot re-measurement with the same corpus generator and
+the same runtime-verification gate (bundle must execute and print the
+independently computed value — both did, on every run):
+
+| Corpus | diffpack output (was) | diffpack output (now) | esbuild output |
+| --- | ---: | ---: | ---: |
+| realistic-1k | 795,910 B | **182,463 B** | 355,577 B |
+| realistic-10k | ~3.6 MB (2.7x esbuild) | **1,874,454 B** | 3,621,068 B |
+
+Diffpack's realistic-corpus output went from ~2.7x larger than esbuild to
+~1.9x **smaller**. Cold wall time on realistic-10k measured ~0.29 s (3 runs,
+consistent with the table above). These are single-cell spot checks run with
+`bench/gen.mjs` + direct CLI invocations, not a full harness re-run; the full
+tables above still show the pre-change sizes. Correctness after the change:
+the full conformance suite (40/48, unchanged), both reference apps' acceptance
+and browser gates, and the incremental/memory thesis guards all pass.
+
 ## Reproducing
 
 ```console

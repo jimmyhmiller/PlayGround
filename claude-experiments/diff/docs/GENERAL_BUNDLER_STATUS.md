@@ -70,9 +70,12 @@ docs.
 
 1. **Faster than every bundler cold** — *not yet true, now measurable*:
    diffpack wins tiny-1k/tiny-10k/realistic-10k, but esbuild wins realistic-1k
-   by ~1.5x and Rolldown ties realistic-10k. Output size also loses ~2.7x to
-   esbuild on realistic corpora (conservative tree shaking) — that gap is the
-   cold-throughput and bytes frontier.
+   by ~1.5x and Rolldown ties realistic-10k. The output-size half of this gap
+   FLIPPED on 2026-07-21: transitive statement-level shaking (liveness
+   fixpoint over removable pure declarations, non-exported helpers included)
+   took the realistic corpora from ~2.7x larger than esbuild to ~1.9x
+   SMALLER, runtime-verified (see the benchmarks doc addendum). The remaining
+   cold-throughput frontier is realistic-1k wall time.
 2. **Incremental edits far below competitors** — *holds everywhere measured*:
    2.5–3.4x vs the best rival per corpus (diffpack's number even includes
    watch latency rivals exclude), ~20x vs Rolldown on the oracle bench; peak
@@ -84,7 +87,9 @@ docs.
 ## Next (ordered)
 
 1. Remaining conformance gaps: `cjs-esmodule-marker` interop rule, factory
-   `this`/`__filename` CJS ambients, TLA across split chunks.
+   `this`/`__filename` CJS ambients, TLA across split chunks. (Transitive
+   statement-level shaking landed 2026-07-21 — `shake_module_code` fixpoint,
+   pinned by `shaking_drops_helpers_of_dead_exports_transitively`.)
 2. Vite surface: `import.meta.glob`, multiple HTML entries, content-hashed
    chunk names, non-root `base` for asset URLs, dev server for `diffpack
    build` projects (HMR already exists for TanStack dev).

@@ -791,8 +791,11 @@ fn lower_module_ast<'a>(
                 if let Some(inner) = &declaration.declaration {
                     let mut names = Vec::new();
                     inner.bound_names(&mut |identifier| names.push(identifier.name.to_string()));
-                    let removable = declaration_is_obviously_pure(inner)
-                        && declaration_bindings_are_locally_unused(inner, scoping);
+                    // Every obviously-pure declaration is marked removable; the
+                    // emit-time shake decides liveness transitively (demand +
+                    // references from retained code), so "locally used by other
+                    // dead code" no longer pins a declaration.
+                    let removable = declaration_is_obviously_pure(inner);
                     if removable && !names.is_empty() {
                         codegen.print_str(&format!("/*__diffpack_decl:{}__*/\n", names.join(",")));
                     }
@@ -842,8 +845,27 @@ fn lower_module_ast<'a>(
                 }
             }
             _ => {
+                // A plain (non-exported) pure top-level declaration is also
+                // removable: a helper only dead exports referenced must fall
+                // with them. Impure statements print unmarked and anchor the
+                // shake's live set.
+                let removable_names = statement.as_declaration().and_then(|declaration| {
+                    if !declaration_is_obviously_pure(declaration) {
+                        return None;
+                    }
+                    let mut names = Vec::new();
+                    declaration
+                        .bound_names(&mut |identifier| names.push(identifier.name.to_string()));
+                    (!names.is_empty()).then_some(names)
+                });
+                if let Some(names) = &removable_names {
+                    codegen.print_str(&format!("/*__diffpack_decl:{}__*/\n", names.join(",")));
+                }
                 statement.print(&mut codegen, Context::default());
                 codegen.print_str("\n");
+                if removable_names.is_some() {
+                    codegen.print_str("/*__diffpack_decl_end__*/\n");
+                }
             }
         }
     }
@@ -1075,19 +1097,6 @@ fn derive_flat_code(code: &str, replacements: &[(String, String)]) -> String {
     flat
 }
 
-fn declaration_bindings_are_locally_unused(
-    declaration: &oxc_ast::ast::Declaration<'_>,
-    scoping: &Scoping,
-) -> bool {
-    let mut unused = true;
-    declaration.bound_names(&mut |identifier| {
-        unused &= scoping
-            .get_resolved_reference_ids(identifier.symbol_id())
-            .is_empty();
-    });
-    unused
-}
-
 fn declaration_is_obviously_pure(declaration: &oxc_ast::ast::Declaration<'_>) -> bool {
     match declaration {
         oxc_ast::ast::Declaration::FunctionDeclaration(_) => true,
@@ -1103,18 +1112,76 @@ fn declaration_is_obviously_pure(declaration: &oxc_ast::ast::Declaration<'_>) ->
     }
 }
 
+/// Whether evaluating `expression` can have no observable side effect, so a
+/// declaration initialized by it may be dropped when nothing live references
+/// it. Deliberately syntactic and conservative — anything not recognized is
+/// impure. Identifier references are allowed: dropping a dead `const a = b`
+/// only changes behavior for a program whose evaluation would have thrown
+/// (TDZ / missing global), the same stance the reference bundlers take.
 fn expression_is_obviously_pure(expression: &oxc_ast::ast::Expression<'_>) -> bool {
-    matches!(
-        expression,
-        oxc_ast::ast::Expression::BooleanLiteral(_)
-            | oxc_ast::ast::Expression::NullLiteral(_)
-            | oxc_ast::ast::Expression::NumericLiteral(_)
-            | oxc_ast::ast::Expression::BigIntLiteral(_)
-            | oxc_ast::ast::Expression::StringLiteral(_)
-            | oxc_ast::ast::Expression::RegExpLiteral(_)
-            | oxc_ast::ast::Expression::FunctionExpression(_)
-            | oxc_ast::ast::Expression::ArrowFunctionExpression(_)
-    )
+    use oxc_ast::ast::Expression;
+    match expression {
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::Identifier(_) => true,
+        Expression::TemplateLiteral(template) => {
+            template.expressions.iter().all(expression_is_obviously_pure)
+        }
+        Expression::ArrayExpression(array) => {
+            array.elements.iter().all(|element| match element {
+                oxc_ast::ast::ArrayExpressionElement::Elision(_) => true,
+                oxc_ast::ast::ArrayExpressionElement::SpreadElement(_) => false,
+                element => element
+                    .as_expression()
+                    .is_some_and(expression_is_obviously_pure),
+            })
+        }
+        Expression::ObjectExpression(object) => {
+            object.properties.iter().all(|property| match property {
+                oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) => {
+                    (!property.computed
+                        || property
+                            .key
+                            .as_expression()
+                            .is_some_and(expression_is_obviously_pure))
+                        && expression_is_obviously_pure(&property.value)
+                }
+                oxc_ast::ast::ObjectPropertyKind::SpreadProperty(_) => false,
+            })
+        }
+        Expression::UnaryExpression(unary) => {
+            unary.operator != oxc_syntax::operator::UnaryOperator::Delete
+                && expression_is_obviously_pure(&unary.argument)
+        }
+        Expression::BinaryExpression(binary) => {
+            // `in`/`instanceof` can throw on non-object operands and private
+            // names; arithmetic/comparison on pure operands cannot observe.
+            !matches!(
+                binary.operator,
+                BinaryOperator::In | BinaryOperator::Instanceof
+            ) && expression_is_obviously_pure(&binary.left)
+                && expression_is_obviously_pure(&binary.right)
+        }
+        Expression::LogicalExpression(logical) => {
+            expression_is_obviously_pure(&logical.left)
+                && expression_is_obviously_pure(&logical.right)
+        }
+        Expression::ConditionalExpression(conditional) => {
+            expression_is_obviously_pure(&conditional.test)
+                && expression_is_obviously_pure(&conditional.consequent)
+                && expression_is_obviously_pure(&conditional.alternate)
+        }
+        Expression::ParenthesizedExpression(inner) => {
+            expression_is_obviously_pure(&inner.expression)
+        }
+        _ => false,
+    }
 }
 
 /// Which TanStack Start environment-directive helper an imported binding refers

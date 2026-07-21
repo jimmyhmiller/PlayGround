@@ -3463,21 +3463,39 @@ fn hash_export_demand(hasher: &mut DefaultHasher, demand: &ExportDemand) {
     names.hash(hasher);
 }
 
+/// Statement-level tree shake of one module's lowered code, driven by the
+/// cross-chunk export demand and TRANSITIVE local liveness: a removable
+/// (obviously-pure, marker-wrapped) declaration is kept only when a demanded
+/// export, an impure statement, or another LIVE declaration references one of
+/// its names — a helper used solely by dead exports falls with them. Liveness
+/// is a fixpoint over identifier occurrences in retained text; scanning raw
+/// text is conservative in the safe direction (a name inside a string keeps
+/// its declaration alive).
 fn shake_module_code(
     code: &str,
     demand: &ExportDemand,
     pruned_imports: &HashSet<String>,
 ) -> String {
-    let mut output = String::with_capacity(code.len());
-    let mut skip_declaration = false;
+    enum Segment<'a> {
+        /// An unconditional line (impure statement, runtime call, ...).
+        Keep(&'a str),
+        /// A `/*__diffpack_import:spec__*/` line, dropped when the import was pruned.
+        Import { line: &'a str },
+        /// A `/*__diffpack_export:...*/` getter, kept only under demand.
+        Export { statement: &'a str },
+        /// A removable declaration block: its bound names and verbatim lines.
+        Declaration { names: Vec<&'a str>, lines: Vec<&'a str> },
+    }
+
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut open_declaration: Option<(Vec<&str>, Vec<&str>)> = None;
     for line in code.lines() {
-        if let Some(marked) = line.strip_prefix("/*__diffpack_import:")
-            && let Some((specifier, code)) = marked.split_once("__*/")
-            && let Ok(specifier) = serde_json::from_str::<String>(specifier)
-        {
-            if !pruned_imports.contains(&specifier) {
-                output.push_str(code);
-                output.push('\n');
+        if let Some((_, lines)) = open_declaration.as_mut() {
+            if line == "/*__diffpack_decl_end__*/" {
+                let (names, lines) = open_declaration.take().expect("declaration is open");
+                segments.push(Segment::Declaration { names, lines });
+            } else {
+                lines.push(line);
             }
             continue;
         }
@@ -3485,29 +3503,127 @@ fn shake_module_code(
             .strip_prefix("/*__diffpack_decl:")
             .and_then(|line| line.strip_suffix("__*/"))
         {
-            skip_declaration = !names.split(',').any(|name| demand.includes(name));
+            open_declaration = Some((names.split(',').collect(), Vec::new()));
             continue;
         }
-        if line == "/*__diffpack_decl_end__*/" {
-            skip_declaration = false;
-            continue;
-        }
-        if skip_declaration {
+        if let Some(marked) = line.strip_prefix("/*__diffpack_import:")
+            && let Some((specifier, import_code)) = marked.split_once("__*/")
+            && let Ok(specifier) = serde_json::from_str::<String>(specifier)
+        {
+            if !pruned_imports.contains(&specifier) {
+                segments.push(Segment::Import { line: import_code });
+            }
             continue;
         }
         if let Some(marked) = line.strip_prefix("/*__diffpack_export:")
             && let Some((name, statement)) = marked.split_once("__*/")
         {
             if demand.includes(name) {
-                output.push_str(statement);
-                output.push('\n');
+                segments.push(Segment::Export { statement });
             }
             continue;
         }
-        output.push_str(line);
-        output.push('\n');
+        segments.push(Segment::Keep(line));
+    }
+    // An unterminated block would mean the transform emitted markers this parse
+    // does not understand; keep its lines rather than silently dropping code.
+    if let Some((_, lines)) = open_declaration.take() {
+        for line in lines {
+            segments.push(Segment::Keep(line));
+        }
+    }
+
+    // Map each removable name to its declaration segment.
+    let mut owner_of: HashMap<&str, usize> = HashMap::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let Segment::Declaration { names, .. } = segment {
+            for name in names {
+                owner_of.insert(name, index);
+            }
+        }
+    }
+
+    // Seed liveness from everything that unconditionally executes, then follow
+    // references to a fixpoint.
+    let mut live = vec![false; segments.len()];
+    let mut queue: Vec<usize> = Vec::new();
+    let mark = |index: usize, live: &mut Vec<bool>, queue: &mut Vec<usize>| {
+        if !live[index] {
+            live[index] = true;
+            queue.push(index);
+        }
+    };
+    for (index, segment) in segments.iter().enumerate() {
+        match segment {
+            Segment::Keep(_) | Segment::Import { .. } | Segment::Export { .. } => {
+                mark(index, &mut live, &mut queue);
+            }
+            Segment::Declaration { names, .. } => {
+                // A demanded export name declared directly (the flat path's
+                // `export{name}` footer references it outside any segment).
+                if names.iter().any(|name| demand.includes(name)) {
+                    mark(index, &mut live, &mut queue);
+                }
+            }
+        }
+    }
+    while let Some(index) = queue.pop() {
+        let scan = |text: &str, live: &mut Vec<bool>, queue: &mut Vec<usize>| {
+            for word in identifier_runs(text) {
+                if let Some(&owner) = owner_of.get(word)
+                    && !live[owner]
+                {
+                    live[owner] = true;
+                    queue.push(owner);
+                }
+            }
+        };
+        match &segments[index] {
+            Segment::Keep(line) => scan(line, &mut live, &mut queue),
+            Segment::Import { line } => scan(line, &mut live, &mut queue),
+            Segment::Export { statement } => scan(statement, &mut live, &mut queue),
+            Segment::Declaration { lines, .. } => {
+                for line in lines {
+                    scan(line, &mut live, &mut queue);
+                }
+            }
+        }
+    }
+
+    let mut output = String::with_capacity(code.len());
+    for (index, segment) in segments.iter().enumerate() {
+        if !live[index] {
+            continue;
+        }
+        match segment {
+            Segment::Keep(line) => {
+                output.push_str(line);
+                output.push('\n');
+            }
+            Segment::Import { line } => {
+                output.push_str(line);
+                output.push('\n');
+            }
+            Segment::Export { statement } => {
+                output.push_str(statement);
+                output.push('\n');
+            }
+            Segment::Declaration { lines, .. } => {
+                for line in lines {
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            }
+        }
     }
     output
+}
+
+/// Iterator over the maximal identifier-character runs (`[A-Za-z0-9_$]+`) in
+/// `text` that could be JavaScript identifiers (not starting with a digit).
+fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .filter(|run| !run.is_empty() && !run.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 impl DirectReachability {
@@ -6577,6 +6693,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_node(&esm_out), "url-kind:true\n");
+    }
+
+    /// Statement-level shaking must be TRANSITIVE: a pure helper (exported or
+    /// not) referenced only by a dead export falls with it, through chains,
+    /// while impure statements and everything they reference stay. Pinned by
+    /// the realistic-corpus finding where non-exported helpers of dead exports
+    /// made output 2.2x larger than esbuild's.
+    #[test]
+    fn shaking_drops_helpers_of_dead_exports_transitively() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("lib.js"),
+            "const DEEP_CONFIG = { step: 3 };\n\
+             function deepHelper(value) { return value + DEEP_CONFIG.step; }\n\
+             function midHelper(value) { return deepHelper(value) * 2; }\n\
+             export function unusedTool(value) { return midHelper(value); }\n\
+             const KEPT_BASE = 40;\n\
+             export function usedTool(value) { return value + KEPT_BASE; }\n\
+             console.log('lib-side-effect:' + usedTool(0));\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { usedTool } from './lib.js';\nconsole.log('result:' + usedTool(2));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        for dead in ["unusedTool", "midHelper", "deepHelper", "DEEP_CONFIG"] {
+            assert!(!code.contains(dead), "`{dead}` should be shaken:\n{code}");
+        }
+        for live in ["usedTool", "KEPT_BASE", "lib-side-effect"] {
+            assert!(code.contains(live), "`{live}` must survive:\n{code}");
+        }
+        assert_eq!(run_node(&output), "lib-side-effect:40\nresult:42\n");
     }
 
     /// Side-effect imports must execute in IMPORT order, not module-id order.
