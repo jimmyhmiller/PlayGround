@@ -341,23 +341,32 @@ today regresses.
 2. **Refresh the nollvm seed** as its own commit, so `rebootstrap-nollvm.sh` works from a clean
    checkout again. Independent of the deletion; currently masks real nollvm verification behind
    a `STAGE0=./coil` workaround.
-3. **Step 5, Phase A — make engine construction incremental and cheap.** Two blockers, both in
-   `metaengine.coil`: `meta-engine-setup` (`:332`) is single-shot (replaces `entries`, sets
-   `active`) and must become additive; and `meta-build-dylib` forks `cc -dynamiclib` (`:312-315`),
-   which is too costly per round. Use the in-memory MObj/JIT route instead — `comptime_eval.coil:163-178`
-   already does exactly this (`jit-load` → `jit-lookup`, no fork, no dlopen), and `main.coil:141-146`
-   registers an arm64 mobj builder even in the LLVM build, so both builds can take it.
-4. **Step 5, Phase B — two-tier staging (design DECIDED by measurement, see
-   "stage-check-noimpl — MEASURED" above).** Tier 1: per-qual pruned-closure check
-   (impls/consts dropped) → every passing qual joins the incremental engine; this is
-   100% of the bootstrap and 99.6% of the corpus. Tier 2: the residue (trait-using
-   macros + macros whose genuine callees still carry unexpanded calls) goes through
-   the ordinary full-closure check on later rounds, after the tower has expanded
-   those calls through the tier-1 engine. Hook before BOTH tower entries
-   (`stage3-parse-recover`, `tower-pass`); `macroctx` and `quals` are in hand.
-   Success metric: corpus fallback count drops 418 → ~112 **and** emitted IR is
-   **byte-identical** with staging on vs off (this IR check was never run — verify
-   it explicitly; parity.sh is the oracle and needs the interpreter alive).
+3. ✅ **Step 5, Phase A — incremental engine: LANDED 2026-07-21** (with Phase B, same
+   commit). `MEEntry` now carries its build's quasiquote registry (each dylib's code
+   indexes the registry of the metalower run that produced it), `meta-engine-setup`
+   is ADDITIVE (appends entries not yet served; existing entries win), and
+   `finish-macro` looks entries up un-gated by `active` so staged entries serve
+   during the tower rounds. The dylib fork stays (measured cheap enough — the
+   per-qual sub-programs are tiny and content-cached); the MObj/JIT route remains an
+   arm64-only optimization to consider later.
+4. ✅ **Step 5, Phase B — two-tier staging: LANDED 2026-07-21, gated
+   `COIL_STAGE_MACROS=1` (default OFF until macOS verification).**
+   `stage-macros-prepass` (`expander.coil`, hooked at `stage3-round` round 0): per
+   qual not yet in the engine, build the PRUNED closure (`closure-funcs-pruned` /
+   `closure-subprogram-pruned`, comptime.coil), check standalone on a PRIVATE
+   resolve (sidesteps the shared-bodies landmine), and on success compile it into
+   the engine additively. Best-effort: any failure leaves the qual to the ordinary
+   batch path (tier 2). **Measured on Linux:**
+   - emitted IR **byte-identical** staging on vs off across the whole corpus
+     (the previously-untested claim — now a PASSED check, 0 diffs);
+   - the compiler's own build: **.o byte-identical** with staging on vs off;
+   - interp fallbacks: corpus **255 → 0**, compiler self-compile **2 → 0** — with
+     staging on, `eval-seq` never fires anywhere in the corpus;
+   - fixpoint + linux gate-full/gate-run + gate-cli green in BOTH modes; parity.sh
+     unchanged (114/116, the 2 known pre-existing divergences).
+   **Remaining for step 5:** verify on macOS (`rebootstrap.sh` + parity + gates with
+   and without the gate), then flip the default ON (delete the env gate), then
+   Phase C.
 5. **Step 5, Phase C** — remove `finish-macro`'s `eval-seq` fallback (`expander.coil:291`); a miss
    becomes a hard error, not a silent reroute.
 6. **Step 4** — reroute `run-metas`. Contained: `(meta …)` appears ONLY in

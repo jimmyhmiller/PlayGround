@@ -1782,6 +1782,50 @@
                     (let [f (prog-fn-find p nm)]
                       (if (icmp-eq (cast i64 f) 0) 0 (cc-list (load (field f body)) names stackb)))))))))
     (field wantedb items)))
+; ---- pruned closure (macro STAGING, interp deletion step 5 Phase B) ---------------
+; closure-funcs minus the impl-method and const-value seeding: only the seeds'
+; transitive callees ride along. Used by the per-qual staging prepass, where the
+; whole point is that closure-funcs' unconditional impl/const seeding drags in
+; functions whose bodies still hold unexpanded macro calls (slice-get's
+; dbg-slice-get) and poisons every check. Measured 2026-07-21: with this pruning,
+; 100% of the compiler's own macro quals and 99.6% of the corpus's check standalone.
+(defn closure-funcs-pruned [(p (ptr Program)) (seeds (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
+  (let [names (prog-fn-names p a)
+        stackb (unwrap-ptr [SBox] (create [SBox] a)) wantedb (unwrap-ptr [SBox] (create [SBox] a))]
+    (store! (field stackb items) (al-new [(slice u8)] a))
+    (store! (field wantedb items) (al-new [(slice u8)] a))
+    (let [ns (al-len [(slice u8)] (load seeds)) (mut si) 0]
+      (loop (if (icmp-ge (load si) ns) (break) (do (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si))) (store! si (iadd (load si) 1))))))
+    (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0) (break)
+      (do (let [sl (load (field stackb items)) top (al-len [(slice u8)] sl) nm (al-get [(slice u8)] sl (isub top 1))]
+            (store! (field (field stackb items) len) (isub top 1))
+            (if (set-contains (field wantedb items) nm) 0
+                (do (al-push! (mut (field wantedb items)) nm)
+                    (let [f (prog-fn-find p nm)]
+                      (if (icmp-eq (cast i64 f) 0) 0 (cc-list (load (field f body)) names stackb)))))))))
+    (field wantedb items)))
+; closure-subprogram with impls and consts PRUNED (companion of the above): a
+; macro whose callees genuinely need trait impls fails this check and simply
+; stays unstaged — the ordinary full-closure batch path picks it up later.
+(defn closure-subprogram-pruned [(p (ptr Program)) (wanted (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr Program))
+  (let [pp (unwrap-ptr [Program] (create [Program] a)) fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut keep) (al-new [Func] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fp (al-elem [Func] fs (load i))]
+            (if (set-contains wanted (load (field fp name))) (do (al-push! (mut keep) (load fp)) 0) 0))
+          (store! i (iadd (load i) 1)))))
+    (store! (field pp conventions) (load (field p conventions)))
+    (store! (field pp structs) (load (field p structs)))
+    (store! (field pp sums) (load (field p sums)))
+    (store! (field pp externs) (load (field p externs)))
+    (store! (field pp funcs) (box-al [Func] a (load keep)))
+    (store! (field pp asserts) (box-al [StaticAssert] a (al-new [StaticAssert] a)))
+    (store! (field pp consts) (box-al [Const] a (al-new [Const] a)))
+    (store! (field pp traits) (load (field p traits)))
+    (store! (field pp impls) (box-al [ImplDef] a (al-new [ImplDef] a)))
+    (store! (field pp metas) (box-al [Expr] a (al-new [Expr] a)))
+    (store! (field pp exports) (box-al [ExportC] a (al-new [ExportC] a)))
+    pp))
+
 (defn closure-subprogram [(p (ptr Program)) (wanted (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr Program))
   (let [pp (unwrap-ptr [Program] (create [Program] a)) fs (load (field p funcs)) n (al-len [Func] (load fs)) (mut keep) (al-new [Func] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)

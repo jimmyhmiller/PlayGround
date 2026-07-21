@@ -109,20 +109,26 @@
       (icmp-ne (load (field (meta-build-box) isset)) 0))))
 
 ; ---- engine state ----------------------------------------------------------------
-(defstruct MEEntry [(name (slice u8)) (fp (ptr i8))])
+; An entry carries ITS build's quasiquote registry: the engine grows ADDITIVELY
+; (per-qual staged builds + the final batch build), and each dylib's compiled code
+; indexes into the registry of the metalower run that produced it.
+(defstruct MEEntry [(name (slice u8)) (fp (ptr i8)) (registry (ptr (ArrayList (ptr Sexp))))])
 (defstruct MetaEngine
   [(active i64)
-   (entries (ptr (ArrayList MEEntry)))
-   (registry (ptr (ArrayList (ptr Sexp))))])
+   (entries (ptr (ArrayList MEEntry)))])
 (defn meta-engine [] (-> (ptr MetaEngine)) (alloc-static MetaEngine))
 (defn meta-engine-active? [] (-> bool) (icmp-ne (load (field (meta-engine) active)) 0))
-(defn meta-engine-lookup [(name (slice u8))] (-> (ptr i8))
-  (let [b (meta-engine)]
-    (if (icmp-eq (load (field b active)) 0) (cast (ptr i8) 0)
-      (let [es (load (field b entries)) n (al-len [MEEntry] (load es)) (mut i) 0 (mut r) (cast (ptr i8) 0)]
+; entry lookup by qual name; null when unknown. Deliberately NOT gated on `active`:
+; a staged entry serves finish-macro during the tower rounds BEFORE the batch
+; engine comes up (with staging off, entries only ever exist once active=1, so the
+; behavior is unchanged there).
+(defn meta-engine-entry [(name (slice u8))] (-> (ptr MEEntry))
+  (let [b (meta-engine) es (load (field b entries)) (mut r) (cast (ptr MEEntry) 0)]
+    (if (icmp-eq (cast i64 es) 0) (load r)
+      (let [n (al-len [MEEntry] (load es)) (mut i) 0]
         (loop (if (icmp-ge (load i) n) (break)
           (do (if (str-eq (load (field (al-elem [MEEntry] es (load i)) name)) name)
-                  (do (store! r (load (field (al-elem [MEEntry] es (load i)) fp))) (break)) 0)
+                  (do (store! r (al-elem [MEEntry] es (load i))) (break)) 0)
               (store! i (iadd (load i) 1)))))
         (load r)))))
 
@@ -393,14 +399,27 @@
                       (let [me (alloc-stack MEEntry)]
                         (store! (field me name) (load (field ep name)))
                         (store! (field me fp) fp)
+                        (store! (field me registry) (load (field mo registry)))
                         (al-push! (mut out) (load me)) 0)))
                   (store! i (iadd (load i) 1)))))
             (match (load failed)
               (Some [d] (Some d))
               (None []
+                ; ADDITIVE: append entries whose name isn't served yet (staged
+                ; per-qual builds land first; the batch build fills in the rest).
+                ; An existing entry wins — it is the same macro, already compiled.
                 (let [b (meta-engine)]
-                  (store! (field b entries) (box-al [MEEntry] a (load out)))
-                  (store! (field b registry) (load (field mo registry)))
+                  (if (icmp-eq (cast i64 (load (field b entries))) 0)
+                      (do (store! (field b entries) (box-al [MEEntry] a (al-new [MEEntry] a))) 0)
+                    0)
+                  (let [no (al-len [MEEntry] (load out)) (mut k) 0]
+                    (loop (if (icmp-ge (load k) no) (break)
+                      (do (let [mev (al-get [MEEntry] (load out) (load k)) mep (alloc-stack MEEntry)]
+                            (store! mep mev)
+                            (if (icmp-eq (cast i64 (meta-engine-entry (load (field mep name)))) 0)
+                                (do (al-push! (mut (load (field b entries))) (load mep)) 0)
+                              0))
+                          (store! k (iadd (load k) 1))))))
                   (store! (field b active) 1)
                   (None [Diag]))))))))))
 
@@ -430,12 +449,12 @@
 (defn me-box-arg [(a (ptr Allocator)) (s Sexp)] (-> (ptr i8))
   (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) (cast (ptr i8) p)))
 
-(defn meta-engine-invoke [(a (ptr Allocator)) (fp (ptr i8)) (cx (ptr CtCtx)) (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
+(defn meta-engine-invoke [(a (ptr Allocator)) (fp (ptr i8)) (reg (ptr (ArrayList (ptr Sexp)))) (cx (ptr CtCtx)) (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
   (let [n (al-len [Sexp] (load argv))]
     (if (icmp-gt n 8)
         (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
-      (let [b (meta-engine) c (alloc-stack MPCall)]
-        (meta-host-set! cx (load (field b registry)))
+      (let [c (alloc-stack MPCall)]
+        (meta-host-set! cx reg)
         (store! (field c fp) fp) (store! (field c argc) n) (store! (field c ret) (cast (ptr i8) 0))
         (store! (field c a0) (if (icmp-gt n 0) (me-box-arg a (al-get [Sexp] (load argv) 0)) (cast (ptr i8) 0)))
         (store! (field c a1) (if (icmp-gt n 1) (me-box-arg a (al-get [Sexp] (load argv) 1)) (cast (ptr i8) 0)))
@@ -468,7 +487,7 @@
 ; ---- the finish-macro fast path -------------------------------------------------------
 ; The interpreter's env (param -> CCode arg, variadic already packed) IS the packed
 ; argument list; extract it and run the compiled entry instead of eval-seq.
-(defn meta-engine-run-env [(a (ptr Allocator)) (fp (ptr i8)) (cx (ptr CtCtx)) (env (ptr (ArrayList EnvBind)))] (-> (Result Sexp Diag))
+(defn meta-engine-run-env [(a (ptr Allocator)) (e (ptr MEEntry)) (cx (ptr CtCtx)) (env (ptr (ArrayList EnvBind)))] (-> (Result Sexp Diag))
   (let [n (al-len [EnvBind] (load env)) (mut argv) (al-new [Sexp] a) (mut i) 0 (mut bad) false]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [v (load (field (al-elem [EnvBind] env (load i)) val))]
@@ -476,4 +495,10 @@
           (store! i (iadd (load i) 1)))))
     (if (load bad)
         (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
-      (meta-engine-invoke a fp cx (box-al [Sexp] a (load argv))))))
+      (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))
+
+; ---- per-qual macro STAGING (interp deletion step 5, Phase B) --------------------
+; Gated by COIL_STAGE_MACROS=1 while it soaks: default behavior is byte-identical.
+(defn meta-staged? [] (-> bool)
+  (let [v (getenv c"COIL_STAGE_MACROS")]
+    (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
