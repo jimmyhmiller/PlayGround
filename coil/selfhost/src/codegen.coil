@@ -1322,7 +1322,19 @@
             (let [vals (emit-vals cg args scp) callee (cg-func cg func)
                   cs (LLVMBuildCall2 b (LLVMGlobalGetValueType callee) callee (carr a vals) (cast i32 (al-len [(ptr i8)] vals)) (cg-call-name cg (LLVMGlobalGetValueType callee) "tailcall"))]
               (LLVMSetInstructionCallConv cs (LLVMGetFunctionCallConv callee))
-              (LLVMSetTailCallKind cs 2)
+              ; musttail (kind 2) guarantees TCO, but the x86-64 SysV backend cannot
+              ; tail-call a self-recursion whose return is a large aggregate: SysV
+              ; classifies it MEMORY and returns it via a hidden sret pointer, and LLVM
+              ; aborts codegen ("failed to perform tail call elimination on a call site
+              ; marked musttail"). AArch64 returns aggregates via x8 and tail-calls them
+              ; fine, so it keeps musttail. On x86, when the callee's LLVM return type is
+              ; a Struct (10) or Array (11), downgrade to `tail` (kind 1): a hint LLVM
+              ; applies where it can (scalar self-calls still get real TCO) and otherwise
+              ; degrades to a normal call. Scalar/pointer returns keep guaranteed musttail.
+              (let [rk (LLVMGetTypeKind (LLVMGetReturnType (LLVMGlobalGetValueType callee)))
+                    x86-agg (and (icmp-eq (load (field cg arch)) 0)
+                                 (or (icmp-eq (cast i64 rk) 10) (icmp-eq (cast i64 rk) 11)))]
+                (LLVMSetTailCallKind cs (if x86-agg 1 2)))
               (if (ty-is-void ret) (do (LLVMBuildRetVoid b) 0) (do (LLVMBuildRet b cs) 0)))
           (let [v (emit-expr cg e scp)] (if (not (cg-terminated cg)) (emit-c-return cg sig ret v) 0))))
       (EMatch [scrut arms] (emit-tail-match cg scrut arms function sig ret scp))
