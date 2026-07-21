@@ -51,6 +51,13 @@ jobs:
           echo "snapshot triple: $REF_TRIPLE"
           export COIL_SELF_ARGS="--target $REF_TRIPLE"
           ./selfhost/rebootstrap.sh /tmp/coil-ci
+      - name: Diagnose gates verbosely (only on failure)
+        if: failure()
+        run: |
+          LF=$(./selfhost/llvm-link-flags.sh dynamic)
+          ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-diag $LF >/dev/null
+          ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-diag --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
+          ./selfhost/oracle/gate-cli.sh /tmp/coil-diag 2>&1 | grep -B1 -A3 "FAIL" | head -40 || true
       - name: Engine parity (default) — pinned to the 2 known divergences
         run: |
           ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity.txt || true
