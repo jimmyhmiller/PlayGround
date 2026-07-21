@@ -845,6 +845,31 @@ impl Bundler {
         Ok(summary)
     }
 
+    /// Emits a generic web build directly into `output_dir`: the browser-ESM
+    /// entry chunk (named `entry_file`, e.g. `index.js`), its dynamic-import
+    /// chunks, the extracted stylesheet beside the entry, and content-hashed
+    /// assets under `assets/`. Mirrors [`Self::emit_public`] but without the
+    /// TanStack `public/` nesting: `output_dir` IS the site root (the caller
+    /// writes `index.html` and any static files after this, since the stale-file
+    /// prune here only keeps what the emit itself wrote).
+    pub fn emit_web(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_dir: &Path,
+        entry_file: &str,
+        options: EmitOptions,
+    ) -> Result<EmitSummary, String> {
+        let options = EmitOptions {
+            format: ModuleFormat::BrowserEsm,
+            ..options
+        };
+        let stats = self.emit_environment(reachable, output_dir, entry_file, options)?;
+        prune_stale_files(output_dir, &stats.written)?;
+        let mut summary = EmitSummary::of(output_dir)?;
+        summary.rendered_chunks = stats.rendered_chunks;
+        Ok(summary)
+    }
+
     /// Emits the server (SSR) build into `<output_root>/server/` as Node ESM
     /// `.mjs` modules, mirroring [`Self::emit_public`]: the entry chunk
     /// (`server/server.mjs`), its dynamic-import chunks
@@ -1601,7 +1626,7 @@ impl Bundler {
         output: &Path,
         written: &mut BTreeSet<PathBuf>,
     ) -> Result<(), String> {
-        let order = self.static_execution_order(allowed).unwrap_or_else(|| {
+        let order = self.static_execution_order(self.entry, allowed).unwrap_or_else(|| {
             let mut ids = allowed.iter().copied().collect::<Vec<_>>();
             ids.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
             ids
@@ -2138,7 +2163,7 @@ impl Bundler {
                 map_json: None,
             });
         }
-        let order = self.static_execution_order(&included)?;
+        let order = self.static_execution_order(entry, &included)?;
         let mut declarations = HashSet::new();
         for &dense_index in &order {
             let flat = self.modules[dense_index].as_ref()?.flat_module.as_ref()?;
@@ -2243,6 +2268,7 @@ impl Bundler {
 
     fn static_execution_order(
         &self,
+        root: DenseModuleId,
         allowed: &HashSet<DenseModuleId>,
     ) -> Option<Vec<DenseModuleId>> {
         fn visit(
@@ -2270,8 +2296,25 @@ impl Bundler {
         }
 
         let mut order = Vec::with_capacity(allowed.len());
-        let mut roots = allowed.iter().copied().collect::<Vec<_>>();
-        roots.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+        // Execution order is defined by the graph's ROOT: its import statements
+        // run first-to-last, depth-first. Seeding the walk from the root (not
+        // from every module in id order) is what makes two sibling subtrees
+        // execute in import order — `import './b'; import './a'` runs `b`
+        // before `a`, and a stylesheet imported by the entry is emitted before
+        // one imported by a later component, so the CSS cascade tie-breaks the
+        // way the source says. Modules the root cannot reach statically (other
+        // dynamic chunk roots in the allowed set) follow in stable id order.
+        let mut roots = Vec::with_capacity(allowed.len());
+        if allowed.contains(&root) {
+            roots.push(root);
+        }
+        let mut rest = allowed
+            .iter()
+            .copied()
+            .filter(|dense| *dense != root)
+            .collect::<Vec<_>>();
+        rest.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
+        roots.extend(rest);
         let mut states = HashMap::new();
         for root in roots {
             visit(self, root, allowed, &mut states, &mut order)?;
@@ -5419,6 +5462,72 @@ mod tests {
     /// The server `.mjs` output must not merely pass `node --check`; it must
     /// EXECUTE under Node's ESM goal. This builds a small multi-module app with a
     /// static cross-module import, an external Node built-in (forcing the shared
+    /// Side-effect imports must execute in IMPORT order, not module-id order.
+    /// The entry imports `./bbb.js` before `./aaa.js`; alphabetical ordering
+    /// would run `aaa` first, which is exactly the bug this pins down (the
+    /// conformance suite's `order-side-effect-imports` finding).
+    #[test]
+    fn side_effect_imports_execute_in_import_order_not_id_order() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("aaa.js"), "console.log('aaa');\n").unwrap();
+        fs::write(directory.path().join("bbb.js"), "console.log('bbb');\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './bbb.js';\nimport './aaa.js';\nconsole.log('entry');\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        assert_eq!(run_node(&output), "bbb\naaa\nentry\n");
+    }
+
+    /// The emitted stylesheet must follow the same execution order, because the
+    /// CSS cascade breaks equal-specificity ties by document order: a rule from
+    /// a stylesheet the entry imports FIRST must lose to a same-specificity rule
+    /// imported later, no matter how the module paths sort. (Found live on the
+    /// create-vite fixture: `App.css`'s `.counter` override lost to `index.css`
+    /// because alphabetical order inverted the cascade.)
+    #[test]
+    fn extracted_css_follows_import_order_so_the_cascade_ties_break_correctly() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("zzz-base.css"), ".x { color: red; }\n").unwrap();
+        fs::write(directory.path().join("aaa-widget.css"), ".x { color: blue; }\n").unwrap();
+        fs::write(
+            directory.path().join("aaa-widget.js"),
+            "import './aaa-widget.css';\nexport const widget = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './zzz-base.css';\nimport { widget } from './aaa-widget.js';\nconsole.log(widget);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        let stylesheet = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        let base_at = stylesheet.find("red").expect("base rule present");
+        let widget_at = stylesheet.find("blue").expect("widget rule present");
+        assert!(
+            base_at < widget_at,
+            "entry-imported stylesheet must precede the later component's:\n{stylesheet}"
+        );
+    }
+
     /// registry runtime), and a dynamic `import()` of a split chunk, emits it via
     /// the server path, then runs the entry under `node` and asserts both the
     /// static value and the dynamically-loaded chunk's value reach stdout.

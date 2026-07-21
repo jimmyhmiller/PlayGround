@@ -72,8 +72,11 @@ pub fn parse_dependencies(path: &Path, source: &str) -> ParseResult {
 pub fn collect_dependencies(program: &Program<'_>) -> Vec<String> {
     let mut visitor = DependencyVisitor::default();
     visitor.visit_program(program);
-    visitor.dependencies.sort();
-    visitor.dependencies.dedup();
+    // First-occurrence SOURCE order, deduped. Import order is semantic — it is
+    // the module execution order (and, through it, the CSS cascade order) — so
+    // sorting here would silently reorder side effects.
+    let mut seen = BTreeSet::new();
+    visitor.dependencies.retain(|dependency| seen.insert(dependency.clone()));
     visitor.dependencies
 }
 

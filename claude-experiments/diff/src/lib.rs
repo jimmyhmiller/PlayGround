@@ -3,6 +3,8 @@ pub mod bundler;
 pub mod config;
 pub mod dead_branch;
 pub mod dev_server;
+pub mod env_file;
+pub mod html_entry;
 mod frontend_profile;
 pub mod hmr;
 pub mod import_meta_env;

@@ -1,0 +1,1160 @@
+{
+  "generated": "2026-07-21T04:43:22.892Z",
+  "node": "v22.21.0",
+  "bundlers": {
+    "diffpack": "target/release/diffpack (local build)",
+    "rolldown": "1.2.0",
+    "esbuild": "0.28.1"
+  },
+  "counts": {
+    "diffpack": {
+      "PASS": 35,
+      "WRONG-OUTPUT": 7,
+      "BUILD-ERROR": 0,
+      "RUNTIME-ERROR": 6
+    },
+    "rolldown": {
+      "PASS": 41,
+      "WRONG-OUTPUT": 5,
+      "BUILD-ERROR": 1,
+      "RUNTIME-ERROR": 1
+    },
+    "esbuild": {
+      "PASS": 39,
+      "WRONG-OUTPUT": 7,
+      "BUILD-ERROR": 1,
+      "RUNTIME-ERROR": 1
+    }
+  },
+  "fixtures": {
+    "cjs-conditional-require": {
+      "expected": {
+        "stdout": "start\nused:eval\nvalue:used-val\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "start\nused:eval\nvalue:used-val\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "start\nused:eval\nvalue:used-val\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "start\nused:eval\nvalue:used-val\n"
+        }
+      }
+    },
+    "cjs-cycle-partial": {
+      "expected": {
+        "stdout": "b:sees-before:a-before\nb:sees-after:undefined\nentry:a-after:b-value\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:sees-before:a-before\nb:sees-after:undefined\nentry:a-after:b-value\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:sees-before:a-before\nb:sees-after:undefined\nentry:a-after:b-value\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:sees-before:a-before\nb:sees-after:undefined\nentry:a-after:b-value\n"
+        }
+      }
+    },
+    "cjs-default-import": {
+      "expected": {
+        "stdout": "answer:42:legacy\ntype:object\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "answer:42:legacy\ntype:object\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "answer:42:legacy\ntype:object\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "answer:42:legacy\ntype:object\n"
+        }
+      }
+    },
+    "cjs-default-primitive": {
+      "expected": {
+        "stdout": "n:42:number\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "n:42:number\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "n:42:number\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "n:42:number\n"
+        }
+      }
+    },
+    "cjs-esmodule-marker": {
+      "expected": {
+        "stdout": "type:object\ndefault-prop:real-default\nnamed:named-val\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"type:object\\ndefault-prop:real-default\\nnamed:named-val\\n\" got \"type:string\\ndefault-prop:undefined\\nnamed:named-val\\n\"",
+          "exit": 0,
+          "stdout": "type:string\ndefault-prop:undefined\nnamed:named-val\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:object\ndefault-prop:real-default\nnamed:named-val\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:object\ndefault-prop:real-default\nnamed:named-val\n"
+        }
+      }
+    },
+    "cjs-exports-reassign": {
+      "expected": {
+        "stdout": "keys:kept,late\nkept:kept-val:false\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:kept,late\nkept:kept-val:false\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:kept,late\nkept:kept-val:false\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:kept,late\nkept:kept-val:false\n"
+        }
+      }
+    },
+    "cjs-named-import-static": {
+      "expected": {
+        "stdout": "foo-val:bar-val\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "foo-val:bar-val\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "foo-val:bar-val\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "foo-val:bar-val\n"
+        }
+      }
+    },
+    "cjs-namespace-import": {
+      "expected": {
+        "stdout": "keys:default,one,two\ndefault-one:1\nnamed-one:1\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:default,one,two\ndefault-one:1\nnamed-one:1\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:default,one,two\ndefault-one:1\nnamed-one:1\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:default,one,two\ndefault-one:1\nnamed-one:1\n"
+        }
+      }
+    },
+    "cjs-require-bundled": {
+      "expected": {
+        "stdout": "req:lib-value\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "req:lib-value\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "req:lib-value\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "req:lib-value\n"
+        }
+      }
+    },
+    "cjs-require-cache-identity": {
+      "expected": {
+        "stdout": "shared:eval\nsame:true\nn:5\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nsame:true\nn:5\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nsame:true\nn:5\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nsame:true\nn:5\n"
+        }
+      }
+    },
+    "cjs-typeof-exports": {
+      "expected": {
+        "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:true\nfilename:string\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:true\nfilename:string\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:string\\n\" got \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:undefined\\n\"",
+          "exit": 0,
+          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:true\nfilename:undefined\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:string\\n\" got \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:undefined\\n\"",
+          "exit": 0,
+          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:true\nfilename:undefined\n"
+        }
+      }
+    },
+    "dynamic-import-cjs": {
+      "expected": {
+        "stdout": "default:dyn-cjs\nhas-tag:false\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"default:dyn-cjs\\nhas-tag:false\\n\" got \"default:dyn-cjs\\nhas-tag:true\\n\"",
+          "exit": 0,
+          "stdout": "default:dyn-cjs\nhas-tag:true\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"default:dyn-cjs\\nhas-tag:false\\n\" got \"default:dyn-cjs\\nhas-tag:true\\n\"",
+          "exit": 0,
+          "stdout": "default:dyn-cjs\nhas-tag:true\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"default:dyn-cjs\\nhas-tag:false\\n\" got \"default:dyn-cjs\\nhas-tag:true\\n\"",
+          "exit": 0,
+          "stdout": "default:dyn-cjs\nhas-tag:true\n"
+        }
+      }
+    },
+    "dynamic-import-concat-literal": {
+      "expected": {
+        "stdout": "got:computed-target\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/diffpack/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/diffpack/diffpack.cjs",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "RUNTIME-ERROR",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/rolldown/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/rolldown/rolldown.mjs",
+          "exit": 1,
+          "stdout": ""
+        },
+        "esbuild": {
+          "class": "RUNTIME-ERROR",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/esbuild/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/esbuild/esbuild.mjs",
+          "exit": 1,
+          "stdout": ""
+        }
+      }
+    },
+    "dynamic-import-esm": {
+      "expected": {
+        "stdout": "before\nmod:eval\nloaded:dyn-esm\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before\nmod:eval\nloaded:dyn-esm\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before\nmod:eval\nloaded:dyn-esm\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before\nmod:eval\nloaded:dyn-esm\n"
+        }
+      }
+    },
+    "dynamic-static-same-namespace": {
+      "expected": {
+        "stdout": "shared:eval\nidentical:true\nid:shared\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nidentical:true\nid:shared\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nidentical:true\nid:shared\n"
+        }
+      }
+    },
+    "esm-cycle-eval-order": {
+      "expected": {
+        "stdout": "eval:b\neval:a\neval:entry\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "eval:b\neval:a\neval:entry\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "eval:b\neval:a\neval:entry\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "eval:b\neval:a\neval:entry\n"
+        }
+      }
+    },
+    "esm-cycle-hoisted-fn": {
+      "expected": {
+        "stdout": "b:A\na:B\nentry\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:A\na:B\nentry\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:A\na:B\nentry\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:A\na:B\nentry\n"
+        }
+      }
+    },
+    "esm-cycle-tdz-uncaught": {
+      "expected": {
+        "stdout": "b:reading\n",
+        "exit": 1
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 1,
+          "stdout": "b:reading\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 1,
+          "stdout": "b:reading\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected a runtime failure but the bundle exited 0",
+          "exit": 0,
+          "stdout": "b:reading\nb:undefined\na:late\nentry:unreachable\n"
+        }
+      }
+    },
+    "esm-default-fn-name": {
+      "expected": {
+        "stdout": "name:default\nval:7\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"name:default\\nval:7\\n\" got \"name:__diffpack_default_0\\nval:7\\n\"",
+          "exit": 0,
+          "stdout": "name:__diffpack_default_0\nval:7\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"name:default\\nval:7\\n\" got \"name:anon_default\\nval:7\\n\"",
+          "exit": 0,
+          "stdout": "name:anon_default\nval:7\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"name:default\\nval:7\\n\" got \"name:anon_default\\nval:7\\n\"",
+          "exit": 0,
+          "stdout": "name:anon_default\nval:7\n"
+        }
+      }
+    },
+    "esm-default-import": {
+      "expected": {
+        "stdout": "hello:world\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "hello:world\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "hello:world\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "hello:world\n"
+        }
+      }
+    },
+    "esm-export-rename": {
+      "expected": {
+        "stdout": "renamed:s3cret\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "renamed:s3cret\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "renamed:s3cret\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "renamed:s3cret\n"
+        }
+      }
+    },
+    "esm-import-meta-url": {
+      "expected": {
+        "stdout": "type:string\nfile:true\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "SyntaxError: Cannot use 'import.meta' outside a module",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:string\nfile:true\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:string\nfile:true\n"
+        }
+      }
+    },
+    "esm-named-import": {
+      "expected": {
+        "stdout": "sum:5\npi:3.14\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "sum:5\npi:3.14\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "sum:5\npi:3.14\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "sum:5\npi:3.14\n"
+        }
+      }
+    },
+    "esm-namespace-import": {
+      "expected": {
+        "stdout": "keys:alpha,beta\nvals:1:2\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"keys:alpha,beta\\nvals:1:2\\n\" got \"keys:beta,alpha\\nvals:1:2\\n\"",
+          "exit": 0,
+          "stdout": "keys:beta,alpha\nvals:1:2\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:alpha,beta\nvals:1:2\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:alpha,beta\nvals:1:2\n"
+        }
+      }
+    },
+    "esm-reexport-named-from": {
+      "expected": {
+        "stdout": "via-hub:orig\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "via-hub:orig\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "via-hub:orig\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "via-hub:orig\n"
+        }
+      }
+    },
+    "esm-reexport-star": {
+      "expected": {
+        "stdout": "keys:fromA,fromB\nAB\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:fromA,fromB\nAB\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:fromA,fromB\nAB\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:fromA,fromB\nAB\n"
+        }
+      }
+    },
+    "esm-reexport-star-ambiguity": {
+      "expected": {
+        "stdout": "keys:uniqueA,uniqueB\nhas-dupe:false\nua:ub\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:uniqueA,uniqueB\nhas-dupe:false\nua:ub\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:uniqueA,uniqueB\nhas-dupe:false\nua:ub\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "keys:uniqueA,uniqueB\nhas-dupe:false\nua:ub\n"
+        }
+      }
+    },
+    "esm-reexport-star-from-cjs": {
+      "expected": {
+        "stdout": "keys:bar,foo\ncjs-foo:cjs-bar\nhas-default:false\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"keys:bar,foo\\ncjs-foo:cjs-bar\\nhas-default:false\\n\" got \"keys:foo,bar\\ncjs-foo:cjs-bar\\nhas-default:false\\n\"",
+          "exit": 0,
+          "stdout": "keys:foo,bar\ncjs-foo:cjs-bar\nhas-default:false\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"keys:bar,foo\\ncjs-foo:cjs-bar\\nhas-default:false\\n\" got \"keys:foo,bar\\ncjs-foo:cjs-bar\\nhas-default:false\\n\"",
+          "exit": 0,
+          "stdout": "keys:foo,bar\ncjs-foo:cjs-bar\nhas-default:false\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"keys:bar,foo\\ncjs-foo:cjs-bar\\nhas-default:false\\n\" got \"keys:foo,bar\\ncjs-foo:cjs-bar\\nhas-default:false\\n\"",
+          "exit": 0,
+          "stdout": "keys:foo,bar\ncjs-foo:cjs-bar\nhas-default:false\n"
+        }
+      }
+    },
+    "esm-reexport-star-shadow": {
+      "expected": {
+        "stdout": "local-x:star-y\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "local-x:star-y\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "local-x:star-y\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "local-x:star-y\n"
+        }
+      }
+    },
+    "esm-self-namespace": {
+      "expected": {
+        "stdout": "self:5:true\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "self:5:true\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "self:5:true\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "self:5:true\n"
+        }
+      }
+    },
+    "esm-string-literal-export": {
+      "expected": {
+        "stdout": "w:string-name-value\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "w:string-name-value\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "w:string-name-value\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "w:string-name-value\n"
+        }
+      }
+    },
+    "esm-tdz-class-caught": {
+      "expected": {
+        "stdout": "b:tdz:ReferenceError\na:defined:widget\nentry:done\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:tdz:ReferenceError\na:defined:widget\nentry:done\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"b:tdz:ReferenceError\\na:defined:widget\\nentry:done\\n\" got \"b:tdz:TypeError\\na:defined:widget\\nentry:done\\n\"",
+          "exit": 0,
+          "stdout": "b:tdz:TypeError\na:defined:widget\nentry:done\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"b:tdz:ReferenceError\\na:defined:widget\\nentry:done\\n\" got \"b:tdz:TypeError\\na:defined:widget\\nentry:done\\n\"",
+          "exit": 0,
+          "stdout": "b:tdz:TypeError\na:defined:widget\nentry:done\n"
+        }
+      }
+    },
+    "esm-tdz-const-caught": {
+      "expected": {
+        "stdout": "b:tdz:ReferenceError\na:value:ready\nentry:done\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:tdz:ReferenceError\na:value:ready\nentry:done\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "b:tdz:ReferenceError\na:value:ready\nentry:done\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"b:tdz:ReferenceError\\na:value:ready\\nentry:done\\n\" got \"b:sees:undefined\\na:value:ready\\nentry:done\\n\"",
+          "exit": 0,
+          "stdout": "b:sees:undefined\na:value:ready\nentry:done\n"
+        }
+      }
+    },
+    "esm-this-undefined": {
+      "expected": {
+        "stdout": "this:undefined\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"this:undefined\\n\" got \"this:[object Object]\\n\"",
+          "exit": 0,
+          "stdout": "this:[object Object]\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "this:undefined\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "this:undefined\n"
+        }
+      }
+    },
+    "json-import-attribute": {
+      "expected": {
+        "stdout": "json:conformance:3\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        }
+      }
+    },
+    "json-require": {
+      "expected": {
+        "stdout": "json:conformance:3\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "json:conformance:3\n"
+        }
+      }
+    },
+    "live-default-alias": {
+      "expected": {
+        "stdout": "d0:0\nd1:1\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "d0:0\nd1:1\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "d0:0\nd1:1\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "d0:0\nd1:1\n"
+        }
+      }
+    },
+    "live-let-mutation": {
+      "expected": {
+        "stdout": "before:0\nafter:2\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before:0\nafter:2\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before:0\nafter:2\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "before:0\nafter:2\n"
+        }
+      }
+    },
+    "mixed-cycle-esm-cjs-eager": {
+      "expected": {
+        "stdout": "mixed:esm-ready\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        }
+      }
+    },
+    "mixed-cycle-esm-cjs-lazy": {
+      "expected": {
+        "stdout": "mixed:esm-ready\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "mixed:esm-ready\n"
+        }
+      }
+    },
+    "namespace-frozen": {
+      "expected": {
+        "stdout": "frozen:false\ntag:Module\nwrite:TypeError\nadd:TypeError\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"frozen:false\\ntag:Module\\nwrite:TypeError\\nadd:TypeError\\n\" got \"frozen:true\\ntag:Module\\nwrite:TypeError\\nadd:TypeError\\n\"",
+          "exit": 0,
+          "stdout": "frozen:true\ntag:Module\nwrite:TypeError\nadd:TypeError\n"
+        },
+        "rolldown": {
+          "class": "BUILD-ERROR",
+          "message": "Build failed with 2 errors:\n\n[ASSIGN_TO_IMPORT] Cannot assign to import 'a'\n   ╭─[ fixtures/namespace-frozen/entry.js:5:6 ]\n   │\n 1 │ import * as ns from \"./vals.js\";\n   │             ─┬  \n   │              ╰── 'ns' is imported here\n   │ \n 5 │   ns.a = 99;\n   │      ┬  \n   │      ╰── Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file (e.g. 'setA') and then import and call that function here instead.\n───╯\n\n[ASSIGN_TO_IMPORT] Cannot assign to import 'newProp'\n    ╭─[ fixtures/namespace-frozen/entry.js:11:6 ]\n    │\n  1 │ import * as ns from \"./vals.js\";\n    │             ─┬  \n    │              ╰── 'ns' is imported here\n    │ \n 11 │   ns.newProp = 1;\n    │      ───┬───  \n    │         ╰───── Imports are immutable in JavaScript. To modify the value of this import, you must export a setter function in the imported file (e.g. 'setNewProp') and then import and call that function here instead.\n────╯\n"
+        },
+        "esbuild": {
+          "class": "BUILD-ERROR",
+          "message": "Cannot assign to import \"a\"; Cannot assign to import \"newProp\""
+        }
+      }
+    },
+    "namespace-getter-live": {
+      "expected": {
+        "stdout": "ns0:0\nns1:1\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "ns0:0\nns1:1\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "ns0:0\nns1:1\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "ns0:0\nns1:1\n"
+        }
+      }
+    },
+    "order-diamond-once": {
+      "expected": {
+        "stdout": "shared:eval\nLS:RS\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nLS:RS\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nLS:RS\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "shared:eval\nLS:RS\n"
+        }
+      }
+    },
+    "order-import-hoisting": {
+      "expected": {
+        "stdout": "dep:eval\nentry:code\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "dep:eval\nentry:code\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "dep:eval\nentry:code\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "dep:eval\nentry:code\n"
+        }
+      }
+    },
+    "order-side-effect-imports": {
+      "expected": {
+        "stdout": "side:b\nside:a\nside:c\nside:entry\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "side:b\nside:a\nside:c\nside:entry\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "side:b\nside:a\nside:c\nside:entry\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "side:b\nside:a\nside:c\nside:entry\n"
+        }
+      }
+    },
+    "tla-basic": {
+      "expected": {
+        "stdout": "tla:before\ntla:after:tla-value\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "tla:before\ntla:after:tla-value\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "tla:before\ntla:after:tla-value\n"
+        }
+      }
+    },
+    "tla-dep-order": {
+      "expected": {
+        "stdout": "slow:start\nslow:done\nentry:yes\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "slow:start\nslow:done\nentry:yes\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "slow:start\nslow:done\nentry:yes\n"
+        }
+      }
+    },
+    "tla-dynamic-import-order": {
+      "expected": {
+        "stdout": "entry:start\ntla-mod:start\ntla-mod:done\nentry:got:9\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "RUNTIME-ERROR",
+          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "entry:start\ntla-mod:start\ntla-mod:done\nentry:got:9\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "entry:start\ntla-mod:start\ntla-mod:done\nentry:got:9\n"
+        }
+      }
+    }
+  }
+}

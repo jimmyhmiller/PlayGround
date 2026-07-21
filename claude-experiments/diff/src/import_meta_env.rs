@@ -37,12 +37,20 @@ pub struct ImportMetaEnv {
 }
 
 impl ImportMetaEnv {
+    /// Whether this env means a development build. `DEV`/`PROD` follow `MODE`
+    /// (as in Vite), so the dev server's `mode: "development"` really flips
+    /// them — hardcoding them to production values would silently strip every
+    /// `if (import.meta.env.DEV)` diagnostic out of the dev build.
+    fn is_dev(&self) -> bool {
+        self.mode == "development"
+    }
+
     /// The JS-source value literal for a static `import.meta.env.KEY` access.
     fn value_for(&self, key: &str, target: Target) -> String {
         match key {
             "MODE" => json(&self.mode),
-            "DEV" => "false".to_string(),
-            "PROD" => "true".to_string(),
+            "DEV" => bool_lit(self.is_dev()),
+            "PROD" => bool_lit(!self.is_dev()),
             "SSR" => bool_lit(target == Target::Server),
             "BASE_URL" => json(&self.base),
             _ => self
@@ -60,8 +68,8 @@ impl ImportMetaEnv {
     fn object_literal(&self, target: Target) -> String {
         let mut parts = vec![
             format!("\"MODE\":{}", json(&self.mode)),
-            "\"DEV\":false".to_string(),
-            "\"PROD\":true".to_string(),
+            format!("\"DEV\":{}", bool_lit(self.is_dev())),
+            format!("\"PROD\":{}", bool_lit(!self.is_dev())),
             format!("\"SSR\":{}", bool_lit(target == Target::Server)),
             format!("\"BASE_URL\":{}", json(&self.base)),
         ];
@@ -226,6 +234,24 @@ mod tests {
         let out = run("const v = import.meta.env[key];", Target::Client);
         assert!(out.contains("[key]"), "{out}");
         assert!(out.contains("\"BASE_URL\":\"/\""), "receiver became the object: {out}");
+    }
+
+    #[test]
+    fn dev_and_prod_follow_the_mode() {
+        let development = ImportMetaEnv {
+            base: "/".to_string(),
+            mode: "development".to_string(),
+            vite_vars: Vec::new(),
+        };
+        let out = transform(
+            Path::new("m.ts"),
+            "const d = import.meta.env.DEV; const p = import.meta.env.PROD;",
+            &development,
+            Target::Client,
+        )
+        .unwrap();
+        assert!(out.contains("const d = true"), "{out}");
+        assert!(out.contains("const p = false"), "{out}");
     }
 
     #[test]

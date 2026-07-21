@@ -103,6 +103,144 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        Some("build") => {
+            let project_root = arguments.next().ok_or_else(usage)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let has_flag = |flag: &str| remaining.iter().any(|value| value.to_str() == Some(flag));
+            let vite = has_flag("--vite");
+            let minify = !has_flag("--no-minify");
+            let source_map = has_flag("--sourcemap");
+            let out_dir = remaining
+                .iter()
+                .position(|value| value.to_str() == Some("--out-dir"))
+                .map(|index| {
+                    remaining
+                        .get(index + 1)
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--out-dir needs a directory argument".to_string())
+                })
+                .transpose()?;
+
+            let root = Path::new(&project_root)
+                .canonicalize()
+                .map_err(|error| {
+                    format!("cannot open project root {}: {error}", Path::new(&project_root).display())
+                })?;
+            let html_path = root.join("index.html");
+            if !html_path.is_file() {
+                return Err(format!(
+                    "{} has no index.html; `diffpack build` bundles an HTML-rooted web app \
+                     (use `diffpack bundle <entry>` for a bare module entry)",
+                    root.display()
+                ));
+            }
+            let html = diffpack::html_entry::parse_file(&html_path)?;
+            let html_origin = html_path.display().to_string();
+            let entry_script = match html.module_scripts.as_slice() {
+                [] => {
+                    return Err(format!(
+                        "{html_origin}: no local <script type=\"module\" src> entry found"
+                    ));
+                }
+                [only] => only,
+                many => {
+                    let sources = many
+                        .iter()
+                        .map(|script| script.src.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "{html_origin}: {} module script entries ({sources}); multiple HTML \
+                         entries are not supported yet",
+                        many.len()
+                    ));
+                }
+            };
+            // A root-absolute src (`/src/main.tsx`) is project-root-relative, as
+            // in a dev server's URL space; anything else is relative to the HTML
+            // document itself.
+            let entry_path = match entry_script.src.strip_prefix('/') {
+                Some(rest) => root.join(rest),
+                None => html_path
+                    .parent()
+                    .expect("an HTML file has a parent directory")
+                    .join(&entry_script.src),
+            };
+            let entry = entry_path.canonicalize().map_err(|error| {
+                format!(
+                    "{html_origin}: module script src \"{}\" does not resolve \
+                     ({}: {error})",
+                    entry_script.src,
+                    entry_path.display()
+                )
+            })?;
+
+            let config = diffpack::config::derive_web_config(&root, vite)?;
+            if config.vite && config.base != "/" {
+                // Asset-URL synthesis does not apply a custom base yet; building
+                // anyway would emit URLs the page cannot load.
+                return Err(format!(
+                    "vite `base` is {:?}, but diffpack does not yet apply a non-root base \
+                     to emitted asset URLs",
+                    config.base
+                ));
+            }
+            println!(
+                "web build{}: entry={}",
+                if config.vite { " (vite mode)" } else { "" },
+                entry.display()
+            );
+            let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
+            // A generic web build fails on unresolved imports — an artifact with
+            // dangling references is not a successful build.
+            if !update.diagnostics.is_empty() {
+                let mut message = format!(
+                    "{} unresolved import(s):",
+                    update.diagnostics.len()
+                );
+                for diagnostic in &update.diagnostics {
+                    message.push_str("\n  ");
+                    message.push_str(diagnostic);
+                }
+                return Err(message);
+            }
+            let reachable = bundler.reachable_modules_direct();
+            println!("reachable {} modules", reachable.len());
+
+            let out_dir = out_dir.unwrap_or_else(|| root.join("dist"));
+            let emit_options = EmitOptions {
+                minify,
+                source_map,
+                ..EmitOptions::default()
+            };
+            let summary = bundler.emit_web(&reachable, &out_dir, "index.js", emit_options)?;
+            // The `public/` passthrough directory is a Vite convention.
+            let static_files = if config.vite {
+                diffpack::config::copy_static_public(&root, &out_dir)?
+            } else {
+                0
+            };
+            let mut injection = diffpack::html_entry::HeadInjection {
+                script_urls: vec![format!("{}index.js", config.base)],
+                stylesheet_urls: Vec::new(),
+            };
+            if summary.css_files > 0 {
+                injection.stylesheet_urls.push(format!("{}index.css", config.base));
+            }
+            let built_html = html.rewrite(&html_origin, &injection)?;
+            let html_out = out_dir.join("index.html");
+            std::fs::write(&html_out, built_html)
+                .map_err(|error| format!("cannot write {}: {error}", html_out.display()))?;
+            println!(
+                "emitted {}: {} .js, {} .css, {} asset(s), {} static file(s), index.html",
+                summary.output_dir.display(),
+                summary.javascript_files,
+                summary.css_files,
+                summary.asset_files,
+                static_files,
+            );
+            Ok(())
+        }
         Some("build-app") => {
             let project_root = arguments.next().ok_or_else(usage)?;
             let remaining = arguments.collect::<Vec<_>>();
@@ -390,7 +528,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {

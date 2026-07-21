@@ -1,0 +1,14 @@
+{
+  "name": "diffpack-conformance",
+  "private": true,
+  "type": "module",
+  "description": "Execution-differential ESM/CJS semantics conformance suite. Ground truth is unbundled Node execution; diffpack, rolldown, and esbuild bundles are compared against it.",
+  "scripts": {
+    "test": "node run.mjs",
+    "update-expected": "node run.mjs --update-expected"
+  },
+  "dependencies": {
+    "esbuild": "0.28.1",
+    "rolldown": "1.2.0"
+  }
+}

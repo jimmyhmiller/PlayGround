@@ -10,7 +10,16 @@ import puppeteer from "puppeteer-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outputRoot = join(here, ".diffpack-output");
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+// Chrome discovery: explicit override, then the machines this repo runs on
+// (Linux box: Playwright-cached Chromium; Mac: system Chrome).
+import { existsSync as __chromeExists } from "node:fs";
+const CHROME = [
+  process.env.CHROME,
+  `${process.env.HOME}/.cache/ms-playwright/chromium-1194/chrome-linux/chrome`,
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+].filter(Boolean).find((p) => __chromeExists(p));
 const PORT = 8577;
 const BASE = `http://127.0.0.1:${PORT}`;
 

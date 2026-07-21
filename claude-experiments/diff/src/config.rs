@@ -130,6 +130,82 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
     })
 }
 
+/// Configuration for a generic HTML-rooted web build (`diffpack build`).
+#[derive(Debug, Clone)]
+pub struct WebConfig {
+    pub build: BuildConfig,
+    /// The public base every emitted URL is joined under. Always `/` unless
+    /// Vite mode resolved a different `base` from the project's config.
+    pub base: String,
+    /// Whether Vite conventions are enabled for this build.
+    pub vite: bool,
+}
+
+/// Derives the build config for an HTML-rooted web application.
+///
+/// The default is a *generic* browser build: browser resolve conditions, no
+/// aliases, and none of Vite's conventions. `vite: true` opts in to Vite
+/// compatibility as a bundle — evaluating `vite.config` for `define`/`base`,
+/// loading the `.env`/`VITE_*` file stack, injecting `import.meta.env`, and the
+/// `NODE_ENV` production define. Vite behavior is never applied implicitly:
+/// a project that wants it asks for it (`--vite`).
+pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot open project root {}: {error}", root.display()))?;
+    let root = root.as_path();
+    let conditions = ["module", "browser"]
+        .iter()
+        .map(|condition| condition.to_string())
+        .collect();
+    let mut config = WebConfig {
+        build: BuildConfig {
+            aliases: Vec::new(),
+            conditions,
+            virtual_modules: Vec::new(),
+            target: Target::Client,
+            import_meta_env: None,
+            defines: Vec::new(),
+            hmr: false,
+        },
+        base: "/".to_string(),
+        vite: false,
+    };
+    if !vite {
+        return Ok(config);
+    }
+    config.vite = true;
+    // Vite mode: the same opt-in evaluation `build-app` uses — the config file's
+    // computed `define` and `base` — with the same non-fatal fallback.
+    let resolved = match crate::vite_config::resolve(root, "production") {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            eprintln!("warning: could not evaluate vite config ({error}); continuing with defaults");
+            None
+        }
+    };
+    let base = resolved
+        .as_ref()
+        .and_then(|resolved| resolved.base.clone())
+        .unwrap_or_else(|| "/".to_string());
+    let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
+    set_node_env(&mut defines, "production");
+    // Vite resolves with the mode condition alongside the browser ones.
+    config.build.conditions.push("production".to_string());
+    config.build.defines = defines;
+    // `import.meta.env` from the full Vite source order: the `.env` file stack
+    // for the mode, overridden by real `VITE_*` process variables (the overlay
+    // is inside `load_vite_env`).
+    let vite_vars = crate::env_file::load_vite_env(root, "production")?;
+    config.build.import_meta_env = Some(crate::import_meta_env::ImportMetaEnv {
+        base: base.clone(),
+        mode: "production".to_string(),
+        vite_vars,
+    });
+    config.base = base;
+    Ok(config)
+}
+
 /// The `process.env.NODE_ENV` compile-time define, the switch every package that
 /// ships both a development and a production build dispatches on:
 ///
