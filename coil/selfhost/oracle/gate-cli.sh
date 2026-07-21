@@ -15,6 +15,11 @@ COIL="$(cd "$(dirname "$COIL")" && pwd)/$(basename "$COIL")"
 
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 FAIL=0
+# Host discrimination: a few checks exercise macOS/arm64-only surfaces (Mach-O
+# cross-links, running --backend arm64 output, dsymutil/.dSYM). Off that host they
+# skip — or assert the located error the same source correctly produces there.
+HOST_OS=$(uname -s)      # Darwin | Linux
+HOST_ARCH=$(uname -m)    # arm64 | x86_64 | aarch64
 ok()   { echo "  ok   — $1"; }
 bad()  { echo "  FAIL — $1"; echo "         $2"; FAIL=1; }
 
@@ -530,11 +535,15 @@ echo "== cross-compiling a native non-host target LINKS (passes -arch), not reje
 # Now build-cmd passes `-arch <arch>` to the link step, so macOS cc cross-links every
 # slice its SDK carries — the build succeeds and produces a real x86_64 executable.
 # (xcompile). This FAILS on the seed (rc 1, no output file) and PASSES here.
-out=$("$COIL" build "$T/seven.coil" -o "$T/xseven" --target x86_64-apple-macosx11.0.0 2>&1); rc=$?
-if [ "$rc" = 0 ] && file "$T/xseven" 2>/dev/null | grep -q "x86_64"; then
-  ok "cross-target build links an x86_64 Mach-O executable"
+if [ "$HOST_OS" = Darwin ]; then
+  out=$("$COIL" build "$T/seven.coil" -o "$T/xseven" --target x86_64-apple-macosx11.0.0 2>&1); rc=$?
+  if [ "$rc" = 0 ] && file "$T/xseven" 2>/dev/null | grep -q "x86_64"; then
+    ok "cross-target build links an x86_64 Mach-O executable"
+  else
+    bad "cross-target build" "rc=$rc, file=$(file "$T/xseven" 2>/dev/null): $(echo "$out" | head -1)"
+  fi
 else
-  bad "cross-target build" "rc=$rc, file=$(file "$T/xseven" 2>/dev/null): $(echo "$out" | head -1)"
+  echo "  (skip: cross-linking a Mach-O slice needs the macOS toolchain host)"
 fi
 
 echo "== object emission on the DEFAULT (LLVM) backend =="
@@ -545,8 +554,19 @@ echo "== object emission on the DEFAULT (LLVM) backend =="
 # (examples/shim.coil) failed to build and no gate noticed.
 for e in examples/shim.coil examples/everything.coil; do
   out=$("$COIL" run "$e" 2>&1); rc=$?
-  [ "$rc" = 42 ] && ok "$e builds+runs on the LLVM backend (42)" \
-                 || bad "$e on the LLVM backend" "rc=$rc: $(echo "$out" | head -1)"
+  if [ "$HOST_ARCH" = arm64 ] || [ "$HOST_ARCH" = aarch64 ]; then
+    [ "$rc" = 42 ] && ok "$e builds+runs on the LLVM backend (42)" \
+                   || bad "$e on the LLVM backend" "rc=$rc: $(echo "$out" | head -1)"
+  else
+    # These examples declare arm64-register shim conventions; on an x86 host the
+    # LLVM backend targets x86_64 and the per-arch diagnostic MUST fire (never a
+    # silently-wrong build).
+    if [ "$rc" != 0 ] && echo "$out" | grep -q "not a general-purpose register on the target architecture"; then
+      ok "$e: arm64-register shim convention is a clear per-arch error on $HOST_ARCH"
+    else
+      bad "$e on $HOST_ARCH" "want the per-arch shim-convention error, got rc=$rc: $(echo "$out" | head -1)"
+    fi
+  fi
 done
 
 echo "== export-c on the arm64 backend (unblocks the LLVM-free compiled metaprogram engine) =="
@@ -566,6 +586,11 @@ cat > "$T/expc.coil" <<'EOF'
 (export-c [make-point :as "shapes_make_point"] [add3 :as "shapes_add3"])
 EOF
 if "$COIL" emit-obj "$T/expc.coil" -o "$T/expc.o" --backend arm64 >/dev/null 2>&1; then
+  if [ "$HOST_OS" != Darwin ]; then
+    # emit-obj produced the arm64 Mach-O object (host-independent codegen); linking
+    # and executing it needs the macOS arm64 host.
+    echo "  (skip: running the arm64 Mach-O object needs the macOS host — emit-obj itself succeeded)"
+  else
   cat > "$T/expc_drv.c" <<'EOF'
 #include <stdint.h>
 typedef struct { int64_t x, y; } Point;
@@ -578,6 +603,7 @@ EOF
     ok "export-c --backend arm64: scalar + struct-return callable from C (AAPCS64, no thunk)"
   else
     bad "export-c --backend arm64: C call" "the linked object did not return the expected value"
+  fi
   fi
 else
   bad "export-c --backend arm64: emit-obj rejected a thunk-free export" "seed hard-errors on all exports"
@@ -816,7 +842,7 @@ echo "== -g: dsymutil runs, the .o is kept, lldb maps source (tool-11) =="
 # valid relocations found. Skipping." and produced an EMPTY dSYM — 0 line rows, "No source
 # available" in lldb. The driver also runs dsymutil after a -g link. FAILS on the seed
 # (it emits no relocations and never runs dsymutil -> no .dSYM, breakpoints don't resolve).
-if command -v dsymutil >/dev/null 2>&1; then
+if [ "$HOST_OS" = Darwin ] && command -v dsymutil >/dev/null 2>&1; then
   cat > "$T/dbg.coil" <<'EOF'
 (module dbg)
 (defn addup [(x i64) (y i64)] (-> i64) (iadd x y))
@@ -935,7 +961,9 @@ echo "== gen-10: monomorphization instantiation lookup is O(1) (hash-indexed), n
 # slow/fast machine cancels out). It FAILS on the seed (seed-vs-seed is 1.00x, below the
 # threshold) and on any future regression that reintroduces a scan into the worklist.
 SEED_BIN=selfhost/seed/coil-seed
-if [ -x "$SEED_BIN" ] && [ -x /usr/bin/time ]; then
+# `-x` alone is not enough: the committed seed is a Mach-O arm64 binary, so on a
+# Linux host the file is "executable" but exec fails — probe an actual run.
+if [ -x "$SEED_BIN" ] && [ -x /usr/bin/time ] && "$SEED_BIN" >/dev/null 2>&1; then
   perf_src="$T/mono_perf.coil"
   # One generic `hub` fans out to 250 generic structs; calling it at 12 distinct array types
   # forces ~3000 DISTINCT struct instantiations (the O(n^2) regime) while keeping check/codegen
@@ -967,7 +995,7 @@ if [ -x "$SEED_BIN" ] && [ -x /usr/bin/time ]; then
     bad "gen-10 mono lookup is O(1) (faster than the pre-fix seed)" "want >=1.25x vs seed, got ${t_seed}s/${t_coil}s = $(awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{printf "%.2fx", s/c}')"
   fi
 else
-  echo "  (skip: no $SEED_BIN or /usr/bin/time for the gen-10 perf probe)"
+  echo "  (skip: no runnable $SEED_BIN or /usr/bin/time for the gen-10 perf probe)"
 fi
 
 echo

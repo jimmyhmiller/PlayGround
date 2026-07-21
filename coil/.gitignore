@@ -10,6 +10,10 @@ roms/invaders.[hgfe]
 apps/invaders/invaders
 apps/invaders/*.o
 
+# the Linux compiler installs here (rebootstrap-linux.sh); the committed binaries
+# stay ./coil and ./coil-nollvm (macOS) + selfhost/seed/coil-seed-linux-x86_64
+/coil-linux
+
 # repro build artifacts
 docs/repro/*/repro
 docs/repro/*/librepro.a

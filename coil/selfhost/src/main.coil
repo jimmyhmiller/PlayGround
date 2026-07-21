@@ -144,9 +144,19 @@
                     (box-al [(slice u8)] a (al-new [(slice u8)] a))
                     false))
 
+; The MObj fast path JITs ARM64 machine code straight into this process, so it is
+; only registered when the host really is arm64. On any other host (linux-x86_64)
+; comptime sites the interpreter can't fold take comptime_eval's dylib route instead.
+(defn host-arm64? [] (-> bool)
+  (match (str-find (cstr->slice (LLVMGetDefaultTargetTriple)) "aarch64")
+    (Some [i0] true)
+    (None [] (match (str-find (cstr->slice (LLVMGetDefaultTargetTriple)) "arm64")
+               (Some [i1] true)
+               (None [] false)))))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))
-  (set-meta-build-mobj! (fnptr-of meta-build-mobj-llvm))
+  (if (host-arm64?) (set-meta-build-mobj! (fnptr-of meta-build-mobj-llvm)) 0)
   (register-comptime-fold!)   ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
   (driver-main argc argv
                (fnptr-of build-ir-program)

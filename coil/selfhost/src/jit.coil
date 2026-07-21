@@ -49,7 +49,6 @@
 (extern mmap     :cc c [(ptr i8) i64 i32 i32 i32 i64] (-> (ptr i8)))
 (extern munmap   :cc c [(ptr i8) i64] (-> i32))
 (extern mprotect :cc c [(ptr i8) i64 i32] (-> i32))
-(extern sys_icache_invalidate :cc c [(ptr i8) i64] (-> i64))
 (extern dlsym    :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 
 (defn prot-rw   [] (-> i64) 3)          ; PROT_READ|PROT_WRITE
@@ -67,6 +66,15 @@
 ; is how a comptime thunk reaches libc and how a metaprogram reaches the host hooks
 ; the compiler exports. RTLD_DEFAULT is (void*)-2 on macOS.
 (defn jit-rtld-default [] (-> (ptr i8)) (cast (ptr i8) -2))
+
+; Darwin's explicit i-cache flush after writing JIT pages, resolved dynamically:
+; the symbol does not exist on ELF hosts (this JIT emits arm64 and never runs
+; there — x86 additionally has a coherent i-cache), and a plain extern would
+; leave the Linux link with an undefined reference.
+(defn jit-icache-invalidate [(base (ptr i8)) (n i64)] (-> i64)
+  (let [f (dlsym (jit-rtld-default) c"sys_icache_invalidate")]
+    (if (icmp-eq (cast i64 f) 0) 0
+      (call-ptr (cast (fnptr c [(ptr i8) i64] i64) f) base n))))
 
 (defstruct JitSym  [(name (slice u8)) (addr (ptr i8))])
 (defstruct JitImage
@@ -345,7 +353,7 @@
                               (return-from :jit
                                 (Err [JitImage (slice u8)] "jit: mprotect of the comptime text pages failed")))
                         0)
-                      (sys_icache_invalidate base textsz))
+                      (jit-icache-invalidate base textsz))
                 0)
 
               (let [img (alloc-stack JitImage)]

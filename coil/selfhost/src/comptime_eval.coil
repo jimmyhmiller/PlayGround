@@ -335,10 +335,10 @@
         (sort-mono-program a mp)
         (let [id (me-unique a)
               obj-s (sconcat3 a "/tmp/coil-ct-" id ".o")
-              tmp-s (sconcat3 a "/tmp/coil-ct-" id ".dylib")]
+              tmp-s (sconcat3 a "/tmp/coil-ct-" id (me-dylib-ext))]
           (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
-          (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
-                                        (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))
+          (let [cmd (sconcat a (sconcat a (sconcat3 a (me-dylib-link-cmd) obj-s " -o ")
+                                        (sconcat a tmp-s (me-dylib-undef-flag)))
                                (me-link-flags-str a))]
             (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
                 (Err [(ptr i8) Diag] (derr "comptime: linking the compiled comptime dylib failed"))

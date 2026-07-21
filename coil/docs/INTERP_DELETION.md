@@ -239,6 +239,38 @@ Prototype location (throwaway, not in the repo):
 `/tmp/coil-stage`. Instrumentation (`ctinterp-log`, `ctmark`, `ctstage`) is measurement-only and
 must never be committed.
 
+## Engine-parity divergences, MEASURED (Linux, 2026-07-21 — pre-existing, not port bugs)
+
+`parity.sh` over the current 116-file corpus on the Linux port: **114 identical, 2
+divergent**. Both divergences are engine differences the deletion must resolve, and
+both reproduce with the same mechanism the doc already describes:
+
+- **`lib/assert.coil` — RC-DIFF (interp=1, compiled=0).** Under `COIL_META=interp`
+  the interpreter dies on its own capability gap (`comptime: generic call to
+  'slice.slice-len' isn't supported yet`); the compiled engine compiles it fine. A
+  file the WEAKER engine cannot process at all is exactly the mac-12 complaint —
+  and it means parity.sh's "both engines agree" contract already has a standing
+  exception that step 5/6 work must either fix or bless.
+- **`metaprog-poc/minrep_test.coil` — DIAG-DIFF.** An erroring macro reports
+  `macro 'minrep.simple-check' did not return Code` on the interpreter vs
+  `compilation failed: checker reported error(s) above` on the compiled engine.
+  Diagnostic-wording parity for failing metaprograms is part of "100% compatible".
+
+## Platform note (Linux port, 2026-07-21)
+
+The compiler now also self-hosts on Linux x86-64 (`docs/LINUX_PORT.md`). Two facts
+matter for this plan:
+
+- **The MObj in-memory JIT route is arm64-only** — `main.coil` registers
+  `set-meta-build-mobj!` only when the host is arm64. On Linux, compiled comptime
+  goes through `comptime_eval`'s **dylib route** (`cc -shared` + `dlopen`) and
+  passes the full gate-cli readback battery. So step 5 Phase A's "use the in-memory
+  MObj/JIT route" is an arm64 optimization, not the portable mechanism: the
+  incremental engine must keep a dylib path (or grow an x86-64 MObj emitter).
+- Linux is a second verification platform for every Phase-2 step:
+  `selfhost/rebootstrap-linux.sh` (LLVM-backend fixpoint + linux gate-full/gate-run
+  + gate-cli) and parity.sh both run there.
+
 ## Landmines
 
 **`closure-subprogram` does NOT own its bodies.** It copies each `Func` by value, but `body` is

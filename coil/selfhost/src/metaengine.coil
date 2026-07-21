@@ -44,9 +44,56 @@
 (extern access :cc c [(ptr i8) i64] (-> i32))     ; F_OK=0: does the path exist
 (extern rename :cc c [(ptr i8) (ptr i8)] (-> i32))
 (extern unlink :cc c [(ptr i8)] (-> i32))
-(extern dispatch_semaphore_create :cc c [i64] (-> (ptr i8)))
-(extern dispatch_semaphore_wait   :cc c [(ptr i8) i64] (-> i64))   ; -1 = DISPATCH_TIME_FOREVER
-(extern dispatch_semaphore_signal :cc c [(ptr i8)] (-> i64))
+(extern malloc :cc c [isize] (-> (ptr i8)))
+(extern pthread_mutex_init   :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_mutex_lock   :cc c [(ptr i8)] (-> i32))
+(extern pthread_mutex_unlock :cc c [(ptr i8)] (-> i32))
+(extern pthread_cond_init    :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_cond_wait    :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_cond_signal  :cc c [(ptr i8)] (-> i32))
+
+; ---- portable counting semaphore --------------------------------------------------
+; pthread mutex+condvar, replacing Darwin's dispatch_semaphore_* (which does not
+; exist on ELF hosts). Same contract as the GCD trio it replaces: create(n),
+; wait(sem, -1) = wait forever (the only timeout ever passed), signal(sem).
+; The mutex/cond buffers are malloc'd oversized: pthread_mutex_t is 40 bytes on
+; glibc and 64 on Darwin, pthread_cond_t 48 on both — 64 covers every host.
+(defstruct MESem [(mtx (ptr i8)) (cnd (ptr i8)) (count i64)])
+(defn me-sem-create [(value i64)] (-> (ptr i8))
+  (let [s (cast (ptr MESem) (malloc (cast isize (sizeof MESem))))]
+    (store! (field s mtx) (malloc 64))
+    (store! (field s cnd) (malloc 64))
+    (pthread_mutex_init (load (field s mtx)) (cast (ptr i8) 0))
+    (pthread_cond_init  (load (field s cnd)) (cast (ptr i8) 0))
+    (store! (field s count) value)
+    (cast (ptr i8) s)))
+(defn me-sem-wait [(sp (ptr i8)) (timeout i64)] (-> i64)
+  (let [s (cast (ptr MESem) sp)]
+    (pthread_mutex_lock (load (field s mtx)))
+    (loop (if (icmp-gt (load (field s count)) 0) (break)
+      (do (pthread_cond_wait (load (field s cnd)) (load (field s mtx))) 0)))
+    (store! (field s count) (isub (load (field s count)) 1))
+    (pthread_mutex_unlock (load (field s mtx)))
+    0))
+(defn me-sem-signal [(sp (ptr i8))] (-> i64)
+  (let [s (cast (ptr MESem) sp)]
+    (pthread_mutex_lock (load (field s mtx)))
+    (store! (field s count) (iadd (load (field s count)) 1))
+    (pthread_cond_signal (load (field s cnd)))
+    (pthread_mutex_unlock (load (field s mtx)))
+    0))
+
+; ---- host-OS probe ----------------------------------------------------------------
+; The dylibs this module builds are dlopen'd into THIS process, so the link line and
+; suffix follow the HOST, never --target. /proc/self/maps exists on every Linux and
+; never on macOS; on macOS the probe is false and every branch below is exactly the
+; historical mach-o one.
+(defn me-host-linux? [] (-> bool)
+  (icmp-eq (cast i64 (access c"/proc/self/maps" 0)) 0))
+(defn me-dylib-ext [] (-> (slice u8)) (if (me-host-linux?) ".so" ".dylib"))
+(defn me-dylib-link-cmd [] (-> (slice u8)) (if (me-host-linux?) "cc -shared " "cc -dynamiclib "))
+; ELF `-shared` allows undefined symbols by default; Mach-O needs the explicit opt-in.
+(defn me-dylib-undef-flag [] (-> (slice u8)) (if (me-host-linux?) "" " -Wl,-undefined,dynamic_lookup"))
 
 ; ---- the engine flag ------------------------------------------------------------
 ; DEFAULT = compiled, whenever a backend object builder is registered (main.coil
@@ -94,8 +141,8 @@
 (defn main-svc-init! [] (-> i64)
   (let [b (main-svc)]
     (if (icmp-ne (load (field b isinit)) 0) 0
-      (do (store! (field b jobsem) (dispatch_semaphore_create 0))
-          (store! (field b donesem) (dispatch_semaphore_create 0))
+      (do (store! (field b jobsem) (me-sem-create 0))
+          (store! (field b donesem) (me-sem-create 0))
           (store! (field b isinit) 1) 0))))
 ; the driver's main thread sits here servicing metaprogram calls until the
 ; pipeline thread signals it is done (no-op unless main-svc-init! ran)
@@ -103,20 +150,20 @@
   (let [b (main-svc)]
     (if (icmp-eq (load (field b isinit)) 0) 0
       (loop
-        (do (dispatch_semaphore_wait (load (field b jobsem)) -1)
+        (do (me-sem-wait (load (field b jobsem)) -1)
             (if (icmp-ne (load (field b finished)) 0) (break 0) 0)
             (me-tramp (load (field b call)))
-            (dispatch_semaphore_signal (load (field b donesem))))))))
+            (me-sem-signal (load (field b donesem))))))))
 (defn main-svc-finish! [] (-> i64)
   (let [b (main-svc)]
     (if (icmp-eq (load (field b isinit)) 0) 0
       (do (store! (field b finished) 1)
-          (dispatch_semaphore_signal (load (field b jobsem))) 0))))
+          (me-sem-signal (load (field b jobsem))) 0))))
 (defn main-svc-run [(c (ptr i8))] (-> i64)
   (let [b (main-svc)]
     (store! (field b call) c)
-    (dispatch_semaphore_signal (load (field b jobsem)))
-    (dispatch_semaphore_wait (load (field b donesem)) -1)
+    (me-sem-signal (load (field b jobsem)))
+    (me-sem-wait (load (field b donesem)) -1)
     0))
 
 ; ---- the program's --link-flag list (set by the driver) ----------------------------
@@ -299,7 +346,7 @@
         (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))
               cpath (match cdir
                       (None [] (None [(slice u8)]))
-                      (Some [d] (Some (sconcat a (sconcat3 a d "/" (me-program-key a mp entries)) ".dylib"))))]
+                      (Some [d] (Some (sconcat a (sconcat3 a d "/" (me-program-key a mp entries)) (me-dylib-ext)))))]
           ; cache hit: the dylib for this exact program already exists
           (match cpath
             (Some [p] (if (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0)
@@ -307,10 +354,10 @@
             (None [] 0))
           (let [id (me-unique a)
                 obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
-                tmp-s (sconcat3 a "/tmp/coil-mp-" id ".dylib")]
+                tmp-s (sconcat3 a "/tmp/coil-mp-" id (me-dylib-ext))]
             (call-ptr (load (field bb fp)) a mp (slice->cstr a obj-s))
-            (let [cmd (sconcat a (sconcat a (sconcat3 a "cc -dynamiclib " obj-s " -o ")
-                                          (sconcat a tmp-s " -Wl,-undefined,dynamic_lookup"))
+            (let [cmd (sconcat a (sconcat a (sconcat3 a (me-dylib-link-cmd) obj-s " -o ")
+                                          (sconcat a tmp-s (me-dylib-undef-flag)))
                                  (me-link-flags-str a))]
               (if (icmp-ne (cast i64 (system (slice->cstr a cmd))) 0)
                   (Err [(ptr i8) Diag] (derr "metaengine: linking the metaprogram dylib failed"))

@@ -816,13 +816,16 @@
 ; emits the __text-relative address RELOCATIONS dsymutil needs (without them it printed
 ; "No valid relocations found. Skipping." and produced an empty dSYM — tool-11).
 (defn run-dsymutil [(a (ptr Allocator)) (out (slice u8))] (-> i64)
+  ; ELF has no debug map / dSYM: the DWARF is linked into the executable itself and
+  ; debuggers read it directly, so on a Linux host there is nothing to gather.
+  (if (me-host-linux?) 0
   (let [(mut db) (sb-new a)]
     (sb-push-str! (mut db) "dsymutil ")
     (sb-push-str! (mut db) out)
     (let [drc (cast i64 (system (slice->cstr a (sb-str (load db)))))]
       (if (icmp-ne drc 0)
           (do (ps (stderr) "warning: dsymutil failed; debug info stays in ") (ps (stderr) out) (ps (stderr) ".o\n") 0)
-        0))))
+        0)))))
 
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
 ; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
@@ -930,12 +933,14 @@
             (if (icmp-eq (load libmode) 1)
                 (do (sb-push-str! (mut cmdsb) "ar rcs ") (sb-push-str! (mut cmdsb) out-slice)
                     (sb-push-str! (mut cmdsb) " ") (sb-push-str! (mut cmdsb) obj-slice) 0)
-              (do (sb-push-str! (mut cmdsb) (if (icmp-eq (load libmode) 2) "cc -dynamiclib " "cc "))
+              (do (sb-push-str! (mut cmdsb) (if (icmp-eq (load libmode) 2) (me-dylib-link-cmd) "cc "))
                   ; cross-target: the object's arch differs from the host cc's default
                   ; (arm64), so pass `-arch <arch>` — otherwise ld dies with
                   ; `found architecture '<arch>', required arm64` (xcompile). wasm never
-                  ; reaches here; a null/host triple is not a cross-target.
-                  (if (native-cross-target? (load trip))
+                  ; reaches here; a null/host triple is not a cross-target. `-arch` is a
+                  ; Mach-O-toolchain flag: on an ELF host it is not passed (cross-LINKING
+                  ; there needs a cross toolchain the driver does not orchestrate).
+                  (if (and (native-cross-target? (load trip)) (not (me-host-linux?)))
                       (do (sb-push-str! (mut cmdsb) "-arch ") (sb-push-str! (mut cmdsb) (triple-arch (load trip)))
                           (sb-push-str! (mut cmdsb) " ") 0)
                     0)
@@ -1369,7 +1374,11 @@
           ; ever running anything.
           (do (wait-report brc "compiler")
               (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
-        (let [runcmd (cat3-d a "/tmp/coil-run" (sb-str (load progargs)))
+        ; `exec` forces system()'s shell to replace itself with the program, so the
+        ; raw wait status (and thus a signal death) reaches wait-report unmasked.
+        ; Without it some shells (Linux dash among them) fork, swallow the signal
+        ; into exit 128+n, and print their own message instead of ours.
+        (let [runcmd (sconcat a "exec " (cat3-d a "/tmp/coil-run" (sb-str (load progargs))))
               rrc (cast i64 (system (slice->cstr a runcmd)))]
           (wait-report rrc "program")
           (wait-code rrc))))))
@@ -1406,7 +1415,7 @@
               ; the BUILD failed (compile error already on stderr, or a build signal death).
               (do (wait-report brc "compiler")
                   (let [c (wait-code brc)] (if (icmp-eq c 0) 1 c)))
-            (let [rrc (cast i64 (system (slice->cstr a "/tmp/coil-test")))]
+            (let [rrc (cast i64 (system (slice->cstr a "exec /tmp/coil-test")))]
               (wait-report rrc "test runner")
               (wait-code rrc))))))))
 

@@ -1713,20 +1713,36 @@
     (if (or (icmp-eq x 2) (icmp-eq y 2)) 2 0)))
 (defn abi-align-up [(x i64) (al i64)] (-> i64)
   (if (icmp-eq al 0) x (imul (udiv (iadd x (isub al 1)) al) al)))
-; Flatten `fields` into scalar leaves at absolute byte offsets, recursing into nested
-; structs and arrays (src/abi.rs::flatten). Field offsets mirror the C/LLVM struct
-; layout (natural alignment).
-(defn abi-flatten [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (base i64) (out (ptr AbiLeafBox))] (-> i64)
-  (let [td (load (field cg td)) n (al-len [Field] (load fields)) (mut acc) base (mut i) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (let [fp (al-elem [Field] fields (load i)) fty (field fp ty)
-                lty (basic-ty cg fty)
-                falign (cast i64 (LLVMABIAlignmentOfType td lty))]
-            (store! acc (abi-align-up (load acc) falign))
-            (abi-flatten-type cg fty (load acc) out)
-            (store! acc (iadd (load acc) (LLVMABISizeOfType td lty))))
-          (store! i (iadd (load i) 1)))))
-    0))
+; Flatten CgStruct `si`'s fields into scalar leaves at absolute byte offsets,
+; recursing into nested structs and arrays (src/abi.rs::flatten). Offsets come from
+; the struct's REAL layout — LLVMOffsetOfElement for LC/packed bodies (field i ==
+; element i), the declared :at offsets for :layout explicit (whose LLVM body is one
+; opaque [size x i8]) — never re-derived by natural alignment, which mis-places
+; every packed/explicit field (packed {u8 i64} put b at offset 8, past the 9-byte
+; struct, and the guard below aborted the build).
+(defn abi-flatten-cs [(cg (ptr Cg)) (si i64) (base i64) (out (ptr AbiLeafBox))] (-> i64)
+  (let [td (load (field cg td)) sp (al-elem [CgStruct] (field cg structs) si)
+        fs (load (field sp fields)) n (al-len [Field] (load fs)) (mut i) 0]
+    (match-else (load (field sp layout))
+      (LBits [backing offs]
+        ; bits struct: one integer backing word (unreachable via cg-abi-struct-cs,
+        ; which reports bits structs as scalars — kept total for direct callers).
+        (let [lf (alloc-stack AbiLeaf)]
+          (store! (field lf offset) base) (store! (field lf size) (udiv backing 8))
+          (store! (field lf cls) 1) (store! (field lf is_f32) false)
+          (al-push! (mut (field out items)) (load lf)) 0))
+      (LExplicit [offs sz al]
+        (do (loop (if (icmp-ge (load i) n) (break)
+              (do (abi-flatten-type cg (field (al-elem [Field] fs (load i)) ty)
+                                    (iadd base (al-get [i64] (load offs) (load i))) out)
+                  (store! i (iadd (load i) 1)))))
+            0))
+      (_
+        (do (loop (if (icmp-ge (load i) n) (break)
+              (do (abi-flatten-type cg (field (al-elem [Field] fs (load i)) ty)
+                                    (iadd base (LLVMOffsetOfElement td (load (field sp ty)) (cast i32 (load i)))) out)
+                  (store! i (iadd (load i) 1)))))
+            0)))))
 (defn abi-flatten-type [(cg (ptr Cg)) (ty (ptr Type)) (offset i64) (out (ptr AbiLeafBox))] (-> i64)
   (let [a (load (field cg a)) td (load (field cg td))]
     (match-else (load ty)
@@ -1741,10 +1757,10 @@
             (do (abi-flatten-type cg elem (iadd offset (imul (load i) esz)) out) (store! i (iadd (load i) 1)))))
           0))
       (TStruct [nm]
-        (let [fs (cg-resolve-fields cg nm)]
-          (if (icmp-eq (cast i64 fs) 0)
+        (let [si (cg-struct-idx cg nm)]
+          (if (icmp-lt si 0)
               (do (unimplemented "SysV ABI: nested type is not a classifiable struct") 0)
-            (abi-flatten cg fs offset out))))
+            (abi-flatten-cs cg si offset out))))
       ; view/generic types have no C representation; the unreachable ones must NOT
       ; fall through to the Integer arm below.
       (TVec   [el n] (do (unimplemented "SysV ABI: passing a vec by value across the C boundary is not supported yet") 0))
@@ -1767,7 +1783,7 @@
             (if (and (load (field lf is_f32)) (icmp-eq (load (field lf offset)) off)) (do (store! r true) 0) 0))
           (store! i (iadd (load i) 1)))))
     (load r)))
-(defn abi-classify-sysv [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
+(defn abi-classify-sysv [(cg (ptr Cg)) (si i64) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
   (let [a (load (field cg a)) ctx (cg-ctx cg)
         p (unwrap-ptr [StructAbi] (create [StructAbi] a))]
     (store! (field p llvm_ty) sty) (store! (field p size) size) (store! (field p align) align)
@@ -1776,7 +1792,7 @@
         (do (store! (field p arg) (ACIndirect align)) (store! (field p ret) (ACIndirect align)))
       (let [lb (unwrap-ptr [AbiLeafBox] (create [AbiLeafBox] a))]
         (store! (field lb items) (al-new [AbiLeaf] a))
-        (abi-flatten cg fields 0 lb)
+        (abi-flatten-cs cg si 0 lb)
         (let [leaves (field lb items) nbytes size
               (mut bytes) (al-new [i64] a) (mut bi) 0]
           ; per-byte class array (None), then merge each leaf onto its byte range.
@@ -1817,14 +1833,17 @@
               (store! (field p ret) (ACDirect sp))))))))
     p))
 
-; classify a struct for the C ABI (StructAbi by pointer).
-(defn abi-classify [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8))] (-> (ptr StructAbi))
+; classify a struct for the C ABI (StructAbi by pointer). Takes the CgStruct INDEX
+; so the SysV flatten can honor the struct's real layout (packed/explicit offsets).
+(defn abi-classify [(cg (ptr Cg)) (si i64)] (-> (ptr StructAbi))
   (let [td (load (field cg td))
+        sp (al-elem [CgStruct] (field cg structs) si)
+        sty (load (field sp ty))
         size (LLVMABISizeOfType td sty)
         align (LLVMABIAlignmentOfType td sty)]
     (if (icmp-eq (load (field cg arch)) 1)
-        (abi-classify-aapcs64 cg fields sty size align)
-      (abi-classify-sysv cg fields sty size align))))
+        (abi-classify-aapcs64 cg (load (field sp fields)) sty size align)
+      (abi-classify-sysv cg si sty size align))))
 (defn abi-classify-aapcs64 [(cg (ptr Cg)) (fields (ptr (ArrayList Field))) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
   (let [a (load (field cg a)) ctx (cg-ctx cg)
         p (unwrap-ptr [StructAbi] (create [StructAbi] a))
@@ -1884,8 +1903,7 @@
     ; return classification
     (let [rcs (cg-abi-struct-cs cg ret)]
       (if (icmp-ge rcs 0)
-          (let [csp (al-elem [CgStruct] (field cg structs) rcs)
-                sa (abi-classify cg (load (field csp fields)) (load (field csp ty)))]
+          (let [sa (abi-classify cg rcs)]
             (if (abi-ret-indirect? sa)
                 (do (al-push! (mut lp) (LLVMPointerTypeInContext ctx 0)) (store! (field sig sret) sa) 0)
               (do (store! rty (abi-direct-return-type cg sa)) (store! (field sig ret_direct) sa) 0)))
@@ -1896,8 +1914,7 @@
       (loop (if (icmp-ge (load i) n) (break)
         (do (let [pty (al-elem [Type] params (load i)) pcs (cg-abi-struct-cs cg pty)]
               (if (icmp-ge pcs 0)
-                  (let [csp (al-elem [CgStruct] (field cg structs) pcs)
-                        sa (abi-classify cg (load (field csp fields)) (load (field csp ty)))]
+                  (let [sa (abi-classify cg pcs)]
                     (match (load (field sa arg))
                       (ACDirect [slots]
                         (let [ns (al-len [(ptr i8)] (load slots)) (mut k) 0]
