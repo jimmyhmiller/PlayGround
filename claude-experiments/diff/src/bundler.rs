@@ -134,6 +134,10 @@ struct ResolutionCache {
     /// module's source before it is transformed. `None` leaves `import.meta.env`
     /// untouched (generic bundling).
     import_meta_env: Arc<Option<crate::import_meta_env::ImportMetaEnv>>,
+    /// Vite `import.meta.glob` expansion, when opted in. Applied alongside
+    /// `import_meta_env` on both load paths; `None` leaves `import.meta.glob`
+    /// untouched (generic bundling). See [`crate::import_meta_glob`].
+    import_meta_glob: Arc<Option<crate::import_meta_glob::ImportMetaGlob>>,
     /// Vite `define` replacements, when opted in. Applied alongside
     /// `import_meta_env` on both load paths.
     defines: Arc<Vec<(String, String)>>,
@@ -157,6 +161,7 @@ impl ResolutionCache {
         aliases: Vec<(String, PathBuf)>,
         virtual_modules: Vec<(String, String)>,
         import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
+        import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
         defines: Vec<(String, String)>,
     ) -> Self {
         Self {
@@ -164,6 +169,7 @@ impl ResolutionCache {
             aliases: Arc::new(aliases),
             virtual_modules: Arc::new(virtual_modules.into_iter().collect()),
             import_meta_env: Arc::new(import_meta_env),
+            import_meta_glob: Arc::new(import_meta_glob),
             defines: Arc::new(defines),
         }
     }
@@ -174,10 +180,10 @@ impl ResolutionCache {
         self.virtual_modules.get(id).map(String::as_str)
     }
 
-    /// Applies the opted-in Vite compile-time rewrites (`import.meta.env`, then
-    /// `define`, then dead-branch elimination) to a module's source before it is
-    /// transformed, returning the source unchanged when the features are off or the
-    /// module uses none of them. One choke point for both the serial
+    /// Applies the opted-in Vite compile-time rewrites (`import.meta.glob`, then
+    /// `import.meta.env`, then `define`, then dead-branch elimination) to a
+    /// module's source before it is transformed, returning the source unchanged
+    /// when the features are off or the module uses none of them. One choke point for both the serial
     /// ([`Bundler::load_module`]) and parallel ([`load_uncached`]) paths.
     ///
     /// Order matters: the two substitutions turn `process.env.NODE_ENV === 'production'`
@@ -186,8 +192,21 @@ impl ResolutionCache {
     /// Running here — before the module is parsed for dependencies — is what makes
     /// the dead branch's `require(...)` disappear from the graph entirely instead
     /// of being bundled but never executed.
-    fn apply_vite_replacements<'s>(&self, path: &Path, source: &'s str, target: Target) -> Cow<'s, str> {
+    fn apply_vite_replacements<'s>(
+        &self,
+        path: &Path,
+        source: &'s str,
+        target: Target,
+    ) -> Result<Cow<'s, str>, String> {
         let mut current = Cow::Borrowed(source);
+        // Glob expansion first: it emits imports the rest of the pipeline (and the
+        // format-sensitive `import.meta` scan) must see as ordinary graph edges.
+        // A malformed call is a hard build error, never a silently empty object.
+        if let Some(options) = self.import_meta_glob.as_ref()
+            && let Some(rewritten) = crate::import_meta_glob::transform(path, &current, options)?
+        {
+            current = Cow::Owned(rewritten);
+        }
         if let Some(options) = self.import_meta_env.as_ref()
             && let Some(rewritten) = crate::import_meta_env::transform(path, &current, options, target)
         {
@@ -205,7 +224,7 @@ impl ResolutionCache {
         {
             current = Cow::Owned(rewritten);
         }
-        current
+        Ok(current)
     }
 
     fn directory(&self, importer: &Path) -> Arc<DirectoryResolutionCache> {
@@ -641,6 +660,7 @@ impl Bundler {
                     .collect(),
                 config.virtual_modules.clone(),
                 config.import_meta_env.clone(),
+                config.import_meta_glob.clone(),
                 config.defines.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
@@ -2135,7 +2155,7 @@ impl Bundler {
         }
         let source = self
             .resolution_cache
-            .apply_vite_replacements(path, &source, self.target);
+            .apply_vite_replacements(path, &source, self.target)?;
         let mut transformed = transform_module(path, &source, self.target);
         diagnostics.extend(
             transformed
@@ -3848,7 +3868,7 @@ fn load_uncached(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
-    let source = resolution_cache.apply_vite_replacements(path, &source, target);
+    let source = resolution_cache.apply_vite_replacements(path, &source, target)?;
     let mut transformed = transform_module(path, &source, target);
     // DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation (client only).
     if hmr {
@@ -4921,6 +4941,11 @@ pub struct BuildConfig {
     /// (the `build-app` path sets it). `None` for generic bundling, which leaves
     /// `import.meta.env` untouched. See [`crate::import_meta_env`].
     pub import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
+    /// Vite's `import.meta.glob` expansion, when the build opts into that
+    /// convention (set alongside `import_meta_env` by the Vite-convention build
+    /// paths). `None` for generic bundling, which leaves `import.meta.glob`
+    /// untouched. See [`crate::import_meta_glob`].
+    pub import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
     /// Vite `define` entries as `(identifier, replacement_source)`, evaluated once
     /// from the config. Empty for generic bundling. See [`crate::vite_define`].
     pub defines: Vec<(String, String)>,
@@ -6806,6 +6831,7 @@ mod tests {
             virtual_modules: Vec::new(),
             target: Target::Server,
             import_meta_env: None,
+            import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
         };
@@ -6872,6 +6898,7 @@ mod tests {
             virtual_modules: Vec::new(),
             target,
             import_meta_env: None,
+            import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
         };
@@ -6950,6 +6977,7 @@ mod tests {
             )],
             target: Target::Server,
             import_meta_env: None,
+            import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
         };
@@ -7154,5 +7182,211 @@ mod tests {
             "the dropped side-effect module's Node built-in must not ship: {bundle}"
         );
         node_check(&output);
+    }
+
+    /// A build that opts into Vite conventions for `import.meta.glob`, rooted at
+    /// `root` (the gate `config::derive_web_config --vite` and `build-app` set).
+    fn glob_config(root: &Path) -> BuildConfig {
+        BuildConfig {
+            import_meta_glob: Some(crate::import_meta_glob::ImportMetaGlob {
+                root: root.canonicalize().unwrap(),
+            }),
+            ..BuildConfig::default()
+        }
+    }
+
+    fn emitted_chunk_names(dist: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dist)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("bundle.chunk-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn import_meta_glob_lazy_matches_load_from_their_own_chunks_in_sorted_key_order() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let widgets = directory.path().join("widgets");
+        fs::create_dir_all(&widgets).unwrap();
+        // Written in reverse name order so sorted keys are the transform's doing.
+        fs::write(widgets.join("beta.js"), "export const name = 'beta';\n").unwrap();
+        fs::write(widgets.join("alpha.js"), "export const name = 'alpha';\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const modules = import.meta.glob('./widgets/*.js');\n\
+             console.log(JSON.stringify(Object.keys(modules)));\n\
+             Promise.all(Object.entries(modules).map(async ([key, load]) => `${key}=${(await load()).name}`))\n\
+               .then((loaded) => console.log(loaded.join(',')));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &glob_config(directory.path())).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        // Each lazy match is its own dynamic-import graph edge, so its own chunk.
+        let chunks = emitted_chunk_names(&directory.path().join("dist"));
+        assert_eq!(chunks.len(), 2, "one chunk per lazy match: {chunks:?}");
+
+        let executed = Command::new("node").arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "[\"./widgets/alpha.js\",\"./widgets/beta.js\"]\n\
+             ./widgets/alpha.js=alpha,./widgets/beta.js=beta\n"
+        );
+    }
+
+    #[test]
+    fn import_meta_glob_eager_with_default_import_binds_values_statically() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let widgets = directory.path().join("widgets");
+        fs::create_dir_all(&widgets).unwrap();
+        fs::write(widgets.join("alpha.js"), "export default 'A';\n").unwrap();
+        fs::write(widgets.join("beta.js"), "export default 'B';\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const modules = import.meta.glob('./widgets/*.js', { eager: true, import: 'default' });\n\
+             console.log(modules['./widgets/alpha.js'], modules['./widgets/beta.js']);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &glob_config(directory.path())).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        // Eager matches are static imports: everything lands in the entry chunk.
+        let chunks = emitted_chunk_names(&directory.path().join("dist"));
+        assert!(chunks.is_empty(), "eager glob must not split chunks: {chunks:?}");
+
+        let executed = Command::new("node").arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&executed.stdout), "A B\n");
+    }
+
+    #[test]
+    fn import_meta_glob_raw_query_routes_matches_through_the_raw_loader() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(notes.join("hello.txt"), "hello from glob raw").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const files = import.meta.glob('./notes/*.txt', { eager: true, import: 'default', query: '?raw' });\n\
+             console.log(files['./notes/hello.txt']);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &glob_config(directory.path())).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let executed = Command::new("node").arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "hello from glob raw\n"
+        );
+    }
+
+    #[test]
+    fn import_meta_glob_pattern_array_unions_and_negative_pattern_excludes() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("a")).unwrap();
+        fs::create_dir_all(directory.path().join("b")).unwrap();
+        fs::write(directory.path().join("a/one.js"), "export const v = 1;\n").unwrap();
+        fs::write(directory.path().join("a/skip.js"), "export const v = 0;\n").unwrap();
+        fs::write(directory.path().join("b/two.js"), "export const v = 2;\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const modules = import.meta.glob(['./a/*.js', './b/*.js', '!**/skip.js']);\n\
+             console.log(JSON.stringify(Object.keys(modules)));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &glob_config(directory.path())).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let executed = Command::new("node").arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "[\"./a/one.js\",\"./b/two.js\"]\n"
+        );
+    }
+
+    #[test]
+    fn without_the_vite_opt_in_import_meta_glob_is_left_untouched() {
+        let directory = tempdir().unwrap();
+        let widgets = directory.path().join("widgets");
+        fs::create_dir_all(&widgets).unwrap();
+        fs::write(widgets.join("alpha.js"), "export const name = 'alpha';\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "export const modules = import.meta.glob('./widgets/*.js');\n",
+        )
+        .unwrap();
+
+        // No `import_meta_glob` in the config: generic bundling. The call must
+        // survive to the module (no expansion, no graph edges), so the existing
+        // import.meta-in-CommonJS honesty check refuses the CJS emit by name.
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 1, "no glob edges without the opt-in: {reachable:?}");
+        let error = bundler
+            .emit(&reachable, &directory.path().join("dist/bundle.js"))
+            .unwrap_err();
+        assert!(error.contains("import.meta"), "{error}");
+        assert!(error.contains("entry.js"), "{error}");
     }
 }

@@ -118,9 +118,13 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             conditions,
             virtual_modules: Vec::new(),
             target,
-            // A TanStack/Vite app expects Vite's `import.meta.env`; supply it (this
-            // is the opt-in — generic bundling leaves `import.meta.env` untouched).
+            // A TanStack/Vite app expects Vite's `import.meta.env` and
+            // `import.meta.glob`; supply them (this is the opt-in — generic
+            // bundling leaves both untouched).
             import_meta_env: Some(import_meta_env(base)),
+            import_meta_glob: Some(crate::import_meta_glob::ImportMetaGlob {
+                root: root.to_path_buf(),
+            }),
             defines,
             // Off by default; the dev server flips it on per environment. `build-app`
             // uses this config path with `hmr` false, so production is unaffected.
@@ -165,6 +169,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             virtual_modules: Vec::new(),
             target: Target::Client,
             import_meta_env: None,
+            import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
         },
@@ -201,6 +206,11 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         base: base.clone(),
         mode: "production".to_string(),
         vite_vars,
+    });
+    // `import.meta.glob` is part of the same Vite-convention opt-in; `/`-prefixed
+    // patterns resolve against the project root, as in Vite.
+    config.build.import_meta_glob = Some(crate::import_meta_glob::ImportMetaGlob {
+        root: root.to_path_buf(),
     });
     config.base = base;
     Ok(config)

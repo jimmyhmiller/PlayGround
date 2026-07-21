@@ -54,6 +54,18 @@ docs.
   vs esbuild, Rolldown, rspack, Vite; tiny + realistic corpora at 1k/10k
   modules plus the real app; runtime-verified pairs only.
 
+- **`import.meta.glob` natively** (`src/import_meta_glob.rs`): build-time
+  expansion with Vite semantics — lazy `() => import(...)` per match (each its
+  own chunk), `eager`, `import: 'default'/'name'`, `query: '?raw'/'?url'`
+  through the existing loaders, pattern arrays and negative patterns, sorted
+  keys for byte-reproducible output. Strictly behind the same Vite-convention
+  opt-in as `import.meta.env` (`BuildConfig::import_meta_glob`; set by
+  `--vite`/`build-app`); generic builds leave the call untouched. Malformed
+  calls (non-literal patterns, bare specifiers, unknown options, unsupported
+  queries) are file-naming hard errors, never a silent `{}`. Known limitation:
+  adding/removing a matched file during watch does not re-expand the importer
+  (dev-server glob invalidation is future work).
+
 ## Scoreboard vs the stated goals
 
 1. **Faster than every bundler cold** — *not yet true, now measurable*:

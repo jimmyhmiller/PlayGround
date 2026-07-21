@@ -9,6 +9,7 @@ pub mod html_entry;
 mod frontend_profile;
 pub mod hmr;
 pub mod import_meta_env;
+pub mod import_meta_glob;
 pub mod js_reachability;
 pub mod manifest;
 pub mod memory;
