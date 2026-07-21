@@ -61,6 +61,15 @@ struct ModuleState {
     /// code). Empty for synthesized modules, which fall back to treating every
     /// dependency as a body use.
     liveness: ModuleLiveness,
+    /// The module `await`s at top level (only representable in flat ESM output;
+    /// the emit hard-errors otherwise). `false` for every synthesized module.
+    uses_top_level_await: bool,
+    /// The module references `import.meta` (valid in ESM output, a syntax error
+    /// in CommonJS output). `false` for every synthesized module.
+    uses_import_meta: bool,
+    /// The module freely references a CommonJS ambient (`exports`, `module`,
+    /// ...), so it must render through the factory runtime in ESM output.
+    uses_cjs_globals: bool,
 }
 
 struct LoadedModule {
@@ -77,6 +86,9 @@ struct LoadedModule {
     externals: Vec<String>,
     droppable: bool,
     liveness: ModuleLiveness,
+    uses_top_level_await: bool,
+    uses_import_meta: bool,
+    uses_cjs_globals: bool,
 }
 
 /// A static asset (e.g. a `?url` import target) that must be content-hashed and
@@ -994,6 +1006,46 @@ impl Bundler {
         // cross-chunk binding imports (what Rollup emits), which is a real feature,
         // not a tweak of this flag.
         let flat_allowed = plans.is_empty();
+        // Honest-format guards: refuse (naming the module and the way out)
+        // rather than emit output Node rejects at parse. `import.meta` is a
+        // syntax error anywhere in a CommonJS file; a top-level `await` is only
+        // representable when the module's statements stay at the top level of an
+        // ESM chunk (i.e. the single-chunk scope-hoisted output, and never under
+        // the dev registry runtime).
+        for &dense in &reachable_dense {
+            let Some(module) = self.modules[dense].as_ref() else {
+                continue;
+            };
+            if module.uses_import_meta && !options.format.is_esm() {
+                return Err(format!(
+                    "`import.meta` in {} is a syntax error in CommonJS output; bundle with \
+                     `--format esm` (where it resolves against the emitted chunk)",
+                    self.ids[dense]
+                ));
+            }
+            if module.uses_top_level_await {
+                if !options.format.is_esm() {
+                    return Err(format!(
+                        "top-level await in {} cannot be represented in CommonJS output; \
+                         bundle with `--format esm`",
+                        self.ids[dense]
+                    ));
+                }
+                if !flat_allowed || options.hmr {
+                    return Err(format!(
+                        "top-level await in {} requires the single-chunk scope-hoisted ESM \
+                         output, but this build {} — code-split or dev output wraps every \
+                         module in a synchronous factory that cannot await",
+                        self.ids[dense],
+                        if options.hmr {
+                            "is a dev (HMR) build".to_string()
+                        } else {
+                            format!("splits into {} extra chunk(s)", plans.len())
+                        }
+                    ));
+                }
+            }
+        }
         for plan in &plans {
             let chunk_path = parent.join(&plan.file_name);
             let prerequisites = plan
@@ -1095,7 +1147,7 @@ impl Bundler {
             flat_allowed,
             format,
             hmr,
-        );
+        )?;
         // Whitespace/syntax minification of the FINISHED chunk. The chunk's `code`
         // is already clean, valid JS (markers were consumed during render; it
         // passes `node --check` and runs in-browser), so a final per-chunk Oxc
@@ -1891,6 +1943,9 @@ impl Bundler {
                     externals: loaded.externals,
                     droppable: loaded.droppable,
                     liveness: loaded.liveness,
+                    uses_top_level_await: loaded.uses_top_level_await,
+                    uses_import_meta: loaded.uses_import_meta,
+                    uses_cjs_globals: loaded.uses_cjs_globals,
                 });
             }
         }
@@ -1943,6 +1998,9 @@ impl Bundler {
                 externals: resolved.externals,
                 droppable: false,
                 liveness: ModuleLiveness::default(),
+                uses_top_level_await: false,
+                uses_import_meta: false,
+                uses_cjs_globals: false,
             });
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
@@ -1987,6 +2045,9 @@ impl Bundler {
                 externals: resolved.externals,
                 droppable: false,
                 liveness: ModuleLiveness::default(),
+                uses_top_level_await: false,
+                uses_import_meta: false,
+                uses_cjs_globals: false,
             });
         }
         let read_started = frontend_profile::start();
@@ -2059,6 +2120,9 @@ impl Bundler {
             externals: resolved_dependencies.externals,
             droppable,
             liveness: transformed.liveness,
+            uses_top_level_await: transformed.uses_top_level_await,
+            uses_import_meta: transformed.uses_import_meta,
+            uses_cjs_globals: transformed.uses_cjs_globals,
         })
     }
 
@@ -2075,7 +2139,7 @@ impl Bundler {
         flat_allowed: bool,
         format: ModuleFormat,
         hmr: bool,
-    ) -> RenderedBundle {
+    ) -> Result<RenderedBundle, String> {
         // The flat path emits a plain concatenation with no per-module factory
         // registry, so it has no place to install `module.hot`; a dev (hmr) build
         // always renders through the registry runtime so every module is HMR-capable.
@@ -2086,9 +2150,26 @@ impl Bundler {
             && let Some(flat) =
                 self.render_flat(reachable, roots, chunk_names, global_demands, is_main, format)
         {
-            return flat;
+            return Ok(flat);
         }
-        self.render_runtime(
+        // The registry runtime wraps every module in a synchronous factory
+        // function, where a top-level `await` cannot exist. A silent fallback
+        // here would emit a bundle Node rejects at parse; refuse with the module
+        // named instead. (The flat ESM path is the representable home for TLA;
+        // `emit_with_options` already rejected non-ESM formats and split builds.)
+        if let Some(dense) = reachable.iter().copied().find(|dense| {
+            self.modules[*dense]
+                .as_ref()
+                .is_some_and(|module| module.uses_top_level_await)
+        }) {
+            return Err(format!(
+                "top-level await in {} cannot be bundled: the module does not qualify for \
+                 the scope-hoisted ESM output (it fell back to the factory runtime, whose \
+                 synchronous factories cannot await)",
+                self.ids[dense]
+            ));
+        }
+        Ok(self.render_runtime(
             reachable,
             roots,
             chunk_names,
@@ -2098,7 +2179,7 @@ impl Bundler {
             is_main,
             format,
             hmr,
-        )
+        ))
     }
 
     fn render_flat(
@@ -2127,6 +2208,14 @@ impl Bundler {
             // The flat path strips import bindings and cannot bind an external's
             // `require`. A module with externals renders through the runtime path.
             if !module.externals.is_empty() {
+                return None;
+            }
+            // A free `exports`/`module`/`require` reference needs the CJS-style
+            // factory wrapper that defines those names. Concatenated at the top
+            // level of an ESM chunk it would throw `exports is not defined`, so
+            // such a module renders through the runtime path there. (In CJS
+            // output the host wrapper provides them, so flat stays fine.)
+            if format.is_esm() && module.uses_cjs_globals {
                 return None;
             }
         }
@@ -2540,7 +2629,7 @@ impl Bundler {
 const __modules=Object.create(null),__maps=Object.create(null),__chunks=Object.create(null),__cache=Object.create(null);
 const __exportStates=new WeakMap();
 function __esmNamespace(){{const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{{value:"Module"}});return namespace;}}
-function __seal(namespace){{for(const key of Reflect.ownKeys(namespace)){{const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{{configurable:false}});}}Object.preventExtensions(namespace);}}
+function __seal(namespace){{const movable=Reflect.ownKeys(namespace).filter(key=>typeof key==="string"&&Object.getOwnPropertyDescriptor(namespace,key).configurable);const sorted=[...movable].sort();if(movable.some((key,index)=>key!==sorted[index])){{const descriptors={{}};for(const key of movable){{descriptors[key]=Object.getOwnPropertyDescriptor(namespace,key);delete namespace[key];}}for(const key of sorted)Object.defineProperty(namespace,key,descriptors[key]);}}for(const key of Reflect.ownKeys(namespace)){{const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{{configurable:false}});}}Object.preventExtensions(namespace);}}
 function __exportState(target){{let state=__exportStates.get(target);if(!state){{state={{explicit:new Set(),stars:new Map(),ambiguous:new Set()}};__exportStates.set(target,state);}}return state;}}
 function __export(target,name,getter){{const state=__exportState(target);const descriptor=Object.getOwnPropertyDescriptor(target,name);if(descriptor?.configurable)delete target[name];if(!Object.prototype.hasOwnProperty.call(target,name))Object.defineProperty(target,name,{{enumerable:true,configurable:true,get:getter}});state.explicit.add(name);state.stars.delete(name);state.ambiguous.delete(name);}}
 function __reExport(target,source){{const state=__exportState(target);for(const key of Object.keys(source)){{if(key==="default"||key==="__esModule"||state.explicit.has(key)||state.ambiguous.has(key))continue;const previous=state.stars.get(key);if(previous&&previous!==source){{delete target[key];state.stars.delete(key);state.ambiguous.add(key);continue;}}if(!previous){{Object.defineProperty(target,key,{{enumerable:true,configurable:true,get:()=>source[key]}});state.stars.set(key,source);}}}}}}
@@ -3632,6 +3721,9 @@ fn load_uncached(
             externals: resolved.externals,
             droppable: false,
             liveness: ModuleLiveness::default(),
+            uses_top_level_await: false,
+            uses_import_meta: false,
+            uses_cjs_globals: false,
         });
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
@@ -3670,6 +3762,9 @@ fn load_uncached(
             externals: resolved.externals,
             droppable: false,
             liveness: ModuleLiveness::default(),
+            uses_top_level_await: false,
+            uses_import_meta: false,
+            uses_cjs_globals: false,
         });
     }
     let read_started = frontend_profile::start();
@@ -3719,6 +3814,9 @@ fn load_uncached(
         externals: dependencies.externals,
         droppable,
         liveness: transformed.liveness,
+        uses_top_level_await: transformed.uses_top_level_await,
+        uses_import_meta: transformed.uses_import_meta,
+        uses_cjs_globals: transformed.uses_cjs_globals,
     })
 }
 
@@ -5462,6 +5560,100 @@ mod tests {
     /// The server `.mjs` output must not merely pass `node --check`; it must
     /// EXECUTE under Node's ESM goal. This builds a small multi-module app with a
     /// static cross-module import, an external Node built-in (forcing the shared
+    /// Top-level `await` cannot exist in CommonJS output or inside the factory
+    /// runtime; both must be hard, module-naming errors (previously the build
+    /// "succeeded" and emitted a bundle Node rejects at parse — the conformance
+    /// suite's worst honesty finding). In single-chunk ESM output it is
+    /// representable and must actually run.
+    #[test]
+    fn top_level_await_is_a_hard_error_in_cjs_and_runs_in_flat_esm() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("value.js"),
+            "export const value = await Promise.resolve('tla-value');\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { value } from './value.js';\nconsole.log('got:' + value);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+
+        let error = bundler
+            .emit_with_options(
+                &reachable,
+                &directory.path().join("dist/out.js"),
+                EmitOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.contains("top-level await"), "{error}");
+        assert!(error.contains("value.js"), "names the module: {error}");
+        assert!(error.contains("--format esm"), "names the way out: {error}");
+
+        let esm_out = directory.path().join("dist/out.mjs");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &esm_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(run_node(&esm_out), "got:tla-value\n");
+    }
+
+    /// `import.meta` is a syntax error anywhere in a CommonJS file, so CJS
+    /// output must refuse; in ESM output it stays, resolving against the
+    /// emitted chunk (the standard bundler semantic).
+    #[test]
+    fn import_meta_is_a_hard_error_in_cjs_and_survives_in_esm() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "console.log('url-kind:' + (import.meta.url.startsWith('file://')));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+
+        let error = bundler
+            .emit_with_options(
+                &reachable,
+                &directory.path().join("dist/out.js"),
+                EmitOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.contains("import.meta"), "{error}");
+        assert!(error.contains("entry.js"), "names the module: {error}");
+
+        let esm_out = directory.path().join("dist/out.mjs");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &esm_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(run_node(&esm_out), "url-kind:true\n");
+    }
+
     /// Side-effect imports must execute in IMPORT order, not module-id order.
     /// The entry imports `./bbb.js` before `./aaa.js`; alphabetical ordering
     /// would run `aaa` first, which is exactly the bug this pins down (the

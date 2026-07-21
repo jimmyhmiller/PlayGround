@@ -1,5 +1,5 @@
 {
-  "generated": "2026-07-21T04:43:22.892Z",
+  "generated": "2026-07-21T04:57:29.852Z",
   "node": "v22.21.0",
   "bundlers": {
     "diffpack": "target/release/diffpack (local build)",
@@ -8,10 +8,10 @@
   },
   "counts": {
     "diffpack": {
-      "PASS": 35,
-      "WRONG-OUTPUT": 7,
-      "BUILD-ERROR": 0,
-      "RUNTIME-ERROR": 6
+      "PASS": 40,
+      "WRONG-OUTPUT": 5,
+      "BUILD-ERROR": 2,
+      "RUNTIME-ERROR": 1
     },
     "rolldown": {
       "PASS": 41,
@@ -265,9 +265,10 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "PASS",
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:string\\n\" got \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:false\\nfilename:undefined\\n\"",
           "exit": 0,
-          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:true\nfilename:string\n"
+          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:false\nfilename:undefined\n"
         },
         "rolldown": {
           "class": "WRONG-OUTPUT",
@@ -317,19 +318,19 @@
       "bundlers": {
         "diffpack": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/diffpack/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/diffpack/diffpack.cjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/diffpack/mod.js' imported from /tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/diffpack/diffpack.mjs",
           "exit": 1,
           "stdout": ""
         },
         "rolldown": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/rolldown/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/rolldown/rolldown.mjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/rolldown/mod.js' imported from /tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/rolldown/rolldown.mjs",
           "exit": 1,
           "stdout": ""
         },
         "esbuild": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/esbuild/mod.js' imported from /tmp/diffpack-conformance-D7ADBB/dynamic-import-concat-literal/esbuild/esbuild.mjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/esbuild/mod.js' imported from /tmp/diffpack-conformance-KYq2xK/dynamic-import-concat-literal/esbuild/esbuild.mjs",
           "exit": 1,
           "stdout": ""
         }
@@ -365,10 +366,8 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "RUNTIME-ERROR",
-          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
-          "exit": 1,
-          "stdout": ""
+          "class": "BUILD-ERROR",
+          "message": "error: top-level await in /home/jimmyhmiller/Documents/Code/Playground/claude-experiments/diff/conformance/fixtures/dynamic-static-same-namespace/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
         },
         "rolldown": {
           "class": "PASS",
@@ -531,10 +530,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "RUNTIME-ERROR",
-          "detail": "SyntaxError: Cannot use 'import.meta' outside a module",
-          "exit": 1,
-          "stdout": ""
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:string\nfile:true\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -578,10 +576,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "WRONG-OUTPUT",
-          "detail": "expected \"keys:alpha,beta\\nvals:1:2\\n\" got \"keys:beta,alpha\\nvals:1:2\\n\"",
+          "class": "PASS",
           "exit": 0,
-          "stdout": "keys:beta,alpha\nvals:1:2\n"
+          "stdout": "keys:alpha,beta\nvals:1:2\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -671,10 +668,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "WRONG-OUTPUT",
-          "detail": "expected \"keys:bar,foo\\ncjs-foo:cjs-bar\\nhas-default:false\\n\" got \"keys:foo,bar\\ncjs-foo:cjs-bar\\nhas-default:false\\n\"",
+          "class": "PASS",
           "exit": 0,
-          "stdout": "keys:foo,bar\ncjs-foo:cjs-bar\nhas-default:false\n"
+          "stdout": "keys:bar,foo\ncjs-foo:cjs-bar\nhas-default:false\n"
         },
         "rolldown": {
           "class": "WRONG-OUTPUT",
@@ -815,10 +811,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "WRONG-OUTPUT",
-          "detail": "expected \"this:undefined\\n\" got \"this:[object Object]\\n\"",
+          "class": "PASS",
           "exit": 0,
-          "stdout": "this:[object Object]\n"
+          "stdout": "this:undefined\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -1091,10 +1086,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "RUNTIME-ERROR",
-          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
-          "exit": 1,
-          "stdout": ""
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "tla:before\ntla:after:tla-value\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -1115,10 +1109,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "RUNTIME-ERROR",
-          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
-          "exit": 1,
-          "stdout": ""
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "slow:start\nslow:done\nentry:yes\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -1139,10 +1132,8 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "RUNTIME-ERROR",
-          "detail": "SyntaxError: await is only valid in async functions and the top level bodies of modules",
-          "exit": 1,
-          "stdout": ""
+          "class": "BUILD-ERROR",
+          "message": "error: top-level await in /home/jimmyhmiller/Documents/Code/Playground/claude-experiments/diff/conformance/fixtures/tla-dynamic-import-order/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
         },
         "rolldown": {
           "class": "PASS",

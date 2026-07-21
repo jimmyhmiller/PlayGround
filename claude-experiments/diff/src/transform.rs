@@ -9,7 +9,7 @@ use oxc_ast::{
     },
     builder::{AstBuilder, NONE},
 };
-use oxc_ast_visit::{Visit, VisitMut, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::{Codegen, Context, Gen};
 use oxc_ecmascript::BoundNames;
 use oxc_parser::Parser;
@@ -30,6 +30,21 @@ pub struct TransformResult {
     pub dependency_demands: Vec<DependencyDemand>,
     pub flat_module: Option<FlatModule>,
     pub liveness: ModuleLiveness,
+    /// The module `await`s at its top level. Only representable in ESM output
+    /// where the module's statements stay at the top level of the chunk; the
+    /// emit refuses (a hard, module-naming error) rather than rendering an
+    /// `await` into a synchronous factory or CommonJS wrapper.
+    pub uses_top_level_await: bool,
+    /// The module references `import.meta` (beyond an opted-in
+    /// `import.meta.env`, which is rewritten before the transform). Valid in
+    /// ESM output (where it resolves against the emitted chunk, the standard
+    /// bundler semantic); a syntax error in CommonJS output, so the emit
+    /// refuses there.
+    pub uses_import_meta: bool,
+    /// The module freely references a CommonJS ambient (`exports`, `module`,
+    /// `require`, `__filename`, `__dirname`). Such a module needs the factory
+    /// wrapper that defines them and must not be scope-hoisted into ESM output.
+    pub uses_cjs_globals: bool,
 }
 
 /// The export/import structure of a module, at the granularity the generic
@@ -141,6 +156,9 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
             dependency_demands: Vec::new(),
             flat_module: None,
             liveness: ModuleLiveness::default(),
+            uses_top_level_await: false,
+            uses_import_meta: false,
+            uses_cjs_globals: false,
         };
     }
 
@@ -168,6 +186,9 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
                 dependency_demands: Vec::new(),
                 flat_module: None,
                 liveness: ModuleLiveness::default(),
+                uses_top_level_await: false,
+                uses_import_meta: false,
+                uses_cjs_globals: false,
             };
         }
     };
@@ -230,6 +251,21 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
     // the original ESM shape.
     let liveness = collect_liveness(&program, &scoping);
 
+    // Detect constructs whose validity depends on the OUTPUT format, before
+    // lowering rewrites the tree: a top-level `await` (only representable when
+    // the module's statements stay at the top level of an ESM chunk) and any
+    // remaining `import.meta` (an opted-in `import.meta.env` was already
+    // rewritten from the source; whatever is left survives into the output).
+    let mut format_scan = FormatSensitiveScan::default();
+    format_scan.visit_program(&program);
+    // A free reference to a CommonJS ambient (`exports`, `module`, ...) means the
+    // module's code only makes sense inside a CJS-style wrapper. The registry
+    // runtime's factories provide those; the flat ESM concatenation does not, so
+    // such a module must never be scope-hoisted into ESM output.
+    let uses_cjs_globals = ["exports", "module", "require", "__filename", "__dirname"]
+        .iter()
+        .any(|name| scoping.root_unresolved_references().contains_key(*name));
+
     let lower_started = frontend_profile::start();
     let (code, is_esm, dependencies, dependency_demands, flat_module) =
         lower_module_ast(&allocator, &mut program, &scoping);
@@ -242,6 +278,63 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
         dependency_demands,
         flat_module,
         liveness,
+        uses_top_level_await: format_scan.top_level_await,
+        uses_import_meta: format_scan.import_meta,
+        uses_cjs_globals,
+    }
+}
+
+/// Finds the two constructs whose validity depends on the output format: a
+/// top-level `await` (including `for await` at the top level) and any
+/// `import.meta` reference. Function bodies do not count for `await` (an
+/// `async` function's await is fine anywhere) but DO count for `import.meta`
+/// (it is a syntax error anywhere in a CommonJS file).
+#[derive(Default)]
+struct FormatSensitiveScan {
+    function_depth: usize,
+    top_level_await: bool,
+    import_meta: bool,
+}
+
+impl<'a> Visit<'a> for FormatSensitiveScan {
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.function_depth += 1;
+        walk::walk_function(self, function, flags);
+        self.function_depth -= 1;
+    }
+
+    fn visit_arrow_function_expression(
+        &mut self,
+        arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+    ) {
+        self.function_depth += 1;
+        walk::walk_arrow_function_expression(self, arrow);
+        self.function_depth -= 1;
+    }
+
+    fn visit_await_expression(&mut self, expression: &oxc_ast::ast::AwaitExpression<'a>) {
+        if self.function_depth == 0 {
+            self.top_level_await = true;
+        }
+        walk::walk_await_expression(self, expression);
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &oxc_ast::ast::ForOfStatement<'a>) {
+        if statement.r#await && self.function_depth == 0 {
+            self.top_level_await = true;
+        }
+        walk::walk_for_of_statement(self, statement);
+    }
+
+    fn visit_meta_property(&mut self, meta: &oxc_ast::ast::MetaProperty<'a>) {
+        if meta.meta.name == "import" && meta.property.name == "meta" {
+            self.import_meta = true;
+        }
+        walk::walk_meta_property(self, meta);
     }
 }
 

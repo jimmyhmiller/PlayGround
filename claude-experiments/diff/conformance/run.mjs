@@ -134,10 +134,9 @@ if (updateExpected) {
 }
 
 // ---------------------------------------------------------------------------
-// Bundler drivers. All three produce a single self-contained file.
-// diffpack has no output-format flag; its own oracle executes its output as
-// CommonJS (.cjs), so this runner does the same. rolldown and esbuild are run
-// as format=esm, platform=node, single chunk.
+// Bundler drivers. All three produce a single self-contained file, all in the
+// SAME output format: diffpack `--format esm` executed as `.mjs`, matching
+// rolldown and esbuild's format=esm, platform=node, single chunk.
 // ---------------------------------------------------------------------------
 if (!existsSync(diffpackBinary)) {
   console.error(`diffpack binary missing at ${diffpackBinary}; run: cargo build --release`);
@@ -145,8 +144,8 @@ if (!existsSync(diffpackBinary)) {
 }
 
 async function buildDiffpack(entry, outDir) {
-  const output = join(outDir, "diffpack.cjs");
-  const result = spawnSync(diffpackBinary, ["bundle", entry, output], {
+  const output = join(outDir, "diffpack.mjs");
+  const result = spawnSync(diffpackBinary, ["bundle", entry, output, "--format", "esm"], {
     encoding: "utf8",
     timeout: 60_000,
   });

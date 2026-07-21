@@ -429,6 +429,25 @@ fn run() -> Result<(), String> {
                 .iter()
                 .any(|value| value.to_str() == Some("--sourcemap"));
             let minify = flags.iter().any(|value| value.to_str() == Some("--minify"));
+            // `--format esm` emits real ES modules (top-level `import`/`export`,
+            // native dynamic `import()`), where `import.meta` and top-level
+            // `await` are representable. The default stays CommonJS.
+            let format = match flags
+                .iter()
+                .position(|value| value.to_str() == Some("--format"))
+            {
+                Some(index) => match flags.get(index + 1).and_then(|value| value.to_str()) {
+                    Some("esm") => diffpack::bundler::ModuleFormat::Esm,
+                    Some("cjs") => diffpack::bundler::ModuleFormat::Cjs,
+                    other => {
+                        return Err(format!(
+                            "--format must be `esm` or `cjs`, got {:?}",
+                            other.unwrap_or("nothing")
+                        ));
+                    }
+                },
+                None => diffpack::bundler::ModuleFormat::Cjs,
+            };
             let (bundler, update) = Bundler::discover_direct(Path::new(&entry))?;
             if !update.diagnostics.is_empty() {
                 return Err(format!(
@@ -438,7 +457,7 @@ fn run() -> Result<(), String> {
                 ));
             }
             let reachable = bundler.reachable_modules_direct();
-            bundler.emit_with_options(&reachable, &output, EmitOptions { source_map, minify, ..Default::default() })?;
+            bundler.emit_with_options(&reachable, &output, EmitOptions { source_map, minify, format, ..Default::default() })?;
             println!(
                 "bundled {} modules to {} (transformed {})",
                 reachable.len(),
@@ -528,7 +547,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {
