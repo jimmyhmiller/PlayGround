@@ -737,10 +737,21 @@
             (let [kind (cte-kind tp)]
               ; scalar (kind 1/2/3) → return-register path; else a readable aggregate
               ; → write-through path; anything else declines (interp error stands).
-              (if (and (icmp-eq kind 0) (not (cte-readable? cx tp))) (cast (ptr i8) 0)
-                ; clear any nested comptime in E itself first (via interp/hook)
+              (if (and (icmp-eq kind 0) (not (cte-readable? cx tp)))
+                  ; a Code result keeps its precise wording (the interpreter's exact
+                  ; error, now produced here since the engine is primary); every other
+                  ; unreadable shape declines — under the compiled-primary fold that
+                  ; surfaces as the located "cannot be materialized" error.
+                  (match-else (load tp)
+                    (TCode [] (cte-box a (Err [Expr Diag] (derr "comptime: a Code value can't be used as a runtime value (it's only meaningful at compile time)"))))
+                    (_ (cast (ptr i8) 0)))
+                ; clear any nested comptime in E itself first (via the same fold).
+                ; Compiled-primary: a nested fold error must SURFACE (declining here
+                ; would mask a real diagnostic — e.g. a nested division by zero —
+                ; behind the generic materialization error). Legacy interp-first:
+                ; decline as before, the interpreter's original error stands.
                 (match (fold-expr inner cx)
-                  (Err [_] (cast (ptr i8) 0))
+                  (Err [de] (if (ct-compiled-primary?) (cte-box a (Err [Expr Diag] de)) (cast (ptr i8) 0)))
                   (Ok [_]
                     (let [names (prog-fn-names prog a)
                           stackb (unwrap-ptr [SBox] (create [SBox] a))]
@@ -768,5 +779,9 @@
                                 (do (cte-restore! saved) res)))))))))))))))))
 
 ; wire the hook into the interpreter's fold pass (called by main / main_a64 at startup).
+; Also decides PRIMACY (step 6): the compiled engine is the first and only comptime
+; evaluator unless a compat flag opts out (COIL_META=interp keeps the interpreter as
+; the oracle, COIL_STAGE_MACROS=0 is the staging soak kill switch; both die at step 7).
 (defn register-comptime-fold! [] (-> i64)
-  (set-comptime-fold-hook! (fnptr-of comptime-fold-one)))
+  (set-comptime-fold-hook! (fnptr-of comptime-fold-one))
+  (ct-set-fold-primary! (and (meta-compiled?) (meta-staged?))))

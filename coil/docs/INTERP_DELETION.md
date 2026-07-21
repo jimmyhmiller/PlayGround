@@ -395,11 +395,40 @@ today regresses.
    `frontend-check-routed`; the interp path remains behind the same two flags.
    **Verified:** `meta_stage3.coil` — identical stdout, exit code, and BYTE-IDENTICAL
    emitted IR, compiled vs interp; fixpoint + all gates + parity green.
-7. **Step 6** — flip `fold-expr` compiled-only. Requires Phase 1b (done) plus closing the
-   remaining readback declines (`comptime_eval.coil:330-344`, `:430-453`: raw ptrs, `TVec`, `TCode`,
-   non-`u8` slices, `LBits` layouts). Deleting `comptime-cap-gap?` belongs to this step.
-8. **Step 7** — delete `eval`/`eval-seq`/`eval-args`, `COIL_META`, `parity.sh`, guide mention;
-   mark DECISIONS.md decision 7 DONE.
+7. ✅ **Step 6 — LANDED 2026-07-21.** `fold-expr` is compiled-PRIMARY: when the fold
+   hook is registered and no compat flag opts out, every `(comptime …)`/`(const …)`
+   site goes straight to the compiled engine (`CtFoldHook.primary`, decided at
+   startup by `register-comptime-fold!` from the engine flags — comptime.coil is
+   imported by metaengine and cannot read them itself). A hook decline is a located
+   hard error. The decline shapes were MEASURED before flipping (both engines were
+   probed per shape): scalars/f32/strings/aggregates/sums/packed/explicit fold
+   identically (gate-full byte-exact proves it); Code-at-runtime keeps its exact
+   error wording (now produced by `comptime-fold-one`); div/rem-by-zero comes from
+   the Phase-1b guard, `(const …)` included. **One intentional tightening:** the
+   interpreter used to fold NUMERIC int→ptr casts (`(comptime (cast (ptr i8) N))`,
+   incl. inside aggregates); the compiled readback declines ALL pointer results —
+   a compile-time constant holding a process address is the silently-wrong-constant
+   class the guard exists to prevent, and the compiled engine (unlike the interp)
+   can produce REAL addresses. Workaround is strictly better: fold the integer,
+   cast at runtime. Nothing in the corpus used it (all gates byte-exact/green).
+   `comptime-cap-gap?` survives only inside the legacy flag path and dies at step 7.
+   Nested-fold errors under compiled-primary SURFACE instead of declining (they
+   were previously masked behind the interp's error).
+8. **Step 7 — the deletion itself. THE ONLY STEP LEFT. Two hard preconditions:**
+   (a) **the nollvm seed refresh** — `rebootstrap-nollvm.sh` is still broken at HEAD
+   (committed seed predates `isize`), so the LLVM-free compiler's engine-only path
+   is currently UNVERIFIABLE; deleting the interpreter before the nollvm build can
+   be rebootstrapped and gated would strand it. Refresh the seed on the Mac (or via
+   CI artifact), get the nollvm gate green, add it to CI. (b) **soak**: steps 4/5C/6
+   all landed 2026-07-21; let CI + real use run on compiled-primary before removing
+   the `COIL_META=interp` / `COIL_STAGE_MACROS=0` escape hatches. Then: delete
+   `eval`/`eval-seq`/`eval-args`, `build-value`/`build-content`'s interp-only
+   callers, `comptime-cap-gap?`, both env flags, `parity.sh` (its job is done — the
+   CI parity pin goes with it), the `guide.coil` interp mention; mark
+   `docs/DECISIONS.md` decision 7 DONE. As of tonight the unification is
+   FUNCTIONALLY COMPLETE: by default, macros (step 5), `(meta …)` generators
+   (step 4), and `(comptime …)`/`(const …)` (step 6) all execute on the compiled
+   engine; the tree-walker is dead code behind the two compat flags.
 
 ⚠ **Ordering constraint that is NOT optional:** `parity.sh` (`COIL_META=interp` vs compiled,
 byte-identical IR over 112 files) is the ONLY oracle that can prove step 5 didn't change expansion

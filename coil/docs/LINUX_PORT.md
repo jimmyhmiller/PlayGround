@@ -82,3 +82,8 @@ except where noted):
   self-tail-calls are `tail` (best-effort) instead of guaranteed TCO on x86 —
   bounded recursions; a stack overflow inside `comptime.*` on pathological input
   would be this.
+
+- `gate-diag` on Linux: 31/33 — the two failures are platform-text refs
+  (`02-link-fail` bakes macOS ld64 wording incl. the `_main` underscore;
+  `14-shim-bad-gpr` bakes the arm64-register diagnostic). Pre-existing, not in the
+  Linux authoritative set (`rebootstrap-linux.sh` runs gate-full/gate-run/gate-cli).

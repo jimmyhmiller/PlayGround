@@ -98,10 +98,17 @@
 ; error stands (the committed LLVM-free seed, which has no such engine, is unchanged).
 ; The hook returns null = DECLINED (aggregate/string/f32 result, or no program) so the
 ; interpreter's error is preserved, else a boxed (Result Expr Diag) with the literal.
-(defstruct CtFoldHook [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
+(defstruct CtFoldHook [(isset i64) (primary i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
 (defn ct-fold-hook [] (-> (ptr CtFoldHook)) (alloc-static CtFoldHook))
 (defn set-comptime-fold-hook! [(fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))] (-> i64)
   (let [b (ct-fold-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+; step 6 (interp deletion): when `primary` is set the compiled engine is the FIRST
+; and only comptime evaluator (fold-expr skips the interpreter entirely). Registered
+; by comptime_eval::register-comptime-fold! from the engine flags — this module is
+; imported BY metaengine, so it cannot read those flags itself.
+(defn ct-set-fold-primary! [(p bool)] (-> i64)
+  (let [b (ct-fold-hook)] (store! (field b primary) (if p 1 0)) 0))
+(defn ct-compiled-primary? [] (-> bool) (icmp-ne (load (field (ct-fold-hook) primary)) 0))
 ; A CAPABILITY gap — the interpreter says "isn't supported yet" for a construct real
 ; codegen CAN do (sizeof/alignof/offsetof, a generic call, a string, a bitfield op, a
 ; function pointer, an aggregate-const ref, a trait call, …). ONLY those are routed to
@@ -1977,15 +1984,28 @@
             ; string — the mac-8 weaknesses), route it through the compiled metaprogram
             ; engine via the registered hook (interp deletion step 1); the hook returns
             ; null (declined) for anything it can't read back, leaving the interp error.
-            (let [lo (load (field ep lo)) hi (load (field ep hi)) esrc (load (field ep source)) ectxt (load (field ep ctxt))]
-              (match (eval inner (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
-                (Ok [fl]
-                  (match fl
-                    (FVal [v] (let [nb (try! (build-value a (new-cell v) lo hi esrc ectxt cx))] (store! (field ep kind) (load (field (box-expr a nb) kind))) 0))
-                    (FBrk [vv ll] (return-from :try (Err (derr "comptime: stray break/continue at top level"))))
-                    (FCont [ll]   (return-from :try (Err (derr "comptime: stray break/continue at top level"))))))
-                (Err [d]
-                  (let [hk (ct-fold-hook)]
+            (let [lo (load (field ep lo)) hi (load (field ep hi)) esrc (load (field ep source)) ectxt (load (field ep ctxt))
+                  hk (ct-fold-hook)]
+              ; step 6: compiled-PRIMARY. When the engine hook is registered and no
+              ; compat flag opts out, the site goes straight to the compiled engine
+              ; — no interpreter, no cap-gap wording sniffing. A hook decline (null)
+              ; is a located hard error (nothing silently falls anywhere).
+              (if (and (icmp-ne (load (field hk isset)) 0) (ct-compiled-primary?))
+                  (let [r (call-ptr (load (field hk fp)) a inner cx)]
+                    (if (icmp-eq (cast i64 r) 0)
+                        (return-from :try (Err (derr-at lo hi "comptime: this expression's value cannot be materialized as a compile-time literal")))
+                      (match (load (cast (ptr (Result Expr Diag)) r))
+                        (Err [d2] (return-from :try (Err d2)))
+                        (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0)))))
+                ; legacy path (COIL_META=interp / COIL_STAGE_MACROS=0 / no hook):
+                ; interpreter first, compiled engine only on a capability gap.
+                (match (eval inner (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
+                  (Ok [fl]
+                    (match fl
+                      (FVal [v] (let [nb (try! (build-value a (new-cell v) lo hi esrc ectxt cx))] (store! (field ep kind) (load (field (box-expr a nb) kind))) 0))
+                      (FBrk [vv ll] (return-from :try (Err (derr "comptime: stray break/continue at top level"))))
+                      (FCont [ll]   (return-from :try (Err (derr "comptime: stray break/continue at top level"))))))
+                  (Err [d]
                     (if (or (not (comptime-cap-gap? d)) (icmp-eq (load (field hk isset)) 0)) (return-from :try (Err d))
                       (let [r (call-ptr (load (field hk fp)) a inner cx)]
                         (if (icmp-eq (cast i64 r) 0) (return-from :try (Err d))
