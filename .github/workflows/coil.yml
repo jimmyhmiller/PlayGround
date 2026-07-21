@@ -1,0 +1,86 @@
+name: coil
+# Verify the coil self-hosted compiler on BOTH platforms. The committed seeds are
+# stage0, so a runner needs only a C compiler + libLLVM: each job re-derives the
+# compiler from source and proves it (fixpoint: the compiler rebuilds itself to a
+# byte-identical object; gates: IR byte-exact vs the blessed snapshots, programs
+# run identically, CLI contract).
+#
+# parity.sh (interp vs compiled macro engine, byte-identical IR) has exactly TWO
+# known divergences (see coil/docs/INTERP_DELETION.md "Engine-parity divergences").
+# CI pins that set — a NEW divergence fails, fixing one fails until the pin is
+# updated. Both jobs also run the COIL_STAGE_MACROS=1 staging gate (interp
+# deletion step 5) to prove it changes nothing observable.
+
+on:
+  push:
+    paths:
+      - 'coil/**'
+      - '.github/workflows/coil.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: coil-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: coil
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM (Homebrew)
+        run: brew install llvm
+      - name: Rebootstrap (seed -> stage3, fixpoint, gate-full + arm64 gate-run + gate-cli)
+        run: ./selfhost/rebootstrap.sh /tmp/coil-ci
+      - name: Engine parity (default) — pinned to the 2 known divergences
+        run: |
+          ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity.txt || true
+          grep -q "RC-DIFF lib/assert.coil" /tmp/parity.txt
+          grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity.txt
+          test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity.txt)" = 2
+      - name: Engine parity (COIL_STAGE_MACROS=1) — same pin
+        run: |
+          COIL_STAGE_MACROS=1 ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity2.txt || true
+          grep -q "RC-DIFF lib/assert.coil" /tmp/parity2.txt
+          grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity2.txt
+          test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity2.txt)" = 2
+      - name: Staged self-build is byte-identical to default
+        run: |
+          LF=$(./selfhost/llvm-link-flags.sh dynamic)
+          /tmp/coil-ci build selfhost/src/main.coil -o /tmp/ci-off $LF
+          COIL_STAGE_MACROS=1 /tmp/coil-ci build selfhost/src/main.coil -o /tmp/ci-on $LF
+          cmp /tmp/ci-off.o /tmp/ci-on.o
+      - name: gate-cli under the staging gate
+        run: COIL_STAGE_MACROS=1 ./selfhost/oracle/gate-cli.sh /tmp/coil-ci
+
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 21 (apt.llvm.org)
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21
+          sudo apt-get install -y llvm-21-dev
+      - name: Rebootstrap (seed -> stage3, fixpoint, linux gate-full + gate-run + gate-cli)
+        run: ./selfhost/rebootstrap-linux.sh /tmp/coil-ci-linux
+      - name: Engine parity (default + staged) — pinned to the 2 known divergences
+        run: |
+          for env_prefix in "" "COIL_STAGE_MACROS=1"; do
+            env $env_prefix ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci-linux | tee /tmp/parity.txt || true
+            grep -q "RC-DIFF lib/assert.coil" /tmp/parity.txt
+            grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity.txt
+            test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity.txt)" = 2
+          done
+      - name: Staged self-build is byte-identical to default
+        run: |
+          libdir="$(/usr/lib/llvm-21/bin/llvm-config --libdir)"
+          LF="--link-flag -L$libdir --link-flag -Wl,-rpath,$libdir --link-flag -lLLVM --link-flag -lstdc++ --link-flag -lm --link-flag -lpthread --link-flag -ldl"
+          /tmp/coil-ci-linux build selfhost/src/main.coil -o /tmp/ci-off $LF
+          COIL_STAGE_MACROS=1 /tmp/coil-ci-linux build selfhost/src/main.coil -o /tmp/ci-on $LF
+          cmp /tmp/ci-off.o /tmp/ci-on.o
