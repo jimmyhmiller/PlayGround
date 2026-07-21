@@ -17,7 +17,7 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 
 | App | Status | Gap(s) |
 | --- | --- | --- |
-| markpad (CodeMirror markdown editor) | ONE gap, proven | Tailwind v4 entry imported as global CSS (only `?url` engages the native engine today) |
+| markpad (CodeMirror markdown editor) | **WORKING** — builds + browser-parity vs reference (13/13 computed properties, zero console errors) | was: Tailwind v4 global entry (wired) + engine coverage (~30 utility families, before/after/focus/breakpoint/group-hover variants, class-candidate dataflow scanner — all landed with 16 new pattern tests) |
 | chebyshev-calculator (antd math tool) | ONE gap, proven (517 modules build with scss bypassed) | Sass compilation |
 | swift-calc | silent-fallback BUG + out-of-scope gap | raw `@tailwind` v3 directives shipped uncompiled with exit 0 — must be a hard error; PostCSS/Tailwind-v3 pipeline itself likely not worth building |
 | app-fire-calculator | 2 gaps | Tailwind v4 global entry; `virtual:pwa-register/react` (vite-plugin-pwa) |
@@ -26,11 +26,9 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 
 ## Fix queue (ordered)
 
-1. Tailwind v4 CSS entry as a plain global import — wire the existing native
-   engine into the global-stylesheet path (unlocks markpad fully; first
-   blocker for app-fire-calculator and wall-go).
-2. Hard error on unprocessed `@tailwind` directives in emitted CSS (honesty
-   policy; found shipping a broken page with exit 0).
+1. DONE — Tailwind v4 entry as plain global import, compiled at emit.
+2. DONE — hard error on Tailwind v3 `@tailwind` directives (was a silent
+   broken page with exit 0).
 3. Non-root `base` applied to emitted asset/chunk URLs (first wall for 2 of 6
    randomly-drawn apps; GitHub Pages is ubiquitous).
 4. Root-relative alias/tsconfig targets (`/src/*`) resolved against the
