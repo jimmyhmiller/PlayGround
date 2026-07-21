@@ -228,16 +228,34 @@ So the batching is not the (only) problem; the **sub-program construction** is. 
 must additionally prune impls/consts from macro sub-programs, or make the check tolerate an
 unexpanded macro call in a function the macro doesn't actually call.
 
-**Not yet measured:** the headroom if impls/consts are also pruned. A diagnostic for exactly this
-(`stage-check-noimpl`) is written in the scratch prototype but was never run — the agent stalled
-first. **That number is the next thing to get**, since it decides whether pruning is sufficient
-or whether step 5 needs a different shape entirely.
+### stage-check-noimpl — MEASURED 2026-07-21 (Linux port; the engines are identical)
 
-Prototype location (throwaway, not in the repo):
-`<scratchpad>/coilm/selfhost/src/expander.coil` — `stage-macros-prepass` (~:792), gated by
-`COIL_STAGE_MACROS=1`, with `stage-check-noimpl` (~:746) as the unrun diagnostic. Binary at
-`/tmp/coil-stage`. Instrumentation (`ctinterp-log`, `ctmark`, `ctstage`) is measurement-only and
-must never be committed.
+The diagnostic was rebuilt (the original scratch prototype was lost with its session
+directory) and run: per macro qual, build the closure sub-program with **impls and
+consts pruned** (`closure-funcs` minus its impl/const seeding; `closure-subprogram`
+with empty impls/consts) and `check-program` it standalone.
+
+- **Compiler self-compile: 100% — every qual checks standalone.** The bootstrap
+  path is fully stageable with pruning alone.
+- **Corpus (examples/lib/metaprog-poc/mini-scheme/bench): 4264 ok / 19 fail (99.6%).**
+  The 19 failures are 11 distinct quals with exactly TWO root causes:
+  1. `assert.tr-emit-main`/`tr-run`/`tr-test-name` — a genuine transitive callee
+     (`slice.subslice`) carries the unexpanded `(dbg-subslice …)` call. Not a
+     pruning gap: staging ORDER fixes it (`slice.dbg-subslice` itself checks
+     standalone, so once tier-1 macros are engine-expandable the tower can expand
+     `subslice`'s body via the ENGINE and re-check).
+  2. `gcauto2.*` (8 quals) — callees genuinely use trait impls (`'i64' does not
+     implement 'Ord'`), so blanket impl-pruning over-prunes for them.
+
+**Design consequence — two-tier staging.** Tier 1: per-qual check with impls/consts
+pruned; every qual that passes joins the (incremental) engine — this covers the
+whole bootstrap and 99.6% of the corpus, including every `dbg-slice-*`/`dbg-subslice`
+that today poisons the batch. Tier 2: for the residue, after the tower expands their
+callees' macro calls through the tier-1 engine, run the ordinary FULL-closure check
+(impls retained) — by then the poisoning calls are gone, so it passes and no
+interpreter is involved. The instrumentation diff (throwaway, never committed) is
+`stagecheck-instrumentation.diff` in the working scratchpad; it is 100 lines and
+trivially re-creatable from this description.
 
 ## Engine-parity divergences, MEASURED (Linux, 2026-07-21 — pre-existing, not port bugs)
 
@@ -329,20 +347,17 @@ today regresses.
    which is too costly per round. Use the in-memory MObj/JIT route instead — `comptime_eval.coil:163-178`
    already does exactly this (`jit-load` → `jit-lookup`, no fork, no dlopen), and `main.coil:141-146`
    registers an arm64 mobj builder even in the LLVM build, so both builds can take it.
-4. **Step 5, Phase B — fix sub-program construction FIRST, then stage.** ⚠ Naive per-qual staging
-   was prototyped and had **zero effect** (see above): `closure-funcs` drags every impl and const
-   into every sub-program, so `slice-get` and its unexpanded macro call are always present and no
-   macro ever checks standalone. **Next action: run the `stage-check-noimpl` diagnostic** (already
-   written in the scratch prototype, never executed) to measure how many quals check standalone
-   once impls/consts are pruned. That number decides the design:
-   - *If most quals then check standalone* → prune impls/consts from macro sub-programs, then the
-     per-qual staging works as originally planned. Hook it before BOTH tower entries,
-     `stage3-parse-recover` (`expander.coil:340`) and `tower-pass` (`:449`); `macroctx` and `quals`
-     are in hand at both (`:709`).
-   - *If not* → step 5 needs a different shape; do not proceed on the DAG-staging assumption.
-   Success metric either way: corpus fallback count drops 418 → ~112 **and** emitted IR is
-   **byte-identical** with staging on vs off (this IR check was never run — the agent stalled at
-   exactly that step).
+4. **Step 5, Phase B — two-tier staging (design DECIDED by measurement, see
+   "stage-check-noimpl — MEASURED" above).** Tier 1: per-qual pruned-closure check
+   (impls/consts dropped) → every passing qual joins the incremental engine; this is
+   100% of the bootstrap and 99.6% of the corpus. Tier 2: the residue (trait-using
+   macros + macros whose genuine callees still carry unexpanded calls) goes through
+   the ordinary full-closure check on later rounds, after the tower has expanded
+   those calls through the tier-1 engine. Hook before BOTH tower entries
+   (`stage3-parse-recover`, `tower-pass`); `macroctx` and `quals` are in hand.
+   Success metric: corpus fallback count drops 418 → ~112 **and** emitted IR is
+   **byte-identical** with staging on vs off (this IR check was never run — verify
+   it explicitly; parity.sh is the oracle and needs the interpreter alive).
 5. **Step 5, Phase C** — remove `finish-macro`'s `eval-seq` fallback (`expander.coil:291`); a miss
    becomes a hard error, not a silent reroute.
 6. **Step 4** — reroute `run-metas`. Contained: `(meta …)` appears ONLY in
