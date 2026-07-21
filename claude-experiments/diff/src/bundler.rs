@@ -1786,7 +1786,16 @@ impl Bundler {
                 if !stylesheet.is_empty() && !stylesheet.ends_with('\n') {
                     stylesheet.push('\n');
                 }
-                stylesheet.push_str(css);
+                // A globally-imported Tailwind v4 entry carries its RAW source;
+                // compile it here against freshly-scanned class candidates,
+                // exactly as the `?url` asset path does in `emit_assets`.
+                if crate::tailwind::is_tailwind_entry(css) {
+                    let css_path = Path::new(self.ids[dense].as_ref());
+                    let candidates = self.tailwind_candidates(css_path, css);
+                    stylesheet.push_str(&crate::tailwind::compile(css, &candidates)?);
+                } else {
+                    stylesheet.push_str(css);
+                }
             }
         }
         if stylesheet.is_empty() {
@@ -4586,12 +4595,32 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     // A Tailwind v4 entry's `@import 'tailwindcss'` is a COMPILER invocation,
     // not a stylesheet import; resolving it through the module resolver would
-    // inline the wrong thing. The supported path (which the reference app uses)
-    // imports the entry as `?url`, where the emit step compiles it natively.
+    // inline the wrong thing. Carry the RAW text as the module's stylesheet —
+    // `emit_css` detects it and compiles through the native Tailwind engine at
+    // emit time (exactly like the `?url` asset path), so class candidates are
+    // re-scanned on every emit and the compile stays off the per-edit
+    // transform hot path.
     if crate::tailwind::is_tailwind_entry(&text) {
+        return Ok(SpecialModule {
+            hash: content_hash(text.as_bytes()),
+            code: String::new(),
+            flat_module: None,
+            assets: Vec::new(),
+            css: Some(text),
+            css_source_files: Vec::new(),
+            css_external_imports: Vec::new(),
+            dependency_specifiers: Vec::new(),
+            dependency_demands: Vec::new(),
+        });
+    }
+    // Tailwind v3's `@tailwind base/components/utilities` needs the PostCSS
+    // pipeline diffpack does not run. Shipping the raw directives would be a
+    // silently unstyled page (found live on a real app), so refuse instead.
+    if text.contains("@tailwind") {
         return Err(format!(
-            "{} is a Tailwind v4 CSS entry; importing it as a global stylesheet is not \
-             supported — import it with `?url` so the emit step compiles it",
+            "{} uses Tailwind v3 `@tailwind` directives, which need the PostCSS \
+             pipeline diffpack does not run; migrate the entry to Tailwind v4 \
+             (`@import \"tailwindcss\"`), which diffpack compiles natively",
             path.display()
         ));
     }
