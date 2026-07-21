@@ -39,8 +39,10 @@ jobs:
         # the committed seed's libLLVM.dylib dependency (and llvm-link-flags.sh's
         # default llvm-config path) resolve to 21.
         run: |
-          brew install llvm@21
+          brew install llvm@21 coreutils
           ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm || sudo ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm
+          # gate-run uses GNU `timeout`; macOS has none natively (coreutils gnubin)
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Rebootstrap (seed -> stage3, fixpoint, gate-full + arm64 gate-run + gate-cli)
         # gate-full's snapshot is byte-exact textual IR, and the triple line embeds
         # the Darwin version of the host that blessed it (LLVMGetDefaultTargetTriple).
