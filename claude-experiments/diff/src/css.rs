@@ -653,7 +653,10 @@ fn rewrite_urls(css: &str, file: &Path, assets: &mut Vec<CssAsset>) -> Result<St
                         )
                     })?;
                     let public_name = asset_public_name(&source, content_hash(&contents));
-                    let rewritten = format!("url(\"/assets/{public_name}{suffix}\")");
+                    // Relative to the emitted stylesheet (which sits beside the `assets/`
+                    // directory), so the reference is correct under ANY public base —
+                    // absolute `/assets/...` would break a site served from a subpath.
+                    let rewritten = format!("url(\"assets/{public_name}{suffix}\")");
                     out.extend_from_slice(rewritten.as_bytes());
                     let source = canonical_path(&source);
                     if !assets

@@ -191,15 +191,6 @@ fn run() -> Result<(), String> {
             })?;
 
             let config = diffpack::config::derive_web_config(&root, vite)?;
-            if config.vite && config.base != "/" {
-                // Asset-URL synthesis does not apply a custom base yet; building
-                // anyway would emit URLs the page cannot load.
-                return Err(format!(
-                    "vite `base` is {:?}, but diffpack does not yet apply a non-root base \
-                     to emitted asset URLs",
-                    config.base
-                ));
-            }
             println!(
                 "web build{}: entry={}",
                 if config.vite { " (vite mode)" } else { "" },

@@ -141,6 +141,8 @@ struct ResolutionCache {
     /// Vite `define` replacements, when opted in. Applied alongside
     /// `import_meta_env` on both load paths.
     defines: Arc<Vec<(String, String)>>,
+    /// Public base for minted asset URLs (always `/`-terminated).
+    base: Arc<str>,
 }
 
 struct DirectoryResolutionCache {
@@ -163,6 +165,7 @@ impl ResolutionCache {
         import_meta_env: Option<crate::import_meta_env::ImportMetaEnv>,
         import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
         defines: Vec<(String, String)>,
+        base: &str,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
@@ -171,6 +174,7 @@ impl ResolutionCache {
             import_meta_env: Arc::new(import_meta_env),
             import_meta_glob: Arc::new(import_meta_glob),
             defines: Arc::new(defines),
+            base: Arc::from(base),
         }
     }
 
@@ -673,6 +677,7 @@ impl Bundler {
                 config.import_meta_env.clone(),
                 config.import_meta_glob.clone(),
                 config.defines.clone(),
+                &config.base,
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -2172,7 +2177,7 @@ impl Bundler {
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
         // ever read as JavaScript.
-        if let Some(special) = load_special_module(&id, path, self.target) {
+        if let Some(special) = load_special_module(&id, path, self.target, &self.resolution_cache.base) {
             let mut special = special?;
             // DEV-ONLY: a `?tsr-split=<component>` module is the extracted route
             // component — a React Fast Refresh boundary. Append the self-accept
@@ -4034,7 +4039,7 @@ fn load_uncached(
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
     // read as JavaScript.
-    if let Some(special) = load_special_module(&id, path, target) {
+    if let Some(special) = load_special_module(&id, path, target, &resolution_cache.base) {
         let mut special = special?;
         // DEV-ONLY: instrument a `?tsr-split=<component>` route component with the
         // Fast Refresh footer (see [`crate::hmr`]). Never runs for `build-app`.
@@ -4179,10 +4184,11 @@ fn load_special_module(
     id: &str,
     path: &Path,
     target: Target,
+    base: &str,
 ) -> Option<Result<SpecialModule, String>> {
     let resource = ResourceId::parse(id);
     if resource.query.is_some() {
-        return Some(synthesize_query_module(&resource, target));
+        return Some(synthesize_query_module_impl(&resource, target, base));
     }
     if crate::css::is_css_module_path(path) {
         return Some(load_css_module(path, target));
@@ -4191,7 +4197,7 @@ fn load_special_module(
         return Some(load_stylesheet(path));
     }
     if is_asset_path(path) {
-        return Some(synthesize_asset_url(path.to_path_buf()));
+        return Some(synthesize_asset_url(path.to_path_buf(), base));
     }
     None
 }
@@ -4201,12 +4207,13 @@ fn load_special_module(
 /// Recognized-but-unimplemented loaders (`?tsr-split`) and unrecognized queries
 /// produce a specific, actionable error rather than a misleading filesystem read
 /// failure.
-fn synthesize_query_module(
+fn synthesize_query_module_impl(
     resource: &ResourceId,
     target: Target,
+    base: &str,
 ) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
-        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path)),
+        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path), base),
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
         Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
         Some(LoaderKind::CssMedia) => synthesize_css_media(resource),
@@ -4529,7 +4536,7 @@ fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
 /// A content-hashed asset module: copies the file into `assets/` and exports its
 /// public URL as the default export. Used for both `?url` and default asset
 /// imports (images, fonts, SVG, ...).
-fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
+fn synthesize_asset_url(source_path: PathBuf, base: &str) -> Result<SpecialModule, String> {
     let bytes = fs::read(&source_path)
         .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
     let public_name = asset_public_name(&source_path, content_hash(&bytes));
@@ -4547,7 +4554,7 @@ fn synthesize_asset_url(source_path: PathBuf) -> Result<SpecialModule, String> {
     // A plain ES module exporting the asset URL, run through the real transformer
     // so it yields flat-linker code and export metadata like any hand-written
     // module.
-    let synthetic = format!("export default {};\n", quote(&format!("/assets/{public_name}")));
+    let synthetic = format!("export default {};\n", quote(&format!("{base}assets/{public_name}")));
     let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic, Target::Server);
     Ok(SpecialModule {
         hash: content_hash(transformed.code.as_bytes()),
@@ -5150,8 +5157,12 @@ fn split_chunk_route_id(id: &str) -> Result<Option<String>, String> {
 /// aliases (specifier -> absolute target), such as TanStack's
 /// `#tanstack-router-entry` -> `<app>/src/router.tsx`. Kept small and owned by
 /// Rust; the host merely supplies the values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BuildConfig {
+    /// The public base URL every emitted asset URL is prefixed with. `"/"`
+    /// unless the build opts into a Vite config with a non-root `base` (a site
+    /// served from a subpath, e.g. GitHub Pages). Always ends with `/`.
+    pub base: String,
     /// Ordered `(specifier, absolute_target)` alias pairs.
     pub aliases: Vec<(String, String)>,
     /// Environment resolve conditions (e.g. client `["module","browser",
@@ -5185,6 +5196,24 @@ pub struct BuildConfig {
     /// rewrite `import.meta.hot`. Set only by the dev server; `build-app` leaves it
     /// `false` so production output is unaffected. See [`crate::hmr`].
     pub hmr: bool,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            // The root base, not an empty string: every minted asset URL is
+            // `{base}assets/...`, and `/assets/...` is the correct default.
+            base: "/".to_string(),
+            aliases: Vec::new(),
+            conditions: Vec::new(),
+            virtual_modules: Vec::new(),
+            target: Target::default(),
+            import_meta_env: None,
+            import_meta_glob: None,
+            defines: Vec::new(),
+            hmr: false,
+        }
+    }
 }
 
 fn resolve_options(config: &BuildConfig) -> ResolveOptions {
@@ -5550,6 +5579,7 @@ mod tests {
 
         let entry = directory.path().join("entry.js");
         let config = BuildConfig {
+            base: "/".to_string(),
             aliases: vec![(
                 "#tanstack-router-entry".to_string(),
                 router.to_string_lossy().into_owned(),
@@ -5609,14 +5639,16 @@ mod tests {
     }
 
     /// The first `/assets/...` URL with the given stem referenced by `css`.
+    /// The relative `assets/<stem>-<hash>.<ext>` reference inside an emitted
+    /// stylesheet (CSS asset URLs are stylesheet-relative so any public base
+    /// works).
     fn asset_url_in<'c>(css: &'c str, stem: &str) -> &'c str {
+        let marker = format!("url(\"assets/{stem}-");
         let start = css
-            .find(&format!("/assets/{stem}-"))
-            .unwrap_or_else(|| panic!("no /assets/{stem}- reference in: {css}"));
-        css[start..]
-            .split(['"', ')'])
-            .next()
-            .expect("the url is terminated")
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no assets/{stem}- reference in: {css}"));
+        let url = &css[start + "url(\"".len()..];
+        url.split('"').next().expect("the url is terminated")
     }
 
     #[test]
@@ -5952,11 +5984,11 @@ mod tests {
         // The assets landed on disk with the referenced bytes.
         let assets = directory.path().join("dist/assets");
         assert_eq!(
-            fs::read(assets.join(img_url.trim_start_matches("/assets/"))).unwrap(),
+            fs::read(assets.join(img_url.trim_start_matches("assets/"))).unwrap(),
             b"png-bytes"
         );
         assert_eq!(
-            fs::read(assets.join(photo_url.trim_start_matches("/assets/"))).unwrap(),
+            fs::read(assets.join(photo_url.trim_start_matches("assets/"))).unwrap(),
             b"jpg-bytes"
         );
     }
@@ -6008,7 +6040,7 @@ mod tests {
                 directory
                     .path()
                     .join("dist/assets")
-                    .join(icon_url.trim_start_matches("/assets/"))
+                    .join(icon_url.trim_start_matches("assets/"))
             )
             .unwrap(),
             b"icon-bytes"
@@ -7148,6 +7180,7 @@ mod tests {
         fs::write(&entry, "import './routes/foo.tsx';\n").unwrap();
 
         let config = BuildConfig {
+            base: "/".to_string(),
             aliases: vec![(
                 "@tanstack/react-router".to_string(),
                 router_stub.to_string_lossy().into_owned(),
@@ -7218,6 +7251,7 @@ mod tests {
     fn client_build_drops_server_only_package_reached_through_neutralized_wrapper() {
         let (_directory, entry) = server_leak_fixture();
         let config = |target| BuildConfig {
+            base: "/".to_string(),
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
@@ -7294,6 +7328,7 @@ mod tests {
         let source =
             "const tsrStartManifest = () => ({ routes: {} });\nexport { tsrStartManifest };\n";
         let config = BuildConfig {
+            base: "/".to_string(),
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: vec![(
@@ -7513,6 +7548,7 @@ mod tests {
     /// `root` (the gate `config::derive_web_config --vite` and `build-app` set).
     fn glob_config(root: &Path) -> BuildConfig {
         BuildConfig {
+            base: "/".to_string(),
             import_meta_glob: Some(crate::import_meta_glob::ImportMetaGlob {
                 root: root.canonicalize().unwrap(),
             }),

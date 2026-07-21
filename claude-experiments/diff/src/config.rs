@@ -119,6 +119,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
     Ok(AppConfig {
         environment: environment.to_string(),
         build: BuildConfig {
+            base: base.clone(),
             aliases,
             conditions,
             virtual_modules: Vec::new(),
@@ -169,6 +170,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         .collect();
     let mut config = WebConfig {
         build: BuildConfig {
+            base: "/".to_string(),
             aliases: Vec::new(),
             conditions,
             virtual_modules: Vec::new(),
@@ -207,9 +209,27 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     // Vite resolves with the mode condition alongside the browser ones.
     config.build.conditions.push("production".to_string());
     config.build.defines = defines;
+    // Vite normalizes `base` to end with `/`; URL joins depend on it.
+    let base = if base.ends_with('/') { base } else { format!("{base}/") };
+    config.build.base = base.clone();
     // `resolve.alias` string finds, applied with Vite's exact-or-prefix
-    // semantics by the resolver.
-    config.build.aliases = alias;
+    // semantics by the resolver. A replacement that starts with `/` and does
+    // not exist as a real absolute path is project-root-relative (Vite's
+    // `'@': '/src'` convention).
+    config.build.aliases = alias
+        .into_iter()
+        .map(|(find, replacement)| {
+            let resolved = if let Some(rest) = replacement.strip_prefix('/')
+                && !Path::new(&replacement).exists()
+                && root.join(rest).exists()
+            {
+                root.join(rest).to_string_lossy().into_owned()
+            } else {
+                replacement
+            };
+            (find, resolved)
+        })
+        .collect();
     // `import.meta.env` from the full Vite source order: the `.env` file stack
     // for the mode, overridden by real `VITE_*` process variables (the overlay
     // is inside `load_vite_env`).
