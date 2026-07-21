@@ -32,8 +32,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM (Homebrew)
-        run: brew install llvm
+      - name: Install LLVM 21 (Homebrew)
+        # Pinned: gate-full compares TEXTUAL IR byte-exactly, and the reference
+        # snapshot is blessed with the LLVM 21 printer — a newer libLLVM prints
+        # differently and fails the gate spuriously. The opt/llvm symlink makes
+        # the committed seed's libLLVM.dylib dependency (and llvm-link-flags.sh's
+        # default llvm-config path) resolve to 21.
+        run: |
+          brew install llvm@21
+          ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm || sudo ln -sfn "$(brew --prefix llvm@21)" /opt/homebrew/opt/llvm
       - name: DEBUG gate-full verbose (temporary)
         continue-on-error: true
         run: |
