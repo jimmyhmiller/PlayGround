@@ -30,6 +30,11 @@ pub struct ResolvedViteConfig {
     /// `define` entries as `(identifier, replacement_source)`, already normalized
     /// to raw replacement text (a string value verbatim, else JSON-stringified).
     pub define: Vec<(String, String)>,
+    /// `resolve.alias` entries with string finds, as `(find, replacement)`.
+    /// Regex/function finds cannot be expressed to the native resolver; the
+    /// evaluator counts them and [`resolve`] surfaces a warning, never a
+    /// silent drop.
+    pub alias: Vec<(String, String)>,
 }
 
 /// The candidate config filenames, in Vite's resolution order.
@@ -116,6 +121,25 @@ fn parse(stdout: &[u8]) -> Result<ResolvedViteConfig, String> {
     }
     // Deterministic order (the graph transform must be reproducible).
     define.sort();
+    let mut alias = Vec::new();
+    if let Some(serde_json::Value::Array(entries)) = value.get("alias") {
+        for entry in entries {
+            if let Some([find, replacement]) = entry.as_array().map(|pair| pair.as_slice())
+                && let (Some(find), Some(replacement)) = (find.as_str(), replacement.as_str())
+            {
+                alias.push((find.to_string(), replacement.to_string()));
+            }
+        }
+    }
+    if let Some(skipped) = value.get("aliasSkipped").and_then(|value| value.as_u64())
+        && skipped > 0
+    {
+        eprintln!(
+            "warning: vite config has {skipped} resolve.alias entr{} with a regex/function \
+             find, which diffpack cannot apply",
+            if skipped == 1 { "y" } else { "ies" }
+        );
+    }
 
-    Ok(ResolvedViteConfig { base, define })
+    Ok(ResolvedViteConfig { base, define, alias })
 }

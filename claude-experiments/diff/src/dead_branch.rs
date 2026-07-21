@@ -121,6 +121,36 @@ impl<'a> Visit<'a> for BranchCollector<'_> {
                 return;
             }
         }
+        // An `else if` whose test is decidably false and which has no branch of
+        // its own to take must disappear TOGETHER with the parent's `else`
+        // keyword — replacing just the inner `if` with nothing leaves a
+        // dangling `else` and a parse error (found live on Redux Toolkit's
+        // `else if (process.env.NODE_ENV !== "production")` guard blocks).
+        if let Statement::IfStatement(branch) = statement
+            && let Some(Statement::IfStatement(inner)) = branch.alternate.as_ref()
+            && let Some(test) = evaluate(&inner.test)
+        {
+            let taken = if test {
+                Some(&inner.consequent)
+            } else {
+                inner.alternate.as_ref()
+            };
+            let dead = if test {
+                inner.alternate.as_ref()
+            } else {
+                Some(&inner.consequent)
+            };
+            if taken.is_none() && dead.is_none_or(|dead| !hoists_a_binding(dead)) {
+                self.edits.push((
+                    Span::new(branch.consequent.span().end, inner.span.end),
+                    String::new(),
+                ));
+                // The kept parts still deserve their own folds.
+                self.visit_expression(&branch.test);
+                self.visit_statement(&branch.consequent);
+                return;
+            }
+        }
         walk::walk_statement(self, statement);
     }
 
@@ -413,9 +443,21 @@ mod tests {
     }
 
     #[test]
+    fn an_else_if_that_folds_to_nothing_removes_the_dangling_else() {
+        let out = run("if (x) { a(); } else if (\"production\" !== 'production') { b(); }").unwrap();
+        assert!(out.contains("if (x) { a(); }"), "{out}");
+        assert!(!out.contains("else"), "no dangling else: {out}");
+        // With a live third arm the generic splice already produces a valid
+        // `else <arm>`; this must stay untouched by the new deletion.
+        let out = run("if (x) { a(); } else if (\"a\" === 'b') { b(); } else { c(); }").unwrap();
+        assert!(out.contains("else {c();}") || out.contains("else { c(); }"), "{out}");
+    }
+
+    #[test]
     fn an_else_if_chain_keeps_the_surviving_arm() {
         let out = run("if (\"a\" === 'b') { one(); } else if (\"c\" === 'c') { two(); } else { three(); }").unwrap();
         assert!(out.contains("two()"), "{out}");
         assert!(!out.contains("one()") && !out.contains("three()"), "{out}");
     }
 }
+

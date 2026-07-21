@@ -220,6 +220,7 @@ impl ResolutionCache {
         // Only worth attempting when a substitution above could have made a test
         // decidable; a module nobody rewrote keeps its branches untouched.
         if !matches!(current, Cow::Borrowed(_))
+            && std::env::var_os("DIFFPACK_DISABLE_DEAD_BRANCH").is_none()
             && let Some(rewritten) = crate::dead_branch::transform(path, &current)
         {
             current = Cow::Owned(rewritten);
@@ -284,31 +285,39 @@ impl DirectoryResolutionCache {
         }
         let resource = ResourceId::parse(specifier);
         let path_specifier = resource.path.as_str();
-        // Plugin-host aliases win as an exact-match rewrite before the
-        // standards-aware resolver (which would route a `#`-specifier through
-        // package `imports` and fail). The alias target is a real file.
-        if let Some((_, target)) = self
-            .aliases
-            .iter()
-            .find(|(from, _)| from == path_specifier)
-        {
-            let result = if target.is_file() {
-                Ok(ResolvedModule {
-                    id: module_id_with_resource(target, &resource),
-                    side_effect_free: false,
-                })
-            } else {
-                Err(format!(
-                    "alias {path_specifier:?} points to {}, which is not a file",
-                    target.display()
-                ))
-            };
-            shard
-                .lock()
-                .expect("resolution specifier cache poisoned")
-                .insert(specifier.to_owned(), result.clone());
-            return result;
+        // Aliases win before the standards-aware resolver (which would route a
+        // `#`-specifier through package `imports` and fail). Two shapes:
+        // an exact match on a real FILE returns it directly (the TanStack
+        // virtual-entry style), while Vite's `resolve.alias` semantics also
+        // rewrite PREFIX matches (`@/components/x` with `@ -> <root>/src`
+        // becomes `<root>/src/components/x`) — the rewritten path then goes
+        // through the normal resolver so extensions and index files apply.
+        let mut aliased_specifier: Option<String> = None;
+        for (from, target) in self.aliases.iter() {
+            if from.as_str() == path_specifier {
+                if target.is_file() {
+                    let result = Ok(ResolvedModule {
+                        id: module_id_with_resource(target, &resource),
+                        side_effect_free: false,
+                    });
+                    shard
+                        .lock()
+                        .expect("resolution specifier cache poisoned")
+                        .insert(specifier.to_owned(), result.clone());
+                    return result;
+                }
+                aliased_specifier = Some(target.to_string_lossy().into_owned());
+                break;
+            }
+            if let Some(rest) = path_specifier
+                .strip_prefix(from.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+            {
+                aliased_specifier = Some(target.join(rest).to_string_lossy().into_owned());
+                break;
+            }
         }
+        let path_specifier = aliased_specifier.as_deref().unwrap_or(path_specifier);
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
@@ -5179,7 +5188,22 @@ fn resolve_options(config: &BuildConfig) -> ResolveOptions {
             (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
         ],
         condition_names,
-        main_fields: vec!["module".into(), "main".into()],
+        // A browser build must honor `package.json`'s `browser` field (the
+        // classic pre-exports substitution map: `debug` swaps its Node entry
+        // for `src/browser.js`, and packages stub out `fs` etc. with `false`).
+        // Without it the Node implementation leaks into the client graph and
+        // drags in Node-only optional dependencies. Server builds must NOT
+        // apply it — they want the real Node entries.
+        alias_fields: if config.target == Target::Client {
+            vec![vec!["browser".into()]]
+        } else {
+            Vec::new()
+        },
+        main_fields: if config.target == Target::Client {
+            vec!["browser".into(), "module".into(), "main".into()]
+        } else {
+            vec!["module".into(), "main".into()]
+        },
         ..ResolveOptions::default()
     }
 }

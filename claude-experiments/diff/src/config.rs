@@ -108,8 +108,13 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         .as_ref()
         .and_then(|resolved| resolved.base.clone())
         .unwrap_or_else(|| "/".to_string());
+    let alias = resolved
+        .as_ref()
+        .map(|resolved| resolved.alias.clone())
+        .unwrap_or_default();
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
+    aliases.extend(alias);
 
     Ok(AppConfig {
         environment: environment.to_string(),
@@ -193,11 +198,18 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         .as_ref()
         .and_then(|resolved| resolved.base.clone())
         .unwrap_or_else(|| "/".to_string());
+    let alias = resolved
+        .as_ref()
+        .map(|resolved| resolved.alias.clone())
+        .unwrap_or_default();
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
     // Vite resolves with the mode condition alongside the browser ones.
     config.build.conditions.push("production".to_string());
     config.build.defines = defines;
+    // `resolve.alias` string finds, applied with Vite's exact-or-prefix
+    // semantics by the resolver.
+    config.build.aliases = alias;
     // `import.meta.env` from the full Vite source order: the `.env` file stack
     // for the mode, overridden by real `VITE_*` process variables (the overlay
     // is inside `load_vite_env`).

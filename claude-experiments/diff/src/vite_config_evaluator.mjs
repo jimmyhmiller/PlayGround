@@ -55,9 +55,32 @@ for (const [key, value] of Object.entries(config.define || {})) {
   define[key] = typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+// `resolve.alias`: both the object form ({ '@': '/abs/src' }) and the array
+// form ([{ find, replacement }]). Only string finds are expressible to the
+// native resolver; regex/function entries are counted, never silently dropped.
+const alias = [];
+let aliasSkipped = 0;
+const aliasConfig = config.resolve?.alias;
+if (Array.isArray(aliasConfig)) {
+  for (const entry of aliasConfig) {
+    if (entry && typeof entry.find === 'string' && typeof entry.replacement === 'string') {
+      alias.push([entry.find, entry.replacement]);
+    } else {
+      aliasSkipped += 1;
+    }
+  }
+} else if (aliasConfig && typeof aliasConfig === 'object') {
+  for (const [find, replacement] of Object.entries(aliasConfig)) {
+    if (typeof replacement === 'string') alias.push([find, replacement]);
+    else aliasSkipped += 1;
+  }
+}
+
 process.stdout.write(
   JSON.stringify({
     base: typeof config.base === 'string' ? config.base : null,
     define,
+    alias,
+    aliasSkipped,
   }),
 );
