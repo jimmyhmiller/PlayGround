@@ -3,7 +3,15 @@
 > Goal: resolve N recorded return addresses to typed, inlined, source-located
 > frames using memory **bounded by the binary's debug info, not by N** — and not
 > blowing up on deeply-inlined functions. Replaces the addr2line path that hit
-> **68 GB** on a real (1.8 GB) recording. **Do not commit** — working plan.
+> **68 GB** on a real (1.8 GB) recording.
+>
+> **STATUS: IMPLEMENTED.** The walker is `memscope-symbols/src/addr_resolve.rs`
+> and is the default `resolve_raw_sites` (plus the two-phase
+> `SiteResolver` for site-count-bounded callers). addr2line remains as the
+> test oracle (`resolve_raw_sites_addr2line`); the differential harness is
+> `memscope-replay/examples/resolve_diff.rs`, the memory probe
+> `examples/resolve_mem.rs`, and the event-count invariant
+> `memscope-replay/tests/constant_memory.rs`.
 
 ## 0. The invariant we are building to
 

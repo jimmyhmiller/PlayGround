@@ -86,6 +86,69 @@ pub fn is_profiler_frame(name: &str) -> bool {
     PREFIXES.iter().any(|p| n.starts_with(p)) || n.contains("memscope")
 }
 
+/// Normalize a recovered *type* name for display: shorten stdlib paths to the
+/// bare type (`alloc::boxed::Box` → `Box`) and drop defaulted allocator/hasher
+/// params (`Box<T, Global>` → `Box<T>`), so a site reads `Vec<Box<Particle>>`
+/// rather than `Vec<alloc::boxed::Box<serve::Particle, alloc::alloc::Global>>`.
+/// User-crate paths are kept — they distinguish types; std paths never do.
+///
+/// Display-only: raw DWARF names remain the layout/graph join keys.
+pub fn clean_type_name(name: &str) -> String {
+    const STD_NS: &[&str] = &["alloc", "core", "std", "hashbrown"];
+    let b = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            // Read one path: `ident(::ident)*` (generic args are handled by the
+            // outer loop — a path run stops at `<`, `,`, `>` etc.).
+            let start = i;
+            let mut first_seg_end = start;
+            let mut last_seg;
+            let mut j = i;
+            loop {
+                let seg = j;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                if seg == start {
+                    first_seg_end = j;
+                }
+                last_seg = seg;
+                // Continue only over `::ident`; `::{closure...}` stays literal.
+                if j + 2 < b.len()
+                    && b[j] == b':'
+                    && b[j + 1] == b':'
+                    && ((b[j + 2] as char).is_ascii_alphabetic() || b[j + 2] == b'_')
+                {
+                    j += 2;
+                } else {
+                    break;
+                }
+            }
+            let first = &name[start..first_seg_end];
+            if last_seg > start && STD_NS.contains(&first) {
+                out.push_str(&name[last_seg..j]);
+            } else {
+                out.push_str(&name[start..j]);
+            }
+            i = j;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    // With paths shortened, defaulted generic params are recognizable bare
+    // names; drop them (they're never the interesting part of the type).
+    for noise in [", Global>", ", RandomState>", ", DefaultHashBuilder>"] {
+        while let Some(p) = out.find(noise) {
+            out.replace_range(p..p + noise.len(), ">");
+        }
+    }
+    out
+}
+
 /// The boundary frame: the first non-runtime frame (frames are recorded
 /// innermost-first), i.e. the application code closest to the allocation.
 /// `None` when every frame is stdlib/runtime.
@@ -109,5 +172,57 @@ pub fn is_profiler_origin(frames: &[FrameMeta]) -> bool {
     match boundary_frame(frames) {
         Some(f) => is_profiler_frame(&clean_frame(&f.func)),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_type_name;
+
+    #[test]
+    fn shortens_std_paths_and_drops_default_params() {
+        assert_eq!(
+            clean_type_name("alloc::boxed::Box<serve::Particle, alloc::alloc::Global>"),
+            "Box<serve::Particle>"
+        );
+        assert_eq!(
+            clean_type_name("alloc::vec::Vec<alloc::string::String>"),
+            "Vec<String>"
+        );
+        assert_eq!(
+            clean_type_name(
+                "std::collections::hash::map::HashMap<u64, serve::Session, std::hash::random::RandomState>"
+            ),
+            "HashMap<u64, serve::Session>"
+        );
+    }
+
+    #[test]
+    fn keeps_user_crate_paths_and_plain_types() {
+        assert_eq!(clean_type_name("serve::Session"), "serve::Session");
+        assert_eq!(clean_type_name("(u64, serve::Session)"), "(u64, serve::Session)");
+        assert_eq!(clean_type_name("u8"), "u8");
+        assert_eq!(clean_type_name("[u8; 4]"), "[u8; 4]");
+        // A user type that happens to start like a std crate name is kept.
+        assert_eq!(clean_type_name("alloc_tracker::Entry"), "alloc_tracker::Entry");
+    }
+
+    #[test]
+    fn nested_wrappers_clean_recursively() {
+        assert_eq!(
+            clean_type_name(
+                "alloc::sync::Arc<alloc::vec::Vec<alloc::boxed::Box<app::Node, alloc::alloc::Global>, alloc::alloc::Global>>"
+            ),
+            "Arc<Vec<Box<app::Node>>>"
+        );
+    }
+
+    #[test]
+    fn closures_and_non_path_syntax_survive() {
+        assert_eq!(
+            clean_type_name("{closure_env#1}<memscope_agent::start_at::{closure_env#0}, ()>"),
+            "{closure_env#1}<memscope_agent::start_at::{closure_env#0}, ()>"
+        );
+        assert_eq!(clean_type_name("core::option::Option<&str>"), "Option<&str>");
     }
 }

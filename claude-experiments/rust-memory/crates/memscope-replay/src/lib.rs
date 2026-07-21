@@ -33,8 +33,8 @@ mod frames;
 mod stream;
 pub use analysis::{analyze, site_stats, Finding, SiteStats};
 pub use frames::{
-    boundary_frame, clean_frame, frame_location, is_profiler_frame, is_profiler_origin,
-    is_std_frame,
+    boundary_frame, clean_frame, clean_type_name, frame_location, is_profiler_frame,
+    is_profiler_origin, is_std_frame,
 };
 pub use stream::{stream_events, EventStream, Record, RecordReader};
 
@@ -245,6 +245,9 @@ pub fn read_recording_raw(file: &str) -> Result<Recording, String> {
     rec.exe = r.exe().to_string();
     rec.slide = r.slide();
     rec.pid = r.pid();
+    if r.truncated() {
+        stream::warn_truncated(file);
+    }
     Ok(rec)
 }
 
@@ -284,8 +287,10 @@ pub fn read_meta_value(f: &mut impl std::io::Read) -> Option<String> {
     }
 }
 
-/// Build a site's type label from its recovered shape + element type.
+/// Build a site's type label from its recovered shape + element type. Element
+/// names are display-normalized (see [`frames::clean_type_name`]).
 pub fn label_for(shape: Option<AllocShape>, ty: Option<String>) -> String {
+    let ty = ty.map(|t| frames::clean_type_name(&t));
     match (shape, ty) {
         (Some(sh), Some(t)) => format!("{sh:?}<{t}>"),
         (Some(sh), None) => format!("{sh:?}<?>"),

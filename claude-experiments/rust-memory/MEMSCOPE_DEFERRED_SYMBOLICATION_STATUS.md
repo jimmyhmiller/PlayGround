@@ -1,7 +1,9 @@
-# memscope: deferred symbolication — status & open issues
+# memscope: deferred symbolication — status (historical)
 
 > Working notes from making `record_to_file` cheap enough to profile a real
-> workload (Turbopack building an app). **Do not commit** — scratch status doc.
+> workload (Turbopack building an app). **All issues below are now RESOLVED** —
+> kept as the record of the diagnosis. See `CONSTANT_MEMORY_SYMBOLICATION_PLAN.md`
+> for the fix that landed.
 
 ## TL;DR
 
@@ -11,11 +13,17 @@
   Turbopack build this took the traced process from **2.12 GB → 279 MB**, **~38s →
   4s**, and the recording file from **8.6 GB → 146 MB**, with **identical** recovered
   types.
-- **Partially fixed:** read-time `analyze` **time** went **84s → ~9s** (per-unique-IP
+- **Fixed:** read-time `analyze` **time** went **84s → ~9s** (per-unique-IP
   dedup + two-pass).
-- **Open issue:** read-time `analyze` **memory** is still **~12.4 GB**. Fully
-  diagnosed (below); the correct fix (a targeted gimli inline walk) was attempted
-  twice and not landed, so the code is left on the correct-but-heavy addr2line path.
+- **Fixed (was the open issue):** read-time `analyze` **memory** (was ~12.4 GB on
+  the 146 MB recording, 68 GB OOM on a 1.8 GB one). The targeted gimli inline
+  walk landed as `memscope-symbols/src/addr_resolve.rs` (third attempt; the plan
+  doc's test-first approach) and is now the default `resolve_raw_sites`.
+  addr2line is kept only as the differential-test oracle
+  (`resolve_raw_sites_addr2line`, exercised by
+  `memscope-replay/examples/resolve_diff.rs`); the memory invariant is probed by
+  `examples/resolve_mem.rs` and the event-count side by
+  `memscope-replay/tests/constant_memory.rs`.
 
 ---
 
