@@ -64,51 +64,10 @@
   (FVal  [(v CtVal)])
   (FBrk  [(value (Option CtVal)) (label (Option (slice u8)))])
   (FCont [(label (Option (slice u8)))]))
-(defn env-clone [(a (ptr Allocator)) (env (ptr (ArrayList EnvBind)))] (-> (ptr (ArrayList EnvBind)))
-  (let [n (al-len [EnvBind] (load env)) (mut out) (al-new [EnvBind] a) (mut i) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (al-push! (mut out) (al-get [EnvBind] (load env) (load i)))
-          (store! i (iadd (load i) 1)))))
-    (box-al [EnvBind] a (load out))))
-(defn env-with [(a (ptr Allocator)) (env (ptr (ArrayList EnvBind))) (name (slice u8)) (v CtVal)] (-> (ptr (ArrayList EnvBind)))
-  (let [n (al-len [EnvBind] (load env)) (mut out) (al-new [EnvBind] a) (mut i) 0]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (al-push! (mut out) (al-get [EnvBind] (load env) (load i)))
-          (store! i (iadd (load i) 1)))))
-    (let [eb (alloc-stack EnvBind)]
-      (store! (field eb name) name)
-      (store! (field eb val) v)
-      (al-push! (mut out) (load eb)))
-    (box-al [EnvBind] a (load out))))
-(defn env-find [(env (ptr (ArrayList EnvBind))) (name (slice u8))] (-> (Option CtVal))
-  (let [n (al-len [EnvBind] (load env)) (mut i) 0 (mut r) (None [CtVal])]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (let [p (al-elem [EnvBind] env (load i))]
-            (if (str-eq (load (field p name)) name) (do (store! r (Some (load (field p val)))) 0) 0))
-          (store! i (iadd (load i) 1)))))
-    (load r)))
-; ---- compiled-comptime fold hook (mac-8) ----------------------------------------
-; The tree-walk interpreter is a WEAKER sublanguage than a macro body: no generics,
-; no sizeof/alignof/offsetof, no strings. When `eval` rejects a `(comptime E)` / a
-; non-literal `(const …)` site for one of those reasons, we route THAT site through
-; the compiled metaprogram engine (real codegen) instead — the same engine macros
-; already use. The engine lives in a higher module (comptime_eval.coil, which imports
-; metaengine/mono), so it registers itself here as a fn pointer, exactly like the
-; metaengine's object builder (set-meta-build-obj!). Unset ⇒ the interpreter's own
-; error stands (the committed LLVM-free seed, which has no such engine, is unchanged).
-; The hook returns null = DECLINED (aggregate/string/f32 result, or no program) so the
-; interpreter's error is preserved, else a boxed (Result Expr Diag) with the literal.
-(defstruct CtFoldHook [(isset i64) (primary i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
+(defstruct CtFoldHook [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))])
 (defn ct-fold-hook [] (-> (ptr CtFoldHook)) (alloc-static CtFoldHook))
 (defn set-comptime-fold-hook! [(fp (fnptr c [(ptr Allocator) (ptr Expr) (ptr CtCtx)] (ptr i8)))] (-> i64)
   (let [b (ct-fold-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
-; step 6 (interp deletion): when `primary` is set the compiled engine is the FIRST
-; and only comptime evaluator (fold-expr skips the interpreter entirely). Registered
-; by comptime_eval::register-comptime-fold! from the engine flags — this module is
-; imported BY metaengine, so it cannot read those flags itself.
-(defn ct-set-fold-primary! [(p bool)] (-> i64)
-  (let [b (ct-fold-hook)] (store! (field b primary) (if p 1 0)) 0))
-(defn ct-compiled-primary? [] (-> bool) (icmp-ne (load (field (ct-fold-hook) primary)) 0))
 ; A CAPABILITY gap — the interpreter says "isn't supported yet" for a construct real
 ; codegen CAN do (sizeof/alignof/offsetof, a generic call, a string, a bitfield op, a
 ; function pointer, an aggregate-const ref, a trait call, …). ONLY those are routed to
@@ -117,16 +76,6 @@
 ; compiled engine would silently compute a target-specific value (arm64 idiv-by-0 = 0)
 ; or crash, masking the bug. The "supported yet" wording is the interpreter's own
 ; convention for "valid code I can't evaluate", so it is a reliable discriminator.
-(defn comptime-cap-gap? [(d Diag)] (-> bool)
-  (let [dp (alloc-stack Diag)] (store! dp d)
-    (match (str-find (load (field dp msg)) "supported yet") (Some [_] true) (None [] false))))
-(defn vget! [(fl Code)] (-> Code)
-  (let [f (gensym) v (gensym)]
-    `(let [~f (try! ~fl)]
-       (match ~f
-         (FVal  [~v] ~v)
-         (FBrk  [vv ll] (return-from :try (Ok [Flow Diag] ~f)))
-         (FCont [ll]    (return-from :try (Ok [Flow Diag] ~f)))))))
 (defn ct-tag [(v CtVal)] (-> i64)
   (match v (CInt [n] 0) (CBool [b] 1) (CFloat [x] 2) (CStr [s] 3) (CCode [f] 4)
            (CStruct [a b] 5) (CArray [a b] 6) (CSum [a b] 7) (CRef [c] 8)))
@@ -139,17 +88,6 @@
 (defn cbool-of [(v CtVal)] (-> bool)
   (match v (CBool [b] b) (CInt [n] false) (CFloat [x] false) (CStr [s] false) (CCode [f] false)
            (CStruct [a b] false) (CArray [a b] false) (CSum [a b] false) (CRef [c] false)))
-(defn truthy [(v CtVal)] (-> (Result bool Diag))
-  (match v
-    (CBool [b] (Ok b))
-    (CInt  [n] (Ok (icmp-ne n 0)))
-    (CFloat [x] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CStr  [s] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CCode [f] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CStruct [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CArray  [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CSum    [a b] (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))
-    (CRef    [c]   (Err [bool Diag] (derr "comptime: condition must be a bool or integer")))))
 (defn bits->f64 [(n i64)] (-> f64)
   (let [p (alloc-stack i64)] (store! p n) (load (cast (ptr f64) p))))
 (defn trunc [(n i64) (bits i64) (signed bool)] (-> i64)
@@ -169,45 +107,8 @@
   (if (icmp-eq op 3) (icmp-ne ord -1)
   (if (icmp-eq op 4) (icmp-eq ord 0)
       (icmp-ne ord 0)))))))
-(defn ct-bin-float [(op i64) (x f64) (y f64)] (-> (Result CtVal Diag))
-  (if (icmp-eq op 0) (Ok (CFloat (fadd x y)))
-  (if (icmp-eq op 1) (Ok (CFloat (fsub x y)))
-  (if (icmp-eq op 2) (Ok (CFloat (fmul x y)))
-  (if (icmp-eq op 3) (Ok (CFloat (fdiv x y)))
-      (Err [CtVal Diag] (derr "comptime: unsupported float operation")))))))
-; The one wording for "an integer div/rem had a zero divisor at comptime". Both the
-; INTERPRETER (ct-bin-int, below) and the COMPILED fold (comptime_eval.coil, which
-; instruments the compiled sub-program and reports the failure after the run) answer
-; with this, so the two engines cannot drift apart on the message.
 (defn ct-divzero-msg [(rem bool)] (-> (slice u8))
   (if rem "comptime: remainder by zero" "comptime: division by zero"))
-(defn ct-bin-int [(op i64) (x i64) (y i64)] (-> (Result CtVal Diag))
-  (if (icmp-eq op 0) (Ok (CInt (iadd x y)))
-  (if (icmp-eq op 1) (Ok (CInt (isub x y)))
-  (if (icmp-eq op 2) (Ok (CInt (imul x y)))
-  (if (icmp-eq op 3) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg false))) (Ok (CInt (idiv x y))))
-  (if (icmp-eq op 4) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg true))) (Ok (CInt (irem x y))))
-  (if (icmp-eq op 5) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg false))) (Ok (CInt (udiv x y))))
-  (if (icmp-eq op 6) (if (icmp-eq y 0) (Err [CtVal Diag] (derr (ct-divzero-msg true))) (Ok (CInt (urem x y))))
-  (if (icmp-eq op 7) (Ok (CInt (iand x y)))
-  (if (icmp-eq op 8) (Ok (CInt (ior x y)))
-  (if (icmp-eq op 9) (Ok (CInt (ixor x y)))
-  (if (icmp-eq op 10) (Ok (CInt (ishl x y)))
-      (Ok (CInt (ishr x y)))))))))))))))
-(defn ct-bin [(op i64) (a CtVal) (b CtVal)] (-> (Result CtVal Diag))
-  (if (and (icmp-eq (ct-tag a) 2) (icmp-eq (ct-tag b) 2))
-      (ct-bin-float op (cfloat-of a) (cfloat-of b))
-  (if (and (icmp-eq (ct-tag a) 0) (icmp-eq (ct-tag b) 0))
-      (ct-bin-int op (cint-of a) (cint-of b))
-      (Err [CtVal Diag] (derr "comptime: arithmetic needs two integers (or two floats)")))))
-(defn ct-cmp [(op i64) (a CtVal) (b CtVal)] (-> (Result CtVal Diag))
-  (if (and (icmp-eq (ct-tag a) 0) (icmp-eq (ct-tag b) 0))
-      (Ok (CBool (cmp-apply op (icmp-ord (cint-of a) (cint-of b)))))
-  (if (and (icmp-eq (ct-tag a) 2) (icmp-eq (ct-tag b) 2))
-      (Ok (CBool (cmp-apply op (fcmp-ord (cfloat-of a) (cfloat-of b)))))
-  (if (and (icmp-eq (ct-tag a) 1) (icmp-eq (ct-tag b) 1))
-      (Ok (CBool (cmp-apply op (bool-ord (cbool-of a) (cbool-of b)))))
-      (Err [CtVal Diag] (derr "comptime: comparison needs two values of the same scalar kind"))))))
 (defn wrap-mut [(v CtVal)] (-> CtVal)
   (if (icmp-eq (ct-tag v) 8) v (CRef (new-cell v))))
 (defn cast-trunc [(n i64) (ty Type)] (-> CtVal)
@@ -217,8 +118,6 @@
     (TPtr [i] (CInt n)) (TRef [m i] (CInt n)) (TStruct [nm] (CInt n))
     (TArray [e k] (CInt n)) (TSlice [e] (CInt n)) (TVec [e k] (CInt n))
     (TFn [c p r] (CInt n)) (TApp [nm ar] (CInt n)) (TNever [] (CInt n)) (TCode [] (CInt n)) (TExternRef [] (CInt n))))
-(defn ct-cast [(v CtVal) (ty Type)] (-> CtVal)
-  (if (icmp-eq (ct-tag v) 0) (cast-trunc (cint-of v) ty) v))
 (defn cref-cell    [(v CtVal)] (-> (ptr CtVal)) (match-else v (CRef [c] c) (_ (cast (ptr CtVal) 0))))
 (defn cstruct-name [(v CtVal)] (-> (slice u8))  (match-else v (CStruct [nm f] nm) (_ "")))
 (defn cstruct-fields [(v CtVal)] (-> (ptr (ArrayList (ptr CtVal)))) (match-else v (CStruct [nm f] f) (_ (cast (ptr (ArrayList (ptr CtVal))) 0))))
@@ -262,31 +161,6 @@
               (do (store! r (al-elem [StructDef] lst (load i))) 0) 0)
           (store! i (iadd (load i) 1)))))
     (load r)))
-(defn ct-fn-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr Func))
-  (let [lst (load (field cx fns)) n (al-len [Func] (load lst)) (mut i) 0 (mut r) (cast (ptr Func) 0)]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (load (field (al-elem [Func] lst (load i)) name)) name)
-              (do (store! r (al-elem [Func] lst (load i))) 0) 0)
-          (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn ct-variant? [(cx (ptr CtCtx)) (name (slice u8))] (-> bool)
-  (let [lst (load (field cx variants)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
-    (loop (if (icmp-ge (load i) n) (break)
-      (do (if (str-eq (al-get [(slice u8)] (load lst) (load i)) name) (do (store! r true) (break)) 0)
-          (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn ct-field-index [(name (slice u8)) (f (slice u8)) (cx (ptr CtCtx))] (-> (Result i64 Diag))
-  (let [a (load (field cx a)) sd (ct-struct-find cx name)]
-    (if (icmp-eq (cast i64 sd) 0)
-        (Err [i64 Diag] (derr (sconcat3 a "comptime: unknown struct '" name "'")))
-        (let [flds (load (field sd fields)) nf (al-len [Field] (load flds)) (mut i) 0 (mut r) -1]
-          (loop (if (icmp-ge (load i) nf) (break)
-            (do (if (str-eq (load (field (al-elem [Field] flds (load i)) name)) f)
-                    (do (store! r (load i)) (break)) 0)
-                (store! i (iadd (load i) 1)))))
-          (if (icmp-lt (load r) 0)
-              (Err [i64 Diag] (derr (sconcat3 a (sconcat3 a "comptime: struct '" name "' has no field '") f "'")))
-              (Ok [i64 Diag] (load r)))))))
 (defn is-u8 [(t Type)] (-> bool) (match-else t (TInt [bits signed] (icmp-eq bits 8)) (_ false)))
 (defn zeroed-struct-cells [(flds (ptr (ArrayList Field))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal))) Diag))
   (let [a (load (field cx a)) nf (al-len [Field] (load flds)) (mut out) (al-new [(ptr CtVal)] a) (mut i) 0 (mut errf) (None [Diag])]
@@ -388,276 +262,10 @@
 (defsum ArgsOut
   (AOK   [(vals (ptr (ArrayList CtVal)))])
   (AFlow [(f Flow)]))
-(defn eval-args [(args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result ArgsOut Diag))
-  (let [a (load (field cx a)) n (al-len [Expr] (load args)) (mut i) 0
-        (mut out) (al-new [CtVal] a) (mut errf) (None [Diag]) (mut flowf) (None [Flow]) (mut stop) false]
-    (loop (if (or (load stop) (icmp-ge (load i) n)) (break)
-      (do (match (eval (al-elem [Expr] args (load i)) env cx)
-            (Err [d] (do (store! errf (Some d)) (store! stop true) 0))
-            (Ok [fl] (match fl
-                       (FVal [v]     (do (al-push! (mut out) v) 0))
-                       (FBrk [vv ll] (do (store! flowf (Some fl)) (store! stop true) 0))
-                       (FCont [ll]   (do (store! flowf (Some fl)) (store! stop true) 0)))))
-          (store! i (iadd (load i) 1)))))
-    (match (load errf)
-      (Some [d] (Err [ArgsOut Diag] d))
-      (None []
-        (match (load flowf)
-          (Some [fl] (Ok [ArgsOut Diag] (AFlow fl)))
-          (None []   (Ok [ArgsOut Diag] (AOK (box-al [CtVal] a (load out))))))))))
-(defn place-ref [(e (ptr Expr)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
-  (try
-    (match-else (load (field e kind))
-      (EField [p fname]
-        (let [base (match (try! (eval p env cx))
-                     (FVal  [v] v)
-                     (FBrk  [vv ll] (return-from :try (Err [CtVal Diag] (derr "comptime: control flow in a place"))))
-                     (FCont [ll]    (return-from :try (Err [CtVal Diag] (derr "comptime: control flow in a place")))))]
-          (if (icmp-ne (ct-tag base) 8)
-              (Err [CtVal Diag] (derr "comptime: `field` base isn't a place"))
-              (let [cell (cref-cell base)]
-                (if (icmp-ne (ct-tag (load cell)) 5)
-                    (Err [CtVal Diag] (derr "comptime: `field` of a non-struct"))
-                    (let [sname (cstruct-name (load cell)) fields (cstruct-fields (load cell))
-                          idx (try! (ct-field-index sname fname cx))]
-                      (Ok [CtVal Diag] (CRef (al-get [(ptr CtVal)] (load fields) idx)))))))))
-      (EIndex [p idx]
-        (let [base (match (try! (eval p env cx))
-                     (FVal  [v] v)
-                     (FBrk  [vv ll] (return-from :try (Err [CtVal Diag] (derr "comptime: control flow in a place"))))
-                     (FCont [ll]    (return-from :try (Err [CtVal Diag] (derr "comptime: control flow in a place")))))
-              i (match (try! (eval idx env cx))
-                  (FVal  [v] (if (icmp-eq (ct-tag v) 0) (cint-of v) (return-from :try (Err [CtVal Diag] (derr "comptime: array index must be an integer")))))
-                  (FBrk  [vv ll] (return-from :try (Err [CtVal Diag] (derr "comptime: array index must be an integer"))))
-                  (FCont [ll]    (return-from :try (Err [CtVal Diag] (derr "comptime: array index must be an integer")))))]
-          (if (icmp-ne (ct-tag base) 8)
-              (Err [CtVal Diag] (derr "comptime: `index` base isn't a place"))
-              (let [cell (cref-cell base)]
-                (if (icmp-ne (ct-tag (load cell)) 6)
-                    (Err [CtVal Diag] (derr "comptime: `index` of a non-array"))
-                    (let [cells (carray-cells (load cell)) ncells (al-len [(ptr CtVal)] (load cells))]
-                      (if (or (icmp-lt i 0) (icmp-ge i ncells))
-                          (Err [CtVal Diag] (derr (sconcat3 (load (field cx a)) "comptime: array index " (dec->str (load (field cx a)) i) " out of bounds")))
-                          (Ok [CtVal Diag] (CRef (al-get [(ptr CtVal)] (load cells) i))))))))))
-      (_ (match (try! (eval e env cx))
-           (FVal  [v] (Ok [CtVal Diag] (if (icmp-eq (ct-tag v) 8) v (CRef (new-cell v)))))
-           (FBrk  [vv ll] (Err [CtVal Diag] (derr "comptime: control flow where a place was expected")))
-           (FCont [ll]    (Err [CtVal Diag] (derr "comptime: control flow where a place was expected"))))))))
 (defsum LoopStep
   (LSAgain [])
   (LSDone  [(v CtVal)])
   (LSProp  [(f Flow)]))
-(defn loop-body-once [(body (ptr (ArrayList Expr))) (label (Option (slice u8))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result LoopStep Diag))
-  (let [n (al-len [Expr] (load body)) (mut i) 0 (mut step) (LSAgain) (mut errf) (None [Diag]) (mut stop) false]
-    (loop (if (or (load stop) (icmp-ge (load i) n)) (break)
-      (do (match (eval (al-elem [Expr] body (load i)) env cx)
-            (Err [d] (do (store! errf (Some d)) (store! stop true) 0))
-            (Ok [fl] (match fl
-                       (FVal  [v] 0)
-                       (FCont [l] (if (lbl-match l label)
-                                      (do (store! stop true) 0)
-                                      (do (store! step (LSProp (FCont l))) (store! stop true) 0)))
-                       (FBrk  [v l] (if (lbl-match l label)
-                                        (do (store! step (LSDone (opt-ctval-or v))) (store! stop true) 0)
-                                        (do (store! step (LSProp (FBrk v l))) (store! stop true) 0))))))
-          (store! i (iadd (load i) 1)))))
-    (match (load errf)
-      (Some [d] (Err [LoopStep Diag] d))
-      (None []  (Ok [LoopStep Diag] (load step))))))
-(defn eval [(e (ptr Expr)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Flow Diag))
-  (try
-    (let [f (load (field cx fuel))]
-      (if (icmp-eq f 0)
-          (return-from :try (Err [Flow Diag] (derr "comptime: evaluation budget exhausted (infinite loop/recursion?)")))
-          0)
-      (store! (field cx fuel) (isub f 1))
-      (match (load (field e kind))
-        (EInt   [n] (Ok (FVal (CInt n))))
-        (EBool  [b] (Ok (FVal (CBool b))))
-        (EFloat [bits] (Ok (FVal (CFloat (bits->f64 bits)))))
-        (EStr   [s] (Ok (FVal (CStr s))))
-        (EComptime [inner] (eval inner env cx))
-        (EAscribe [ty inner] (eval inner env cx))
-        (EVar [name]
-          (match (env-find env name)
-            (Some [v] (Ok (FVal v)))
-            (None []  (Err [Flow Diag] (derr (sconcat3 (load (field cx a)) "comptime: unbound variable '" name "'"))))))
-        (ENot [inner]
-          (let [v (vget! (eval inner env cx))]
-            (if (icmp-eq (ct-tag v) 0)
-                (Ok (FVal (CInt (ixor (cint-of v) -1))))
-                (Err [Flow Diag] (derr "comptime: `inot` needs an integer")))))
-        (EBin [op lhs rhs]
-          (let [x (vget! (eval lhs env cx)) y (vget! (eval rhs env cx))]
-            (Ok (FVal (try! (ct-bin op x y))))))
-        (ECmp [op lhs rhs]
-          (let [x (vget! (eval lhs env cx)) y (vget! (eval rhs env cx))]
-            (Ok (FVal (try! (ct-cmp op x y))))))
-        (EIf [cnd thn els]
-          (let [c (vget! (eval cnd env cx))]
-            (if (try! (truthy c)) (eval thn env cx) (eval els env cx))))
-        (EDo [body] (eval-seq body env cx))
-        (ELet [binds body]
-          (let [(mut scope) (env-clone (load (field cx a)) env) nb (al-len [Bind] (load binds)) (mut i) 0]
-            (loop (if (icmp-ge (load i) nb) (break)
-              (do (let [bp (al-elem [Bind] binds (load i))
-                        v  (vget! (eval (field bp value) (load scope) cx))
-                        bound (if (load (field bp mutable)) (wrap-mut v) v)]
-                    (store! scope (env-with (load (field cx a)) (load scope) (load (field bp name)) bound)))
-                  (store! i (iadd (load i) 1)))))
-            (eval-seq body (load scope) cx)))
-        (ECast [ty inner]
-          (let [v (vget! (eval inner env cx))]
-            (Ok (FVal (ct-cast v ty)))))
-        ; ---- memory arms (src/comptime.rs) ----
-        (EZeroed [ty] (Ok (FVal (try! (zeroed-value ty cx)))))
-        (EAlloc [storage ty] (Ok (FVal (CRef (new-cell (try! (zeroed-content ty cx)))))))
-        (EBorrow [mutable place] (Ok (FVal (try! (place-ref place env cx)))))
-        (ESpillRef [inner]
-          (let [v (vget! (eval inner env cx))]
-            (Ok (FVal (if (icmp-eq (ct-tag v) 8) v (CRef (new-cell v)))))))
-        (ELoad [inner]
-          (let [r (vget! (eval inner env cx))]
-            (Ok (FVal (if (icmp-eq (ct-tag r) 8) (cell-value (cref-cell r)) r)))))
-        (EStore [p val]
-          (let [r (vget! (eval p env cx)) v (vget! (eval val env cx))]
-            (if (icmp-ne (ct-tag r) 8)
-                (Err [Flow Diag] (derr "comptime: `store!` target isn't a place"))
-                ; std-12: store! yields unit (canonical i64 0), not the stored value.
-                (do (store! (cref-cell r) (to-content-v v)) (Ok (FVal (CInt 0)))))))
-        (EField [p fname] (Ok (FVal (try! (place-ref e env cx)))))
-        (EIndex [p idx]   (Ok (FVal (try! (place-ref e env cx)))))
-        ; ---- construct / match / call ----
-        (EConstruct [sum variant args]
-          (match (try! (eval-args args env cx))
-            (AFlow [fl] (Ok [Flow Diag] fl))
-            (AOK [vals] (Ok (FVal (CRef (new-cell (CSum variant (vals->cells vals (load (field cx a))))))))) ))
-        (EMatch [scrut arms]
-          (let [s (vget! (eval scrut env cx))]
-            (if (icmp-ne (ct-tag s) 8)
-                (Err [Flow Diag] (derr "comptime: `match` scrutinee must be a sum value"))
-                (let [cell (cref-cell s)]
-                  (if (icmp-ne (ct-tag (load cell)) 7)
-                      (Err [Flow Diag] (derr "comptime: `match` scrutinee must be a sum value"))
-                      (let [al (load (field cx a))
-                            variant (csum-variant (load cell)) fields (csum-fields (load cell))
-                            arm (match-arm-find arms variant)]
-                        (if (icmp-eq (cast i64 arm) 0)
-                            (Err [Flow Diag] (derr (sconcat3 al "comptime: no match arm for variant '" variant "'")))
-                            (let [(mut scope) (env-clone al env)
-                                  binds (load (field arm binds))
-                                  nb (al-len [(slice u8)] (load binds)) nf (al-len [(ptr CtVal)] (load fields))
-                                  nn (if (icmp-lt nb nf) nb nf) (mut k) 0]
-                              (loop (if (icmp-ge (load k) nn) (break)
-                                (do (store! scope (env-with al (load scope)
-                                                    (al-get [(slice u8)] (load binds) (load k))
-                                                    (cell-value (al-get [(ptr CtVal)] (load fields) (load k)))))
-                                    (store! k (iadd (load k) 1)))))
-                              (eval (field arm body) (load scope) cx)))))))) )
-        (ECall [func type_args args]
-          (let [al (load (field cx a))]
-            (match (try! (eval-args args env cx))
-              (AFlow [fl] (Ok [Flow Diag] fl))
-              (AOK [vals]
-                (if (ct-variant? cx func)
-                    (Ok (FVal (CRef (new-cell (CSum func (vals->cells vals al))))))
-                    (if (icmp-gt (al-len [Type] (load type_args)) 0)
-                        (Err [Flow Diag] (derr (sconcat3 al "comptime: generic call to '" func "' isn't supported yet")))
-                        (let [callee (ct-fn-find cx func)]
-                          (if (icmp-eq (cast i64 callee) 0)
-                              (Err [Flow Diag] (derr (sconcat3 al "comptime: call to '" func "' (not a comptime-evaluable function — extern/FFI?)")))
-                              (let [pparams (load (field callee params))
-                                    np (al-len [Param] (load pparams)) na (al-len [CtVal] (load vals))]
-                                (if (icmp-ne np na)
-                                    (Err [Flow Diag] (derr (sconcat3 al "comptime: '" func "' arity mismatch")))
-                                    (let [(mut scope) (al-new [EnvBind] al) (mut j) 0]
-                                      (loop (if (icmp-ge (load j) np) (break)
-                                        (do (let [pp (al-elem [Param] pparams (load j)) eb (alloc-stack EnvBind)]
-                                              (store! (field eb name) (load (field pp name)))
-                                              (store! (field eb val) (al-get [CtVal] (load vals) (load j)))
-                                              (al-push! (mut scope) (load eb)))
-                                            (store! j (iadd (load j) 1)))))
-                                      (let [d (iadd (load (field cx depth)) 1)]
-                                        (if (icmp-gt d 2000)
-                                            (Err [Flow Diag] (derr (sconcat3 al "comptime: call stack too deep (> 2000) calling '" func "' — runaway recursion?")))
-                                            (do (store! (field cx depth) d)
-                                                (let [r (eval-seq (load (field callee body)) (box-al [EnvBind] al (load scope)) cx)]
-                                                  (store! (field cx depth) (isub d 1))
-                                                  r)))))))))))))) )
-        ; ---- loop / break / continue (Flow sum) ----
-        (ELoop [label body]
-          (loop
-            (let [r (loop-body-once body label env cx)]
-              (match r
-                (Err [d] (return-from :try (Err [Flow Diag] d)))
-                (Ok [step]
-                  (match step
-                    (LSAgain []
-                      (let [f (load (field cx fuel))]
-                        (if (icmp-eq f 0)
-                            (return-from :try (Err [Flow Diag] (derr "comptime: loop budget exhausted")))
-                            (do (store! (field cx fuel) (isub f 1)) 0))))
-                    (LSDone [v] (return-from :try (Ok [Flow Diag] (FVal v))))
-                    (LSProp [fl] (return-from :try (Ok [Flow Diag] fl)))))))))
-        (EBreak [label value]
-          (match value
-            (Some [ve] (let [v (vget! (eval ve env cx))] (Ok (FBrk (Some v) label))))
-            (None []   (Ok (FBrk (None [CtVal]) label)))))
-        (EContinue [label] (Ok (FCont label)))
-        ; ---- still un-ported arms (quote / code-op / reflection / dyn) ----
-        (ECStr  [s] (Err [Flow Diag] (derr "comptime: a string (comptime strings aren't supported yet) isn't supported yet")))
-        (ESizeOf [ty] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
-        (EAlignOf [ty] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
-        (EOffsetOf [ty fname] (Err [Flow Diag] (derr "comptime: sizeof/alignof/offsetof isn't supported yet")))
-        (EBitGet [p fname] (Err [Flow Diag] (derr "comptime: a bitfield op isn't supported yet")))
-        (EBitSet [p fname val] (Err [Flow Diag] (derr "comptime: a bitfield op isn't supported yet")))
-        (EFree [inner] (Err [Flow Diag] (derr "comptime: free isn't supported yet")))
-        (EErase [trait_name inner] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
-        (EFnPtrOf [name] (Err [Flow Diag] (derr "comptime: a function pointer isn't supported yet")))
-        (ECallPtr [fp args] (Err [Flow Diag] (derr "comptime: a function pointer isn't supported yet")))
-        (ELlvmIr [result args body] (Err [Flow Diag] (derr "comptime: raw llvm-ir isn't supported yet")))
-        (ETypeQuery [q ty]
-          (match (type-query q ty cx)
-            (Err [d] (Err [Flow Diag] d))
-            (Ok [v] (Ok [Flow Diag] (FVal v)))))
-        (EFieldMeta [meta ty idx]
-          (let [iv (vget! (eval idx env cx))]
-            (if (icmp-ne (ct-tag iv) 0) (Err [Flow Diag] (derr "comptime: field index must be an integer"))
-              (match (field-meta meta ty (cint-of iv) cx)
-                (Err [d] (Err [Flow Diag] d))
-                (Ok [v] (Ok [Flow Diag] (FVal v)))))))
-        (EFieldIndex [ty name]
-          (let [nv (vget! (eval name env cx))]
-            (if (icmp-ne (ct-tag nv) 3) (Err [Flow Diag] (derr "comptime: field-index name must be a string"))
-              (match (find-field-index ty (cstr-of nv) cx)
-                (Err [d] (Err [Flow Diag] d))
-                (Ok [v] (Ok [Flow Diag] (FVal v)))))))
-        (EQuote [form] (Ok (FVal (CCode (load form)))))
-        (ECodeOp [op args]
-          (match (try! (eval-args args env cx))
-            (AFlow [fl] (Ok [Flow Diag] fl))
-            (AOK [vals]
-              (match (code-op op vals cx)
-                (Err [d] (Err [Flow Diag] d))
-                (Ok [v] (Ok [Flow Diag] (FVal v)))))))
-        (EQuasi [q]
-          (let [qp (alloc-stack Quasi)] (store! qp q)
-            (match (eval-quasi qp env cx)
-              (Err [d] (Err [Flow Diag] d))
-              (Ok [s] (Ok [Flow Diag] (FVal (CCode s)))))))
-        (ETraitCall [trait_name method self_tp args] (Err [Flow Diag] (derr "comptime: an unresolved trait call isn't supported yet")))
-        (EDynDispatch [dyn_struct vtable_struct method_index cc params ret recv args] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
-        (EMakeDyn [dyn_struct vtable_struct methods inner] (Err [Flow Diag] (derr "comptime: this expression isn't supported yet")))
-        (EStaticRef [name] (Err [Flow Diag] (derr "comptime: a reference to an aggregate const (a static global) isn't supported yet")))))))
-(defn eval-seq [(es (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Flow Diag))
-  (try
-    (let [n (al-len [Expr] (load es))]
-      (if (icmp-eq n 0) (Ok [Flow Diag] (FVal (CInt 0)))
-        (let [(mut i) 0]
-          (loop (if (icmp-ge (load i) (isub n 1)) (break)
-            (do (let [discard (vget! (eval (al-elem [Expr] es (load i)) env cx))] 0)
-                (store! i (iadd (load i) 1)))))
-          (eval (al-elem [Expr] es (isub n 1)) env cx))))))
 (defstruct GsCell [(n i64)])
 (defn gensym-cell [] (-> (ptr GsCell)) (alloc-static GsCell))
 (defn next-gensym [] (-> i64)
@@ -1635,50 +1243,6 @@
                     (match (resolve-in-module cx name m)
                       (None [] 0)
                       (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
-(defn eval-quasi-items [(items (ptr (ArrayList Quasi))) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList Sexp)) Diag))
-  (let [a (load (field cx a)) n (al-len [Quasi] (load items)) (mut out) (al-new [Sexp] a) (mut i) 0 (mut errf) (None [Diag])]
-    (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
-      (do (let [it (al-elem [Quasi] items (load i))]
-            (match-else (load it)
-              (QSplice [e]
-                (match (eval e env cx)
-                  (Err [d] (do (store! errf (Some d)) 0))
-                  (Ok [fl]
-                    (match fl
-                      (FBrk [vv ll] (do (store! errf (Some (derr "comptime: control flow inside a ~@ splice"))) 0))
-                      (FCont [ll]   (do (store! errf (Some (derr "comptime: control flow inside a ~@ splice"))) 0))
-                      (FVal [v]
-                        (if (not (is-ccode v)) (do (store! errf (Some (derr "comptime: ~@ splice expects a Code list"))) 0)
-                          (let [c (ccode-of v) tg (sx-tag c)]
-                            (if (not (or (icmp-eq tg 6) (icmp-eq tg 7))) (do (store! errf (Some (derr "comptime: ~@ splice expects a Code list"))) 0)
-                              (let [xs (sx-items c) m (sx-len xs) (mut j) 0]
-                                (loop (if (icmp-ge (load j) m) (break) (do (al-push! (mut out) (sx-at xs (load j))) (store! j (iadd (load j) 1)))))
-                                0)))))))))
-              (_ (match (eval-quasi it env cx)
-                   (Err [d] (do (store! errf (Some d)) 0))
-                   (Ok [s] (do (al-push! (mut out) s) 0))))))
-          (store! i (iadd (load i) 1)))))
-    (match (load errf)
-      (Some [d] (Err [(ptr (ArrayList Sexp)) Diag] d))
-      (None []  (Ok [(ptr (ArrayList Sexp)) Diag] (box-al [Sexp] a (load out)))))))
-(defn eval-quasi [(q (ptr Quasi)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx))] (-> (Result Sexp Diag))
-  (try
-    (let [a (load (field cx a))]
-      (match (load q)
-        (QLit [fp] (Ok [Sexp Diag] (load fp)))
-        (QUnquote [e]
-          (match (try! (eval e env cx))
-            (FVal  [v] (ctval->sexp v))
-            (FBrk  [vv ll] (Err [Sexp Diag] (derr "comptime: control flow inside an unquote")))
-            (FCont [ll]    (Err [Sexp Diag] (derr "comptime: control flow inside an unquote")))))
-        (QSplice [e] (Err [Sexp Diag] (derr "comptime: ~@ (splice) is only valid inside a list/vector")))
-        (QList [items]
-          (let [out (try! (eval-quasi-items items env cx))]
-            (qualify-head out items cx)
-            (Ok [Sexp Diag] (mk-sexp (KList out) -1 -1))))
-        (QVector [items]
-          (let [out (try! (eval-quasi-items items env cx))]
-            (Ok [Sexp Diag] (mk-sexp (KVec out) -1 -1))))))))
 (defn type-is-code [(t (ptr Type))] (-> bool) (match-else (load t) (TCode [] true) (_ false)))
 (defn cc-push! [(out (ptr SBox)) (names (ptr (ArrayList (slice u8)))) (func (slice u8))] (-> i64)
   (if (set-contains names func) (do (al-push! (mut (field out items)) func) 0) 0))
@@ -1984,34 +1548,20 @@
             ; string — the mac-8 weaknesses), route it through the compiled metaprogram
             ; engine via the registered hook (interp deletion step 1); the hook returns
             ; null (declined) for anything it can't read back, leaving the interp error.
-            (let [lo (load (field ep lo)) hi (load (field ep hi)) esrc (load (field ep source)) ectxt (load (field ep ctxt))
+            (let [lo (load (field ep lo)) hi (load (field ep hi))
                   hk (ct-fold-hook)]
-              ; step 6: compiled-PRIMARY. When the engine hook is registered and no
-              ; compat flag opts out, the site goes straight to the compiled engine
-              ; — no interpreter, no cap-gap wording sniffing. A hook decline (null)
-              ; is a located hard error (nothing silently falls anywhere).
-              (if (and (icmp-ne (load (field hk isset)) 0) (ct-compiled-primary?))
-                  (let [r (call-ptr (load (field hk fp)) a inner cx)]
-                    (if (icmp-eq (cast i64 r) 0)
-                        (return-from :try (Err (derr-at lo hi "comptime: this expression's value cannot be materialized as a compile-time literal")))
-                      (match (load (cast (ptr (Result Expr Diag)) r))
-                        (Err [d2] (return-from :try (Err d2)))
-                        (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0)))))
-                ; legacy path (COIL_META=interp / COIL_STAGE_MACROS=0 / no hook):
-                ; interpreter first, compiled engine only on a capability gap.
-                (match (eval inner (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
-                  (Ok [fl]
-                    (match fl
-                      (FVal [v] (let [nb (try! (build-value a (new-cell v) lo hi esrc ectxt cx))] (store! (field ep kind) (load (field (box-expr a nb) kind))) 0))
-                      (FBrk [vv ll] (return-from :try (Err (derr "comptime: stray break/continue at top level"))))
-                      (FCont [ll]   (return-from :try (Err (derr "comptime: stray break/continue at top level"))))))
-                  (Err [d]
-                    (if (or (not (comptime-cap-gap? d)) (icmp-eq (load (field hk isset)) 0)) (return-from :try (Err d))
-                      (let [r (call-ptr (load (field hk fp)) a inner cx)]
-                        (if (icmp-eq (cast i64 r) 0) (return-from :try (Err d))
-                          (match (load (cast (ptr (Result Expr Diag)) r))
-                            (Err [d2] (return-from :try (Err d2)))
-                            (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0)))))))))))
+              ; the compiled engine is THE comptime evaluator (the tree-walking
+              ; interpreter is gone — decision 7). A hook decline (null) is a
+              ; located hard error; an unregistered hook means this compiler build
+              ; cannot evaluate comptime at all and says so.
+              (if (icmp-eq (load (field hk isset)) 0)
+                  (return-from :try (Err (derr-at lo hi "comptime: this compiler build has no comptime engine registered (compiler bug)")))
+                (let [r (call-ptr (load (field hk fp)) a inner cx)]
+                  (if (icmp-eq (cast i64 r) 0)
+                      (return-from :try (Err (derr-at lo hi "comptime: this expression's value cannot be materialized as a compile-time literal")))
+                    (match (load (cast (ptr (Result Expr Diag)) r))
+                      (Err [d2] (return-from :try (Err d2)))
+                      (Ok [lit] (do (store! (field ep kind) (load (field (box-expr a lit) kind))) 0))))))))
           (EInt   [_] 0) (EFloat [_] 0) (EBool [_] 0) (EStr [_] 0) (ECStr [_] 0) (EVar [_] 0)
           (EZeroed [_] 0) (ESizeOf [_] 0) (EAlignOf [_] 0) (EOffsetOf [_ _] 0) (EFnPtrOf [_] 0)
           (EAlloc [_ _] 0)
@@ -2083,43 +1633,6 @@
 ; ---- comptime::run_metas — evaluate each (meta …) form (checked/elaborated) via the
 ;      comptime interpreter to a Code value, splice a `(do …)` result, else push it.
 ;      Returns the generated top-level forms as raw Sexp (re-resolved by the caller).
-(defn run-metas [(checked (ptr Program)) (a (ptr Allocator))] (-> (Result (ptr (ArrayList Sexp)) Diag))
-  (let [cx (alloc-stack CtCtx)]
-    (store! (field cx a) a)
-    (store! (field cx fns) (load (field checked funcs)))
-    (store! (field cx structs) (load (field checked structs)))
-    (store! (field cx sums) (load (field checked sums)))
-    (store! (field cx variants) (all-variant-names (load (field checked sums)) a))
-    (store! (field cx traits) (load (field checked traits)))
-    (store! (field cx fuel) 50000000)
-    (store! (field cx depth) 0)
-    (store! (field cx gensym) 0)
-    (store! (field cx qmodule) (None [(slice u8)]))
-    (store! (field cx module_fns) (cast (ptr (ArrayList (slice u8))) 0))
-    (store! (field cx qimports) (cast (ptr ModImports) 0))
-    (store! (field cx qexports) (cast (ptr (ArrayList ExpEntry)) 0))
-    (store! (field cx prog) checked)
-    (let [ms (load (field checked metas)) n (al-len [Expr] (load ms)) (mut out) (al-new [Sexp] a)
-          (mut i) 0 (mut errf) (None [Diag])]
-      (loop (if (or (diag-some? (load errf)) (icmp-ge (load i) n)) (break)
-        (do (match (eval (al-elem [Expr] ms (load i)) (box-al [EnvBind] a (al-new [EnvBind] a)) cx)
-              (Err [d] (do (store! errf (Some d)) 0))
-              (Ok [fl]
-                (match fl
-                  (FVal [v]
-                    (if (not (is-ccode v)) (do (store! errf (Some (derr "meta: expression must produce Code (a quoted form)"))) 0)
-                      (let [sexp (ccode-of v)]
-                        (if (and (icmp-eq (sx-tag sexp) 6)
-                                 (let [it (sx-items sexp)] (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "do")))))
-                            (let [it (sx-items sexp) m (sx-len it) (mut j) 1]
-                              (loop (if (icmp-ge (load j) m) (break) (do (al-push! (mut out) (sx-at it (load j))) (store! j (iadd (load j) 1))))) 0)
-                          (do (al-push! (mut out) sexp) 0)))))
-                  (FBrk [vv ll] (do (store! errf (Some (derr "meta: stray control flow at top level"))) 0))
-                  (FCont [ll]   (do (store! errf (Some (derr "meta: stray control flow at top level"))) 0)))))
-            (store! i (iadd (load i) 1)))))
-      (match (load errf) (Some [d] (Err [(ptr (ArrayList Sexp)) Diag] d)) (None [] (Ok (box-al [Sexp] a (load out))))))))
-; whether any top-level tagged form in `s` is a (meta …) form (so the first resolve
-; is non-strict — undefined refs to not-yet-generated defns are expected).
 (defn ls-has-meta [(s (mut LS))] (-> bool)
   (let [a (load (field s a)) out (box-al [TaggedForm] a (load (field s out))) n (al-len [TaggedForm] (load out)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)
@@ -2149,37 +1662,3 @@
 ; src/lib.rs::elaborate_on_stack — the (meta …) staged-macro loop. `prog` is the
 ; NON-STRICT first resolve (metas non-empty): check the generator closure, run the
 ; metas, splice the generated forms, then STRICT re-resolve + final check.
-(defn elaborate-metas [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
-  (let [stackb (unwrap-ptr [SBox] (create [SBox] a))]
-    (store! (field stackb items) (al-new [(slice u8)] a))
-    (let [names (prog-fn-names prog a) ms (load (field prog metas)) nm (al-len [Expr] (load ms)) (mut i) 0]
-      (loop (if (icmp-ge (load i) nm) (break)
-        (do (collect-calls (al-elem [Expr] ms (load i)) names stackb) (store! i (iadd (load i) 1))))))
-    (let [wanted (closure-funcs prog (field stackb items) a) sub (closure-subprogram prog wanted a)]
-      (store! (field sub metas) (load (field prog metas)))
-      (let [checkls (alloc-stack LS)]
-        (store! (field checkls a) a)
-        (store! (field checkls out) (al-new [TaggedForm] a))
-        (store! (field checkls loaded) (al-new [(slice u8)] a))
-        (store! (field checkls imports) (al-new [ImpEntry] a))
-        (store! (field checkls exports) (al-new [ExpEntry] a))
-        ; checks a sub-program with no resolve pass — null the poison list (see expander).
-        (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
-        (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
-        (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
-        (match (check-program a sub (mut checkls))
-          (Err [d] (Err [(ptr Program) Diag] d))
-          (Ok [checked]
-            (match (run-metas checked a)
-              (Err [d] (Err [(ptr Program) Diag] d))
-              (Ok [gen]
-                (do (splice-metas (mut s) gen a)
-                    (match (resolve-program a (mut s) true false)
-                      (Err [d] (Err [(ptr Program) Diag] d))
-                      (Ok [prog2] (check-program a prog2 (mut s)))))))))))))
-; src/lib.rs::elaborate — check the resolved program, running the (meta …) staged-macro
-; loop first when there are meta forms; returns the final checked/elaborated Program.
-(defn frontend-check [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
-  (if (icmp-eq (al-len [Expr] (load (field prog metas))) 0)
-      (check-program a prog (mut s))
-    (elaborate-metas a (mut s) prog)))

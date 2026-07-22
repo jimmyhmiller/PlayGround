@@ -284,25 +284,21 @@
                           (store! k (iadd (load k) 1)))))
                   (finish-macro callee (box-al [EnvBind] a (load env)) cx a fn-name)))))))))
 (defn finish-macro [(callee (ptr Func)) (env (ptr (ArrayList EnvBind))) (cx (ptr CtCtx)) (a (ptr Allocator)) (fn-name (slice u8))] (-> (Result Sexp Diag))
-  ; compiled engine: the env (param -> CCode arg, variadic already packed) IS the
-  ; argument list — run the dylib entry instead of interpreting the body.
+  ; The compiled engine is THE macro engine (the tree-walking interpreter is gone —
+  ; decision 7). The env (param -> CCode arg, variadic already packed) IS the
+  ; argument list. A miss stages this qual on demand (pruned closure -> standalone
+  ; check -> additive engine build); a macro that cannot be staged is a hard error.
+  ; `callee` stays in the signature for the call sites' sake — the body itself now
+  ; lives only in the engine's compiled form.
   (let [e (meta-engine-entry fn-name)]
     (if (icmp-ne (cast i64 e) 0)
         (meta-engine-run-env a e cx env)
-      ; step 5 Phase C: under the compiled engine with staging on, an engine miss is
-      ; a HARD ERROR, not a silent reroute to the interpreter — the staging prepass
-      ; (re-run every tower round) is expected to have compiled every macro that is
-      ; actually called. COIL_META=interp and COIL_STAGE_MACROS=0 both keep the
-      ; interpreter path (parity.sh's oracle and the soak kill switch).
-      (if (and (meta-compiled?) (meta-staged?))
-          (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' is not compiled into the metaprogram engine (staging could not build it standalone; COIL_STAGE_MACROS=0 restores the interpreter fallback while this is investigated)")))
-      (match (eval-seq (load (field callee body)) env cx)
-        (Err [d] (Err [Sexp Diag] d))
-        (Ok [fl]
-          (match fl
-            (FVal [v] (if (is-ccode v) (Ok [Sexp Diag] (ccode-of v)) (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' did not return Code")))))
-            (FBrk [vv ll] (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow"))))
-            (FCont [ll]   (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "': stray control flow")))))))))))
+      (if (stage-one-macro! fn-name)
+          (let [e2 (meta-engine-entry fn-name)]
+            (if (icmp-ne (cast i64 e2) 0)
+                (meta-engine-run-env a e2 cx env)
+              (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' staged but is missing from the engine (compiler bug)")))))
+        (Err [Sexp Diag] (derr (sconcat3 a "macro '" fn-name "' could not be compiled into the metaprogram engine")))))))
 ; A macro-BODY error comes back with a dummy span — the code-op derrs (`str-bytes
 ; expects a string`, `error …`, arity mismatches) carry none, so it renders as a bare
 ; internal message that names, e.g., `str-bytes`, with no source. Point it at the macro
@@ -678,56 +674,75 @@
             (store! i (iadd (load i) 1)))))
       (Ok [i64 Diag] (load (field tc hit)))))))
 
-; ---- per-qual macro STAGING prepass (interp deletion step 5, Phase B) -------------
-; For each macro qual not yet served by the engine: build its PRUNED closure
-; sub-program (impls/consts dropped — see closure-funcs-pruned), check it
-; standalone, and if it checks, compile it into the engine ADDITIVELY. finish-macro
-; then serves those macros compiled during the tower rounds, instead of eval-seq.
-; BEST-EFFORT by design: any per-qual failure leaves that qual to the ordinary
-; batch path, so behavior can only move expansions from the interpreter to the
-; engine, never change what expansion produces (both engines are the parity.sh
-; contract). Runs on its OWN resolve of the sub-forms so its check-program passes
-; never touch the Program the batch path checks (closure-subprogram bodies are
-; SHARED with their program — see docs/INTERP_DELETION.md "Landmines").
-; Gated by COIL_STAGE_MACROS=1 (metaengine.coil meta-staged?) while it soaks.
-(defn stage-macros-prepass [(s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (a (ptr Allocator))] (-> i64)
-  (let [subls (alloc-stack LS)]
-    (store! (field subls a) a)
-    (store! (field subls out) (load sub-forms))
-    (store! (field subls loaded) (al-new [(slice u8)] a))
-    (store! (field subls imports) (load (field s imports)))
-    (store! (field subls exports) (load (field s exports)))
-    (match (resolve-program a (mut subls) false true)
-      (Err [d] 0)                          ; the batch path will surface it
-      (Ok [mctx]
-        (let [quals (code-sig-funcs mctx a) nq (al-len [(slice u8)] (load quals)) (mut i) 0]
-          (loop (if (icmp-ge (load i) nq) (break)
-            (do (let [q (al-get [(slice u8)] (load quals) (load i))]
-                  (if (icmp-ne (cast i64 (meta-engine-entry q)) 0) 0   ; already compiled
-                    (let [(mut seedl) (al-new [(slice u8)] a)]
-                      (al-push! (mut seedl) q)
-                      (let [seeds (meta-shim-seeds a mctx (box-al [(slice u8)] a (load seedl)))
-                            wanted (closure-funcs-pruned mctx seeds a)
-                            sub (closure-subprogram-pruned mctx wanted a)
-                            checkls (alloc-stack LS)
-                            (mut squal) (al-new [(slice u8)] a)]
-                        (al-push! (mut squal) q)
-                        (store! (field checkls a) a)
-                        (store! (field checkls out) (al-new [TaggedForm] a))
-                        (store! (field checkls loaded) (al-new [(slice u8)] a))
-                        (store! (field checkls imports) (al-new [ImpEntry] a))
-                        (store! (field checkls exports) (al-new [ExpEntry] a))
-                        (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
-                        (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
-                        (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
-                        (match (check-program a sub (mut checkls))
-                          (Ok [checked]
-                            (match (meta-engine-setup a checked (box-al [(slice u8)] a (load squal)))
-                              (Some [d] 0)   ; best-effort: unstaged, batch path owns it
-                              (None [] 0)))
-                          (Err [d] 0))))))
-                (store! i (iadd (load i) 1)))))
-          0)))))
+; ---- LAZY per-qual macro STAGING (interp deletion step 5, Phase B) ----------------
+; The engine is grown ON DEMAND: stage3-round only RECORDS the round's sub-forms in
+; a box (free), and the first time finish-macro misses a qual — which for almost
+; every program is NEVER, and for the bootstrap is exactly the two dbg-slice-*
+; tower expansions — stage-one-macro! builds THAT qual's pruned closure
+; (impls/consts dropped, see closure-funcs-pruned), checks it standalone, and
+; compiles it into the engine additively. An eager prepass was measured 2.7x slower
+; cold across the corpus (one dylib per qual per file, ~20x the cc forks) for zero
+; benefit on programs whose batch check passes round 0 — i.e. nearly all of them.
+; The private resolve of the recorded sub-forms happens once per round, only on the
+; first miss, so its check-program passes never touch the Program the batch path
+; checks (closure-subprogram bodies are SHARED — see INTERP_DELETION.md Landmines).
+(defstruct StageBox
+  [(isset i64) (resolved i64)
+   (sub-forms (ptr (ArrayList TaggedForm)))
+   (imports (ArrayList ImpEntry)) (exports (ArrayList ExpEntry))
+   (mctx (ptr Program)) (a (ptr Allocator))])
+(defn stage-box [] (-> (ptr StageBox)) (alloc-static StageBox))
+(defn stage-box-set! [(s (mut LS)) (sub-forms (ptr (ArrayList TaggedForm))) (a (ptr Allocator))] (-> i64)
+  (let [b (stage-box)]
+    (store! (field b sub-forms) sub-forms)
+    (store! (field b imports) (load (field s imports)))
+    (store! (field b exports) (load (field s exports)))
+    (store! (field b a) a)
+    (store! (field b resolved) 0)
+    (store! (field b mctx) (cast (ptr Program) 0))
+    (store! (field b isset) 1) 0))
+; resolve the recorded forms once per round (memoized until the next stage-box-set!)
+(defn stage-box-mctx [] (-> (ptr Program))
+  (let [b (stage-box)]
+    (if (icmp-eq (load (field b isset)) 0) (cast (ptr Program) 0)
+      (if (icmp-ne (load (field b resolved)) 0) (load (field b mctx))
+        (let [a (load (field b a)) subls (alloc-stack LS)]
+          (store! (field subls a) a)
+          (store! (field subls out) (load (load (field b sub-forms))))
+          (store! (field subls loaded) (al-new [(slice u8)] a))
+          (store! (field subls imports) (load (field b imports)))
+          (store! (field subls exports) (load (field b exports)))
+          (store! (field b resolved) 1)
+          (match (resolve-program a (mut subls) false true)
+            (Err [d] (do (store! (field b mctx) (cast (ptr Program) 0)) (cast (ptr Program) 0)))
+            (Ok [mctx] (do (store! (field b mctx) mctx) mctx))))))))
+; stage exactly one qual: pruned closure -> standalone check -> additive engine
+; build. false = could not stage (caller decides what that means).
+(defn stage-one-macro! [(q (slice u8))] (-> bool)
+  (let [mctx (stage-box-mctx)]
+    (if (icmp-eq (cast i64 mctx) 0) false
+      (let [a (load (field (stage-box) a)) (mut seedl) (al-new [(slice u8)] a)]
+        (al-push! (mut seedl) q)
+        (let [seeds (meta-shim-seeds a mctx (box-al [(slice u8)] a (load seedl)))
+              wanted (closure-funcs-pruned mctx seeds a)
+              sub (closure-subprogram-pruned mctx wanted a)
+              checkls (alloc-stack LS)
+              (mut squal) (al-new [(slice u8)] a)]
+          (al-push! (mut squal) q)
+          (store! (field checkls a) a)
+          (store! (field checkls out) (al-new [TaggedForm] a))
+          (store! (field checkls loaded) (al-new [(slice u8)] a))
+          (store! (field checkls imports) (al-new [ImpEntry] a))
+          (store! (field checkls exports) (al-new [ExpEntry] a))
+          (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
+          (store! (field checkls resolve_diags) (cast (ptr (ArrayList Diag)) 0))
+          (store! (field checkls resolve_poisoned) (cast (ptr (ArrayList (slice u8))) 0))
+          (match (check-program a sub (mut checkls))
+            (Ok [checked]
+              (match (meta-engine-setup a checked (box-al [(slice u8)] a (load squal)))
+                (Some [d] false)
+                (None [] true)))
+            (Err [d] false)))))))
 
 (defn expand-stage3 [(s (mut LS))] (-> (Result i64 Diag))
   (let [a (load (field s a)) out-forms (box-al [TaggedForm] a (load (field s out)))]
@@ -762,15 +777,13 @@
       (Err [d] (Err [i64 Diag] d))
       (Ok [macroctx]
         (let [quals (code-sig-funcs macroctx a)]
-          ; staged engine construction: compile every standalone-checkable macro
-          ; BEFORE the all-or-nothing batch check, so the tower's recovery
-          ; expansions run compiled instead of falling back to eval-seq. Runs every
-          ; ROUND (not just round 0): a macro whose pruned closure still held an
-          ; unexpanded macro call in round N often checks clean in round N+1, after
-          ; the tower expanded that call — so the engine converges toward total.
-          ; Already-compiled quals are skipped, so later rounds are cheap.
-          (if (and (meta-staged?) (meta-compiled?))
-              (stage-macros-prepass (mut s) sub-forms a)
+          ; record this round's forms for the LAZY stager: finish-macro stages a
+          ; qual on its first miss (see stage-one-macro!). Recording is free; the
+          ; per-round refresh keeps the convergence property (a qual unstageable in
+          ; round N often stages in round N+1, after the tower expanded a call in
+          ; one of its callees).
+          (if (meta-compiled?)
+              (stage-box-set! (mut s) sub-forms a)
             0)
           (if (icmp-eq (al-len [(slice u8)] (load quals)) 0) (Ok [i64 Diag] 0)
             ; PARSE-level tower: a defn the tolerant resolve SKIPPED may contain a
@@ -1055,15 +1068,12 @@
                                 (Err [d] (Err [(ptr Program) Diag] d))
                                 (Ok [prog2] (check-program a prog2 (mut s)))))))))))))))))))
 
-; route the (meta …) elaboration: compiled engine when it is the active engine
-; (default), the interpreter path otherwise (COIL_META=interp / COIL_STAGE_MACROS=0
-; keep the oracle and the soak kill switch alive until step 7).
+; the (meta …) elaboration: no metas = plain check; metas = the compiled engine
+; (the interpreter path is gone — decision 7).
 (defn frontend-check-routed [(a (ptr Allocator)) (s (mut LS)) (prog (ptr Program))] (-> (Result (ptr Program) Diag))
   (if (icmp-eq (al-len [Expr] (load (field prog metas))) 0)
-      (frontend-check a (mut s) prog)
-    (if (and (meta-compiled?) (meta-staged?))
-        (elaborate-metas-compiled a (mut s) prog)
-      (frontend-check a (mut s) prog))))
+      (check-program a prog (mut s))
+    (elaborate-metas-compiled a (mut s) prog)))
 
 (defn strict-resolve-check [(a (ptr Allocator)) (s (mut LS))] (-> (Result (ptr Program) Diag))
   (match (resolve-program a (mut s) (not (ls-has-meta (mut s))) false)

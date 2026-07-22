@@ -1,6 +1,6 @@
 ; selfhost/src/metashim.coil — the COMPILED-metaprogram boundary shim.
 ;
-; When the compiled metaprogram engine is on (COIL_META=compiled), expand-stage3
+; expand-stage3 runs every metaprogram on the compiled engine;
 ; injects this module's forms into the metaprogram sub-program, and metalower.coil
 ; rewrites every ECodeOp/EQuote/EQuasi node into a plain call to one of the mp-*
 ; functions below. The metaprogram is then compiled to a dylib like any other

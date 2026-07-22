@@ -746,12 +746,11 @@
                     (TCode [] (cte-box a (Err [Expr Diag] (derr "comptime: a Code value can't be used as a runtime value (it's only meaningful at compile time)"))))
                     (_ (cast (ptr i8) 0)))
                 ; clear any nested comptime in E itself first (via the same fold).
-                ; Compiled-primary: a nested fold error must SURFACE (declining here
-                ; would mask a real diagnostic — e.g. a nested division by zero —
-                ; behind the generic materialization error). Legacy interp-first:
-                ; decline as before, the interpreter's original error stands.
+                ; A nested fold error must SURFACE — declining here would mask a
+                ; real diagnostic (e.g. a nested division by zero) behind the
+                ; generic materialization error.
                 (match (fold-expr inner cx)
-                  (Err [de] (if (ct-compiled-primary?) (cte-box a (Err [Expr Diag] de)) (cast (ptr i8) 0)))
+                  (Err [de] (cte-box a (Err [Expr Diag] de)))
                   (Ok [_]
                     (let [names (prog-fn-names prog a)
                           stackb (unwrap-ptr [SBox] (create [SBox] a))]
@@ -778,10 +777,7 @@
                                             (cte-run a sub cx inner kind tp)))]
                                 (do (cte-restore! saved) res)))))))))))))))))
 
-; wire the hook into the interpreter's fold pass (called by main / main_a64 at startup).
-; Also decides PRIMACY (step 6): the compiled engine is the first and only comptime
-; evaluator unless a compat flag opts out (COIL_META=interp keeps the interpreter as
-; the oracle, COIL_STAGE_MACROS=0 is the staging soak kill switch; both die at step 7).
+; wire the hook into the fold pass (called by main / main_a64 at startup). The
+; compiled engine is the ONLY comptime evaluator (decision 7).
 (defn register-comptime-fold! [] (-> i64)
-  (set-comptime-fold-hook! (fnptr-of comptime-fold-one))
-  (ct-set-fold-primary! (and (meta-compiled?) (meta-staged?))))
+  (set-comptime-fold-hook! (fnptr-of comptime-fold-one)))

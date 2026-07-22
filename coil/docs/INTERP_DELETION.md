@@ -1,4 +1,25 @@
-# Deleting the comptime interpreter — status, architecture, and the plan to finish
+# Deleting the comptime interpreter — ✅ DONE 2026-07-22
+
+**The deletion is complete.** `comptime.coil`'s tree-walker (`eval`/`eval-seq`/
+`eval-args`, the quasiquote evaluator, 14 interp-only helpers — ~650 lines), the
+`COIL_META` and `COIL_STAGE_MACROS` flags, `parity.sh`, and the guide's two-engines
+section are gone. The compiled engine is the only engine for macros, `(meta …)`
+generators, checkers/transforms, and `(comptime …)`/`(const …)` folding. Macro
+staging is LAZY (an engine miss stages that one qual on demand; unstageable = hard
+error), measured to old-path performance: self-build equal-or-faster, corpus warm
+within noise, and emitted IR byte-identical pre-vs-post deletion across the corpus.
+The nollvm-verification precondition was consciously WAIVED (its rebootstrap was
+already broken by the stale seed, independent of this work); `main_a64.coil` still
+typechecks, and its engine path should be gated when the seed is refreshed.
+Deliberate semantic changes, all located errors instead of silent behavior: pointer
+results can't be materialized as compile-time constants; a non-terminating comptime
+now hangs (fuel died with the interpreter) exactly like a non-terminating macro
+always did under the engine. `docs/DECISIONS.md` decision 7 is DONE. The rest of
+this file is the historical record of how it got there.
+
+---
+
+# (historical) status, architecture, and the plan to finish
 
 _Decision 7 of `docs/DECISIONS.md` ("delete the comptime interpreter"), written up so the
 remaining work can be executed as a focused session. This is the one reviewed item still

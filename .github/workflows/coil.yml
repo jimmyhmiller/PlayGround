@@ -5,11 +5,9 @@ name: coil
 # byte-identical object; gates: IR byte-exact vs the blessed snapshots, programs
 # run identically, CLI contract).
 #
-# parity.sh (interp vs compiled macro engine, byte-identical IR) has exactly TWO
-# known divergences (see coil/docs/INTERP_DELETION.md "Engine-parity divergences").
-# CI pins that set — a NEW divergence fails, fixing one fails until the pin is
-# updated. Both jobs also run the COIL_STAGE_MACROS=1 staging gate (interp
-# deletion step 5) to prove it changes nothing observable.
+# The compiled metaprogram engine is the ONLY engine (the comptime interpreter was
+# deleted — decision 7), so the old parity/staging matrix is retired; the gates and
+# fixpoints above are the whole proof, plus meta_stage3 as the (meta …) smoke test.
 
 on:
   push:
@@ -60,26 +58,9 @@ jobs:
           ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-diag $LF >/dev/null
           ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-diag --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
           ./selfhost/oracle/gate-cli.sh /tmp/coil-diag 2>&1 | grep -B1 -A3 "FAIL" | head -40 || true
-      - name: Engine parity (default) — pinned to the 2 known divergences
+      - name: meta_stage3 (compiled (meta …) elaboration)
         run: |
-          ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity.txt || true
-          grep -q "RC-DIFF lib/assert.coil" /tmp/parity.txt
-          grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity.txt
-          test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity.txt)" = 2
-      - name: Engine parity (COIL_STAGE_MACROS=1) — same pin
-        run: |
-          COIL_STAGE_MACROS=1 ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci | tee /tmp/parity2.txt || true
-          grep -q "RC-DIFF lib/assert.coil" /tmp/parity2.txt
-          grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity2.txt
-          test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity2.txt)" = 2
-      - name: Staged self-build is byte-identical to default
-        run: |
-          LF=$(./selfhost/llvm-link-flags.sh dynamic)
-          /tmp/coil-ci build selfhost/src/main.coil -o /tmp/ci-off $LF
-          COIL_STAGE_MACROS=1 /tmp/coil-ci build selfhost/src/main.coil -o /tmp/ci-on $LF
-          cmp /tmp/ci-off.o /tmp/ci-on.o
-      - name: gate-cli under the staging gate
-        run: COIL_STAGE_MACROS=1 ./selfhost/oracle/gate-cli.sh /tmp/coil-ci
+          /tmp/coil-ci run selfhost/oracle/features/meta_stage3.coil; test $? = 42
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -93,18 +74,6 @@ jobs:
           sudo apt-get install -y llvm-21-dev
       - name: Rebootstrap (seed -> stage3, fixpoint, linux gate-full + gate-run + gate-cli)
         run: ./selfhost/rebootstrap-linux.sh /tmp/coil-ci-linux
-      - name: Engine parity (default + staged) — pinned to the 2 known divergences
+      - name: meta_stage3 (compiled (meta …) elaboration)
         run: |
-          for env_prefix in "" "COIL_STAGE_MACROS=1"; do
-            env $env_prefix ./metaprog-poc/compile-and-run/parity.sh /tmp/coil-ci-linux | tee /tmp/parity.txt || true
-            grep -q "RC-DIFF lib/assert.coil" /tmp/parity.txt
-            grep -q "DIAG-DIFF metaprog-poc/minrep_test.coil" /tmp/parity.txt
-            test "$(grep -cE '^(RC|DIAG|IR)-DIFF' /tmp/parity.txt)" = 2
-          done
-      - name: Staged self-build is byte-identical to default
-        run: |
-          libdir="$(/usr/lib/llvm-21/bin/llvm-config --libdir)"
-          LF="--link-flag -L$libdir --link-flag -Wl,-rpath,$libdir --link-flag -lLLVM --link-flag -lstdc++ --link-flag -lm --link-flag -lpthread --link-flag -ldl"
-          /tmp/coil-ci-linux build selfhost/src/main.coil -o /tmp/ci-off $LF
-          COIL_STAGE_MACROS=1 /tmp/coil-ci-linux build selfhost/src/main.coil -o /tmp/ci-on $LF
-          cmp /tmp/ci-off.o /tmp/ci-on.o
+          /tmp/coil-ci-linux run selfhost/oracle/features/meta_stage3.coil; test $? = 42

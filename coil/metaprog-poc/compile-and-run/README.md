@@ -88,7 +88,8 @@ into a dylib and runs every macro/checker/transform entry as native code. The
 interpreter stays the default engine and the oracle.
 
     COIL_META=compiled coil run app.coil        # any program; same output
-    metaprog-poc/compile-and-run/parity.sh ./coil   # the proof
+    (parity.sh is retired: the interpreter was deleted — decision 7 — and the
+    compiled engine is the only engine; gate-full/gate-run/gate-cli are the proof)
 
 The pieces (all in `selfhost/src/`):
 

@@ -1,8 +1,8 @@
 ; selfhost/src/metaengine.coil — the compiled metaprogram ENGINE.
 ;
-; With COIL_META=compiled, expand-stage3 (expander.coil) uses this module to turn
-; the checked metaprogram sub-program into a dylib and run metaprogram entries as
-; native code instead of interpreting them:
+; expand-stage3 (expander.coil) uses this module to turn the checked metaprogram
+; sub-program into a dylib and run metaprogram entries as native code. It is THE
+; engine — the tree-walking interpreter was deleted (decision 7):
 ;
 ;   metalower-program  (metalower.coil: Code -> (ptr i8), code ops -> metashim calls)
 ;   -> monomorphize -> the injected backend object builder -> cc -dynamiclib
@@ -11,9 +11,8 @@
 ;      metahost.coil exports resolve) -> dlsym each coil_mp_<k> entry.
 ;
 ; Every entry call runs on ITS OWN pthread: metahost's mh-halt implements
-; `(error ...)` (and every interpreter-Err) as record-the-Diag + pthread_exit, so
-; the pipeline thread just joins, reads the Diag, and reports it exactly like the
-; interpreter path. The interpreter stays available (flag off) as the oracle.
+; `(error ...)` as record-the-Diag + pthread_exit, so the pipeline thread just
+; joins, reads the Diag, and reports it as a located build error.
 (module metaengine)
 
 (import "alloc.coil" :use *)
@@ -96,17 +95,13 @@
 (defn me-dylib-undef-flag [] (-> (slice u8)) (if (me-host-linux?) "" " -Wl,-undefined,dynamic_lookup"))
 
 ; ---- the engine flag ------------------------------------------------------------
-; DEFAULT = compiled, whenever a backend object builder is registered (main.coil
-; registers the LLVM one; the LLVM-free main_a64.coil registers none — its native
-; backend has no export-c yet, so it stays on the interpreter by default and an
-; explicit COIL_META=compiled fails loudly at engine setup instead of degrading).
-; COIL_META=interp opts back into the interpreter; COIL_META=compiled forces the
-; engine. Both engines are byte-identical (metaprog-poc/compile-and-run/parity.sh).
+; True when a backend object builder is registered (main.coil registers the LLVM
+; one; main_a64.coil registers the arm64 one since mac-12). The compiled engine is
+; THE engine — the tree-walking interpreter and its COIL_META flag are gone
+; (decision 7). A build with no registered builder cannot expand macros and fails
+; loudly at engine setup.
 (defn meta-compiled? [] (-> bool)
-  (let [v (getenv c"COIL_META")]
-    (if (icmp-ne (cast i64 v) 0)
-        (str-eq (cstr->slice v) "compiled")
-      (icmp-ne (load (field (meta-build-box) isset)) 0))))
+  (icmp-ne (load (field (meta-build-box) isset)) 0))
 
 ; ---- engine state ----------------------------------------------------------------
 ; An entry carries ITS build's quasiquote registry: the engine grows ADDITIVELY
@@ -346,7 +341,7 @@
   (try (do
     (let [bb (meta-build-box)]
       (if (icmp-eq (load (field bb isset)) 0)
-          (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: this compiler build cannot compile metaprograms (the arm64-only compiler has no export-c yet) — unset COIL_META to use the interpreter"))) 0)
+          (return-from :try (Err [(ptr i8) Diag] (derr "metaengine: this compiler build has no backend object builder registered, so it cannot compile metaprograms (compiler bug)"))) 0)
       (let [mp (try! (monomorphize a lowered))]
         (sort-mono-program a mp)
         (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))
@@ -497,11 +492,3 @@
         (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
       (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))
 
-; ---- per-qual macro STAGING (interp deletion step 5, Phase B) --------------------
-; DEFAULT ON since 2026-07-21: emitted IR proven byte-identical staging on/off over
-; the whole corpus, the staged self-build .o byte-identical, and fixpoint + gates +
-; parity green on BOTH platforms (macOS arm64 via CI, Linux x86-64 locally + CI).
-; COIL_STAGE_MACROS=0 is the soak-period kill switch; it goes away with step 7.
-(defn meta-staged? [] (-> bool)
-  (let [v (getenv c"COIL_STAGE_MACROS")]
-    (if (icmp-eq (cast i64 v) 0) true (not (str-eq (cstr->slice v) "0")))))

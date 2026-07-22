@@ -419,9 +419,10 @@ transforms before checkers. To apply one without editing the source:
 
     coil run app.coil --use lint.coil       # repeatable; works on run and build
 
-Metaprograms compile to native code by default, so they can use the whole language —
-generics, collections, FFI, allocation. `COIL_META=interp` selects the interpreter
-instead (no generics/FFI/raw memory; it exists as the parity oracle).
+Metaprograms compile to native code — always. Macros, `(meta …)` generators,
+checkers, transforms, and `(comptime E)` / `(const …)` folding all run on the one
+compiled engine with the whole language available: generics, collections, FFI,
+allocation. (The old tree-walking interpreter and its `COIL_META` flag are gone.)
 
 ## I/O & FFI
 

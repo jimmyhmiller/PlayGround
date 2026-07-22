@@ -168,7 +168,17 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    2) ✅ DONE. `export-c` on the arm64 backend → `main_a64` registers a builder → the compiled
       engine becomes available on the LLVM-free compiler too (the last dependency blocking the
       deletion; the LLVM-free compiler stops being secretly weaker).
-   3) Delete `comptime.coil`'s evaluator, the `COIL_META` flag, parity.sh, and guide.coil:426.
+   3) ✅ DONE (2026-07-22). `comptime.coil`'s evaluator (`eval`/`eval-seq`/`eval-args`, the
+      quasiquote evaluator, and 14 interp-only helpers), the `COIL_META` flag, parity.sh, and
+      the guide's two-engines section are all deleted. Before the deletion the compiled engine
+      was made PRIMARY everywhere and proven equivalent while the interpreter still existed:
+      macros via lazy per-qual staging (an engine miss stages on demand; unstageable = hard
+      error), `(meta …)` via synthetic engine entries (byte-identical IR), comptime/const via
+      the fold hook (gate-full byte-exact; div/rem-by-zero guarded with the interpreter's
+      wording). Perf was measured old-vs-new before deleting: self-build equal-or-faster,
+      corpus warm within noise (the eager-staging 2.7x cold regression was found by
+      measurement and fixed with lazy staging first). One deliberate semantic tightening:
+      comptime results holding POINTERS are a located error, not a baked process address.
    The deletion CANNOT come first — steps 1–2 remove what still depends on it.
    STEP 2 OUTCOME: the arm64 backend is AAPCS64-native, so `(export-c …)` needs no C-ABI thunk —
    an exported function is emitted directly under its C symbol with external linkage
