@@ -22,7 +22,7 @@ Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 | swift-calc | silent-fallback BUG + out-of-scope gap | raw `@tailwind` v3 directives shipped uncompiled with exit 0 — must be a hard error; PostCSS/Tailwind-v3 pipeline itself likely not worth building |
 | app-fire-calculator | 2 gaps | Tailwind v4 global entry; `virtual:pwa-register/react` (vite-plugin-pwa) |
 | the-last-pawn | ONE gap left (sass landed: 11 `*.module.scss` + `additionalData` `@use` theme compile; 479/480 computed properties match the reference) | public-rooted URLs (`/fonts/...` in css `url()`, `/favicon-*.png` in index.html) are not rewritten with the non-root `base` the way Vite does — the remaining 404s and the single 2px style delta (font fallback) all trace to it |
-| wall-go | 4 gaps | non-root base; Tailwind v4 entry; root-relative alias target `/src/*` not resolved against project root; `new Worker(new URL(...))` |
+| wall-go | **WORKING** — builds, renders, and the emitted AI worker bundle boots as a real module worker (zero console errors; only failure is offline Google Analytics, identical in the reference) | was: non-root base (landed), root-relative alias (landed), Tailwind `@custom-variant` + top-level `@apply`/`@keyframes`/`@media` passthrough (landed), module workers via `new Worker(new URL(...))` — bundled as self-contained `assets/` files, deduped per entry, placeholder-substituted URLs, worker-asset graphs hard-error (landed) |
 
 ## Fix queue (ordered)
 

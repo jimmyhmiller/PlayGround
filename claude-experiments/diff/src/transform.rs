@@ -45,6 +45,13 @@ pub struct TransformResult {
     /// `require`, `__filename`, `__dirname`). Such a module needs the factory
     /// wrapper that defines them and must not be scope-hoisted into ESM output.
     pub uses_cjs_globals: bool,
+    /// Module-worker entries this module creates via
+    /// `new Worker(new URL('<specifier>', import.meta.url))`, as
+    /// `(placeholder_key, specifier)`. The placeholder (already substituted
+    /// into the code) is `__diffpack_worker__<key>__`; the bundler resolves
+    /// the specifier and the emit replaces the placeholder with the emitted
+    /// worker bundle's public URL.
+    pub workers: Vec<(String, String)>,
 }
 
 /// The export/import structure of a module, at the granularity the generic
@@ -159,6 +166,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            workers: Vec::new(),
         };
     }
 
@@ -189,6 +197,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                workers: Vec::new(),
             };
         }
     };
@@ -258,6 +267,20 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
     // rewritten from the source; whatever is left survives into the output).
     let mut format_scan = FormatSensitiveScan::default();
     format_scan.visit_program(&program);
+
+    // `new Worker(new URL('./x', import.meta.url))` (module workers): the URL's
+    // string literal is rewritten to a deterministic placeholder and the
+    // specifier recorded; the bundler resolves it, bundles the worker entry as
+    // its own self-contained file under `assets/`, and the emit substitutes the
+    // real public URL. Left alone, the raw specifier would ship and 404 at
+    // runtime — a silently broken feature.
+    let mut worker_rewriter = WorkerRewriter {
+        builder: AstBuilder::new(&allocator),
+        importer: path,
+        workers: Vec::new(),
+    };
+    worker_rewriter.visit_program(&mut program);
+    let workers = worker_rewriter.workers;
     // A free reference to a CommonJS ambient (`exports`, `module`, ...) means the
     // module's code only makes sense inside a CJS-style wrapper. The registry
     // runtime's factories provide those; the flat ESM concatenation does not, so
@@ -281,6 +304,7 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
         uses_top_level_await: format_scan.top_level_await,
         uses_import_meta: format_scan.import_meta,
         uses_cjs_globals,
+        workers,
     }
 }
 
@@ -335,6 +359,62 @@ impl<'a> Visit<'a> for FormatSensitiveScan {
             self.import_meta = true;
         }
         walk::walk_meta_property(self, meta);
+    }
+}
+
+/// The deterministic key for one worker creation site: importer path +
+/// specifier, hashed. Both the placeholder in the code and the emitted worker
+/// file name derive from it, so they agree by construction.
+pub fn worker_key(importer: &Path, specifier: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    importer.hash(&mut hasher);
+    specifier.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Rewrites `new Worker(new URL('<lit>', import.meta.url), ...)` (and
+/// `SharedWorker`) URL literals to `__diffpack_worker__<key>__` placeholders,
+/// recording `(key, specifier)`.
+struct WorkerRewriter<'a, 'p> {
+    builder: AstBuilder<'a>,
+    importer: &'p Path,
+    workers: Vec<(String, String)>,
+}
+
+impl<'a> VisitMut<'a> for WorkerRewriter<'a, '_> {
+    fn visit_new_expression(&mut self, new_expression: &mut oxc_ast::ast::NewExpression<'a>) {
+        let is_worker = matches!(
+            &new_expression.callee,
+            oxc_ast::ast::Expression::Identifier(identifier)
+                if identifier.name == "Worker" || identifier.name == "SharedWorker"
+        );
+        if is_worker
+            && let Some(oxc_ast::ast::Argument::NewExpression(url)) =
+                new_expression.arguments.first_mut()
+            && matches!(
+                &url.callee,
+                oxc_ast::ast::Expression::Identifier(identifier) if identifier.name == "URL"
+            )
+            && url.arguments.len() == 2
+            && matches!(
+                url.arguments.get(1).and_then(|argument| argument.as_expression()),
+                Some(oxc_ast::ast::Expression::StaticMemberExpression(member))
+                    if member.property.name == "url"
+            )
+            && let Some(oxc_ast::ast::Argument::StringLiteral(literal)) = url.arguments.first_mut()
+        {
+            let specifier = literal.value.to_string();
+            let key = worker_key(self.importer, &specifier);
+            literal.value = oxc_allocator::FromIn::from_in(
+                format!("__diffpack_worker__{key}__"),
+                self.builder.allocator,
+            );
+            literal.raw = None;
+            self.workers.push((key, specifier));
+            return;
+        }
+        walk_mut::walk_new_expression(self, new_expression);
     }
 }
 

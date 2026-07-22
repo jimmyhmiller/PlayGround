@@ -80,6 +80,8 @@ struct ModuleState {
     /// The module freely references a CommonJS ambient (`exports`, `module`,
     /// ...), so it must render through the factory runtime in ESM output.
     uses_cjs_globals: bool,
+    /// Module-worker entries: `(placeholder_key, resolved_entry_path)`.
+    workers: Vec<(String, PathBuf)>,
 }
 
 struct LoadedModule {
@@ -101,6 +103,10 @@ struct LoadedModule {
     uses_top_level_await: bool,
     uses_import_meta: bool,
     uses_cjs_globals: bool,
+    /// Module-worker entries this module creates: `(placeholder_key,
+    /// resolved_entry_path)`. Emitted as self-contained bundles under
+    /// `assets/`; the key ties the code placeholder to the emitted file.
+    workers: Vec<(String, PathBuf)>,
 }
 
 /// A static asset (e.g. a `?url` import target) that must be content-hashed and
@@ -634,6 +640,10 @@ pub struct Bundler {
     /// across incremental re-emits within one bundler, so a leaf edit re-renders
     /// only the chunk that changed and reuses every other chunk's bytes.
     render_cache: Mutex<RenderCache>,
+    /// The build configuration this bundler was constructed with, kept so a
+    /// module-worker entry can be bundled with the SAME config as a nested,
+    /// self-contained build at emit time.
+    config: BuildConfig,
 }
 
 impl Bundler {
@@ -693,6 +703,7 @@ impl Bundler {
             modules: Vec::new(),
             target: config.target,
             hmr: config.hmr,
+            config: config.clone(),
             render_cache: Mutex::new(RenderCache::default()),
         };
         bundler.entry = bundler.intern(entry_id.clone());
@@ -1097,6 +1108,114 @@ impl Bundler {
         // cross-chunk binding imports (what Rollup emits), which is a real feature,
         // not a tweak of this flag.
         let flat_allowed = plans.is_empty();
+        // Module workers: each `(key, entry)` a live module declared becomes a
+        // nested, self-contained bundle under `assets/`; the placeholder the
+        // transform substituted into the code is replaced with the emitted
+        // file's public URL. Names derive from the key, so both sides agree by
+        // construction. A worker whose own graph spawns workers nests one
+        // level at a time; a runaway cycle is cut by the depth guard.
+        let mut worker_urls: Vec<(String, String)> = Vec::new();
+        {
+            thread_local! {
+                static WORKER_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+            }
+            let mut worker_entries: Vec<(String, PathBuf)> = Vec::new();
+            for &dense in &reachable_dense {
+                if let Some(module) = self.modules[dense].as_ref() {
+                    for (key, entry) in &module.workers {
+                        if !worker_entries.iter().any(|(existing, _)| existing == key) {
+                            worker_entries.push((key.clone(), entry.clone()));
+                        }
+                    }
+                }
+            }
+            if !worker_entries.is_empty() {
+                let depth = WORKER_DEPTH.with(|cell| cell.get());
+                if depth >= 4 {
+                    return Err(format!(
+                        "worker bundling nested {depth} levels deep — a worker graph that \
+                         spawns workers recursively is not supported"
+                    ));
+                }
+                let assets_dir = parent.join("assets");
+                fs::create_dir_all(&assets_dir)
+                    .map_err(|error| format!("cannot create {}: {error}", assets_dir.display()))?;
+                let mut emitted_paths: Vec<(PathBuf, String)> = Vec::new();
+                for (key, entry) in worker_entries {
+                    let stem = entry
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("worker");
+                    // One bundle per resolved ENTRY: several creation sites of
+                    // the same worker share one emitted file, so the name
+                    // derives from the entry path, not the per-site key.
+                    let file_name =
+                        format!("{stem}-{:08x}.worker.js", content_hash(entry.to_string_lossy().as_bytes()) as u32);
+                    if let Some((_, existing)) = emitted_paths.iter().find(|(path, _)| *path == entry) {
+                        worker_urls.push((
+                            format!("__diffpack_worker__{key}__"),
+                            format!("{}assets/{existing}", self.resolution_cache.base),
+                        ));
+                        continue;
+                    }
+                    emitted_paths.push((entry.clone(), file_name.clone()));
+                    WORKER_DEPTH.with(|cell| cell.set(depth + 1));
+                    let result = (|| -> Result<(), String> {
+                        let (worker_bundler, update) =
+                            Bundler::discover_direct_with_config(&entry, &self.config)?;
+                        if !update.diagnostics.is_empty() {
+                            return Err(format!(
+                                "worker entry {} has {} unresolved import(s); first: {}",
+                                entry.display(),
+                                update.diagnostics.len(),
+                                update.diagnostics[0]
+                            ));
+                        }
+                        let worker_reachable = worker_bundler.reachable_modules_direct();
+                        let worker_stats = worker_bundler.emit_with_options(
+                            &worker_reachable,
+                            &assets_dir.join(&file_name),
+                            EmitOptions {
+                                format: ModuleFormat::BrowserEsm,
+                                ..options
+                            },
+                        )?;
+                        // The nested emit's own assets would land under
+                        // `assets/assets/` while their minted URLs claim
+                        // `{base}assets/` — broken references. Refuse until
+                        // worker asset graphs are really supported.
+                        let worker_assets_dir = assets_dir.join("assets");
+                        if worker_stats
+                            .written
+                            .iter()
+                            .any(|path| path.starts_with(&worker_assets_dir))
+                        {
+                            return Err(format!(
+                                "worker entry {} references assets/CSS; asset graphs \
+                                 inside module workers are not supported yet",
+                                entry.display()
+                            ));
+                        }
+                        stats.written.extend(worker_stats.written);
+                        Ok(())
+                    })();
+                    WORKER_DEPTH.with(|cell| cell.set(depth));
+                    result?;
+                    worker_urls.push((
+                        format!("__diffpack_worker__{key}__"),
+                        format!("{}assets/{file_name}", self.resolution_cache.base),
+                    ));
+                }
+            }
+        }
+        let substitute_workers = |mut bundle: RenderedBundle| -> RenderedBundle {
+            for (placeholder, url) in &worker_urls {
+                if bundle.code.contains(placeholder.as_str()) {
+                    bundle.code = bundle.code.replace(placeholder.as_str(), url);
+                }
+            }
+            bundle
+        };
         // Honest-format guards: refuse (naming the module and the way out)
         // rather than emit output Node rejects at parse. `import.meta` is a
         // syntax error anywhere in a CommonJS file; a top-level `await` is only
@@ -1161,6 +1280,7 @@ impl Bundler {
                 &mut live_keys,
                 &mut stats.rendered_chunks,
             )?;
+            let rendered = substitute_workers(rendered);
             self.write_rendered(rendered, &chunk_path, options, &mut stats.written)?;
         }
         let rendered = self.render_chunk_cached(
@@ -1180,6 +1300,7 @@ impl Bundler {
             &mut live_keys,
             &mut stats.rendered_chunks,
         )?;
+        let rendered = substitute_workers(rendered);
         self.write_rendered(rendered, output, options, &mut stats.written)?;
         self.evict_render_cache(&live_keys);
         Ok(stats)
@@ -2122,6 +2243,7 @@ impl Bundler {
                     uses_top_level_await: loaded.uses_top_level_await,
                     uses_import_meta: loaded.uses_import_meta,
                     uses_cjs_globals: loaded.uses_cjs_globals,
+                    workers: loaded.workers,
                 });
             }
         }
@@ -2179,6 +2301,7 @@ impl Bundler {
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                workers: Vec::new(),
             });
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
@@ -2228,6 +2351,7 @@ impl Bundler {
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                workers: Vec::new(),
             });
         }
         let read_started = frontend_profile::start();
@@ -2305,6 +2429,7 @@ impl Bundler {
             uses_top_level_await: transformed.uses_top_level_await,
             uses_import_meta: transformed.uses_import_meta,
             uses_cjs_globals: transformed.uses_cjs_globals,
+            workers: resolve_worker_entries(&self.resolver, path, &transformed.workers)?,
         })
     }
 
@@ -4041,6 +4166,7 @@ fn load_uncached(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            workers: Vec::new(),
         });
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
@@ -4084,6 +4210,7 @@ fn load_uncached(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            workers: Vec::new(),
         });
     }
     let read_started = frontend_profile::start();
@@ -4138,6 +4265,7 @@ fn load_uncached(
         uses_top_level_await: transformed.uses_top_level_await,
         uses_import_meta: transformed.uses_import_meta,
         uses_cjs_globals: transformed.uses_cjs_globals,
+        workers: resolve_worker_entries(resolver, path, &transformed.workers)?,
     })
 }
 
@@ -4839,6 +4967,31 @@ fn is_external_specifier(specifier: &str) -> bool {
             | "worker_threads"
             | "zlib"
     )
+}
+
+
+/// Resolves each transform-detected worker specifier relative to its importer.
+/// An unresolvable worker entry is a hard error — the emitted page would 404
+/// on `new Worker(...)` at runtime otherwise.
+fn resolve_worker_entries(
+    resolver: &Resolver,
+    importer: &Path,
+    workers: &[(String, String)],
+) -> Result<Vec<(String, PathBuf)>, String> {
+    workers
+        .iter()
+        .map(|(key, specifier)| {
+            resolver
+                .resolve_file(importer, specifier)
+                .map(|resolution| (key.clone(), resolution.full_path().to_path_buf()))
+                .map_err(|error| {
+                    format!(
+                        "cannot resolve worker entry {specifier:?} from {}: {error}",
+                        importer.display()
+                    )
+                })
+        })
+        .collect()
 }
 
 fn resolve_dependencies(
@@ -7137,6 +7290,58 @@ mod tests {
             assert!(code.contains(live), "`{live}` must survive:\n{code}");
         }
         assert_eq!(run_node(&output), "lib-side-effect:40\nresult:42\n");
+    }
+
+    /// `new Worker(new URL('./x', import.meta.url))` bundles the worker entry
+    /// as its own self-contained file under `assets/` and substitutes its
+    /// public URL — shipping the raw specifier would 404 at runtime (found
+    /// live on wall-go's minimax AI workers).
+    #[test]
+    fn module_workers_are_bundled_and_their_urls_substituted() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("logic.js"),
+            "export function answer() { return 42; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("worker.js"),
+            "import { answer } from './logic.js';\nself.postMessage(answer());\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });\nconsole.log('spawned:' + (w instanceof Object));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("dist/bundle.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(!code.contains("__diffpack_worker__"), "placeholder replaced: {code}");
+        assert!(!code.contains("./worker.js"), "raw specifier gone: {code}");
+        let url_start = code.find("/assets/worker-").expect("worker URL substituted");
+        let url = code[url_start..].split(['"', '\'', '`']).next().unwrap();
+        let emitted = directory.path().join("dist").join(url.trim_start_matches('/'));
+        assert!(emitted.is_file(), "worker bundle emitted at {}", emitted.display());
+        let worker_code = fs::read_to_string(&emitted).unwrap();
+        assert!(worker_code.contains("postMessage"), "{worker_code}");
+        assert!(worker_code.contains("42"), "the worker's import is bundled in: {worker_code}");
     }
 
     /// Side-effect imports must execute in IMPORT order, not module-id order.

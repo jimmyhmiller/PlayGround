@@ -91,7 +91,7 @@ pub fn compile(css: &str, candidate_classes: &BTreeSet<String>) -> Result<String
         if user.defined_classes.contains(class) || is_marker_class(class) {
             continue;
         }
-        match render_utility(class, &theme, &mut tw_props) {
+        match render_utility(class, &theme, &mut tw_props, &user.custom_variants) {
             Ok(rule) => groups
                 .entry((rule.order, rule.media_key))
                 .or_default()
@@ -813,6 +813,7 @@ fn parse_variants(
     class: &str,
     theme: &Theme,
     tw_props: &mut BTreeSet<TwProp>,
+    custom_variants: &std::collections::BTreeMap<String, String>,
 ) -> Result<VariantSpec, String> {
     let mut spec = VariantSpec {
         pseudo: String::new(),
@@ -864,6 +865,14 @@ fn parse_variants(
             "backdrop" => {
                 spec.pseudo.push_str("::backdrop");
             }
+            name if custom_variants.contains_key(name) => {
+                // A `@custom-variant` overrides any built-in meaning: the
+                // `&`-rooted template appends to the candidate selector
+                // (`dark:x` -> `.dark\:x:where(.dark, .dark *)`).
+                let template = &custom_variants[name];
+                spec.pseudo.push_str(&template[1..]);
+                spec.order = spec.order.max(12);
+            }
             "dark" => {
                 push_media(&mut spec.media, "prefers-color-scheme:dark");
                 spec.order = spec.order.max(12);
@@ -903,6 +912,7 @@ fn render_utility(
     class: &str,
     theme: &Theme,
     tw_props: &mut BTreeSet<TwProp>,
+    custom_variants: &std::collections::BTreeMap<String, String>,
 ) -> Result<RenderedRule, String> {
     // Split on `:` only outside brackets: arbitrary values may contain `:`
     // (e.g. `bg-[color:var(--x)]`).
@@ -910,7 +920,7 @@ fn render_utility(
     let base = segments
         .pop()
         .ok_or_else(|| format!("empty class candidate `{class}`"))?;
-    let spec = parse_variants(&segments, class, theme, tw_props)?;
+    let spec = parse_variants(&segments, class, theme, tw_props, custom_variants)?;
 
     let utility = generate_utility(base, class, theme, tw_props)?;
     let escaped = escape_class(class);
@@ -2010,8 +2020,11 @@ fn escape_class(class: &str) -> String {
 
 /// The app's own CSS with `@apply` expanded and the framework import removed.
 struct UserCss {
+    /// `@custom-variant` definitions: variant name -> `&`-rooted template.
+    custom_variants: std::collections::BTreeMap<String, String>,
     /// The `@layer base` body: the app's base rules (with `@apply` expanded) plus
-    /// their `dark:` companions as `@media (prefers-color-scheme:dark)` rules.
+    /// their `dark:` companions as `@media (prefers-color-scheme:dark)` rules
+    /// (or the custom `dark` template's selector form when one is defined).
     base_layer: String,
     /// Plain (unlayered) rules passed through after the layers, in source order.
     postlude: String,
@@ -2031,9 +2044,42 @@ fn process_user_css(
     let mut postlude = String::new();
     let mut defined_classes = BTreeSet::new();
     let items = parse_top_level(css)?;
+    // Variants first: a `@custom-variant` applies to the whole sheet no matter
+    // where it appears.
+    let mut custom_variants = std::collections::BTreeMap::new();
+    for item in &items {
+        if let TopItem::CustomVariant { name, template } = item {
+            custom_variants.insert(name.clone(), template.clone());
+        }
+    }
+    // The `dark:` companion of an expanded rule: under a custom `dark` variant
+    // it is a sibling rule with the template applied to each selector; under
+    // the default it is a `prefers-color-scheme` media block.
+    let emit_dark = |out: &mut String, selector: &str, dark_rule: &str,
+                     custom_variants: &std::collections::BTreeMap<String, String>| {
+        if let Some(template) = custom_variants.get("dark") {
+            let transformed = selector
+                .split(',')
+                .map(|part| format!("{}{}", part.trim(), &template[1..]))
+                .collect::<Vec<_>>()
+                .join(",");
+            let body = &dark_rule[dark_rule.find('{').map_or(0, |at| at)..];
+            out.push_str(&transformed);
+            out.push_str(body);
+        } else {
+            out.push_str("@media (prefers-color-scheme:dark){");
+            out.push_str(dark_rule);
+            out.push('}');
+        }
+    };
     for item in items {
         match item {
             TopItem::Import => {}
+            TopItem::CustomVariant { .. } => {}
+            TopItem::Verbatim(block) => {
+                collect_selector_classes(&block, &mut defined_classes);
+                postlude.push_str(&block);
+            }
             TopItem::Layer { names, body } => {
                 if names.split_whitespace().next() != Some("base") {
                     return Err(format!(
@@ -2048,28 +2094,31 @@ fn process_user_css(
                         base_layer.push_str(&main);
                     }
                     if let Some(dark) = dark {
-                        base_layer.push_str("@media (prefers-color-scheme:dark){");
-                        base_layer.push_str(&dark);
-                        base_layer.push('}');
+                        emit_dark(&mut base_layer, &rule.selector, &dark, &custom_variants);
                     }
                 }
             }
             TopItem::Rule { selector, body } => {
                 collect_selector_classes(&selector, &mut defined_classes);
-                let decls = split_declarations(&body)
-                    .iter()
-                    .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
-                    .filter(|d| !d.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                postlude.push_str(&selector);
-                postlude.push('{');
-                postlude.push_str(&decls);
-                postlude.push('}');
+                // Tailwind v4 allows `@apply` in any rule, not just `@layer
+                // base` — expand it here too (a literal-only body round-trips
+                // unchanged through the same expansion).
+                let rule = StyleRule {
+                    selector: selector.clone(),
+                    body,
+                };
+                let (main, dark) = expand_rule(&rule, theme, tw_props)?;
+                if let Some(main) = main {
+                    postlude.push_str(&main);
+                }
+                if let Some(dark) = dark {
+                    emit_dark(&mut postlude, &selector, &dark, &custom_variants);
+                }
             }
         }
     }
     Ok(UserCss {
+        custom_variants,
         base_layer,
         postlude,
         defined_classes,
@@ -2102,6 +2151,13 @@ enum TopItem {
     Import,
     Layer { names: String, body: String },
     Rule { selector: String, body: String },
+    /// `@custom-variant <name> (<template>);` — a user-defined variant whose
+    /// template (with `&` for the candidate selector) replaces the built-in
+    /// meaning of `<name>:` for both utilities and `@apply` expansion.
+    CustomVariant { name: String, template: String },
+    /// A top-level block passed through verbatim (`@keyframes`, `@media`,
+    /// `@supports`, `@font-face`) — app CSS the compiler has no opinion on.
+    Verbatim(String),
 }
 
 /// Splits the entry into top-level items: `@import` statements, `@layer …{…}`
@@ -2129,6 +2185,46 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             let names = css[i + 6..i + brace].trim().to_string();
             let (body, end) = read_braced(css, i + brace)?;
             items.push(TopItem::Layer { names, body });
+            i = end;
+            continue;
+        }
+        if css[i..].starts_with("@custom-variant") {
+            let end = css[i..]
+                .find(';')
+                .map(|rel| i + rel)
+                .ok_or_else(|| "malformed @custom-variant (no `;`)".to_string())?;
+            let inner = css[i + "@custom-variant".len()..end].trim();
+            let open = inner
+                .find('(')
+                .ok_or_else(|| format!("malformed @custom-variant `{inner}` (no `(`)"))?;
+            let name = inner[..open].trim().to_string();
+            let template = inner[open + 1..]
+                .strip_suffix(')')
+                .ok_or_else(|| format!("malformed @custom-variant `{inner}` (no `)`)"))?
+                .trim()
+                .to_string();
+            if name.is_empty() || template.is_empty() {
+                return Err(format!("malformed @custom-variant `{inner}`"));
+            }
+            if !template.starts_with('&') {
+                return Err(format!(
+                    "@custom-variant `{name}`: only templates that start with `&` are \
+                     supported (got `{template}`)"
+                ));
+            }
+            items.push(TopItem::CustomVariant { name, template });
+            i = end + 1;
+            continue;
+        }
+        if ["@keyframes", "@media", "@supports", "@font-face"]
+            .iter()
+            .any(|at| css[i..].starts_with(at))
+        {
+            let brace = css[i..]
+                .find('{')
+                .ok_or_else(|| "malformed at-rule block (no `{`)".to_string())?;
+            let (_, end) = read_braced(css, i + brace)?;
+            items.push(TopItem::Verbatim(css[i..end].to_string()));
             i = end;
             continue;
         }
@@ -2376,6 +2472,30 @@ mod tests {
         // The `mode === "split"` comparison string must NOT leak: `isSplit` is
         // only a ternary condition and its initializer is not string-shaped.
         assert!(!out.contains("split"));
+    }
+
+    #[test]
+    fn custom_variant_overrides_dark_for_utilities_apply_and_top_level_rules() {
+        let css = "@import 'tailwindcss';\n\
+                   @custom-variant dark (&:where(.dark, .dark *));\n\
+                   html, body { @apply bg-white dark:bg-gray-900; }\n\
+                   @keyframes pop { 0% { transform: scale(0.7); } }\n\
+                   .animate-pop { animation: pop 0.2s; }\n";
+        let mut candidates = BTreeSet::new();
+        candidates.insert("dark:text-gray-100".to_string());
+        candidates.insert("animate-pop".to_string());
+        let out = compile(css, &candidates).unwrap();
+        assert!(
+            out.contains(".dark\\:text-gray-100:where(.dark, .dark *)"),
+            "utility uses the custom selector: {out}"
+        );
+        assert!(
+            out.contains("html:where(.dark, .dark *)"),
+            "@apply dark companion uses the custom selector: {out}"
+        );
+        assert!(!out.contains("prefers-color-scheme"), "no media dark: {out}");
+        assert!(out.contains("@keyframes pop"), "verbatim keyframes survive: {out}");
+        assert!(out.contains(".animate-pop"), "plain rule survives: {out}");
     }
 
     #[test]
