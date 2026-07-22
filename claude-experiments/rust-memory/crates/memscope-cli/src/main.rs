@@ -101,7 +101,7 @@ fn print_help() {
          START HERE\n  \
          memscope check [BIN|CARGO_DIR]                where you stand: allocator / debug info / injectable (exit 0 = ready)\n  \
          memscope setup [BIN|CARGO_DIR] [--live]       guided: shows the ONE next step, re-run to verify + continue\n  \
-         memscope agent-setup [DIR]                    print the pending steps as an AI-agent prompt:\n  \
+         memscope agent-setup                          the pending steps as an AI-agent prompt (uses cwd):\n  \
          \x20                                              claude \"$(memscope agent-setup)\"\n\n\
          CAPTURE — no code changes (works on an unmodified binary)\n  \
          memscope run --on-exit  -- <prog> [args...]    run it, dump what was never freed (.hprof → MAT/heapster)\n  \

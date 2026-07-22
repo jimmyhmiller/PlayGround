@@ -301,11 +301,12 @@ pub fn cmd_check(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         let n = steps.len();
+        let target = target_arg(args);
         println!(
-            "  → {n} step{} needed — walk through {}:  memscope setup {}{}",
+            "  → {n} step{} needed — walk through {}:  memscope setup{}{}",
             if n == 1 { "" } else { "s" },
             if n == 1 { "it" } else { "them" },
-            target_arg(args),
+            if target == "." { String::new() } else { format!(" {target}") },
             if live { " --live" } else { "" },
         );
         // Scriptable: exit 1 until ready, so agents/loops can poll `check`.
@@ -335,8 +336,7 @@ pub fn cmd_setup(args: &[String]) -> Result<(), String> {
     if step.code_change {
         println!();
         println!(
-            "  or hand it to an agent:  claude \"$(memscope agent-setup {}{})\"",
-            target_arg(args),
+            "  or, from your project dir, hand it to an agent:  claude \"$(memscope agent-setup{})\"",
             if live { " --live" } else { "" }
         );
     }
@@ -381,7 +381,7 @@ pub fn cmd_agent_setup(args: &[String]) -> Result<(), String> {
     println!("`{me} check {}` exits 0 (it prints \"ready\").", dir.display());
 
     eprintln!();
-    eprintln!("[memscope] pass the text above to an agent, e.g.:  claude \"$(memscope agent-setup {target})\"");
+    eprintln!("[memscope] pass the text above to an agent, e.g.:  claude \"$(memscope agent-setup)\"");
     Ok(())
 }
 
