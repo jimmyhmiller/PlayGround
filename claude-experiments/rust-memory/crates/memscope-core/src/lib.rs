@@ -304,6 +304,14 @@ pub fn stats() -> Stats {
     recorder().stats()
 }
 
+/// Wait (bounded) until the pump has applied every event recorded so far to
+/// all sinks — i.e. a file recording is complete on disk up to this instant.
+/// Called automatically at process exit when a recording is active.
+pub fn flush_events() {
+    let _g = HookScope::enter();
+    recorder().flush();
+}
+
 /// Raw return-address frames for an interned site.
 pub fn site_frames(site: SiteId) -> Option<Vec<u64>> {
     let _g = HookScope::enter();

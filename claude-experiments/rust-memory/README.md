@@ -20,40 +20,24 @@ never touched**, by injection (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`). See
 [Heap dumps (`.hprof`)](#heap-dumps-hprof--jvm-tooling-for-rust) and
 [Zero-instrumentation](#zero-instrumentation-dump-an-unmodified-binary).
 
-## Start here: `memscope check`
-
-There are two ways to use memscope — **no code changes** (inject into an
-unmodified binary) or the **2-line agent** (live monitoring, checkpoints,
-diffs). Which one you need depends on your program: its allocator, its debug
-info, its code signature. Don't work it out by hand — ask:
+## Start here
 
 ```sh
-memscope check ./target/release/myapp     # or a cargo project dir, or no arg for .
+memscope check .    # where you stand: allocator / debug info / injectable   (exit 0 = ready)
+memscope setup .    # not ready? shows the ONE next step; re-run after each to verify + continue
 ```
 
-```
-== memscope check: ./target/release/myapp ==
-
-  allocator     system default              ✓ injection sees every allocation
-  debug info    fresh .dSYM next to the binary  ✓ types will be recovered
-  signing       ad-hoc signature (normal cargo build output)  ✓ injection allowed
-
-VERDICT — no code changes needed.
-
-  Dump this program's heap, unmodified:
-    memscope run --on-exit  -- ./target/release/myapp        # what was never freed, at exit
-    ...
-```
-
-It knows the failure modes and tells you the exact fix: a **custom global
-allocator** (mimalloc/jemalloc/…) bypasses `malloc`, so injection would see
-nothing — `check` prints the 2-line `MemScope::new(...)` wrap for *your*
-allocator. **Missing debug info** → dumps work but are untyped — it prints the
-`Cargo.toml` change. A **hardened-runtime signature** silently disables
-injection on macOS — it prints the `codesign` command. If memscope is already
-integrated, it says so and shows the attach commands. `memscope run` performs
-the same checks before launching and refuses (override with `--force`) rather
-than hand you a silently empty dump.
+`check` reads your binary (or project) and knows the failure modes: a custom
+global allocator that blinds injection, missing debug info, a signature that
+makes macOS silently drop `DYLD_INSERT_LIBRARIES`. `setup` walks you through
+the fixes one at a time — most programs need **zero** steps and go straight to
+`memscope run`; a custom allocator needs the 2-line wrap, and `setup` prints it
+tailored to your allocator (`--live` if you want the live agent regardless).
+Rather do none of it by hand? `memscope agent-setup` prints the pending steps
+as a prompt for an AI agent — e.g. `claude "$(memscope agent-setup)"` — with
+the done-condition built in (`memscope check` exits 0). `memscope run` runs the
+same checks before launching and refuses to hand you a silently-empty dump
+(`--force` overrides).
 
 ## Quick start (try it in 30 seconds)
 
@@ -110,9 +94,8 @@ cargo run -p memscope-cli --release -- show /tmp/heap.json
 
 ## Using it in your own program
 
-Run `memscope check <your binary or project dir>` first — it tells you whether
-you need this section at all (often `memscope run` on the unmodified binary is
-enough) and tailors the snippet below to your allocator.
+`memscope setup --live` walks you through exactly this, tailored to your
+project (and `memscope run` needs none of it). The manual version:
 
 ```toml
 # Cargo.toml — debug info is required for type recovery (no nightly, no toolchain change)

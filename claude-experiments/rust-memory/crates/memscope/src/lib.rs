@@ -55,13 +55,34 @@ macro_rules! meta {
 /// Start the transport agent on a background thread. Returns the socket path a
 /// consumer should connect to (also printed to stderr). Override the path with
 /// the `MEMSCOPE_SOCK` environment variable.
+///
+/// Also honors `MEMSCOPE_RECORD=<path>`: when set, the full allocation stream
+/// is additionally recorded to that file (as if [`record_to_file`] were
+/// called) — so an integrated program supports env-driven recording with no
+/// extra code. An explicit earlier `record_to_file` call wins.
 pub fn start_agent() -> std::io::Result<String> {
+    maybe_record_from_env();
     memscope_agent::start()
 }
 
-/// Start the agent at an explicit socket path.
+/// Start the agent at an explicit socket path. Honors `MEMSCOPE_RECORD` like
+/// [`start_agent`].
 pub fn start_agent_at(path: &str) -> std::io::Result<()> {
+    maybe_record_from_env();
     memscope_agent::start_at(path)
+}
+
+fn maybe_record_from_env() {
+    let Ok(path) = std::env::var("MEMSCOPE_RECORD") else { return };
+    if path.is_empty() {
+        return;
+    }
+    match memscope_agent::record_to_file(&path) {
+        Ok(()) => {}
+        // An explicit record_to_file already started — env is a no-op then.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => eprintln!("[memscope] MEMSCOPE_RECORD={path}: failed to start recording: {e}"),
+    }
 }
 
 /// Stream the full allocation event stream to a self-contained file (resolved

@@ -141,7 +141,7 @@ fn probe_debug_info(path: &Path, obj: &object::File, generate_dsym: bool) -> Deb
         }
         if generate_dsym {
             return match load::find_or_make_dsym(path) {
-                Ok(p) => DebugInfo::Present { source: format!(".dSYM generated via dsymutil ({})", p.display()) },
+                Ok(_) => DebugInfo::Present { source: ".dSYM generated".into() },
                 Err(e) => DebugInfo::Absent { detail: format!("dsymutil could not produce DWARF: {e}") },
             };
         }

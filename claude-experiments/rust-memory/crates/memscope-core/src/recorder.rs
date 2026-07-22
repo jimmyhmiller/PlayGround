@@ -388,8 +388,10 @@ impl Recorder {
     }
 
     /// Wait until the reconstructor has applied every event up to this instant
-    /// (bounded, so a dead pump can't hang the caller).
-    fn flush(&self) {
+    /// (bounded, so a dead pump can't hang the caller). Public so a process can
+    /// drain the pump (and thus every registered sink, e.g. a file recording)
+    /// before exiting.
+    pub fn flush(&self) {
         let target = crate::tls_ring::tsc();
         let start = Instant::now();
         while self.applied_tsc.load(Ordering::Acquire) < target {

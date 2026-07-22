@@ -37,6 +37,8 @@ fn main() {
 
     let result = match cmd {
         "check" => check::cmd_check(rest),
+        "setup" => check::cmd_setup(rest),
+        "agent-setup" => check::cmd_agent_setup(rest),
         "monitor" => cmd_monitor(rest),
         "dump" => cmd_dump(rest),
         "events" => cmd_events(rest),
@@ -97,8 +99,10 @@ fn print_help() {
     eprintln!(
         "memscope — memory profiling for Rust, with real types\n\n\
          START HERE\n  \
-         memscope check [BINARY | CARGO_DIR]           what will work for your program: custom allocator?\n  \
-         \x20                                            code changes needed? debug info? — with exact next steps\n\n\
+         memscope check [BIN|CARGO_DIR]                where you stand: allocator / debug info / injectable (exit 0 = ready)\n  \
+         memscope setup [BIN|CARGO_DIR] [--live]       guided: shows the ONE next step, re-run to verify + continue\n  \
+         memscope agent-setup [DIR]                    print the pending steps as an AI-agent prompt:\n  \
+         \x20                                              claude \"$(memscope agent-setup)\"\n\n\
          CAPTURE — no code changes (works on an unmodified binary)\n  \
          memscope run --on-exit  -- <prog> [args...]    run it, dump what was never freed (.hprof → MAT/heapster)\n  \
          memscope run --after 5s -- <prog>              dump at steady state, 5s in (program keeps running)\n  \

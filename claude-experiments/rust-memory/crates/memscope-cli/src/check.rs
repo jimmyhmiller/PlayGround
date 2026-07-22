@@ -1,58 +1,68 @@
-//! `memscope check` — the "where do I stand?" doctor, plus the preflight that
-//! `memscope run` uses to refuse footguns.
+//! `memscope check` / `setup` / `agent-setup` — where you stand, and the
+//! guided path to ready.
 //!
-//! Point it at a binary or a cargo project directory and it answers, in order:
-//! do you need code changes at all, will injection see your allocations, and
-//! will types resolve — each with the exact next command or the exact lines to
-//! add.
+//! All three commands share one pipeline: `assess` gathers the facts (binary
+//! symbols + project source), `plan` turns them into the ordered list of steps
+//! still needed. `check` prints the facts and how many steps remain (exit 0 =
+//! ready). `setup` prints ONLY the next step, and you re-run it after each one
+//! — every re-run re-verifies from scratch, so it doubles as the "did I do it
+//! right?" check. `agent-setup` prints the pending steps as a compact prompt an
+//! AI agent can execute (`claude "$(memscope agent-setup)"`).
+//!
+//! Output discipline: no walls of text. One step at a time, a handful of lines
+//! each, exact edits only.
 
 use std::path::{Path, PathBuf};
 
 use memscope_symbols::inspect::{inspect_binary, Allocator, BinaryFacts, DebugInfo, Injection};
 
-pub fn cmd_check(args: &[String]) -> Result<(), String> {
-    let target = args
-        .iter()
-        .find(|a| !a.starts_with("--"))
-        .map(String::as_str)
-        .unwrap_or(".");
-    let path = Path::new(target);
-    if path.is_dir() {
-        check_project(path)
-    } else if path.is_file() {
-        let facts = inspect_binary(path, true).map_err(|e| e.to_string())?;
-        render(&facts, None);
-        Ok(())
-    } else {
-        Err(format!(
-            "{target}: not a file or directory\nusage: memscope check [BINARY | CARGO_DIR]   (default: current directory)"
-        ))
-    }
-}
+// --- assessment --------------------------------------------------------------
 
-/// What the project's *source* says, which the binary alone can't:
-/// where a `#[global_allocator]` is declared and whether debug info is enabled.
+/// What the project's *source* says, which the binary alone can't.
 struct SourceFacts {
-    root: PathBuf,
-    /// (file, line, the `static …` declaration under the attribute)
+    /// (file, line, the `static …` declaration under `#[global_allocator]`)
     global_allocators: Vec<(PathBuf, usize, String)>,
     release_debug: bool,
-    /// Which profile the inspected binary came from, when checking a project.
-    bin_profile: Option<&'static str>,
+    /// Cargo.toml already mentions a memscope dependency.
+    memscope_dep: bool,
 }
 
-fn check_project(dir: &Path) -> Result<(), String> {
-    let manifest = dir.join("Cargo.toml");
+struct Assessment {
+    /// The project directory, when the target was one.
+    dir: Option<PathBuf>,
+    source: Option<SourceFacts>,
+    /// Inspected binary (the target itself, or the newest build in target/).
+    bin: Option<PathBuf>,
+    bin_profile: Option<&'static str>,
+    facts: Option<BinaryFacts>,
+}
+
+fn assess(target: &str) -> Result<Assessment, String> {
+    let path = Path::new(target);
+    if path.is_file() {
+        let facts = inspect_binary(path, true).map_err(|e| e.to_string())?;
+        return Ok(Assessment {
+            dir: None,
+            source: None,
+            bin: Some(path.to_path_buf()),
+            bin_profile: None,
+            facts: Some(facts),
+        });
+    }
+    if !path.is_dir() {
+        return Err(format!("{target}: not a file or directory"));
+    }
+    let manifest = path.join("Cargo.toml");
     if !manifest.exists() {
         return Err(format!(
             "{}: no Cargo.toml here — pass a cargo project directory or a built binary",
-            dir.display()
+            path.display()
         ));
     }
     let manifest_text = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
 
     let mut global_allocators = Vec::new();
-    scan_rs_files(dir, &mut |file, text| {
+    scan_rs_files(path, &mut |file, text| {
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if line.contains("#[global_allocator]") && !line.trim_start().starts_with("//") {
@@ -67,193 +77,316 @@ fn check_project(dir: &Path) -> Result<(), String> {
         }
     });
 
-    let mut source = SourceFacts {
-        root: dir.to_path_buf(),
+    let source = SourceFacts {
         global_allocators,
         release_debug: profile_has_debug(&manifest_text, "release"),
-        bin_profile: None,
+        memscope_dep: manifest_text.contains("memscope"),
     };
 
-    match newest_binary(dir) {
-        Some((bin, profile)) => {
-            let facts = inspect_binary(&bin, true).map_err(|e| e.to_string())?;
-            source.bin_profile = Some(profile);
-            render(&facts, Some(&source));
+    let (bin, bin_profile, facts) = match newest_binary(path) {
+        Some((b, profile)) => {
+            let f = inspect_binary(&b, true).map_err(|e| e.to_string())?;
+            (Some(b), Some(profile), Some(f))
         }
-        None => {
-            println!("== memscope check: {} ==", dir.display());
-            println!();
-            println!("  no built binary found under {}/target", dir.display());
-            render_source_only(&source);
+        None => (None, None, None),
+    };
+    Ok(Assessment { dir: Some(path.to_path_buf()), source: Some(source), bin, bin_profile, facts })
+}
+
+impl Assessment {
+    fn memscope_installed(&self) -> bool {
+        self.facts.as_ref().map(|f| f.memscope_linked).unwrap_or(false)
+            || self
+                .source
+                .as_ref()
+                .map(|s| s.global_allocators.iter().any(|(_, _, d)| d.contains("MemScope")))
+                .unwrap_or(false)
+    }
+
+    /// The allocator memscope must wrap, if any: (display name, Rust type expr).
+    fn custom_allocator(&self) -> Option<(String, String)> {
+        if self.memscope_installed() {
+            return None;
+        }
+        if let Some(BinaryFacts { allocator: Allocator::Named { name, wrap_type }, .. }) =
+            &self.facts
+        {
+            return Some((name.to_string(), wrap_type.to_string()));
+        }
+        // Source-only detection: pull the inner type out of `static X: Ty = …;`.
+        let (_, _, decl) = self.source.as_ref()?.global_allocators.first()?;
+        let ty = decl
+            .split_once(':')
+            .map(|(_, rest)| rest.split('=').next().unwrap_or("").trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "YourAllocator".to_string());
+        Some(("a custom allocator".to_string(), ty))
+    }
+}
+
+// --- the plan ----------------------------------------------------------------
+
+struct Step {
+    title: &'static str,
+    lines: Vec<String>,
+    /// What to do after this step (always ends with re-running `memscope setup`).
+    then: String,
+    /// This step edits the user's code — the agent handoff applies.
+    code_change: bool,
+}
+
+/// The ordered steps still needed. Empty = ready. `live` forces the in-process
+/// agent integration even when injection alone would do.
+fn plan(a: &Assessment, live: bool) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let setup_cmd = if live { "memscope setup --live" } else { "memscope setup" };
+    let installed = a.memscope_installed();
+    let custom = a.custom_allocator();
+
+    let debug_missing = match (&a.facts, &a.source) {
+        // Trust the binary when we have one: it either has DWARF or it doesn't.
+        (Some(f), _) => matches!(f.debug_info, DebugInfo::Absent { .. }),
+        (None, Some(s)) => !s.release_debug,
+        (None, None) => false,
+    };
+
+    // Integration (the only code-change step). Needed when a custom allocator
+    // blinds injection, or when the user asked for the live agent.
+    if !installed && (custom.is_some() || live) {
+        let (_, wrap) = custom
+            .clone()
+            .unwrap_or(("".into(), "".into()));
+        let mut lines = Vec::new();
+        let mut n = 0;
+        let mut item = |lines: &mut Vec<String>, s: String| {
+            n += 1;
+            lines.push(format!("{n}. {s}"));
+        };
+        if a.source.as_ref().map(|s| !s.memscope_dep).unwrap_or(true) {
+            item(&mut lines, format!("Cargo.toml [dependencies]:  memscope = {{ path = \"{}\" }}", memscope_crate_path()));
+        }
+        if debug_missing {
+            lines.push("   …and in the same file:      [profile.release] debug = true".to_string());
+        }
+        if wrap.is_empty() {
+            item(&mut lines, "In your binary's main.rs:".to_string());
+            lines.push("     #[global_allocator]".to_string());
+            lines.push("     static GLOBAL: memscope::MemScope = memscope::MemScope::system();".to_string());
+        } else {
+            item(&mut lines, "Replace your #[global_allocator] static with the wrapped one:".to_string());
+            lines.push(format!("     static GLOBAL: memscope::MemScope<{wrap}> = memscope::MemScope::new({wrap});"));
+        }
+        item(&mut lines, "First lines of fn main():".to_string());
+        lines.push("     memscope::set_mode(memscope::Mode::Full);".to_string());
+        lines.push("     memscope::start_agent().unwrap();".to_string());
+        steps.push(Step {
+            title: "install the tracking allocator",
+            lines,
+            then: format!("cargo build --release && {setup_cmd}"),
+            code_change: true,
+        });
+    } else if debug_missing {
+        // Only a standalone step when integration didn't already fold it in.
+        steps.push(Step {
+            title: "enable debug info (needed for type names)",
+            lines: vec![
+                "Add to Cargo.toml:".to_string(),
+                "  [profile.release]".to_string(),
+                "  debug = true".to_string(),
+            ],
+            then: format!("cargo build --release && {setup_cmd}"),
+            code_change: true,
+        });
+    }
+
+    if a.dir.is_some() && a.bin.is_none() && steps.is_empty() {
+        steps.push(Step {
+            title: "build the binary",
+            lines: vec!["cargo build --release".to_string()],
+            then: setup_cmd.to_string(),
+            code_change: false,
+        });
+    }
+
+    // Signing only matters on the injection path (no in-process agent).
+    if !installed && !live && custom.is_none() {
+        if let Some(BinaryFacts { injection: Injection::Blocked { reason, fix }, .. }) = &a.facts {
+            steps.push(Step {
+                title: "unblock injection (signature)",
+                lines: vec![format!("{reason}:"), format!("  {fix}")],
+                then: setup_cmd.to_string(),
+                code_change: false,
+            });
         }
     }
+
+    steps
+}
+
+/// Path to the memscope crate for a `{ path = … }` dependency. The CLI is built
+/// from this workspace, so the crate lives next to this crate's manifest.
+fn memscope_crate_path() -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../memscope");
+    std::fs::canonicalize(&p).unwrap_or(p).display().to_string()
+}
+
+fn ready_line(a: &Assessment) -> String {
+    let target = a
+        .bin
+        .as_ref()
+        .map(|b| b.display().to_string())
+        .unwrap_or_else(|| "<your binary>".to_string());
+    if a.memscope_installed() {
+        "run your program, then:  memscope monitor   (or record: MEMSCOPE_RECORD=rec.mscope, then memscope analyze)".to_string()
+    } else {
+        format!("memscope run --on-exit -- {target}   (more: memscope help)")
+    }
+}
+
+// --- commands ----------------------------------------------------------------
+
+fn target_arg(args: &[String]) -> &str {
+    args.iter().find(|a| !a.starts_with("--")).map(String::as_str).unwrap_or(".")
+}
+
+pub fn cmd_check(args: &[String]) -> Result<(), String> {
+    let a = assess(target_arg(args))?;
+    let live = args.iter().any(|x| x == "--live");
+
+    let shown = a.bin.as_ref().or(a.dir.as_ref()).unwrap();
+    println!("== memscope check: {} ==", shown.display());
+    if let (Some(_), Some(profile)) = (&a.dir, a.bin_profile) {
+        println!("  binary        newest {profile} build in target/");
+    }
+    if let Some(f) = &a.facts {
+        match (&f.allocator, a.memscope_installed()) {
+            (_, true) => println!("  allocator     memscope — already installed  ✓"),
+            (Allocator::SystemDefault, _) => match a.custom_allocator() {
+                Some((name, _)) => println!("  allocator     {name} (from source)  ✗ injection can't see it"),
+                None => println!("  allocator     system default  ✓ injection sees everything"),
+            },
+            (Allocator::Named { name, .. }, _) => {
+                println!("  allocator     {name}  ✗ bypasses malloc — injection can't see it")
+            }
+        }
+        match &f.debug_info {
+            DebugInfo::Present { source } => println!("  debug info    {source}  ✓ types resolve"),
+            DebugInfo::Absent { .. } => println!("  debug info    none  ✗ dumps would be untyped"),
+            DebugInfo::Unknown { detail } => println!("  debug info    ? {detail}"),
+        }
+        match &f.injection {
+            Injection::Ok { detail } => println!("  signing       {detail}  ✓ injectable"),
+            Injection::Blocked { reason, .. } => println!("  signing       ✗ {reason}"),
+        }
+    } else if let Some(s) = &a.source {
+        println!("  binary        none built yet");
+        match a.custom_allocator() {
+            Some((name, _)) => println!("  allocator     {name} (from source)  ✗ injection can't see it"),
+            None if a.memscope_installed() => println!("  allocator     memscope — already installed  ✓"),
+            None => println!("  allocator     system default (no #[global_allocator] in source)  ✓"),
+        }
+        println!(
+            "  debug info    [profile.release] debug {}",
+            if s.release_debug { "= true  ✓" } else { "not set  ✗" }
+        );
+    }
+
+    let steps = plan(&a, live);
+    println!();
+    if steps.is_empty() {
+        println!("  ✓ ready — {}", ready_line(&a));
+        if !a.memscope_installed() && !live {
+            println!("    live monitor / marks / diff need 2 lines of code:  memscope setup --live");
+        }
+        Ok(())
+    } else {
+        let n = steps.len();
+        println!(
+            "  → {n} step{} needed — walk through {}:  memscope setup {}{}",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "it" } else { "them" },
+            target_arg(args),
+            if live { " --live" } else { "" },
+        );
+        // Scriptable: exit 1 until ready, so agents/loops can poll `check`.
+        std::process::exit(1);
+    }
+}
+
+pub fn cmd_setup(args: &[String]) -> Result<(), String> {
+    let a = assess(target_arg(args))?;
+    let live = args.iter().any(|x| x == "--live");
+    let steps = plan(&a, live);
+
+    if steps.is_empty() {
+        println!("✓ ready — {}", ready_line(&a));
+        if !a.memscope_installed() && !live {
+            println!("  live monitor / marks / diff need 2 lines of code:  memscope setup --live");
+        }
+        return Ok(());
+    }
+
+    let step = &steps[0];
+    println!("memscope setup — step 1 of {}: {}", steps.len(), step.title);
+    println!();
+    for l in &step.lines {
+        println!("  {l}");
+    }
+    if step.code_change {
+        println!();
+        println!(
+            "  or hand it to an agent:  claude \"$(memscope agent-setup {}{})\"",
+            target_arg(args),
+            if live { " --live" } else { "" }
+        );
+    }
+    println!();
+    println!("  then:  {}", step.then);
     Ok(())
 }
 
-fn render_source_only(source: &SourceFacts) {
-    for (file, line, decl) in &source.global_allocators {
-        let rel = file.strip_prefix(&source.root).unwrap_or(file);
-        if decl.contains("MemScope") {
-            println!("  allocator     memscope already installed  ({}:{line})", rel.display());
-        } else {
-            println!("  allocator     custom #[global_allocator]  ({}:{line})  {decl}", rel.display());
+/// Print the pending setup as a prompt for an AI agent. Stdout carries ONLY the
+/// prompt (so `claude "$(memscope agent-setup)"` is clean); the usage hint goes
+/// to stderr.
+pub fn cmd_agent_setup(args: &[String]) -> Result<(), String> {
+    let target = target_arg(args);
+    let a = assess(target)?;
+    let live = args.iter().any(|x| x == "--live");
+    let steps = plan(&a, live);
+
+    let dir = a
+        .dir
+        .clone()
+        .or_else(|| a.bin.as_ref().and_then(|b| b.parent().map(|p| p.to_path_buf())))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+
+    if steps.is_empty() {
+        println!("memscope is already set up in {} — nothing to do.", dir.display());
+        return Ok(());
+    }
+
+    let me = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "memscope".to_string());
+
+    println!("In {}: finish setting up the memscope memory profiler. Steps:", dir.display());
+    for (i, step) in steps.iter().enumerate() {
+        println!("{}. {}:", i + 1, step.title);
+        for l in &step.lines {
+            println!("   {l}");
         }
     }
-    if source.global_allocators.is_empty() {
-        println!("  allocator     system default (no #[global_allocator] in source)");
-    }
-    println!(
-        "  debug info    [profile.release] debug {}",
-        if source.release_debug { "= true  ✓ types will resolve" } else { "not set  ✗ release types won't resolve" }
-    );
-    println!();
-    println!("VERDICT — build first, then re-run `memscope check` on the result:");
-    println!("    cargo build --release && memscope check .");
-    if !source.release_debug {
-        println!();
-        println!("  For typed release dumps, add to Cargo.toml first:");
-        println!("    [profile.release]");
-        println!("    debug = true");
-    }
+    println!("Change nothing else. Verify when done: `cargo build --release` succeeds and");
+    println!("`{me} check {}` exits 0 (it prints \"ready\").", dir.display());
+
+    eprintln!();
+    eprintln!("[memscope] pass the text above to an agent, e.g.:  claude \"$(memscope agent-setup {target})\"");
+    Ok(())
 }
 
-fn render(facts: &BinaryFacts, source: Option<&SourceFacts>) {
-    println!("== memscope check: {} ==", facts.path.display());
-    println!();
-    if let Some(profile) = source.and_then(|s| s.bin_profile) {
-        println!("  binary        newest {profile} build in target/");
-    }
-
-    // -- facts table ---------------------------------------------------------
-    let src_alloc = source.and_then(|s| s.global_allocators.first());
-    match (&facts.allocator, facts.memscope_linked) {
-        (_, true) => {
-            let loc = src_alloc
-                .filter(|(_, _, d)| d.contains("MemScope"))
-                .map(|(f, l, _)| {
-                    let rel = source.map(|s| f.strip_prefix(&s.root).unwrap_or(f)).unwrap_or(f);
-                    format!("  ({}:{l})", rel.display())
-                })
-                .unwrap_or_default();
-            println!("  allocator     memscope (already installed){loc}");
-        }
-        (Allocator::SystemDefault, false) => match src_alloc {
-            Some((f, l, decl)) => {
-                let rel = source.map(|s| f.strip_prefix(&s.root).unwrap_or(f)).unwrap_or(f);
-                println!("  allocator     ! custom #[global_allocator] at {}:{l}", rel.display());
-                println!("                  {decl}");
-            }
-            None => println!("  allocator     system default              ✓ injection sees every allocation"),
-        },
-        (Allocator::Named { name, .. }, false) => {
-            println!("  allocator     {name}                    ✗ bypasses malloc — injection would see (almost) nothing");
-        }
-    }
-
-    match &facts.debug_info {
-        DebugInfo::Present { source } => println!("  debug info    {source}  ✓ types will be recovered"),
-        DebugInfo::Absent { detail } => println!("  debug info    none  ✗ dumps will be complete but untyped\n                  ({detail})"),
-        DebugInfo::Unknown { detail } => println!("  debug info    ? {detail}"),
-    }
-
-    match &facts.injection {
-        Injection::Ok { detail } => println!("  signing       {detail}  ✓ injection allowed"),
-        Injection::Blocked { reason, .. } => println!("  signing       ✗ {reason}"),
-    }
-
-    if !facts.is_rust {
-        println!("  language      not Rust (or stripped) — injection + dumps still work; type names may be C symbols");
-    }
-
-    // -- verdict -------------------------------------------------------------
-    println!();
-    let bin = facts.path.display();
-    if facts.memscope_linked {
-        println!("VERDICT — memscope is already in this program. No changes needed.");
-        println!();
-        println!("  Run it, then attach live:");
-        println!("    memscope monitor        # live heap by type");
-        println!("    memscope graph          # top retainers (retained size)");
-        println!("  Or if it records to a file (record_to_file):");
-        println!("    memscope analyze rec.mscope");
-        finish_debug_note(facts, source);
-        return;
-    }
-
-    // A custom allocator makes injection blind regardless of anything else.
-    let custom = match &facts.allocator {
-        Allocator::Named { name, wrap_type } => Some((*name, *wrap_type)),
-        Allocator::SystemDefault => src_alloc
-            .filter(|(_, _, d)| !d.contains("MemScope"))
-            .map(|_| ("your custom allocator", "YourAllocator")),
-    };
-    if let Some((name, wrap_type)) = custom {
-        println!("VERDICT — code changes needed (2 lines).");
-        println!();
-        println!("  This program's global allocator is {name}, which bypasses malloc, so");
-        println!("  `memscope run` (malloc interposition) can't see its allocations.");
-        println!("  Wrap it — memscope tracks, {name} still does the allocating:");
-        println!();
-        println!("    #[global_allocator]");
-        println!("    static GLOBAL: memscope::MemScope<{wrap_type}> =");
-        println!("        memscope::MemScope::new({wrap_type});");
-        if wrap_type == "YourAllocator" {
-            println!("    // YourAllocator = the type currently in your #[global_allocator]");
-        }
-        println!();
-        println!("    fn main() {{");
-        println!("        memscope::set_mode(memscope::Mode::Full);");
-        println!("        memscope::start_agent().unwrap();     // then: memscope monitor");
-        println!("        // or: memscope::record_to_file(\"rec.mscope\").unwrap();");
-        println!("    }}");
-        finish_debug_note(facts, source);
-        return;
-    }
-
-    if let Injection::Blocked { reason, fix } = &facts.injection {
-        println!("VERDICT — no code changes needed, but injection is blocked: {reason}.");
-        println!();
-        println!("  Fix, then dump the unmodified binary:");
-        println!("    {fix}");
-        println!("    memscope run --on-exit -- {bin}");
-        finish_debug_note(facts, source);
-        return;
-    }
-
-    println!("VERDICT — no code changes needed.");
-    println!();
-    println!("  Dump this program's heap, unmodified:");
-    println!("    memscope run --on-exit  -- {bin}        # what was never freed, at exit");
-    println!("    memscope run --after 5s -- {bin}        # steady state, 5s in");
-    println!("    memscope run --at-bytes 50MB -- {bin}   # the moment the heap first hits 50MB");
-    println!("    memscope run --out rec.mscope -- {bin}  # full allocation stream → analyze/flamegraph/perfetto");
-    println!();
-    println!("  Want live monitoring, checkpoints (mark), or diffs? That takes the 2-line agent:");
-    println!("    #[global_allocator]");
-    println!("    static GLOBAL: memscope::MemScope = memscope::MemScope::system();");
-    println!("    // in main: memscope::set_mode(memscope::Mode::Full); memscope::start_agent().unwrap();");
-    finish_debug_note(facts, source);
-}
-
-fn finish_debug_note(facts: &BinaryFacts, source: Option<&SourceFacts>) {
-    if let DebugInfo::Absent { .. } = &facts.debug_info {
-        println!();
-        println!("  note: no debug info — everything above works, but types show as raw sizes.");
-        if let Some(s) = source {
-            if !s.release_debug {
-                println!("  Fix in Cargo.toml (then rebuild):");
-                println!("    [profile.release]");
-                println!("    debug = true");
-                return;
-            }
-        }
-        println!("  Build with `debug = true` in the profile you ship (no nightly needed).");
-    }
-}
-
-/// Preflight for `memscope run`: same facts, but as hard errors for the two
-/// cases where the run would *silently* produce garbage (empty or missing
-/// dump), and warnings for the rest. `--force` downgrades the errors.
+/// Preflight for `memscope run`: refuse the two cases where the run would
+/// silently produce a useless dump. Short messages; `setup` has the details.
 pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
     // Target may be resolved via PATH (`memscope run -- ls`); only inspect
     // real paths, and never fail the run because inspection itself failed.
@@ -267,39 +400,34 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
 
     if let Allocator::Named { name, .. } = &facts.allocator {
         let msg = format!(
-            "{} uses {name} as its allocator — injection interposes malloc, so the dump would be (almost) empty.\n\
-             Run `memscope check {}` for the 2-line fix (wrap it in MemScope::new).",
-            bin.display(),
+            "{} uses {name} — injection interposes malloc, so the dump would be (almost) empty.\n\
+             next: memscope setup <its project dir>   (walks you through the 2-line fix; or pass --force)",
             bin.display()
         );
         if force {
             eprintln!("[memscope] WARNING (--force): {msg}");
         } else {
-            return Err(format!("{msg}\nPass --force to run anyway."));
+            return Err(msg);
         }
     }
 
     if let Injection::Blocked { reason, fix } = &facts.injection {
-        let msg = format!(
-            "injection into {} will be silently ignored: {reason}.\nFix: {fix}",
-            bin.display()
-        );
+        let msg = format!("injection would be silently ignored: {reason}.\nfix: {fix}   (or pass --force)");
         if force {
             eprintln!("[memscope] WARNING (--force): {msg}");
         } else {
-            return Err(format!("{msg}\nPass --force to run anyway."));
+            return Err(msg);
         }
     }
 
     if facts.memscope_linked {
         eprintln!(
-            "[memscope] note: {} already has memscope compiled in — you can attach directly \
-             (memscope monitor) instead of injecting.",
+            "[memscope] note: {} already has memscope built in — you can attach directly (memscope monitor).",
             bin.display()
         );
     }
-    if let DebugInfo::Absent { detail } = &facts.debug_info {
-        eprintln!("[memscope] warning: no debug info ({detail}) — the dump will be untyped.");
+    if let DebugInfo::Absent { .. } = &facts.debug_info {
+        eprintln!("[memscope] warning: no debug info — the dump will be untyped (memscope setup to fix).");
     }
     Ok(())
 }

@@ -106,6 +106,9 @@ impl FileRecorder {
                 )?;
             }
         }
+        // Land the header now: a program that exits before the pump's first
+        // batch must still leave a valid (if empty) recording, not a 0-byte file.
+        w.flush()?;
 
         Ok(FileRecorder {
             w,
@@ -319,9 +322,29 @@ fn json_str(s: &str) -> String {
 /// default; `.json`/`.jsonl` for human-readable). Switches the ring to Reliable
 /// so nothing is dropped. Read it back with `memscope replay <file>`.
 pub fn record_to_file(path: &str) -> std::io::Result<()> {
+    // One recording per process: a second recorder on the same ring would
+    // interleave two writers into (typically) the same file. This makes an
+    // explicit record_to_file call compose with the automatic MEMSCOPE_RECORD
+    // handling in `memscope::start_agent` — whichever runs first wins.
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "a recording is already running in this process",
+        ));
+    }
     let rec = FileRecorder::create(path)?;
     mem::set_ring_mode(mem::RingMode::Reliable);
     mem::spawn_consumer(Box::new(rec), std::time::Duration::from_millis(1));
+    // Drain the pump at exit so short-lived programs don't lose the tail (or
+    // the whole recording) to an unflushed buffer / never-scheduled pump.
+    extern "C" fn drain_at_exit() {
+        mem::flush_events();
+    }
+    // SAFETY: registering a plain extern "C" fn with libc atexit.
+    unsafe {
+        libc::atexit(drain_at_exit);
+    }
     eprintln!("[memscope] recording allocations to {path}");
     Ok(())
 }
