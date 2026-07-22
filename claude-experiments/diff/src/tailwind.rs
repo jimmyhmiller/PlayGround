@@ -96,7 +96,17 @@ pub fn compile(css: &str, candidate_classes: &BTreeSet<String>) -> Result<String
                 .entry((rule.order, rule.media_key))
                 .or_default()
                 .push((rule.rank, class.clone(), rule.css)),
-            Err(error) => errors.push(error),
+            // Tailwind's own scanner treats EVERY string token in the source
+            // tree as a candidate and silently ignores the ones that are not
+            // utilities at all (`zero`, `data`, ...). Matching that: a token
+            // whose root no utility family recognizes is skipped; a token with
+            // a RECOGNIZED root but an unsupported form stays a hard error —
+            // that is the surface where silence would ship a broken style.
+            Err(error) => {
+                if utility_root_recognized(class) {
+                    errors.push(error);
+                }
+            }
         }
     }
     if !errors.is_empty() {
@@ -904,6 +914,42 @@ struct RenderedRule {
     order: u8,
     media_key: String,
     rank: u16,
+}
+
+/// Whether a candidate's base (variants stripped) starts with a prefix any
+/// utility family owns, or is one of the exact utility keywords. Only these
+/// candidates hard-error when unsupported; everything else is a non-utility
+/// source token Tailwind's scanner would also ignore.
+fn utility_root_recognized(class: &str) -> bool {
+    let segments = split_variants(class);
+    let base = segments.last().copied().unwrap_or(class);
+    let base = base.strip_prefix('-').unwrap_or(base);
+    const PREFIXES: &[&str] = &[
+        "bg-", "text-", "font-", "border-", "rounded-", "ring-", "outline-", "shadow-",
+        "inset-", "top-", "right-", "bottom-", "left-", "z-", "translate-", "rotate-",
+        "scale-", "skew-", "w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-", "size-",
+        "m-", "mx-", "my-", "mt-", "mr-", "mb-", "ml-", "p-", "px-", "py-", "pt-", "pr-",
+        "pb-", "pl-", "gap-", "space-", "flex-", "grid-", "col-", "row-", "justify-",
+        "items-", "content-", "self-", "place-", "order-", "leading-", "tracking-",
+        "align-", "list-", "decoration-", "underline-", "overflow-", "overscroll-",
+        "cursor-", "select-", "pointer-events-", "opacity-", "transition-", "duration-",
+        "delay-", "ease-", "animate-", "fill-", "stroke-", "object-", "aspect-",
+        "columns-", "break-", "whitespace-", "line-clamp-", "backdrop-", "blur-",
+        "brightness-", "contrast-", "divide-", "accent-", "caret-", "scroll-",
+        "snap-", "touch-", "will-change-", "from-", "via-", "to-",
+    ];
+    const EXACT: &[&str] = &[
+        "flex", "grid", "block", "inline", "inline-block", "inline-flex", "inline-grid",
+        "hidden", "contents", "static", "fixed", "absolute", "relative", "sticky",
+        "isolate", "visible", "invisible", "container", "italic", "not-italic",
+        "underline", "overline", "line-through", "no-underline", "uppercase",
+        "lowercase", "capitalize", "normal-case", "truncate", "antialiased",
+        "subpixel-antialiased", "rounded", "rounded-full", "border", "ring",
+        "ring-inset", "shadow", "outline", "outline-none", "transition", "grow",
+        "shrink", "tabular-nums", "sr-only", "not-sr-only", "group", "peer",
+    ];
+    PREFIXES.iter().any(|prefix| base.starts_with(prefix))
+        || EXACT.contains(&base)
 }
 
 /// Renders a full utility class (with any variant chain) into a CSS rule string

@@ -1873,9 +1873,24 @@ impl Bundler {
     /// directory when no `source(...)` is given.
     fn tailwind_candidates(&self, css_path: &Path, source_css: &str) -> BTreeSet<String> {
         let css_dir = css_path.parent().unwrap_or_else(|| Path::new("."));
+        // Tailwind v4's default source detection scans the PROJECT, not the
+        // stylesheet's own directory. An entry that declares `source(...)`
+        // keeps its explicit root; otherwise walk up to the nearest
+        // `package.json` (found live: wall-go keeps its entry in
+        // `src/assets/`, and scanning only that directory yielded zero
+        // utility candidates — an entirely unstyled app).
         let scan_root = tailwind_source_root(source_css)
             .map(|rel| css_dir.join(rel))
-            .unwrap_or_else(|| css_dir.to_path_buf());
+            .unwrap_or_else(|| {
+                let mut root = css_dir;
+                for ancestor in css_dir.ancestors() {
+                    if ancestor.join("package.json").is_file() {
+                        root = ancestor;
+                        break;
+                    }
+                }
+                root.to_path_buf()
+            });
         let mut candidates = BTreeSet::new();
         scan_directory_for_classes(&scan_root, &mut candidates);
         candidates
@@ -2666,7 +2681,7 @@ impl Bundler {
         // The browser entry runs first, so its process/NODE_ENV shim must precede
         // any module code (and any later dynamically-imported chunk). The runtime
         // path injects this via the entry prelude; the flat path prepends it here.
-        if is_main && format == ModuleFormat::BrowserEsm {
+        if is_main && format == ModuleFormat::BrowserEsm && self.config.browser_process_shim {
             code.insert_str(0, BROWSER_GLOBALS_PRELUDE);
             for mapping in &mut mappings {
                 mapping.generated_line += 1;
@@ -2848,7 +2863,9 @@ impl Bundler {
                 // non-TanStack Node bundle.
                 "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n"
             }
-            ModuleFormat::BrowserEsm if is_main => BROWSER_GLOBALS_PRELUDE,
+            ModuleFormat::BrowserEsm if is_main && self.config.browser_process_shim => {
+                BROWSER_GLOBALS_PRELUDE
+            }
             _ => "",
         };
         // Lines the chunk emits before `const __newModules={`: the format's
@@ -5371,6 +5388,13 @@ fn split_chunk_route_id(id: &str) -> Result<Option<String>, String> {
 /// Rust; the host merely supplies the values.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
+    /// Install the browser `process.env` shim in client output. Vite does NOT
+    /// (a Vite browser build has `typeof process === "undefined"`, and
+    /// env-sniffing libraries take browser paths because of it — found live:
+    /// i18next behaved differently under the shim). Only the TanStack
+    /// `build-app` path needs it, for runtime reads of `TSS_SERVER_FN_BASE`
+    /// and `NODE_ENV` in vendored code the compile-time define cannot reach.
+    pub browser_process_shim: bool,
     /// The public base URL every emitted asset URL is prefixed with. `"/"`
     /// unless the build opts into a Vite config with a non-root `base` (a site
     /// served from a subpath, e.g. GitHub Pages). Always ends with `/`.
@@ -5420,6 +5444,7 @@ impl Default for BuildConfig {
             // The root base, not an empty string: every minted asset URL is
             // `{base}assets/...`, and `/assets/...` is the correct default.
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
@@ -5797,6 +5822,7 @@ mod tests {
         let entry = directory.path().join("entry.js");
         let config = BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: vec![(
                 "#tanstack-router-entry".to_string(),
                 router.to_string_lossy().into_owned(),
@@ -7589,6 +7615,7 @@ mod tests {
 
         let config = BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: vec![(
                 "@tanstack/react-router".to_string(),
                 router_stub.to_string_lossy().into_owned(),
@@ -7661,6 +7688,7 @@ mod tests {
         let (_directory, entry) = server_leak_fixture();
         let config = |target| BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
@@ -7739,6 +7767,7 @@ mod tests {
             "const tsrStartManifest = () => ({ routes: {} });\nexport { tsrStartManifest };\n";
         let config = BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: vec![(
@@ -7960,6 +7989,7 @@ mod tests {
     fn glob_config(root: &Path) -> BuildConfig {
         BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             import_meta_glob: Some(crate::import_meta_glob::ImportMetaGlob {
                 root: root.canonicalize().unwrap(),
             }),

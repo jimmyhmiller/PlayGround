@@ -126,6 +126,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         environment: environment.to_string(),
         build: BuildConfig {
             base: base.clone(),
+            browser_process_shim: true,
             aliases,
             conditions,
             virtual_modules: Vec::new(),
@@ -178,6 +179,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     let mut config = WebConfig {
         build: BuildConfig {
             base: "/".to_string(),
+            browser_process_shim: false,
             aliases: Vec::new(),
             conditions,
             virtual_modules: Vec::new(),
