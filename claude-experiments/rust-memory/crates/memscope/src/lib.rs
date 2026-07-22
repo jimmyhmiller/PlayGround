@@ -62,6 +62,11 @@ macro_rules! meta {
 /// extra code. An explicit earlier `record_to_file` call wins.
 pub fn start_agent() -> std::io::Result<String> {
     maybe_record_from_env();
+    // Same env-trigger contract as injection (`memscope run`): SIGUSR1,
+    // MEMSCOPE_HPROF_ON_EXIT / _AT_BYTES / _OUT — so `run` can drive an
+    // integrated binary identically, just without the preload shim.
+    memscope_agent::install_env_triggers();
+    memscope_agent::spawn_trigger_thread();
     memscope_agent::start()
 }
 
@@ -69,6 +74,8 @@ pub fn start_agent() -> std::io::Result<String> {
 /// [`start_agent`].
 pub fn start_agent_at(path: &str) -> std::io::Result<()> {
     maybe_record_from_env();
+    memscope_agent::install_env_triggers();
+    memscope_agent::spawn_trigger_thread();
     memscope_agent::start_at(path)
 }
 

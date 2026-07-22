@@ -327,12 +327,14 @@ pub fn cmd_setup(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    print_next_step(&steps, live);
+    print_next_step(&steps, live, None);
     Ok(())
 }
 
 /// The one-step-at-a-time view shared by `setup` and `run`'s preflight.
-fn print_next_step(steps: &[Step], live: bool) {
+/// `then_override` replaces the step's own "then:" line (the run flow
+/// auto-detects completion, so it shouldn't say "re-run memscope setup").
+fn print_next_step(steps: &[Step], live: bool, then_override: Option<&str>) {
     let step = &steps[0];
     println!("memscope setup — step 1 of {}: {}", steps.len(), step.title);
     println!();
@@ -347,7 +349,7 @@ fn print_next_step(steps: &[Step], live: bool) {
         );
     }
     println!();
-    println!("  then:  {}", step.then);
+    println!("  then:  {}", then_override.unwrap_or(&step.then));
 }
 
 /// Print the pending setup as a prompt for an AI agent. Stdout carries ONLY the
@@ -392,16 +394,33 @@ pub fn cmd_agent_setup(args: &[String]) -> Result<(), String> {
 
 /// Preflight for `memscope run`: refuse the two cases where the run would
 /// silently produce a useless dump. Short messages; `setup` has the details.
-pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
+/// How `memscope run` should drive the target.
+pub enum RunMode {
+    /// Inject the preload shim (`DYLD_INSERT_LIBRARIES` / `LD_PRELOAD`).
+    Inject,
+    /// The binary has memscope built in — same env contract, no injection
+    /// (injecting would double-track every allocation).
+    Integrated,
+}
+
+pub fn preflight_run(bin: &Path, force: bool, wait: bool) -> Result<RunMode, String> {
     // Target may be resolved via PATH (`memscope run -- ls`); only inspect
     // real paths, and never fail the run because inspection itself failed.
     if !bin.is_file() {
-        return Ok(());
+        return Ok(RunMode::Inject);
     }
     let facts = match inspect_binary(bin, false) {
         Ok(f) => f,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(RunMode::Inject),
     };
+
+    if facts.memscope_linked {
+        eprintln!(
+            "[memscope] {} has memscope built in — running with the in-process agent (no injection).",
+            bin.display()
+        );
+        return Ok(RunMode::Integrated);
+    }
 
     if let Allocator::Named { name, .. } = &facts.allocator {
         if force {
@@ -411,8 +430,8 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
                 bin.display()
             );
         } else {
-            // Don't just refuse — explain why and start the setup process on the
-            // spot (against the binary's project if we can find it).
+            // Don't just refuse — explain why, start the setup process on the
+            // spot, and then wait: the moment the rebuilt binary passes, run.
             println!(
                 "{} uses {name} as its global allocator, which bypasses malloc — so `memscope run`\n\
                  (malloc interposition) would see (almost) nothing. This needs the 2-line setup:\n",
@@ -424,14 +443,15 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
             let a = assess(&target)?;
             let steps = plan(&a, false);
             if steps.is_empty() {
-                // e.g. an already-integrated binary that ALSO links the custom
-                // allocator as MemScope's inner — nothing to do, but injection
-                // is still pointless; say what to run instead.
                 println!("✓ setup is already done — {}", ready_line(&a));
             } else {
-                print_next_step(&steps, false);
+                print_next_step(
+                    &steps,
+                    false,
+                    Some("cargo build --release   (I'll detect the rebuild and launch automatically)"),
+                );
             }
-            return Err("not launching (setup needed first; re-run with --force to inject anyway)".into());
+            return wait_for_setup(bin, wait);
         }
     }
 
@@ -444,16 +464,80 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
         }
     }
 
-    if facts.memscope_linked {
-        eprintln!(
-            "[memscope] note: {} already has memscope built in — you can attach directly (memscope monitor).",
-            bin.display()
-        );
-    }
     if let DebugInfo::Absent { .. } = &facts.debug_info {
         eprintln!("[memscope] warning: no debug info — the dump will be untyped (memscope setup to fix).");
     }
-    Ok(())
+    Ok(RunMode::Inject)
+}
+
+/// Block until the binary passes preflight, then run it. Re-inspects every 2s
+/// (a rebuild shows up automatically); Enter forces a check now and reports
+/// what's still missing; Ctrl-C gives up. Skipped when stdin isn't a terminal
+/// (scripts get the immediate error instead of a silent hang) unless `--wait`
+/// asked for it explicitly.
+fn wait_for_setup(bin: &Path, wait_flag: bool) -> Result<RunMode, String> {
+    // SAFETY: plain isatty query.
+    if !wait_flag && unsafe { libc::isatty(0) } != 1 {
+        return Err("not launching (setup needed first; re-run when done, or --wait to auto-launch after the rebuild, or --force)".into());
+    }
+    eprintln!();
+    eprintln!(
+        "[memscope] waiting for setup — re-checking every 2s; Enter = check now, Ctrl-C = give up"
+    );
+
+    // Enter-to-check-now: a reader thread turns stdin lines into nudges.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::BufRead::read_line(&mut stdin.lock(), &mut line) {
+                Ok(0) | Err(_) => break, // EOF — polling continues without us
+                Ok(_) => {
+                    if tx.send(()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    loop {
+        let nudged = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+            // Reader gone (stdin EOF): keep polling on our own clock.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                false
+            }
+        };
+        // Mid-rebuild the binary may be missing or half-written — not ready yet.
+        let facts = match inspect_binary(bin, false) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if facts.memscope_linked {
+            eprintln!("[memscope] ✓ rebuilt binary has memscope — launching");
+            return Ok(RunMode::Integrated);
+        }
+        if matches!(facts.allocator, Allocator::SystemDefault) {
+            eprintln!("[memscope] ✓ custom allocator is gone — launching with injection");
+            return Ok(RunMode::Inject);
+        }
+        if nudged {
+            let name = match &facts.allocator {
+                Allocator::Named { name, .. } => name,
+                Allocator::SystemDefault => unreachable!(),
+            };
+            eprintln!(
+                "[memscope] not ready yet — {} still uses {name} and doesn't link memscope \
+                 (did `cargo build --release` finish?)",
+                bin.display()
+            );
+        }
+    }
 }
 
 /// The cargo project a binary came from: nearest ancestor with a Cargo.toml

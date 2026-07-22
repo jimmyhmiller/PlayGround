@@ -22,8 +22,10 @@ use memscope_symbols::TypeOracle;
 
 mod heapdump;
 mod record;
+mod triggers;
 pub use heapdump::{heap_dump, HprofStats};
 pub use record::{record_against_main_executable, record_to_file, FileRecorder};
+pub use triggers::{install_env_triggers, spawn_trigger_thread};
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

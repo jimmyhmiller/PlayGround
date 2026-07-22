@@ -103,7 +103,8 @@ fn print_help() {
          memscope setup [BIN|CARGO_DIR] [--live]       guided: shows the ONE next step, re-run to verify + continue\n  \
          memscope agent-setup                          the pending steps as an AI-agent prompt (uses cwd):\n  \
          \x20                                              claude \"$(memscope agent-setup)\"\n\n\
-         CAPTURE — no code changes (works on an unmodified binary)\n  \
+         CAPTURE — no code changes (works on an unmodified binary; if setup IS needed, run\n  \
+         \x20        walks you through it and launches automatically once it's done)\n  \
          memscope run --on-exit  -- <prog> [args...]    run it, dump what was never freed (.hprof → MAT/heapster)\n  \
          memscope run --after 5s -- <prog>              dump at steady state, 5s in (program keeps running)\n  \
          memscope run --at-bytes 50MB -- <prog>         dump the moment the live heap first hits 50MB\n  \
@@ -2140,13 +2141,15 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     // Default trigger: dump at exit if nothing else was requested.
     let default_on_exit = !on_exit && after.is_none() && at_bytes.is_none();
 
-    // Preflight the target: refuse the two setups where the run would silently
-    // produce a useless dump (custom allocator bypassing malloc, signature that
-    // makes dyld drop the injection). `--force` downgrades those to warnings.
+    // Preflight the target. This decides HOW to run it (inject vs the built-in
+    // agent), blocks the setups that would silently produce a useless dump, and
+    // — when setup is needed — walks the user through it and waits, launching
+    // the moment the rebuilt binary passes. `--force` injects regardless.
     let force = opts.iter().any(|a| a == "--force");
-    check::preflight_run(std::path::Path::new(&cmd[0]), force)?;
+    let wait = opts.iter().any(|a| a == "--wait");
+    let mode = check::preflight_run(std::path::Path::new(&cmd[0]), force, wait)?;
+    let inject = matches!(mode, check::RunMode::Inject);
 
-    let lib = preload_lib()?;
     let env_var = if cfg!(target_os = "macos") { "DYLD_INSERT_LIBRARIES" } else { "LD_PRELOAD" };
 
     // Infer whether the caller wants an alloc-stream (.mscope) or a live-heap dump
@@ -2166,7 +2169,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     let mut child = std::process::Command::new(&cmd[0]);
     child.args(&cmd[1..]);
-    child.env(env_var, &lib);
+    if inject {
+        child.env(env_var, preload_lib()?);
+    }
     if wants_mscope {
         // Full alloc-stream. memscope-preload now honors MEMSCOPE_RECORD and starts a
         // FileRecorder directly, so we get a self-contained .mscope with raw sites + slide.
@@ -2189,14 +2194,15 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         }
     }
 
+    let how = if inject { env_var } else { "built-in agent" };
     if wants_mscope {
         eprintln!(
-            "[memscope] launching `{}` under memscope ({env_var}) — recording full alloc-stream to {}",
+            "[memscope] launching `{}` under memscope ({how}) — recording full alloc-stream to {}",
             cmd.join(" "),
             out.unwrap_or("/tmp/memscope-{pid}-0.mscope")
         );
     } else {
-        eprintln!("[memscope] launching `{}` under memscope ({env_var})", cmd.join(" "));
+        eprintln!("[memscope] launching `{}` under memscope ({how})", cmd.join(" "));
     }
     let mut handle = child.spawn().map_err(|e| format!("failed to launch {}: {e}", cmd[0]))?;
     let pid = handle.id();
