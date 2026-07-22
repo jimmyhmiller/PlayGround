@@ -136,12 +136,22 @@ fn probe_debug_info(path: &Path, obj: &object::File, generate_dsym: bool) -> Deb
     {
         if let Some(dsym) = load::dsym_dwarf_path(path) {
             if dsym.exists() && !load::is_stale(&dsym, path) {
-                return DebugInfo::Present { source: "fresh .dSYM next to the binary".into() };
+                return match dwarf_nonempty(&dsym) {
+                    true => DebugInfo::Present { source: "fresh .dSYM next to the binary".into() },
+                    false => DebugInfo::Absent {
+                        detail: "the .dSYM has no DWARF — build with `debug = true`".into(),
+                    },
+                };
             }
         }
         if generate_dsym {
             return match load::find_or_make_dsym(path) {
-                Ok(_) => DebugInfo::Present { source: ".dSYM generated".into() },
+                // dsymutil exits 0 even for a binary with no debug info at all —
+                // it just writes an EMPTY dSYM. Presence isn't proof; look inside.
+                Ok(p) if dwarf_nonempty(&p) => DebugInfo::Present { source: ".dSYM generated".into() },
+                Ok(_) => DebugInfo::Absent {
+                    detail: "binary has no debug info (dsymutil produced an empty .dSYM) — build with `debug = true`".into(),
+                },
                 Err(e) => DebugInfo::Absent { detail: format!("dsymutil could not produce DWARF: {e}") },
             };
         }
@@ -157,6 +167,17 @@ fn probe_debug_info(path: &Path, obj: &object::File, generate_dsym: bool) -> Deb
             detail: "no .debug_info section — build with `debug = true` in the used [profile.*]".into(),
         }
     }
+}
+
+/// Does this DWARF-bearing file actually contain a non-empty `.debug_info`?
+#[cfg(target_os = "macos")]
+fn dwarf_nonempty(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    // SAFETY: read-only map of an on-disk build artifact.
+    let Ok(mmap) = (unsafe { memmap2::Mmap::map(&file) }) else { return false };
+    let Ok(obj) = object::File::parse(&*mmap) else { return false };
+    obj.sections()
+        .any(|s| s.name().map(|n| n.ends_with("debug_info")).unwrap_or(false) && s.size() > 0)
 }
 
 /// On macOS, `DYLD_INSERT_LIBRARIES` is silently ignored for setuid binaries

@@ -214,9 +214,12 @@ pub(crate) fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
         return Ok(path);
     }
     // Generate it: `dsymutil <exe>` writes `<exe>.dSYM` alongside the binary.
+    // Capture (rather than inherit) its output — its "no debug symbols"
+    // warning is our Absent verdict, not something to splat on the terminal.
     let status = std::process::Command::new("dsymutil")
         .arg(exe)
-        .status()
+        .output()
+        .map(|o| o.status)
         .map_err(|e| -> DynErr {
             format!(
                 "no dSYM next to {} and failed to run dsymutil ({e}). \

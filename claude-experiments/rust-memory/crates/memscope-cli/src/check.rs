@@ -327,6 +327,12 @@ pub fn cmd_setup(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    print_next_step(&steps, live);
+    Ok(())
+}
+
+/// The one-step-at-a-time view shared by `setup` and `run`'s preflight.
+fn print_next_step(steps: &[Step], live: bool) {
     let step = &steps[0];
     println!("memscope setup — step 1 of {}: {}", steps.len(), step.title);
     println!();
@@ -342,7 +348,6 @@ pub fn cmd_setup(args: &[String]) -> Result<(), String> {
     }
     println!();
     println!("  then:  {}", step.then);
-    Ok(())
 }
 
 /// Print the pending setup as a prompt for an AI agent. Stdout carries ONLY the
@@ -399,15 +404,34 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
     };
 
     if let Allocator::Named { name, .. } = &facts.allocator {
-        let msg = format!(
-            "{} uses {name} — injection interposes malloc, so the dump would be (almost) empty.\n\
-             next: memscope setup <its project dir>   (walks you through the 2-line fix; or pass --force)",
-            bin.display()
-        );
         if force {
-            eprintln!("[memscope] WARNING (--force): {msg}");
+            eprintln!(
+                "[memscope] WARNING (--force): {} uses {name} — injection interposes malloc, \
+                 so the dump will be (almost) empty.",
+                bin.display()
+            );
         } else {
-            return Err(msg);
+            // Don't just refuse — explain why and start the setup process on the
+            // spot (against the binary's project if we can find it).
+            println!(
+                "{} uses {name} as its global allocator, which bypasses malloc — so `memscope run`\n\
+                 (malloc interposition) would see (almost) nothing. This needs the 2-line setup:\n",
+                bin.display()
+            );
+            let target = project_dir_of(bin)
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| bin.display().to_string());
+            let a = assess(&target)?;
+            let steps = plan(&a, false);
+            if steps.is_empty() {
+                // e.g. an already-integrated binary that ALSO links the custom
+                // allocator as MemScope's inner — nothing to do, but injection
+                // is still pointless; say what to run instead.
+                println!("✓ setup is already done — {}", ready_line(&a));
+            } else {
+                print_next_step(&steps, false);
+            }
+            return Err("not launching (setup needed first; re-run with --force to inject anyway)".into());
         }
     }
 
@@ -430,6 +454,20 @@ pub fn preflight_run(bin: &Path, force: bool) -> Result<(), String> {
         eprintln!("[memscope] warning: no debug info — the dump will be untyped (memscope setup to fix).");
     }
     Ok(())
+}
+
+/// The cargo project a binary came from: nearest ancestor with a Cargo.toml
+/// (e.g. `<project>/target/release/app` → `<project>`).
+fn project_dir_of(bin: &Path) -> Option<PathBuf> {
+    let abs = std::fs::canonicalize(bin).ok()?;
+    let mut dir = abs.parent()?;
+    for _ in 0..8 {
+        if dir.join("Cargo.toml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 // --- project scanning helpers -----------------------------------------------
