@@ -599,7 +599,8 @@
 
 (defn wasm-target? [(triple (ptr i8))] (-> bool)
   (if (icmp-eq (cast i64 triple) 0) false
-    (starts-with (cstr->slice triple) "wasm32-")))
+    (let [s (cstr->slice triple)]
+      (or (starts-with s "wasm32-") (starts-with s "wasm64-")))))
 
 ; ---- reading a source file the user named ------------------------------------
 ; `read-file` maps ENOENT to "" — right for the loader's disk-first/embedded-module

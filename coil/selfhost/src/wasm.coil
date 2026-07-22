@@ -14,7 +14,7 @@
 (import "control.coil" :use *)
 
 (defstruct WasmReader [(data (slice u8)) (pos i64)])
-(defstruct WasmImports [(items (ArrayList u8)) (count i64) (mem (ArrayList u8)) (has-mem bool) (mem-min i64)])
+(defstruct WasmImports [(items (ArrayList u8)) (count i64) (mem (ArrayList u8)) (has-mem bool) (mem-min i64) (mem64 bool)])
 ; One wasm function export: its symbol name and its function-index-space index.
 (defstruct WasmExport [(name (slice u8)) (idx i64)])
 ; One entry of an active `funcref` element segment: a function placed at a table slot.
@@ -462,6 +462,9 @@
             (if (and (icmp-eq kind 2) (and (str-eq mod "env") (str-eq name "__linear_memory")))
                 (do (wbytes! (mut (field out mem)) (subslice payload type-start end))
                     (store! (field out mem-min) (wasm-mem-min (subslice payload type-start end)))
+                    ; limits flags bit 0x04 = 64-bit index (memory64). LLVM sets it on the
+                    ; imported memory for a wasm64 triple; preserve it into the defined memory.
+                    (store! (field out mem64) (icmp-ne (iand (cast i64 (slice-get (subslice payload type-start end) 0)) 4) 0))
                     (store! (field out has-mem) true) 0)
               (if (or (icmp-eq kind 3) (icmp-eq kind 1))   ; global import / indirect table → defined by finalizer; drop
                   0
@@ -482,7 +485,8 @@
 (defn wasm-memory-payload [(a (ptr Allocator)) (im WasmImports) (req-pages i64)] (-> (slice u8))
   (let [(mut b) (al-new [u8] a)
         min (if (icmp-gt req-pages (load (field im mem-min))) req-pages (load (field im mem-min)))]
-    (wuleb! (mut b) 1) (wb! (mut b) 0) (wuleb! (mut b) min)
+    ; flags: 0 = 32-bit index, no max (growable); 0x04 = 64-bit index (memory64), no max.
+    (wuleb! (mut b) 1) (wb! (mut b) (if (load (field im mem64)) 4 0)) (wuleb! (mut b) min)
     (al-slice [u8] (load b))))
 
 ; Emit the export section payload: one entry per collected function export

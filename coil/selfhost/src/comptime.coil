@@ -341,6 +341,7 @@
   (if (icmp-eq (cast i64 triple) 0) "aarch64"          ; null = host default
     (let [t (cstr->slice triple)]
       (cond (starts-with t "wasm32")  "wasm32"
+            (starts-with t "wasm64")  "wasm64"
             (starts-with t "x86_64")  "x86_64"
             (starts-with t "aarch64") "aarch64"
             (starts-with t "arm64")   "aarch64"

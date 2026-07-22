@@ -71,7 +71,7 @@
           (ps w (cstr->slice (load errout))) (wb w 10)
           (exit 1) 0)
       0)
-    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 3 2 0)
+    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" (llvm-cpu-features triple) 3 2 0)
           pbo (LLVMCreatePassBuilderOptions)
           ; --sanitize=address (mem-7): append LLVM's AddressSanitizer module pass to
           ; the O3 pipeline so the emitted object is instrumented. Only the PROGRAM

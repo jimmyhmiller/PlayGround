@@ -1443,7 +1443,7 @@
             (ps w (cstr->slice (load errout))) (wb w 10)
             (exit 1) 0)
         0)
-      (let [tm (LLVMCreateTargetMachine (load targetout) triple c"generic" c"" 2 2 0)
+      (let [tm (LLVMCreateTargetMachine (load targetout) triple c"generic" (llvm-cpu-features triple) 2 2 0)
             td (LLVMCreateTargetDataLayout tm)
             dl (LLVMCopyStringRepOfTargetData td)
             module (LLVMModuleCreateWithNameInContext c"coil" ctx)
@@ -1641,8 +1641,17 @@
     (let [a0 (substr triple 0 (load i))]
       (if (or (str-eq a0 "x86_64") (str-eq a0 "amd64")) 0
         (if (or (str-eq a0 "aarch64") (or (str-eq a0 "arm64") (str-eq a0 "arm64e"))) 1
-          (if (str-eq a0 "wasm32") 2
+          (if (or (str-eq a0 "wasm32") (str-eq a0 "wasm64")) 2   ; wasm ABI class is width-agnostic; word width comes from the triple's datalayout
             (do (unimplemented "abi: unsupported target architecture") -1)))))))
+
+; LLVM subtarget-feature string for a triple's TargetMachine, as a C string for
+; LLVMCreateTargetMachine's `Features` arg. wasm64's 64-bit memory is IMPLIED by the
+; triple's datalayout (there is no `+memory64` subtarget feature in LLVM), so the only
+; wasm feature we opt into is `+tail-call` (Wasm 3.0 tail calls — LLVM lowers `musttail`
+; to `return_call`). Everything else takes LLVM's defaults (empty features).
+(defn llvm-cpu-features [(triple (ptr i8))] (-> (ptr i8))
+  (if (icmp-eq (cast i64 triple) 0) c""
+    c""))                                  ; TODO(wasm 3.0): +tail-call once memory64 lands + verified
 
 ; smallest power-of-two-byte int width (bits) covering `bytes` data bytes.
 (defn abi-int-bits-for-bytes [(bytes i64)] (-> i64)
