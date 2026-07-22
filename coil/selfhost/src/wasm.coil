@@ -649,6 +649,22 @@
   (al-set! (mut buf) (iadd at 4)   (cast u8 (iand (ishr v 28) 127)))
   0)
 
+; Overwrite the 10-byte padded sleb128 at buf[at..at+10] with `v` — the SLEB64 form
+; LLVM emits for R_WASM_TABLE_INDEX_SLEB64 placeholders under table64 (wasm64). Table
+; indices are small and non-negative, so the high bytes are continuation-padded zeros.
+(defn wasm-put-sleb10 [(buf (mut (ArrayList u8))) (at i64) (v i64)] (-> i64)
+  (al-set! (mut buf) at            (cast u8 (ior (iand v 127) 128)))
+  (al-set! (mut buf) (iadd at 1)   (cast u8 (ior (iand (ishr v 7) 127) 128)))
+  (al-set! (mut buf) (iadd at 2)   (cast u8 (ior (iand (ishr v 14) 127) 128)))
+  (al-set! (mut buf) (iadd at 3)   (cast u8 (ior (iand (ishr v 21) 127) 128)))
+  (al-set! (mut buf) (iadd at 4)   (cast u8 (ior (iand (ishr v 28) 127) 128)))
+  (al-set! (mut buf) (iadd at 5)   (cast u8 (ior (iand (ishr v 35) 127) 128)))
+  (al-set! (mut buf) (iadd at 6)   (cast u8 (ior (iand (ishr v 42) 127) 128)))
+  (al-set! (mut buf) (iadd at 7)   (cast u8 (ior (iand (ishr v 49) 127) 128)))
+  (al-set! (mut buf) (iadd at 8)   (cast u8 (ior (iand (ishr v 56) 127) 128)))
+  (al-set! (mut buf) (iadd at 9)   (cast u8 (iand (ishr v 63) 127)))
+  0)
+
 ; The reloc.CODE section body (section index + entry count + entries), after its
 ; name, or an empty slice when the object has none.
 (defn wasm-reloc-code [(obj (slice u8))] (-> (slice u8))
@@ -676,7 +692,7 @@
             (loop (if (icmp-ge (load k) cnt) (break)
               (do (let [ty (wr-byte rr) off (wr-uleb rr) idx (wr-uleb rr)]
                     (if (wasm-reloc-has-addend ty) (do (wr-sleb rr) 0) 0)
-                    (if (or (icmp-eq ty 1) (icmp-eq ty 12))
+                    (if (or (or (icmp-eq ty 1) (icmp-eq ty 12)) (or (icmp-eq ty 18) (icmp-eq ty 24)))  ; incl. SLEB64 (table64)
                         (let [func (if (icmp-lt idx (al-len [i64] symfuncs)) (al-get [i64] symfuncs idx) -1)]
                           (if (icmp-lt (wasm-elem-lookup elems func) 0)
                               (do (store! msg "wasm: table-index relocation references a function with no table slot") 0) 0) 0)
@@ -706,7 +722,11 @@
                         (let [func (if (icmp-lt idx (al-len [i64] symfuncs)) (al-get [i64] symfuncs idx) -1)
                               tidx (wasm-elem-lookup elems func)]
                           (if (icmp-ge tidx 0) (wasm-put-sleb5 (mut buf) off tidx) 0) 0)
-                      0))
+                      (if (or (icmp-eq ty 18) (icmp-eq ty 24))    ; R_WASM_TABLE_INDEX_SLEB64 / _REL_SLEB64 (table64)
+                          (let [func (if (icmp-lt idx (al-len [i64] symfuncs)) (al-get [i64] symfuncs idx) -1)
+                                tidx (wasm-elem-lookup elems func)]
+                            (if (icmp-ge tidx 0) (wasm-put-sleb10 (mut buf) off tidx) 0) 0)
+                        0)))
                   (store! k (iadd (load k) 1))))))
           (al-slice [u8] (load buf)))))))
 
