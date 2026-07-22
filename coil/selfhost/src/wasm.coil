@@ -400,7 +400,7 @@
 ; can be exported for the JS heap allocator. Empty ⇒ none.
 (defn wasm-globals-section [(obj (slice u8)) (add-heap bool) (heap-base i64) (a (ptr Allocator))] (-> (slice u8))
   (let [offs (wasm-data-offsets obj a) (mut body) (al-new [u8] a) (mut count) 0
-        r (alloc-stack WasmReader) n (slice-len obj)]
+        r (alloc-stack WasmReader) n (slice-len obj) mem64 (wasm-obj-mem64? obj)]
     (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
     (loop (if (icmp-ge (load (field r pos)) n) (break)
       (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
@@ -414,18 +414,29 @@
                           (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
                             (if (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
                               (if (icmp-eq kind 3)
-                                  (let [valtype (wr-byte ir) gmut (wr-byte ir)
-                                        value (wasm-global-value obj offs imod inm)]
+                                  (let [valtype0 (wr-byte ir) gmut (wr-byte ir)
+                                        value (wasm-global-value obj offs imod inm)
+                                        ; LLVM's wasm64 backend declares GOT.mem.* (addresses) and
+                                        ; GOT.func.* (64-bit table indices under table64) as i32 in the
+                                        ; RELOCATABLE object even though the code uses them as i64;
+                                        ; wasm-ld defines them as i64 at final link — so must we. Promote
+                                        ; any GOT.* global to i64 under memory64; other globals keep type.
+                                        valtype (if (and mem64 (starts-with imod "GOT.")) 126 valtype0)
+                                        ; init-expr const opcode must match the global's valtype:
+                                        ; i64.const (0x42=66) for an i64 global, else i32.const (0x41=65).
+                                        constop (if (icmp-eq (cast i64 valtype) 126) 66 65)]
                                     (wb! (mut body) valtype) (wb! (mut body) gmut)
-                                    (wb! (mut body) 65) (wsleb! (mut body) value) (wb! (mut body) 11)
+                                    (wb! (mut body) constop) (wsleb! (mut body) value) (wb! (mut body) 11)
                                     (store! count (iadd (load count) 1)) 0)
                                 (do (wr-uleb ir) 0))))))
                       (store! k (iadd (load k) 1)))))))
           0))))
-    ; Appended __heap_base: immutable i32 = heap-base (const init expr).
+    ; Appended __heap_base: immutable, = heap-base (const init expr). It is an ADDRESS,
+    ; so under memory64 it must be i64 (0x7E/i64.const) — the runtime loads it into a
+    ; 64-bit pointer context — else i32 (0x7F/i32.const).
     (if add-heap
-        (do (wb! (mut body) 127) (wb! (mut body) 0)
-            (wb! (mut body) 65) (wsleb! (mut body) heap-base) (wb! (mut body) 11)
+        (do (wb! (mut body) (if mem64 126 127)) (wb! (mut body) 0)
+            (wb! (mut body) (if mem64 66 65)) (wsleb! (mut body) heap-base) (wb! (mut body) 11)
             (store! count (iadd (load count) 1)) 0) 0)
     (if (icmp-eq (load count) 0) (slice-new [u8] (cast (ptr u8) 0) 0)
       (let [(mut out) (al-new [u8] a)]
@@ -701,12 +712,40 @@
 
 ; Table section (id 4) payload: one funcref table with min = highest slot + 1, so
 ; every elem entry (and the reserved null slot 0) fits. Empty ⇒ no table needed.
-(defn wasm-table-section [(maxtidx i64) (a (ptr Allocator))] (-> (slice u8))
+; True when the object's imported linear memory is 64-bit (memory64): its limits flags
+; carry bit 0x04. LLVM emits this — and a matching 64-bit indirect function table with
+; i64.const elem offsets / i64 call_indirect indices — for a wasm64 triple, so the
+; finalizer must define BOTH the memory and the table with the 64-bit flag to match.
+(defn wasm-obj-mem64? [(obj (slice u8))] (-> bool)
+  (let [r (alloc-stack WasmReader) n (slice-len obj) (mut ans) false]
+    (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
+    (loop (if (icmp-ge (load (field r pos)) n) (break)
+      (let [id (wr-byte r) size (wr-uleb r) payload (wr-bytes r size)]
+        (if (icmp-eq id 2)
+            (let [ir (alloc-stack WasmReader)]
+              (store! ir (zeroed WasmReader)) (store! (field ir data) payload)
+              (let [ic (wr-uleb ir) (mut k) 0]
+                (loop (if (icmp-ge (load k) ic) (break)
+                  (do (let [imod (wr-name ir) inm (wr-name ir) kind (wr-byte ir)]
+                        (if (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                          (if (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                            (if (icmp-eq kind 2)
+                                (let [flags (wr-byte ir)]
+                                  (if (icmp-ne (iand (cast i64 flags) 4) 0) (store! ans true) 0)
+                                  (wr-uleb ir)                                              ; min
+                                  (if (icmp-ne (iand (cast i64 flags) 1) 0) (do (wr-uleb ir) 0) 0))  ; max
+                              (if (icmp-eq kind 3) (do (wr-byte ir) (wr-byte ir) 0)
+                                (do (wr-uleb ir) 0))))))
+                      (store! k (iadd (load k) 1)))))))
+          0))))
+    (load ans)))
+
+(defn wasm-table-section [(maxtidx i64) (mem64 bool) (a (ptr Allocator))] (-> (slice u8))
   (if (icmp-lt maxtidx 0) (slice-new [u8] (cast (ptr u8) 0) 0)
     (let [(mut b) (al-new [u8] a)]
       (wuleb! (mut b) 1)                    ; one table
       (wb! (mut b) 112)                     ; 0x70 funcref
-      (wb! (mut b) 0)                       ; limits: min only
+      (wb! (mut b) (if mem64 4 0))          ; limits flags: 0x04 = 64-bit index (table64), matches memory64
       (wuleb! (mut b) (iadd maxtidx 1))     ; min slots
       (al-slice [u8] (load b)))))
 
@@ -734,7 +773,7 @@
               hb-idx (wasm-count-global-imports obj)
               sp-idx (if has-sp (wasm-global-import-index obj "env" "__stack_pointer") -1)
               maxtidx (wasm-elem-max elems)
-              tsec (wasm-table-section maxtidx a)
+              tsec (wasm-table-section maxtidx (wasm-obj-mem64? obj) a)
               gsec (wasm-globals-section obj has-sp heap-base a) n (slice-len obj)]
           (store! r (zeroed WasmReader)) (store! (field r data) obj) (store! (field r pos) 8)
           (wbytes! (mut out) (subslice obj 0 8))
