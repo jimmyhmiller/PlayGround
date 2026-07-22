@@ -99,6 +99,49 @@ pub fn current_image_slide() -> u64 {
     0
 }
 
+/// The (slide, path) of the **main executable**, regardless of which image this
+/// code lives in. This is what the preload shim must record: interposed
+/// `malloc` calls come from the *target's* code, so the reader has to
+/// symbolicate against the target — recording the shim dylib (what
+/// [`current_image_path`] would return there) leaves every target frame
+/// unresolvable.
+#[cfg(target_os = "macos")]
+pub fn main_image() -> Option<(u64, std::path::PathBuf)> {
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+    extern "C" {
+        fn _dyld_image_count() -> u32;
+        fn _dyld_get_image_vmaddr_slide(image_index: u32) -> isize;
+        fn _dyld_get_image_name(image_index: u32) -> *const c_char;
+    }
+    // Find the executable by *path*, not by image index — with
+    // DYLD_INSERT_LIBRARIES in play, index 0 isn't reliably the main image.
+    let exe = std::env::current_exe().ok()?;
+    let exe_canon = std::fs::canonicalize(&exe).unwrap_or(exe);
+    // SAFETY: plain libdyld queries over a valid index range.
+    unsafe {
+        for i in 0.._dyld_image_count() {
+            let name = _dyld_get_image_name(i);
+            if name.is_null() {
+                continue;
+            }
+            let p = std::path::PathBuf::from(CStr::from_ptr(name).to_string_lossy().into_owned());
+            let canon = std::fs::canonicalize(&p).unwrap_or(p);
+            if canon == exe_canon {
+                return Some((_dyld_get_image_vmaddr_slide(i) as u64, exe_canon));
+            }
+        }
+    }
+    None
+}
+
+/// ELF: the executable path with slide 0, matching the [`current_image_slide`]
+/// convention (the reader folds the slide in).
+#[cfg(not(target_os = "macos"))]
+pub fn main_image() -> Option<(u64, std::path::PathBuf)> {
+    std::env::current_exe().ok().map(|p| (0, p))
+}
+
 /// DWARF-bearing bytes for the current executable.
 pub fn dwarf_bytes_for_current_exe() -> Result<Vec<u8>, DynErr> {
     let exe = std::env::current_exe()?;
@@ -138,7 +181,7 @@ pub fn dwarf_mmap_for(exe: &Path) -> Result<memmap2::Mmap, DynErr> {
 
 /// True if `dsym` is older than `exe` (so it predates the current build).
 #[cfg(target_os = "macos")]
-fn is_stale(dsym: &Path, exe: &Path) -> bool {
+pub(crate) fn is_stale(dsym: &Path, exe: &Path) -> bool {
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     match (mtime(dsym), mtime(exe)) {
         (Some(d), Some(e)) => d < e,
@@ -148,7 +191,7 @@ fn is_stale(dsym: &Path, exe: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
     let name = exe.file_name()?;
     let parent = exe.parent()?;
     let mut bundle = parent.to_path_buf();
@@ -161,7 +204,7 @@ fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
+pub(crate) fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
     let path = dsym_dwarf_path(exe)
         .ok_or_else(|| -> DynErr { "could not derive dSYM path from executable".into() })?;
     // Reuse an existing dSYM only if it's at least as new as the binary.

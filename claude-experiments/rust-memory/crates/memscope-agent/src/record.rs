@@ -34,6 +34,21 @@ enum Format {
 /// resolves the addresses against the binary's dSYM once, off the traced
 /// process. The header carries the load slide so the reader can map runtime
 /// addresses back to static ones.
+/// Set by [`record_against_main_executable`] before the recorder starts.
+static RECORD_IMAGE_OVERRIDE: std::sync::OnceLock<(String, u64)> = std::sync::OnceLock::new();
+
+/// Make recordings symbolicate against the **main executable** instead of the
+/// image containing memscope. The preload shim must call this before
+/// [`record_to_file`]: it lives in an injected dylib, but the allocations it
+/// interposes come from the target executable's code — recording the dylib as
+/// the image would leave every target frame `[unknown]` and untyped at read
+/// time.
+pub fn record_against_main_executable() {
+    if let Some((slide, path)) = memscope_symbols::main_image() {
+        let _ = RECORD_IMAGE_OVERRIDE.set((path.display().to_string(), slide));
+    }
+}
+
 pub struct FileRecorder {
     w: BufWriter<std::fs::File>,
     seen_sites: HashSet<u32>,
@@ -56,18 +71,24 @@ impl FileRecorder {
         };
         let f = std::fs::File::create(path)?;
         let mut w = BufWriter::new(f);
-        // The image memscope lives in — the main executable, OR a dylib (e.g. a
-        // Node native addon) when injected. The frames + slide are relative to
-        // *this* image, so the reader must symbolicate against it, not the host
-        // executable (which would be `node` for an addon).
-        let exe = memscope_symbols::current_image_path()
-            .or_else(|| std::env::current_exe().ok())
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-
-        // The load slide lets the reader map recorded runtime addresses back to
-        // static (link-time) addresses for symbolication.
-        let slide = memscope_symbols::current_image_slide();
+        // The image the *recorded frames* belong to. By default that's the image
+        // memscope lives in — the main executable, OR a dylib (e.g. a Node native
+        // addon) when injected — because the instrumented allocations come from
+        // that image's own code. The preload shim is the exception: it interposes
+        // the whole process's malloc, so the frames belong to the target
+        // executable, and it overrides via [`record_against_main_executable`].
+        let (exe, slide) = match RECORD_IMAGE_OVERRIDE.get() {
+            Some((exe, slide)) => (exe.clone(), *slide),
+            None => (
+                memscope_symbols::current_image_path()
+                    .or_else(|| std::env::current_exe().ok())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                // The load slide lets the reader map recorded runtime addresses
+                // back to static (link-time) addresses for symbolication.
+                memscope_symbols::current_image_slide(),
+            ),
+        };
 
         match format {
             Format::Binary => {

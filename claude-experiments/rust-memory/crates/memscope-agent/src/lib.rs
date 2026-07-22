@@ -23,7 +23,7 @@ use memscope_symbols::TypeOracle;
 mod heapdump;
 mod record;
 pub use heapdump::{heap_dump, HprofStats};
-pub use record::{record_to_file, FileRecorder};
+pub use record::{record_against_main_executable, record_to_file, FileRecorder};
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

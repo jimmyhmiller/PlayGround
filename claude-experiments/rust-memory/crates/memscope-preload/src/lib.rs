@@ -199,6 +199,9 @@ extern "C" fn init() {
     // not just a live-heap snapshot.
     if let Ok(rec_path) = std::env::var("MEMSCOPE_RECORD") {
         if !rec_path.is_empty() {
+            // We live in an injected dylib, but the frames we capture belong to
+            // the target executable — symbolicate the recording against it, not us.
+            memscope_agent::record_against_main_executable();
             // Start the file recorder; it switches the ring to Reliable and spawns
             // its own pump. Ignore errors — falling back to HPROF mode is still
             // useful for live-heap debugging.

@@ -16,6 +16,7 @@
 
 mod addr_resolve;
 mod dwarf;
+pub mod inspect;
 mod load;
 mod recognizer;
 
@@ -29,6 +30,7 @@ pub use dwarf::{DwarfIndex, FnTypeInfo, LayoutIndex, MemReader, PtrField};
 pub use addr_resolve::resolve as resolve_raw_sites_targeted;
 pub use load::{
     current_image_path, current_image_slide, dwarf_bytes_for, dwarf_bytes_for_current_exe,
+    main_image,
 };
 
 type DynErr = Box<dyn Error + Send + Sync>;

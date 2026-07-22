@@ -1,15 +1,17 @@
-//! `memscope` CLI — a terminal consumer for the in-process agent.
+//! `memscope` CLI. Commands come in three groups (see [`print_help`]):
 //!
-//! Subcommands:
-//!   monitor [--sock P] [--interval MS]   live, type-resolved heap monitor
-//!   dump    [--sock P] [--out FILE]       one type-resolved heap dump
-//!   events  [--sock P]                    raw allocation event stream
-//!   mode    <off|full|sampled> [--rate N] switch the agent's recording mode
-//!   show    <FILE>                        explore a saved dump posthoc (no agent)
+//! * `check` — the doctor: what will work for a given binary/project, and
+//!   exactly what to do next (in `check.rs`)
+//! * capture — `run` (inject into an unmodified binary) or the live-agent
+//!   consumers `monitor`/`dump`/`graph`/`paths`/`events`/`mode`
+//! * analyze — readers over a `.mscope` recording: `analyze`/`diff`/`marks`/
+//!   `query`/`flamegraph`/`flamechart`/`perfetto`/`show`/`replay`
 //!
-//! The agent prints its socket path on startup (default /tmp/memscope-<pid>.sock,
-//! or $MEMSCOPE_SOCK). Pass it with --sock, or omit to auto-detect a single
-//! running agent's socket in /tmp.
+//! The live agent prints its socket path on startup (default
+//! /tmp/memscope-<pid>.sock, or $MEMSCOPE_SOCK). Pass it with --sock, or omit
+//! to auto-detect a single running agent's socket in /tmp.
+
+mod check;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -34,6 +36,7 @@ fn main() {
     let rest = &args[args.len().min(1)..];
 
     let result = match cmd {
+        "check" => check::cmd_check(rest),
         "monitor" => cmd_monitor(rest),
         "dump" => cmd_dump(rest),
         "events" => cmd_events(rest),
@@ -55,6 +58,29 @@ fn main() {
             print_help();
             Ok(())
         }
+        // Friendly dispatch: `memscope <file>` does the obvious thing for the
+        // file's kind, so nobody has to remember which subcommand reads what.
+        other if std::path::Path::new(other).is_file() => {
+            let lower = other.to_ascii_lowercase();
+            if lower.ends_with(".mscope") || lower.ends_with(".jsonl") {
+                eprintln!("[memscope] {other} is a recording — running `memscope analyze` (see `memscope help` for more views)");
+                cmd_analyze(&args)
+            } else if lower.ends_with(".json") {
+                eprintln!("[memscope] {other} is a heap dump — running `memscope show`");
+                cmd_show(&args)
+            } else if lower.ends_with(".hprof") {
+                eprintln!(
+                    "{other} is a JVM heap dump — open it in Eclipse MAT, VisualVM, or heapster.\n\
+                     memscope's own analysis (analyze/diff/flamegraph) reads .mscope recordings:\n  \
+                     memscope run --out rec.mscope -- <your program>"
+                );
+                std::process::exit(2);
+            } else {
+                // A binary, most likely: tell them where they stand with it.
+                eprintln!("[memscope] {other} is a file, not a command — running `memscope check` on it");
+                check::cmd_check(&args)
+            }
+        }
         other => {
             eprintln!("unknown command: {other}\n");
             print_help();
@@ -69,32 +95,36 @@ fn main() {
 
 fn print_help() {
     eprintln!(
-        "memscope — JVM-style memory tooling for Rust\n\n\
-         USAGE:\n  \
-         memscope monitor [--sock P] [--interval MS]   live type-resolved heap monitor\n  \
-         memscope dump    [--sock P] [--out FILE]       one type-resolved heap dump\n  \
-         memscope events  [--sock P]                    raw allocation event stream\n  \
-         memscope mode    <off|full|sampled> [--rate N] switch recording mode\n  \
-         memscope show    <FILE>                        explore a saved dump posthoc\n  \
-         memscope graph   [--sock P] [--limit N]        heap reference graph: top retainers\n  \
-         memscope paths   <hexaddr> [--sock P]          who retains/references an allocation\n  \
-         memscope replay  <FILE>                        read a record_to_file recording\n  \
-         memscope perfetto <FILE> [--out trace.json]    convert a recording to a Perfetto trace\n  \
-         memscope flamegraph <FILE> [--format chrome|folded] [--by bytes|count] [--live] [--no-std]\n  \
-         \x20                       [--group-by KEY] [--filter KEY=VAL]   pivot/filter by meta!() metadata\n  \
-         \x20                                            allocation flame graph by call stack (aggregated)\n  \
-         memscope flamechart <FILE> [--no-std]          allocation flame CHART (full timeline, every allocation)\n  \
-         \x20                                            (--no-std strips std/core/alloc/runtime frames)\n  \
+        "memscope — memory profiling for Rust, with real types\n\n\
+         START HERE\n  \
+         memscope check [BINARY | CARGO_DIR]           what will work for your program: custom allocator?\n  \
+         \x20                                            code changes needed? debug info? — with exact next steps\n\n\
+         CAPTURE — no code changes (works on an unmodified binary)\n  \
+         memscope run --on-exit  -- <prog> [args...]    run it, dump what was never freed (.hprof → MAT/heapster)\n  \
+         memscope run --after 5s -- <prog>              dump at steady state, 5s in (program keeps running)\n  \
+         memscope run --at-bytes 50MB -- <prog>         dump the moment the live heap first hits 50MB\n  \
+         memscope run --out rec.mscope -- <prog>        record the FULL allocation stream → everything below\n  \
+         memscope dump-pid <PID>                        trigger a dump in a process started by `run`\n\n\
+         CAPTURE — live agent (2 lines in your program: MemScope + start_agent)\n  \
+         memscope monitor [--interval MS]               live heap by type, refreshes each second\n  \
+         memscope graph   [--limit N]                   top retainers (retained size, dominator tree)\n  \
+         memscope paths   <hexaddr>                     who keeps this allocation alive\n  \
+         memscope dump    [--out FILE]                  one type-resolved heap dump (explore later: show)\n  \
+         memscope events                                raw allocation event stream\n  \
+         memscope mode    <off|full|sampled> [--rate N] switch tracking overhead on the fly\n\n\
+         ANALYZE a recording (.mscope from `run --out` or record_to_file)\n  \
+         memscope analyze <FILE> [--json] [--top N]     what's WRONG, ranked: leaks, churn, realloc-thrash\n  \
+         memscope diff    <FILE> <A> <B> [--json]       what grew between two checkpoints (marks, or start/end)\n  \
          memscope marks   <FILE> [--json]               list checkpoints (memscope::mark) + heap size at each\n  \
-         memscope diff    <FILE> <A> <B> [--json]       diff the live set between two checkpoints (A->B)\n  \
-         \x20                                            A/B are mark labels, or `start`/`end` for the stream ends\n  \
-         memscope analyze <FILE> [--json] [--top N]     ranked memory findings (leaks/churn/realloc/short-lived)\n  \
          memscope query   <FILE> (--site N | --type T) [--field stack|lifetimes|stats|sites] [--json]\n  \
-         \x20                                            drill into one finding: call stack, lifetime histogram, stats\n  \
-         memscope run     [--out PATH] [--on-exit] [--after DUR] [--at-bytes N] -- <prog> [args...]\n  \
-         \x20                                            run an UNMODIFIED binary under memscope, dump its heap to .hprof\n  \
-         \x20                                            (no DYLD/LD_PRELOAD setup needed; DUR e.g. 2s/500ms, N e.g. 5MB)\n  \
-         memscope dump-pid <PID>                        trigger a heap dump in a process started by `memscope run`\n"
+         \x20                                            drill into one finding\n  \
+         memscope flamegraph <FILE> [--live] [--no-std] [--group-by KEY] [--filter K=V] [--format chrome|folded]\n  \
+         \x20                                            where the bytes come from, by call stack (aggregated)\n  \
+         memscope flamechart <FILE> [--no-std]          same, on a timeline (every allocation)\n  \
+         memscope perfetto <FILE> [--out trace.json]    heap over time in the Perfetto UI\n  \
+         memscope show    <FILE>                        explore a saved .json heap dump\n  \
+         memscope replay  <FILE>                        raw recording reader\n\n\
+         Tip: `memscope <file>` picks the right reader from the extension.\n"
     );
 }
 
@@ -2106,6 +2136,12 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     // Default trigger: dump at exit if nothing else was requested.
     let default_on_exit = !on_exit && after.is_none() && at_bytes.is_none();
 
+    // Preflight the target: refuse the two setups where the run would silently
+    // produce a useless dump (custom allocator bypassing malloc, signature that
+    // makes dyld drop the injection). `--force` downgrades those to warnings.
+    let force = opts.iter().any(|a| a == "--force");
+    check::preflight_run(std::path::Path::new(&cmd[0]), force)?;
+
     let lib = preload_lib()?;
     let env_var = if cfg!(target_os = "macos") { "DYLD_INSERT_LIBRARIES" } else { "LD_PRELOAD" };
 
@@ -2195,7 +2231,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             eprintln!("           analyze:   memscope analyze {expected}");
         } else {
             eprintln!("[memscope] heap dump: {expected}");
-            eprintln!("           analyze it:  memscope analyze {expected}   (or open in MAT / heapster)");
+            eprintln!("           open it in Eclipse MAT / VisualVM / heapster (dominator tree, retained sizes)");
+            eprintln!("           want ranked findings instead? re-run with --out rec.mscope, then: memscope analyze rec.mscope");
         }
     } else {
         eprintln!("[memscope] no dump found at {expected} — was a trigger reached? (--on-exit/--after/--at-bytes)");
