@@ -35,7 +35,7 @@
 
 ; file-writing externs (creat is NOT variadic, unlike open-with-O_CREAT)
 (extern cga64.creat [(ptr i8) i64] (-> i64))
-(extern cga64.write [i32 (ptr i8) i64] (-> i64))   ; C write's fd is int (i32); matches io/cimport write
+(extern cga64.write [i32 (ptr i8) isize] (-> isize))   ; C write's fd is int (i32); matches io/cimport write (isize=i64 native, i32 wasm)
 (extern cga64.close [i32] (-> i32))   ; C `close(int)` returns int, not long — matches ffi.close/cimport.close (return is discarded)
 (extern cga64.exit  [i32] (-> i64))
 
