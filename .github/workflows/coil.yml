@@ -59,8 +59,10 @@ jobs:
           ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-diag --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
           ./selfhost/oracle/gate-cli.sh /tmp/coil-diag 2>&1 | grep -B1 -A3 "FAIL" | head -40 || true
       - name: meta_stage3 (compiled (meta …) elaboration)
+        # exit 42 is the feature test's SUCCESS code; capture it around bash -e
         run: |
-          /tmp/coil-ci run selfhost/oracle/features/meta_stage3.coil; test $? = 42
+          rc=0; /tmp/coil-ci run selfhost/oracle/features/meta_stage3.coil || rc=$?
+          test "$rc" = 42
 
   linux-x86_64:
     runs-on: ubuntu-24.04
@@ -75,5 +77,7 @@ jobs:
       - name: Rebootstrap (seed -> stage3, fixpoint, linux gate-full + gate-run + gate-cli)
         run: ./selfhost/rebootstrap-linux.sh /tmp/coil-ci-linux
       - name: meta_stage3 (compiled (meta …) elaboration)
+        # exit 42 is the feature test's SUCCESS code; capture it around bash -e
         run: |
-          /tmp/coil-ci-linux run selfhost/oracle/features/meta_stage3.coil; test $? = 42
+          rc=0; /tmp/coil-ci-linux run selfhost/oracle/features/meta_stage3.coil || rc=$?
+          test "$rc" = 42
