@@ -1846,8 +1846,14 @@ impl Bundler {
                     // candidates scanned from the app's source tree (the scan
                     // root the entry declares via `source(...)`). This is a
                     // build-emit step, off the incremental transform hot path.
-                    let candidates = self.tailwind_candidates(&asset.source, source_css);
-                    let compiled = crate::tailwind::compile(source_css, &candidates)?;
+                    let scan_root = tailwind_scan_root(&asset.source, source_css);
+                    let candidates = self.tailwind_candidates(&scan_root, parent);
+                    let app_theme = app_tailwind_theme(&scan_root);
+                    let compiled = crate::tailwind::compile_with_theme(
+                        source_css,
+                        &candidates,
+                        app_theme.as_deref(),
+                    )?;
                     write_if_changed(&destination, compiled.as_bytes())?;
                 } else if !destination.exists() {
                     // The public name is content-hashed, so a destination that
@@ -1871,28 +1877,12 @@ impl Bundler {
     /// resolved relative to the entry file); every JS/TS/JSX file under it
     /// contributes its `className`/`class` tokens. Falls back to the entry's own
     /// directory when no `source(...)` is given.
-    fn tailwind_candidates(&self, css_path: &Path, source_css: &str) -> BTreeSet<String> {
-        let css_dir = css_path.parent().unwrap_or_else(|| Path::new("."));
-        // Tailwind v4's default source detection scans the PROJECT, not the
-        // stylesheet's own directory. An entry that declares `source(...)`
-        // keeps its explicit root; otherwise walk up to the nearest
-        // `package.json` (found live: wall-go keeps its entry in
-        // `src/assets/`, and scanning only that directory yielded zero
-        // utility candidates — an entirely unstyled app).
-        let scan_root = tailwind_source_root(source_css)
-            .map(|rel| css_dir.join(rel))
-            .unwrap_or_else(|| {
-                let mut root = css_dir;
-                for ancestor in css_dir.ancestors() {
-                    if ancestor.join("package.json").is_file() {
-                        root = ancestor;
-                        break;
-                    }
-                }
-                root.to_path_buf()
-            });
+    fn tailwind_candidates(&self, scan_root: &Path, out_root: &Path) -> BTreeSet<String> {
+        let skip = ScanSkip::for_root(scan_root, out_root);
+        let mut sources = Vec::new();
+        collect_scan_sources(scan_root, &mut sources, &skip);
         let mut candidates = BTreeSet::new();
-        scan_directory_for_classes(&scan_root, &mut candidates);
+        crate::tailwind::scan_class_candidates_multi(&sources, &mut candidates);
         candidates
     }
 
@@ -1938,8 +1928,15 @@ impl Bundler {
                 // exactly as the `?url` asset path does in `emit_assets`.
                 if crate::tailwind::is_tailwind_entry(css) {
                     let css_path = Path::new(self.ids[dense].as_ref());
-                    let candidates = self.tailwind_candidates(css_path, css);
-                    stylesheet.push_str(&crate::tailwind::compile(css, &candidates)?);
+                    let out_root = output.parent().unwrap_or_else(|| Path::new("."));
+                    let scan_root = tailwind_scan_root(css_path, css);
+                    let candidates = self.tailwind_candidates(&scan_root, out_root);
+                    let app_theme = app_tailwind_theme(&scan_root);
+                    stylesheet.push_str(&crate::tailwind::compile_with_theme(
+                        css,
+                        &candidates,
+                        app_theme.as_deref(),
+                    )?);
                 } else {
                     stylesheet.push_str(css);
                 }
@@ -4869,6 +4866,36 @@ fn is_css_path(path: &Path) -> bool {
     matches!(path.extension().and_then(|value| value.to_str()), Some("css"))
 }
 
+/// The directory a Tailwind entry's candidate scan covers. Tailwind v4's
+/// default source detection scans the PROJECT, not the stylesheet's own
+/// directory: an entry that declares `source(...)` keeps its explicit root;
+/// otherwise walk up to the nearest `package.json` (found live: wall-go keeps
+/// its entry in `src/assets/`, and scanning only that directory yielded zero
+/// utility candidates — an entirely unstyled app).
+fn tailwind_scan_root(css_path: &Path, source_css: &str) -> PathBuf {
+    let css_dir = css_path.parent().unwrap_or_else(|| Path::new("."));
+    tailwind_source_root(source_css)
+        .map(|rel| css_dir.join(rel))
+        .unwrap_or_else(|| {
+            let mut root = css_dir;
+            for ancestor in css_dir.ancestors() {
+                if ancestor.join("package.json").is_file() {
+                    root = ancestor;
+                    break;
+                }
+            }
+            root.to_path_buf()
+        })
+}
+
+/// The app's own installed Tailwind default theme, when present. Compiling
+/// against it matches the exact Tailwind version the reference build used
+/// (default tokens like `--font-sans` changed between v4 releases); without
+/// it the vendored copy in `src/tailwind_theme.css` applies.
+fn app_tailwind_theme(scan_root: &Path) -> Option<String> {
+    fs::read_to_string(scan_root.join("node_modules/tailwindcss/theme.css")).ok()
+}
+
 /// Parses the `source('...')` argument of a Tailwind v4 `@import 'tailwindcss'`
 /// entry: the (entry-relative) directory the compiler scans for classes.
 fn tailwind_source_root(source_css: &str) -> Option<String> {
@@ -4878,11 +4905,72 @@ fn tailwind_source_root(source_css: &str) -> Option<String> {
     Some(rest[..end].trim().trim_matches(['\'', '"']).to_string())
 }
 
-/// Recursively scans a directory for utility-class candidates, reading every
-/// JS/TS/JSX/HTML source and collecting its `className`/`class` tokens. Skips
-/// `node_modules` and dot-directories (as Tailwind does), so only the app's own
-/// classes are generated.
-fn scan_directory_for_classes(root: &Path, out: &mut BTreeSet<String>) {
+/// What the candidate scan must not descend into: the scan root's `.gitignore`
+/// entries (Tailwind's own scanner respects `.gitignore`, which is how a
+/// checked-in reference build never picks candidates out of `dist/`) plus this
+/// build's own output directory (never scan what we emitted).
+struct ScanSkip {
+    /// Simple ignored names (`dist`, `logs`): skipped wherever they appear.
+    names: Vec<String>,
+    /// Ignored filename suffixes from `*.<ext>`-style patterns (`.log`).
+    suffixes: Vec<String>,
+    /// The build's canonical output root.
+    out_root: Option<PathBuf>,
+}
+
+impl ScanSkip {
+    fn for_root(scan_root: &Path, out_root: &Path) -> ScanSkip {
+        let mut names = Vec::new();
+        let mut suffixes = Vec::new();
+        if let Ok(gitignore) = fs::read_to_string(scan_root.join(".gitignore")) {
+            for line in gitignore.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                    continue;
+                }
+                let entry = line.trim_matches('/');
+                if let Some(suffix) = entry.strip_prefix("*.") {
+                    if !suffix.contains(['*', '/', '?', '[']) {
+                        suffixes.push(format!(".{suffix}"));
+                    }
+                } else if !entry.contains(['*', '/', '?', '[']) {
+                    names.push(entry.to_string());
+                }
+            }
+        }
+        ScanSkip {
+            names,
+            suffixes,
+            out_root: fs::canonicalize(out_root).ok(),
+        }
+    }
+
+    fn skips(&self, path: &Path, name: &str) -> bool {
+        if name.starts_with('.') || name == "node_modules" {
+            return true;
+        }
+        if self.names.iter().any(|n| n == name)
+            || self.suffixes.iter().any(|s| name.ends_with(s.as_str()))
+        {
+            return true;
+        }
+        if let Some(out_root) = &self.out_root
+            && let Ok(canonical) = fs::canonicalize(path)
+            && canonical == *out_root
+        {
+            return true;
+        }
+        false
+    }
+}
+
+/// Recursively gathers the sources the utility-class candidate scan reads:
+/// every JS/TS/JSX/HTML file under the scan root. Skips `node_modules`,
+/// dot-directories, `.gitignore`d entries (as Tailwind does), and the build's
+/// own output directory, so only the app's own classes are scanned. The files
+/// are scanned together (`scan_class_candidates_multi`) so identifiers resolve
+/// across module boundaries.
+fn collect_scan_sources(root: &Path, out: &mut Vec<String>, skip: &ScanSkip) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -4890,17 +4978,17 @@ fn scan_directory_for_classes(root: &Path, out: &mut BTreeSet<String>) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') || name == "node_modules" {
+        if skip.skips(&path, &name) {
             continue;
         }
         if path.is_dir() {
-            scan_directory_for_classes(&path, out);
+            collect_scan_sources(&path, out, skip);
         } else if matches!(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "html")
         ) && let Ok(source) = fs::read_to_string(&path)
         {
-            crate::tailwind::scan_class_candidates(&source, out);
+            out.push(source);
         }
     }
 }
