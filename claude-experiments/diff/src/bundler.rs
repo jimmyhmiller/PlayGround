@@ -149,6 +149,8 @@ struct ResolutionCache {
     defines: Arc<Vec<(String, String)>>,
     /// Public base for minted asset URLs (always `/`-terminated).
     base: Arc<str>,
+    /// Vite's `assetsInlineLimit` (0 = off).
+    asset_inline_limit: usize,
     /// SCSS compile options (Vite `additionalData` + project root), threaded
     /// to the `.scss` loaders.
     scss: Arc<crate::sass::ScssOptions>,
@@ -168,6 +170,7 @@ struct ResolvedModule {
 }
 
 impl ResolutionCache {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         aliases: Vec<(String, PathBuf)>,
         virtual_modules: Vec<(String, String)>,
@@ -175,6 +178,7 @@ impl ResolutionCache {
         import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
         defines: Vec<(String, String)>,
         base: &str,
+        asset_inline_limit: usize,
         scss: crate::sass::ScssOptions,
     ) -> Self {
         Self {
@@ -185,6 +189,7 @@ impl ResolutionCache {
             import_meta_glob: Arc::new(import_meta_glob),
             defines: Arc::new(defines),
             base: Arc::from(base),
+            asset_inline_limit,
             scss: Arc::new(scss),
         }
     }
@@ -693,6 +698,7 @@ impl Bundler {
                 config.import_meta_glob.clone(),
                 config.defines.clone(),
                 &config.base,
+                config.asset_inline_limit,
                 config.scss.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
@@ -4336,7 +4342,7 @@ fn load_special_module(
 ) -> Option<Result<SpecialModule, String>> {
     let resource = ResourceId::parse(id);
     if resource.query.is_some() {
-        return Some(synthesize_query_module_impl(&resource, target, &cache.base));
+        return Some(synthesize_query_module_impl(&resource, target, &cache.base, cache.asset_inline_limit));
     }
     if crate::css::is_css_module_path(path) {
         return Some(load_css_module(path, target));
@@ -4348,7 +4354,7 @@ fn load_special_module(
         return Some(load_scss(path, target, &cache.scss));
     }
     if is_asset_path(path) {
-        return Some(synthesize_asset_url(path.to_path_buf(), &cache.base));
+        return Some(synthesize_asset_url(path.to_path_buf(), &cache.base, cache.asset_inline_limit));
     }
     None
 }
@@ -4382,9 +4388,10 @@ fn synthesize_query_module_impl(
     resource: &ResourceId,
     target: Target,
     base: &str,
+    asset_inline_limit: usize,
 ) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
-        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path), base),
+        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path), base, asset_inline_limit),
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
         Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
         Some(LoaderKind::CssMedia) => synthesize_css_media(resource),
@@ -4719,10 +4726,96 @@ fn synthesize_virtual_module(source: &str) -> Result<SpecialModule, String> {
     })
 }
 
+
+/// Vite's SVG inlining: UTF-8 SVGs become a compact percent-encoded
+/// `data:image/svg+xml,...` (double quotes swapped for single, whitespace
+/// collapsed, only the URL-hostile characters escaped, lowercase hex) — the
+/// same transform Vite applies, so the emitted attribute matches its output
+/// byte-for-byte. An SVG with mixed nested quotes (where the swap would change
+/// meaning) or non-UTF-8 bytes falls back to base64, as Vite does.
+fn svg_data_url(path: &Path, bytes: &[u8]) -> Option<String> {
+    if path.extension().and_then(|value| value.to_str()) != Some("svg") {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.contains('\'') && text.contains('"') {
+        return None;
+    }
+    let collapsed = text.replace('"', "'");
+    let collapsed = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Whitespace between tags is structure, not content — Vite drops it.
+    let collapsed = collapsed.replace("> <", "><");
+    let mut out = String::with_capacity(collapsed.len() + 32);
+    out.push_str("data:image/svg+xml,");
+    for c in collapsed.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '#' => out.push_str("%23"),
+            '<' => out.push_str("%3c"),
+            '>' => out.push_str("%3e"),
+            ' ' => out.push_str("%20"),
+            '{' => out.push_str("%7b"),
+            '}' => out.push_str("%7d"),
+            '|' => out.push_str("%7c"),
+            '^' => out.push_str("%5e"),
+            '`' => out.push_str("%60"),
+            '"' => out.push_str("%22"),
+            '[' => out.push_str("%5b"),
+            ']' => out.push_str("%5d"),
+            '\\' => out.push_str("%5c"),
+            '?' => out.push_str("%3f"),
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+/// The MIME type an inlined asset's `data:` URI declares, by extension.
+fn asset_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Standard base64 (RFC 4648, with padding). Hand-rolled: a data-URI encoder
+/// is 20 lines, not a dependency.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) as usize & 63] as char);
+        out.push(TABLE[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(triple >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[triple as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 /// A content-hashed asset module: copies the file into `assets/` and exports its
 /// public URL as the default export. Used for both `?url` and default asset
 /// imports (images, fonts, SVG, ...).
-fn synthesize_asset_url(source_path: PathBuf, base: &str) -> Result<SpecialModule, String> {
+fn synthesize_asset_url(source_path: PathBuf, base: &str, inline_limit: usize) -> Result<SpecialModule, String> {
     let bytes = fs::read(&source_path)
         .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
     let public_name = asset_public_name(&source_path, content_hash(&bytes));
@@ -4740,6 +4833,33 @@ fn synthesize_asset_url(source_path: PathBuf, base: &str) -> Result<SpecialModul
     // A plain ES module exporting the asset URL, run through the real transformer
     // so it yields flat-linker code and export metadata like any hand-written
     // module.
+    // Vite's `assetsInlineLimit`: a small asset becomes a `data:` URI instead
+    // of an emitted file — one request fewer, byte-parity with Vite's output
+    // model. A Tailwind entry is exempt: its bytes here are the RAW source,
+    // and the emit step replaces them with the compiled stylesheet.
+    if inline_limit > 0 && bytes.len() <= inline_limit && tailwind_source.is_none() {
+        let data_uri = svg_data_url(&source_path, &bytes).unwrap_or_else(|| {
+            format!(
+                "data:{};base64,{}",
+                asset_mime_type(&source_path),
+                base64_encode(&bytes)
+            )
+        });
+        let synthetic = format!("export default {};\n", quote(&data_uri));
+        let transformed =
+            transform_module(Path::new("diffpack-url-asset.js"), &synthetic, Target::Server);
+        return Ok(SpecialModule {
+            hash: content_hash(transformed.code.as_bytes()),
+            code: transformed.code,
+            flat_module: transformed.flat_module,
+            assets: Vec::new(),
+            css: None,
+            css_source_files: Vec::new(),
+            css_external_imports: Vec::new(),
+            dependency_specifiers: Vec::new(),
+            dependency_demands: Vec::new(),
+        });
+    }
     let synthetic = format!("export default {};\n", quote(&format!("{base}assets/{public_name}")));
     let transformed = transform_module(Path::new("diffpack-url-asset.js"), &synthetic, Target::Server);
     Ok(SpecialModule {
@@ -5483,6 +5603,10 @@ pub struct BuildConfig {
     /// `build-app` path needs it, for runtime reads of `TSS_SERVER_FN_BASE`
     /// and `NODE_ENV` in vendored code the compile-time define cannot reach.
     pub browser_process_shim: bool,
+    /// Assets at or under this many bytes are inlined as `data:` URIs instead
+    /// of emitted files (Vite's `assetsInlineLimit`, default 4096 in Vite
+    /// mode). `0` disables inlining — the default for generic bundling.
+    pub asset_inline_limit: usize,
     /// The public base URL every emitted asset URL is prefixed with. `"/"`
     /// unless the build opts into a Vite config with a non-root `base` (a site
     /// served from a subpath, e.g. GitHub Pages). Always ends with `/`.
@@ -5533,6 +5657,7 @@ impl Default for BuildConfig {
             // `{base}assets/...`, and `/assets/...` is the correct default.
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
@@ -5911,6 +6036,7 @@ mod tests {
         let config = BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: vec![(
                 "#tanstack-router-entry".to_string(),
                 router.to_string_lossy().into_owned(),
@@ -7406,6 +7532,52 @@ mod tests {
         assert_eq!(run_node(&output), "lib-side-effect:40\nresult:42\n");
     }
 
+    /// Vite's `assetsInlineLimit`: in Vite mode a small asset import yields a
+    /// `data:` URI (no emitted file, no request); over the limit — or with the
+    /// limit disabled (generic bundling) — it stays a hashed public file.
+    #[test]
+    fn small_assets_inline_as_data_uris_only_in_vite_mode() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("icon.svg"), "<svg xmlns='x'/>").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import icon from './icon.svg';\nconsole.log(icon.slice(0, 30));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+
+        let inline_config = BuildConfig {
+            asset_inline_limit: 4096,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &inline_config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("dist/bundle.js");
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        assert_eq!(run_node(&output), "data:image/svg+xml,%3csvg%20xm\n");
+        assert!(
+            !directory.path().join("dist/assets").exists(),
+            "an inlined asset emits no file"
+        );
+
+        let (bundler, _) = Bundler::discover_direct(&entry).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        let plain = directory.path().join("dist-plain/bundle.js");
+        bundler
+            .emit_with_options(&reachable, &plain, EmitOptions::default())
+            .unwrap();
+        assert!(
+            run_node(&plain).starts_with("/assets/icon-"),
+            "generic bundling keeps the hashed file URL"
+        );
+    }
+
     /// `new Worker(new URL('./x', import.meta.url))` bundles the worker entry
     /// as its own self-contained file under `assets/` and substitutes its
     /// public URL — shipping the raw specifier would 404 at runtime (found
@@ -7704,6 +7876,7 @@ mod tests {
         let config = BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: vec![(
                 "@tanstack/react-router".to_string(),
                 router_stub.to_string_lossy().into_owned(),
@@ -7777,6 +7950,7 @@ mod tests {
         let config = |target| BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: Vec::new(),
@@ -7856,6 +8030,7 @@ mod tests {
         let config = BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
             virtual_modules: vec![(
@@ -8078,6 +8253,7 @@ mod tests {
         BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             import_meta_glob: Some(crate::import_meta_glob::ImportMetaGlob {
                 root: root.canonicalize().unwrap(),
             }),

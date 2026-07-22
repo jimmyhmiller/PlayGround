@@ -52,3 +52,20 @@ Also flagged: one NONDETERMINISTIC `Unexpected token` on a valid ESM file
 keep an eye out, add stress coverage when reproducible. UPDATE: not
 reproducible in 150 consecutive builds of the 1002-module redux app on the
 current binary (post-ordering-fix); left open but downgraded.
+
+
+## Behavioral parity: ALL FIVE APPS FULLY GREEN (2026-07-22)
+
+`integration/app-parity/` run: every exact step of every app passes all five
+channels (normalized DOM, all computed styles, pixel screenshots,
+console/network, storage); wall-go's AI-reply invariant holds. Closing the
+board took, beyond the wall-go Tailwind coverage round: `assetsInlineLimit`
+(sub-4KB assets inline as data URIs in Vite mode — SVGs percent-encoded
+byte-identically to Vite's encoder incl. inter-tag whitespace stripping,
+everything else base64; generic builds keep hashed files), and harness rule
+[N12] (pure-numeric `calc()` in custom properties evaluates — the two
+reference bundlers themselves disagree textually there, rolldown-vite
+preserving `calc(1.5 / 1)` where esbuild folds it). Known flake, documented:
+a blocked third-party analytics retry can land in different steps run-to-run
+on wall-go; it is a timing artifact of the sandbox, visible with its
+explanation when it occurs.

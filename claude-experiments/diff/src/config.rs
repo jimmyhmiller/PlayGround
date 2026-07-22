@@ -127,6 +127,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
         build: BuildConfig {
             base: base.clone(),
             browser_process_shim: true,
+            asset_inline_limit: 4096,
             aliases,
             conditions,
             virtual_modules: Vec::new(),
@@ -180,6 +181,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         build: BuildConfig {
             base: "/".to_string(),
             browser_process_shim: false,
+            asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions,
             virtual_modules: Vec::new(),
@@ -233,6 +235,8 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     // Vite normalizes `base` to end with `/`; URL joins depend on it.
     let base = if base.ends_with('/') { base } else { format!("{base}/") };
     config.build.base = base.clone();
+    // Vite's default `assetsInlineLimit`.
+    config.build.asset_inline_limit = 4096;
     // `resolve.alias` string finds, applied with Vite's exact-or-prefix
     // semantics by the resolver. A replacement that starts with `/` and does
     // not exist as a real absolute path is project-root-relative (Vite's

@@ -349,6 +349,24 @@ export function canonicalizeCssValue(s) {
     /(^|[\s(,:])((?:\d+\.?\d*|\.\d+))s\b/g,
     (_, p, n) => `${p}${parseFloat(n) * 1000}ms`
   );
+  // [N12] Pure-numeric calc() in a custom-property token stream evaluates to
+  // its number: `calc(1.5 / 1)` and `1.5` are the same value, and the two
+  // REFERENCE bundlers themselves disagree here (rolldown-vite preserves the
+  // expression; esbuild folds it), so no output can match both textually.
+  // Only number-and-operator expressions qualify — anything with a unit or
+  // function stays verbatim.
+  out = out.replace(
+    /calc\(\s*((?:[\d.]+|[+\-*/()]|\s)+)\)/g,
+    (whole, expr) => {
+      if (!/^[\d.\s+\-*/()]+$/.test(expr)) return whole;
+      try {
+        const value = Function(`"use strict"; return (${expr});`)();
+        return Number.isFinite(value) ? String(Math.round(value * 1e6) / 1e6) : whole;
+      } catch {
+        return whole;
+      }
+    }
+  );
   return out;
 }
 

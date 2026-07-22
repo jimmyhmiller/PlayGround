@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-07-22T06:03:23.858Z",
+  "startedAt": "2026-07-22T06:22:10.148Z",
   "apps": [
     {
       "app": "redux-essentials",
@@ -49,7 +49,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3748
+          "ms": 3756
         },
         {
           "name": "reload-under-service-worker",
@@ -96,7 +96,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3883
+          "ms": 3876
         },
         {
           "name": "client-side-navigation-404-route",
@@ -143,14 +143,14 @@
             }
           },
           "status": "PASS",
-          "ms": 1881
+          "ms": 1874
         }
       ],
       "notes": [
         "This clone is the tutorial starting point: Navbar has no links (src/components/Navbar.tsx renders an empty .navLinks). 'Click through nav links' is therefore vacuous; documented instead of faked.",
         "MSW's mockServiceWorker.js registers on first load; the reload step exercises the service-worker-controlled fetch path on both sides."
       ],
-      "ms": 9784
+      "ms": 9769
     },
     {
       "app": "markpad",
@@ -236,7 +236,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3853
+          "ms": 3889
         },
         {
           "name": "type-markdown",
@@ -323,7 +323,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3062
+          "ms": 3112
         },
         {
           "name": "mode-preview",
@@ -489,7 +489,7 @@
             }
           },
           "status": "PASS",
-          "ms": 1926
+          "ms": 1941
         },
         {
           "name": "mode-split",
@@ -572,7 +572,7 @@
             }
           },
           "status": "PASS",
-          "ms": 1948
+          "ms": 1943
         },
         {
           "name": "toggle-dark-theme",
@@ -655,13 +655,13 @@
             }
           },
           "status": "PASS",
-          "ms": 1971
+          "ms": 1985
         }
       ],
       "notes": [
         "Tauri IPC stubbed identically on both sides (same stub as the triage harness); session = one empty untitled doc."
       ],
-      "ms": 15106
+      "ms": 15217
     },
     {
       "app": "chebyshev-calculator",
@@ -671,10 +671,7 @@
           "mode": "exact",
           "channels": {
             "dom": {
-              "status": "DIFF",
-              "detail": "normalized DOM differs at char 868",
-              "refExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20height='24px'%20viewBox='0%20-960%20960%20960'%20width='24px'%20fill='%23000000'%3e%3cpath%20d='M478-240q21%200%2035.5-14.5T528-290q0-2",
-              "diffExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"/assets/icon_help.svg\" style=\"display:flex\"></button><a target=\"_blank\" href=\"https://github.com/stuffmatic/chebyshev-calculator\"><img src=\"/assets/icon_github.svg\" style=\"display:flex;width:26px\"></a"
+              "status": "PASS"
             },
             "styles": {
               "status": "PASS",
@@ -702,34 +699,22 @@
               "detail": "1 messages"
             },
             "network": {
-              "status": "DIFF",
-              "parts": [
-                {
-                  "channel": "requests",
-                  "onlyRef": [],
-                  "onlyDiff": [
-                    "icon_help.svg (x1)",
-                    "icon_github.svg (x1)"
-                  ]
-                }
-              ]
+              "status": "PASS",
+              "detail": "6 requests"
             },
             "storage": {
               "status": "PASS"
             }
           },
-          "status": "DIFF",
-          "ms": 4211
+          "status": "PASS",
+          "ms": 4425
         },
         {
           "name": "slider-increase-terms",
           "mode": "exact",
           "channels": {
             "dom": {
-              "status": "DIFF",
-              "detail": "normalized DOM differs at char 868",
-              "refExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20height='24px'%20viewBox='0%20-960%20960%20960'%20width='24px'%20fill='%23000000'%3e%3cpath%20d='M478-240q21%200%2035.5-14.5T528-290q0-2",
-              "diffExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"/assets/icon_help.svg\" style=\"display:flex\"></button><a target=\"_blank\" href=\"https://github.com/stuffmatic/chebyshev-calculator\"><img src=\"/assets/icon_github.svg\" style=\"display:flex;width:26px\"></a"
+              "status": "PASS"
             },
             "styles": {
               "status": "PASS",
@@ -768,18 +753,15 @@
               "detail": "{\"slider\":\"12\",\"coefficientCount\":40}"
             }
           },
-          "status": "DIFF",
-          "ms": 2549
+          "status": "PASS",
+          "ms": 2561
         },
         {
           "name": "edit-xmax",
           "mode": "exact",
           "channels": {
             "dom": {
-              "status": "DIFF",
-              "detail": "normalized DOM differs at char 868",
-              "refExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20height='24px'%20viewBox='0%20-960%20960%20960'%20width='24px'%20fill='%23000000'%3e%3cpath%20d='M478-240q21%200%2035.5-14.5T528-290q0-2",
-              "diffExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"/assets/icon_help.svg\" style=\"display:flex\"></button><a target=\"_blank\" href=\"https://github.com/stuffmatic/chebyshev-calculator\"><img src=\"/assets/icon_github.svg\" style=\"display:flex;width:26px\"></a"
+              "status": "PASS"
             },
             "styles": {
               "status": "PASS",
@@ -818,18 +800,15 @@
               "detail": "\"3.65\""
             }
           },
-          "status": "DIFF",
-          "ms": 2971
+          "status": "PASS",
+          "ms": 3009
         },
         {
           "name": "toggle-first-checkbox",
           "mode": "exact",
           "channels": {
             "dom": {
-              "status": "DIFF",
-              "detail": "normalized DOM differs at char 868",
-              "refExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20height='24px'%20viewBox='0%20-960%20960%20960'%20width='24px'%20fill='%23000000'%3e%3cpath%20d='M478-240q21%200%2035.5-14.5T528-290q0-2",
-              "diffExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"/assets/icon_help.svg\" style=\"display:flex\"></button><a target=\"_blank\" href=\"https://github.com/stuffmatic/chebyshev-calculator\"><img src=\"/assets/icon_github.svg\" style=\"display:flex;width:26px\"></a"
+              "status": "PASS"
             },
             "styles": {
               "status": "PASS",
@@ -868,18 +847,15 @@
               "detail": "[true,false]"
             }
           },
-          "status": "DIFF",
-          "ms": 2546
+          "status": "PASS",
+          "ms": 2527
         },
         {
           "name": "switch-match-segment",
           "mode": "exact",
           "channels": {
             "dom": {
-              "status": "DIFF",
-              "detail": "normalized DOM differs at char 868",
-              "refExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20height='24px'%20viewBox='0%20-960%20960%20960'%20width='24px'%20fill='%23000000'%3e%3cpath%20d='M478-240q21%200%2035.5-14.5T528-290q0-2",
-              "diffExcerpt": "order-top-width:initial;cursor:pointer;padding-bottom:4px;padding-left:4px;padding-right:4px;padding-top:4px\"><img src=\"/assets/icon_help.svg\" style=\"display:flex\"></button><a target=\"_blank\" href=\"https://github.com/stuffmatic/chebyshev-calculator\"><img src=\"/assets/icon_github.svg\" style=\"display:flex;width:26px\"></a"
+              "status": "PASS"
             },
             "styles": {
               "status": "PASS",
@@ -918,14 +894,14 @@
               "detail": "[false,true]"
             }
           },
-          "status": "DIFF",
-          "ms": 2214
+          "status": "PASS",
+          "ms": 2217
         }
       ],
       "notes": [
         "Canvas plots cannot be compared via DOM/styles; they are covered by the full-page screenshot channel (canvases are same-origin, untainted)."
       ],
-      "ms": 14732
+      "ms": 14982
     },
     {
       "app": "the-last-pawn",
@@ -971,7 +947,7 @@
             }
           },
           "status": "PASS",
-          "ms": 4337
+          "ms": 4359
         },
         {
           "name": "how-to-play",
@@ -1014,7 +990,7 @@
             }
           },
           "status": "PASS",
-          "ms": 4270
+          "ms": 4264
         },
         {
           "name": "back-to-menu",
@@ -1057,7 +1033,7 @@
             }
           },
           "status": "PASS",
-          "ms": 6332
+          "ms": 6325
         },
         {
           "name": "start-game",
@@ -1100,7 +1076,7 @@
             }
           },
           "status": "PASS",
-          "ms": 4951
+          "ms": 4954
         },
         {
           "name": "move-right",
@@ -1147,7 +1123,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3439
+          "ms": 3436
         },
         {
           "name": "move-up",
@@ -1194,7 +1170,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3431
+          "ms": 3420
         },
         {
           "name": "move-right-again",
@@ -1241,7 +1217,7 @@
             }
           },
           "status": "PASS",
-          "ms": 3417
+          "ms": 3432
         }
       ],
       "notes": [
@@ -1249,7 +1225,7 @@
         "All game randomness goes through the page's Math.random, seeded identically on both sides by the harness, so spawns/AI are exactly comparable.",
         "framer-motion animates via JS (inline styles); each step waits for the animation to settle before capture."
       ],
-      "ms": 30429
+      "ms": 30448
     },
     {
       "app": "wall-go",
@@ -1297,7 +1273,7 @@
             }
           },
           "status": "PASS",
-          "ms": 4543
+          "ms": 4783
         },
         {
           "name": "open-vs-ai-select",
@@ -1342,7 +1318,7 @@
             }
           },
           "status": "PASS",
-          "ms": 2178
+          "ms": 2161
         },
         {
           "name": "choose-easy-level",
@@ -1391,7 +1367,7 @@
             }
           },
           "status": "PASS",
-          "ms": 1565
+          "ms": 1570
         },
         {
           "name": "start-as-first",
@@ -1440,7 +1416,7 @@
             }
           },
           "status": "PASS",
-          "ms": 2626
+          "ms": 2606
         },
         {
           "name": "place-stone-and-await-ai-reply",
@@ -1455,7 +1431,7 @@
             {
               "name": "AI placed exactly two stones, on legal empty squares (both sides)",
               "pass": true,
-              "detail": "ref.B=1,5,4,3,5,1,5,3 diffpack.B=1,5,3,4,3,5,5,1"
+              "detail": "ref.B=1,5,3,1,3,2,5,1 diffpack.B=1,5,3,4,3,5,5,1"
             },
             {
               "name": "board structure identical (49 cells both sides)",
@@ -1469,15 +1445,15 @@
             }
           ],
           "status": "PASS",
-          "ms": 3171
+          "ms": 3173
         }
       ],
       "notes": [
         "AI runs in a module Web Worker; the ai-reply step proves worker behavioral parity (boots, receives game state, replies with a legal placement).",
         "Human plays Red and moves first ('First' button sets the AI to Blue)."
       ],
-      "ms": 14343
+      "ms": 14541
     }
   ],
-  "totalMs": 84399
+  "totalMs": 84964
 }
