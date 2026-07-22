@@ -182,7 +182,7 @@
 ; offset (or -1 for a passive/unsupported segment) onto `offs`.
 (defn wasm-seg-offset [(dr (ptr WasmReader)) (offs (mut (ArrayList i64)))] (-> i64)
   (let [op (wr-byte dr)]
-    (if (icmp-eq op 65)                              ; 0x41 i32.const
+    (if (or (icmp-eq op 65) (icmp-eq op 66))         ; 0x41 i32.const / 0x42 i64.const (memory64 offset)
         (let [v (wr-sleb dr)] (wr-byte dr) (al-push! (mut offs) v) 0)   ; consume end 0x0b
       (do (wr-byte dr) (al-push! (mut offs) 0) 0)))
   (let [dl (wr-uleb dr)] (store! (field dr pos) (iadd (load (field dr pos)) dl)) 0))
@@ -266,7 +266,7 @@
                         (let [(mut off) 0]
                           (if (or (icmp-eq flags 0) (icmp-eq flags 2))
                               (let [op (wr-byte dr)]                    ; offset init expr
-                                (if (icmp-eq op 65) (store! off (wr-sleb dr)) 0)
+                                (if (or (icmp-eq op 65) (icmp-eq op 66)) (store! off (wr-sleb dr)) 0)  ; i32/i64.const
                                 (wr-byte dr) 0)                          ; consume end 0x0b
                             (store! off 0))
                           (let [dl (wr-uleb dr) e (iadd (load off) dl)]
@@ -551,7 +551,7 @@
                         (if (icmp-eq flags 0)
                             (let [(mut base) 0]
                               (let [op (wr-byte er)]                       ; offset init expr
-                                (if (icmp-eq op 65) (do (store! base (wr-sleb er)) (wr-byte er) 0) 0))
+                                (if (or (icmp-eq op 65) (icmp-eq op 66)) (do (store! base (wr-sleb er)) (wr-byte er) 0) 0))  ; i32/i64.const (table64)
                               (let [cnt (wr-uleb er) (mut j) 0]
                                 (loop (if (icmp-ge (load j) cnt) (break)
                                   (let [fi (wr-uleb er) e (alloc-stack WasmElem)]
