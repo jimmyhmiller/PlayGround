@@ -400,8 +400,66 @@
   (let [sp (load (field en status))]
     (if (icmp-eq (cast i64 sp) 0) 0 (call-ptr (cast (fnptr c [] i64) sp)))))
 
+; ============================ WASM comptime fold path ============================
+; When the compiler is hosted in wasm it cannot mmap-JIT or dlopen the fold thunk.
+; Instead the fold sub-program is compiled to a codegen_wasm SIDE-MODULE (the same
+; build hook the macro engine uses) and run by the host (meta_run_ct) sharing this
+; compiler's memory + mh_* — exactly like the macro path, but the entry is
+; coil_ct_thunk. The host writes the scalar result bits into `cell` and returns the
+; div-by-zero status; we rebuild the CtVal from the cell exactly as cte-invoke would.
+(defn cte-cell->ctval [(cell (ptr i8)) (kind i64) (tp (ptr Type))] (-> CtVal)
+  (if (icmp-eq kind 4) (CFloat (load (cast (ptr f64) cell)))       ; f32 widened to f64 by the host
+  (if (icmp-eq kind 3) (CFloat (load (cast (ptr f64) cell)))
+    (let [n (load (cast (ptr i64) cell))]
+      (if (icmp-eq kind 2) (CBool (icmp-ne n 0))
+        (match-else (load tp)
+          (TInt [b s] (CInt (trunc n b s)))
+          (_ (CInt n))))))))
+
+(defn cte-run-wasm [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (match (monomorphize a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [mp]
+      (do (sort-mono-program a mp)
+        (let [bytes (call-ptr (load (field (meta-wasm-box) build)) a mp)
+              cell (alloc-stack (array i8 8))
+              st (call-ptr (load (field (meta-wasm-box) run-ct))
+                           (slice-data bytes) (slice-len bytes)
+                           (slice->cstr a "coil_ct_thunk") (slice->cstr a "coil_ct_status")
+                           kind (cast (ptr i8) cell))]
+          (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+            (let [cv (cte-cell->ctval (cast (ptr i8) cell) kind tp)
+                  lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+              (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                (Err [d] (cte-box a (Err [Expr Diag] d)))
+                (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
+
+(defn cte-run-agg-wasm [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
+  (match (monomorphize a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [mp]
+      (do (sort-mono-program a mp)
+        (let [tp (alloc-stack Type)] (store! tp t0)
+          (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+            (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
+            (Some [buf]
+              (let [bytes (call-ptr (load (field (meta-wasm-box) build)) a mp)
+                    st (call-ptr (load (field (meta-wasm-box) run-ct))
+                                 (slice-data bytes) (slice-len bytes)
+                                 (slice->cstr a "coil_ct_thunk") (slice->cstr a "coil_ct_status")
+                                 0 buf)]
+                (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                  (match (cte-read cx tp buf 0 a)
+                    (None [] (cast (ptr i8) 0))
+                    (Some [cv]
+                      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+                        (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                          (Err [d] (cte-box a (Err [Expr Diag] d)))
+                          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
+
 ; run the entry, reconstruct a literal from the scalar it returns.
 (defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (if (meta-wasm-active?) (cte-run-wasm a sub cx inner kind tp)
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
     (Ok [en0]
@@ -414,7 +472,7 @@
           (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
             (match (build-value a (new-cell cv) lo hi src ctxt cx)
               (Err [d] (cte-box a (Err [Expr Diag] d)))
-              (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))
+              (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
 
 ; ============================ AGGREGATE readback (interp deletion step 3a) =========
 ; The scalar path above reads int/bool/f64 out of the return register. An AGGREGATE
@@ -706,6 +764,7 @@
   0)
 ; run the entry write-through into a heap buffer, then read the aggregate back.
 (defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
+  (if (meta-wasm-active?) (cte-run-agg-wasm a sub cx inner t0)
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
     (Ok [en0]
@@ -724,7 +783,7 @@
                         (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
                           (match (build-value a (new-cell cv) lo hi src ctxt cx)
                             (Err [d] (cte-box a (Err [Expr Diag] d)))
-                            (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))))))))
+                            (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))))
 
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))

@@ -213,19 +213,27 @@
 ; Both unset ⇒ the native dylib + pthread path. Keeping the wasm-only extern
 ; (meta_run_wasm) and the codegen_wasm import in main_wasm (not here) means the native
 ; main.coil / main_a64.coil builds never reference either.
+; run-ct runs a compiled COMPTIME fold thunk (comptime_eval.coil): the same
+; side-module mechanism, but the entry is coil_ct_thunk (no Sexp args). The host
+; writes the scalar result bits into a caller cell (or, for an aggregate, the thunk
+; writes through the buf pointer directly in shared memory) and returns the div-by-zero
+; status code. Args: bytes, len, thunk-sym, status-sym, kind, cell/buf.
 (defstruct MetaWasmBox
   [(isset i64)
    (build (fnptr c [(ptr Allocator) (ptr Program)] (slice u8)))
    (run   (fnptr c [(ptr u8) i64 (ptr i8) i64
                     (ptr i8) (ptr i8) (ptr i8) (ptr i8)
-                    (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)))])
+                    (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)))
+   (run-ct (fnptr c [(ptr u8) i64 (ptr i8) (ptr i8) i64 (ptr i8)] i64))])
 (defn meta-wasm-box [] (-> (ptr MetaWasmBox)) (alloc-static MetaWasmBox))
 (defn set-meta-wasm! [(build (fnptr c [(ptr Allocator) (ptr Program)] (slice u8)))
                       (run   (fnptr c [(ptr u8) i64 (ptr i8) i64
                                        (ptr i8) (ptr i8) (ptr i8) (ptr i8)
-                                       (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)))] (-> i64)
+                                       (ptr i8) (ptr i8) (ptr i8) (ptr i8)] (ptr i8)))
+                      (run-ct (fnptr c [(ptr u8) i64 (ptr i8) (ptr i8) i64 (ptr i8)] i64))] (-> i64)
   (let [b (meta-wasm-box)]
-    (store! (field b build) build) (store! (field b run) run) (store! (field b isset) 1) 0))
+    (store! (field b build) build) (store! (field b run) run) (store! (field b run-ct) run-ct)
+    (store! (field b isset) 1) 0))
 (defn meta-wasm-active? [] (-> bool) (icmp-ne (load (field (meta-wasm-box) isset)) 0))
 
 ; ---- unique scratch paths ---------------------------------------------------------

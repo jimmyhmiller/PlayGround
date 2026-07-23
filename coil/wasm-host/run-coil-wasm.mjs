@@ -117,19 +117,17 @@ function sideDataSize(bytes) {
 }
 
 let compilerExports = null;                        // set after instantiate
-function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
-  const modBytes = Uint8Array.prototype.slice.call(u8(), Number(bytesPtr), Number(bytesPtr) + Number(len));
-  const sym = cstr(symPtr);
-  const mod = new WebAssembly.Module(modBytes);
 
-  // carve regions from the compiler heap for the side-module's data + shadow stack
+// instantiate a metaprogram/comptime side-module sharing the compiler's memory: its
+// static data lands in a fresh __memory_base region, its shadow stack in another, and
+// every env.mh_* / libc import is bridged to the compiler instance (or host libc).
+function instantiateSide(bytesPtr, len) {
+  const modBytes = Uint8Array.prototype.slice.call(u8(), Number(bytesPtr), Number(bytesPtr) + Number(len));
+  const mod = new WebAssembly.Module(modBytes);
   const dataSize = Math.max(sideDataSize(modBytes), 64);
   const memBase = malloc(BigInt(dataSize));
   const STACK = 1n << 23n;                          // 8 MiB shadow stack
-  const stackLo = malloc(STACK);
-  const stackTop = stackLo + STACK;
-
-  // build the side-module's env from ITS declared imports
+  const stackTop = malloc(STACK) + STACK;
   const sideEnv = {
     memory: mem(),
     __memory_base: new WebAssembly.Global({ value: 'i64', mutable: false }, memBase),
@@ -139,7 +137,7 @@ function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
     if (imp.module !== 'env' || imp.name in sideEnv) continue;
     if (imp.name.startsWith('mh_')) {
       const f = compilerExports[imp.name];
-      if (typeof f !== 'function') throw new Error(`meta_run_wasm: compiler does not export ${imp.name}`);
+      if (typeof f !== 'function') throw new Error(`side-module: compiler does not export ${imp.name}`);
       sideEnv[imp.name] = f;                        // bridge callback → compiler instance
     } else if (imp.name in env) {
       sideEnv[imp.name] = env[imp.name];             // reuse host libc (malloc/free/mem*)
@@ -147,14 +145,42 @@ function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
       sideEnv[imp.name] = trap(`side:${imp.name}`);  // loud on anything unexpected
     }
   }
+  return new WebAssembly.Instance(mod, { env: sideEnv });
+}
 
-  const side = new WebAssembly.Instance(mod, { env: sideEnv });
+function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
+  const sym = cstr(symPtr);
+  const side = instantiateSide(bytesPtr, len);
   const entry = side.exports[sym];
   if (typeof entry !== 'function') throw new Error(`meta_run_wasm: side-module has no export ${sym}`);
   const callArgs = args.slice(0, Number(argc)).map((x) => BigInt(x));
   const ret = entry(...callArgs);                    // synchronous; returns Sexp ptr (i64)
   if (process.env.COIL_WASM_META_TRACE) console.error(`[meta_run_wasm] ran ${sym}(argc=${argc}) → ${ret}`);
   return BigInt(ret);
+}
+
+// run a COMPTIME fold side-module: coil_ct_thunk yields the folded value; write its
+// bits into `cell` (or, for an aggregate, kind 0, the thunk writes through cell as a
+// buf pointer). coil_ct_status (if present) reports div-by-zero (1=div, 2=rem). We
+// return that status; the compiler discards the value and errors when it is nonzero.
+function meta_run_ct(bytesPtr, len, thunkSymPtr, statusSymPtr, kind, cell) {
+  const side = instantiateSide(bytesPtr, len);
+  const thunkSym = cstr(thunkSymPtr);
+  const thunk = side.exports[thunkSym];
+  if (typeof thunk !== 'function') throw new Error(`meta_run_ct: side-module has no export ${thunkSym}`);
+  kind = Number(kind);
+  if (kind === 0) {
+    thunk(BigInt(cell));                             // aggregate write-through into shared memory
+  } else if (kind === 3 || kind === 4) {
+    dv().setFloat64(Number(cell), Number(thunk()), true);
+  } else {
+    dv().setBigInt64(Number(cell), BigInt(thunk()), true);
+  }
+  let st = 0n;
+  const statusSym = statusSymPtr && Number(statusSymPtr) !== 0 ? cstr(statusSymPtr) : null;
+  if (statusSym) { const s = side.exports[statusSym]; if (typeof s === 'function') st = BigInt(s()); }
+  if (process.env.COIL_WASM_META_TRACE) console.error(`[meta_run_ct] ran ${thunkSym}(kind=${kind}) status=${st}`);
+  return st;
 }
 
 // ---- minimal snprintf(buf,size,fmt,arg) — one conversion -------------------
@@ -212,7 +238,7 @@ const env = {
   pthread_create: trap('pthread_create'),
   // Wall 1: comptime JIT / dylib / subprocess — the wasm meta path replaces these
   // with meta_run_wasm (run a metaprogram as a shared-memory side-module in-sandbox).
-  meta_run_wasm,
+  meta_run_wasm, meta_run_ct,
   mmap: trap('mmap'), munmap: trap('munmap'), mprotect: trap('mprotect'),
   dlopen: trap('dlopen'), dlsym: trap('dlsym'), system: trap('system'),
 };

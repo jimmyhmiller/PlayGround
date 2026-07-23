@@ -527,6 +527,24 @@
         (al-push! (mut (field g strs)) (load e))
         off))))
 
+; alloc-static: reserve a fresh, zero-initialised cell in the static data segment for
+; ONE call site. Data is written into linear memory at __memory_base on instantiation,
+; and the cell's address (base+off) is a compile-time constant, so every execution of
+; this alloc-static returns the SAME cell — the wasm equivalent of one global slot per
+; call site. Returns the 0-based offset (the address is formed at the use via
+; wg-data-addr!, PIC-aware). `size` bytes, aligned to `align`.
+(defn wintern-static! [(g (ptr Wcg)) (size i64) (align i64)] (-> i64)
+  (let [al (if (icmp-gt align 1) align 1)
+        cur (al-len [u8] (load (field g data)))
+        rem (irem cur al)
+        pad (if (icmp-eq rem 0) 0 (isub al rem))]
+    (let [(mut k) 0] (loop (if (icmp-ge (load k) pad) (break)
+      (do (al-push! (mut (field g data)) (cast u8 0)) (store! k (iadd (load k) 1))))))
+    (let [off (al-len [u8] (load (field g data))) (mut j) 0]
+      (loop (if (icmp-ge (load j) size) (break)
+        (do (al-push! (mut (field g data)) (cast u8 0)) (store! j (iadd (load j) 1)))))
+      off)))
+
 ; ============================ functype pool =================================
 ; build a functype (0x60 …) for a source (param-type list, ret) under the wasm ABI:
 ; every wasm value is i64; an aggregate RET prepends a sret i64 param and yields no result.
@@ -1274,8 +1292,11 @@
                 (wg-call! g (load (field (wal-at [WImport] (field g imports) ii) funcidx)))
                 (wg-i64-store! g)
                 (mk-av 1 slot (TPtr (box-type a t))))
-            (do (wcg-unimpl "alloc-static (needs a global data cell)")
-                (mk-av 0 0 (TInt 64 true)))))))
+            ; static: one zero-initialised cell in the data segment per call site; its
+            ; address is a compile-time constant, so every call yields the same slot.
+            (let [off (wintern-static! g (wty-size g tp) (wty-align g tp)) slot (wslot-new! g 8 8)]
+              (wg-push-addr! g slot) (wg-data-addr! g off) (wg-i64-store! g)
+              (mk-av 1 slot (TPtr (box-type a t))))))))
     (EField [p fname]
       (let [av (wemit-expr g p) a (load (field g a)) t (alloc-stack Type)]
         (store! t (av-ty av))
