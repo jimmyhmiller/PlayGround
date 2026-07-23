@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import { parseFlow } from "../dsl/parser.js";
 import type { Flow } from "../dsl/ir.js";
-import { diagnoseFailure } from "./diagnose.js";
+import { explainFailure } from "./explain.js";
 import type { Seed } from "../world/types.js";
 import type { BatConfig } from "../config.js";
 import { composeFlowWorld, prepareContext, runSteps } from "./executor.js";
@@ -33,8 +33,8 @@ export interface RunResult {
 }
 
 export interface RunFlowOptions {
-  /** triage failures automatically (test-fault vs app-fault). Default true. */
-  diagnose?: boolean;
+  /** explain failures automatically (causal account + rerun evidence). Default true. */
+  explain?: boolean;
   /** write trace/report/checkpoints under .bat/runs. Default true. */
   persist?: boolean;
 }
@@ -46,7 +46,7 @@ export async function runFlowFile(file: string, deps: RunDeps, options: RunFlowO
 }
 
 export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions = {}): Promise<RunResult> {
-  const { diagnose = true, persist = true } = options;
+  const { explain = true, persist = true } = options;
   const { config, world, seeds, browser } = deps;
   const description = composeFlowWorld(flow, seeds);
   let verification: FlowTrace["worldVerification"] = null;
@@ -93,11 +93,16 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
     await context.close();
   }
 
-  // Every failure gets triaged: is the TEST faulty or is the APP faulty?
-  if (trace.status === "fail" && diagnose) {
-    trace.diagnosis = await diagnoseFailure(flow, trace, {
+  // Every failure gets an automatic causal explanation (no verdicts).
+  const rerunTraces: FlowTrace[] = [];
+  if (trace.status === "fail" && explain) {
+    trace.explanation = await explainFailure(flow, trace, {
       ...deps,
-      rerun: async (rerunDeps) => (await runFlow(flow, rerunDeps, { diagnose: false, persist: false })).trace,
+      rerun: async (rerunDeps) => {
+        const rerun = (await runFlow(flow, rerunDeps, { explain: false, persist: false })).trace;
+        rerunTraces.push(rerun);
+        return rerun;
+      },
     });
   }
 
@@ -105,6 +110,11 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
     const report = renderReport(trace);
     await writeFile(join(runDir, "trace.json"), JSON.stringify(trace, null, 2), "utf8");
     await writeFile(join(runDir, "report.txt"), report, "utf8");
+    // rerun traces referenced by the explanation, for side-by-side comparison
+    for (let i = 0; i < rerunTraces.length; i++) {
+      await mkdir(join(runDir, "reruns"), { recursive: true });
+      await writeFile(join(runDir, "reruns", `rerun-${i + 1}.json`), JSON.stringify(rerunTraces[i], null, 2), "utf8");
+    }
     await writeFile(join(config.root, ".bat", "runs", slug(flow.file), "latest"), runId, "utf8");
   }
   return { trace, runDir, reportPath: join(runDir, "report.txt") };

@@ -187,40 +187,43 @@ The replay report states which tier ran and why.
 
 ```
 bat check <flow...>     parse + static checks only (no browser)
-bat run <flow...>       run flows; every failure is auto-triaged
+bat run <flow...>       run flows; every failure gets a causal explanation
 bat replay <flow>:<n>   atomic replay of one step
 bat inspect <url>       dump the semantic tree (roles/names/testids) of a page
 bat doctor              report world adapter capability level + next rung
 ```
 
-### Automatic failure triage
+### Automatic failure explanation
 
-Any time a run fails, bat answers the question a human would otherwise spend an
-afternoon on: **is the TEST faulty, or is the APP faulty?** A `diagnosis`
-section is appended to every failure report.
+bat never issues a verdict — it can't. An app's timing may legitimately vary,
+and whether an observed state is "broken" depends on user expectations, which
+only the flow's author knows (the flow *is* the attempt to encode them). What
+bat does instead: any time a run fails, it replaces "couldn't find X after n
+seconds" with a causal, evidence-backed **`why this failed:`** section:
 
-The epistemics: bat holds the world (seeded, fingerprinted), the timing
-(event-driven settlement), and the steps constant. So the diagnosis engine can
-actually *prove* things:
-
-1. **Fast paths** (no reruns): an ambiguous target is always a test fault;
-   a target that doesn't exist but nearly matches something in the page's
-   semantic tree (or testid list) gets a *did-you-mean* and is classified a
-   likely test fault.
-2. **Determinism check**: the flow is rerun N times (config `diagnoseReruns`,
-   default 4) under identical conditions.
-   - **Reruns disagree → THE APP IS FAULTY (nondeterministic).** Variance
-     cannot come from the test — bat held everything else constant. Outcomes
-     are cross-tabulated against response completion order at the failing
-     step; when order fully determines the outcome, the report states "a race
-     in the app" with the numbers.
-   - **All reruns fail identically → not flakiness.** With a did-you-mean, it's
-     a test fault; otherwise: "THE APP CONSISTENTLY BEHAVES DIFFERENTLY THAN
-     THE FLOW EXPECTS" — the app regressed or the expectation is stale, and
-     rerunning will never change the outcome.
-3. **Conditions check**: when simulated bad conditions are active and every
-   conditioned rerun fails, one clean rerun runs without them. If it passes,
-   the verdict is **CHAOS-INDUCED** — an app resilience gap, not a test issue.
+1. **What was expected vs what the settled page showed** — always concrete
+   values, never bare timeouts.
+2. **What the page did during the step** — requests with status and completion
+   order, injected-condition annotations, errors, navigations.
+3. **Reproducibility** — the flow is rerun N times (config `rerunsOnFailure`,
+   default 4) with the identical seeded world and steps.
+   - Reruns disagree → "NOT deterministic," and the outcome is cross-tabulated
+     against response completion order. When order explains it exactly, the
+     report states the fact and offers **both readings**: if a user must always
+     end in the expected state, the app doesn't guarantee it under every
+     ordering; if every ordering's end state is acceptable, the expectation is
+     stricter than the app's actual contract. Deciding which is a question of
+     intent — the report equips the human to answer it in a minute.
+   - All reruns fail identically → "fully reproducible: stable behavior, not a
+     timing variation" — rerunning will never change it.
+   - Rerun traces are saved next to the run's trace for side-by-side diffing.
+4. **Near-miss facts** — a target that matches nothing, when something close
+   exists ("closest present: heading \"Products\""), is pointed out as a naming
+   mismatch in the flow.
+5. **Conditions check** — with simulated bad conditions active, one clean rerun
+   runs without them; if it passes, the report states the failure only occurs
+   under the injected conditions, with both readings (missing app resilience
+   vs an over-harsh profile).
 
 ### Simulated bad conditions
 

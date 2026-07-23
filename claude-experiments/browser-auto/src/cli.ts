@@ -15,8 +15,8 @@ const USAGE = `bat — browser auto tests
 
 usage:
   bat check [flows...]        parse + static checks (no browser)
-  bat run [flows...]          run flows; every failure is auto-triaged
-                              (test-fault vs app-fault, with rerun evidence)
+  bat run [flows...]          run flows; every failure gets a causal explanation
+                              (what happened, reproducibility, both readings)
   bat replay <flow>:<step>    replay one step (add --fast to restore from checkpoint)
   bat inspect <url>           dump a page's semantic tree (write targets from ground truth)
   bat doctor                  world adapter capability level + the next rung

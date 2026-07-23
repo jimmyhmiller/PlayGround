@@ -1,7 +1,7 @@
 import type { Effect, Step, Target } from "../dsl/ir.js";
 import { formatEffect } from "../dsl/ir.js";
-import type { Diagnosis } from "./diagnose.js";
-import { renderDiagnosis } from "./diagnose.js";
+import type { Explanation } from "./explain.js";
+import { renderExplanation } from "./explain.js";
 import type { ObservedRequest } from "./settle.js";
 
 export interface EffectVerdict {
@@ -56,8 +56,8 @@ export interface FlowTrace {
   conditions: { latencyMs?: [number, number]; failRate?: number; seed: number } | null;
   status: "pass" | "fail";
   steps: StepTrace[];
-  /** automatic failure triage: test-fault vs app-fault, with evidence */
-  diagnosis?: Diagnosis;
+  /** automatic causal explanation of the failure (no verdicts — evidence) */
+  explanation?: Explanation;
 }
 
 export interface Checkpoint {
@@ -149,9 +149,9 @@ export function renderReport(trace: FlowTrace): string {
       out.push(`  replay just this step: bat replay ${trace.file}:${s.index + 1}`);
     }
   }
-  if (trace.diagnosis) {
+  if (trace.explanation) {
     out.push("");
-    out.push(renderDiagnosis(trace.diagnosis));
+    out.push(renderExplanation(trace.explanation));
   }
   return out.join("\n");
 }

@@ -45,11 +45,11 @@ afterAll(async () => {
   await shop?.close();
 });
 
-describe("automatic failure triage: THE APP IS FAULTY", () => {
-  it("a race in the app is diagnosed as nondeterministic, with order evidence", async () => {
-    // 12 reruns of the ~50/50 race: P(no passing rerun) ≈ 0.02% — the verdict
+describe("explaining nondeterministic outcomes", () => {
+  it("a racy page's failure is explained with rerun + order evidence, no verdict", async () => {
+    // 12 reruns of the ~50/50 race: P(no passing rerun) ≈ 0.02% — the evidence
     // is statistically forced without making this test itself flaky.
-    const racy: RunDeps = { ...deps, config: { ...baseConfig, diagnoseReruns: 12 } };
+    const racy: RunDeps = { ...deps, config: { ...baseConfig, rerunsOnFailure: 12 } };
     let trace: FlowTrace | null = null;
     for (let i = 0; i < 20 && !trace; i++) {
       const result = await runFlowFile(FLAKY_CART, racy);
@@ -57,19 +57,23 @@ describe("automatic failure triage: THE APP IS FAULTY", () => {
     }
     if (!trace) throw new Error("no failure in 20 runs — the fixture race disappeared?");
 
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("app-inconsistent");
-    expect(d.headline).toContain("THE APP IS FAULTY");
-    expect(d.details.join("\n")).toContain("variance can only come from the app");
+    const e = trace.explanation!;
+    expect(e.reruns.reachedExpected).toBeGreaterThan(0);
+    expect(e.orderEvidence!.length).toBeGreaterThan(1);
+    expect(e.orderEvidence!.every((o) => o.reached === 0 || o.missed === 0)).toBe(true);
 
     const report = renderReport(trace);
-    expect(report).toContain("diagnosis: THE APP IS FAULTY (nondeterministic)");
-    expect(report).toContain("a race in the app");
-    expect(d.orderEvidence!.length).toBeGreaterThan(1);
-    expect(d.orderEvidence!.every((o) => o.passes === 0 || o.fails === 0)).toBe(true);
+    expect(report).toContain("why this failed:");
+    expect(report).toContain("NOT deterministic");
+    expect(report).toContain("the outcome tracks response completion order exactly");
+    // both readings offered; no blame stamped
+    expect(report).toContain("the app doesn't guarantee it under every ordering");
+    expect(report).toContain("stricter than the app's actual contract");
+    expect(report).not.toMatch(/FAULT/i);
+    expect(report).not.toMatch(/verdict/i);
   }, 240000);
 
-  it("a consistently wrong expectation is diagnosed as deterministic, not flaky", async () => {
+  it("a consistently failing expectation is explained as stable behavior, not flaky", async () => {
     const flow = parseFlow(
       `flow "wrong expectation"
 given seed "catalog-basic"
@@ -83,19 +87,18 @@ click button "Add to cart" in listitem "Blue Widget"
     );
     const { trace } = await runFlow(flow, deps);
     expect(trace.status).toBe("fail");
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("app-behavior-mismatch");
-    expect(d.headline).toContain("CONSISTENTLY");
-    expect(d.reruns.failedSame).toBe(4);
-    expect(d.reruns.passed).toBe(0);
+    const e = trace.explanation!;
+    expect(e.reruns.failedSame).toBe(4);
+    expect(e.reruns.reachedExpected).toBe(0);
     const report = renderReport(trace);
-    expect(report).toContain("this is not flakiness");
-    expect(report).toContain("the expectation is stale");
+    expect(report).toContain("fully reproducible");
+    expect(report).toContain("stable behavior, not a timing variation");
+    expect(report).toContain("what a user is supposed to see here");
   }, 120000);
 });
 
-describe("automatic failure triage: THE TEST IS FAULTY", () => {
-  it("ambiguous targets are a test fault — no reruns needed", async () => {
+describe("explaining flow-side problems", () => {
+  it("ambiguous targets are explained without reruns", async () => {
     const flow = parseFlow(
       `flow "ambiguous"
 given seed "catalog-basic"
@@ -107,13 +110,12 @@ click button "Add to cart"
       "inline.flow",
     );
     const { trace } = await runFlow(flow, deps);
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("test-fault");
-    expect(d.headline).toContain("THE TEST IS FAULTY");
-    expect(d.reruns.total).toBe(0);
+    const e = trace.explanation!;
+    expect(e.reruns.total).toBe(0);
+    expect(e.meaning.join("\n")).toContain("bat never guesses");
   }, 60000);
 
-  it("a misspelled target name gets a did-you-mean", async () => {
+  it("a misspelled target name gets a closest-present suggestion", async () => {
     const flow = parseFlow(
       `flow "typo"
 given seed "catalog-basic"
@@ -122,12 +124,11 @@ go /
 `,
       "inline.flow",
     );
-    const quick: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 4000, diagnoseReruns: 2 } };
+    const quick: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 4000, rerunsOnFailure: 2 } };
     const { trace } = await runFlow(flow, quick);
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("test-fault");
-    expect(d.headline).toContain("THE TEST IS LIKELY FAULTY");
-    expect(d.details.join("\n")).toContain('did you mean heading "Products"');
+    const e = trace.explanation!;
+    expect(e.meaning.join("\n")).toContain('closest present: heading "Products"');
+    expect(e.meaning.join("\n")).toContain("the flow's name for it is wrong");
   }, 120000);
 
   it("a misspelled testid suggests the nearest real testid", async () => {
@@ -141,28 +142,24 @@ go /
       "inline.flow",
     );
     // a missing element waits out the step budget on every rerun; keep this quick
-    const quick: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 4000, diagnoseReruns: 2 } };
+    const quick: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 4000, rerunsOnFailure: 2 } };
     const { trace } = await runFlow(flow, quick);
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("test-fault");
-    expect(d.details.join("\n")).toContain('testid "cart-count"');
+    expect(trace.explanation!.meaning.join("\n")).toContain('closest present testid is "cart-count"');
   }, 120000);
 });
 
-describe("automatic failure triage: CHAOS-INDUCED", () => {
+describe("explaining chaos-induced failures", () => {
   it("failures under injected conditions that pass clean are attributed to the conditions", async () => {
     const conditioned: RunDeps = {
       ...deps,
-      config: { ...baseConfig, conditions: { failRate: 1, seed: 3 }, diagnoseReruns: 1 },
+      config: { ...baseConfig, conditions: { failRate: 1, seed: 3 }, rerunsOnFailure: 1 },
     };
     const { trace } = await runFlowFile(BUY_FLOW, conditioned);
     expect(trace.status).toBe("fail");
-    const d = trace.diagnosis!;
-    expect(d.verdict).toBe("conditions-induced");
-    expect(d.headline).toContain("CHAOS-INDUCED");
     const report = renderReport(trace);
     expect(report).toContain("SIMULATED BAD CONDITIONS ACTIVE");
-    expect(report).toContain("passes without the injected conditions");
+    expect(report).toContain("only occurs under the injected conditions");
+    expect(report).toContain("a rerun WITHOUT them reached the expected state");
   }, 120000);
 
   it("latency alone never fails a flow, and is recorded in the trace", async () => {
@@ -179,7 +176,7 @@ describe("automatic failure triage: CHAOS-INDUCED", () => {
 });
 
 describe("report clarity", () => {
-  it("failure reports carry completion order + the diagnosis section", async () => {
+  it("failure reports carry completion order + the explanation section", async () => {
     const flow = parseFlow(
       `flow "flaky cart failing report"
 given seed "catalog-basic"
@@ -196,7 +193,7 @@ click button "Add to cart"
     const report = renderReport(trace);
     expect(report).toContain("response completion order:");
     expect(report).toMatch(/finished #\d+/);
-    expect(report).toContain("diagnosis:");
-    expect(report).toMatch(/evidence base: \d+ automatic rerun/);
+    expect(report).toContain("why this failed:");
+    expect(report).toMatch(/automatic rerun/);
   }, 120000);
 });
