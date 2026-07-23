@@ -53,22 +53,21 @@ export async function runFlow(flow: Flow, deps: RunDeps): Promise<RunResult> {
   const context = await browser.newContext({ baseURL: config.baseUrl });
   const page = await context.newPage();
   try {
-    const env = await prepareContext(context, page, flow, {
+    const baseOpts = {
       baseUrl: config.baseUrl,
       stepBudgetMs: config.stepBudgetMs,
       seedRegistry: seeds,
       world,
-    });
+      ...(config.conditions ? { conditions: config.conditions } : {}),
+    };
+    const env = await prepareContext(context, page, flow, baseOpts);
 
     const trace = await runSteps(
       flow,
       context,
       page,
       {
-        baseUrl: config.baseUrl,
-        stepBudgetMs: config.stepBudgetMs,
-        seedRegistry: seeds,
-        world,
+        ...baseOpts,
         onCheckpoint: async (cp: Checkpoint) => {
           await writeFile(join(runDir, `checkpoint-${cp.step}.json`), JSON.stringify(cp), "utf8");
         },
@@ -157,13 +156,15 @@ export async function replayStep(
   const context = await browser.newContext(contextOpts);
   const page = await context.newPage();
   try {
-    const flowForPrepare = checkpoint ? { ...flow, givens: flow.givens.filter((g) => g.type !== "user") } : flow;
-    const env = await prepareContext(context, page, flowForPrepare, {
+    const baseOpts = {
       baseUrl: config.baseUrl,
       stepBudgetMs: config.stepBudgetMs,
       seedRegistry: seeds,
       world,
-    });
+      ...(config.conditions ? { conditions: config.conditions } : {}),
+    };
+    const flowForPrepare = checkpoint ? { ...flow, givens: flow.givens.filter((g) => g.type !== "user") } : flow;
+    const env = await prepareContext(context, page, flowForPrepare, baseOpts);
 
     let startAt = 0;
     if (checkpoint) {
@@ -177,7 +178,7 @@ export async function replayStep(
       flow,
       context,
       page,
-      { baseUrl: config.baseUrl, stepBudgetMs: config.stepBudgetMs, seedRegistry: seeds, world },
+      baseOpts,
       env,
       { fingerprint: description?.fingerprint ?? null, verification },
       startAt,

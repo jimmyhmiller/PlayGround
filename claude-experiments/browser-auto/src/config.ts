@@ -12,6 +12,8 @@ export interface BatConfig {
   flows: string;
   stepBudgetMs: number;
   headless: boolean;
+  /** simulated bad conditions (seeded latency / failure injection) */
+  conditions?: { latencyMs?: [number, number]; failRate?: number; seed: number };
   /** resolved project root (dir containing bat.config.json) */
   root: string;
 }
@@ -51,6 +53,14 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
   if (!world.module && !world.http) {
     throw new ConfigError(`bat.config.json needs "world": {"module": "./path/to/world.ts"} or {"http": "http://..."}`);
   }
+  let conditions: BatConfig["conditions"];
+  if (parsed.conditions !== undefined) {
+    const c = parsed.conditions as { latencyMs?: unknown; failRate?: unknown; seed?: unknown };
+    if (typeof c !== "object" || c === null || typeof c.seed !== "number") {
+      throw new ConfigError(`"conditions" needs at least a numeric "seed" (runs must be reproducible)`);
+    }
+    conditions = c as BatConfig["conditions"];
+  }
   return {
     baseUrl: parsed.baseUrl,
     world,
@@ -58,6 +68,7 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
     flows: typeof parsed.flows === "string" ? parsed.flows : DEFAULTS.flows,
     stepBudgetMs: typeof parsed.stepBudgetMs === "number" ? parsed.stepBudgetMs : DEFAULTS.stepBudgetMs,
     headless: typeof parsed.headless === "boolean" ? parsed.headless : DEFAULTS.headless,
+    ...(conditions ? { conditions } : {}),
     root: cwd,
     ...overrides,
   };

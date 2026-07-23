@@ -21,6 +21,12 @@ export interface ObservedRequest {
   status: number | null;
   failure: string | null;
   finished: boolean;
+  /** order the request STARTED within this step (1-based) */
+  startSeq: number;
+  /** order the request FINISHED within this step (1-based); null while pending */
+  finishSeq: number | null;
+  /** set when a condition profile injected latency or failure into this request */
+  injected?: string;
 }
 
 export class NetworkTracker {
@@ -28,6 +34,8 @@ export class NetworkTracker {
   /** everything observed since the last step boundary, for traces */
   observed: ObservedRequest[] = [];
   private drainWaiters: Array<() => void> = [];
+  private startCounter = 0;
+  private finishCounter = 0;
 
   constructor(page: Page) {
     page.on("request", (req) => {
@@ -39,6 +47,8 @@ export class NetworkTracker {
         status: null,
         failure: null,
         finished: false,
+        startSeq: ++this.startCounter,
+        finishSeq: null,
       };
       this.inflight.set(req, rec);
       this.observed.push(rec);
@@ -48,6 +58,7 @@ export class NetworkTracker {
       if (!rec) return;
       rec.finished = true;
       rec.failure = failure;
+      rec.finishSeq = ++this.finishCounter;
       this.inflight.delete(req);
       if (this.inflight.size === 0) {
         const waiters = this.drainWaiters;
@@ -87,6 +98,7 @@ export class NetworkTracker {
     for (const [req, rec] of [...this.inflight.entries()]) {
       if (rec.status === null) continue;
       rec.finished = true;
+      rec.finishSeq = ++this.finishCounter;
       this.inflight.delete(req);
       notes.push(
         `${rec.method} ${rec.url}: response ${rec.status} received but the finish event never arrived ` +
@@ -116,6 +128,8 @@ export class NetworkTracker {
 
   stepBoundary(): void {
     this.observed = [];
+    this.startCounter = 0;
+    this.finishCounter = 0;
   }
 }
 
@@ -175,6 +189,8 @@ export class RequestMatcher {
         status: resp.status(),
         failure: null,
         finished: true,
+        startSeq: 0, // synthetic matcher record; ordering lives in NetworkTracker.observed
+        finishSeq: null,
       });
     };
     this.onReqFailed = (req: Request) => {
@@ -186,6 +202,8 @@ export class RequestMatcher {
         status: null,
         failure: req.failure()?.errorText ?? "failed",
         finished: true,
+        startSeq: 0,
+        finishSeq: null,
       });
     };
     page.on("response", this.onResponse);

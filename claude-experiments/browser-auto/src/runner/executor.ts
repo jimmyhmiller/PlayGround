@@ -3,6 +3,7 @@ import type { Effect, Flow, Step, Target } from "../dsl/ir.js";
 import { formatEffect, formatTarget } from "../dsl/ir.js";
 import type { Seed, SessionState, WorldDescription } from "../world/types.js";
 import { composeWorld, WorldError } from "../world/algebra.js";
+import { ConditionEngine, type ConditionProfile } from "./conditions.js";
 import { matchPath, pathOf } from "./patterns.js";
 import { NetworkTracker, RequestMatcher, settle } from "./settle.js";
 import { TransientHub } from "./transients.js";
@@ -21,6 +22,8 @@ export interface RunOptions {
   stepBudgetMs: number;
   seedRegistry: Map<string, Seed>;
   world: WorldHandle;
+  /** simulated bad conditions (seeded latency / failure injection) */
+  conditions?: ConditionProfile;
   /** called after each step with the checkpoint (for persistence) */
   onCheckpoint?: (cp: Checkpoint) => Promise<void> | void;
   /** replay support: skip full trace verbosity for fast-forwarded steps */
@@ -61,12 +64,14 @@ interface StepContext {
   clockInstalled: boolean;
   allowConsoleErrors: boolean;
   hub: TransientHub;
+  engine: ConditionEngine | null;
 }
 
 export interface FlowEnv {
   clockInstalled: boolean;
   allowConsoleErrors: boolean;
   hub: TransientHub;
+  engine: ConditionEngine | null;
 }
 
 export async function prepareContext(
@@ -76,6 +81,13 @@ export async function prepareContext(
   opts: RunOptions,
 ): Promise<FlowEnv> {
   const hub = await TransientHub.install(context);
+  // conditions first: stubs are registered after and therefore win —
+  // stubbed traffic is hermetic and immune to chaos
+  let engine: ConditionEngine | null = null;
+  if (opts.conditions) {
+    engine = new ConditionEngine(opts.conditions);
+    await engine.install(page);
+  }
   let clockInstalled = false;
   const allowConsoleErrors = flow.givens.some((g) => g.type === "allow" && g.what === "console-errors");
 
@@ -109,7 +121,7 @@ export async function prepareContext(
       await applySession(context, session, opts.baseUrl);
     }
   }
-  return { clockInstalled, allowConsoleErrors, hub };
+  return { clockInstalled, allowConsoleErrors, hub, engine };
 }
 
 async function applySession(context: BrowserContext, session: SessionState, baseUrl: string): Promise<void> {
@@ -148,6 +160,7 @@ export async function runSteps(
     startedAt: new Date().toISOString(),
     worldFingerprint: worldMeta.fingerprint,
     worldVerification: worldMeta.verification,
+    conditions: opts.conditions ?? null,
     status: "pass",
     steps: [],
   };
@@ -173,6 +186,7 @@ export async function runSteps(
       clockInstalled: env.clockInstalled,
       allowConsoleErrors: env.allowConsoleErrors,
       hub: env.hub,
+      engine: env.engine,
     };
     const stepTrace = await runStep(step, i, ctx);
     trace.steps.push(stepTrace);
@@ -305,6 +319,7 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
 
   trace.postUrl = page.url();
   trace.requests = [...tracker.observed];
+  if (ctx.engine) for (const rec of trace.requests) ctx.engine.annotate(rec);
   trace.durationMs = Date.now() - started;
   return trace;
 }

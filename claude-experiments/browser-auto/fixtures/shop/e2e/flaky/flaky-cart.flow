@@ -1,0 +1,15 @@
+# This flow tests a page with a REAL app bug (fire-and-forget refetch racing
+# the mutation response). It fails ~half the time BY DESIGN — it lives outside
+# the flows glob and exists for `bat hunt` to demonstrate app inconsistency.
+flow "flaky cart badge"
+
+given seed "catalog-basic"
+
+go /flaky-cart
+  expect heading "Flaky Cart"
+  expect button "Add to cart"
+
+click button "Add to cart"
+  expect request POST /api/cart ok
+  expect request GET /api/cart ok
+  expect text "1" in testid "flaky-count"

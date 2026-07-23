@@ -6,6 +6,7 @@ import { chromium } from "playwright";
 import { globFiles, loadConfig, loadSeeds, loadWorldHandle, ConfigError } from "./config.js";
 import { parseFlow, FlowParseError } from "./dsl/parser.js";
 import { composeFlowWorld, FlowSetupError } from "./runner/executor.js";
+import { huntFlow, persistHunt } from "./runner/hunt.js";
 import { launchBrowser, replayStep, runFlowFile } from "./runner/run.js";
 import { NetworkTracker, settle } from "./runner/settle.js";
 import { renderReport } from "./runner/trace.js";
@@ -16,12 +17,18 @@ const USAGE = `bat — browser auto tests
 usage:
   bat check [flows...]        parse + static checks (no browser)
   bat run [flows...]          run flows (default: all from config)
+  bat hunt <flow>             run one flow many times; prove flakiness with evidence
   bat replay <flow>:<step>    replay one step (add --fast to restore from checkpoint)
   bat inspect <url>           dump a page's semantic tree (write targets from ground truth)
   bat doctor                  world adapter capability level + the next rung
 options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
+  --runs <n>                  hunt: number of runs (default 20)
+conditions (run + hunt; simulated bad conditions, always recorded in traces):
+  --latency <lo>-<hi>         inject lo..hi ms of latency per request
+  --fail-rate <p>             fail p (0..1) of requests at the network level
+  --seed <n>                  PRNG seed (required with any condition; reproducible)
 `;
 
 async function main(): Promise<number> {
@@ -33,15 +40,44 @@ async function main(): Promise<number> {
   }
 
   const flags = new Set<string>();
+  const values = new Map<string, string>();
+  const VALUE_FLAGS = new Set(["config", "runs", "latency", "fail-rate", "seed"]);
   const positional: string[] = [];
-  let rootOverride: string | null = null;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "--config") rootOverride = args[++i] ?? null;
-    else if (a.startsWith("--")) flags.add(a.slice(2));
+    if (a.startsWith("--") && VALUE_FLAGS.has(a.slice(2))) {
+      const v = args[++i];
+      if (v === undefined) {
+        console.error(`${a} needs a value`);
+        return 1;
+      }
+      values.set(a.slice(2), v);
+    } else if (a.startsWith("--")) flags.add(a.slice(2));
     else positional.push(a);
   }
-  const cwd = rootOverride ? resolve(rootOverride) : process.cwd();
+  const cwd = values.has("config") ? resolve(values.get("config")!) : process.cwd();
+
+  const conditionsFromFlags = (): { latencyMs?: [number, number]; failRate?: number; seed: number } | null => {
+    const latency = values.get("latency");
+    const failRate = values.get("fail-rate");
+    if (!latency && !failRate) return null;
+    const seed = values.get("seed");
+    if (seed === undefined) {
+      throw new ConfigError("conditions require --seed <n> so runs are reproducible");
+    }
+    const profile: { latencyMs?: [number, number]; failRate?: number; seed: number } = { seed: Number(seed) };
+    if (latency) {
+      const m = /^(\d+)-(\d+)$/.exec(latency);
+      if (!m) throw new ConfigError(`--latency must look like 200-1500, got '${latency}'`);
+      profile.latencyMs = [Number(m[1]), Number(m[2])];
+    }
+    if (failRate) {
+      const p = Number(failRate);
+      if (!(p >= 0 && p <= 1)) throw new ConfigError(`--fail-rate must be 0..1, got '${failRate}'`);
+      profile.failRate = p;
+    }
+    return profile;
+  };
 
   switch (cmd) {
     case "check": {
@@ -67,7 +103,11 @@ async function main(): Promise<number> {
     }
 
     case "run": {
-      const config = await loadConfig(cwd, flags.has("headed") ? { headless: false } : {});
+      const cond = conditionsFromFlags();
+      const config = await loadConfig(cwd, {
+        ...(flags.has("headed") ? { headless: false } : {}),
+        ...(cond ? { conditions: cond } : {}),
+      });
       const seeds = await loadSeeds(config);
       const world = await loadWorldHandle(config);
       const files = positional.length ? positional.map((f) => resolve(f)) : await globFiles(config.root, config.flows);
@@ -92,6 +132,33 @@ async function main(): Promise<number> {
         await browser.close();
       }
       return failed ? 1 : 0;
+    }
+
+    case "hunt": {
+      const file = positional[0];
+      if (!file) {
+        console.error("usage: bat hunt <flow-file> [--runs 20] [--latency 200-1500 --seed 1] [--fail-rate 0.05]");
+        return 1;
+      }
+      const cond = conditionsFromFlags();
+      const config = await loadConfig(cwd, {
+        ...(flags.has("headed") ? { headless: false } : {}),
+        ...(cond ? { conditions: cond } : {}),
+      });
+      const seeds = await loadSeeds(config);
+      const world = await loadWorldHandle(config);
+      const browser = await launchBrowser(config);
+      try {
+        const runs = values.has("runs") ? Number(values.get("runs")) : 20;
+        const deps = { config, world, seeds, browser };
+        const report = await huntFlow(resolve(file), deps, { runs });
+        const dir = await persistHunt(report, deps);
+        console.log(report.reportText);
+        console.log(`\nfull data: ${dir}/hunt.json`);
+        return report.verdict === "STABLE" ? 0 : 1;
+      } finally {
+        await browser.close();
+      }
     }
 
     case "replay": {

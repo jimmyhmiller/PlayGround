@@ -1,0 +1,16 @@
+# Debounced input under a frozen clock: the 300ms debounce runs on virtual
+# time, advanced deterministically during settlement. No real waiting anywhere.
+flow "debounced search"
+
+given seed "catalog-basic"
+given clock 2026-07-22T10:00:00Z
+
+go /search
+  expect heading "Search"
+  expect text "Type to search the catalog."
+
+fill field "Search" "blue"
+  expect request GET /api/products ok
+  expect count listitem 1 in list "search-results"
+  expect text "Blue Widget" in list "search-results"
+  expect text "1 result(s)"

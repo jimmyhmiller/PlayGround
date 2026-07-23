@@ -57,13 +57,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
 
+  if (path === "/api/cart" && req.method === "GET") {
+    // Read-then-jitter: the payload is read from the db when the request
+    // ARRIVES, but the response leaves after a random delay. Correct for a
+    // settled world — but it gives concurrent writers a stale-read window,
+    // which is exactly the race the /flaky-cart page's refetch bug trips over.
+    const payload = cartPayload();
+    await jitter();
+    return sendJson(res, 200, payload);
+  }
+
   if (path.startsWith("/api/")) {
     await jitter();
     if (path === "/api/products" && req.method === "GET") {
-      return sendJson(res, 200, [...db.products.values()]);
-    }
-    if (path === "/api/cart" && req.method === "GET") {
-      return sendJson(res, 200, cartPayload());
+      const q = url.searchParams.get("q")?.toLowerCase() ?? "";
+      const all = [...db.products.values()];
+      return sendJson(res, 200, q ? all.filter((p) => p.name.toLowerCase().includes(q)) : all);
     }
     if (path === "/api/cart" && req.method === "POST") {
       const chunks: Buffer[] = [];

@@ -37,16 +37,16 @@ const NO_NAME_FROM_CONTENT = new Set([
   "tabpanel", "article", "form", "group", "main", "banner", "navigation",
 ]);
 
-export function buildLocator(page: Page, target: Target, captures: Captures): Locator {
-  const scope: Page | Locator = target.within ? buildLocator(page, target.within, captures) : page;
+export function buildLocator(page: Page, target: Target, captures: Captures, exact = false): Locator {
+  const scope: Page | Locator = target.within ? buildLocator(page, target.within, captures, exact) : page;
   const name = target.name !== undefined ? interpolate(target.name, captures) : undefined;
   switch (target.kind) {
     case "text":
-      return scope.getByText(name!);
+      return scope.getByText(name!, { exact });
     case "field":
-      return scope.getByLabel(name!);
+      return scope.getByLabel(name!, { exact });
     case "placeholder":
-      return scope.getByPlaceholder(name!);
+      return scope.getByPlaceholder(name!, { exact });
     case "testid":
       return scope.getByTestId(name!);
     default: {
@@ -56,11 +56,18 @@ export function buildLocator(page: Page, target: Target, captures: Captures): Lo
       const role = target.kind as Parameters<Page["getByRole"]>[0];
       if (name === undefined) return scope.getByRole(role);
       if (NO_NAME_FROM_CONTENT.has(target.kind)) {
-        return scope.getByRole(role, { name }).or(scope.getByRole(role).filter({ hasText: name }));
+        const content = exact
+          ? scope.getByRole(role).filter({ hasText: new RegExp(`^\\s*${escapeRegex(name)}\\s*$`) })
+          : scope.getByRole(role).filter({ hasText: name });
+        return scope.getByRole(role, { name, exact }).or(content);
       }
-      return scope.getByRole(role, { name });
+      return scope.getByRole(role, { name, exact });
     }
   }
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -88,10 +95,19 @@ export async function resolveUnique(
   }
   const count = await locator.count();
   if (count > 1) {
+    // Disambiguation rule: a UNIQUE exact-name match wins over substring
+    // matches ("Search" beats "search-results"). Anything else is still a
+    // hard error — bat never picks the first one.
+    const exactLoc = buildLocator(page, target, captures, true);
+    const exactCount = await exactLoc.count();
+    if (exactCount === 1) return exactLoc;
     const listing = await describeMatches(locator, count);
     throw new TargetError(
       `${formatTarget(target)} is ambiguous: ${count} elements match — bat never picks the first one.\n` +
         `Matches:\n${listing}\n` +
+        (exactCount > 1
+          ? `(${exactCount} of them match the name exactly, so exact matching cannot disambiguate either.)\n`
+          : "") +
         `Scope the target (e.g. 'in <container>') or use a testid.`,
     );
   }

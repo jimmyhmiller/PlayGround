@@ -46,7 +46,16 @@ Key mechanics:
   a capability ladder (L0 trust-me → L4 time-travel) where every operator you
   provide buys a stronger *checked* guarantee. See `docs/WORLD.md`.
 - **Failures are stories**: what was expected, what was observed, the network
-  during the step, the page's semantic tree, and the exact replay command.
+  during the step (with response completion order), the page's semantic tree,
+  and the exact replay command.
+- **`bat hunt` proves app flakiness.** Run a flow N times; failures are grouped
+  by signature and cross-tabbed against response completion order — when the
+  outcome is fully determined by which response landed last, the report says
+  "this is a race in the app," with the numbers to back it.
+- **Simulated bad conditions** (seeded latency / failure injection via
+  `--latency`, `--fail-rate`, `--seed`) are recorded in every trace and
+  attributed per request — a chaos-induced failure can never masquerade as a
+  real one. Latency alone never fails a flow; that invariant is executable.
 
 ## Try it
 
@@ -56,8 +65,15 @@ npm install && npm run build
 # unit + e2e self-tests (spins up the fixture shop with random API latency)
 npm test
 
-# the anti-flake stress harness: same flow, N times, random latency every run
+# the anti-flake stress harness: all flows, N times, random latency every run
 npx tsx scripts/gauntlet.ts 15
+
+# invariant: injected latency alone must never fail a flow
+npx tsx scripts/chaos-gauntlet.ts 10 42
+
+# hunt a genuinely buggy page (fire-and-forget refetch race) and watch bat
+# PROVE the app is inconsistent, with a completion-order cross-tab
+npx tsx scripts/debug-once.ts fixtures/shop/e2e/flaky/flaky-cart.flow 24
 
 # CLI against the fixture shop
 npx tsx fixtures/shop/serve.ts &        # starts the app on :4173 with BAT_TEST=1

@@ -95,8 +95,11 @@ menuitem img banner navigation main article form group`.
 Scoping: `<target> in <target>` (chainable with `of`:
 `cell "x" of row "y" in table "z"` scopes right-to-left).
 
-Ambiguity (two matches at act time) is a **hard error** listing every match.
-The runner never picks "the first one."
+Names match case-insensitively as substrings (Playwright semantics). If a name
+is ambiguous, a **unique exact-name match wins** (`field "Search"` resolves to
+the element labelled exactly "Search" even when "search-results" also
+substring-matches). Any remaining ambiguity is a **hard error** listing every
+match. The runner never picks "the first one."
 
 ### Effects
 
@@ -185,10 +188,36 @@ The replay report states which tier ran and why.
 ```
 bat check <flow...>     parse + static checks only (no browser)
 bat run <flow...>       run flows
+bat hunt <flow>         run one flow N times; prove flakiness with evidence
 bat replay <flow>:<n>   atomic replay of one step
 bat inspect <url>       dump the semantic tree (roles/names/testids) of a page
 bat doctor              report world adapter capability level + next rung
 ```
+
+### bat hunt — demonstrating app inconsistency
+
+`bat hunt <flow> --runs 20` runs one flow repeatedly, groups failures by
+signature (step + failed expectations + observed values), and cross-tabulates
+outcomes against **response completion order** at the failing step. When every
+completion order maps to exactly one outcome, the report says so plainly:
+
+```
+⚑ the outcome is FULLY DETERMINED by response completion order. This is not a
+  test problem: the app renders different results depending on which response
+  lands last — a race in the app.
+```
+
+### Simulated bad conditions
+
+Conditions are runtime physics, never test semantics — they live in config or
+CLI flags (`--latency 200-1500 --fail-rate 0.05 --seed 7`), never in flow
+files, and require a seed so every chaos run is reproducible. Every injection
+is recorded: the report header announces the active profile, and each affected
+request is annotated (`[+842ms injected latency]`, `[injected failure
+(conditions)]`) so a chaos-induced failure can never masquerade as a real one.
+`given stub` routes are registered after the condition route and therefore win:
+stubbed traffic is hermetic and immune to chaos. Invariant (enforced by
+`scripts/chaos-gauntlet.ts`): injected latency alone must never fail a flow.
 
 Static checks (`bat check`, always run before `run`): grammar, unknown
 action/kind, mutating action without effects, unknown seed name, seed merge

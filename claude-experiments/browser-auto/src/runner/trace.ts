@@ -46,6 +46,8 @@ export interface FlowTrace {
   startedAt: string;
   worldFingerprint: string | null;
   worldVerification: { level: number; proven: string[]; asserted: string[] } | null;
+  /** active simulated-conditions profile, if any */
+  conditions: { latencyMs?: [number, number]; failRate?: number; seed: number } | null;
   status: "pass" | "fail";
   steps: StepTrace[];
 }
@@ -79,6 +81,14 @@ export function renderReport(trace: FlowTrace): string {
   const out: string[] = [];
   out.push(`flow "${trace.flow}" — ${trace.status.toUpperCase()}`);
   out.push(`file: ${trace.file}`);
+  if (trace.conditions) {
+    const c = trace.conditions;
+    const parts: string[] = [];
+    if (c.latencyMs) parts.push(`latency +${c.latencyMs[0]}–${c.latencyMs[1]}ms`);
+    if (c.failRate) parts.push(`${Math.round(c.failRate * 100)}% request failures`);
+    parts.push(`seed ${c.seed}`);
+    out.push(`conditions: SIMULATED BAD CONDITIONS ACTIVE — ${parts.join(", ")} (rerun with the same seed to reproduce)`);
+  }
   if (trace.worldFingerprint) out.push(`world: ${trace.worldFingerprint}`);
   if (trace.worldVerification) {
     out.push(`world verification: L${trace.worldVerification.level}`);
@@ -112,10 +122,15 @@ export function renderReport(trace: FlowTrace): string {
         for (const c of s.consoleErrors) out.push(`    [${c.kind}] ${c.text.slice(0, 300)}`);
       }
       if (s.requests.length) {
-        out.push(`  network during this step:`);
+        out.push(`  network during this step (in start order):`);
         for (const r of s.requests.slice(0, 20)) {
-          out.push(`    ${r.method} ${r.url} -> ${r.failure ? `FAILED (${r.failure})` : (r.status ?? "pending")}`);
+          const outcome = r.failure ? `FAILED (${r.failure})` : (r.status ?? "pending");
+          const finished = r.finishSeq !== null ? ` (finished #${r.finishSeq})` : "";
+          const injected = r.injected ? ` [${r.injected}]` : "";
+          out.push(`    ${r.method} ${r.url} -> ${outcome}${finished}${injected}`);
         }
+        const order = completionOrder(s.requests);
+        if (order.length > 1) out.push(`  response completion order: ${order.join(" → ")}`);
       }
       out.push(`  url: ${s.preUrl}${s.postUrl && s.postUrl !== s.preUrl ? ` -> ${s.postUrl}` : ""}`);
       if (s.ariaSnapshot && !(s.failure && s.failure.includes("semantic tree"))) {
@@ -131,6 +146,14 @@ export function renderReport(trace: FlowTrace): string {
 
 export function renderEffect(e: Effect): string {
   return formatEffect(e);
+}
+
+/** "METHOD /path" list in the order responses completed (api traffic only). */
+export function completionOrder(requests: ObservedRequest[]): string[] {
+  return requests
+    .filter((r) => r.finishSeq !== null && r.resourceType !== "document")
+    .sort((a, b) => a.finishSeq! - b.finishSeq!)
+    .map((r) => `${r.method} ${new URL(r.url).pathname}${r.failure ? " (failed)" : ""}`);
 }
 
 function indent(s: string, n: number): string {
