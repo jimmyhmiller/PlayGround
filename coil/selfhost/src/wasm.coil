@@ -24,7 +24,14 @@
 ; The shadow stack the linker would otherwise provide. A VM recurses deep, so
 ; reserve generously (wasm-ld defaults to 64 KiB); this is placed just above the
 ; static-data high-water and grows down, with the JS heap above it.
-(defn wasm-stack-size [] (-> i64) 1048576)      ; 1 MiB
+; 256 MiB. The self-hosted compiler recurses DEEP — checking a whole module (let
+; alone all of main_a64.coil) nests the reader/parser/resolver/checker per form, and
+; the native build runs the pipeline on a 512 MiB pthread stack for exactly this
+; reason (driver.coil run-on-big-stack). At the old 1 MiB the wasm-hosted compiler
+; overflowed the shadow stack into the data/heap and mis-parsed valid code
+; ("unexpected vector", "table index out of bounds"). This is virtual address space in
+; linear memory; the pages only fault in (native) / grow (JS) as the stack is used.
+(defn wasm-stack-size [] (-> i64) 268435456)    ; 256 MiB
 (defn wasm-page []       (-> i64) 65536)         ; wasm page size
 ; Round `v` up to a multiple of `a` (a must be a power of two).
 (defn wasm-align-up [(v i64) (a i64)] (-> i64) (iand (iadd v (isub a 1)) (isub 0 a)))
