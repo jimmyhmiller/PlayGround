@@ -482,7 +482,7 @@
   (let [w (stderr)
         (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
     (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
-      (Some [mp] (do (d-write-file a (cstr->slice obj-cstr) (wcg-build-module a mp)) 1))
+      (Some [mp] (do (d-write-file a (cstr->slice obj-cstr) (wcg-build-module a mp (wasm-side-module?))) 1))
       (None []   0))))
 
 ; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
@@ -756,6 +756,7 @@
         (str-eq arg "--debug")  true
         (str-eq arg "--debug-checks")     true
         (str-eq arg "--sanitize=address") true
+        (str-eq arg "--wasm-side-module") true
         false))
 
 ; index of the first positional at/after `start`, or 0 if there is none.
@@ -891,7 +892,9 @@
                                 (if (str-eq bn "wasm") (store! backend 4)   ; native wasm64 (memory64) backend
                                   (store! backend 1))))
                             (store! i (iadd (load i) 2)) 0)
-                      (do (store! i (iadd (load i) 1)) 0)))))))))))
+                      (if (str-eq arg "--wasm-side-module")
+                          (do (set-wasm-side-module! true) (store! i (iadd (load i) 1)) 0)
+                        (do (store! i (iadd (load i) 1)) 0))))))))))))
     ; a usage mistake is exit 1, not SIGABRT — abort here made `coil build f.coil`
     ; look like the compiler had panicked, and any CI reporting on signals agreed.
     (if (icmp-eq (cast i64 (load outp)) 0)

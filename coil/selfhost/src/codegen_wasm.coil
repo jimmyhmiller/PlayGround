@@ -49,6 +49,13 @@
 (defn wcg-stack-top [] (-> i64) 16777216)            ; shadow stack top (grows down from here)
 (defn wcg-data-base [] (-> i64) 1024)                ; string/static data lives at [1024 .. ) (low null region reserved)
 
+; process-global flag: the driver sets this when `--wasm-side-module` is passed, and
+; build-wasm-program reads it (it runs on a worker thread via the shared DumpCtx).
+(defstruct WSideFlag [(v i64)])
+(defn wasm-side-cell [] (-> (ptr WSideFlag)) (alloc-static WSideFlag))
+(defn set-wasm-side-module! [(on bool)] (-> i64) (store! (field (wasm-side-cell) v) (if on 1 0)) 0)
+(defn wasm-side-module? [] (-> bool) (icmp-ne (load (field (wasm-side-cell) v)) 0))
+
 ; ============================ state ==========================================
 ; a lowered value: kind 0 = i64 immediate (v = value); 1 = slot (v = byte offset
 ; from the frame base). Scalars are 8-byte i64-canonical; aggregates occupy a slot
@@ -88,6 +95,13 @@
    (depth i64)                      ; current control-nesting depth (open block/loop/if)
    (terminated bool)
    (retty Type)
+   ; --- side-module (PIC) emission ---
+   ; side-module: true ⇒ import memory + __memory_base + __stack_pointer (shared with
+   ; the running compiler) and export the metaprogram entries; false ⇒ standalone
+   ; (define+export memory, a defined $sp global, export main).
+   (side-module bool)
+   (sp-global i64)          ; wasm global index of the shadow-stack pointer $sp
+   (membase-global i64)     ; wasm global index of __memory_base (side-module only; -1 otherwise)
    ; aggret: current function returns an aggregate (sret pointer in wasm local 0)
    (aggret bool)])
 
@@ -426,9 +440,11 @@
       (if (icmp-eq bytes 4) (do (wb! (mut b) 62) (wb! (mut b) 2) (wb! (mut b) 0) 0)
         (do (wb! (mut b) 55) (wb! (mut b) 3) (wb! (mut b) 0) 0)))))
 
-; push the ADDRESS of frame slot `off` onto the operand stack: global.get $sp (+off)
-(defn we-push-addr! [(b (mut (ArrayList u8))) (off i64)] (-> i64)
-  (we-global-get! (mut b) 0)
+; push the ADDRESS of frame slot `off` onto the operand stack: global.get $sp (+off).
+; `spidx` is the wasm global index of $sp (0 standalone; 1 side-module, after the
+; imported __memory_base / __stack_pointer globals).
+(defn we-push-addr! [(b (mut (ArrayList u8))) (spidx i64) (off i64)] (-> i64)
+  (we-global-get! (mut b) spidx)
   (if (icmp-gt off 0) (do (we-i64-const! (mut b) off) (wb! (mut b) 124) 0) 0)   ; i64.const off ; i64.add
   0)
 
@@ -441,7 +457,14 @@
 (defn wg-load-mem! [(g (ptr Wcg)) (bytes i64) (signed bool)] (-> i64) (we-load-mem! (mut (field g code)) bytes signed))
 (defn wg-store-mem! [(g (ptr Wcg)) (bytes i64)] (-> i64) (we-store-mem! (mut (field g code)) bytes))
 (defn wg-memcopy! [(g (ptr Wcg))] (-> i64) (we-memcopy! (mut (field g code))))
-(defn wg-push-addr! [(g (ptr Wcg)) (off i64)] (-> i64) (we-push-addr! (mut (field g code)) off))
+(defn wg-push-addr! [(g (ptr Wcg)) (off i64)] (-> i64) (we-push-addr! (mut (field g code)) (load (field g sp-global)) off))
+; push a static-data ADDRESS: standalone ⇒ absolute i64.const; side-module ⇒
+; (global.get __memory_base) + off (PIC — the host places the data at __memory_base).
+(defn wg-data-addr! [(g (ptr Wcg)) (off i64)] (-> i64)
+  (if (load (field g side-module))
+      (do (we-global-get! (mut (field g code)) (load (field g membase-global)))
+          (if (icmp-gt off 0) (do (wg-i64-const! g off) (wg-op! g 124) 0) 0) 0)
+    (wg-i64-const! g (iadd (wcg-data-base) off))))
 (defn wg-call! [(g (ptr Wcg)) (idx i64)] (-> i64) (we-call! (mut (field g code)) idx))
 (defn wg-br! [(g (ptr Wcg)) (idx i64)] (-> i64) (we-br! (mut (field g code)) idx))
 
@@ -492,7 +515,9 @@
                 (store! found (load (field e off))) 0))
           (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load found) 0) (load found)
-      (let [off (iadd (wcg-data-base) (al-len [u8] (load (field g data))))
+      ; `off` is the 0-based offset within the data buffer; the runtime ADDRESS is
+      ; computed at the use site (wg-data-addr!) so it works in both PIC and absolute modes.
+      (let [off (al-len [u8] (load (field g data)))
             e (alloc-stack WStr)]
         (let [m (slice-len sv) (mut k) 0]
           (loop (if (icmp-ge (load k) m) (break)
@@ -600,9 +625,25 @@
           (store! i (iadd (load i) 1)))))
     (if (icmp-eq (slice-len (load r)) 0) (wcg-fail "no `main` function in the program") 0)
     (load r)))
-(defn wcg-reachable [(a (ptr Allocator)) (mp (ptr Program))] (-> (ArrayList i64))
+; the C symbol an (export-c …) entry is exported under (its :as name, or the
+; function's last dotted component when :as was omitted).
+(defn wexportc-sym [(ec (ptr ExportC))] (-> (slice u8))
+  (match (load (field ec symbol)) (Some [s] s) (None [] (wlast-component (load (field ec name))))))
+; reachability SEEDS: standalone ⇒ `main`; side-module ⇒ every (export-c …) entry.
+(defn wseeds [(a (ptr Allocator)) (mp (ptr Program)) (side bool)] (-> (ptr (ArrayList (slice u8))))
+  (let [(mut s) (al-new [(slice u8)] a)]
+    (if side
+        (let [es (load (field mp exports)) n (al-len [ExportC] (load es)) (mut i) 0]
+          (if (icmp-eq n 0) (wcg-fail "side-module mode requires at least one (export-c …) metaprogram entry") 0)
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (wname-add! (mut s) (load (field (wal-at [ExportC] es (load i)) name))) (store! i (iadd (load i) 1))))))
+      (wname-add! (mut s) (wprogram-main-name mp)))
+    (box-al [(slice u8)] a (load s))))
+(defn wcg-reachable [(a (ptr Allocator)) (mp (ptr Program)) (seeds (ptr (ArrayList (slice u8))))] (-> (ArrayList i64))
   (let [(mut names) (al-new [(slice u8)] a) (mut wi) 0]
-    (wname-add! (mut names) (wprogram-main-name mp))
+    (let [ns (al-len [(slice u8)] (load seeds)) (mut j) 0]
+      (loop (if (icmp-ge (load j) ns) (break)
+        (do (wname-add! (mut names) (al-get [(slice u8)] (load seeds) (load j))) (store! j (iadd (load j) 1))))))
     (loop (if (icmp-ge (load wi) (al-len [(slice u8)] (load names))) (break)
       (do (let [nm (al-get [(slice u8)] (load names) (load wi)) fidx (wfind-func-idx mp nm)]
             (if (icmp-ge fidx 0)
@@ -1292,8 +1333,8 @@
         (mk-av 1 pslot (TPtr (box-type a (av-ty av))))))
     (EStr [sv]
       (let [off (wintern-str! g sv true) a (load (field g a)) slot (wslot-new! g 16 8)]
-        ; slice value {ptr@0, len@8}
-        (wg-push-addr! g slot) (wg-i64-const! g off) (wg-i64-store! g)
+        ; slice value {ptr@0, len@8}; ptr = data address (PIC-aware)
+        (wg-push-addr! g slot) (wg-data-addr! g off) (wg-i64-store! g)
         (wg-push-addr! g (iadd slot 8)) (wg-i64-const! g (slice-len sv)) (wg-i64-store! g)
         (mk-av 1 slot (TSlice (box-type a (TInt 8 false))))))
     (EConstruct [sum variant args] (wemit-construct g sum variant args))
@@ -1382,30 +1423,67 @@
                     (do (we-local-get! (mut (field g code)) 0) (wg-addr-of-av! g bav) (wg-i64-const! g (wty-size g retp)) (wg-memcopy! g) 0)
                   (wg-push-av! g bav)))                     ; scalar return value on the stack
               ; epilogue: $sp += framesize (net stack-neutral; a scalar return stays on top)
-              (we-global-get! (mut (field g code)) 0) (we-i64-const! (mut (field g code)) framesize) (wg-op! g 124) (we-global-set! (mut (field g code)) 0)))
+              (we-global-get! (mut (field g code)) (load (field g sp-global))) (we-i64-const! (mut (field g code)) framesize) (wg-op! g 124) (we-global-set! (mut (field g code)) (load (field g sp-global)))))
         (wg-op! g 11)
         ; assemble: locals(none) + prologue + body
-        (let [(mut pro) (al-new [u8] a)]
+        (let [(mut pro) (al-new [u8] a) spg (load (field g sp-global))]
           (wb! (mut pro) 0)
-          (we-global-get! (mut pro) 0) (we-i64-const! (mut pro) framesize) (wb! (mut pro) 125) (we-global-set! (mut pro) 0)
+          (we-global-get! (mut pro) spg) (we-i64-const! (mut pro) framesize) (wb! (mut pro) 125) (we-global-set! (mut pro) spg)
           (wbytes! (mut pro) (al-slice [u8] (load (field g code))))
           (load pro)))))))
 
 ; ============================ module assembly ===============================
-; import section (id 2) payload: one `(import "env" "<field>" (func typeidx))` per import.
+; import section (id 2) payload. Function imports are `(import "env" "<field>"
+; (func typeidx))`. In SIDE-MODULE mode, three extra imports precede them so the
+; module shares the running compiler's linear memory + PIC bases:
+;   (import "env" "memory" (memory i64 …))
+;   (import "env" "__memory_base"   (global i64))          ; immutable data base
+;   (import "env" "__stack_pointer" (global (mut i64)))    ; the shadow-stack pointer $sp
+(defn wemit-name! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64) (wuleb! (mut b) (slice-len s)) (wbytes! (mut b) s) 0)
 (defn wbuild-import-section [(g (ptr Wcg)) (a (ptr Allocator))] (-> (slice u8))
-  (let [n (al-len [WImport] (load (field g imports))) (mut b) (al-new [u8] a)]
-    (wuleb! (mut b) n)
+  (let [side (load (field g side-module)) nfun (al-len [WImport] (load (field g imports)))
+        (mut b) (al-new [u8] a)]
+    (wuleb! (mut b) (iadd nfun (if side 3 0)))
+    (if side
+        (do (wemit-name! (mut b) "env") (wemit-name! (mut b) "memory") (wb! (mut b) 2) (wb! (mut b) 4) (wuleb! (mut b) 1)  ; memory i64, min 1
+            (wemit-name! (mut b) "env") (wemit-name! (mut b) "__memory_base") (wb! (mut b) 3) (wb! (mut b) 126) (wb! (mut b) 0)   ; global i64 immutable
+            (wemit-name! (mut b) "env") (wemit-name! (mut b) "__stack_pointer") (wb! (mut b) 3) (wb! (mut b) 126) (wb! (mut b) 1)) 0)  ; global (mut i64)
     (let [(mut i) 0]
-      (loop (if (icmp-ge (load i) n) (break)
+      (loop (if (icmp-ge (load i) nfun) (break)
         (do (let [imp (wal-at [WImport] (field g imports) (load i))]
-              (wuleb! (mut b) 3) (wbytes! (mut b) "env")
-              (wuleb! (mut b) (slice-len (load (field imp field)))) (wbytes! (mut b) (load (field imp field)))
+              (wemit-name! (mut b) "env") (wemit-name! (mut b) (load (field imp field)))
               (wb! (mut b) 0) (wuleb! (mut b) (load (field imp typeidx))))
             (store! i (iadd (load i) 1))))))
     (al-slice [u8] (load b))))
 
-(defn wcg-build-module [(a (ptr Allocator)) (mp (ptr Program))] (-> (slice u8))
+; export section (id 7) payload. Standalone ⇒ `main` (func) + `memory`. Side-module
+; ⇒ each (export-c …) entry by its C symbol (deduped; no memory export).
+(defn wbuild-export-section [(g (ptr Wcg)) (mp (ptr Program)) (a (ptr Allocator)) (mainidx i64)] (-> (slice u8))
+  (if (not (load (field g side-module)))
+      (let [(mut b) (al-new [u8] a)]
+        (wuleb! (mut b) 2)
+        (wemit-name! (mut b) "main") (wb! (mut b) 0) (wuleb! (mut b) mainidx)
+        (wemit-name! (mut b) "memory") (wb! (mut b) 2) (wuleb! (mut b) 0)
+        (al-slice [u8] (load b)))
+    (let [es (load (field mp exports)) n (al-len [ExportC] (load es))
+          (mut seen) (al-new [(slice u8)] a) (mut eb) (al-new [u8] a) (mut cnt) 0 (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [ec (wal-at [ExportC] es (load i))
+                  sym (wexportc-sym ec)
+                  si (wsig-idx g (load (field ec name)))]
+              (if (and (icmp-ge si 0) (not (wname-present? (mut seen) sym)))
+                  (do (wname-add! (mut seen) sym)
+                      (wemit-name! (mut eb) sym) (wb! (mut eb) 0)
+                      (wuleb! (mut eb) (load (field (wal-at [WSig] (field g sigs) si) funcidx)))
+                      (store! cnt (iadd (load cnt) 1)) 0)
+                0))
+            (store! i (iadd (load i) 1)))))
+      (if (icmp-eq (load cnt) 0) (wcg-fail "side-module mode: no (export-c …) entry resolved to a defined function") 0)
+      (let [(mut out) (al-new [u8] a)]
+        (wuleb! (mut out) (load cnt)) (wbytes! (mut out) (al-slice [u8] (load eb)))
+        (al-slice [u8] (load out))))))
+
+(defn wcg-build-module [(a (ptr Allocator)) (mp (ptr Program)) (side-module bool)] (-> (slice u8))
   (let [g (alloc-stack Wcg)]
     (store! (field g a) a)
     (store! (field g structs) (al-new [WStruct] a))
@@ -1424,11 +1502,16 @@
     (store! (field g terminated) false)
     (store! (field g retty) (TInt 64 true))
     (store! (field g aggret) false)
+    ; PIC/side-module layout: imported globals __memory_base(0), __stack_pointer(1)
+    ; precede any defined global, so $sp is global 1 and there is no defined global.
+    (store! (field g side-module) side-module)
+    (store! (field g sp-global) (if side-module 1 0))
+    (store! (field g membase-global) (if side-module 0 -1))
     (wregister-types! g mp)
-    (let [keepv (wcg-reachable a mp) keep (box-al [i64] a keepv)]
+    (let [keepv (wcg-reachable a mp (wseeds a mp side-module)) keep (box-al [i64] a keepv)]
     (wscan-imports! g mp keep)                          ; discover env.* imports before assigning funcidxs
     (wcg-register-sigs! g mp keep)
-    (let [mainidx (wcg-main-idx g)
+    (let [mainidx (if side-module 0 (wcg-main-idx g))
           nimp (al-len [WImport] (load (field g imports)))
           fs (load (field mp funcs)) nfn (al-len [i64] (load keep))
           ntotal (iadd (al-len [WImport] (load (field g imports))) (al-len [i64] (load keep)))
@@ -1452,18 +1535,13 @@
           (let [(mut tabbody) (al-new [u8] a)]
             (if (load (field g needs-table))
                 (do (wuleb! (mut tabbody) 1) (wb! (mut tabbody) 112) (wb! (mut tabbody) 0) (wuleb! (mut tabbody) ntotal)) 0)
-            ; ---- memory section (id 5) ----
+            ; ---- memory section (id 5): standalone only (side-module imports memory) ----
             (let [(mut mbody) (al-new [u8] a)]
               (wuleb! (mut mbody) 1) (wb! (mut mbody) 4) (wuleb! (mut mbody) (wcg-mem-pages))
-              ; ---- global section (id 6): $sp ----
+              ; ---- global section (id 6): $sp — standalone only (side-module imports __stack_pointer) ----
               (let [(mut gbody) (al-new [u8] a)]
                 (wuleb! (mut gbody) 1) (wb! (mut gbody) 126) (wb! (mut gbody) 1)
                 (wb! (mut gbody) 66) (wsleb! (mut gbody) (wcg-stack-top)) (wb! (mut gbody) 11)
-                ; ---- export section (id 7): main + memory ----
-                (let [(mut ebody) (al-new [u8] a)]
-                  (wuleb! (mut ebody) 2)
-                  (wuleb! (mut ebody) 4) (wbytes! (mut ebody) "main") (wb! (mut ebody) 0) (wuleb! (mut ebody) mainidx)
-                  (wuleb! (mut ebody) 6) (wbytes! (mut ebody) "memory") (wb! (mut ebody) 2) (wuleb! (mut ebody) 0)
                   ; ---- element section (id 9): active table[0] = 0..ntotal-1 (fnptr = funcidx) ----
                   (let [(mut elbody) (al-new [u8] a)]
                     (if (load (field g needs-table))
@@ -1479,24 +1557,26 @@
                           (do (let [ent (al-get [(ArrayList u8)] entries (load k))]
                                 (wuleb! (mut cbody) (al-len [u8] ent)) (wbytes! (mut cbody) (al-slice [u8] ent)))
                               (store! k (iadd (load k) 1))))))
-                      ; ---- data section (id 11) ----
+                      ; ---- data section (id 11): active; offset i64.const (standalone) or global.get __memory_base (side) ----
                       (let [(mut dbody) (al-new [u8] a) datalen (al-len [u8] (load (field g data)))]
                         (if (icmp-gt datalen 0)
                             (do (wuleb! (mut dbody) 1) (wb! (mut dbody) 0)                ; 1 segment, active memory 0
-                                (wb! (mut dbody) 66) (wsleb! (mut dbody) (wcg-data-base)) (wb! (mut dbody) 11)   ; i64.const base offset
+                                (if side-module
+                                    (do (wb! (mut dbody) 35) (wuleb! (mut dbody) (load (field g membase-global))) (wb! (mut dbody) 11) 0)  ; global.get __memory_base
+                                  (do (wb! (mut dbody) 66) (wsleb! (mut dbody) (wcg-data-base)) (wb! (mut dbody) 11) 0))                    ; i64.const base
                                 (wuleb! (mut dbody) datalen) (wbytes! (mut dbody) (al-slice [u8] (load (field g data))))) 0)
                         ; ---- assemble ----
                         (let [(mut out) (al-new [u8] a)]
                           (wb! (mut out) 0) (wb! (mut out) 97) (wb! (mut out) 115) (wb! (mut out) 109)
                           (wb! (mut out) 1) (wb! (mut out) 0) (wb! (mut out) 0) (wb! (mut out) 0)
                           (wasm-section! (mut out) 1 (al-slice [u8] (load tbody)))
-                          (if (icmp-gt nimp 0) (wasm-section! (mut out) 2 (wbuild-import-section g a)) 0)
+                          (if (or side-module (icmp-gt nimp 0)) (wasm-section! (mut out) 2 (wbuild-import-section g a)) 0)
                           (wasm-section! (mut out) 3 (al-slice [u8] (load fbody)))
                           (if (load (field g needs-table)) (wasm-section! (mut out) 4 (al-slice [u8] (load tabbody))) 0)
-                          (wasm-section! (mut out) 5 (al-slice [u8] (load mbody)))
-                          (wasm-section! (mut out) 6 (al-slice [u8] (load gbody)))
-                          (wasm-section! (mut out) 7 (al-slice [u8] (load ebody)))
+                          (if side-module 0 (wasm-section! (mut out) 5 (al-slice [u8] (load mbody))))
+                          (if side-module 0 (wasm-section! (mut out) 6 (al-slice [u8] (load gbody))))
+                          (wasm-section! (mut out) 7 (wbuild-export-section g mp a mainidx))
                           (if (load (field g needs-table)) (wasm-section! (mut out) 9 (al-slice [u8] (load elbody))) 0)
                           (wasm-section! (mut out) 10 (al-slice [u8] (load cbody)))
                           (if (icmp-gt datalen 0) (wasm-section! (mut out) 11 (al-slice [u8] (load dbody))) 0)
-                          (al-slice [u8] (load out))))))))))))))))
+                          (al-slice [u8] (load out)))))))))))))))
