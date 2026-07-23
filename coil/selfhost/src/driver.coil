@@ -530,6 +530,11 @@
 ; Run the (emit-ir or build) pipeline on a 512 MiB pthread, given a fully-populated
 ; DumpCtx. Shared by the `emit-ir` and `build` subcommands.
 (defn run-on-big-stack [(ctx (ptr DumpCtx))] (-> i64)
+  ; WASM-hosted build: no pthread. The sandbox is single-threaded and the shadow
+  ; stack is already the module's whole reserved stack, so run the pipeline inline
+  ; (dump-thread-entry writes ctx.ok exactly as the spawned thread would).
+  (if (meta-wasm-active?)
+      (do (dump-thread-entry (cast (ptr i8) ctx)) (load (field ctx ok)))
   (let [attr (alloc-stack (array i8 64))
         tid  (alloc-stack (ptr i8))]
     (pthread_attr_init (cast (ptr i8) attr))
@@ -553,7 +558,7 @@
     (main-svc-loop)
     (pthread_join (load tid) (cast (ptr i8) 0))
     ; the thread wrote its pipeline result (1 ok / 0 failed) into ctx.ok.
-    (load (field ctx ok))))
+    (load (field ctx ok)))))
 
 ; ---- debug dumps on the big stack -------------------------------------------
 ; `coil expand` / the `dump-*` debug commands run the SAME recursive front-end

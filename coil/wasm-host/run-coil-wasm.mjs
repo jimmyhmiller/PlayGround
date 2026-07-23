@@ -85,6 +85,78 @@ function doWrite(fd, ptr, len) {
 const WALL1 = new Set();
 function trap(name) { return (...a) => { throw new Error(`WALL1: env.${name} — native execution (JIT/dlopen/subprocess) is not available in the wasm sandbox`); }; }
 
+// ---- meta_run_wasm: run a metaprogram side-module IN the sandbox ------------
+// The compiler (metaengine.coil, wasm meta path) compiled the metaprogram to a wasm
+// SIDE-MODULE (codegen_wasm --wasm-side-module) whose bytes live in the compiler's
+// linear memory. It hands us those bytes, the coil_mp_<k> entry symbol, and up to 8
+// boxed Sexp arg pointers. We instantiate the side-module SHARING the compiler's
+// memory: its static data is placed at a fresh __memory_base region we carve from the
+// compiler heap, its shadow stack in another, and every `env.mh_*` import is bridged
+// to the COMPILER instance's exported mh_* — so the metaprogram's callbacks build
+// Sexps in the same memory the compiler reads. No pthread, no dlopen: synchronous.
+//
+// Parse the side-module's single active data segment length so __memory_base gets a
+// region exactly large enough for the module's static data (blob written at base+0).
+function sideDataSize(bytes) {
+  let p = 8, max = 0;                              // skip magic+version
+  const uleb = () => { let x = 0n, s = 0n, b; do { b = bytes[p++]; x |= BigInt(b & 0x7f) << s; s += 7n; } while (b & 0x80); return Number(x); };
+  while (p < bytes.length) {
+    const id = bytes[p++]; const size = uleb(); const end = p + size;
+    if (id === 11) {                               // data section
+      const count = uleb();
+      for (let i = 0; i < count; i++) {
+        const flags = uleb();
+        if ((flags & 1) === 0) { if (flags & 2) uleb(); while (bytes[p++] !== 0x0b); } // active: skip memidx?, offset expr to `end`
+        const n = uleb(); p += n;                  // segment payload
+        if (n > max) max = n;
+      }
+    }
+    p = end;
+  }
+  return max;
+}
+
+let compilerExports = null;                        // set after instantiate
+function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
+  const modBytes = Uint8Array.prototype.slice.call(u8(), Number(bytesPtr), Number(bytesPtr) + Number(len));
+  const sym = cstr(symPtr);
+  const mod = new WebAssembly.Module(modBytes);
+
+  // carve regions from the compiler heap for the side-module's data + shadow stack
+  const dataSize = Math.max(sideDataSize(modBytes), 64);
+  const memBase = malloc(BigInt(dataSize));
+  const STACK = 1n << 23n;                          // 8 MiB shadow stack
+  const stackLo = malloc(STACK);
+  const stackTop = stackLo + STACK;
+
+  // build the side-module's env from ITS declared imports
+  const sideEnv = {
+    memory: mem(),
+    __memory_base: new WebAssembly.Global({ value: 'i64', mutable: false }, memBase),
+    __stack_pointer: new WebAssembly.Global({ value: 'i64', mutable: true }, stackTop),
+  };
+  for (const imp of WebAssembly.Module.imports(mod)) {
+    if (imp.module !== 'env' || imp.name in sideEnv) continue;
+    if (imp.name.startsWith('mh_')) {
+      const f = compilerExports[imp.name];
+      if (typeof f !== 'function') throw new Error(`meta_run_wasm: compiler does not export ${imp.name}`);
+      sideEnv[imp.name] = f;                        // bridge callback → compiler instance
+    } else if (imp.name in env) {
+      sideEnv[imp.name] = env[imp.name];             // reuse host libc (malloc/free/mem*)
+    } else {
+      sideEnv[imp.name] = trap(`side:${imp.name}`);  // loud on anything unexpected
+    }
+  }
+
+  const side = new WebAssembly.Instance(mod, { env: sideEnv });
+  const entry = side.exports[sym];
+  if (typeof entry !== 'function') throw new Error(`meta_run_wasm: side-module has no export ${sym}`);
+  const callArgs = args.slice(0, Number(argc)).map((x) => BigInt(x));
+  const ret = entry(...callArgs);                    // synchronous; returns Sexp ptr (i64)
+  if (process.env.COIL_WASM_META_TRACE) console.error(`[meta_run_wasm] ran ${sym}(argc=${argc}) → ${ret}`);
+  return BigInt(ret);
+}
+
 // ---- minimal snprintf(buf,size,fmt,arg) — one conversion -------------------
 function snprintf(bufPtr, size, fmtPtr, arg) {
   const fmt = cstr(fmtPtr);
@@ -118,7 +190,19 @@ const env = {
   getenv:(n)=>0n, getpid:()=>Number(process.pid), realpath_stub:()=>0n,
   // string
   strlen:(p)=>{ const m=u8(); let e=Number(p); while(m[e]!==0)e++; return BigInt(e-Number(p)); },
-  snprintf, strtod:(nptr,endptr)=>{ const s=cstr(nptr); const v=parseFloat(s); if(endptr){/*approx*/ } return isNaN(v)?0:v; },
+  snprintf,
+  // strtod MUST set *endptr = first-unparsed byte: the reader computes the consumed
+  // length as (*endptr - nptr) and rejects the token as a symbol if it isn't the full
+  // number. The old stub left endptr untouched, so every float literal (e.g. 0.0 in
+  // fmt.coil) resolved as an unbound variable.
+  strtod:(nptr,endptr)=>{
+    const s=cstr(nptr);
+    const m=s.match(/^[ \t\n\r]*[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)/i);
+    let v=0, consumed=0;
+    if(m){ const p=parseFloat(m[0]); if(!isNaN(p)) v=p; consumed=Buffer.byteLength(m[0],'utf8'); }
+    if(endptr && Number(endptr)!==0) dv().setBigUint64(Number(endptr), BigInt(Number(nptr)+consumed), true);
+    return v;
+  },
   // process
   abort:()=>{ throw new Error('env.abort() called'); }, exit:(c)=>{ throw new ExitSignal(Number(c)); },
   // threads — init/lock are noops (single-threaded); create spawns → WALL1
@@ -126,7 +210,9 @@ const env = {
   pthread_cond_init:()=>0, pthread_cond_signal:()=>0, pthread_cond_wait:()=>0,
   pthread_attr_init:()=>0, pthread_attr_setstacksize:()=>0, pthread_join:()=>0, pthread_exit:()=>0n,
   pthread_create: trap('pthread_create'),
-  // Wall 1: comptime JIT / dylib / subprocess
+  // Wall 1: comptime JIT / dylib / subprocess — the wasm meta path replaces these
+  // with meta_run_wasm (run a metaprogram as a shared-memory side-module in-sandbox).
+  meta_run_wasm,
   mmap: trap('mmap'), munmap: trap('munmap'), mprotect: trap('mprotect'),
   dlopen: trap('dlopen'), dlsym: trap('dlsym'), system: trap('system'),
 };
@@ -135,6 +221,7 @@ class ExitSignal extends Error { constructor(code){ super('exit'); this.code = c
 
 const { instance: inst } = await WebAssembly.instantiate(bytes, { env });
 instance = inst;
+compilerExports = instance.exports;                          // meta_run_wasm bridges mh_* to these
 heap = BigInt(instance.exports.__heap_base.value);          // start allocating after static+stack
 
 // ---- set up argv = ["coil", ...coilArgs] -----------------------------------
