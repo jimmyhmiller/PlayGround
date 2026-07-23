@@ -1,0 +1,856 @@
+; selfhost/src/codegen_wasm.coil — native WebAssembly (memory64) backend, zero LLVM.
+;
+; Consumes the SAME monomorphized Program as codegen_a64.coil / codegen.coil and
+; lowers it directly to a FINAL, instantiable `wasm64-unknown-unknown` (memory64)
+; module — it does not go through the LLVM-object + wasm.coil finalizer path; it
+; builds the module bytes itself (reusing wasm.coil's LEB128 + section framing).
+;
+; Codegen model (debug backend — correctness over code quality, like codegen_a64):
+;  - every scalar value lives by-value in an 8-byte SHADOW-STACK slot in linear
+;    memory; all scalars (i8..i64, bool, pointers) are represented as i64.
+;  - a single mutable i64 global (index 0) is the shadow-stack pointer `$sp`. Each
+;    function decrements it by its frame size in the prologue and restores it in the
+;    epilogue, so recursion gets fresh slots. `global.get 0` is the frame base.
+;  - values are computed on the wasm operand stack, then stored to a slot. Every
+;    `wemit-expr` is OPERAND-STACK-NEUTRAL: it leaves nothing on the stack; its
+;    result is an AVal (a slot, or an i64 immediate). Calls/binops materialize their
+;    operands onto the stack only at the point of use, exactly like arm64 loads
+;    slot values into registers.
+;  - control flow uses wasm's STRUCTURED blocks. A `loop` is `block(brk) loop(cont)
+;    … end end`; `break`→`br`(to the block), `continue`→`br`(to the loop). Relative
+;    `br` depths are computed from a running control-nesting `depth` counter.
+;
+; Anything outside the supported subset calls `wcg-unimpl` — a CLEAR hard error
+; (never a silent no-op or wrong code). Supported today: i64/i32 integer arithmetic
+; & comparisons & bitwise, bool, functions/params/returns, direct calls, recursion,
+; let/(mut …)/store!/load, if/loop/break/continue/do, and `main` returning i64.
+(module cgwasm)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+(import "ast.coil" :use *)
+(import "parser.coil" :use *)
+(import "wasm.coil" :use *)
+
+; ============================ layout constants ===============================
+(defn wcg-mem-pages [] (-> i64) 256)                 ; 256 * 64KiB = 16 MiB linear memory
+(defn wcg-stack-top [] (-> i64) 16777216)            ; shadow stack top (grows down from here)
+
+; ============================ state ==========================================
+; a lowered value: kind 0 = i64 immediate (v = value); 1 = slot (v = byte offset
+; from the frame base). Floats are unsupported (they'd be kind 2), so kind 2 fails.
+(defstruct WAVal [(kind i64) (v i64) (ty Type)])
+(defstruct WSig  [(name (slice u8)) (params (ptr (ArrayList Type))) (ret Type) (funcidx i64)])
+(defstruct WLoop [(label (Option (slice u8))) (breaklevel i64) (contlevel i64)
+                  (resslot i64) (resty Type) (has_res bool)])
+(defsum WScope
+  (WNil  [])
+  (WBind [(name (slice u8)) (av WAVal) (rest (ptr WScope))]))
+
+(defstruct Wcg
+  [(a (ptr Allocator))
+   (sigs (ArrayList WSig))
+   (code (ArrayList u8))            ; current function body buffer (operand-stack code)
+   (frame i64)                      ; next free slot offset (bytes)
+   (env (ptr WScope))
+   (loops (ArrayList WLoop))
+   (depth i64)                      ; current control-nesting depth (open block/loop/if)
+   (terminated bool)
+   (retty Type)])
+
+; hard error helpers — no silent fallbacks anywhere in this backend.
+(defn wcg-fail [(msg (slice u8))] (-> i64)
+  (print-str (stderr) "codegen_wasm: ") (print-str (stderr) msg) (write-byte (stderr) (cast u8 10))
+  (abort) 0)
+(defn wcg-fail2 [(msg (slice u8)) (what (slice u8))] (-> i64)
+  (print-str (stderr) "codegen_wasm: ") (print-str (stderr) msg) (print-str (stderr) what)
+  (write-byte (stderr) (cast u8 10)) (abort) 0)
+(defn wcg-unimpl [(what (slice u8))] (-> i64)
+  (print-str (stderr) "codegen_wasm: unimplemented: ") (print-str (stderr) what)
+  (write-byte (stderr) (cast u8 10)) (abort) 0)
+
+(defn mk-av [(kind i64) (v i64) (ty Type)] (-> WAVal)
+  (let [p (alloc-stack WAVal)]
+    (store! (field p kind) kind) (store! (field p v) v) (store! (field p ty) ty)
+    (load p)))
+(defn av-kind [(x WAVal)] (-> i64) (let [p (alloc-stack WAVal)] (store! p x) (load (field p kind))))
+(defn av-v    [(x WAVal)] (-> i64) (let [p (alloc-stack WAVal)] (store! p x) (load (field p v))))
+(defn av-ty   [(x WAVal)] (-> Type) (let [p (alloc-stack WAVal)] (store! p x) (load (field p ty))))
+
+; pointer to element i of an ArrayList reached by pointer (live, mutable). Local to
+; this module (a64.coil's `al-at` is arm64-only; a fresh name avoids a :use * clash).
+(defn wal-at [T] [(p (ptr (ArrayList T))) (i i64)] (-> (ptr T))
+  (index (load (field p data)) i))
+
+; ============================ scopes =========================================
+(defn wscope-nil [(a (ptr Allocator))] (-> (ptr WScope))
+  (let [p (unwrap-ptr [WScope] (create [WScope] a))] (store! p (WNil)) p))
+(defn wscope-put [(a (ptr Allocator)) (s (ptr WScope)) (name (slice u8)) (av WAVal)] (-> (ptr WScope))
+  (let [p (unwrap-ptr [WScope] (create [WScope] a))] (store! p (WBind name av s)) p))
+(defn wscope-get [(s (ptr WScope)) (name (slice u8))] (-> (Option WAVal))
+  (match (load s)
+    (WNil  [] (None [WAVal]))
+    (WBind [n av rest] (if (str-eq n name) (Some [WAVal] av) (wscope-get rest name)))))
+
+; ============================ types ==========================================
+; This backend represents every scalar (integer of any width, bool, pointer) as a
+; single 8-byte i64 slot. Non-scalar types (floats, structs, sums, slices, arrays,
+; …) are not yet supported and raise a clear error at the use site.
+(defn wty-scalar? [(t (ptr Type))] (-> bool)
+  (match-else (load t)
+    (TInt  [_b _s] true)
+    (TBool [] true)
+    (TPtr  [_] true)
+    (TRef  [_ _] true)
+    (TNever [] true)
+    (_ false)))
+(defn wty-float? [(t (ptr Type))] (-> bool)
+  (match-else (load t) (TFloat [_b] true) (_ false)))
+; the type a pointer/ref points at (for ELoad's result type).
+(defn wty-pointee [(t (ptr Type))] (-> Type)
+  (match-else (load t)
+    (TPtr [inner] (load inner))
+    (TRef [_m inner] (load inner))
+    (_ (do (wcg-fail "load through a non-pointer type") (TInt 64 true)))))
+
+; last dotted component of a (possibly qualified) name: `foo.main` -> `main`.
+(defn wlast-component [(nm (slice u8))] (-> (slice u8))
+  (let [n (slice-len nm) (mut cut) 0 (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-eq (cast i64 (slice-get nm (load i))) 46) (store! cut (iadd (load i) 1)) 0)
+          (store! i (iadd (load i) 1)))))
+    (subslice nm (load cut) n)))
+
+; ============================ low-level byte emitters =========================
+; All take an explicit (mut (ArrayList u8)) buffer so they serve both the per-
+; function body (g.code) and the prologue buffer. Opcodes are raw wasm bytes.
+(defn we-global-get! [(b (mut (ArrayList u8))) (idx i64)] (-> i64)
+  (wb! (mut b) 35) (wuleb! (mut b) idx) 0)              ; 0x23 global.get
+(defn we-global-set! [(b (mut (ArrayList u8))) (idx i64)] (-> i64)
+  (wb! (mut b) 36) (wuleb! (mut b) idx) 0)              ; 0x24 global.set
+(defn we-local-get! [(b (mut (ArrayList u8))) (idx i64)] (-> i64)
+  (wb! (mut b) 32) (wuleb! (mut b) idx) 0)              ; 0x20 local.get
+(defn we-i64-const! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (wb! (mut b) 66) (wsleb! (mut b) v) 0)                ; 0x42 i64.const
+(defn we-i64-load!  [(b (mut (ArrayList u8)))] (-> i64)
+  (wb! (mut b) 41) (wb! (mut b) 3) (wb! (mut b) 0) 0)   ; 0x29 i64.load  align=3 off=0
+(defn we-i64-store! [(b (mut (ArrayList u8)))] (-> i64)
+  (wb! (mut b) 55) (wb! (mut b) 3) (wb! (mut b) 0) 0)   ; 0x37 i64.store align=3 off=0
+(defn we-call!      [(b (mut (ArrayList u8))) (idx i64)] (-> i64)
+  (wb! (mut b) 16) (wuleb! (mut b) idx) 0)              ; 0x10 call
+(defn we-br!        [(b (mut (ArrayList u8))) (idx i64)] (-> i64)
+  (wb! (mut b) 12) (wuleb! (mut b) idx) 0)              ; 0x0C br
+
+; push the ADDRESS of frame slot `off` onto the operand stack: global.get $sp (+off)
+(defn we-push-addr! [(b (mut (ArrayList u8))) (off i64)] (-> i64)
+  (we-global-get! (mut b) 0)
+  (if (icmp-gt off 0)
+      (do (we-i64-const! (mut b) off) (wb! (mut b) 124) 0)   ; i64.const off ; 0x7C i64.add
+    0)
+  0)
+
+; push an AVal onto the operand stack as an i64 value.
+(defn we-push-av! [(b (mut (ArrayList u8))) (av WAVal)] (-> i64)
+  (if (icmp-eq (av-kind av) 0)
+      (we-i64-const! (mut b) (av-v av))
+    (if (icmp-eq (av-kind av) 1)
+        (do (we-push-addr! (mut b) (av-v av)) (we-i64-load! (mut b)) 0)
+      (do (wcg-unimpl "float value on the operand stack") 0))))
+
+; store AVal into frame slot `off`: push_addr(off) ; push value ; i64.store.
+(defn we-store-av! [(b (mut (ArrayList u8))) (av WAVal) (off i64)] (-> i64)
+  (we-push-addr! (mut b) off) (we-push-av! (mut b) av) (we-i64-store! (mut b)) 0)
+
+; ---- thin g-based wrappers over the current function body buffer -------------
+(defn wg-op! [(g (ptr Wcg)) (byte i64)] (-> i64) (wb! (mut (field g code)) byte) 0)
+(defn wg-uleb! [(g (ptr Wcg)) (v i64)] (-> i64) (wuleb! (mut (field g code)) v) 0)
+(defn wg-i64-const! [(g (ptr Wcg)) (v i64)] (-> i64) (we-i64-const! (mut (field g code)) v))
+(defn wg-i64-load! [(g (ptr Wcg))] (-> i64) (we-i64-load! (mut (field g code))))
+(defn wg-i64-store! [(g (ptr Wcg))] (-> i64) (we-i64-store! (mut (field g code))))
+(defn wg-push-addr! [(g (ptr Wcg)) (off i64)] (-> i64) (we-push-addr! (mut (field g code)) off))
+(defn wg-push-av! [(g (ptr Wcg)) (av WAVal)] (-> i64) (we-push-av! (mut (field g code)) av))
+(defn wg-store-av! [(g (ptr Wcg)) (av WAVal) (off i64)] (-> i64) (we-store-av! (mut (field g code)) av off))
+(defn wg-call! [(g (ptr Wcg)) (idx i64)] (-> i64) (we-call! (mut (field g code)) idx))
+(defn wg-br! [(g (ptr Wcg)) (idx i64)] (-> i64) (we-br! (mut (field g code)) idx))
+
+; ---- slots ------------------------------------------------------------------
+(defn wslot-new! [(g (ptr Wcg)) (size i64) (align i64)] (-> i64)
+  (let [f (load (field g frame))
+        aligned (imul (idiv (iadd f (isub align 1)) align) align)]
+    (store! (field g frame) (iadd aligned size))
+    aligned))
+
+; ---- op-code tables ---------------------------------------------------------
+; integer binary op (all i64). EBin op codes: 0 add 1 sub 2 mul 3 div 4 rem
+; 5 udiv 6 urem 7 and 8 or 9 xor 10 shl 11 shr.
+(defn wbin-opcode [(op i64) (signed bool)] (-> i64)
+  (if (icmp-eq op 0) 124                                 ; i64.add  0x7C
+    (if (icmp-eq op 1) 125                               ; i64.sub  0x7D
+      (if (icmp-eq op 2) 126                             ; i64.mul  0x7E
+        (if (icmp-eq op 3) (if signed 127 128)           ; div_s 0x7F / div_u 0x80
+          (if (icmp-eq op 4) (if signed 129 130)         ; rem_s 0x81 / rem_u 0x82
+            (if (icmp-eq op 5) 128                        ; udiv -> div_u
+              (if (icmp-eq op 6) 130                      ; urem -> rem_u
+                (if (icmp-eq op 7) 131                    ; and 0x83
+                  (if (icmp-eq op 8) 132                  ; or  0x84
+                    (if (icmp-eq op 9) 133                ; xor 0x85
+                      (if (icmp-eq op 10) 134             ; shl 0x86
+                        (if (icmp-eq op 11) (if signed 135 136)   ; shr_s 0x87 / shr_u 0x88
+                          (wcg-fail "unknown integer binary op"))))))))))))))
+; integer comparison. ECmp op codes: 0 lt 1 le 2 gt 3 ge 4 eq 5 ne.
+(defn wcmp-opcode [(op i64) (signed bool)] (-> i64)
+  (if (icmp-eq op 0) (if signed 83 84)                   ; lt_s 0x53 / lt_u 0x54
+    (if (icmp-eq op 1) (if signed 87 88)                 ; le_s 0x57 / le_u 0x58
+      (if (icmp-eq op 2) (if signed 85 86)               ; gt_s 0x55 / gt_u 0x56
+        (if (icmp-eq op 3) (if signed 89 90)             ; ge_s 0x59 / ge_u 0x5A
+          (if (icmp-eq op 4) 81                          ; eq 0x51
+            (if (icmp-eq op 5) 82                        ; ne 0x52
+              (wcg-fail "unknown comparison op"))))))))
+
+; canonicalize the operand-stack top (an i64) to exact iN width semantics — no-op
+; for 8/16/32/64 (they already fit / are represented full-width). Mirrors
+; codegen_a64's emit-canon-int! (shift left then arithmetic/logical shift right).
+(defn wg-canon-int! [(g (ptr Wcg)) (bits i64) (signed bool)] (-> i64)
+  (if (or (or (icmp-eq bits 8) (icmp-eq bits 16)) (or (icmp-eq bits 32) (icmp-eq bits 64)))
+      0
+    (let [sh (isub 64 bits)]
+      (wg-i64-const! g sh) (wg-op! g 134)                ; i64.shl
+      (wg-i64-const! g sh) (wg-op! g (if signed 135 136))  ; i64.shr_s / i64.shr_u
+      0)))
+
+; ============================ sig registration ===============================
+(defn wsig-idx [(g (ptr Wcg)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [WSig] (load (field g sigs))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (load (field (wal-at [WSig] (field g sigs) (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; ---- reachability (call-graph from `main`) ---------------------------------
+; The monomorphized Program carries EVERY concrete function — including bundled
+; prelude impls (e.g. `coil.core.Add$f64$+`) the program never calls, whose
+; signatures use types this backend does not yet support (floats, structs, …). The
+; arm64/LLVM backends emit them all; here we emit ONLY the functions reachable from
+; `main`, so unreachable non-scalar prelude code is excluded rather than force an
+; `unimplemented` on code that never runs. A reachable function that DOES need an
+; unsupported construct still hard-errors at emit time — the correct behavior.
+(defn wname-present? [(lst (ptr (ArrayList (slice u8)))) (nm (slice u8))] (-> bool)
+  (let [n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
+    (loop (if (or (icmp-ge (load i) n) (load r)) (break)
+      (do (if (str-eq (al-get [(slice u8)] (load lst) (load i)) nm) (store! r true) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn wname-add! [(lst (mut (ArrayList (slice u8)))) (nm (slice u8))] (-> i64)
+  (if (wname-present? (mut lst) nm) 0 (do (al-push! (mut lst) nm) 0)))
+
+; push every function/fnptr NAME referenced by expr `e` (transitively over sub-exprs).
+(defn wcollect-expr! [(out (mut (ArrayList (slice u8)))) (e (ptr Expr))] (-> i64)
+  (match-else (load (field e kind))
+    (ECall     [func _t args] (do (wname-add! (mut out) func) (wcollect-body! (mut out) args) 0))
+    (EFnPtrOf  [name] (do (wname-add! (mut out) name) 0))
+    (ECallPtr  [fp args] (do (wcollect-expr! (mut out) fp) (wcollect-body! (mut out) args) 0))
+    (EBin      [_o l r] (do (wcollect-expr! (mut out) l) (wcollect-expr! (mut out) r) 0))
+    (ECmp      [_o l r] (do (wcollect-expr! (mut out) l) (wcollect-expr! (mut out) r) 0))
+    (ENot      [i] (wcollect-expr! (mut out) i))
+    (EIf       [c t el] (do (wcollect-expr! (mut out) c) (wcollect-expr! (mut out) t) (wcollect-expr! (mut out) el) 0))
+    (EDo       [b] (wcollect-body! (mut out) b))
+    (ELet      [binds body]
+      (do (let [n (al-len [Bind] (load binds)) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (wcollect-expr! (mut out) (field (wal-at [Bind] binds (load i)) value))
+                  (store! i (iadd (load i) 1))))))
+          (wcollect-body! (mut out) body) 0))
+    (ELoop     [_l b] (wcollect-body! (mut out) b))
+    (EBreak    [_l value] (match value (Some [ve] (wcollect-expr! (mut out) ve)) (None [] 0)))
+    (EBorrow   [_m place] (wcollect-expr! (mut out) place))
+    (ESpillRef [i] (wcollect-expr! (mut out) i))
+    (EField    [p _f] (wcollect-expr! (mut out) p))
+    (ELoad     [i] (wcollect-expr! (mut out) i))
+    (EStore    [p v] (do (wcollect-expr! (mut out) p) (wcollect-expr! (mut out) v) 0))
+    (EIndex    [p i] (do (wcollect-expr! (mut out) p) (wcollect-expr! (mut out) i) 0))
+    (ECast     [_t i] (wcollect-expr! (mut out) i))
+    (EBitGet   [p _f] (wcollect-expr! (mut out) p))
+    (EBitSet   [p _f v] (do (wcollect-expr! (mut out) p) (wcollect-expr! (mut out) v) 0))
+    (EFree     [i] (wcollect-expr! (mut out) i))
+    (EErase    [_t i] (wcollect-expr! (mut out) i))
+    (EComptime [i] (wcollect-expr! (mut out) i))
+    (EAscribe  [_t i] (wcollect-expr! (mut out) i))
+    (EMakeDyn  [_a _b _c inner] (wcollect-expr! (mut out) inner))
+    (EMatch    [s arms]
+      (do (wcollect-expr! (mut out) s)
+          (let [n (al-len [Arm] (load arms)) (mut i) 0]
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (wcollect-expr! (mut out) (field (wal-at [Arm] arms (load i)) body))
+                  (store! i (iadd (load i) 1)))))) 0))
+    (EConstruct [_s _v args] (wcollect-body! (mut out) args))
+    (ETraitCall [_a _b _c args] (wcollect-body! (mut out) args))
+    (EDynDispatch [_a _b _c _d _e _f recv args] (do (wcollect-expr! (mut out) recv) (wcollect-body! (mut out) args) 0))
+    (ELlvmIr   [_r args _b] (wcollect-body! (mut out) args))
+    (_ 0)))
+(defn wcollect-body! [(out (mut (ArrayList (slice u8)))) (body (ptr (ArrayList Expr)))] (-> i64)
+  (let [n (al-len [Expr] (load body)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wcollect-expr! (mut out) (wal-at [Expr] body (load i))) (store! i (iadd (load i) 1))))))
+  0)
+
+; program-func index of the function named `nm`, or -1 (an extern / unknown name).
+(defn wfind-func-idx [(mp (ptr Program)) (nm (slice u8))] (-> i64)
+  (let [fs (load (field mp funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load r) 0)) (break)
+      (do (if (str-eq (load (field (wal-at [Func] fs (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; full (qualified) name of `main` (last dotted component == "main"), or a hard error.
+(defn wprogram-main-name [(mp (ptr Program))] (-> (slice u8))
+  (let [fs (load (field mp funcs)) n (al-len [Func] (load fs)) (mut i) 0 (mut r) ""]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [nm (load (field (wal-at [Func] fs (load i)) name))]
+            (if (and (icmp-eq (slice-len r) 0) (str-eq (wlast-component nm) "main")) (store! r nm) 0))
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-eq (slice-len (load r)) 0) (wcg-fail "no `main` function in the program") 0)
+    (load r)))
+
+; the list of program-func indices reachable from `main`, in program order.
+(defn wcg-reachable [(a (ptr Allocator)) (mp (ptr Program))] (-> (ArrayList i64))
+  (let [(mut names) (al-new [(slice u8)] a) (mut wi) 0]
+    (wname-add! (mut names) (wprogram-main-name mp))
+    ; worklist: expand each reachable name's callees until fixpoint
+    (loop (if (icmp-ge (load wi) (al-len [(slice u8)] (load names))) (break)
+      (do (let [nm (al-get [(slice u8)] (load names) (load wi))
+                fidx (wfind-func-idx mp nm)]
+            (if (icmp-ge fidx 0)
+                (wcollect-body! (mut names) (load (field (wal-at [Func] (load (field mp funcs)) fidx) body)))
+              0))
+          (store! wi (iadd (load wi) 1)))))
+    ; project to program-order func indices that are reachable
+    (let [fs (load (field mp funcs)) n (al-len [Func] (load fs)) (mut keep) (al-new [i64] a) (mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (if (wname-present? (mut names) (load (field (wal-at [Func] fs (load i)) name)))
+                (al-push! (mut keep) (load i)) 0)
+            (store! i (iadd (load i) 1)))))
+      (load keep))))
+
+(defn wal-get-keep [(keep (ptr (ArrayList i64))) (i i64)] (-> i64)
+  (al-get [i64] (load keep) i))
+
+; Register the reachable functions as defined wasm functions; funcidx = position in
+; `keep` (no imported functions exist, so the function index space begins at 0).
+(defn wcg-register-sigs! [(g (ptr Wcg)) (mp (ptr Program)) (keep (ptr (ArrayList i64)))] (-> i64)
+  (let [fs (load (field mp funcs)) n (al-len [i64] (load keep)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [fd (wal-at [Func] fs (wal-get-keep keep (load i))) e (alloc-stack WSig)]
+            (store! (field e name) (load (field fd name)))
+            (store! (field e params) (cast (ptr (ArrayList Type)) 0))   ; unused; kept for shape
+            (store! (field e ret) (load (field fd ret)))
+            (store! (field e funcidx) (load i))
+            (al-push! (mut (field g sigs)) (load e)))
+          (store! i (iadd (load i) 1))))))
+  0)
+
+; funcidx of `main` among the registered (reachable) sigs, or a hard error.
+(defn wcg-main-idx [(g (ptr Wcg))] (-> i64)
+  (let [n (al-len [WSig] (load (field g sigs))) (mut i) 0 (mut r) -1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (str-eq (wlast-component (load (field (wal-at [WSig] (field g sigs) (load i)) name))) "main")
+              (if (icmp-lt (load r) 0) (store! r (load i)) 0) 0)
+          (store! i (iadd (load i) 1)))))
+    (if (icmp-lt (load r) 0) (wcg-fail "no `main` function in the program") 0)
+    (load r)))
+
+; ============================ expression lowering ============================
+(defn wemit-body [(g (ptr Wcg)) (body (ptr (ArrayList Expr)))] (-> WAVal)
+  (let [n (al-len [Expr] (load body)) (mut i) 0 (mut last) (mk-av 0 0 (TInt 64 true))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (load (field g terminated)) (break) 0)
+          (store! last (wemit-expr g (wal-at [Expr] body (load i))))
+          (store! i (iadd (load i) 1)))))
+    (load last)))
+
+(defn wemit-stmts [(g (ptr Wcg)) (body (ptr (ArrayList Expr)))] (-> i64)
+  (let [n (al-len [Expr] (load body)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (load (field g terminated)) (break) 0)
+          (wemit-expr g (wal-at [Expr] body (load i)))
+          (store! i (iadd (load i) 1))))))
+  0)
+
+(defn wemit-binds [(g (ptr Wcg)) (binds (ptr (ArrayList Bind)))] (-> i64)
+  (let [n (al-len [Bind] (load binds)) (mut i) 0 (mut a) (load (field g a))]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [b (wal-at [Bind] binds (load i))
+                av (wemit-expr g (field b value))
+                t (alloc-stack Type)]
+            (store! t (av-ty av))
+            (if (not (wty-scalar? t)) (wcg-unimpl "let-binding of a non-scalar value") 0)
+            (if (load (field b mutable))
+                ; mutable: a value slot, plus a pointer slot holding its address; the
+                ; NAME binds to the pointer (the checker reads it via (load name)).
+                (let [vslot (wslot-new! g 8 8)
+                      pslot (wslot-new! g 8 8)]
+                  (wg-store-av! g av vslot)
+                  ; store ADDRESS of vslot into pslot
+                  (wg-push-addr! g pslot) (wg-push-addr! g vslot) (wg-i64-store! g)
+                  (store! (field g env)
+                    (wscope-put (load a) (load (field g env)) (load (field b name))
+                      (mk-av 1 pslot (TPtr (box-type (load a) (av-ty av)))))))
+              (store! (field g env)
+                (wscope-put (load a) (load (field g env)) (load (field b name)) av))))
+          (store! i (iadd (load i) 1))))))
+  0)
+
+; find the target loop index (labeled search from innermost, else innermost).
+(defn wg-loop-index [(g (ptr Wcg)) (label (Option (slice u8)))] (-> i64)
+  (let [n (al-len [WLoop] (load (field g loops)))]
+    (match label
+      (None []
+        (do (if (icmp-eq n 0) (wcg-fail "break/continue outside a loop") 0)
+            (isub n 1)))
+      (Some [want]
+        (let [(mut i) (isub n 1) (mut r) -1]
+          (loop (if (icmp-lt (load i) 0) (break)
+            (do (match (load (field (wal-at [WLoop] (field g loops) (load i)) label))
+                  (None [] 0)
+                  (Some [have] (if (and (icmp-lt (load r) 0) (str-eq have want)) (do (store! r (load i)) 0) 0)))
+                (store! i (isub (load i) 1)))))
+          (if (icmp-lt (load r) 0) (wcg-fail2 "no such loop label: " want) 0)
+          (load r))))))
+
+(defn wemit-bin [(g (ptr Wcg)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr))] (-> WAVal)
+  (let [lav (wemit-expr g lhs)
+        rav (wemit-expr g rhs)
+        t (alloc-stack Type)]
+    (store! t (av-ty lav))
+    (if (wty-float? t) (wcg-unimpl "floating-point arithmetic") 0)
+    (if (not (wty-scalar? t)) (wcg-unimpl "arithmetic on a non-scalar type") 0)
+    (let [signed (match-else (load t) (TInt [_b sg] sg) (_ true))
+          slot (wslot-new! g 8 8)]
+      (wg-push-addr! g slot)
+      (wg-push-av! g lav) (wg-push-av! g rav)
+      (wg-op! g (wbin-opcode op signed))
+      (match-else (load t) (TInt [bits sg] (wg-canon-int! g bits sg)) (_ 0))
+      (wg-i64-store! g)
+      (mk-av 1 slot (av-ty lav)))))
+
+(defn wemit-cmp [(g (ptr Wcg)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr))] (-> WAVal)
+  (let [lav (wemit-expr g lhs)
+        rav (wemit-expr g rhs)
+        t (alloc-stack Type)]
+    (store! t (av-ty lav))
+    (if (wty-float? t) (wcg-unimpl "floating-point comparison") 0)
+    (let [signed (match-else (load t) (TInt [_b sg] sg) (TBool [] false) (TPtr [_] false) (_ true))
+          slot (wslot-new! g 8 8)]
+      (wg-push-addr! g slot)
+      (wg-push-av! g lav) (wg-push-av! g rav)
+      (wg-op! g (wcmp-opcode op signed))
+      (wg-op! g 173)                                     ; 0xAD i64.extend_i32_u  (i32 bool -> i64 0/1)
+      (wg-i64-store! g)
+      (mk-av 1 slot (TBool)))))
+
+(defn wemit-if [(g (ptr Wcg)) (cnd (ptr Expr)) (thn (ptr Expr)) (els (ptr Expr))] (-> WAVal)
+  (let [cav (wemit-expr g cnd)]
+    ; materialize the condition as an i32 bool: (cond != 0)
+    (wg-push-av! g cav) (wg-i64-const! g 0) (wg-op! g 82)   ; 0x52 i64.ne -> i32
+    (wg-op! g 4) (wg-op! g 64)                              ; if, blocktype void
+    (store! (field g depth) (iadd (load (field g depth)) 1))
+    (let [thnav (wemit-expr g thn)
+          thnterm (load (field g terminated))
+          (mut rslot) -1
+          (mut rty) (TInt 64 true)]
+      (if thnterm 0
+        (do (let [tt (alloc-stack Type)]
+              (store! tt (av-ty thnav))
+              (if (not (wty-scalar? tt)) (wcg-unimpl "if yielding a non-scalar value") 0)
+              (store! rslot (wslot-new! g 8 8))
+              (store! rty (av-ty thnav))
+              (wg-store-av! g thnav (load rslot)))
+            0))
+      (wg-op! g 5)                                          ; else
+      (store! (field g terminated) false)
+      (let [elsav (wemit-expr g els)
+            elsterm (load (field g terminated))]
+        (if elsterm 0
+          (do (let [et (alloc-stack Type)]
+                (store! et (av-ty elsav))
+                (if (icmp-lt (load rslot) 0)
+                    (do (if (not (wty-scalar? et)) (wcg-unimpl "if yielding a non-scalar value") 0)
+                        (store! rslot (wslot-new! g 8 8))
+                        (store! rty (av-ty elsav)) 0)
+                  0)
+                (wg-store-av! g elsav (load rslot)))
+              0))
+        (wg-op! g 11)                                       ; end
+        (store! (field g depth) (isub (load (field g depth)) 1))
+        (store! (field g terminated) (and thnterm elsterm))
+        (if (icmp-ge (load rslot) 0)
+            (mk-av 1 (load rslot) (load rty))
+          (mk-av 0 0 (TInt 64 true)))))))
+
+(defn wemit-loop [(g (ptr Wcg)) (label (Option (slice u8))) (body (ptr (ArrayList Expr)))] (-> WAVal)
+  ; block (break target) { loop (continue target) { body ; br loop } }
+  (wg-op! g 2) (wg-op! g 64)                               ; block, void
+  (store! (field g depth) (iadd (load (field g depth)) 1))
+  (let [breaklevel (load (field g depth))]
+    (wg-op! g 3) (wg-op! g 64)                             ; loop, void
+    (store! (field g depth) (iadd (load (field g depth)) 1))
+    (let [contlevel (load (field g depth))
+          gl (alloc-stack WLoop)]
+      (store! (field gl label) label)
+      (store! (field gl breaklevel) breaklevel)
+      (store! (field gl contlevel) contlevel)
+      (store! (field gl resslot) -1)
+      (store! (field gl resty) (TInt 64 true))
+      (store! (field gl has_res) false)
+      (al-push! (mut (field g loops)) (load gl))
+      (wemit-stmts g body)
+      (if (load (field g terminated)) 0
+        (do (wg-br! g (isub (load (field g depth)) contlevel)) 0))   ; br back to loop top
+      (wg-op! g 11)                                         ; end loop
+      (store! (field g depth) (isub (load (field g depth)) 1))
+      ; pop the loop frame and read its break results
+      (let [n (al-len [WLoop] (load (field g loops)))
+            fin (al-get [WLoop] (load (field g loops)) (isub n 1))
+            fp (alloc-stack WLoop)]
+        (store! fp fin)
+        (store! (field (field g loops) len) (isub n 1))
+        (wg-op! g 11)                                       ; end block
+        (store! (field g depth) (isub (load (field g depth)) 1))
+        (if (load (field fp has_res))
+            (do (store! (field g terminated) false)
+                (mk-av 1 (load (field fp resslot)) (load (field fp resty))))
+          (do (store! (field g terminated) true)
+              (mk-av 0 0 (TInt 64 true))))))))
+
+(defn wemit-break [(g (ptr Wcg)) (label (Option (slice u8))) (value (Option (ptr Expr)))] (-> WAVal)
+  (if (load (field g terminated))
+      (mk-av 0 0 (TInt 64 true))
+    (let [av (match value
+               (Some [ve] (wemit-expr g ve))
+               (None [] (mk-av 0 0 (TInt 64 true))))
+          li (wg-loop-index g label)
+          lp (wal-at [WLoop] (field g loops) li)]
+      (if (icmp-lt (load (field lp resslot)) 0)
+          (do (let [t (alloc-stack Type)]
+                (store! t (av-ty av))
+                (if (not (wty-scalar? t)) (wcg-unimpl "break yielding a non-scalar value") 0)
+                (store! (field lp resslot) (wslot-new! g 8 8))
+                (store! (field lp resty) (av-ty av))
+                (store! (field lp has_res) true))
+              0)
+        0)
+      (wg-store-av! g av (load (field lp resslot)))
+      (wg-br! g (isub (load (field g depth)) (load (field lp breaklevel))))
+      (store! (field g terminated) true)
+      (mk-av 0 0 (TInt 64 true)))))
+
+(defn wemit-call [(g (ptr Wcg)) (func (slice u8)) (args (ptr (ArrayList Expr)))] (-> WAVal)
+  (let [si (wsig-idx g func)]
+    (if (icmp-lt si 0) (wcg-fail2 "call to unknown/unsupported function (extern imports are not supported by the wasm backend): " func) 0)
+    (let [e (wal-at [WSig] (field g sigs) si)
+          fidx (load (field e funcidx))
+          (mut avs) (al-new [WAVal] (load (field g a)))
+          n (al-len [Expr] (load args)) (mut i) 0
+          retp (alloc-stack Type)]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (al-push! (mut avs) (wemit-expr g (wal-at [Expr] args (load i))))
+            (store! i (iadd (load i) 1)))))
+      (store! retp (load (field e ret)))
+      (if (match-else (load retp) (TVoid [] true) (_ false))
+          (do (let [(mut j) 0]
+                (loop (if (icmp-ge (load j) n) (break)
+                  (do (wg-push-av! g (al-get [WAVal] (load avs) (load j))) (store! j (iadd (load j) 1))))))
+              (wg-call! g fidx)
+              (mk-av 0 0 (TInt 64 true)))
+        (do (if (not (wty-scalar? retp)) (wcg-unimpl "call returning a non-scalar value") 0)
+            (let [slot (wslot-new! g 8 8)]
+              (wg-push-addr! g slot)                        ; address for the result store
+              (let [(mut j) 0]
+                (loop (if (icmp-ge (load j) n) (break)
+                  (do (wg-push-av! g (al-get [WAVal] (load avs) (load j))) (store! j (iadd (load j) 1))))))
+              (wg-call! g fidx)                             ; result now on stack (above address)
+              (wg-i64-store! g)
+              (mk-av 1 slot (load (field e ret)))))))))
+
+(defn wemit-cast [(g (ptr Wcg)) (t Type) (inner (ptr Expr))] (-> WAVal)
+  (let [av (wemit-expr g inner)
+        st (alloc-stack Type) dt (alloc-stack Type)]
+    (store! st (av-ty av)) (store! dt t)
+    (if (or (wty-float? st) (wty-float? dt)) (wcg-unimpl "cast involving a floating-point type") 0)
+    (if (not (and (wty-scalar? st) (wty-scalar? dt))) (wcg-unimpl "cast involving a non-scalar type") 0)
+    ; scalar<->scalar: same i64 representation; canonicalize when narrowing to iN<64.
+    (match-else t
+      (TInt [bits signed]
+        (if (or (or (icmp-eq bits 8) (icmp-eq bits 16)) (or (icmp-eq bits 32) (icmp-eq bits 64)))
+            (mk-av (av-kind av) (av-v av) t)
+          (let [slot (wslot-new! g 8 8)]
+            (wg-push-addr! g slot) (wg-push-av! g av) (wg-canon-int! g bits signed) (wg-i64-store! g)
+            (mk-av 1 slot t))))
+      (_ (mk-av (av-kind av) (av-v av) t)))))
+
+(defn wemit-expr [(g (ptr Wcg)) (e (ptr Expr))] (-> WAVal)
+  (match (load (field e kind))
+    (EInt [v] (mk-av 0 v (TInt 64 true)))
+    (EBool [b] (mk-av 0 (if b 1 0) (TBool)))
+    (EVar [name]
+      (match (wscope-get (load (field g env)) name)
+        (Some [av] av)
+        (None [] (do (wcg-fail2 "unbound variable: " name) (mk-av 0 0 (TInt 64 true))))))
+    (EBin [op lhs rhs] (wemit-bin g op lhs rhs))
+    (ECmp [op lhs rhs] (wemit-cmp g op lhs rhs))
+    (ENot [inner]
+      (let [av (wemit-expr g inner)
+            t (alloc-stack Type)
+            slot (wslot-new! g 8 8)]
+        (store! t (av-ty av))
+        (wg-push-addr! g slot)
+        (if (match-else (load t) (TBool [] true) (_ false))
+            (do (wg-push-av! g av) (wg-i64-const! g 1) (wg-op! g 133) 0)   ; xor 1 (bool not)
+          (do (wg-i64-const! g -1) (wg-push-av! g av) (wg-op! g 133) 0))   ; xor -1 (bitwise not)
+        (wg-i64-store! g)
+        (mk-av 1 slot (av-ty av))))
+    (EIf [cnd thn els] (wemit-if g cnd thn els))
+    (EDo [body] (wemit-body g body))
+    (ELet [binds body]
+      (let [saved (load (field g env))]
+        (wemit-binds g binds)
+        (let [r (wemit-body g body)]
+          (store! (field g env) saved)
+          r)))
+    (ELoop [label body] (wemit-loop g label body))
+    (EBreak [label value] (wemit-break g label value))
+    (EContinue [label]
+      (do (let [li (wg-loop-index g label)]
+            (wg-br! g (isub (load (field g depth)) (load (field (wal-at [WLoop] (field g loops) li) contlevel))))
+            (store! (field g terminated) true))
+          (mk-av 0 0 (TInt 64 true))))
+    (ECall [func _targs args] (wemit-call g func args))
+    (ELoad [inner]
+      (let [av (wemit-expr g inner)
+            a (load (field g a))
+            t (alloc-stack Type)]
+        (store! t (av-ty av))
+        (let [pt (alloc-stack Type)]
+          (store! pt (wty-pointee t))
+          (if (not (wty-scalar? pt)) (wcg-unimpl "load of a non-scalar value") 0)
+          (let [slot (wslot-new! g 8 8)]
+            (wg-push-addr! g slot)
+            (wg-push-av! g av)                              ; the address
+            (wg-i64-load! g)                               ; deref
+            (wg-i64-store! g)                              ; into slot
+            (mk-av 1 slot (load pt))))))
+    (EStore [p val]
+      (let [pav (wemit-expr g p)
+            vav (wemit-expr g val)
+            t (alloc-stack Type)]
+        (store! t (av-ty vav))
+        (if (not (wty-scalar? t)) (wcg-unimpl "store of a non-scalar value") 0)
+        (wg-push-av! g pav)                                 ; address
+        (wg-push-av! g vav)                                 ; value
+        (wg-i64-store! g)
+        (mk-av 0 0 (TInt 64 true))))
+    (ECast [t inner] (wemit-cast g t inner))
+    (EBorrow [_m place] (wemit-expr g place))
+    (ESpillRef [inner]
+      ; give the inner value a stable slot and yield a pointer to it.
+      (let [av (wemit-expr g inner)
+            a (load (field g a))
+            t (alloc-stack Type)]
+        (store! t (av-ty av))
+        (if (not (wty-scalar? t)) (wcg-unimpl "spill-ref of a non-scalar value") 0)
+        (let [vslot (wslot-new! g 8 8)
+              pslot (wslot-new! g 8 8)]
+          (wg-store-av! g av vslot)
+          (wg-push-addr! g pslot) (wg-push-addr! g vslot) (wg-i64-store! g)
+          (mk-av 1 pslot (TPtr (box-type a (av-ty av)))))))
+    (ESizeOf [_t] (do (wcg-unimpl "sizeof (needs full type layout)") (mk-av 0 0 (TInt 64 true))))
+    (EAlignOf [_t] (do (wcg-unimpl "alignof (needs full type layout)") (mk-av 0 0 (TInt 64 true))))
+    (EZeroed [_t] (do (wcg-unimpl "zeroed") (mk-av 0 0 (TInt 64 true))))
+    (EStr [_s] (do (wcg-unimpl "string literals (need a data section)") (mk-av 0 0 (TInt 64 true))))
+    (ECStr [_s] (do (wcg-unimpl "C string literals (need a data section)") (mk-av 0 0 (TInt 64 true))))
+    (EFloat [_b] (do (wcg-unimpl "floating-point literals") (mk-av 0 0 (TInt 64 true))))
+    (EAlloc [storage t]
+      ; only alloc-stack (storage 0) is supported: reserve a frame slot for the value
+      ; and yield a pointer to it (address = frame base + offset, stable within the
+      ; function). This is also how the checker lowers a `(mut …)` local.
+      (let [a (load (field g a)) tp (alloc-stack Type)]
+        (store! tp t)
+        (if (icmp-eq storage 0)
+            (do (if (not (wty-scalar? tp)) (wcg-unimpl "alloc-stack of a non-scalar type") 0)
+                (let [vslot (wslot-new! g 8 8)
+                      pslot (wslot-new! g 8 8)]
+                  (wg-push-addr! g pslot) (wg-push-addr! g vslot) (wg-i64-store! g)
+                  (mk-av 1 pslot (TPtr (box-type a t)))))
+          (do (wcg-unimpl "alloc-heap / alloc-static (need a runtime allocator / data section)")
+              (mk-av 0 0 (TInt 64 true))))))
+    (EField [_p _f] (do (wcg-unimpl "struct field access") (mk-av 0 0 (TInt 64 true))))
+    (EIndex [_p _i] (do (wcg-unimpl "array/pointer indexing") (mk-av 0 0 (TInt 64 true))))
+    (EConstruct [_s _v _a] (do (wcg-unimpl "sum-type construction") (mk-av 0 0 (TInt 64 true))))
+    (EMatch [_s _a] (do (wcg-unimpl "match") (mk-av 0 0 (TInt 64 true))))
+    (EFnPtrOf [_n] (do (wcg-unimpl "fnptr-of") (mk-av 0 0 (TInt 64 true))))
+    (ECallPtr [_f _a] (do (wcg-unimpl "call-ptr (indirect calls)") (mk-av 0 0 (TInt 64 true))))
+    (EOffsetOf [_t _f] (do (wcg-unimpl "offset-of") (mk-av 0 0 (TInt 64 true))))
+    (EFree [_i] (do (wcg-unimpl "free") (mk-av 0 0 (TInt 64 true))))
+    (EBitGet [_p _f] (do (wcg-unimpl "bit-struct read") (mk-av 0 0 (TInt 64 true))))
+    (EBitSet [_p _f _v] (do (wcg-unimpl "bit-struct write") (mk-av 0 0 (TInt 64 true))))
+    (ELlvmIr [_r _a _b] (do (wcg-unimpl "inline llvm-ir") (mk-av 0 0 (TInt 64 true))))
+    (EMakeDyn [_a _b _c _d] (do (wcg-unimpl "make-dyn (trait objects)") (mk-av 0 0 (TInt 64 true))))
+    (EDynDispatch [_a _b _c _d _e _f _g _h] (do (wcg-unimpl "dyn dispatch (trait objects)") (mk-av 0 0 (TInt 64 true))))
+    (EStaticRef [_n] (do (wcg-unimpl "static-ref") (mk-av 0 0 (TInt 64 true))))
+    (EErase [_t _i] (do (wcg-fail "EErase reached wasm codegen (checker bug)") (mk-av 0 0 (TInt 64 true))))
+    (ETraitCall [_a _b _c _d] (do (wcg-fail "ETraitCall reached wasm codegen (mono bug)") (mk-av 0 0 (TInt 64 true))))
+    (EComptime [_i] (do (wcg-fail "EComptime reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (EAscribe [_t _i] (do (wcg-fail "EAscribe reached wasm codegen (checker bug)") (mk-av 0 0 (TInt 64 true))))
+    (ETypeQuery [_q _t] (do (wcg-fail "ETypeQuery reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (EFieldMeta [_m _t _i] (do (wcg-fail "EFieldMeta reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (EFieldIndex [_t _n] (do (wcg-fail "EFieldIndex reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (EQuote [_f] (do (wcg-fail "EQuote reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (ECodeOp [_o _a] (do (wcg-fail "ECodeOp reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
+    (EQuasi [_q] (do (wcg-fail "EQuasi reached wasm codegen") (mk-av 0 0 (TInt 64 true))))))
+
+; ============================ function emission ==============================
+; Emit one function's CODE-section entry body (locals decl + code + `end`).
+(defn wemit-func! [(g (ptr Wcg)) (fd (ptr Func))] (-> (ArrayList u8))
+  (store! (field g frame) 0)
+  (store! (field g env) (wscope-nil (load (field g a))))
+  (store! (field (field g loops) len) 0)
+  (store! (field g depth) 0)
+  (store! (field g terminated) false)
+  (store! (field g retty) (load (field fd ret)))
+  (store! (field g code) (al-new [u8] (load (field g a))))
+  (let [a (load (field g a))
+        ps (load (field fd params)) np (al-len [Param] (load ps))
+        (mut paramslots) (al-new [i64] a)
+        retvoid (match-else (load (field fd ret)) (TVoid [] true) (_ false))]
+    ; allocate a slot per param and bind it (params are wasm locals 0..np-1).
+    (let [(mut i) 0]
+      (loop (if (icmp-ge (load i) np) (break)
+        (do (let [prm (wal-at [Param] ps (load i))
+                  t (field prm ty)
+                  slot (wslot-new! g 8 8)]
+              (if (not (wty-scalar? t)) (wcg-unimpl "non-scalar function parameter") 0)
+              (al-push! (mut paramslots) slot)
+              (store! (field g env)
+                (wscope-put a (load (field g env)) (load (field prm name)) (mk-av 1 slot (load t)))))
+            (store! i (iadd (load i) 1))))))
+    ; emit the body into g.code
+    (let [bav (wemit-body g (load (field fd body)))
+          framesize (imul (idiv (iadd (load (field g frame)) 15) 16) 16)]
+      ; finish the body: return value + epilogue, OR unreachable when divergent.
+      (if (load (field g terminated))
+          (wg-op! g 0)                                      ; unreachable
+        (do (if retvoid 0
+              (do (if (not (wty-scalar? (let [rp (alloc-stack Type)] (store! rp (load (field fd ret))) rp)))
+                      (wcg-unimpl "function returning a non-scalar value") 0)
+                  (wg-push-av! g bav)))                     ; push return value
+            ; epilogue: $sp += framesize  (net stack-neutral; return value stays on top)
+            (we-global-get! (mut (field g code)) 0)
+            (we-i64-const! (mut (field g code)) framesize)
+            (wg-op! g 124)                                  ; i64.add
+            (we-global-set! (mut (field g code)) 0)))
+      (wg-op! g 11)                                         ; end
+      ; assemble the final entry: locals(none) + prologue + body(g.code)
+      (let [(mut pro) (al-new [u8] a)]
+        (wb! (mut pro) 0)                                   ; 0 local declarations
+        ; prologue: $sp -= framesize
+        (we-global-get! (mut pro) 0)
+        (we-i64-const! (mut pro) framesize)
+        (wb! (mut pro) 125)                                 ; i64.sub
+        (we-global-set! (mut pro) 0)
+        ; spill each param local into its frame slot
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) np) (break)
+            (do (we-push-addr! (mut pro) (al-get [i64] (load paramslots) (load i)))
+                (we-local-get! (mut pro) (load i))
+                (we-i64-store! (mut pro))
+                (store! i (iadd (load i) 1))))))
+        (wbytes! (mut pro) (al-slice [u8] (load (field g code))))
+        (load pro)))))
+
+; ============================ module assembly ================================
+(defn wcg-functype! [(b (mut (ArrayList u8))) (np i64) (retvoid bool)] (-> i64)
+  (wb! (mut b) 96)                                          ; 0x60 func type
+  (wuleb! (mut b) np)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) np) (break)
+      (do (wb! (mut b) 126) (store! i (iadd (load i) 1))))))  ; i64 param
+  (if retvoid (wuleb! (mut b) 0) (do (wuleb! (mut b) 1) (wb! (mut b) 126)))  ; i64 result
+  0)
+
+; Build the whole memory64 module and return its bytes.
+(defn wcg-build-module [(a (ptr Allocator)) (mp (ptr Program))] (-> (slice u8))
+  (let [g (alloc-stack Wcg)]
+    (store! (field g a) a)
+    (store! (field g sigs) (al-new [WSig] a))
+    (store! (field g code) (al-new [u8] a))
+    (store! (field g frame) 0)
+    (store! (field g env) (wscope-nil a))
+    (store! (field g loops) (al-new [WLoop] a))
+    (store! (field g depth) 0)
+    (store! (field g terminated) false)
+    (store! (field g retty) (TInt 64 true))
+    ; only functions reachable from main are emitted (see wcg-reachable).
+    (let [keepv (wcg-reachable a mp)
+          keep  (box-al [i64] a keepv)]
+    (wcg-register-sigs! g mp keep)
+    (let [mainidx (wcg-main-idx g)
+          fs (load (field mp funcs)) nfn (al-len [i64] (load keep))
+          ; ---- emit every reachable function, collecting code-section entries ----
+          (mut entries) (al-new [(ArrayList u8)] a)
+          (mut i) 0]
+      (loop (if (icmp-ge (load i) nfn) (break)
+        (do (al-push! (mut entries) (wemit-func! g (wal-at [Func] fs (wal-get-keep keep (load i)))))
+            (store! i (iadd (load i) 1)))))
+      ; ---- type section (id 1) ----
+      (let [(mut tbody) (al-new [u8] a)]
+        (wuleb! (mut tbody) nfn)
+        (let [(mut k) 0]
+          (loop (if (icmp-ge (load k) nfn) (break)
+            (do (let [fd (wal-at [Func] fs (wal-get-keep keep (load k)))
+                      np (al-len [Param] (load (field fd params)))
+                      rv (match-else (load (field fd ret)) (TVoid [] true) (_ false))]
+                  (wcg-functype! (mut tbody) np rv))
+                (store! k (iadd (load k) 1))))))
+        ; ---- function section (id 3): type index == function index ----
+        (let [(mut fbody) (al-new [u8] a)]
+          (wuleb! (mut fbody) nfn)
+          (let [(mut k) 0]
+            (loop (if (icmp-ge (load k) nfn) (break)
+              (do (wuleb! (mut fbody) (load k)) (store! k (iadd (load k) 1))))))
+          ; ---- memory section (id 5): one memory64, min pages, growable ----
+          (let [(mut mbody) (al-new [u8] a)]
+            (wuleb! (mut mbody) 1) (wb! (mut mbody) 4) (wuleb! (mut mbody) (wcg-mem-pages))  ; flags 0x04 = 64-bit, no max
+            ; ---- global section (id 6): $sp = i64 mutable, init = stack top ----
+            (let [(mut gbody) (al-new [u8] a)]
+              (wuleb! (mut gbody) 1) (wb! (mut gbody) 126) (wb! (mut gbody) 1)   ; i64, mutable
+              (wb! (mut gbody) 66) (wsleb! (mut gbody) (wcg-stack-top)) (wb! (mut gbody) 11)  ; i64.const TOP; end
+              ; ---- export section (id 7): main + memory ----
+              (let [(mut ebody) (al-new [u8] a)]
+                (wuleb! (mut ebody) 2)
+                (wuleb! (mut ebody) 4) (wbytes! (mut ebody) "main") (wb! (mut ebody) 0) (wuleb! (mut ebody) mainidx)
+                (wuleb! (mut ebody) 6) (wbytes! (mut ebody) "memory") (wb! (mut ebody) 2) (wuleb! (mut ebody) 0)
+                ; ---- code section (id 10) ----
+                (let [(mut cbody) (al-new [u8] a)]
+                  (wuleb! (mut cbody) nfn)
+                  (let [(mut k) 0]
+                    (loop (if (icmp-ge (load k) nfn) (break)
+                      (do (let [ent (al-get [(ArrayList u8)] entries (load k))]
+                            (wuleb! (mut cbody) (al-len [u8] ent))
+                            (wbytes! (mut cbody) (al-slice [u8] ent)))
+                          (store! k (iadd (load k) 1))))))
+                  ; ---- assemble ----
+                  (let [(mut out) (al-new [u8] a)]
+                    (wb! (mut out) 0) (wb! (mut out) 97) (wb! (mut out) 115) (wb! (mut out) 109)  ; \0asm
+                    (wb! (mut out) 1) (wb! (mut out) 0) (wb! (mut out) 0) (wb! (mut out) 0)        ; version 1
+                    (wasm-section! (mut out) 1 (al-slice [u8] (load tbody)))
+                    (wasm-section! (mut out) 3 (al-slice [u8] (load fbody)))
+                    (wasm-section! (mut out) 5 (al-slice [u8] (load mbody)))
+                    (wasm-section! (mut out) 6 (al-slice [u8] (load gbody)))
+                    (wasm-section! (mut out) 7 (al-slice [u8] (load ebody)))
+                    (wasm-section! (mut out) 10 (al-slice [u8] (load cbody)))
+                    (al-slice [u8] (load out)))))))))))))

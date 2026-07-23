@@ -39,6 +39,7 @@
 (import "expander.coil" :use *)
 (import "codegen_a64.coil" :use *)
 (import "wasm.coil" :use *)
+(import "codegen_wasm.coil" :use *)   ; native wasm64 (memory64) backend, no LLVM
 (import "../../fmt/rules.coil" :as fmtr)      ; the `coil fmt` formatter (qualified to avoid name clashes)
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
@@ -474,6 +475,16 @@
                      1))
       (None []   0))))
 
+; native wasm64 backend: mono Program -> a FINAL memory64 wasm module (no LLVM, no
+; linker, no finalizer step). The module bytes are written straight to `obj-cstr`,
+; which build-cmd points at the -o output path for --backend wasm.
+(defn build-wasm-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (do (d-write-file a (cstr->slice obj-cstr) (wcg-build-module a mp)) 1))
+      (None []   0))))
+
 ; Context handed to the pipeline thread (the C entry takes a single (ptr i8) arg).
 ; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
 ; `triple` = the `--target` override cstr (null = host default) for cross-compiling.
@@ -504,11 +515,13 @@
   (let [ctx (cast (ptr DumpCtx) arg)
         r   (if (icmp-eq (load (field ctx mode)) 3)
                 (call-ptr (load (field ctx dump-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx path)))
+              (if (icmp-eq (load (field ctx mode)) 4)
+                (build-wasm-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
               (if (icmp-eq (load (field ctx mode)) 2)
                 (build-arm64-program (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx path)))
               (if (icmp-eq (load (field ctx mode)) 1)
                 (call-ptr (load (field ctx build-fn))  (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx obj)) (load (field ctx triple)) (load (field ctx path)))
-              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path))))))]
+              (call-ptr (load (field ctx emitir-fn)) (load (field ctx a)) (load (field ctx src)) (load (field ctx cwd)) (load (field ctx triple)) (load (field ctx path)))))))]
     (store! (field ctx ok) r)
     ; release the main thread if it is servicing metaprogram calls (COIL_META_MAIN=1)
     (main-svc-finish!)
@@ -873,9 +886,10 @@
                   (if (and (icmp-ge (slice-len [u8] arg) 2) (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45)) (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
                       (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)   ; -l<lib>
                     (if (str-eq arg "--backend")
-                        (do (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
-                                (store! backend 2)
-                              (store! backend 1))
+                        (do (let [bn (cstr->slice (load (index argv (iadd (load i) 1))))]
+                              (if (str-eq bn "arm64") (store! backend 2)
+                                (if (str-eq bn "wasm") (store! backend 4)   ; native wasm64 (memory64) backend
+                                  (store! backend 1))))
                             (store! i (iadd (load i) 2)) 0)
                       (do (store! i (iadd (load i) 1)) 0)))))))))))
     ; a usage mistake is exit 1, not SIGABRT — abort here made `coil build f.coil`
@@ -907,7 +921,9 @@
       0)
     (let [out-slice (cstr->slice (load outp))
           obj-slice (obj-path a out-slice)]
-      (let [obj-cstr  (slice->cstr a obj-slice)
+      ; the native wasm backend emits a FINAL module (no link step), so it writes
+      ; straight to the -o path; every other backend writes an intermediate <out>.o.
+      (let [obj-cstr  (slice->cstr a (if (icmp-eq (load backend) 4) out-slice obj-slice))
             ctx       (alloc-stack DumpCtx)]
         (store! (field ctx a)    a)
         (store! (field ctx src)  (read-src a file))
@@ -928,6 +944,10 @@
         ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
         ; file` / undefined-symbol junk is ever emitted.
         (if (icmp-eq (run-on-big-stack ctx) 0) 1
+        ; native wasm backend: the module written by build-wasm-program IS the final
+        ; artifact — no cc/ar/finalizer step. Report and stop.
+        (if (icmp-eq (load backend) 4)
+            (do (let [w (stdout)] (ps w "wrote ") (ps w out-slice) (wb w 10)) 0)
           ; final step depends on libmode: exe = `cc obj -o out flags`,
           ; static = `ar rcs out obj`, shared = `cc -dynamiclib obj -o out flags`.
           (let [(mut cmdsb) (sb-new a)]
@@ -966,7 +986,7 @@
                         (run-dsymutil a out-slice) 0)
                     (match ehdr
                       (Some [h] (cheader-program a (read-src a file) (dirname (cstr->slice file)) (Some h)))
-                      (None [] 0)))))))))))
+                      (None [] 0))))))))))))
 
 ; ============================ cheader (export-c → C header) =================
 ; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +
