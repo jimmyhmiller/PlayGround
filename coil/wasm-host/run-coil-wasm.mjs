@@ -7,6 +7,7 @@
 // Usage:  node --experimental-wasm-memory64 run-coil-wasm.mjs <wasm> <coil-args...>
 //   e.g.  node ... run-coil-wasm.mjs /tmp/coilc.wasm check /tmp/wtest.coil
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 
 const [wasmPath, ...coilArgs] = process.argv.slice(2);
 if (!wasmPath) { console.error('usage: run-coil-wasm.mjs <wasm> <coil-args...>'); process.exit(2); }
@@ -254,8 +255,18 @@ const env = {
   // Wall 1: comptime JIT / dylib / subprocess — the wasm meta path replaces these
   // with meta_run_wasm (run a metaprogram as a shared-memory side-module in-sandbox).
   meta_run_wasm, meta_run_ct,
+  // JIT/dylib in-sandbox execution stays a hard trap. `system` is different: the
+  // compiler uses it only to invoke the host TOOLCHAIN (cc) to LINK the final object
+  // it just emitted — a host build service, not sandboxed code execution, exactly like
+  // the fs I/O this harness already provides. Run the command on the host and return
+  // its exit status so `build` completes end to end.
   mmap: trap('mmap'), munmap: trap('munmap'), mprotect: trap('mprotect'),
-  dlopen: trap('dlopen'), dlsym: trap('dlsym'), system: trap('system'),
+  dlopen: trap('dlopen'), dlsym: trap('dlsym'),
+  system: (cmdPtr) => {                              // returns i32 (a JS Number, not BigInt)
+    const cmd = cstr(cmdPtr);
+    try { execSync(cmd, { stdio: 'inherit' }); return 0; }
+    catch (e) { return ((e && e.status ? e.status : 1) & 0xff) << 8; }  // wait()-style status
+  },
 };
 
 class ExitSignal extends Error { constructor(code){ super('exit'); this.code = code; } }
@@ -280,5 +291,6 @@ try {
 } catch (e) {
   if (e instanceof ExitSignal) { process.exit(e.code & 0xff); }
   console.error(`\n[wasm compiler trapped] ${e.message}`);
+  if (process.env.COIL_WASM_STACK) console.error(e.stack);
   process.exit(70);
 }
