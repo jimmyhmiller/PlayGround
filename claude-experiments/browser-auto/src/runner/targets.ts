@@ -1,0 +1,128 @@
+import type { Locator, Page } from "playwright";
+import type { Target } from "../dsl/ir.js";
+import { formatTarget } from "../dsl/ir.js";
+
+export class TargetError extends Error {
+  constructor(message: string, public ariaSnapshot?: string) {
+    super(message);
+    this.name = "TargetError";
+  }
+}
+
+export type Captures = Map<string, string>;
+
+export function interpolate(s: string, captures: Captures): string {
+  return s.replace(/\$([A-Za-z_][\w-]*)/g, (whole, name: string) => {
+    const v = captures.get(name);
+    if (v === undefined) {
+      // parser guarantees defined-before-use; reaching here is a runner bug
+      throw new TargetError(`internal: $${name} has no captured value (parser should have rejected this)`);
+    }
+    return v;
+  });
+}
+
+const ROLE_SET = new Set([
+  "button", "link", "heading", "textbox", "checkbox", "radio", "combobox",
+  "option", "row", "cell", "table", "list", "listitem", "region", "dialog",
+  "alert", "status", "tab", "tabpanel", "menu", "menuitem", "img", "banner",
+  "navigation", "main", "article", "form", "group",
+]);
+
+/** Roles that do NOT compute an accessible name from their contents (per ARIA).
+ * For these, `listitem "Blue Widget"` means "the listitem containing that text"
+ * (or one labelled with it) — so we union the aria-name match with a content filter. */
+const NO_NAME_FROM_CONTENT = new Set([
+  "list", "listitem", "table", "region", "dialog", "alert", "status", "menu",
+  "tabpanel", "article", "form", "group", "main", "banner", "navigation",
+]);
+
+export function buildLocator(page: Page, target: Target, captures: Captures): Locator {
+  const scope: Page | Locator = target.within ? buildLocator(page, target.within, captures) : page;
+  const name = target.name !== undefined ? interpolate(target.name, captures) : undefined;
+  switch (target.kind) {
+    case "text":
+      return scope.getByText(name!);
+    case "field":
+      return scope.getByLabel(name!);
+    case "placeholder":
+      return scope.getByPlaceholder(name!);
+    case "testid":
+      return scope.getByTestId(name!);
+    default: {
+      if (!ROLE_SET.has(target.kind)) {
+        throw new TargetError(`internal: unhandled target kind "${target.kind}"`);
+      }
+      const role = target.kind as Parameters<Page["getByRole"]>[0];
+      if (name === undefined) return scope.getByRole(role);
+      if (NO_NAME_FROM_CONTENT.has(target.kind)) {
+        return scope.getByRole(role, { name }).or(scope.getByRole(role).filter({ hasText: name }));
+      }
+      return scope.getByRole(role, { name });
+    }
+  }
+}
+
+/**
+ * Resolve a target to exactly one element, or fail with an actionable story.
+ * - waits (event-driven, bounded by the step budget) for at least one match;
+ * - two or more matches at act time is a HARD error listing every match —
+ *   bat never picks "the first one".
+ */
+export async function resolveUnique(
+  page: Page,
+  target: Target,
+  captures: Captures,
+  budgetMs: number,
+): Promise<Locator> {
+  const locator = buildLocator(page, target, captures);
+  try {
+    await locator.first().waitFor({ state: "visible", timeout: budgetMs });
+  } catch {
+    const snapshot = await ariaSnapshotSafe(page);
+    throw new TargetError(
+      `no visible match for ${formatTarget(target)} (page: ${page.url()})\n` +
+        `The page's semantic tree at failure:\n${indent(snapshot)}`,
+      snapshot,
+    );
+  }
+  const count = await locator.count();
+  if (count > 1) {
+    const listing = await describeMatches(locator, count);
+    throw new TargetError(
+      `${formatTarget(target)} is ambiguous: ${count} elements match — bat never picks the first one.\n` +
+        `Matches:\n${listing}\n` +
+        `Scope the target (e.g. 'in <container>') or use a testid.`,
+    );
+  }
+  return locator;
+}
+
+async function describeMatches(locator: Locator, count: number): Promise<string> {
+  const lines: string[] = [];
+  for (let i = 0; i < Math.min(count, 10); i++) {
+    const el = locator.nth(i);
+    const [text, tid] = await Promise.all([
+      el.innerText().catch(() => ""),
+      el.getAttribute("data-testid").catch(() => null),
+    ]);
+    lines.push(`  ${i + 1}. "${(text || "").slice(0, 80).replace(/\n/g, " ")}"${tid ? ` (testid: ${tid})` : ""}`);
+  }
+  if (count > 10) lines.push(`  … and ${count - 10} more`);
+  return lines.join("\n");
+}
+
+export async function ariaSnapshotSafe(page: Page): Promise<string> {
+  try {
+    return await page.locator("body").ariaSnapshot();
+  } catch (e) {
+    return `(aria snapshot unavailable: ${e instanceof Error ? e.message : String(e)})`;
+  }
+}
+
+function indent(s: string): string {
+  return s
+    .split("\n")
+    .map((l) => `    ${l}`)
+    .join("\n");
+}

@@ -1,0 +1,29 @@
+{
+  "name": "browser-auto",
+  "version": "0.1.0",
+  "description": "bat — browser auto tests: a timing-free, fully-explainable e2e DSL on Playwright",
+  "type": "module",
+  "bin": {
+    "bat": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./world": "./dist/world/index.js",
+    "./server": "./dist/server/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/runner/inject && cp src/runner/inject/*.js dist/runner/inject/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bat": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.54.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

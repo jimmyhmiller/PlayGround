@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>bat fixture shop</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    header { display: flex; gap: 1rem; align-items: baseline; margin-bottom: 1.5rem; }
+    .toast { position: fixed; top: 1rem; right: 1rem; background: #222; color: #fff; padding: .5rem 1rem; border-radius: 4px; }
+    table { border-collapse: collapse; }
+    td, th { border: 1px solid #ccc; padding: .4rem .8rem; }
+    li { margin: .4rem 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" data-nav><strong>Shop</strong></a>
+    <a href="/cart" data-nav>Cart</a>
+    <a href="/account" data-nav>Account</a>
+    <span>items: <span data-testid="cart-count">0</span></span>
+  </header>
+  <main id="app" aria-live="off"><p>Loading…</p></main>
+  <script src="/app.js"></script>
+</body>
+</html>

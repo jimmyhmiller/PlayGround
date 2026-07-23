@@ -1,0 +1,10 @@
+# Time is a fixed instant, never a duration.
+flow "frozen clock"
+
+given seed "catalog-basic"
+given user "shopper" signed-in
+given clock 2026-07-22T10:00:00Z
+
+go /account
+  expect heading "Account"
+  expect text "Today is 2026-07-22" in testid "today"

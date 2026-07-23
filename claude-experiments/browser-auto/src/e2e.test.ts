@@ -1,0 +1,194 @@
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { chromium, type Browser } from "playwright";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { startShopServer } from "../fixtures/shop/server.js";
+import { world } from "../fixtures/shop/world.js";
+import { parseFlow } from "./dsl/parser.js";
+import { replayStep, runFlow, runFlowFile } from "./runner/run.js";
+import { httpWorldHandle, localWorldHandle } from "./runner/world-handle.js";
+import { renderReport } from "./runner/trace.js";
+import { loadSeeds, type BatConfig } from "./config.js";
+import type { Seed } from "./world/types.js";
+import type { RunDeps } from "./runner/run.js";
+
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "shop");
+
+let browser: Browser;
+let shop: Awaited<ReturnType<typeof startShopServer>>;
+let deps: RunDeps;
+let seeds: Map<string, Seed>;
+
+beforeAll(async () => {
+  process.env.BAT_TEST = "1";
+  shop = await startShopServer();
+  browser = await chromium.launch({ headless: true });
+  const root = await mkdtemp(join(tmpdir(), "bat-e2e-"));
+  const config: BatConfig = {
+    baseUrl: shop.url,
+    world: { module: join(FIXTURE, "world.ts") },
+    seeds: join(FIXTURE, "e2e/world/*.seed.ts"),
+    flows: join(FIXTURE, "e2e/flows/**/*.flow"),
+    stepBudgetMs: 10000,
+    headless: true,
+    root,
+  };
+  seeds = await loadSeeds(config);
+  deps = { config, world: localWorldHandle(world), seeds, browser };
+}, 60000);
+
+afterAll(async () => {
+  await browser?.close();
+  await shop?.close();
+});
+
+const BUY_FLOW = join(FIXTURE, "e2e/flows/buy.flow");
+
+describe("the flake gauntlet", () => {
+  it("buy.flow passes 5 consecutive runs against random server latency", async () => {
+    for (let run = 0; run < 5; run++) {
+      const { trace } = await runFlowFile(BUY_FLOW, deps);
+      if (trace.status !== "pass") {
+        throw new Error(`run ${run + 1} failed:\n${renderReport(trace)}`);
+      }
+    }
+  }, 120000);
+
+  it("catches the 150ms toast every time (armed before the click)", async () => {
+    // covered by buy.flow's `expect appear status "Added to cart"`; assert the verdict is recorded
+    const { trace } = await runFlowFile(BUY_FLOW, deps);
+    const step2 = trace.steps[1]!;
+    const toastVerdict = step2.effects.find((e) => e.rendered.includes("appear"));
+    expect(toastVerdict?.pass).toBe(true);
+  }, 60000);
+
+  it("frozen clock makes Date deterministic", async () => {
+    const { trace } = await runFlowFile(join(FIXTURE, "e2e/flows/clock.flow"), deps);
+    if (trace.status !== "pass") throw new Error(renderReport(trace));
+  }, 60000);
+});
+
+describe("explainable failures", () => {
+  function flowFrom(src: string) {
+    return parseFlow(src, "inline.flow");
+  }
+
+  it("wrong expectation produces observed-vs-expected, not a timeout", async () => {
+    const flow = flowFrom(`flow "wrong text"
+given seed "catalog-basic"
+go /
+  expect heading "Products"
+click button "Add to cart" in listitem "Blue Widget"
+  expect request POST /api/cart ok
+  expect text "99" in testid "cart-count"
+`);
+    const { trace } = await runFlow(flow, deps);
+    expect(trace.status).toBe("fail");
+    const report = renderReport(trace);
+    expect(report).toContain('✗ expect text "99" in testid "cart-count"');
+    expect(report).toMatch(/observed: .*text is "1"/);
+    expect(report).toContain("semantic tree");
+    expect(report).toContain("bat replay");
+    // the request expectation itself passed — the report shows exactly which effect failed
+    expect(report).toContain("✓ expect request POST /api/cart ok");
+  }, 60000);
+
+  it("ambiguous targets are hard errors listing every match", async () => {
+    const flow = flowFrom(`flow "ambiguous"
+given seed "catalog-basic"
+go /
+  expect heading "Products"
+click button "Add to cart"
+  expect text "1" in testid "cart-count"
+`);
+    const { trace } = await runFlow(flow, deps);
+    expect(trace.status).toBe("fail");
+    const report = renderReport(trace);
+    expect(report).toContain("ambiguous: 3 elements match");
+    expect(report).toContain("never picks the first one");
+  }, 60000);
+
+  it("a page error fails the step and is attributed to it", async () => {
+    const flow = flowFrom(`flow "broken page"
+given seed "catalog-basic"
+go /broken
+  expect heading "Broken"
+`);
+    const { trace } = await runFlow(flow, deps);
+    expect(trace.status).toBe("fail");
+    const report = renderReport(trace);
+    expect(report).toContain("kaboom");
+    expect(report).toContain("errors from the page during this step");
+  }, 60000);
+
+  it("a failing API surfaces the actual response status", async () => {
+    const flow = flowFrom(`flow "out of stock"
+given seed "catalog-basic"
+go /
+  expect heading "Products"
+click button "Add to cart" in listitem "Green Widget"
+  expect request POST /api/cart ok
+  expect text "1" in testid "cart-count"
+`);
+    const { trace } = await runFlow(flow, deps);
+    expect(trace.status).toBe("fail");
+    const report = renderReport(trace);
+    expect(report).toMatch(/responded 409/);
+  }, 60000);
+});
+
+describe("atomic replay", () => {
+  it("fallback replay re-runs to the target step and passes", async () => {
+    await runFlowFile(BUY_FLOW, deps); // ensure a run exists
+    const result = await replayStep(BUY_FLOW, 4, deps, { fast: false });
+    expect(result.trace.status).toBe("pass");
+    expect(result.tier).toContain("fallback");
+    const step4 = result.trace.steps[3]!;
+    expect(step4.status).toBe("pass");
+    // step 5 was not run
+    expect(result.trace.steps[4]!.status).toBe("not-run");
+  }, 60000);
+
+  it("--fast replay restores the L4 world snapshot + browser checkpoint", async () => {
+    await runFlowFile(BUY_FLOW, deps);
+    const result = await replayStep(BUY_FLOW, 4, deps, { fast: true });
+    expect(result.tier).toContain("snapshot");
+    if (result.trace.status !== "pass") throw new Error(renderReport(result.trace));
+  }, 60000);
+});
+
+describe("http world transport", () => {
+  it("drives the world through the in-app handler", async () => {
+    const httpDeps: RunDeps = { ...deps, world: httpWorldHandle(`${shop.url}/api/__bat`) };
+    const { trace } = await runFlowFile(BUY_FLOW, httpDeps);
+    if (trace.status !== "pass") throw new Error(renderReport(trace));
+    expect(trace.worldVerification?.level).toBe(4);
+  }, 60000);
+
+  it("refuses to exist without BAT_TEST=1", async () => {
+    process.env.BAT_TEST = "0";
+    try {
+      const res = await fetch(`${shop.url}/api/__bat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "capabilities" }),
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      process.env.BAT_TEST = "1";
+    }
+  });
+});
+
+describe("world verification in traces", () => {
+  it("records proven guarantees for the L4 fixture adapter", async () => {
+    const { trace, runDir } = await runFlowFile(BUY_FLOW, deps);
+    expect(trace.worldVerification?.level).toBe(4);
+    expect(trace.worldVerification?.proven.join("\n")).toContain("verified by read-back");
+    expect(trace.worldFingerprint).toMatch(/^sha256:/);
+    const persisted = JSON.parse(await readFile(join(runDir, "trace.json"), "utf8")) as { status: string };
+    expect(persisted.status).toBe("pass");
+  }, 60000);
+});

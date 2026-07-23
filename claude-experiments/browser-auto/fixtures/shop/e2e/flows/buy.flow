@@ -1,0 +1,29 @@
+# The flake gauntlet: every render is behind a random-latency fetch,
+# and the toast lives 150ms. This must pass every single run.
+flow "add item to cart"
+
+given seed "catalog-basic"
+given user "shopper" signed-in
+
+go /
+  expect heading "Products"
+  expect count listitem 3 in list "product-list"
+
+click button "Add to cart" in listitem "Blue Widget"
+  expect request POST /api/cart ok
+  expect appear status "Added to cart"
+  expect text "1" in testid "cart-count"
+
+click button "Add to cart" in listitem "Red Widget"
+  expect request POST /api/cart ok
+  expect text "2" in testid "cart-count"
+
+click link "Cart"
+  expect url /cart
+  expect heading "Your Cart"
+  expect row "Blue Widget" in table "cart-items"
+  let blue_total = text in testid "line-total" of row "Blue Widget" in table "cart-items"
+
+click link "Account"
+  expect url /account
+  expect text "Signed in as shopper@test.dev"
