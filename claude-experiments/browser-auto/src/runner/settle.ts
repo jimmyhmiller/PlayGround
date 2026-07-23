@@ -27,6 +27,9 @@ export interface ObservedRequest {
   finishSeq: number | null;
   /** set when a condition profile injected latency or failure into this request */
   injected?: string;
+  /** response has no Content-Length (chunked/streaming: RSC, SSE, …) —
+   * its body is genuinely still in flight until requestfinished fires */
+  streaming?: boolean;
 }
 
 export class NetworkTracker {
@@ -71,7 +74,10 @@ export class NetworkTracker {
     // (which settlement's drain depends on) must be event-driven and sync.
     page.on("response", (resp) => {
       const rec = this.inflight.get(resp.request());
-      if (rec) rec.status = resp.status();
+      if (rec) {
+        rec.status = resp.status();
+        rec.streaming = resp.headers()["content-length"] === undefined;
+      }
     });
     page.on("requestfinished", (req) => complete(req, null));
     page.on("requestfailed", (req) => complete(req, req.failure()?.errorText ?? "failed"));
@@ -82,7 +88,11 @@ export class NetworkTracker {
   }
 
   pendingDescriptions(): string[] {
-    return [...this.inflight.values()].map((r) => `${r.method} ${r.url} (still pending)`);
+    return [...this.inflight.values()].map((r) =>
+      r.streaming
+        ? `${r.method} ${r.url} (response ${r.status} still streaming — an endless stream like SSE needs 'given stub')`
+        : `${r.method} ${r.url} (still pending)`,
+    );
   }
 
   /** true when every in-flight request has at least received response headers */
@@ -90,19 +100,21 @@ export class NetworkTracker {
     return [...this.inflight.values()].every((r) => r.status !== null);
   }
 
-  /** Evict in-flight requests whose response headers arrived but whose
-   * finished/failed event never came (lost CDP events, SSE/long-poll bodies).
-   * Returns trace notes describing what was evicted. */
+  /** Evict in-flight requests whose complete (Content-Length-known) response
+   * arrived but whose finished event never came — a lost browser event.
+   * Streaming responses (no Content-Length: RSC, SSE) are NEVER evicted:
+   * their bodies are genuinely still in flight, and settling early would
+   * assert against Suspense fallbacks. Returns trace notes. */
   forceCompleteStragglers(): string[] {
     const notes: string[] = [];
     for (const [req, rec] of [...this.inflight.entries()]) {
-      if (rec.status === null) continue;
+      if (rec.status === null || rec.streaming) continue;
       rec.finished = true;
       rec.finishSeq = ++this.finishCounter;
       this.inflight.delete(req);
       notes.push(
-        `${rec.method} ${rec.url}: response ${rec.status} received but the finish event never arrived ` +
-          `(lost browser event, or a streaming body) — counted as complete after two quiet passes`,
+        `${rec.method} ${rec.url}: complete response ${rec.status} received but the finish event never arrived ` +
+          `(lost browser event) — counted as complete after two quiet passes`,
       );
     }
     if (this.inflight.size === 0) {
@@ -245,31 +257,69 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
   const notes: string[] = [];
   let stragglerPasses = 0;
 
-  // One "quiet pulse": a real roundtrip through both event loops. Under an
-  // installed (fake) clock, advance virtual time a deterministic quantum so
-  // 0-delay timers and debounces run; otherwise a double-rAF with a macrotask
-  // fallback (headless pages may produce no frames while idle).
+  // One "quiet pulse": a real roundtrip through both event loops that also
+  // measures, PAGE-SIDE (no cross-process race), whether the DOM mutated
+  // during the window and whether React streaming content is still hidden
+  // awaiting reveal (`<div hidden id="S:...">` / `<template id="B:...">` —
+  // React's stable streaming format; Next.js reveals Suspense content long
+  // after the network went quiet, gated only on its own scheduler).
+  // Under an installed (fake) clock, advance virtual time a deterministic
+  // quantum instead so 0-delay timers and debounces run.
+  let lastPulse = { mutated: false, pendingBoundaries: 0 };
   const quietPulse = async (): Promise<boolean> => {
     try {
+      let mutated = false;
+      let pendingBoundaries = 0;
       if (opts.clockInstalled) {
+        const before = (await page.evaluate("window.__batMutationCount ?? 0")) as number;
         await tick(page, 16);
         clockAdvanced += 16;
+        const after = (await page.evaluate(
+          '({ count: window.__batMutationCount ?? 0, boundaries: document.querySelectorAll(\'div[hidden][id^="S:"], template[id^="B:"]\').length })',
+        )) as { count: number; boundaries: number };
+        mutated = after.count !== before;
+        pendingBoundaries = after.boundaries;
       } else {
         // NOTE: no named bindings inside this closure — esbuild-based dev
         // runners (tsx/vitest) inject a __name helper for them, which does
         // not exist inside the page and makes the evaluate throw.
-        await page.evaluate(
+        const result = (await page.evaluate(
           () =>
-            new Promise<void>((resolve) => {
-              requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0)));
-              setTimeout(resolve, 50); // fallback: idle headless pages may produce no frames
+            new Promise<{ mutated: boolean; boundaries: number }>((resolve) => {
+              const w = window as unknown as { __batMutationCount?: number };
+              const before = w.__batMutationCount ?? 0;
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() =>
+                  setTimeout(
+                    () =>
+                      resolve({
+                        mutated: (w.__batMutationCount ?? 0) !== before,
+                        boundaries: document.querySelectorAll('div[hidden][id^="S:"], template[id^="B:"]').length,
+                      }),
+                    0,
+                  ),
+                ),
+              );
+              // fallback: idle headless pages may produce no frames
+              setTimeout(
+                () =>
+                  resolve({
+                    mutated: (w.__batMutationCount ?? 0) !== before,
+                    boundaries: document.querySelectorAll('div[hidden][id^="S:"], template[id^="B:"]').length,
+                  }),
+                50,
+              );
             }),
-        );
+        )) as { mutated: boolean; boundaries: number };
+        mutated = result.mutated;
+        pendingBoundaries = result.boundaries;
       }
+      lastPulse = { mutated, pendingBoundaries };
       return true;
     } catch {
       // evaluate fails mid-navigation; wait for the nav to land, then re-check
       await page.waitForLoadState("domcontentloaded").catch(() => {});
+      lastPulse = { mutated: true, pendingBoundaries: 0 };
       return false;
     }
   };
@@ -318,8 +368,11 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
       }
       stragglerPasses = 0;
 
-      // 3. quiet check: JS task queue drained; navigation not mid-flight.
+      // 3. quiet check: JS task queue drained; navigation not mid-flight;
+      //    no DOM mutations during the window; no streaming content still
+      //    hidden awaiting a framework reveal.
       if (!(await quietPulse())) continue;
+      if (lastPulse.mutated || lastPulse.pendingBoundaries > 0) continue;
 
       // 4. anything new appear during the quiet check?
       if (tracker.inflightCount > 0) continue;
@@ -338,6 +391,14 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
     }
   }
   stuck.push(...tracker.pendingDescriptions());
+  if (lastPulse.pendingBoundaries > 0) {
+    stuck.push(
+      `${lastPulse.pendingBoundaries} streamed content boundar${lastPulse.pendingBoundaries === 1 ? "y" : "ies"} received but never revealed by the framework`,
+    );
+  }
+  if (stuck.length === 0 && lastPulse.mutated) {
+    stuck.push("the page's DOM never stopped changing (an animation loop or poller? consider 'given stub' or a testid on stable content)");
+  }
   if (stuck.length === 0) stuck.push("the page kept scheduling work and never went quiet (a poller? consider 'given stub' for it)");
   return { settled: false, iterations, stuck, clockAdvanced, notes };
 }

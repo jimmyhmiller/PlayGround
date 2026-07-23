@@ -2,7 +2,8 @@
  * Path patterns for `expect request` / `given stub` / `expect url`:
  * literal segments, `*` matches exactly one segment, `**` matches any suffix.
  * Query strings: a pattern without `?` ignores the URL's query; a pattern
- * with `?` must match it exactly.
+ * with `?` requires every named param to match — extra params in the URL are
+ * ignored (frameworks append their own, e.g. Next.js `_rsc=`).
  */
 export function matchPath(pattern: string, urlPath: string, urlQuery = ""): boolean {
   let pPath = pattern;
@@ -12,7 +13,13 @@ export function matchPath(pattern: string, urlPath: string, urlQuery = ""): bool
     pPath = pattern.slice(0, qIdx);
     pQuery = pattern.slice(qIdx + 1);
   }
-  if (pQuery !== null && pQuery !== urlQuery.replace(/^\?/, "")) return false;
+  if (pQuery !== null) {
+    const want = new URLSearchParams(pQuery);
+    const got = new URLSearchParams(urlQuery.replace(/^\?/, ""));
+    for (const [k, v] of want) {
+      if (got.get(k) !== v) return false;
+    }
+  }
 
   const pSegs = pPath.split("/").filter((s) => s !== "");
   const uSegs = urlPath.split("/").filter((s) => s !== "");

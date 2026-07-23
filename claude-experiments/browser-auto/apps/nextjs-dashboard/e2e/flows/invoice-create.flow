@@ -1,0 +1,27 @@
+# Create an invoice through the real form (Next.js server action -> redirect).
+flow "create an invoice"
+
+given seed "dashboard-basic"
+given user "admin" signed-in
+
+# the create page has no heading; "Create Invoice" is the active breadcrumb
+go /dashboard/invoices/create
+  expect link "Create Invoice" in navigation "Breadcrumb"
+  expect button "Create Invoice"
+
+select field "Choose customer" "Lee Robinson"
+  expect selected "Lee Robinson" in field "Choose customer"
+
+fill field "Choose an amount" "250"
+  expect value "250" in field "Choose an amount"
+
+check field "Paid"
+  expect checked field "Paid"
+
+# server actions that redirect respond 303, not 2xx
+click button "Create Invoice"
+  expect request POST /dashboard/invoices/create 303
+  expect url /dashboard/invoices
+  expect heading "Invoices"
+  expect count row 5 in table   # 4 invoices + header row
+  expect text "$250.00"

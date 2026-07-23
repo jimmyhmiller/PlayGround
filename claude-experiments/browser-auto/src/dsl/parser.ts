@@ -321,11 +321,20 @@ function parseEffect(p: LineParser): Effect | null {
     if (!target) return null;
     return p.expectEnd("expect no") ? { type: "absent", target } : null;
   }
-  if (first?.t === "word" && (first.v === "appear" || first.v === "gone")) {
+  if (first?.t === "word" && (first.v === "appear" || first.v === "gone" || first.v === "checked" || first.v === "unchecked")) {
     p.next();
     const target = p.parseTarget();
     if (!target) return null;
     return p.expectEnd(`expect ${first.v}`) ? { type: first.v, target } : null;
+  }
+  if (first?.t === "word" && first.v === "selected") {
+    p.next();
+    const value = p.expectString("the selected option's label");
+    if (value === null) return null;
+    if (p.expectWord("in") === null) return null;
+    const target = p.parseTarget();
+    if (!target) return null;
+    return p.expectEnd("expect selected") ? { type: "selected", target, value } : null;
   }
   if (first?.t === "word" && (first.v === "text" || first.v === "exact")) {
     let exact = false;

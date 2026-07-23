@@ -1,0 +1,15 @@
+# Delete an invoice (server action, no confirmation dialog in this app).
+flow "delete an invoice"
+
+given seed "dashboard-basic"
+given user "admin" signed-in
+
+go /dashboard/invoices
+  expect heading "Invoices"
+  expect count row 4 in table
+  expect row "Evil Rabbit" in table
+
+click button "Delete" in row "Evil Rabbit"
+  expect request POST /dashboard/invoices ok
+  expect count row 3 in table
+  expect no text "Evil Rabbit"

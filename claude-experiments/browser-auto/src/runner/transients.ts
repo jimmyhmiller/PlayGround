@@ -49,6 +49,9 @@ export class TransientHub {
 
   /** One binding ping = one round of one-shot checks. */
   async tick(): Promise<void> {
+    const waiters = this.tickWaiters;
+    this.tickWaiters = [];
+    for (const resolve of waiters) resolve();
     await Promise.all([...this.watchers].map((w) => this.check(w)));
   }
 
@@ -90,5 +93,20 @@ export class TransientHub {
   /** Step boundary: drop this step's watchers. */
   clear(): void {
     this.watchers.clear();
+  }
+
+  private tickWaiters: Array<() => void> = [];
+
+  /** Resolves on the next DOM-mutation tick, or after maxWaitMs (runner
+   * physics — frameworks like React commit transitions with no preceding
+   * network or frame signal, so effect evaluation re-checks on mutations). */
+  waitForNextTick(maxWaitMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(), maxWaitMs);
+      this.tickWaiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 }

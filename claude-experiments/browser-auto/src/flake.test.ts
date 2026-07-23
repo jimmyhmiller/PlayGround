@@ -85,7 +85,8 @@ click button "Add to cart" in listitem "Blue Widget"
 `,
       "inline.flow",
     );
-    const { trace } = await runFlow(flow, deps);
+    const wrongDeps: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 3000 } };
+    const { trace } = await runFlow(flow, wrongDeps);
     expect(trace.status).toBe("fail");
     const e = trace.explanation!;
     expect(e.reruns.failedSame).toBe(4);
@@ -188,7 +189,8 @@ click button "Add to cart"
 `,
       "inline.flow",
     );
-    const { trace } = await runFlow(flow, deps);
+    const quick: RunDeps = { ...deps, config: { ...baseConfig, stepBudgetMs: 3000, rerunsOnFailure: 2 } };
+    const { trace } = await runFlow(flow, quick);
     expect(trace.status).toBe("fail");
     const report = renderReport(trace);
     expect(report).toContain("response completion order:");

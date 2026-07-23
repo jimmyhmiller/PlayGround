@@ -42,6 +42,8 @@ export type Effect =
   | { type: "gone"; target: Target }
   | { type: "text"; target?: Target; value: string; exact: boolean }
   | { type: "value"; target: Target; value: string }
+  | { type: "checked" | "unchecked"; target: Target }
+  | { type: "selected"; target: Target; value: string }
   | { type: "count"; kind: TargetKind; name?: string; n: number; within?: Target }
   | { type: "url"; path: string }
   | { type: "request"; method: string; pathPattern: string; status: "ok" | number }
@@ -102,6 +104,9 @@ export function formatEffect(e: Effect): string {
     case "gone": return `expect gone ${formatTarget(e.target)}`;
     case "text": return `expect ${e.exact ? "exact " : ""}text "${e.value}"${e.target ? ` in ${formatTarget(e.target)}` : ""}`;
     case "value": return `expect value "${e.value}" in ${formatTarget(e.target)}`;
+    case "checked": return `expect checked ${formatTarget(e.target)}`;
+    case "unchecked": return `expect unchecked ${formatTarget(e.target)}`;
+    case "selected": return `expect selected "${e.value}" in ${formatTarget(e.target)}`;
     case "count": return `expect count ${e.kind}${e.name ? ` "${e.name}"` : ""} ${e.n}${e.within ? ` in ${formatTarget(e.within)}` : ""}`;
     case "url": return `expect url ${e.path}`;
     case "request": return `expect request ${e.method} ${e.pathPattern} ${e.status}`;

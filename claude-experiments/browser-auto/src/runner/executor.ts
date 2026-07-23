@@ -273,13 +273,22 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     trace.settle = outcome;
 
     // ---- evaluate effects against the settled page.
+    // State effects are EVENTUALLY-HOLDS assertions: frameworks (e.g. React
+    // transitions) can commit DOM changes after all network and task-queue
+    // signals have gone quiet, so a failing check re-evaluates on each DOM
+    // mutation tick until it passes or the budget ends.
     // Instant reads first, armed watchers last: a transient that never shows
     // must not starve the other verdicts' budget (and their reports).
     const verdicts = new Map<Effect, EffectVerdict>();
     const instant = step.effects.filter((e) => e.type !== "appear" && e.type !== "gone");
     const armedEffects = step.effects.filter((e) => e.type === "appear" || e.type === "gone");
     for (const eff of [...instant, ...armedEffects]) {
-      verdicts.set(eff, await evaluateEffect(eff, ctx, armed, remaining));
+      let verdict = await evaluateEffect(eff, ctx, armed, remaining);
+      while (!verdict.pass && eff.type !== "request" && remaining() > 100) {
+        await ctx.hub.waitForNextTick(Math.min(250, remaining()));
+        verdict = await evaluateEffect(eff, ctx, armed, remaining);
+      }
+      verdicts.set(eff, verdict);
     }
     for (const eff of step.effects) {
       const verdict = verdicts.get(eff)!;
@@ -438,6 +447,23 @@ async function evaluateEffect(
         const loc = buildLocator(page, eff.target, captures).first();
         const got = await loc.inputValue({ timeout: remaining() }).catch(() => null);
         return got === want ? v(true) : v(false, `value is ${got === null ? "(no input found)" : JSON.stringify(got)}`);
+      }
+      case "checked":
+      case "unchecked": {
+        const loc = buildLocator(page, eff.target, captures).first();
+        const got = await loc.isChecked({ timeout: remaining() }).catch(() => null);
+        if (got === null) return v(false, `${formatTarget(eff.target)} is not a checkable element (or not found)`);
+        const pass = eff.type === "checked" ? got : !got;
+        return pass ? v(true) : v(false, `${formatTarget(eff.target)} is ${got ? "checked" : "not checked"}`);
+      }
+      case "selected": {
+        const want = interpolate(eff.value, captures);
+        const loc = buildLocator(page, eff.target, captures).first();
+        const got = (await loc
+          .evaluate((el) => (el instanceof HTMLSelectElement ? (el.selectedOptions[0]?.label ?? null) : null))
+          .catch(() => null)) as string | null;
+        if (got === null) return v(false, `${formatTarget(eff.target)} is not a <select> (or nothing is selected)`);
+        return got === want ? v(true) : v(false, `selected option is ${JSON.stringify(got)}`);
       }
       case "count": {
         const target: Target = eff.name !== undefined ? { kind: eff.kind, name: eff.name } : { kind: eff.kind };

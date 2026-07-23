@@ -248,7 +248,7 @@ function nearMissSuggestions(step: StepTrace): string[] {
   for (const t of wanted) {
     if (t.name === undefined) continue;
     if (t.kind === "testid") {
-      const best = bestMatch(t.name, (step.testids ?? []).map((id) => ({ kind: "testid", name: id })));
+      const best = bestMatch(t.name, (step.testids ?? []).map((id) => ({ kind: "testid", name: id })), true);
       if (best) {
         suggestions.push(
           `nothing on the page matches ${formatTarget(t)}; the closest present testid is "${best.name}" — if that is the element the flow means, the flow's name for it is wrong.`,
@@ -256,8 +256,17 @@ function nearMissSuggestions(step: StepTrace): string[] {
       }
       continue;
     }
+    // right name on a DIFFERENT kind is the strongest signal: the element
+    // exists, the flow just called it the wrong thing
+    const exactOtherKind = candidates.find((c) => c.kind !== t.kind && c.name === t.name);
+    if (exactOtherKind) {
+      suggestions.push(
+        `there is no ${t.kind} "${t.name}" on the page, but there IS a ${exactOtherKind.kind} "${exactOtherKind.name}" — if that is the element the flow means, its kind is wrong.`,
+      );
+      continue;
+    }
     const sameKind = candidates.filter((c) => c.kind === t.kind);
-    const best = bestMatch(t.name, sameKind) ?? bestMatch(t.name, candidates);
+    const best = bestMatch(t.name, sameKind, true) ?? bestMatch(t.name, candidates, false);
     if (best) {
       suggestions.push(
         `nothing on the page matches ${formatTarget(t)}; closest present: ${best.kind} "${best.name}" — if that is the element the flow means, the flow's name for it is wrong.`,
@@ -267,11 +276,16 @@ function nearMissSuggestions(step: StepTrace): string[] {
   return [...new Set(suggestions)];
 }
 
-function bestMatch(name: string, candidates: Array<{ kind: string; name: string }>): { kind: string; name: string } | null {
+function bestMatch(
+  name: string,
+  candidates: Array<{ kind: string; name: string }>,
+  skipExact: boolean,
+): { kind: string; name: string } | null {
   let best: { kind: string; name: string } | null = null;
   let bestScore = 0.55; // below this, suggesting would mislead
   for (const c of candidates) {
-    if (c.name === name) continue; // an exact match means the name isn't the problem
+    // same-kind exact matches would have resolved; suggesting them is noise
+    if (skipExact && c.name === name) continue;
     const s = similarity(name, c.name);
     if (s > bestScore) {
       best = c;

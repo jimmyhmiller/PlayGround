@@ -1,0 +1,22 @@
+# Debounced search (use-debounce 300ms) driving URL params + a server
+# round-trip. No waits anywhere: the armed request expectation anchors
+# settlement to the debounced navigation.
+flow "search invoices"
+
+given seed "dashboard-basic"
+given user "admin" signed-in
+
+go /dashboard/invoices
+  expect heading "Invoices"
+  expect count row 4 in table   # 3 invoices + header row
+  expect text "Evil Rabbit"
+  expect text "Delba de Oliveira"
+
+# NOTE: the app's search label is broken (htmlFor="search" but the input has
+# no id) — a real a11y bug this flow works around by targeting the placeholder.
+fill placeholder "Search invoices..." "delba"
+  expect request GET /dashboard/invoices?query=delba ok
+  expect url /dashboard/invoices?page=1&query=delba
+  expect count row 2 in table
+  expect text "Delba de Oliveira"
+  expect no text "Evil Rabbit"

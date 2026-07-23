@@ -7,9 +7,13 @@
 (() => {
   if (window.__batObserverInstalled) return;
   window.__batObserverInstalled = true;
+  // monotonically increasing count of mutation batches — settlement reads it
+  // page-side (same evaluate) to detect "the DOM changed during this window"
+  window.__batMutationCount = 0;
 
   let scheduled = false;
   const notify = () => {
+    window.__batMutationCount++;
     if (scheduled) return;
     scheduled = true;
     let fired = false;

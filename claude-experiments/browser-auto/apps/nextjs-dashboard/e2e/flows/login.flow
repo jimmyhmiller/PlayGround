@@ -1,0 +1,19 @@
+# Log in through the real UI (NextAuth credentials + server action).
+flow "log in through the UI"
+
+given seed "dashboard-basic"
+
+go /login
+  expect heading "Please log in to continue."
+
+fill field "Email" "admin@bat.dev"
+  expect value "admin@bat.dev" in field "Email"
+
+fill field "Password" "batpass123"
+  expect value "batpass123" in field "Password"
+
+click button "Log in"
+  expect url /dashboard
+  expect heading "Dashboard"
+  expect text "Collected"
+  expect text "Total Customers"

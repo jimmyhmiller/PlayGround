@@ -19,6 +19,7 @@ const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", 
 let browser: Browser;
 let shop: Awaited<ReturnType<typeof startShopServer>>;
 let deps: RunDeps;
+let quickFailDeps: RunDeps;
 let seeds: Map<string, Seed>;
 
 beforeAll(async () => {
@@ -37,6 +38,10 @@ beforeAll(async () => {
   };
   seeds = await loadSeeds(config);
   deps = { config, world: localWorldHandle(world), seeds, browser };
+  // for tests that fail BY DESIGN: failing state effects retry until the step
+  // budget ends (eventually-holds semantics) and explanation reruns multiply
+  // that — keep those tests quick with a small budget and fewer reruns
+  quickFailDeps = { ...deps, config: { ...config, stepBudgetMs: 3000, rerunsOnFailure: 2 } };
 }, 60000);
 
 afterAll(async () => {
@@ -84,7 +89,7 @@ click button "Add to cart" in listitem "Blue Widget"
   expect request POST /api/cart ok
   expect text "99" in testid "cart-count"
 `);
-    const { trace } = await runFlow(flow, deps);
+    const { trace } = await runFlow(flow, quickFailDeps);
     expect(trace.status).toBe("fail");
     const report = renderReport(trace);
     expect(report).toContain('✗ expect text "99" in testid "cart-count"');
@@ -103,7 +108,7 @@ go /
 click button "Add to cart"
   expect text "1" in testid "cart-count"
 `);
-    const { trace } = await runFlow(flow, deps);
+    const { trace } = await runFlow(flow, quickFailDeps);
     expect(trace.status).toBe("fail");
     const report = renderReport(trace);
     expect(report).toContain("ambiguous: 3 elements match");
@@ -116,7 +121,7 @@ given seed "catalog-basic"
 go /broken
   expect heading "Broken"
 `);
-    const { trace } = await runFlow(flow, deps);
+    const { trace } = await runFlow(flow, quickFailDeps);
     expect(trace.status).toBe("fail");
     const report = renderReport(trace);
     expect(report).toContain("kaboom");
@@ -132,7 +137,7 @@ click button "Add to cart" in listitem "Green Widget"
   expect request POST /api/cart ok
   expect text "1" in testid "cart-count"
 `);
-    const { trace } = await runFlow(flow, deps);
+    const { trace } = await runFlow(flow, quickFailDeps);
     expect(trace.status).toBe("fail");
     const report = renderReport(trace);
     expect(report).toMatch(/responded 409/);

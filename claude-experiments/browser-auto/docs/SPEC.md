@@ -110,6 +110,8 @@ match. The runner never picks "the first one."
 | `expect text "<t>" in <target>` | element's text contains `<t>` |
 | `expect exact text "<t>" in <target>` | element's text equals `<t>` |
 | `expect value "<v>" in <target>` | input value equals |
+| `expect checked <target>` / `expect unchecked <target>` | checkbox/radio state |
+| `expect selected "<label>" in <target>` | a `<select>`'s chosen option label |
 | `expect count <kind> <n> [in <target>]` | number of matches |
 | `expect url <path>` | page url path (+query) matches |
 | `expect request <METHOD> <path-pattern> [ok\|<status>]` | this step causes a matching request that resolves with the status (`ok` = 2xx). Armed **before** the action. |
@@ -120,6 +122,8 @@ match. The runner never picks "the first one."
 `$name` interpolates into any quoted string or path.
 
 Path patterns: literal paths, `*` matches one segment, `**` matches any suffix.
+A pattern with `?` requires the named query params to match; extra params in
+the URL are ignored (frameworks append their own, e.g. Next.js `_rsc=`).
 
 ## Execution semantics
 
