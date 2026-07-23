@@ -215,6 +215,66 @@
    (unq_float (fnptr c [f64] (ptr i8)))
    (unq_str   (fnptr c [(ptr u8) i64] (ptr i8)))
    (fail      (fnptr c [i64] i64))])
+; ---- WASM export surface (piece 1) --------------------------------------------
+; When this compiler is itself built to wasm, a metaprogram compiles to a wasm
+; SIDE-MODULE (codegen_wasm side-module mode) that the host instantiates sharing
+; THIS module's linear memory. The side-module's metashim wrappers call the code-op
+; callbacks below as env imports; the host bridges each `env.mh_*` to the compiler
+; instance's exported `mh_*`. So the boundary is the SAME callbacks the native
+; vtable holds — all raw scalar (ptr/i64/f64) ABI, no struct-by-value.
+;
+; These are THIN forwarding wrappers, deliberately NOT the mh-* functions
+; themselves: meta-vtable takes the address of every mh-* via (fnptr-of …), and an
+; export-c'd + address-taken function makes LLVM's wasm backend emit a GOT.func.*
+; global import the single-unit finalizer cannot resolve. Keeping mh-* internal
+; (their fnptr-of stays a plain TABLE_INDEX reloc) and export-c'ing wrappers that
+; are never address-taken exports them by function index — no GOT.func. Native
+; targets just carry 21 trivial extra thunks; gate-full is byte-unaffected (it
+; diffs corpus emit-ir, not the compiler's own export table).
+(defn mhx-arg-new   [] (-> (ptr i8)) (mh-arg-new))
+(defn mhx-arg-c     [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh-arg-c b c))
+(defn mhx-arg-i     [(b (ptr i8)) (v i64)] (-> (ptr i8)) (mh-arg-i b v))
+(defn mhx-arg-s     [(b (ptr i8)) (p (ptr u8)) (n i64)] (-> (ptr i8)) (mh-arg-s b p n))
+(defn mhx-arg-b     [(b (ptr i8)) (v i64)] (-> (ptr i8)) (mh-arg-b b v))
+(defn mhx-arg-f     [(b (ptr i8)) (x f64)] (-> (ptr i8)) (mh-arg-f b x))
+(defn mhx-op-i      [(op i64) (b (ptr i8))] (-> i64) (mh-op-i op b))
+(defn mhx-op-h      [(op i64) (b (ptr i8))] (-> (ptr i8)) (mh-op-h op b))
+(defn mhx-op-s      [(op i64) (b (ptr i8))] (-> (ptr i8)) (mh-op-s op b))
+(defn mhx-quoted    [(k i64)] (-> (ptr i8)) (mh-quoted k))
+(defn mhx-qq-new    [] (-> (ptr i8)) (mh-qq-new))
+(defn mhx-qq-push   [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh-qq-push b c))
+(defn mhx-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh-qq-splice b c))
+(defn mhx-qq-list   [(b (ptr i8))] (-> (ptr i8)) (mh-qq-list b))
+(defn mhx-qq-listq  [(b (ptr i8))] (-> (ptr i8)) (mh-qq-listq b))
+(defn mhx-qq-vec    [(b (ptr i8))] (-> (ptr i8)) (mh-qq-vec b))
+(defn mhx-unq-int   [(v i64)] (-> (ptr i8)) (mh-unq-int v))
+(defn mhx-unq-bool  [(v i64)] (-> (ptr i8)) (mh-unq-bool v))
+(defn mhx-unq-float [(x f64)] (-> (ptr i8)) (mh-unq-float x))
+(defn mhx-unq-str   [(p (ptr u8)) (n i64)] (-> (ptr i8)) (mh-unq-str p n))
+(defn mhx-fail      [(code i64)] (-> i64) (mh-fail code))
+(export-c
+  [mhx-arg-new   :as "mh_arg_new"]
+  [mhx-arg-c     :as "mh_arg_c"]
+  [mhx-arg-i     :as "mh_arg_i"]
+  [mhx-arg-s     :as "mh_arg_s"]
+  [mhx-arg-b     :as "mh_arg_b"]
+  [mhx-arg-f     :as "mh_arg_f"]
+  [mhx-op-i      :as "mh_op_i"]
+  [mhx-op-h      :as "mh_op_h"]
+  [mhx-op-s      :as "mh_op_s"]
+  [mhx-quoted    :as "mh_quoted"]
+  [mhx-qq-new    :as "mh_qq_new"]
+  [mhx-qq-push   :as "mh_qq_push"]
+  [mhx-qq-splice :as "mh_qq_splice"]
+  [mhx-qq-list   :as "mh_qq_list"]
+  [mhx-qq-listq  :as "mh_qq_listq"]
+  [mhx-qq-vec    :as "mh_qq_vec"]
+  [mhx-unq-int   :as "mh_unq_int"]
+  [mhx-unq-bool  :as "mh_unq_bool"]
+  [mhx-unq-float :as "mh_unq_float"]
+  [mhx-unq-str   :as "mh_unq_str"]
+  [mhx-fail      :as "mh_fail"])
+
 (defn meta-vtable [] (-> (ptr i8))
   (let [v (alloc-static MetaVt)]
     (store! (field v arg_new) (fnptr-of mh-arg-new))
