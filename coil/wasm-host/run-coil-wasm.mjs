@@ -154,7 +154,15 @@ function meta_run_wasm(bytesPtr, len, symPtr, argc, ...args) {
   const entry = side.exports[sym];
   if (typeof entry !== 'function') throw new Error(`meta_run_wasm: side-module has no export ${sym}`);
   const callArgs = args.slice(0, Number(argc)).map((x) => BigInt(x));
-  const ret = entry(...callArgs);                    // synchronous; returns Sexp ptr (i64)
+  let ret;
+  try { ret = entry(...callArgs); }                  // synchronous; returns Sexp ptr (i64)
+  catch (e) {
+    if (e instanceof MetaHalt) {                     // (error …)/bad op: diag already recorded
+      if (process.env.COIL_WASM_META_TRACE) console.error(`[meta_run_wasm] ${sym} halted (metaprogram error)`);
+      return 0n;                                      // → compiler reads meta-host-err and reports it
+    }
+    throw e;
+  }
   if (process.env.COIL_WASM_META_TRACE) console.error(`[meta_run_wasm] ran ${sym}(argc=${argc}) → ${ret}`);
   return BigInt(ret);
 }
@@ -234,7 +242,14 @@ const env = {
   // threads — init/lock are noops (single-threaded); create spawns → WALL1
   pthread_mutex_init:()=>0, pthread_mutex_lock:()=>0, pthread_mutex_unlock:()=>0,
   pthread_cond_init:()=>0, pthread_cond_signal:()=>0, pthread_cond_wait:()=>0,
-  pthread_attr_init:()=>0, pthread_attr_setstacksize:()=>0, pthread_join:()=>0, pthread_exit:()=>0n,
+  pthread_attr_init:()=>0, pthread_attr_setstacksize:()=>0, pthread_join:()=>0,
+  // metahost's mh-halt records the metaprogram diagnostic in the compiler's
+  // MetaHostBox and then calls pthread_exit to end the (native) metaprogram thread.
+  // In the sandbox there is no thread; THROW instead so the exception unwinds out of
+  // the side-module (through the mh_* bridge and the metalowered (loop 0) it would
+  // otherwise spin on) back into meta_run_wasm's try/catch, which returns null. The
+  // compiler then reads the recorded Diag via meta-host-err and reports it located.
+  pthread_exit:()=>{ throw new MetaHalt(); },
   pthread_create: trap('pthread_create'),
   // Wall 1: comptime JIT / dylib / subprocess — the wasm meta path replaces these
   // with meta_run_wasm (run a metaprogram as a shared-memory side-module in-sandbox).
@@ -244,6 +259,7 @@ const env = {
 };
 
 class ExitSignal extends Error { constructor(code){ super('exit'); this.code = code; } }
+class MetaHalt extends Error { constructor(){ super('meta-halt'); } }   // metaprogram (error …)
 
 const { instance: inst } = await WebAssembly.instantiate(bytes, { env });
 instance = inst;
