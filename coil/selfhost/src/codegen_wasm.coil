@@ -55,6 +55,8 @@
 ; of their natural size (accessed by address + memory.copy).
 (defstruct WAVal [(kind i64) (v i64) (ty Type)])
 (defstruct WSig  [(name (slice u8)) (params (ptr (ArrayList Type))) (ret Type) (funcidx i64) (typeidx i64)])
+; one wasm function IMPORT: env.<field>, keyed/deduped by its C symbol (`field`).
+(defstruct WImport [(field (slice u8)) (params (ptr (ArrayList Type))) (ret Type) (funcidx i64) (typeidx i64)])
 (defstruct WLoop [(label (Option (slice u8))) (breaklevel i64) (contlevel i64)
                   (resslot i64) (resty Type) (has_res bool)])
 (defstruct WStr  [(bytes (slice u8)) (nul bool) (off i64)])   ; interned string literal (off = data offset)
@@ -74,6 +76,7 @@
    (structs (ArrayList WStruct))
    (sums (ArrayList WSum))
    (sigs (ArrayList WSig))
+   (imports (ArrayList WImport))    ; env.* function imports (funcidx 0..K-1; defined funcs shift up by K)
    (types (ArrayList (slice u8)))   ; deduped functype byte-strings (type section pool)
    (data (ArrayList u8))            ; static data segment payload (strings live here)
    (strs (ArrayList WStr))          ; interned strings (dedup)
@@ -613,6 +616,93 @@
       (load keep))))
 (defn wal-get-keep [(keep (ptr (ArrayList i64))) (i i64)] (-> i64) (al-get [i64] (load keep) i))
 
+; ============================ extern imports ================================
+; A call to a function that is declared `extern` but not DEFINED becomes a wasm
+; import `env.<C-symbol>` (same convention as the LLVM wasm path). Imports occupy
+; the LOW function-index space (0..K-1); defined functions shift up by K. `free`
+; (from EFree) and `malloc` (from alloc-heap) are synthesized on demand.
+(defn wfind-extern [(mp (ptr Program)) (nm (slice u8))] (-> i64)
+  (let [es (load (field mp externs)) n (al-len [Extern] (load es)) (mut i) 0 (mut r) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load r) 0)) (break)
+      (do (if (str-eq (load (field (wal-at [Extern] es (load i)) name)) nm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+(defn wimport-idx [(g (ptr Wcg)) (fieldnm (slice u8))] (-> i64)
+  (let [n (al-len [WImport] (load (field g imports))) (mut i) 0 (mut r) -1]
+    (loop (if (or (icmp-ge (load i) n) (icmp-ge (load r) 0)) (break)
+      (do (if (str-eq (load (field (wal-at [WImport] (field g imports) (load i)) field)) fieldnm) (store! r (load i)) 0)
+          (store! i (iadd (load i) 1)))))
+    (load r)))
+; add (dedup by symbol) an import; returns its funcidx (its ordinal among imports).
+(defn wadd-import! [(g (ptr Wcg)) (fieldnm (slice u8)) (types (ptr (ArrayList Type))) (ret Type)] (-> i64)
+  (let [ex (wimport-idx g fieldnm)]
+    (if (icmp-ge ex 0) (load (field (wal-at [WImport] (field g imports) ex) funcidx))
+      (let [retp (alloc-stack Type) e (alloc-stack WImport) fidx (al-len [WImport] (load (field g imports)))]
+        (store! retp ret)
+        (store! (field e field) fieldnm) (store! (field e params) types) (store! (field e ret) ret)
+        (store! (field e funcidx) fidx) (store! (field e typeidx) (wtype-idx! g types retp))
+        (al-push! (mut (field g imports)) (load e))
+        fidx))))
+; synthetic libc signatures: void free(void*) ; void* malloc(size_t).
+(defn wfree-params [(a (ptr Allocator))] (-> (ptr (ArrayList Type)))
+  (box-al [Type] a (let [(mut l) (al-new [Type] a)] (al-push! (mut l) (TPtr (box-type a (TInt 8 false)))) (load l))))
+(defn wmalloc-params [(a (ptr Allocator))] (-> (ptr (ArrayList Type)))
+  (box-al [Type] a (let [(mut l) (al-new [Type] a)] (al-push! (mut l) (TInt 64 true)) (load l))))
+
+(defn wscan-imports-expr! [(g (ptr Wcg)) (mp (ptr Program)) (e (ptr Expr))] (-> i64)
+  (let [a (load (field g a))]
+    (match-else (load (field e kind))
+      (ECall     [func _t args]
+        (do (if (icmp-lt (wfind-func-idx mp func) 0)
+                (let [ei (wfind-extern mp func)]
+                  (if (icmp-ge ei 0)
+                      (let [ed (wal-at [Extern] (load (field mp externs)) ei)]
+                        (if (load (field ed variadic)) (wcg-fail2 "call to a variadic extern is unsupported by the wasm backend: " func) 0)
+                        (wadd-import! g (wlast-component (load (field ed name))) (load (field ed params)) (load (field ed ret))) 0)
+                    0))
+              0)
+            (wscan-imports-body! g mp args) 0))
+      (EFree     [i] (do (wadd-import! g "free" (wfree-params a) (TVoid)) (wscan-imports-expr! g mp i) 0))
+      (EAlloc    [storage _t] (do (if (icmp-eq storage 2) (do (wadd-import! g "malloc" (wmalloc-params a) (TPtr (box-type a (TInt 8 false)))) 0) 0) 0))
+      (ECallPtr  [fp args] (do (wscan-imports-expr! g mp fp) (wscan-imports-body! g mp args) 0))
+      (EBin      [_o l r] (do (wscan-imports-expr! g mp l) (wscan-imports-expr! g mp r) 0))
+      (ECmp      [_o l r] (do (wscan-imports-expr! g mp l) (wscan-imports-expr! g mp r) 0))
+      (ENot      [i] (wscan-imports-expr! g mp i))
+      (EIf       [c t el] (do (wscan-imports-expr! g mp c) (wscan-imports-expr! g mp t) (wscan-imports-expr! g mp el) 0))
+      (EDo       [b] (wscan-imports-body! g mp b))
+      (ELet      [binds body]
+        (do (let [n (al-len [Bind] (load binds)) (mut i) 0]
+              (loop (if (icmp-ge (load i) n) (break)
+                (do (wscan-imports-expr! g mp (field (wal-at [Bind] binds (load i)) value)) (store! i (iadd (load i) 1))))))
+            (wscan-imports-body! g mp body) 0))
+      (ELoop     [_l b] (wscan-imports-body! g mp b))
+      (EBreak    [_l value] (match value (Some [ve] (wscan-imports-expr! g mp ve)) (None [] 0)))
+      (EBorrow   [_m place] (wscan-imports-expr! g mp place))
+      (ESpillRef [i] (wscan-imports-expr! g mp i))
+      (EField    [p _f] (wscan-imports-expr! g mp p))
+      (ELoad     [i] (wscan-imports-expr! g mp i))
+      (EStore    [p v] (do (wscan-imports-expr! g mp p) (wscan-imports-expr! g mp v) 0))
+      (EIndex    [p i] (do (wscan-imports-expr! g mp p) (wscan-imports-expr! g mp i) 0))
+      (ECast     [_t i] (wscan-imports-expr! g mp i))
+      (EComptime [i] (wscan-imports-expr! g mp i))
+      (EMatch    [s arms]
+        (do (wscan-imports-expr! g mp s)
+            (let [n (al-len [Arm] (load arms)) (mut i) 0]
+              (loop (if (icmp-ge (load i) n) (break)
+                (do (wscan-imports-expr! g mp (field (wal-at [Arm] arms (load i)) body)) (store! i (iadd (load i) 1)))))) 0))
+      (EConstruct [_s _v args] (wscan-imports-body! g mp args))
+      (ELlvmIr   [_r args _b] (wscan-imports-body! g mp args))
+      (_ 0))))
+(defn wscan-imports-body! [(g (ptr Wcg)) (mp (ptr Program)) (body (ptr (ArrayList Expr)))] (-> i64)
+  (let [n (al-len [Expr] (load body)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wscan-imports-expr! g mp (wal-at [Expr] body (load i))) (store! i (iadd (load i) 1)))))) 0)
+(defn wscan-imports! [(g (ptr Wcg)) (mp (ptr Program)) (keep (ptr (ArrayList i64)))] (-> i64)
+  (let [fs (load (field mp funcs)) n (al-len [i64] (load keep)) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (wscan-imports-body! g mp (load (field (wal-at [Func] fs (wal-get-keep keep (load i))) body)))
+          (store! i (iadd (load i) 1)))))) 0)
+
 ; ============================ sig registration ==============================
 (defn wsig-idx [(g (ptr Wcg)) (nm (slice u8))] (-> i64)
   (let [n (al-len [WSig] (load (field g sigs))) (mut i) 0 (mut r) -1]
@@ -626,7 +716,8 @@
       (do (al-push! (mut out) (load (field (wal-at [Param] ps (load i)) ty))) (store! i (iadd (load i) 1)))))
     (box-al [Type] a (load out))))
 (defn wcg-register-sigs! [(g (ptr Wcg)) (mp (ptr Program)) (keep (ptr (ArrayList i64)))] (-> i64)
-  (let [fs (load (field mp funcs)) a (load (field g a)) n (al-len [i64] (load keep)) (mut i) 0]
+  (let [fs (load (field mp funcs)) a (load (field g a)) n (al-len [i64] (load keep))
+        k (al-len [WImport] (load (field g imports))) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (let [fd (wal-at [Func] fs (wal-get-keep keep (load i)))
                 types (wparams->types a (load (field fd params)))
@@ -635,11 +726,12 @@
             (store! (field e name) (load (field fd name)))
             (store! (field e params) types)
             (store! (field e ret) (load (field fd ret)))
-            (store! (field e funcidx) (load i))
+            (store! (field e funcidx) (iadd k (load i)))   ; imports occupy funcidx 0..K-1
             (store! (field e typeidx) (wtype-idx! g types retp))
             (al-push! (mut (field g sigs)) (load e)))
           (store! i (iadd (load i) 1))))))
   0)
+; the wasm FUNCTION INDEX (import-shifted) of `main`, for the export section.
 (defn wcg-main-idx [(g (ptr Wcg))] (-> i64)
   (let [n (al-len [WSig] (load (field g sigs))) (mut i) 0 (mut r) -1]
     (loop (if (icmp-ge (load i) n) (break)
@@ -647,7 +739,7 @@
               (if (icmp-lt (load r) 0) (store! r (load i)) 0) 0)
           (store! i (iadd (load i) 1)))))
     (if (icmp-lt (load r) 0) (wcg-fail "no `main` function in the program") 0)
-    (load r)))
+    (load (field (wal-at [WSig] (field g sigs) (load r)) funcidx))))
 
 ; ============================ op-code tables ================================
 (defn wbin-opcode [(op i64) (signed bool)] (-> i64)
@@ -837,10 +929,17 @@
 
 (defn wemit-call [(g (ptr Wcg)) (func (slice u8)) (args (ptr (ArrayList Expr)))] (-> WAVal)
   (let [si (wsig-idx g func)]
-    (if (icmp-lt si 0) (wcg-fail2 "call to unknown/unsupported function (extern imports are not supported by the wasm backend): " func) 0)
-    (let [e (wal-at [WSig] (field g sigs) si) retp (alloc-stack Type)]
-      (store! retp (load (field e ret)))
-      (wemit-invoke g (load (field e params)) retp args false (load (field e funcidx)) (mk-av 0 0 (TInt 64 true)) 0))))
+    (if (icmp-ge si 0)
+        ; a DEFINED function: direct call.
+        (let [e (wal-at [WSig] (field g sigs) si) retp (alloc-stack Type)]
+          (store! retp (load (field e ret)))
+          (wemit-invoke g (load (field e params)) retp args false (load (field e funcidx)) (mk-av 0 0 (TInt 64 true)) 0))
+      ; an EXTERN (declared, not defined): call the env.<symbol> import (scanned earlier).
+      (let [ii (wimport-idx g (wlast-component func))]
+        (if (icmp-lt ii 0) (wcg-fail2 "call to unknown/unsupported function: " func) 0)
+        (let [imp (wal-at [WImport] (field g imports) ii) retp (alloc-stack Type)]
+          (store! retp (load (field imp ret)))
+          (wemit-invoke g (load (field imp params)) retp args false (load (field imp funcidx)) (mk-av 0 0 (TInt 64 true)) 0))))))
 
 (defn wemit-callptr [(g (ptr Wcg)) (fp (ptr Expr)) (args (ptr (ArrayList Expr)))] (-> WAVal)
   (store! (field g needs-table) true)
@@ -1125,8 +1224,17 @@
             (let [vslot (wslot-for-ty! g tp) pslot (wslot-new! g 8 8)]
               (wg-push-addr! g pslot) (wg-push-addr! g vslot) (wg-i64-store! g)
               (mk-av 1 pslot (TPtr (box-type a t))))
-          (do (wcg-unimpl "alloc-heap / alloc-static (need a runtime allocator / data section)")
-              (mk-av 0 0 (TInt 64 true))))))
+          (if (icmp-eq storage 2)
+              ; heap: call the malloc import (funcidx from the pre-scan)
+              (let [ii (wimport-idx g "malloc") slot (wslot-new! g 8 8)]
+                (if (icmp-lt ii 0) (wcg-fail "alloc-heap: malloc import was not scanned") 0)
+                (wg-push-addr! g slot)
+                (wg-i64-const! g (wty-size g tp))
+                (wg-call! g (load (field (wal-at [WImport] (field g imports) ii) funcidx)))
+                (wg-i64-store! g)
+                (mk-av 1 slot (TPtr (box-type a t))))
+            (do (wcg-unimpl "alloc-static (needs a global data cell)")
+                (mk-av 0 0 (TInt 64 true)))))))
     (EField [p fname]
       (let [av (wemit-expr g p) a (load (field g a)) t (alloc-stack Type)]
         (store! t (av-ty av))
@@ -1206,7 +1314,16 @@
         (let [slot (wslot-for-ty! g tp)]
           (wg-push-addr! g slot) (wg-i64-const! g 0) (wg-i64-const! g (wty-size g tp)) (wg-op! g 252) (wg-op! g 11) (wg-op! g 0)
           (mk-av 1 slot t))))
-    (EFree [_i] (do (wcg-unimpl "free (needs the libc allocator import — deferred to the extern-imports milestone)") (mk-av 0 0 (TInt 64 true))))
+    (EFree [inner]
+      ; lower to a call of the env.free import (the pointer arg passed by value)
+      (let [ii (wimport-idx g "free")]
+        (if (icmp-lt ii 0) (wcg-fail "free: the `free` import was not scanned") 0)
+        (let [imp (wal-at [WImport] (field g imports) ii)
+              a (load (field g a))
+              (mut a1) (al-new [Expr] a) retp (alloc-stack Type)]
+          (al-push! (mut a1) (load inner))
+          (store! retp (load (field imp ret)))
+          (wemit-invoke g (load (field imp params)) retp (box-al [Expr] a (load a1)) false (load (field imp funcidx)) (mk-av 0 0 (TInt 64 true)) 0))))
     (EComptime [_i] (do (wcg-fail "EComptime reached wasm codegen") (mk-av 0 0 (TInt 64 true))))
     (ECStr [_s] (do (wcg-unimpl "C string literals") (mk-av 0 0 (TInt 64 true))))
     (EFloat [_b] (do (wcg-unimpl "floating-point literals / arithmetic") (mk-av 0 0 (TInt 64 true))))
@@ -1275,12 +1392,26 @@
           (load pro)))))))
 
 ; ============================ module assembly ===============================
+; import section (id 2) payload: one `(import "env" "<field>" (func typeidx))` per import.
+(defn wbuild-import-section [(g (ptr Wcg)) (a (ptr Allocator))] (-> (slice u8))
+  (let [n (al-len [WImport] (load (field g imports))) (mut b) (al-new [u8] a)]
+    (wuleb! (mut b) n)
+    (let [(mut i) 0]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [imp (wal-at [WImport] (field g imports) (load i))]
+              (wuleb! (mut b) 3) (wbytes! (mut b) "env")
+              (wuleb! (mut b) (slice-len (load (field imp field)))) (wbytes! (mut b) (load (field imp field)))
+              (wb! (mut b) 0) (wuleb! (mut b) (load (field imp typeidx))))
+            (store! i (iadd (load i) 1))))))
+    (al-slice [u8] (load b))))
+
 (defn wcg-build-module [(a (ptr Allocator)) (mp (ptr Program))] (-> (slice u8))
   (let [g (alloc-stack Wcg)]
     (store! (field g a) a)
     (store! (field g structs) (al-new [WStruct] a))
     (store! (field g sums) (al-new [WSum] a))
     (store! (field g sigs) (al-new [WSig] a))
+    (store! (field g imports) (al-new [WImport] a))
     (store! (field g types) (al-new [(slice u8)] a))
     (store! (field g data) (al-new [u8] a))
     (store! (field g strs) (al-new [WStr] a))
@@ -1295,9 +1426,12 @@
     (store! (field g aggret) false)
     (wregister-types! g mp)
     (let [keepv (wcg-reachable a mp) keep (box-al [i64] a keepv)]
+    (wscan-imports! g mp keep)                          ; discover env.* imports before assigning funcidxs
     (wcg-register-sigs! g mp keep)
     (let [mainidx (wcg-main-idx g)
+          nimp (al-len [WImport] (load (field g imports)))
           fs (load (field mp funcs)) nfn (al-len [i64] (load keep))
+          ntotal (iadd (al-len [WImport] (load (field g imports))) (al-len [i64] (load keep)))
           (mut entries) (al-new [(ArrayList u8)] a) (mut i) 0]
       (loop (if (icmp-ge (load i) nfn) (break)
         (do (al-push! (mut entries) (wemit-func! g (wal-at [Func] fs (wal-get-keep keep (load i)))))
@@ -1314,10 +1448,10 @@
           (let [(mut k) 0]
             (loop (if (icmp-ge (load k) nfn) (break)
               (do (wuleb! (mut fbody) (load (field (wal-at [WSig] (field g sigs) (load k)) typeidx))) (store! k (iadd (load k) 1))))))
-          ; ---- table section (id 4): one funcref table with all functions ----
+          ; ---- table section (id 4): one funcref table covering ALL functions (imports + defined) ----
           (let [(mut tabbody) (al-new [u8] a)]
             (if (load (field g needs-table))
-                (do (wuleb! (mut tabbody) 1) (wb! (mut tabbody) 112) (wb! (mut tabbody) 0) (wuleb! (mut tabbody) nfn)) 0)
+                (do (wuleb! (mut tabbody) 1) (wb! (mut tabbody) 112) (wb! (mut tabbody) 0) (wuleb! (mut tabbody) ntotal)) 0)
             ; ---- memory section (id 5) ----
             (let [(mut mbody) (al-new [u8] a)]
               (wuleb! (mut mbody) 1) (wb! (mut mbody) 4) (wuleb! (mut mbody) (wcg-mem-pages))
@@ -1330,13 +1464,13 @@
                   (wuleb! (mut ebody) 2)
                   (wuleb! (mut ebody) 4) (wbytes! (mut ebody) "main") (wb! (mut ebody) 0) (wuleb! (mut ebody) mainidx)
                   (wuleb! (mut ebody) 6) (wbytes! (mut ebody) "memory") (wb! (mut ebody) 2) (wuleb! (mut ebody) 0)
-                  ; ---- element section (id 9): active table[0]=0..nfn-1 ----
+                  ; ---- element section (id 9): active table[0] = 0..ntotal-1 (fnptr = funcidx) ----
                   (let [(mut elbody) (al-new [u8] a)]
                     (if (load (field g needs-table))
                         (do (wuleb! (mut elbody) 1) (wb! (mut elbody) 0)                 ; 1 segment, flag 0 (active table 0)
                             (wb! (mut elbody) 65) (wsleb! (mut elbody) 0) (wb! (mut elbody) 11)   ; i32.const 0 offset
-                            (wuleb! (mut elbody) nfn)
-                            (let [(mut k) 0] (loop (if (icmp-ge (load k) nfn) (break) (do (wuleb! (mut elbody) (load k)) (store! k (iadd (load k) 1))))))) 0)
+                            (wuleb! (mut elbody) ntotal)
+                            (let [(mut k) 0] (loop (if (icmp-ge (load k) ntotal) (break) (do (wuleb! (mut elbody) (load k)) (store! k (iadd (load k) 1))))))) 0)
                     ; ---- code section (id 10) ----
                     (let [(mut cbody) (al-new [u8] a)]
                       (wuleb! (mut cbody) nfn)
@@ -1356,6 +1490,7 @@
                           (wb! (mut out) 0) (wb! (mut out) 97) (wb! (mut out) 115) (wb! (mut out) 109)
                           (wb! (mut out) 1) (wb! (mut out) 0) (wb! (mut out) 0) (wb! (mut out) 0)
                           (wasm-section! (mut out) 1 (al-slice [u8] (load tbody)))
+                          (if (icmp-gt nimp 0) (wasm-section! (mut out) 2 (wbuild-import-section g a)) 0)
                           (wasm-section! (mut out) 3 (al-slice [u8] (load fbody)))
                           (if (load (field g needs-table)) (wasm-section! (mut out) 4 (al-slice [u8] (load tabbody))) 0)
                           (wasm-section! (mut out) 5 (al-slice [u8] (load mbody)))
