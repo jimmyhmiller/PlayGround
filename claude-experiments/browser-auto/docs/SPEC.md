@@ -111,6 +111,7 @@ match. The runner never picks "the first one."
 | `expect exact text "<t>" in <target>` | element's text equals `<t>` |
 | `expect value "<v>" in <target>` | input value equals |
 | `expect checked <target>` / `expect unchecked <target>` | checkbox/radio state |
+| `expect enabled <target>` / `expect disabled <target>` | control enablement |
 | `expect selected "<label>" in <target>` | a `<select>`'s chosen option label |
 | `expect count <kind> <n> [in <target>]` | number of matches |
 | `expect url <path>` | page url path (+query) matches |

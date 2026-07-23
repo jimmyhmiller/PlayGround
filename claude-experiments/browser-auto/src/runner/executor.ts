@@ -448,6 +448,14 @@ async function evaluateEffect(
         const got = await loc.inputValue({ timeout: remaining() }).catch(() => null);
         return got === want ? v(true) : v(false, `value is ${got === null ? "(no input found)" : JSON.stringify(got)}`);
       }
+      case "enabled":
+      case "disabled": {
+        const loc = buildLocator(page, eff.target, captures).first();
+        const got = await loc.isEnabled({ timeout: remaining() }).catch(() => null);
+        if (got === null) return v(false, `${formatTarget(eff.target)} not found`);
+        const pass = eff.type === "enabled" ? got : !got;
+        return pass ? v(true) : v(false, `${formatTarget(eff.target)} is ${got ? "enabled" : "disabled"}`);
+      }
       case "checked":
       case "unchecked": {
         const loc = buildLocator(page, eff.target, captures).first();

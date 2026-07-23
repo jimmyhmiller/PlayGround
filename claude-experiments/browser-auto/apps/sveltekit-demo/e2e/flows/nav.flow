@@ -1,0 +1,13 @@
+# Client-side routing between prerendered pages.
+flow "navigation"
+
+go /
+  expect heading "SvelteKit app"
+
+click link "About" in navigation
+  expect url /about
+  expect heading "About this app"
+
+click link "Sverdle" in navigation
+  expect url /sverdle
+  expect heading "Sverdle"

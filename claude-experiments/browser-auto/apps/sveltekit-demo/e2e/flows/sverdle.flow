@@ -1,0 +1,33 @@
+# Play a full Sverdle guess: click letters, then submit via a SvelteKit form
+# action (use:enhance -> fetch POST). Game state lives in a cookie.
+#
+# App observation: the board tiles are anonymous divs — the only semantic
+# observable while typing is the enter button's enablement (it arms after the
+# 5th letter). Per-letter tile assertions are not expressible; a screen-reader
+# user gets equally little per-keystroke feedback.
+flow "sverdle first guess"
+
+go /sverdle
+  expect heading "Sverdle"
+  expect count text "empty" 30
+  expect disabled button "enter"
+
+click button "a"
+  expect disabled button "enter"
+
+click button "b"
+  expect disabled button "enter"
+
+click button "o"
+  expect disabled button "enter"
+
+click button "u"
+  expect disabled button "enter"
+
+click button "t"
+  expect enabled button "enter"
+
+click button "enter"
+  expect request POST /sverdle ok
+  expect count text "empty" 25
+  expect disabled button "enter"

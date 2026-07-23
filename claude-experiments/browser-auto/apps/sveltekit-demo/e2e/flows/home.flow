@@ -1,0 +1,16 @@
+# Home page: hydration + a spring-animated counter (the settle engine must
+# wait out the animation's DOM churn before asserting).
+flow "home counter"
+
+go /
+  expect heading "SvelteKit app"
+  expect img "Welcome"
+
+click button "Increase the counter by one"
+  expect text "1"
+
+click button "Increase the counter by one"
+  expect text "2"
+
+click button "Decrease the counter by one"
+  expect text "1"

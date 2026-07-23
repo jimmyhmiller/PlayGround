@@ -14,6 +14,7 @@ import { WorldError } from "./world/algebra.js";
 const USAGE = `bat — browser auto tests
 
 usage:
+  bat init [dir]              scaffold bat.config.json + world adapter + example flow
   bat check [flows...]        parse + static checks (no browser)
   bat run [flows...]          run flows; every failure gets a causal explanation
                               (what happened, reproducibility, both readings)
@@ -184,6 +185,17 @@ async function main(): Promise<number> {
       } finally {
         await browser.close();
       }
+    }
+
+    case "init": {
+      const { initProject } = await import("./init.js");
+      const target = positional[0] ? resolve(positional[0]) : cwd;
+      const result = await initProject(target);
+      for (const f of result.created) console.log(`created ${f}`);
+      for (const f of result.skipped) console.log(`skipped ${f} (already exists)`);
+      console.log("\nnext steps:");
+      for (const s of result.nextSteps) console.log(`  ${s}`);
+      return 0;
     }
 
     case "doctor": {

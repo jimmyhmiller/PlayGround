@@ -122,6 +122,25 @@ describe("parseFlow", () => {
     expect(flow.steps[1]!.action).toEqual({ type: "press", key: "Enter", target: { kind: "textbox", name: "Search" } });
   });
 
+  it("parses state effects: checked/unchecked/enabled/disabled/selected", () => {
+    const flow = parseFlow(
+      `flow "t"
+go /f
+  expect heading "F"
+check field "Paid"
+  expect checked field "Paid"
+  expect unchecked field "Pending"
+  expect enabled button "Submit"
+  expect disabled button "Reset"
+  expect selected "Lee" in field "Customer"
+`,
+      "t.flow",
+    );
+    const effects = flow.steps[1]!.effects;
+    expect(effects.map((e) => e.type)).toEqual(["checked", "unchecked", "enabled", "disabled", "selected"]);
+    expect(effects[4]).toEqual({ type: "selected", value: "Lee", target: { kind: "field", name: "Customer" } });
+  });
+
   it("parses fill with $var values and trailing-string extraction", () => {
     const flow = parseFlow(
       `flow "t"\ngo /f\n  expect heading "F"\n  let code = text in testid "code"\nfill textbox "Code" in form "redeem" $code\n  expect value $code in textbox "Code"\n`,

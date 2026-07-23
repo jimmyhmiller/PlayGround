@@ -321,7 +321,10 @@ function parseEffect(p: LineParser): Effect | null {
     if (!target) return null;
     return p.expectEnd("expect no") ? { type: "absent", target } : null;
   }
-  if (first?.t === "word" && (first.v === "appear" || first.v === "gone" || first.v === "checked" || first.v === "unchecked")) {
+  if (
+    first?.t === "word" &&
+    (first.v === "appear" || first.v === "gone" || first.v === "checked" || first.v === "unchecked" || first.v === "enabled" || first.v === "disabled")
+  ) {
     p.next();
     const target = p.parseTarget();
     if (!target) return null;

@@ -43,6 +43,7 @@ export type Effect =
   | { type: "text"; target?: Target; value: string; exact: boolean }
   | { type: "value"; target: Target; value: string }
   | { type: "checked" | "unchecked"; target: Target }
+  | { type: "enabled" | "disabled"; target: Target }
   | { type: "selected"; target: Target; value: string }
   | { type: "count"; kind: TargetKind; name?: string; n: number; within?: Target }
   | { type: "url"; path: string }
@@ -106,6 +107,8 @@ export function formatEffect(e: Effect): string {
     case "value": return `expect value "${e.value}" in ${formatTarget(e.target)}`;
     case "checked": return `expect checked ${formatTarget(e.target)}`;
     case "unchecked": return `expect unchecked ${formatTarget(e.target)}`;
+    case "enabled": return `expect enabled ${formatTarget(e.target)}`;
+    case "disabled": return `expect disabled ${formatTarget(e.target)}`;
     case "selected": return `expect selected "${e.value}" in ${formatTarget(e.target)}`;
     case "count": return `expect count ${e.kind}${e.name ? ` "${e.name}"` : ""} ${e.n}${e.within ? ` in ${formatTarget(e.within)}` : ""}`;
     case "url": return `expect url ${e.path}`;
