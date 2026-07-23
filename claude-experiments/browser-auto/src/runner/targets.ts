@@ -3,7 +3,7 @@ import type { Target } from "../dsl/ir.js";
 import { formatTarget } from "../dsl/ir.js";
 
 export class TargetError extends Error {
-  constructor(message: string, public ariaSnapshot?: string) {
+  constructor(message: string, public ariaSnapshot?: string, public target?: Target) {
     super(message);
     this.name = "TargetError";
   }
@@ -91,6 +91,7 @@ export async function resolveUnique(
       `no visible match for ${formatTarget(target)} (page: ${page.url()})\n` +
         `The page's semantic tree at failure:\n${indent(snapshot)}`,
       snapshot,
+      target,
     );
   }
   const count = await locator.count();
@@ -109,6 +110,8 @@ export async function resolveUnique(
           ? `(${exactCount} of them match the name exactly, so exact matching cannot disambiguate either.)\n`
           : "") +
         `Scope the target (e.g. 'in <container>') or use a testid.`,
+      undefined,
+      target,
     );
   }
   return locator;

@@ -6,7 +6,6 @@ import { chromium } from "playwright";
 import { globFiles, loadConfig, loadSeeds, loadWorldHandle, ConfigError } from "./config.js";
 import { parseFlow, FlowParseError } from "./dsl/parser.js";
 import { composeFlowWorld, FlowSetupError } from "./runner/executor.js";
-import { huntFlow, persistHunt } from "./runner/hunt.js";
 import { launchBrowser, replayStep, runFlowFile } from "./runner/run.js";
 import { NetworkTracker, settle } from "./runner/settle.js";
 import { renderReport } from "./runner/trace.js";
@@ -16,16 +15,15 @@ const USAGE = `bat — browser auto tests
 
 usage:
   bat check [flows...]        parse + static checks (no browser)
-  bat run [flows...]          run flows (default: all from config)
-  bat hunt <flow>             run one flow many times; prove flakiness with evidence
+  bat run [flows...]          run flows; every failure is auto-triaged
+                              (test-fault vs app-fault, with rerun evidence)
   bat replay <flow>:<step>    replay one step (add --fast to restore from checkpoint)
   bat inspect <url>           dump a page's semantic tree (write targets from ground truth)
   bat doctor                  world adapter capability level + the next rung
 options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
-  --runs <n>                  hunt: number of runs (default 20)
-conditions (run + hunt; simulated bad conditions, always recorded in traces):
+conditions (simulated bad conditions, always recorded and attributed):
   --latency <lo>-<hi>         inject lo..hi ms of latency per request
   --fail-rate <p>             fail p (0..1) of requests at the network level
   --seed <n>                  PRNG seed (required with any condition; reproducible)
@@ -41,7 +39,7 @@ async function main(): Promise<number> {
 
   const flags = new Set<string>();
   const values = new Map<string, string>();
-  const VALUE_FLAGS = new Set(["config", "runs", "latency", "fail-rate", "seed"]);
+  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed"]);
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -132,33 +130,6 @@ async function main(): Promise<number> {
         await browser.close();
       }
       return failed ? 1 : 0;
-    }
-
-    case "hunt": {
-      const file = positional[0];
-      if (!file) {
-        console.error("usage: bat hunt <flow-file> [--runs 20] [--latency 200-1500 --seed 1] [--fail-rate 0.05]");
-        return 1;
-      }
-      const cond = conditionsFromFlags();
-      const config = await loadConfig(cwd, {
-        ...(flags.has("headed") ? { headless: false } : {}),
-        ...(cond ? { conditions: cond } : {}),
-      });
-      const seeds = await loadSeeds(config);
-      const world = await loadWorldHandle(config);
-      const browser = await launchBrowser(config);
-      try {
-        const runs = values.has("runs") ? Number(values.get("runs")) : 20;
-        const deps = { config, world, seeds, browser };
-        const report = await huntFlow(resolve(file), deps, { runs });
-        const dir = await persistHunt(report, deps);
-        console.log(report.reportText);
-        console.log(`\nfull data: ${dir}/hunt.json`);
-        return report.verdict === "STABLE" ? 0 : 1;
-      } finally {
-        await browser.close();
-      }
     }
 
     case "replay": {

@@ -187,25 +187,40 @@ The replay report states which tier ran and why.
 
 ```
 bat check <flow...>     parse + static checks only (no browser)
-bat run <flow...>       run flows
-bat hunt <flow>         run one flow N times; prove flakiness with evidence
+bat run <flow...>       run flows; every failure is auto-triaged
 bat replay <flow>:<n>   atomic replay of one step
 bat inspect <url>       dump the semantic tree (roles/names/testids) of a page
 bat doctor              report world adapter capability level + next rung
 ```
 
-### bat hunt — demonstrating app inconsistency
+### Automatic failure triage
 
-`bat hunt <flow> --runs 20` runs one flow repeatedly, groups failures by
-signature (step + failed expectations + observed values), and cross-tabulates
-outcomes against **response completion order** at the failing step. When every
-completion order maps to exactly one outcome, the report says so plainly:
+Any time a run fails, bat answers the question a human would otherwise spend an
+afternoon on: **is the TEST faulty, or is the APP faulty?** A `diagnosis`
+section is appended to every failure report.
 
-```
-⚑ the outcome is FULLY DETERMINED by response completion order. This is not a
-  test problem: the app renders different results depending on which response
-  lands last — a race in the app.
-```
+The epistemics: bat holds the world (seeded, fingerprinted), the timing
+(event-driven settlement), and the steps constant. So the diagnosis engine can
+actually *prove* things:
+
+1. **Fast paths** (no reruns): an ambiguous target is always a test fault;
+   a target that doesn't exist but nearly matches something in the page's
+   semantic tree (or testid list) gets a *did-you-mean* and is classified a
+   likely test fault.
+2. **Determinism check**: the flow is rerun N times (config `diagnoseReruns`,
+   default 4) under identical conditions.
+   - **Reruns disagree → THE APP IS FAULTY (nondeterministic).** Variance
+     cannot come from the test — bat held everything else constant. Outcomes
+     are cross-tabulated against response completion order at the failing
+     step; when order fully determines the outcome, the report states "a race
+     in the app" with the numbers.
+   - **All reruns fail identically → not flakiness.** With a did-you-mean, it's
+     a test fault; otherwise: "THE APP CONSISTENTLY BEHAVES DIFFERENTLY THAN
+     THE FLOW EXPECTS" — the app regressed or the expectation is stale, and
+     rerunning will never change the outcome.
+3. **Conditions check**: when simulated bad conditions are active and every
+   conditioned rerun fails, one clean rerun runs without them. If it passes,
+   the verdict is **CHAOS-INDUCED** — an app resilience gap, not a test issue.
 
 ### Simulated bad conditions
 

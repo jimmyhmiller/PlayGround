@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import { parseFlow } from "../dsl/parser.js";
 import type { Flow } from "../dsl/ir.js";
+import { diagnoseFailure } from "./diagnose.js";
 import type { Seed } from "../world/types.js";
 import type { BatConfig } from "../config.js";
 import { composeFlowWorld, prepareContext, runSteps } from "./executor.js";
@@ -31,13 +32,21 @@ export interface RunResult {
   reportPath: string;
 }
 
-export async function runFlowFile(file: string, deps: RunDeps): Promise<RunResult> {
-  const source = await readFile(file, "utf8");
-  const flow = parseFlow(source, file);
-  return runFlow(flow, deps);
+export interface RunFlowOptions {
+  /** triage failures automatically (test-fault vs app-fault). Default true. */
+  diagnose?: boolean;
+  /** write trace/report/checkpoints under .bat/runs. Default true. */
+  persist?: boolean;
 }
 
-export async function runFlow(flow: Flow, deps: RunDeps): Promise<RunResult> {
+export async function runFlowFile(file: string, deps: RunDeps, options: RunFlowOptions = {}): Promise<RunResult> {
+  const source = await readFile(file, "utf8");
+  const flow = parseFlow(source, file);
+  return runFlow(flow, deps, options);
+}
+
+export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions = {}): Promise<RunResult> {
+  const { diagnose = true, persist = true } = options;
   const { config, world, seeds, browser } = deps;
   const description = composeFlowWorld(flow, seeds);
   let verification: FlowTrace["worldVerification"] = null;
@@ -48,10 +57,11 @@ export async function runFlow(flow: Flow, deps: RunDeps): Promise<RunResult> {
 
   const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const runDir = join(config.root, ".bat", "runs", slug(flow.file), runId);
-  await mkdir(runDir, { recursive: true });
+  if (persist) await mkdir(runDir, { recursive: true });
 
   const context = await browser.newContext({ baseURL: config.baseUrl });
   const page = await context.newPage();
+  let trace: FlowTrace;
   try {
     const baseOpts = {
       baseUrl: config.baseUrl,
@@ -62,28 +72,42 @@ export async function runFlow(flow: Flow, deps: RunDeps): Promise<RunResult> {
     };
     const env = await prepareContext(context, page, flow, baseOpts);
 
-    const trace = await runSteps(
+    trace = await runSteps(
       flow,
       context,
       page,
       {
         ...baseOpts,
-        onCheckpoint: async (cp: Checkpoint) => {
-          await writeFile(join(runDir, `checkpoint-${cp.step}.json`), JSON.stringify(cp), "utf8");
-        },
+        ...(persist
+          ? {
+              onCheckpoint: async (cp: Checkpoint) => {
+                await writeFile(join(runDir, `checkpoint-${cp.step}.json`), JSON.stringify(cp), "utf8");
+              },
+            }
+          : {}),
       },
       env,
       { fingerprint: description?.fingerprint ?? null, verification },
     );
+  } finally {
+    await context.close();
+  }
 
+  // Every failure gets triaged: is the TEST faulty or is the APP faulty?
+  if (trace.status === "fail" && diagnose) {
+    trace.diagnosis = await diagnoseFailure(flow, trace, {
+      ...deps,
+      rerun: async (rerunDeps) => (await runFlow(flow, rerunDeps, { diagnose: false, persist: false })).trace,
+    });
+  }
+
+  if (persist) {
     const report = renderReport(trace);
     await writeFile(join(runDir, "trace.json"), JSON.stringify(trace, null, 2), "utf8");
     await writeFile(join(runDir, "report.txt"), report, "utf8");
     await writeFile(join(config.root, ".bat", "runs", slug(flow.file), "latest"), runId, "utf8");
-    return { trace, runDir, reportPath: join(runDir, "report.txt") };
-  } finally {
-    await context.close();
   }
+  return { trace, runDir, reportPath: join(runDir, "report.txt") };
 }
 
 export interface ReplayOptions {

@@ -1,5 +1,6 @@
-/** Run one flow (or a hunt) against the fixture and print the full report.
- * Usage: npx tsx scripts/debug-once.ts <flow-file> [hunt-runs]
+/** Run one flow against the fixture and print the full report (failures are
+ * auto-diagnosed: test-fault vs app-fault, with rerun evidence).
+ * Usage: npx tsx scripts/debug-once.ts <flow-file>
  */
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,14 +10,12 @@ import { chromium } from "playwright";
 import { startShopServer } from "../fixtures/shop/server.js";
 import { world } from "../fixtures/shop/world.js";
 import { runFlowFile } from "../src/runner/run.js";
-import { huntFlow } from "../src/runner/hunt.js";
 import { localWorldHandle } from "../src/runner/world-handle.js";
 import { loadSeeds, type BatConfig } from "../src/config.js";
 import { renderReport } from "../src/runner/trace.js";
 
 const BASE = join(dirname(fileURLToPath(import.meta.url)), "..");
 const flowFile = process.argv[2]!;
-const huntRuns = process.argv[3] ? Number(process.argv[3]) : 0;
 
 process.env.BAT_TEST = "1";
 const shop = await startShopServer();
@@ -34,13 +33,8 @@ const config: BatConfig = {
 const seeds = await loadSeeds(config);
 const deps = { config, world: localWorldHandle(world), seeds, browser };
 
-if (huntRuns > 0) {
-  const report = await huntFlow(join(BASE, flowFile), deps, { runs: huntRuns });
-  console.log(report.reportText);
-} else {
-  const { trace } = await runFlowFile(join(BASE, flowFile), deps);
-  console.log(renderReport(trace));
-}
+const { trace } = await runFlowFile(join(BASE, flowFile), deps);
+console.log(renderReport(trace));
 await browser.close();
 await shop.close();
 process.exit(0);

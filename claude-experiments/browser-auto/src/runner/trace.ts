@@ -1,5 +1,7 @@
-import type { Effect, Step } from "../dsl/ir.js";
+import type { Effect, Step, Target } from "../dsl/ir.js";
 import { formatEffect } from "../dsl/ir.js";
+import type { Diagnosis } from "./diagnose.js";
+import { renderDiagnosis } from "./diagnose.js";
 import type { ObservedRequest } from "./settle.js";
 
 export interface EffectVerdict {
@@ -37,6 +39,10 @@ export interface StepTrace {
   /** populated on failure */
   failure?: string;
   ariaSnapshot?: string;
+  /** the unresolved action target, when the action itself failed */
+  failedTarget?: Target;
+  /** data-testids present on the page at failure time */
+  testids?: string[];
   durationMs: number;
 }
 
@@ -50,6 +56,8 @@ export interface FlowTrace {
   conditions: { latencyMs?: [number, number]; failRate?: number; seed: number } | null;
   status: "pass" | "fail";
   steps: StepTrace[];
+  /** automatic failure triage: test-fault vs app-fault, with evidence */
+  diagnosis?: Diagnosis;
 }
 
 export interface Checkpoint {
@@ -140,6 +148,10 @@ export function renderReport(trace: FlowTrace): string {
       out.push("");
       out.push(`  replay just this step: bat replay ${trace.file}:${s.index + 1}`);
     }
+  }
+  if (trace.diagnosis) {
+    out.push("");
+    out.push(renderDiagnosis(trace.diagnosis));
   }
   return out.join("\n");
 }

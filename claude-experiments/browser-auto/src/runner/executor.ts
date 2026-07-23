@@ -308,6 +308,7 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
   } catch (e) {
     trace.status = "fail";
     trace.failure = e instanceof Error ? e.message : String(e);
+    if (e instanceof TargetError && e.target) trace.failedTarget = e.target;
     if (e instanceof TargetError && e.ariaSnapshot) trace.ariaSnapshot = e.ariaSnapshot;
     else trace.ariaSnapshot = await ariaSnapshotSafe(page);
   } finally {
@@ -320,6 +321,11 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
   trace.postUrl = page.url();
   trace.requests = [...tracker.observed];
   if (ctx.engine) for (const rec of trace.requests) ctx.engine.annotate(rec);
+  if (trace.status === "fail") {
+    trace.testids = await page
+      .$$eval("[data-testid]", (els) => els.map((el) => el.getAttribute("data-testid")).filter((x): x is string => x !== null))
+      .catch(() => []);
+  }
   trace.durationMs = Date.now() - started;
   return trace;
 }

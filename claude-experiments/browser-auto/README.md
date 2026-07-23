@@ -48,10 +48,14 @@ Key mechanics:
 - **Failures are stories**: what was expected, what was observed, the network
   during the step (with response completion order), the page's semantic tree,
   and the exact replay command.
-- **`bat hunt` proves app flakiness.** Run a flow N times; failures are grouped
-  by signature and cross-tabbed against response completion order — when the
-  outcome is fully determined by which response landed last, the report says
-  "this is a race in the app," with the numbers to back it.
+- **Every failure is auto-triaged: test fault or app fault.** On any failing
+  run, bat reruns the flow under identical conditions (same seeded world, same
+  event-driven timing). Reruns that disagree *prove* the app is
+  nondeterministic — cross-tabbed against response completion order, "a race
+  in the app" comes with numbers. Identical failures are classified: a
+  near-miss target name gets a did-you-mean (test fault); otherwise "the app
+  consistently behaves differently than the flow expects — this is not
+  flakiness." Chaos-induced failures are separated by a clean rerun.
 - **Simulated bad conditions** (seeded latency / failure injection via
   `--latency`, `--fail-rate`, `--seed`) are recorded in every trace and
   attributed per request — a chaos-induced failure can never masquerade as a
@@ -71,9 +75,9 @@ npx tsx scripts/gauntlet.ts 15
 # invariant: injected latency alone must never fail a flow
 npx tsx scripts/chaos-gauntlet.ts 10 42
 
-# hunt a genuinely buggy page (fire-and-forget refetch race) and watch bat
-# PROVE the app is inconsistent, with a completion-order cross-tab
-npx tsx scripts/debug-once.ts fixtures/shop/e2e/flaky/flaky-cart.flow 24
+# run a genuinely buggy page (fire-and-forget refetch race); on failure the
+# report ends with a diagnosis PROVING the app is inconsistent (order cross-tab)
+npx tsx scripts/debug-once.ts fixtures/shop/e2e/flaky/flaky-cart.flow
 
 # CLI against the fixture shop
 npx tsx fixtures/shop/serve.ts &        # starts the app on :4173 with BAT_TEST=1

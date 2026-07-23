@@ -14,6 +14,8 @@ export interface BatConfig {
   headless: boolean;
   /** simulated bad conditions (seeded latency / failure injection) */
   conditions?: { latencyMs?: [number, number]; failRate?: number; seed: number };
+  /** automatic reruns used to triage a failure (default 4; 0 = fast-path checks only) */
+  diagnoseReruns?: number;
   /** resolved project root (dir containing bat.config.json) */
   root: string;
 }
@@ -69,6 +71,7 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
     stepBudgetMs: typeof parsed.stepBudgetMs === "number" ? parsed.stepBudgetMs : DEFAULTS.stepBudgetMs,
     headless: typeof parsed.headless === "boolean" ? parsed.headless : DEFAULTS.headless,
     ...(conditions ? { conditions } : {}),
+    ...(typeof parsed.diagnoseReruns === "number" ? { diagnoseReruns: parsed.diagnoseReruns } : {}),
     root: cwd,
     ...overrides,
   };
