@@ -1,0 +1,97 @@
+; selfhost/src/metashim_wasm.coil — the WASM variant of the compiled-metaprogram
+; boundary shim (see metashim.coil for the native, vtable-based one).
+;
+; When the compiler is itself hosted in wasm, a metaprogram is compiled to a wasm
+; SIDE-MODULE (codegen_wasm side-module mode) that the host instantiates sharing the
+; compiler instance's linear memory. There is no in-process vtable to call through:
+; instead each code-op callback is an ENV IMPORT (`env.mh_*`) that the host bridges
+; to the compiler instance's exported `mh_*` (metahost.coil). So the mp-* wrappers
+; below are byte-for-byte the same surface metalower.coil targets (module tag
+; "metashim"), but their bodies call the imported mh_* directly rather than through
+; (mp-vt). The slice split stays INTERNAL to the side-module (mp-sdata / mp-slen), so
+; every env boundary is raw scalar (ptr/i64/f64) — matching metahost's mh_* exactly.
+;
+; meta-sub-forms injects THIS module (not metashim.coil) when the wasm meta runner is
+; active; metaengine builds the side-module and calls the entry via `meta_run_wasm`.
+; RULES (same as metashim.coil): no imports; everything crossing the boundary is
+; (ptr …)/i64/f64; a `Code` value is an opaque (ptr i8) handle into compiler memory.
+(module metashim)
+
+; ---- the host code-op callbacks, as env imports (bridged to metahost mh_*) ------
+; Declared but not defined ⇒ codegen_wasm emits each as `env.<name>` (raw scalars).
+(extern mh_arg_new   :cc c [] (-> (ptr i8)))
+(extern mh_arg_c     :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern mh_arg_i     :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern mh_arg_s     :cc c [(ptr i8) (ptr u8) i64] (-> (ptr i8)))
+(extern mh_arg_b     :cc c [(ptr i8) i64] (-> (ptr i8)))
+(extern mh_arg_f     :cc c [(ptr i8) f64] (-> (ptr i8)))
+(extern mh_op_i      :cc c [i64 (ptr i8)] (-> i64))
+(extern mh_op_h      :cc c [i64 (ptr i8)] (-> (ptr i8)))
+(extern mh_op_s      :cc c [i64 (ptr i8)] (-> (ptr i8)))
+(extern mh_quoted    :cc c [i64] (-> (ptr i8)))
+(extern mh_qq_new    :cc c [] (-> (ptr i8)))
+(extern mh_qq_push   :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern mh_qq_splice :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern mh_qq_list   :cc c [(ptr i8)] (-> (ptr i8)))
+(extern mh_qq_listq  :cc c [(ptr i8)] (-> (ptr i8)))
+(extern mh_qq_vec    :cc c [(ptr i8)] (-> (ptr i8)))
+(extern mh_unq_int   :cc c [i64] (-> (ptr i8)))
+(extern mh_unq_bool  :cc c [i64] (-> (ptr i8)))
+(extern mh_unq_float :cc c [f64] (-> (ptr i8)))
+(extern mh_unq_str   :cc c [(ptr u8) i64] (-> (ptr i8)))
+(extern mh_fail      :cc c [i64] (-> i64))
+
+; No-op vtable handshake: metalower always lists metashim.mp-init as an export-c
+; entry (coil_mp_init); in wasm there is no vtable to install, and the host calls the
+; coil_mp_<k> entries directly, so this exists only to satisfy the export.
+(defn mp-init [(vt (ptr i8))] (-> i64) 0)
+
+; String results: host-owned {ptr,len} (layout mirrored in metahost.coil MetaBuf).
+(defstruct MetaBuf [(p (ptr u8)) (n i64)])
+
+; ---- slice primitives (u8-only copies of lib/slice.coil) ---------------------
+(defn mp-sdata [(s (slice u8))] (-> (ptr u8))
+  (llvm-ir (ptr u8) [s] "%d = extractvalue $t0 $0, 0
+ret $ret %d"))
+(defn mp-slen [(s (slice u8))] (-> i64)
+  (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
+ret $ret %l"))
+(defn mp-mkslice [(p (ptr u8)) (n i64)] (-> (slice u8))
+  (llvm-ir (slice u8) [p n]
+    "%s0 = insertvalue $ret undef, $t0 $0, 0
+%s1 = insertvalue $ret %s0, $t1 $1, 1
+ret $ret %s1"))
+(defn mp-buf->str [(r (ptr i8))] (-> (slice u8))
+  (let [b (cast (ptr MetaBuf) r)]
+    (mp-mkslice (load (field b p)) (load (field b n)))))
+
+; ---- code-op argument builder -------------------------------------------------
+(defn mp-arg-new [] (-> (ptr i8)) (mh_arg_new))
+(defn mp-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh_arg_c b c))
+(defn mp-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8)) (mh_arg_i b v))
+(defn mp-arg-s [(b (ptr i8)) (s (slice u8))] (-> (ptr i8)) (mh_arg_s b (mp-sdata s) (mp-slen s)))
+(defn mp-arg-b [(b (ptr i8)) (v bool)] (-> (ptr i8)) (mh_arg_b b (if v 1 0)))
+(defn mp-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8)) (mh_arg_f b x))
+
+; ---- run an op (result shape = codeop-rty, known statically per op) -----------
+(defn mp-op-int  [(op i64) (b (ptr i8))] (-> i64) (mh_op_i op b))
+(defn mp-op-bool [(op i64) (b (ptr i8))] (-> bool) (icmp-ne (mh_op_i op b) 0))
+(defn mp-op-code [(op i64) (b (ptr i8))] (-> (ptr i8)) (mh_op_h op b))
+(defn mp-op-str  [(op i64) (b (ptr i8))] (-> (slice u8)) (mp-buf->str (mh_op_s op b)))
+
+; ---- quote / quasiquote -------------------------------------------------------
+(defn mp-quoted [(k i64)] (-> (ptr i8)) (mh_quoted k))
+(defn mp-qq-new [] (-> (ptr i8)) (mh_qq_new))
+(defn mp-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh_qq_push b c))
+(defn mp-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh_qq_splice b c))
+(defn mp-qq-list [(b (ptr i8))] (-> (ptr i8)) (mh_qq_list b))
+(defn mp-qq-listq [(b (ptr i8))] (-> (ptr i8)) (mh_qq_listq b))
+(defn mp-qq-vec [(b (ptr i8))] (-> (ptr i8)) (mh_qq_vec b))
+(defn mp-unq-int [(v i64)] (-> (ptr i8)) (mh_unq_int v))
+(defn mp-unq-bool [(v bool)] (-> (ptr i8)) (mh_unq_bool (if v 1 0)))
+(defn mp-unq-float [(x f64)] (-> (ptr i8)) (mh_unq_float x))
+(defn mp-unq-str [(s (slice u8))] (-> (ptr i8)) (mh_unq_str (mp-sdata s) (mp-slen s)))
+
+; ---- interpreter-parity runtime failures --------------------------------------
+(defn mp-parity-fail [(code i64)] (-> (ptr i8))
+  (do (mh_fail code) (cast (ptr i8) 0)))
