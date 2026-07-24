@@ -21,8 +21,9 @@ usage:
   bat replay <flow>:<step>    replay one step (add --fast to restore from checkpoint)
   bat inspect <url>           dump a page's semantic tree (write targets from ground truth)
   bat doctor                  world adapter capability level + the next rung
+  bat watch                   rerun affected flows when e2e files change
   bat ui                      local viewer for runs: steps, verdicts, network,
-                              screenshots, explanations, one-click replay
+                              screenshots, explanations, diffs, one-click replay
 options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
@@ -201,6 +202,17 @@ async function main(): Promise<number> {
       } finally {
         await browser.close();
       }
+    }
+
+    case "watch": {
+      const cond = conditionsFromFlags();
+      const config = await loadConfig(cwd, {
+        ...(flags.has("headed") ? { headless: false } : {}),
+        ...(cond ? { conditions: cond } : {}),
+      });
+      const browser = await launchBrowser(config);
+      const { watchFlows } = await import("./watch.js");
+      return await watchFlows(config, browser);
     }
 
     case "ui": {

@@ -53,8 +53,8 @@ async function loadRuns() {
 }
 
 async function openRun(slug, id) {
-  const { trace, report } = await (await fetch(`/api/trace?flow=${slug}&run=${id}`)).json();
-  current = { slug, id, trace };
+  const { trace, report, reruns } = await (await fetch(`/api/trace?flow=${slug}&run=${id}`)).json();
+  current = { slug, id, trace, reruns: reruns ?? [] };
 
   const header = el(
     "div",
@@ -101,7 +101,82 @@ async function openRun(slug, id) {
     el("pre", { class: "reportpre" }, report),
   );
 
-  $main.replaceChildren(header, explanation ?? "", ...steps, rawReport);
+  const diff = trace.status === "fail" && current.reruns.length ? renderDiffPicker(trace) : null;
+
+  $main.replaceChildren(header, explanation ?? "", diff ?? "", ...steps, rawReport);
+}
+
+/* ------- run-vs-rerun diff (the reruns bat took while explaining) ------- */
+
+function renderDiffPicker(trace) {
+  const wrap = el("div", { class: "explanation diff-wrap" });
+  const passing = current.reruns.filter((r) => r.status === "pass");
+  const failing = current.reruns.filter((r) => r.status !== "pass");
+  const label = el(
+    "h3",
+    {},
+    `compare with a rerun `,
+    el("span", { class: "dim" }, `(bat reran this flow ${current.reruns.length}× while explaining — ${passing.length} reached the expected state)`),
+  );
+  const out = el("div");
+  const buttons = current.reruns.map((r, i) =>
+    el(
+      "button",
+      {
+        class: "replay",
+        onclick: async () => {
+          const rerun = await (await fetch(`/api/rerun?flow=${current.slug}&run=${current.id}&name=${r.name}`)).json();
+          out.replaceChildren(renderDiff(trace, rerun, r));
+        },
+      },
+      el("span", { class: `dot ${r.status}` }),
+      ` rerun ${i + 1} (${r.status})`,
+    ),
+  );
+  wrap.append(label, el("div", { class: "diff-buttons" }, ...buttons), out);
+  return wrap;
+}
+
+function stepSummary(s) {
+  if (!s || s.status === "not-run") return { order: "—", effects: [], duration: null };
+  const order = (s.requests ?? [])
+    .filter((r) => r.finishSeq != null && r.resourceType !== "document")
+    .sort((a, b) => a.finishSeq - b.finishSeq)
+    .map((r) => `${r.method} ${new URL(r.url).pathname}`)
+    .join(" → ");
+  return { order: order || "(no api traffic)", effects: s.effects ?? [], duration: s.durationMs };
+}
+
+function renderDiff(trace, rerun, meta) {
+  const failIdx = trace.steps.findIndex((s) => s.status === "fail");
+  const a = stepSummary(trace.steps[failIdx]);
+  const b = stepSummary(rerun.steps[failIdx]);
+  const orderDiffers = a.order !== b.order;
+
+  const col = (title, status, sum) =>
+    el(
+      "div",
+      { class: "diff-col" },
+      el("h4", {}, title, el("span", { class: `badge ${status}` }, status.toUpperCase())),
+      el("div", { class: "section-label" }, "response completion order"),
+      el("div", { class: `order ${orderDiffers ? "differs" : ""}` }, sum.order),
+      el("div", { class: "section-label" }, "effects"),
+      ...sum.effects.map((e) =>
+        el("div", { class: `effect ${e.pass ? "pass" : "fail"}` }, e.rendered, e.observed && !e.pass ? el("span", { class: "observed" }, `observed: ${e.observed}`) : null),
+      ),
+      sum.duration != null ? el("div", { class: "section-label" }, `step duration: ${sum.duration}ms`) : null,
+    );
+
+  return el(
+    "div",
+    {},
+    el(
+      "div",
+      { class: "section-label" },
+      `step ${failIdx + 1} — ${trace.steps[failIdx]?.source ?? ""}` + (orderDiffers ? "  ·  completion order DIFFERS between the runs" : "  ·  completion order identical — the difference is elsewhere"),
+    ),
+    el("div", { class: "diff-grid" }, col("this run", trace.status, a), col(`rerun (${meta.status})`, rerun.status, b)),
+  );
 }
 
 function renderStep(s, trace) {

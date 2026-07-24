@@ -69,3 +69,11 @@ button.replay:hover { background: color-mix(in srgb, var(--accent) 10%, transpar
 button.replay:disabled { opacity: .5; cursor: wait; }
 .replay-out { margin-top: 10px; }
 details.sub > summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+
+.diff-buttons { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px; }
+.diff-buttons .dot { display: inline-block; }
+.diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; }
+.diff-col { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--bg); min-width: 0; }
+.diff-col h4 { margin: 0 0 4px; font-size: 13px; }
+.order { font-family: var(--mono); font-size: 12.5px; padding: 4px 8px; border-radius: 5px; background: var(--panel); }
+.order.differs { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); }

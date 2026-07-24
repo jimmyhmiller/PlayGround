@@ -69,7 +69,27 @@ export async function startUiServer(config: BatConfig, port: number): Promise<Se
           const dir = join(config.root, ".bat", "runs", slug, id);
           const trace = JSON.parse(await readFile(join(dir, "trace.json"), "utf8")) as FlowTrace;
           const report = await readFile(join(dir, "report.txt"), "utf8").catch(() => renderReport(trace));
-          return json(200, { trace, report });
+          const reruns: Array<{ name: string; status: string }> = [];
+          for (const name of (await readdir(join(dir, "reruns")).catch(() => [] as string[])).sort()) {
+            if (!SAFE.test(name) || !name.endsWith(".json")) continue;
+            try {
+              const rt = JSON.parse(await readFile(join(dir, "reruns", name), "utf8")) as FlowTrace;
+              reruns.push({ name, status: rt.status });
+            } catch {
+              // partial file
+            }
+          }
+          return json(200, { trace, report, reruns });
+        }
+        if (url.pathname === "/api/rerun") {
+          const slug = url.searchParams.get("flow") ?? "";
+          const id = url.searchParams.get("run") ?? "";
+          const name = basename(url.searchParams.get("name") ?? "");
+          if (!SAFE.test(slug) || !SAFE.test(id) || !SAFE.test(name) || !name.endsWith(".json")) {
+            return json(400, { error: "bad params" });
+          }
+          const rt = JSON.parse(await readFile(join(config.root, ".bat", "runs", slug, id, "reruns", name), "utf8")) as FlowTrace;
+          return json(200, rt);
         }
         if (url.pathname === "/api/artifact") {
           const slug = url.searchParams.get("flow") ?? "";
