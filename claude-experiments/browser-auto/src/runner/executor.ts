@@ -284,11 +284,17 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     const armedEffects = step.effects.filter((e) => e.type === "appear" || e.type === "gone");
     for (const eff of [...instant, ...armedEffects]) {
       let verdict = await evaluateEffect(eff, ctx, armed, remaining);
-      while (!verdict.pass && eff.type !== "request" && remaining() > 100) {
+      // Keep the most INFORMATIVE failing verdict: a re-evaluation running as
+      // the budget expires can have its read starved ("element not found"
+      // with a ~1ms timeout) — that must never overwrite a concrete earlier
+      // observation. The explanation's quality may not depend on load.
+      let informative = verdict;
+      while (!verdict.pass && eff.type !== "request" && remaining() > 500) {
         await ctx.hub.waitForNextTick(Math.min(250, remaining()));
         verdict = await evaluateEffect(eff, ctx, armed, remaining);
+        if (verdict.pass || !isStarvedRead(verdict)) informative = verdict;
       }
-      verdicts.set(eff, verdict);
+      verdicts.set(eff, verdict.pass ? verdict : informative);
     }
     for (const eff of step.effects) {
       const verdict = verdicts.get(eff)!;
@@ -512,4 +518,10 @@ async function evaluateEffect(
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/** a failure whose read itself was cut off by an exhausted budget — carries
+ * no information about the page, only about the clock */
+function isStarvedRead(v: EffectVerdict): boolean {
+  return v.observed !== undefined && (v.observed.includes("(element not found)") || v.observed.includes("(no input found)"));
 }

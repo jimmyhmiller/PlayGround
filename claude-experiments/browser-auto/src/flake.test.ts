@@ -1,5 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser } from "playwright";
@@ -14,6 +13,7 @@ import { loadSeeds, type BatConfig } from "./config.js";
 import type { RunDeps } from "./runner/run.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "shop");
+const REPO_RUNS = join(dirname(fileURLToPath(import.meta.url)), "..", ".bat-test-runs");
 const FLAKY_CART = join(FIXTURE, "e2e/flaky/flaky-cart.flow");
 const BUY_FLOW = join(FIXTURE, "e2e/flows/buy.flow");
 
@@ -24,9 +24,12 @@ let deps: RunDeps;
 
 beforeAll(async () => {
   process.env.BAT_TEST = "1";
+  await mkdir(REPO_RUNS, { recursive: true });
   shop = await startShopServer();
   browser = await chromium.launch({ headless: true });
-  const root = await mkdtemp(join(tmpdir(), "bat-flake-"));
+  // flow traces/reports persist under the repo (gitignored), never OS temp:
+  // a failure must remain identifiable after the run — see vitest.config.ts
+  const root = await mkdtemp(join(REPO_RUNS, "bat-flake-"));
   baseConfig = {
     baseUrl: shop.url,
     world: { module: join(FIXTURE, "world.ts") },
