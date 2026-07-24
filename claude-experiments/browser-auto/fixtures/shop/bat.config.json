@@ -1,6 +1,10 @@
 {
-  "baseUrl": "http://localhost:4173",
-  "world": { "http": "http://localhost:4173/api/__bat" },
+  "baseUrl": "http://localhost:{port}",
+  "world": { "http": "http://localhost:{port}/api/__bat" },
+  "app": {
+    "command": "npx tsx serve.ts",
+    "env": { "BAT_TEST": "1" }
+  },
   "seeds": "./e2e/world/*.seed.ts",
   "flows": "./e2e/flows/**/*.flow",
   "stepBudgetMs": 10000,

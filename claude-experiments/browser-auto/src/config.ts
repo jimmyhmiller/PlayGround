@@ -16,6 +16,10 @@ export interface BatConfig {
   conditions?: { latencyMs?: [number, number]; failRate?: number; seed: number };
   /** automatic reruns used to triage a failure (default 4; 0 = fast-path checks only) */
   rerunsOnFailure?: number;
+  /** parallel workers (default 1). >1 requires an `app` spec — isolation is structural. */
+  workers?: number;
+  /** how bat launches an isolated app instance per worker; {port}/{index} substitute */
+  app?: { command: string; readyUrl?: string; env?: Record<string, string>; startupTimeoutMs?: number };
   /** resolved project root (dir containing bat.config.json) */
   root: string;
 }
@@ -72,8 +76,25 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
     headless: typeof parsed.headless === "boolean" ? parsed.headless : DEFAULTS.headless,
     ...(conditions ? { conditions } : {}),
     ...(typeof parsed.rerunsOnFailure === "number" ? { rerunsOnFailure: parsed.rerunsOnFailure } : {}),
+    ...(typeof parsed.workers === "number" ? { workers: parsed.workers } : {}),
+    ...(parsed.app && typeof (parsed.app as { command?: unknown }).command === "string"
+      ? { app: parsed.app as NonNullable<BatConfig["app"]> }
+      : {}),
     root: cwd,
     ...overrides,
+  };
+}
+
+/** Per-worker view of the config: {port}/{index} resolved in baseUrl and world.http. */
+export function resolveWorkerConfig(config: BatConfig, vars: { port: number; index: number }): BatConfig {
+  const sub = (s: string) => s.replace(/\{port\}/g, String(vars.port)).replace(/\{index\}/g, String(vars.index));
+  return {
+    ...config,
+    baseUrl: sub(config.baseUrl),
+    world: {
+      ...config.world,
+      ...(config.world.http ? { http: sub(config.world.http) } : {}),
+    },
   };
 }
 
@@ -81,7 +102,13 @@ function stripJsonComments(s: string): string {
   return s.replace(/^\s*\/\/.*$/gm, "");
 }
 
-export async function loadWorldHandle(config: BatConfig): Promise<WorldHandle> {
+export interface WorkerEnvInfo {
+  index: number;
+  baseUrl: string;
+  port: number | null;
+}
+
+export async function loadWorldHandle(config: BatConfig, workerEnv?: WorkerEnvInfo): Promise<WorldHandle> {
   if (config.world.http) return httpWorldHandle(config.world.http);
   const modPath = isAbsolute(config.world.module!) ? config.world.module! : resolve(config.root, config.world.module!);
   let mod: Record<string, unknown>;
@@ -90,9 +117,17 @@ export async function loadWorldHandle(config: BatConfig): Promise<WorldHandle> {
   } catch (e) {
     throw new ConfigError(`could not import world module ${modPath}: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const adapter = (mod.default ?? mod.world) as WorldAdapter | undefined;
+  // per-worker isolation: a module may export createWorld(env) to bind each
+  // worker slot to its own isolated state (db name, server instance, …)
+  const factory = mod.createWorld;
+  let adapter: WorldAdapter | undefined;
+  if (typeof factory === "function") {
+    adapter = (await factory(workerEnv ?? { index: 0, baseUrl: config.baseUrl, port: null })) as WorldAdapter;
+  } else {
+    adapter = (mod.default ?? mod.world) as WorldAdapter | undefined;
+  }
   if (!adapter || adapter.kind !== "bat.world") {
-    throw new ConfigError(`${modPath} must default-export defineWorld(...) (got ${typeof adapter})`);
+    throw new ConfigError(`${modPath} must default-export defineWorld(...) or export createWorld(env) (got ${typeof adapter})`);
   }
   return localWorldHandle(adapter);
 }

@@ -10,10 +10,8 @@ import type { FactRow } from "../../../../src/world/types.js";
  * Sessions are minted through the app's real NextAuth credentials endpoints.
  */
 
-const POSTGRES_URL = process.env.POSTGRES_URL ?? "postgres://jimmyhmiller@localhost:5432/bat_dashboard";
-const APP_URL = process.env.BAT_APP_URL ?? "http://localhost:3000";
-
-const sql = postgres(POSTGRES_URL, { max: 2 });
+const DEFAULT_POSTGRES_URL = process.env.POSTGRES_URL ?? "postgres://jimmyhmiller@localhost:5432/bat_dashboard";
+const DEFAULT_APP_URL = process.env.BAT_APP_URL ?? "http://localhost:3000";
 
 /** deterministic uuid from a fact key — same world description, same ids */
 function keyUuid(kind: string, key: string): string {
@@ -21,23 +19,24 @@ function keyUuid(kind: string, key: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** credentials captured at install time so session() can log in for real */
-const installedUsers = new Map<string, { email: string; password: string }>();
-
 const TABLES = ["invoices", "customers", "users", "revenue"] as const;
 
-async function dumpAll(): Promise<Record<string, unknown[]>> {
-  const out: Record<string, unknown[]> = {};
-  for (const t of TABLES) {
-    out[t] = await sql`SELECT * FROM ${sql(t)} ORDER BY 1`;
+export function buildWorld(sql: ReturnType<typeof postgres>, APP_URL: string) {
+  /** credentials captured at install time so session() can log in for real */
+  const installedUsers = new Map<string, { email: string; password: string }>();
+
+  async function dumpAll(): Promise<Record<string, unknown[]>> {
+    const out: Record<string, unknown[]> = {};
+    for (const t of TABLES) {
+      out[t] = await sql`SELECT * FROM ${sql(t)} ORDER BY 1`;
+    }
+    return out;
   }
-  return out;
-}
 
-const snapshots = new Map<string, Record<string, unknown[]>>();
-let snapshotCounter = 0;
+  const snapshots = new Map<string, Record<string, unknown[]>>();
+  let snapshotCounter = 0;
 
-export default defineWorld({
+  return defineWorld({
   reset: async () => {
     await sql`TRUNCATE invoices, customers, users, revenue`;
     installedUsers.clear();
@@ -195,3 +194,36 @@ export default defineWorld({
     }
   },
 });
+}
+
+export default buildWorld(postgres(DEFAULT_POSTGRES_URL, { max: 2 }), DEFAULT_APP_URL);
+
+/**
+ * Per-worker isolation for `bat run --workers N`: each worker slot gets its
+ * OWN database (bat_dashboard_w<index>), created and migrated on first use.
+ * The app instance for that worker is pointed at the same database via the
+ * POSTGRES_URL in bat.config.json's app.env ({index} substitution).
+ */
+export async function createWorld(env: { index: number; baseUrl: string }) {
+  const dbName = `bat_dashboard_w${env.index}`;
+  const admin = postgres("postgres://jimmyhmiller@localhost:5432/postgres", { max: 1 });
+  try {
+    await admin.unsafe(`CREATE DATABASE ${dbName}`);
+  } catch (e) {
+    if (!(e instanceof Error && "code" in e && (e as { code?: string }).code === "42P04")) throw e; // 42P04 = already exists
+  } finally {
+    await admin.end();
+  }
+  const sql = postgres(`postgres://jimmyhmiller@localhost:5432/${dbName}`, { max: 2, onnotice: () => {} });
+  await sql`CREATE TABLE IF NOT EXISTS users (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    name VARCHAR(255) NOT NULL, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL)`;
+  await sql`CREATE TABLE IF NOT EXISTS customers (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    name VARCHAR(255) NOT NULL, email VARCHAR(255) NOT NULL, image_url VARCHAR(255) NOT NULL)`;
+  await sql`CREATE TABLE IF NOT EXISTS invoices (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    customer_id UUID NOT NULL, amount INT NOT NULL, status VARCHAR(255) NOT NULL, date DATE NOT NULL)`;
+  await sql`CREATE TABLE IF NOT EXISTS revenue (month VARCHAR(4) NOT NULL UNIQUE, revenue INT NOT NULL)`;
+  return buildWorld(sql, env.baseUrl);
+}

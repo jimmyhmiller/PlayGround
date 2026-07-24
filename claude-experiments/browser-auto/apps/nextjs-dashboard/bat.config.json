@@ -1,6 +1,17 @@
 {
-  "baseUrl": "http://localhost:3000",
+  "baseUrl": "http://localhost:{port}",
   "world": { "module": "./e2e/world/world.ts" },
+  "app": {
+    "command": "npx next start -p {port}",
+    "readyUrl": "/login",
+    "startupTimeoutMs": 45000,
+    "env": {
+      "POSTGRES_URL": "postgres://jimmyhmiller@localhost:5432/bat_dashboard_w{index}",
+      "POSTGRES_SSL": "disable",
+      "AUTH_SECRET": "bat-local-dev-secret-0123456789abcdef",
+      "AUTH_URL": "http://localhost:{port}/api/auth"
+    }
+  },
   "seeds": "./e2e/world/*.seed.ts",
   "flows": "./e2e/flows/**/*.flow",
   "stepBudgetMs": 20000

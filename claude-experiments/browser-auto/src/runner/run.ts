@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { chromium, type Browser } from "playwright";
@@ -55,7 +56,8 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
     verification = applied.verification;
   }
 
-  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  // random suffix: parallel workers can start the same flow in the same ms
+  const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
   const runDir = join(config.root, ".bat", "runs", slug(flow.file), runId);
   if (persist) await mkdir(runDir, { recursive: true });
 

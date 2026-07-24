@@ -3,7 +3,8 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BatConfig } from "../config.js";
-import { loadSeeds, loadWorldHandle } from "../config.js";
+import { loadSeeds, loadWorldHandle, resolveWorkerConfig } from "../config.js";
+import { launchApp } from "../runner/appenv.js";
 import { launchBrowser, replayStep } from "../runner/run.js";
 import { renderReport, type FlowTrace } from "../runner/trace.js";
 
@@ -104,14 +105,22 @@ export async function startUiServer(config: BatConfig, port: number): Promise<Se
           for await (const c of req) chunks.push(c as Buffer);
           const body = JSON.parse(Buffer.concat(chunks).toString() || "{}") as { file?: string; step?: number; headed?: boolean };
           if (!body.file || !body.step) return json(400, { error: "file and step required" });
-          const seeds = await loadSeeds(config);
-          const world = await loadWorldHandle(config);
-          const browser = await launchBrowser({ ...config, headless: !body.headed });
+          // configs with an `app` spec expect bat to launch the app — lease one instance for the replay
+          let replayConfig = config;
+          let app: Awaited<ReturnType<typeof launchApp>> | null = null;
+          if (config.app) {
+            app = await launchApp(config.app, 0, config.baseUrl, config.root);
+            replayConfig = resolveWorkerConfig(config, { port: app.port, index: 0 });
+          }
+          const seeds = await loadSeeds(replayConfig);
+          const world = await loadWorldHandle(replayConfig, { index: 0, baseUrl: replayConfig.baseUrl, port: app?.port ?? null });
+          const browser = await launchBrowser({ ...replayConfig, headless: !body.headed });
           try {
-            const result = await replayStep(body.file, body.step, { config, world, seeds, browser }, { fast: false });
+            const result = await replayStep(body.file, body.step, { config: replayConfig, world, seeds, browser }, { fast: false });
             return json(200, { tier: result.tier, status: result.trace.status, report: renderReport(result.trace) });
           } finally {
             await browser.close();
+            await app?.stop();
           }
         }
 

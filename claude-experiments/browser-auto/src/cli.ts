@@ -28,6 +28,8 @@ options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
   --junit                     run: also write .bat/junit.xml (CI)
+  --workers <n>               run: parallel workers; bat launches one isolated
+                              app instance per worker (needs "app" in config)
   --port <n>                  ui: port (default 8123)
 ci: on GitHub Actions, run emits ::error annotations and a job summary automatically
 conditions (simulated bad conditions, always recorded and attributed):
@@ -46,7 +48,7 @@ async function main(): Promise<number> {
 
   const flags = new Set<string>();
   const values = new Map<string, string>();
-  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed", "port"]);
+  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed", "port", "workers"]);
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -123,16 +125,32 @@ async function main(): Promise<number> {
       const browser = await launchBrowser(config);
       let failed = 0;
       const ciRuns: Array<{ trace: import("./runner/trace.js").FlowTrace; runDir: string }> = [];
+      const workers = values.has("workers") ? Number(values.get("workers")) : (config.workers ?? 1);
       try {
-        for (const file of files) {
-          const { trace, runDir, reportPath } = await runFlowFile(file, { config, world, seeds, browser });
-          ciRuns.push({ trace, runDir });
-          if (trace.status === "pass") {
-            console.log(`✓ ${trace.flow} (${trace.steps.length} steps)`);
-          } else {
-            failed++;
-            console.error(renderReport(trace));
-            console.error(`\nfull trace: ${reportPath.replace(/report\.txt$/, "trace.json")}`);
+        if (workers > 1 || config.app) {
+          const { runPool } = await import("./runner/pool.js");
+          const { results } = await runPool(files, config, browser, Math.max(1, workers), ({ trace, runDir, reportPath, worker }) => {
+            ciRuns.push({ trace, runDir });
+            if (trace.status === "pass") {
+              console.log(`✓ ${trace.flow} (${trace.steps.length} steps)${workers > 1 ? `  [worker ${worker}]` : ""}`);
+            } else {
+              failed++;
+              console.error(renderReport(trace));
+              console.error(`\nfull trace: ${reportPath.replace(/report\.txt$/, "trace.json")}`);
+            }
+          });
+          void results;
+        } else {
+          for (const file of files) {
+            const { trace, runDir, reportPath } = await runFlowFile(file, { config, world, seeds, browser });
+            ciRuns.push({ trace, runDir });
+            if (trace.status === "pass") {
+              console.log(`✓ ${trace.flow} (${trace.steps.length} steps)`);
+            } else {
+              failed++;
+              console.error(renderReport(trace));
+              console.error(`\nfull trace: ${reportPath.replace(/report\.txt$/, "trace.json")}`);
+            }
           }
         }
       } finally {

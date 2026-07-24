@@ -79,6 +79,17 @@ fingerprints, symmetric conflicts) and the DSL round-trip
 (`parse(format(step)) ≡ step`) are verified with fast-check across ~1,500
 generated cases per run.
 
+## Parallelism
+
+`bat run --workers 4`: bat launches one isolated app instance per worker
+(config `app.command`, with `{port}`/`{index}` substitution) and workers pull
+flows from a shared queue — world isolation is structural, so the same flow
+can run concurrently with itself. World modules export `createWorld(env)` to
+bind worker slots to isolated state (the Next.js dashboard creates + migrates
+`bat_dashboard_w<index>` Postgres databases on the fly). Parallel workers
+without an `app` spec are a hard error: bat never runs flows against a shared
+world.
+
 ## CI
 
 `bat run --junit` writes `.bat/junit.xml`; on GitHub Actions, failures emit

@@ -246,6 +246,36 @@ Static checks (`bat check`, always run before `run`): grammar, unknown
 action/kind, mutating action without effects, unknown seed name, seed merge
 conflicts, dangling refs, patch targets, `$var` used before `let`.
 
+## Parallelism
+
+World isolation is structural, never cooperative: parallel workers each get an
+ISOLATED app instance (own port) and an isolated world — two workers can run
+the same flow simultaneously because they are never in the same world.
+
+```jsonc
+{
+  "workers": 4,                                  // or bat run --workers 4
+  "baseUrl": "http://localhost:{port}",          // {port}/{index} substitute per worker
+  "app": {                                        // bat launches one instance per worker
+    "command": "npx next start -p {port}",
+    "readyUrl": "/login",                        // polled until the app responds
+    "env": { "POSTGRES_URL": "postgres://localhost/myapp_w{index}" }
+  },
+  "world": { "module": "./e2e/world/world.ts" }  // may export createWorld(env)
+}
+```
+
+- The `app` spec makes bat own the app lifecycle (also with 1 worker — no more
+  "start the app first"). PORT/BAT_PORT/BAT_WORKER are set in the child env;
+  all app output is retained under `.bat/app-logs/worker-N.log`; a startup
+  failure reports the log tail, never a bare timeout.
+- A world module may export `createWorld(env: { index, port, baseUrl })` to
+  bind each worker slot to its own isolated state — e.g. create + migrate
+  `myapp_w<index>` on first use (see apps/nextjs-dashboard/e2e/world/world.ts).
+  HTTP worlds get `{port}`/`{index}` substituted in `world.http` instead.
+- Requesting workers > 1 without an `app` spec is a hard error explaining
+  exactly what to add — bat never runs parallel flows against a shared world.
+
 ## Config
 
 `bat.config.json` at project root:
