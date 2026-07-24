@@ -112,7 +112,8 @@
 ; bytes (shared by every entry from one build), run via meta_run_wasm.
 (defstruct MEEntry
   [(name (slice u8)) (fp (ptr i8)) (registry (ptr (ArrayList (ptr Sexp))))
-   (symbol (slice u8)) (modbytes (slice u8))])
+   (symbol (slice u8)) (modbytes (slice u8))
+   (interpcx (ptr i8))])   ; interp path: the shared (ptr Interp) built for this batch
 (defstruct MetaEngine
   [(active i64)
    (entries (ptr (ArrayList MEEntry)))])
@@ -236,6 +237,25 @@
     (store! (field b isset) 1) 0))
 (defn meta-wasm-active? [] (-> bool) (icmp-ne (load (field (meta-wasm-box) isset)) 0))
 
+; ---- INTERPRETER meta path (registered by main*, gated on COIL_META_INTERP) ---------
+; The simplest execution option: run a metaprogram by INTERPRETING its mono'd
+; sub-program in-process (interp.coil) — no dylib, no JIT, no wasm side-module. `build`
+; turns a mono'd Program into a persistent interpreter context (ptr Interp); `run`
+; calls one coil_mp_<k> entry in that context with boxed Sexp arg cells and returns the
+; result Code handle. The metashim mh_* callbacks the interpreter makes are dispatched
+; back into the compiler via interp.coil's registered extern hook (main wires it).
+; Registered only in the interp-mode entry ⇒ native dylib/wasm builds never reference it.
+(defstruct MetaInterpBox
+  [(isset i64)
+   (build (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
+   (run   (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))])
+(defn meta-interp-box [] (-> (ptr MetaInterpBox)) (alloc-static MetaInterpBox))
+(defn set-meta-interp! [(build (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
+                        (run   (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))] (-> i64)
+  (let [b (meta-interp-box)]
+    (store! (field b build) build) (store! (field b run) run) (store! (field b isset) 1) 0))
+(defn meta-interp-active? [] (-> bool) (icmp-ne (load (field (meta-interp-box) isset)) 0))
+
 ; ---- unique scratch paths ---------------------------------------------------------
 ; per-process uniqueness from the static box's (ASLR-randomized) address, plus a
 ; counter for multiple engine builds in one process. No extra libc externs needed.
@@ -262,9 +282,10 @@
       (do (al-push! (mut out) (al-get [TaggedForm] (load base) (load k)))
           (store! k (iadd (load k) 1)))))
     (if (not (meta-compiled?)) (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out)))
-      ; The wasm meta path injects metashim_wasm.coil (mp-* call env-imported mh_*)
-      ; instead of metashim.coil (mp-* call through the in-process vtable).
-      (let [text (if (meta-wasm-active?) (include-str "metashim_wasm.coil") (include-str "metashim.coil"))
+      ; The wasm AND interpreter meta paths inject metashim_wasm.coil (mp-* call the
+      ; mh_* callbacks as externs — env imports in wasm, interp-hook dispatch in the
+      ; interpreter) instead of metashim.coil (mp-* call through the in-process vtable).
+      (let [text (if (or (meta-wasm-active?) (meta-interp-active?)) (include-str "metashim_wasm.coil") (include-str "metashim.coil"))
             sid (load (field s srccount))]
         (store! (field s srccount) (iadd sid 1))
         (register-source! (mut s) "<metashim>" text)
@@ -437,6 +458,7 @@
                     (store! (field me registry) (load (field mo registry)))
                     (store! (field me symbol) (load (field ep symbol)))
                     (store! (field me modbytes) "")
+                    (store! (field me interpcx) (cast (ptr i8) 0))
                     (al-push! (mut out) (load me)) 0)))
               (store! i (iadd (load i) 1)))))
         (match (load failed)
@@ -461,6 +483,30 @@
                 (store! (field me registry) (load (field mo registry)))
                 (store! (field me symbol) (load (field ep symbol)))
                 (store! (field me modbytes) bytes)
+                (store! (field me interpcx) (cast (ptr i8) 0))
+                (al-push! (mut out) (load me)))
+              (store! i (iadd (load i) 1)))))
+        (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (load out))))))))
+
+; ---- entry-set construction: interpreter path --------------------------------------
+; monomorphize + sort, then build ONE persistent interpreter context (shared by every
+; entry of this build). Each MEEntry carries its coil_mp_<k> symbol and that context;
+; the entry is run by interpreting it. No dylib, no side-module, no fp.
+(defn me-setup-interp [(a (ptr Allocator)) (mo (ptr MLOut))] (-> (Result (ptr (ArrayList MEEntry)) Diag))
+  (try (do
+    (let [mp (try! (monomorphize a (load (field mo prog))))]
+      (sort-mono-program a mp)
+      (let [cx (call-ptr (load (field (meta-interp-box) build)) a mp)
+            es (load (field mo entries)) n (al-len [MLEntry] (load es))
+            (mut out) (al-new [MEEntry] a) (mut i) 0]
+        (loop (if (icmp-ge (load i) n) (break)
+          (do (let [ep (al-elem [MLEntry] es (load i)) me (alloc-stack MEEntry)]
+                (store! (field me name) (load (field ep name)))
+                (store! (field me fp) (cast (ptr i8) 0))
+                (store! (field me registry) (load (field mo registry)))
+                (store! (field me symbol) (load (field ep symbol)))
+                (store! (field me modbytes) "")
+                (store! (field me interpcx) cx)
                 (al-push! (mut out) (load me)))
               (store! i (iadd (load i) 1)))))
         (Ok [(ptr (ArrayList MEEntry)) Diag] (box-al [MEEntry] a (load out))))))))
@@ -470,7 +516,8 @@
   (match (metalower-program a checked quals)
     (Err [d] (Some d))
     (Ok [mo]
-      (match (if (meta-wasm-active?) (me-setup-wasm a mo) (me-setup-native a mo))
+      (match (if (meta-interp-active?) (me-setup-interp a mo)
+               (if (meta-wasm-active?) (me-setup-wasm a mo) (me-setup-native a mo)))
         (Err [d] (Some d))
         (Ok [outl]
           (let [out (load outl)]
@@ -517,6 +564,32 @@
 
 (defn me-box-arg [(a (ptr Allocator)) (s Sexp)] (-> (ptr i8))
   (let [p (unwrap-ptr [Sexp] (create [Sexp] a))] (store! p s) (cast (ptr i8) p)))
+
+; run one metaprogram entry by INTERPRETING it (in-process, single-threaded). The
+; boxed Sexp arg pointers go into an i64 arg-cell buffer; the interpreter runs the
+; entry, its metashim mh_* callbacks dispatched back into this process. A
+; metaprogram-level (error …) sets mh-halt's abort flag, which the VM polls and
+; unwinds cleanly — errset then carries the diagnostic (meta-host-err), reported here.
+(defn meta-engine-invoke-interp [(a (ptr Allocator)) (symbol (slice u8)) (interpcx (ptr i8)) (reg (ptr (ArrayList (ptr Sexp)))) (cx (ptr CtCtx)) (argv (ptr (ArrayList Sexp)))] (-> (Result Sexp Diag))
+  (let [n (al-len [Sexp] (load argv))]
+    (if (icmp-gt n 8)
+        (Err [Sexp Diag] (derr "metaengine: metaprogram entries with more than 8 parameters are not supported yet"))
+      (do
+        (meta-host-set! cx reg)
+        (meta-host-interp! 1)                         ; enable interp-mode mh-halt + clear the abort flag
+        (let [argbuf (alloc-stack (array i64 8)) (mut i) 0]
+          (loop (if (icmp-ge (load i) n) (break)
+            (do (store! (index (cast (ptr i64) argbuf) (load i))
+                        (cast i64 (me-box-arg a (al-get [Sexp] (load argv) (load i)))))
+                (store! i (iadd (load i) 1)))))
+          (let [rp (call-ptr (load (field (meta-interp-box) run)) interpcx (slice->cstr a symbol) (cast (ptr i64) argbuf) n)]
+            (match (meta-host-err)
+              (Some [d] (do (meta-host-interp! 0) (Err [Sexp Diag] d)))
+              (None []
+                (do (meta-host-interp! 0)
+                    (if (icmp-eq (cast i64 rp) 0)
+                        (Err [Sexp Diag] (derr "metaengine: interpreted metaprogram returned a null Code handle (compiler bug)"))
+                      (Ok [Sexp Diag] (load (cast (ptr Sexp) rp)))))))))))))
 
 ; run one metaprogram entry as a wasm side-module (single-threaded, no pthread).
 ; The side-module bytes + entry symbol come from the MEEntry; args are boxed Sexp
@@ -592,7 +665,11 @@
           (store! i (iadd (load i) 1)))))
     (if (load bad)
         (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
-      (if (meta-wasm-active?)
-          (meta-engine-invoke-wasm a (load (field e symbol)) (load (field e modbytes)) (load (field e registry)) cx (box-al [Sexp] a (load argv)))
-        (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv)))))))
+      (if (meta-interp-active?)
+          ; the interpreter looks the entry up by its coil FUNCTION name (the qual
+          ; name), not the export-c symbol (coil_mp_<k>) the compiled backends emit.
+          (meta-engine-invoke-interp a (load (field e name)) (load (field e interpcx)) (load (field e registry)) cx (box-al [Sexp] a (load argv)))
+        (if (meta-wasm-active?)
+            (meta-engine-invoke-wasm a (load (field e symbol)) (load (field e modbytes)) (load (field e registry)) cx (box-al [Sexp] a (load argv)))
+          (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))))
 

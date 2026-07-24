@@ -1210,7 +1210,13 @@
       (str-eq nm "ceil")  (f64->bits (interp.ceil (bits->f64 (load (index buf 0)))))
       (str-eq nm "strtol") (interp.strtol (cast (ptr i8) (load (index buf 0))) (cast (ptr (ptr i8)) (load (index buf 1))) (cast i32 (load (index buf 2))))
       (str-eq nm "atoi")  (cast i64 (interp.atoi (cast (ptr i8) (load (index buf 0)))))
-      (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))
+      ; not a libc builtin: if a meta extern hook is registered (meta execution), let
+      ; it dispatch (e.g. the metashim mh_* callbacks into the compiler). Otherwise a
+      ; genuinely unsupported extern is a hard error, as before.
+      (let [hk (interp-extern-hook)]
+        (if (icmp-ne (load (field hk isset)) 0)
+            (call-ptr (load (field hk fp)) (slice-data nm) (slice-len nm) buf n)
+          (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))))
 
 ; ============================ inline LLVM-IR interpreter ====================
 ; The corpus' (llvm-ir …) bodies are straight-line SSA (slice / atomic / simd /
@@ -1606,7 +1612,10 @@
         (do (store! (index locals (load i)) (load (index argv (load i))))
             (store! i (iadd (load i) 1))))))
     (loop
-      (if (load halt) (break)
+      ; interp-aborting? is false (one field load) unless a metaprogram-level (error …)
+      ; requested an abort; when it fires, every vm-exec frame breaks here and unwinds,
+      ; freeing its frame memory below — no pthread_exit, no (loop 0) spin.
+      (if (or (load halt) (interp-aborting?)) (break)
         (let [ins (ial-at [Instr] code (load pc))
               op (load (field ins op)) a (load (field ins a))
               b (load (field ins b)) c (load (field ins c))]
@@ -1701,6 +1710,65 @@
 (defn iargs-box [] (-> (ptr IArgs)) (alloc-static IArgs))
 (defn set-interp-args [(argc i64) (argv i64)] (-> i64)
   (let [b (iargs-box)] (store! (field b argc) argc) (store! (field b argv) argv) 0))
+
+; ============================ META execution hooks ==========================
+; The metaengine can run a metaprogram (or a comptime fold thunk) by INTERPRETING
+; its mono'd sub-program in-process — no dylib/JIT/side-module. Two registered hooks
+; make that work without interp.coil depending on the metahost:
+;   (1) an EXTERN FALLBACK: the metaprogram's metashim wrappers call `mh_*` externs
+;       (metashim_wasm), which are not libc — dispatch them to the compiler's real
+;       mh_* via a registered callback keyed by the extern's C symbol.
+;   (2) an ABORT CHECK: a metaprogram-level `(error …)` cannot pthread_exit (that would
+;       kill the whole in-process pipeline) and must not spin on metalower's (loop 0).
+;       mh-halt sets a flag; vm-exec polls this hook and unwinds every frame cleanly.
+; Both unset ⇒ the interpreter behaves exactly as `coil interp` (gate-interp green).
+(defstruct InterpExternHook [(isset i64) (fp (fnptr c [(ptr u8) i64 (ptr i64) i64] i64))])
+(defn interp-extern-hook [] (-> (ptr InterpExternHook)) (alloc-static InterpExternHook))
+(defn set-interp-extern-hook! [(fp (fnptr c [(ptr u8) i64 (ptr i64) i64] i64))] (-> i64)
+  (let [b (interp-extern-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+
+(defstruct InterpAbortHook [(isset i64) (fp (fnptr c [] i64))])
+(defn interp-abort-hook [] (-> (ptr InterpAbortHook)) (alloc-static InterpAbortHook))
+(defn set-interp-abort-check! [(fp (fnptr c [] i64))] (-> i64)
+  (let [b (interp-abort-hook)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
+(defn interp-aborting? [] (-> bool)
+  (let [b (interp-abort-hook)]
+    (if (icmp-eq (load (field b isset)) 0) false (icmp-ne (call-ptr (load (field b fp))) 0))))
+
+; Build a persistent (heap) interpreter context for a mono'd Program WITHOUT running
+; main: same registration as interp-program, so entries can be called repeatedly (one
+; per macro invocation). Reachable functions compile lazily on first call.
+(defn interp-build [(a (ptr Allocator)) (mp (ptr Program))] (-> (ptr Interp))
+  (let [cx (unwrap-ptr [Interp] (create [Interp] a))]
+    (store! (field cx a) a)
+    (store! (field cx mp) mp)
+    (store! (field cx externs) (load (field mp externs)))
+    (store! (field cx bfuncs) (al-new [BFunc] a))
+    (store! (field cx structs) (al-new [IStruct] a))
+    (store! (field cx sums) (al-new [ISum] a))
+    (store! (field cx irs) (al-new [IIr] a))
+    (iregister-types! cx mp)
+    (let [fs (load (field mp funcs)) n (al-len [Func] (load fs)) (mut i) 0 bf0 (alloc-stack BFunc)]
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [fd (ial-at [Func] fs (load i))]
+              (store! (field bf0 name) (load (field fd name)))
+              (store! (field bf0 nparams) (al-len [Param] (load (field fd params))))
+              (store! (field bf0 nlocals) 0)
+              (store! (field bf0 code) (cast (ptr (ArrayList Instr)) 0))
+              (store! (field bf0 retty) (load (field fd ret)))
+              (store! (field bf0 state) 0)
+              (al-push! (mut (field cx bfuncs)) (load bf0)))
+            (store! i (iadd (load i) 1))))))
+    cx))
+
+; Run entry `nm` with `argc` already-boxed argument cells; returns the i64 result cell
+; (a metaprogram entry returns a Code/Sexp handle as a pointer-in-a-cell). A missing
+; entry is a hard error.
+(defn interp-call-entry [(cx (ptr Interp)) (nm (slice u8)) (argv (ptr i64)) (argc i64)] (-> i64)
+  (let [fi (find-func cx nm)]
+    (if (icmp-lt fi 0) (do (idie2 "interp meta: no such entry function: " nm) 0)
+      (do (ensure-compiled cx fi)
+          (vm-exec cx fi argv argc 0)))))
 
 ; Compile every mono'd function to bytecode, then run `main` and return its i64
 ; (the process exit code). Registration happens BEFORE compilation so calls

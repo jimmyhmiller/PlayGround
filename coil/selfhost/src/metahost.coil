@@ -43,7 +43,9 @@
    (registry (ptr (ArrayList (ptr Sexp))))
    (errset i64)
    (err Diag)
-   (onmain i64)])
+   (onmain i64)
+   (interp i64)     ; 1 ⇒ metaprogram runs via the in-process interpreter (interp.coil)
+   (halt i64)])     ; set by mh-halt in interp mode; polled by vm-exec to unwind cleanly
 (defn meta-host-box [] (-> (ptr MetaHostBox)) (alloc-static MetaHostBox))
 (defn meta-host-set! [(cx (ptr CtCtx)) (registry (ptr (ArrayList (ptr Sexp))))] (-> i64)
   (let [b (meta-host-box)]
@@ -51,6 +53,10 @@
     (store! (field b errset) 0) 0))
 (defn meta-host-onmain! [(v i64)] (-> i64)
   (store! (field (meta-host-box) onmain) v) 0)
+; interpreter meta path: mark it active and clear the abort flag before an entry runs.
+(defn meta-host-interp! [(v i64)] (-> i64)
+  (let [b (meta-host-box)] (store! (field b interp) v) (store! (field b halt) 0) 0))
+(defn mh-interp-halted? [] (-> i64) (load (field (meta-host-box) halt)))
 (defn meta-host-err [] (-> (Option Diag))
   (let [b (meta-host-box)]
     (if (icmp-eq (load (field b errset)) 0) (None [Diag]) (Some (load (field b err))))))
@@ -67,11 +73,17 @@
 ; no thread to end, so print the diagnostic and fail the build directly.
 (defn mh-halt [(d Diag)] (-> i64)
   (let [b (meta-host-box)]
-    (if (icmp-ne (load (field b onmain)) 0)
-        (do (fmt (stderr) "error: {s}\n" (load (field d msg)))
-            (exit 1) 0)
-      (do (store! (field b err) d) (store! (field b errset) 1)
-          (pthread_exit (cast (ptr i8) 1))))))
+    (if (icmp-ne (load (field b interp)) 0)
+        ; interpreter meta path: record the diag and request a cooperative VM abort.
+        ; We run in-process on the pipeline thread, so pthread_exit would kill the
+        ; whole compile; instead set halt and let vm-exec unwind (mp-op-* then returns
+        ; here into the metalowered (loop 0), but the abort poll breaks out first).
+        (do (store! (field b err) d) (store! (field b errset) 1) (store! (field b halt) 1) 0)
+      (if (icmp-ne (load (field b onmain)) 0)
+          (do (fmt (stderr) "error: {s}\n" (load (field d msg)))
+              (exit 1) 0)
+        (do (store! (field b err) d) (store! (field b errset) 1)
+            (pthread_exit (cast (ptr i8) 1)))))))
 
 (defn mh-cx [] (-> (ptr CtCtx))
   (let [b (meta-host-box) cx (load (field b cx))]
@@ -274,6 +286,40 @@
   [mhx-unq-float :as "mh_unq_float"]
   [mhx-unq-str   :as "mh_unq_str"]
   [mhx-fail      :as "mh_fail"])
+
+; ---- interpreter meta path: extern dispatch (piece: interp-meta) ---------------
+; When a metaprogram runs via the in-process interpreter (interp.coil), its metashim
+; wrappers call the mh_* callbacks as `extern`s. The interpreter can't natively call
+; the compiler's mh_* (calling a real C address as a Coil fnptr is unsupported), so it
+; routes unknown externs to this registered dispatcher, keyed by the extern's C symbol,
+; with the same raw-scalar ABI the wasm export bridge uses. Args arrive as i64 cells;
+; f64 params (mh_arg_f / mh_unq_float) carry the IEEE-754 bit pattern.
+(defn mh-bits->f64 [(bits i64)] (-> f64)
+  (let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p))))
+(defn mh-interp-dispatch [(nmd (ptr u8)) (nml i64) (buf (ptr i64)) (n i64)] (-> i64)
+  (let [nm (slice-new nmd nml)]
+    (if (str-eq nm "mh_arg_new")   (cast i64 (mh-arg-new))
+    (if (str-eq nm "mh_arg_c")     (cast i64 (mh-arg-c (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
+    (if (str-eq nm "mh_arg_i")     (cast i64 (mh-arg-i (cast (ptr i8) (load (index buf 0))) (load (index buf 1))))
+    (if (str-eq nm "mh_arg_s")     (cast i64 (mh-arg-s (cast (ptr i8) (load (index buf 0))) (cast (ptr u8) (load (index buf 1))) (load (index buf 2))))
+    (if (str-eq nm "mh_arg_b")     (cast i64 (mh-arg-b (cast (ptr i8) (load (index buf 0))) (load (index buf 1))))
+    (if (str-eq nm "mh_arg_f")     (cast i64 (mh-arg-f (cast (ptr i8) (load (index buf 0))) (mh-bits->f64 (load (index buf 1)))))
+    (if (str-eq nm "mh_op_i")      (mh-op-i (load (index buf 0)) (cast (ptr i8) (load (index buf 1))))
+    (if (str-eq nm "mh_op_h")      (cast i64 (mh-op-h (load (index buf 0)) (cast (ptr i8) (load (index buf 1)))))
+    (if (str-eq nm "mh_op_s")      (cast i64 (mh-op-s (load (index buf 0)) (cast (ptr i8) (load (index buf 1)))))
+    (if (str-eq nm "mh_quoted")    (cast i64 (mh-quoted (load (index buf 0))))
+    (if (str-eq nm "mh_qq_new")    (cast i64 (mh-qq-new))
+    (if (str-eq nm "mh_qq_push")   (cast i64 (mh-qq-push (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
+    (if (str-eq nm "mh_qq_splice") (cast i64 (mh-qq-splice (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
+    (if (str-eq nm "mh_qq_list")   (cast i64 (mh-qq-list (cast (ptr i8) (load (index buf 0)))))
+    (if (str-eq nm "mh_qq_listq")  (cast i64 (mh-qq-listq (cast (ptr i8) (load (index buf 0)))))
+    (if (str-eq nm "mh_qq_vec")    (cast i64 (mh-qq-vec (cast (ptr i8) (load (index buf 0)))))
+    (if (str-eq nm "mh_unq_int")   (cast i64 (mh-unq-int (load (index buf 0))))
+    (if (str-eq nm "mh_unq_bool")  (cast i64 (mh-unq-bool (load (index buf 0))))
+    (if (str-eq nm "mh_unq_float") (cast i64 (mh-unq-float (mh-bits->f64 (load (index buf 0)))))
+    (if (str-eq nm "mh_unq_str")   (cast i64 (mh-unq-str (cast (ptr u8) (load (index buf 0))) (load (index buf 1))))
+    (if (str-eq nm "mh_fail")      (mh-fail (load (index buf 0)))
+      (do (mh-bug (sconcat3 (malloc-allocator) "meta interp: unknown callback extern '" nm "'")) 0))))))))))))))))))))))))
 
 (defn meta-vtable [] (-> (ptr i8))
   (let [v (alloc-static MetaVt)]
