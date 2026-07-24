@@ -556,7 +556,13 @@
         (if (icmp-ge ei 0)
             (do (compile-args fb args)
                 (femit fb 14 ei (al-len [Expr] (load args)) 0)
-                (load (field (ial-at [Extern] (load (field cx externs)) ei) ret)))
+                (let [rt (load (field (ial-at [Extern] (load (field cx externs)) ei) ret)) rtp (alloc-stack Type)]
+                  (store! rtp rt)
+                  ; a by-value aggregate C return (<=8 bytes, e.g. div's div_t in
+                  ; x0) comes back as a packed word; box it into a frame slot so it
+                  ; behaves as an aggregate value (an address) like any other.
+                  (if (ty-is-agg rtp) (femit fb 43 (isize-of cx rtp) (ialign-of cx rtp) 0) 0)
+                  rt))
           (do (idie2 "call to unknown function: " func) (TInt 64 true)))))))
 
 ; compile a sequence, POPping all but the last; returns the last expr's type
@@ -1106,6 +1112,32 @@
     (if (icmp-eq destbytes 8) (f64->bits (cast f64 (bits->f32 v)))
       (f32->bits (cast f32 (bits->f64 v))))))
 
+; qsort(base, n, size, cmp): sort in place, invoking the Coil comparator fnptr
+; through the VM (C-calls-back-into-Coil). A stable insertion sort — for the
+; corpus' distinct keys the final order equals libc qsort's. cmp returns i32
+; (<0 / 0 / >0); we sign-extend it. Ascending: swap while prev > cur.
+(defn interp-qsort [(cx (ptr Interp)) (base i64) (n i64) (size i64) (cmpfp i64)] (-> i64)
+  (let [fi (isub cmpfp (fnptr-base))
+        tmp (cast i64 (interp.malloc (if (icmp-lt size 1) 1 size)))
+        argbuf (alloc-stack (array i64 2)) (mut i) 1]
+    (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
+        (idie "qsort: comparator is not a Coil function pointer") 0)
+    (loop
+      (if (icmp-ge (load i) n) (break)
+        (do (let [(mut j) (load i)]
+              (loop
+                (if (icmp-le (load j) 0) (break)
+                  (let [pa (iadd base (imul (isub (load j) 1) size)) pb (iadd base (imul (load j) size))]
+                    (store! (index (cast (ptr i64) argbuf) 0) pa)
+                    (store! (index (cast (ptr i64) argbuf) 1) pb)
+                    (if (icmp-gt (canon-int (vm-exec cx fi (cast (ptr i64) argbuf) 2 0) 32 true) 0)
+                        (do (memcopy tmp pa size) (memcopy pa pb size) (memcopy pb tmp size)
+                            (store! j (isub (load j) 1)))
+                      (store! j 0))))))       ; in order -> stop inner loop
+            (store! i (iadd (load i) 1)))))
+    (interp.free (cast (ptr i8) tmp))
+    0))
+
 ; ============================ FFI dispatch ==================================
 ; Builtin table: dispatch an extern call to the REAL native libc function by its
 ; C symbol name. This is self-contained (no dlsym) and every entry is a genuine
@@ -1140,6 +1172,12 @@
       (str-eq nm "snprintf") (cast i64 (interp.snprintf (cast (ptr i8) (load (index buf 0))) (load (index buf 1)) (cast (ptr i8) (load (index buf 2)))
                                         (load (index buf 3)) (load (index buf 4)) (load (index buf 5))
                                         (load (index buf 6)) (load (index buf 7)) (load (index buf 8))))
+      ; div_t div(int,int): {quot@0, rem@4}, returned in x0 (quot low, rem high).
+      ; Computed directly (avoids a struct-return extern declaration); the caller
+      ; boxes this packed word into a div_t slot (opcode 43).
+      (str-eq nm "div") (let [x (load (index buf 0)) y (load (index buf 1))]
+                          (ior (iand (idiv x y) 4294967295) (ishl (irem x y) 32)))
+      (str-eq nm "qsort") (interp-qsort cx (load (index buf 0)) (load (index buf 1)) (load (index buf 2)) (load (index buf 3)))
       (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))
 
 ; ============================ inline LLVM-IR interpreter ====================
@@ -1603,6 +1641,9 @@
                    (do (store! (index (cast (ptr i64) argbuf) (load k)) (vpop ops spc))
                        (store! k (isub (load k) 1)))))
                  (vpush ops spc (ir-run cx (ial-at [IIr] (field cx irs) a) (cast (ptr i64) argbuf) framemem memoffc)))  ; LLVMIR
+            43 (let [val (vpop ops spc) slot (frame-alloc framemem memoffc a b)]
+                 (if (icmp-gt a 8) (idie "extern by-value struct return >8 bytes not supported by interp") 0)
+                 (memzero slot a) (mem-store slot val a) (vpush ops spc slot))    ; box extern agg return
             42 (let [(mut k) (isub a 1)]
                  (loop (if (icmp-lt (load k) 0) (break)
                    (do (store! (index (cast (ptr i64) argbuf) (load k)) (vpop ops spc))
