@@ -59,6 +59,13 @@
 (extern interp.abort   [] (-> i64))
 (extern interp.fmod    [f64 f64] (-> f64))
 (extern interp.fmodf   [f32 f32] (-> f32))
+(extern interp.sqrt    [f64] (-> f64))
+(extern interp.pow     [f64 f64] (-> f64))
+(extern interp.fabs    [f64] (-> f64))
+(extern interp.floor   [f64] (-> f64))
+(extern interp.ceil    [f64] (-> f64))
+(extern interp.strtol  [(ptr i8) (ptr (ptr i8)) i32] (-> i64))
+(extern interp.atoi    [(ptr i8)] (-> i32))
 ; Variadic forwarding. We always pass a fixed tail of 6 word-sized varargs; a
 ; real printf/snprintf reads only as many as the format string names, so extra
 ; (unused) trailing words are harmless. This is correct for integer / string /
@@ -1178,6 +1185,13 @@
       (str-eq nm "div") (let [x (load (index buf 0)) y (load (index buf 1))]
                           (ior (iand (idiv x y) 4294967295) (ishl (irem x y) 32)))
       (str-eq nm "qsort") (interp-qsort cx (load (index buf 0)) (load (index buf 1)) (load (index buf 2)) (load (index buf 3)))
+      (str-eq nm "sqrt")  (f64->bits (interp.sqrt (bits->f64 (load (index buf 0)))))
+      (str-eq nm "pow")   (f64->bits (interp.pow (bits->f64 (load (index buf 0))) (bits->f64 (load (index buf 1)))))
+      (str-eq nm "fabs")  (f64->bits (interp.fabs (bits->f64 (load (index buf 0)))))
+      (str-eq nm "floor") (f64->bits (interp.floor (bits->f64 (load (index buf 0)))))
+      (str-eq nm "ceil")  (f64->bits (interp.ceil (bits->f64 (load (index buf 0)))))
+      (str-eq nm "strtol") (interp.strtol (cast (ptr i8) (load (index buf 0))) (cast (ptr (ptr i8)) (load (index buf 1))) (cast i32 (load (index buf 2))))
+      (str-eq nm "atoi")  (cast i64 (interp.atoi (cast (ptr i8) (load (index buf 0)))))
       (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))
 
 ; ============================ inline LLVM-IR interpreter ====================
