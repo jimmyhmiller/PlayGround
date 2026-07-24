@@ -52,8 +52,24 @@ const effect: fc.Arbitrary<Effect> = fc.oneof(
   fc.tuple(target, name).map(([t, v]): Effect => ({ type: "selected", target: t, value: v })),
   path.map((p): Effect => ({ type: "url", path: p })),
   fc
-    .tuple(fc.constantFrom("GET", "POST", "PUT", "DELETE"), path, fc.oneof(fc.constant("ok" as const), fc.integer({ min: 200, max: 599 })))
-    .map(([method, p, status]): Effect => ({ type: "request", method, pathPattern: p, status })),
+    .tuple(
+      fc.constantFrom("GET", "POST", "PUT", "DELETE"),
+      path,
+      fc.oneof(fc.constant("ok" as const), fc.integer({ min: 200, max: 599 })),
+      fc.option(name, { nil: undefined }),
+    )
+    .map(([method, p, status, bodyContains]): Effect => {
+      const e: Effect = { type: "request", method, pathPattern: p, status };
+      if (bodyContains !== undefined) (e as { bodyContains?: string }).bodyContains = bodyContains;
+      return e;
+    }),
+  fc
+    .tuple(fc.constantFrom("sent", "received") as fc.Arbitrary<"sent" | "received">, name, fc.option(path, { nil: undefined }))
+    .map(([dir, text, pathPattern]): Effect => {
+      const e: Effect = { type: "ws", dir, text };
+      if (pathPattern !== undefined) (e as { pathPattern?: string }).pathPattern = pathPattern;
+      return e;
+    }),
 );
 
 describe("DSL round-trip (property-based)", () => {

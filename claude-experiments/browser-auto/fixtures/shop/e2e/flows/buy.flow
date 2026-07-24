@@ -10,7 +10,7 @@ go /
   expect count listitem 3 in list "product-list"
 
 click button "Add to cart" in listitem "Blue Widget"
-  expect request POST /api/cart ok
+  expect request POST /api/cart ok containing "productId"
   expect appear status "Added to cart"
   expect text "1" in testid "cart-count"
 

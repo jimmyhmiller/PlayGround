@@ -141,6 +141,30 @@ check field "Paid"
     expect(effects[4]).toEqual({ type: "selected", value: "Lee", target: { kind: "field", name: "Customer" } });
   });
 
+  it("parses request body matching and ws frame effects", () => {
+    const flow = parseFlow(
+      `flow "t"
+click button "Save"
+  expect request POST /graphql ok containing "mutation CreateInvoice"
+  expect request POST /api/x containing "field"
+  expect ws sent "hello" on /ws/chat
+  expect ws received "echo"
+`,
+      "t.flow",
+    );
+    expect(flow.steps[0]!.effects).toEqual([
+      { type: "request", method: "POST", pathPattern: "/graphql", status: "ok", bodyContains: "mutation CreateInvoice" },
+      { type: "request", method: "POST", pathPattern: "/api/x", status: "ok", bodyContains: "field" },
+      { type: "ws", dir: "sent", text: "hello", pathPattern: "/ws/chat" },
+      { type: "ws", dir: "received", text: "echo" },
+    ]);
+  });
+
+  it("parses allow dialogs", () => {
+    const flow = parseFlow(`flow "t"\nallow dialogs\ngo /\n  expect heading "H"\n`, "t.flow");
+    expect(flow.givens).toEqual([{ type: "allow", what: "dialogs" }]);
+  });
+
   it("parses fill with $var values and trailing-string extraction", () => {
     const flow = parseFlow(
       `flow "t"\ngo /f\n  expect heading "F"\n  let code = text in testid "code"\nfill textbox "Code" in form "redeem" $code\n  expect value $code in textbox "Code"\n`,

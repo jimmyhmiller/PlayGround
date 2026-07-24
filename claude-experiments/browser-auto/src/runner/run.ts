@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { chromium, type Browser } from "playwright";
+import { chromium, firefox, webkit, type Browser } from "playwright";
 import { parseFlow } from "../dsl/parser.js";
 import type { Flow } from "../dsl/ir.js";
 import { explainFailure } from "./explain.js";
@@ -20,7 +20,8 @@ export interface RunDeps {
 }
 
 export async function launchBrowser(config: BatConfig): Promise<Browser> {
-  return chromium.launch({ headless: config.headless });
+  const engine = config.browser === "firefox" ? firefox : config.browser === "webkit" ? webkit : chromium;
+  return engine.launch({ headless: config.headless });
 }
 
 function slug(file: string): string {

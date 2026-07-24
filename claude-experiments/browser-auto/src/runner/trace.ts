@@ -2,7 +2,7 @@ import type { Effect, Step, Target } from "../dsl/ir.js";
 import { formatEffect } from "../dsl/ir.js";
 import type { Explanation } from "./explain.js";
 import { renderExplanation } from "./explain.js";
-import type { ObservedRequest } from "./settle.js";
+import type { ObservedRequest, WsFrame } from "./settle.js";
 
 export interface EffectVerdict {
   effect: Effect;
@@ -25,6 +25,8 @@ export interface StepTrace {
   preUrl: string;
   postUrl?: string;
   requests: ObservedRequest[];
+  /** websocket frames observed during this step */
+  wsFrames?: WsFrame[];
   consoleErrors: ConsoleEntry[];
   navigations: string[];
   effects: EffectVerdict[];
@@ -141,6 +143,13 @@ export function renderReport(trace: FlowTrace): string {
         }
         const order = completionOrder(s.requests);
         if (order.length > 1) out.push(`  response completion order: ${order.join(" → ")}`);
+      }
+      if (s.wsFrames?.length) {
+        out.push(`  websocket frames during this step:`);
+        for (const f of s.wsFrames.slice(0, 12)) {
+          out.push(`    ${f.dir === "sent" ? "→ sent" : "← received"} ${new URL(f.url).pathname}: ${f.data.slice(0, 120)}`);
+        }
+        if (s.wsFrames.length > 12) out.push(`    … and ${s.wsFrames.length - 12} more`);
       }
       out.push(`  url: ${s.preUrl}${s.postUrl && s.postUrl !== s.preUrl ? ` -> ${s.postUrl}` : ""}`);
       if (s.ariaSnapshot && !(s.failure && s.failure.includes("semantic tree"))) {

@@ -1,0 +1,8 @@
+# SSE: the stream stays open forever by design — settlement must not block
+# on it (live streams are exempt from drain), and the burst's DOM churn is
+# waited out by mutation-quiet.
+flow "live ticker over an open SSE stream"
+
+go /ticker
+  expect heading "Ticker"
+  expect text "tick 5" in testid "tick"

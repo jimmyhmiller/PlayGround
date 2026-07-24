@@ -16,6 +16,8 @@ export interface BatConfig {
   conditions?: { latencyMs?: [number, number]; failRate?: number; seed: number };
   /** automatic reruns used to triage a failure (default 4; 0 = fast-path checks only) */
   rerunsOnFailure?: number;
+  /** browser engine (default chromium) */
+  browser?: "chromium" | "firefox" | "webkit";
   /** parallel workers (default 1). >1 requires an `app` spec — isolation is structural. */
   workers?: number;
   /** how bat launches an isolated app instance per worker; {port}/{index} substitute */
@@ -77,6 +79,9 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
     ...(conditions ? { conditions } : {}),
     ...(typeof parsed.rerunsOnFailure === "number" ? { rerunsOnFailure: parsed.rerunsOnFailure } : {}),
     ...(typeof parsed.workers === "number" ? { workers: parsed.workers } : {}),
+    ...(parsed.browser === "chromium" || parsed.browser === "firefox" || parsed.browser === "webkit"
+      ? { browser: parsed.browser }
+      : {}),
     ...(parsed.app && typeof (parsed.app as { command?: unknown }).command === "string"
       ? { app: parsed.app as NonNullable<BatConfig["app"]> }
       : {}),

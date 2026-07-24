@@ -5,7 +5,7 @@ import type { Seed, SessionState, WorldDescription } from "../world/types.js";
 import { composeWorld, WorldError } from "../world/algebra.js";
 import { ConditionEngine, type ConditionProfile } from "./conditions.js";
 import { matchPath, pathOf } from "./patterns.js";
-import { NetworkTracker, RequestMatcher, settle } from "./settle.js";
+import { NetworkTracker, RequestMatcher, WsMatcher, settle } from "./settle.js";
 import { TransientHub } from "./transients.js";
 import { ariaSnapshotSafe, buildLocator, interpolate, resolveUnique, TargetError, type Captures } from "./targets.js";
 import {
@@ -69,13 +69,17 @@ interface StepContext {
   allowConsoleErrors: boolean;
   hub: TransientHub;
   engine: ConditionEngine | null;
+  unmodeled: string[];
 }
 
 export interface FlowEnv {
   clockInstalled: boolean;
   allowConsoleErrors: boolean;
+  allowDialogs: boolean;
   hub: TransientHub;
   engine: ConditionEngine | null;
+  /** unmodeled interactions observed (popups, dialogs) — bat fails loudly on these */
+  unmodeled: string[];
 }
 
 export async function prepareContext(
@@ -94,6 +98,32 @@ export async function prepareContext(
   }
   let clockInstalled = false;
   const allowConsoleErrors = flow.givens.some((g) => g.type === "allow" && g.what === "console-errors");
+  const allowDialogs = flow.givens.some((g) => g.type === "allow" && g.what === "dialogs");
+
+  // LOUD NON-GOALS: bat flows are single-page and dialog-free by design.
+  // Popups are closed and fail the step with an explanation; dialogs are
+  // dismissed and fail the step unless `allow dialogs` opts in (then they are
+  // dismissed and recorded).
+  const unmodeled: string[] = [];
+  context.on("page", (p) => {
+    if (p === page) return;
+    const url = p.url();
+    unmodeled.push(
+      `a popup/new tab opened (${url || "about:blank"}) — bat flows are single-page by design; ` +
+        `popups and multi-tab journeys are not supported. The window was closed.`,
+    );
+    void p.close().catch(() => {});
+  });
+  page.on("dialog", (dialog) => {
+    if (!allowDialogs) {
+      unmodeled.push(
+        `the page opened a ${dialog.type()} dialog (${JSON.stringify(dialog.message().slice(0, 120))}) — ` +
+          `bat has no dialog vocabulary; it was dismissed. If dismissing is acceptable app behavior, ` +
+          `add 'allow dialogs' to the flow.`,
+      );
+    }
+    void dialog.dismiss().catch(() => {});
+  });
 
   for (const g of flow.givens) {
     if (g.type === "clock") {
@@ -125,7 +155,7 @@ export async function prepareContext(
       await applySession(context, session, opts.baseUrl);
     }
   }
-  return { clockInstalled, allowConsoleErrors, hub, engine };
+  return { clockInstalled, allowConsoleErrors, allowDialogs, hub, engine, unmodeled };
 }
 
 async function applySession(context: BrowserContext, session: SessionState, baseUrl: string): Promise<void> {
@@ -191,6 +221,7 @@ export async function runSteps(
       allowConsoleErrors: env.allowConsoleErrors,
       hub: env.hub,
       engine: env.engine,
+      unmodeled: env.unmodeled,
     };
     const stepTrace = await runStep(step, i, ctx);
     const mode = opts.screenshotMode ?? "on-failure";
@@ -228,6 +259,7 @@ export async function runSteps(
 
 async function runStep(step: Step, index: number, ctx: StepContext): Promise<StepTrace> {
   const { page, tracker } = ctx;
+  const unmodeledBefore = ctx.unmodeled.length;
   const started = Date.now();
   const deadline = started + ctx.budgetMs;
   const remaining = () => Math.max(1, deadline - Date.now());
@@ -248,19 +280,37 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
   page.on("pageerror", pageErrorHandler);
   page.on("framenavigated", navHandler);
 
-  const matchers: RequestMatcher[] = [];
-  const armed: ArmedWatchers = { matchers, appear: new Map(), gone: new Map() };
+  const armed: ArmedWatchers = { requests: new Map(), ws: new Map(), appear: new Map(), gone: new Map() };
+  const allMatchers = () => [...armed.requests.values(), ...armed.ws.values()];
   ctx.hub.clear();
 
   try {
     // ---- arm phase: observers exist BEFORE the action (the whole point)
     for (const eff of step.effects) {
       if (eff.type === "request") {
-        matchers.push(
+        armed.requests.set(
+          eff,
           new RequestMatcher(
-            { method: eff.method, pathPattern: interpolate(eff.pathPattern, ctx.captures), status: eff.status },
+            {
+              method: eff.method,
+              pathPattern: interpolate(eff.pathPattern, ctx.captures),
+              status: eff.status,
+              ...(eff.bodyContains !== undefined ? { bodyContains: interpolate(eff.bodyContains, ctx.captures) } : {}),
+            },
             tracker,
             page,
+          ),
+        );
+      } else if (eff.type === "ws") {
+        armed.ws.set(
+          eff,
+          new WsMatcher(
+            {
+              dir: eff.dir,
+              text: interpolate(eff.text, ctx.captures),
+              ...(eff.pathPattern !== undefined ? { pathPattern: interpolate(eff.pathPattern, ctx.captures) } : {}),
+            },
+            tracker,
           ),
         );
       } else if (eff.type === "appear") {
@@ -280,7 +330,7 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     const outcome = await settle(page, tracker, {
       budgetMs: remaining(),
       clockInstalled: ctx.clockInstalled,
-      matchers,
+      matchers: allMatchers(),
     });
     trace.settle = outcome;
 
@@ -301,7 +351,7 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
       // with a ~1ms timeout) — that must never overwrite a concrete earlier
       // observation. The explanation's quality may not depend on load.
       let informative = verdict;
-      while (!verdict.pass && eff.type !== "request" && remaining() > 500) {
+      while (!verdict.pass && eff.type !== "request" && eff.type !== "ws" && remaining() > 500) {
         await ctx.hub.waitForNextTick(Math.min(250, remaining()));
         verdict = await evaluateEffect(eff, ctx, armed, remaining);
         if (verdict.pass || !isStarvedRead(verdict)) informative = verdict;
@@ -320,13 +370,15 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     const effectsFailed = trace.effects.filter((e) => !e.pass);
     const consoleFailed = !ctx.allowConsoleErrors && trace.consoleErrors.length > 0;
     const settleFailed = !outcome.settled;
+    const unmodeledNow = ctx.unmodeled.slice(unmodeledBefore);
 
-    if (effectsFailed.length || consoleFailed || settleFailed) {
+    if (effectsFailed.length || consoleFailed || settleFailed || unmodeledNow.length) {
       trace.status = "fail";
       const reasons: string[] = [];
       if (effectsFailed.length) reasons.push(`${effectsFailed.length} expectation(s) not met`);
       if (settleFailed) reasons.push("the page never settled within the step budget");
       if (consoleFailed) reasons.push(`the page emitted ${trace.consoleErrors.length} error(s) (use 'allow console-errors' to opt out)`);
+      for (const u of unmodeledNow) reasons.push(u);
       trace.failure = `after '${step.source}': ${reasons.join("; ")}`;
       trace.ariaSnapshot = await ariaSnapshotSafe(page);
     } else {
@@ -342,11 +394,13 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     page.off("console", consoleHandler);
     page.off("pageerror", pageErrorHandler);
     page.off("framenavigated", navHandler);
-    for (const m of matchers) m.dispose();
+    for (const m of armed.requests.values()) m.dispose();
+    for (const m of armed.ws.values()) m.dispose();
   }
 
   trace.postUrl = page.url();
   trace.requests = [...tracker.observed];
+  if (tracker.wsFrames.length) trace.wsFrames = [...tracker.wsFrames];
   if (ctx.engine) for (const rec of trace.requests) ctx.engine.annotate(rec);
   if (trace.status === "fail") {
     trace.testids = await page
@@ -410,7 +464,8 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
 }
 
 interface ArmedWatchers {
-  matchers: RequestMatcher[];
+  requests: Map<Effect, RequestMatcher>;
+  ws: Map<Effect, WsMatcher>;
   appear: Map<Effect, Awaited<ReturnType<TransientHub["arm"]>>>;
   gone: Map<Effect, { presentAtAct: boolean; watcher: Awaited<ReturnType<TransientHub["arm"]>> }>;
 }
@@ -505,14 +560,32 @@ async function evaluateEffect(
         return pass ? v(true) : v(false, `url is ${path}${query ? `?${query}` : ""}`);
       }
       case "request": {
-        const m = armed.matchers.find((mm) => mm.expectation.pathPattern === interpolate(eff.pathPattern, captures) && mm.expectation.method === eff.method);
+        const m = armed.requests.get(eff);
         if (!m) return v(false, "internal: no matcher was armed for this expectation");
         if (!m.result.matched) {
-          return v(false, `no ${eff.method} request matching ${eff.pathPattern} was made during this step`);
+          return v(
+            false,
+            `no ${eff.method} request matching ${eff.pathPattern}` +
+              (eff.bodyContains !== undefined ? ` with a body containing ${JSON.stringify(eff.bodyContains)}` : "") +
+              ` was made during this step`,
+          );
         }
         if (!m.result.statusOk) {
           const r = m.result.matched;
           return v(false, `${r.method} ${r.url} responded ${r.failure ? `FAILED (${r.failure})` : r.status}`);
+        }
+        return v(true);
+      }
+      case "ws": {
+        const m = armed.ws.get(eff);
+        if (!m) return v(false, "internal: no ws matcher was armed for this expectation");
+        if (!m.result.matched) {
+          return v(
+            false,
+            `no ${eff.dir} websocket frame containing ${JSON.stringify(eff.text)}` +
+              (eff.pathPattern !== undefined ? ` on ${eff.pathPattern}` : "") +
+              ` was observed during this step (watcher was armed before the action)`,
+          );
         }
         return v(true);
       }

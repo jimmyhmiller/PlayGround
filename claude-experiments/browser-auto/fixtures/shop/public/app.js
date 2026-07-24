@@ -164,6 +164,46 @@ async function renderAccount() {
   app.replaceChildren(h1, p, today);
 }
 
+function renderChat() {
+  const h1 = document.createElement("h1");
+  h1.textContent = "Chat";
+  const input = document.createElement("input");
+  input.setAttribute("aria-label", "Message");
+  const btn = document.createElement("button");
+  btn.textContent = "Send";
+  const ul = document.createElement("ul");
+  ul.setAttribute("aria-label", "messages");
+  const ws = new WebSocket(`ws://${location.host}/ws/chat`);
+  ws.addEventListener("message", (ev) => {
+    const msg = JSON.parse(ev.data);
+    const li = document.createElement("li");
+    li.textContent = `${msg.user}: ${msg.text}`;
+    ul.appendChild(li);
+  });
+  btn.addEventListener("click", () => {
+    if (!input.value) return;
+    const li = document.createElement("li");
+    li.textContent = `me: ${input.value}`;
+    ul.appendChild(li);
+    ws.send(JSON.stringify({ text: input.value }));
+    input.value = "";
+  });
+  app.replaceChildren(h1, input, btn, ul);
+}
+
+function renderTicker() {
+  const h1 = document.createElement("h1");
+  h1.textContent = "Ticker";
+  const p = document.createElement("p");
+  p.setAttribute("data-testid", "tick");
+  p.textContent = "waiting…";
+  const es = new EventSource("/api/ticker");
+  es.addEventListener("message", (ev) => {
+    p.textContent = `tick ${ev.data}`;
+  });
+  app.replaceChildren(h1, p);
+}
+
 function renderBroken() {
   const h1 = document.createElement("h1");
   h1.textContent = "Broken";
@@ -181,6 +221,8 @@ async function render() {
   if (path === "/broken") return renderBroken();
   if (path === "/search") return renderSearch();
   if (path === "/flaky-cart") return renderFlakyCart();
+  if (path === "/chat") return renderChat();
+  if (path === "/ticker") return renderTicker();
   return renderProducts();
 }
 

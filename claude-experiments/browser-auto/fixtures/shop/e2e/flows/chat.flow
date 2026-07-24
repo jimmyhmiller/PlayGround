@@ -1,0 +1,16 @@
+# Realtime over websockets: frame expectations are armed before the action,
+# and the echo's delay is server-profiled — no timing in the flow.
+flow "chat echo"
+
+go /chat
+  expect heading "Chat"
+  expect button "Send"
+
+fill field "Message" "hello bat"
+  expect value "hello bat" in field "Message"
+
+click button "Send"
+  expect ws sent "hello bat" on /ws/chat
+  expect ws received "echo: hello bat" on /ws/chat
+  expect text "me: hello bat" in list "messages"
+  expect text "echo: hello bat" in list "messages"

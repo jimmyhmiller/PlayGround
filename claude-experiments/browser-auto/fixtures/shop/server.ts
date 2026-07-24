@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 import { createWorldHandler } from "../../src/server/index.js";
 import { db } from "./db.js";
 import { world } from "./world.js";
@@ -95,6 +96,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return sendJson(res, 200, payload);
   }
 
+  if (path === "/api/ticker" && req.method === "GET") {
+    // SSE: a finite burst, then the stream stays OPEN — settlement must not
+    // block on a deliberately long-lived stream
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    sseSockets.add(res);
+    for (let n = 1; n <= 5; n++) {
+      await new Promise((r) => setTimeout(r, 80));
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`data: ${n}\n\n`);
+    }
+    return; // connection intentionally left open
+  }
+
   if (path.startsWith("/api/")) {
     await jitter();
     if (path === "/api/products" && req.method === "GET") {
@@ -137,6 +151,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   res.end(html);
 }
 
+const sseSockets = new Set<ServerResponse>();
+
 export async function startShopServer(port = 0): Promise<{ url: string; server: Server; close: () => Promise<void> }> {
   const server = createServer((req, res) => {
     handle(req, res).catch((e) => {
@@ -144,12 +160,32 @@ export async function startShopServer(port = 0): Promise<{ url: string; server: 
       res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
     });
   });
+
+  // websocket chat: echoes each message back with a small (profiled) delay
+  const wss = new WebSocketServer({ server, path: "/ws/chat" });
+  wss.on("connection", (ws) => {
+    ws.on("message", (raw) => {
+      const msg = JSON.parse(String(raw)) as { text?: string };
+      setTimeout(() => {
+        if (ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ user: "echo", text: `echo: ${msg.text ?? ""}` }));
+        }
+      }, 30 + Math.round(rng() * 120));
+    });
+  });
+
   await new Promise<void>((resolve) => server.listen(port, resolve));
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("could not determine server port");
   return {
     url: `http://localhost:${address.port}`,
     server,
-    close: () => new Promise((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
+    close: async () => {
+      for (const res of sseSockets) res.destroy();
+      sseSockets.clear();
+      for (const client of wss.clients) client.terminate();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+    },
   };
 }

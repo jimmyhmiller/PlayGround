@@ -87,8 +87,12 @@ export async function resolveUnique(
     await locator.first().waitFor({ state: "visible", timeout: budgetMs });
   } catch {
     const snapshot = await ariaSnapshotSafe(page);
+    const frames = page.frames().length - 1;
     throw new TargetError(
       `no visible match for ${formatTarget(target)} (page: ${page.url()})\n` +
+        (frames > 0
+          ? `note: the page contains ${frames} iframe(s) — bat targets the MAIN frame only; content inside iframes is not reachable.\n`
+          : "") +
         `The page's semantic tree at failure:\n${indent(snapshot)}`,
       snapshot,
       target,

@@ -30,6 +30,22 @@ export interface ObservedRequest {
   /** response has no Content-Length (chunked/streaming: RSC, SSE, …) —
    * its body is genuinely still in flight until requestfinished fires */
   streaming?: boolean;
+  /** deliberately long-lived stream (text/event-stream) — EXEMPT from drain:
+   * an SSE app would otherwise never settle */
+  liveStream?: boolean;
+}
+
+export interface WsFrame {
+  dir: "sent" | "received";
+  url: string;
+  data: string;
+}
+
+/** the contract settle needs from any armed matcher (request or ws) */
+export interface SettleMatcher {
+  result: { matched: unknown | null };
+  matchedAndFinished: Promise<void>;
+  describe(): string;
 }
 
 export class NetworkTracker {
@@ -63,11 +79,7 @@ export class NetworkTracker {
       rec.failure = failure;
       rec.finishSeq = ++this.finishCounter;
       this.inflight.delete(req);
-      if (this.inflight.size === 0) {
-        const waiters = this.drainWaiters;
-        this.drainWaiters = [];
-        for (const w of waiters) w();
-      }
+      this.flushIfDrained();
     };
     // Status comes from the synchronous `response` EVENT, never from awaiting
     // req.response() — that promise can stall, and completion bookkeeping
@@ -77,10 +89,46 @@ export class NetworkTracker {
       if (rec) {
         rec.status = resp.status();
         rec.streaming = resp.headers()["content-length"] === undefined;
+        rec.liveStream = (resp.headers()["content-type"] ?? "").includes("text/event-stream");
+        if (rec.liveStream) this.flushIfDrained(); // exemption may complete the drain
       }
     });
     page.on("requestfinished", (req) => complete(req, null));
     page.on("requestfailed", (req) => complete(req, req.failure()?.errorText ?? "failed"));
+
+    // websockets: record every frame per step; matchers subscribe via onWsFrame
+    page.on("websocket", (ws) => {
+      const url = ws.url();
+      ws.on("framesent", (data) => this.wsEvent("sent", url, data.payload));
+      ws.on("framereceived", (data) => this.wsEvent("received", url, data.payload));
+    });
+  }
+
+  wsFrames: WsFrame[] = [];
+  private wsListeners = new Set<(f: WsFrame) => void>();
+
+  private wsEvent(dir: "sent" | "received", url: string, payload: string | Buffer): void {
+    const frame: WsFrame = { dir, url, data: String(payload).slice(0, 500) };
+    this.wsFrames.push(frame);
+    for (const l of this.wsListeners) l(frame);
+  }
+
+  onWsFrame(listener: (f: WsFrame) => void): () => void {
+    this.wsListeners.add(listener);
+    return () => this.wsListeners.delete(listener);
+  }
+
+  private flushIfDrained(): void {
+    if (this.drainableCount === 0) {
+      const waiters = this.drainWaiters;
+      this.drainWaiters = [];
+      for (const w of waiters) w();
+    }
+  }
+
+  /** in-flight requests that GATE settlement (live streams are exempt) */
+  get drainableCount(): number {
+    return [...this.inflight.values()].filter((r) => !r.liveStream).length;
   }
 
   get inflightCount(): number {
@@ -88,11 +136,13 @@ export class NetworkTracker {
   }
 
   pendingDescriptions(): string[] {
-    return [...this.inflight.values()].map((r) =>
-      r.streaming
-        ? `${r.method} ${r.url} (response ${r.status} still streaming — an endless stream like SSE needs 'given stub')`
-        : `${r.method} ${r.url} (still pending)`,
-    );
+    return [...this.inflight.values()]
+      .filter((r) => !r.liveStream) // live streams are exempt by design, never "stuck"
+      .map((r) =>
+        r.streaming
+          ? `${r.method} ${r.url} (response ${r.status} still streaming)`
+          : `${r.method} ${r.url} (still pending)`,
+      );
   }
 
   /** true when every in-flight request has at least received response headers */
@@ -108,7 +158,7 @@ export class NetworkTracker {
   forceCompleteStragglers(): string[] {
     const notes: string[] = [];
     for (const [req, rec] of [...this.inflight.entries()]) {
-      if (rec.status === null || rec.streaming) continue;
+      if (rec.status === null || rec.streaming || rec.liveStream) continue;
       rec.finished = true;
       rec.finishSeq = ++this.finishCounter;
       this.inflight.delete(req);
@@ -117,17 +167,13 @@ export class NetworkTracker {
           `(lost browser event) — counted as complete after two quiet passes`,
       );
     }
-    if (this.inflight.size === 0) {
-      const waiters = this.drainWaiters;
-      this.drainWaiters = [];
-      for (const w of waiters) w();
-    }
+    this.flushIfDrained();
     return notes;
   }
 
   /** Resolves the moment in-flight drains to zero (immediately if already drained). */
   waitForDrain(signal: AbortSignal): Promise<void> {
-    if (this.inflight.size === 0) return Promise.resolve();
+    if (this.drainableCount === 0) return Promise.resolve();
     return new Promise((resolve) => {
       const onAbort = () => resolve(); // settle loop re-checks state; abort just unblocks
       signal.addEventListener("abort", onAbort, { once: true });
@@ -140,6 +186,7 @@ export class NetworkTracker {
 
   stepBoundary(): void {
     this.observed = [];
+    this.wsFrames = [];
     this.startCounter = 0;
     this.finishCounter = 0;
   }
@@ -149,6 +196,8 @@ export interface RequestExpectation {
   method: string;
   pathPattern: string;
   status: "ok" | number;
+  /** substring the request BODY must contain (GraphQL operations, payload fields) */
+  bodyContains?: string;
 }
 
 export interface RequestMatchResult {
@@ -177,11 +226,12 @@ export class RequestMatcher {
     this.matchedAndFinished = new Promise((resolve) => {
       this.resolveMatched = resolve;
     });
-    const onFinished = (rec: ObservedRequest) => {
+    const onFinished = (rec: ObservedRequest, postData: string | null) => {
       if (this.result.matched) return;
       if (rec.method !== expectation.method) return;
       const { path, query } = pathOf(rec.url);
       if (!matchPath(expectation.pathPattern, path, query)) return;
+      if (expectation.bodyContains !== undefined && !(postData ?? "").includes(expectation.bodyContains)) return;
       this.result.matched = rec;
       this.result.statusOk =
         expectation.status === "ok"
@@ -194,29 +244,35 @@ export class RequestMatcher {
     this.onResponse = (resp: Response) => {
       const req = resp.request();
       if (!TRACKED_TYPES.has(req.resourceType())) return;
-      onFinished({
-        method: req.method(),
-        url: req.url(),
-        resourceType: req.resourceType(),
-        status: resp.status(),
-        failure: null,
-        finished: true,
-        startSeq: 0, // synthetic matcher record; ordering lives in NetworkTracker.observed
-        finishSeq: null,
-      });
+      onFinished(
+        {
+          method: req.method(),
+          url: req.url(),
+          resourceType: req.resourceType(),
+          status: resp.status(),
+          failure: null,
+          finished: true,
+          startSeq: 0, // synthetic matcher record; ordering lives in NetworkTracker.observed
+          finishSeq: null,
+        },
+        req.postData(),
+      );
     };
     this.onReqFailed = (req: Request) => {
       if (!TRACKED_TYPES.has(req.resourceType())) return;
-      onFinished({
-        method: req.method(),
-        url: req.url(),
-        resourceType: req.resourceType(),
-        status: null,
-        failure: req.failure()?.errorText ?? "failed",
-        finished: true,
-        startSeq: 0,
-        finishSeq: null,
-      });
+      onFinished(
+        {
+          method: req.method(),
+          url: req.url(),
+          resourceType: req.resourceType(),
+          status: null,
+          failure: req.failure()?.errorText ?? "failed",
+          finished: true,
+          startSeq: 0,
+          finishSeq: null,
+        },
+        req.postData(),
+      );
     };
     page.on("response", this.onResponse);
     page.on("requestfailed", this.onReqFailed);
@@ -226,6 +282,57 @@ export class RequestMatcher {
   dispose(): void {
     this.page.off("response", this.onResponse);
     this.page.off("requestfailed", this.onReqFailed);
+  }
+
+  describe(): string {
+    const e = this.expectation;
+    return (
+      `declared 'expect request ${e.method} ${e.pathPattern}` +
+      (e.bodyContains !== undefined ? ` containing "${e.bodyContains}"` : "") +
+      `' never saw a matching request`
+    );
+  }
+}
+
+export interface WsExpectation {
+  dir: "sent" | "received";
+  text: string;
+  pathPattern?: string;
+}
+
+/** Armed BEFORE the action: matches a websocket frame by direction, substring,
+ * and (optionally) socket path. Subscribes through the tracker so frames on
+ * sockets opened in earlier steps are seen too. */
+export class WsMatcher implements SettleMatcher {
+  result: { matched: WsFrame | null } = { matched: null };
+  matchedAndFinished: Promise<void>;
+  private unsubscribe: () => void;
+
+  constructor(public expectation: WsExpectation, tracker: NetworkTracker) {
+    let resolveMatched!: () => void;
+    this.matchedAndFinished = new Promise((resolve) => {
+      resolveMatched = resolve;
+    });
+    this.unsubscribe = tracker.onWsFrame((frame) => {
+      if (this.result.matched) return;
+      if (frame.dir !== expectation.dir) return;
+      if (expectation.pathPattern !== undefined) {
+        const { path, query } = pathOf(frame.url);
+        if (!matchPath(expectation.pathPattern, path, query)) return;
+      }
+      if (!frame.data.includes(expectation.text)) return;
+      this.result.matched = frame;
+      resolveMatched();
+    });
+  }
+
+  dispose(): void {
+    this.unsubscribe();
+  }
+
+  describe(): string {
+    const e = this.expectation;
+    return `declared 'expect ws ${e.dir} "${e.text}"${e.pathPattern ? ` on ${e.pathPattern}` : ""}' never saw a matching frame`;
   }
 }
 
@@ -245,7 +352,7 @@ export interface SettleOptions {
   /** a `given clock` is installed — fake timers need explicit advancing */
   clockInstalled: boolean;
   /** matchers armed for this step; settlement requires them all matched */
-  matchers: RequestMatcher[];
+  matchers: SettleMatcher[];
 }
 
 export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOptions): Promise<SettleOutcome> {
@@ -343,13 +450,13 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
 
       // 2. drain tracked in-flight traffic. Pulse while waiting so lost
       //    finish events can't wedge the loop.
-      if (tracker.inflightCount > 0) {
+      if (tracker.drainableCount > 0) {
         const drained = await Promise.race([
           tracker.waitForDrain(controller.signal).then(() => true),
           quietPulse().then(() => false),
         ]);
         if (controller.signal.aborted) break;
-        if (!drained && tracker.inflightCount > 0) {
+        if (!drained && tracker.drainableCount > 0) {
           // Straggler policy: every in-flight request has response headers,
           // and two consecutive quiet pulses saw no finish event. Chromium
           // sometimes never delivers requestfinished (lost event, or a
@@ -375,7 +482,7 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
       if (lastPulse.mutated || lastPulse.pendingBoundaries > 0) continue;
 
       // 4. anything new appear during the quiet check?
-      if (tracker.inflightCount > 0) continue;
+      if (tracker.drainableCount > 0) continue;
       if (opts.matchers.some((m) => !m.result.matched)) continue;
 
       return { settled: true, iterations, stuck: [], clockAdvanced, notes };
@@ -387,7 +494,7 @@ export async function settle(page: Page, tracker: NetworkTracker, opts: SettleOp
   const stuck: string[] = [];
   for (const m of opts.matchers) {
     if (!m.result.matched) {
-      stuck.push(`declared 'expect request ${m.expectation.method} ${m.expectation.pathPattern}' never saw a matching request`);
+      stuck.push(m.describe());
     }
   }
   stuck.push(...tracker.pendingDescriptions());

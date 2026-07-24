@@ -28,6 +28,7 @@ options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
   --junit                     run: also write .bat/junit.xml (CI)
+  --browser <engine>          run: chromium (default) | firefox | webkit
   --workers <n>               run: parallel workers; bat launches one isolated
                               app instance per worker (needs "app" in config)
   --port <n>                  ui: port (default 8123)
@@ -48,7 +49,7 @@ async function main(): Promise<number> {
 
   const flags = new Set<string>();
   const values = new Map<string, string>();
-  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed", "port", "workers"]);
+  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed", "port", "workers", "browser"]);
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -111,9 +112,14 @@ async function main(): Promise<number> {
 
     case "run": {
       const cond = conditionsFromFlags();
+      const browserChoice = values.get("browser");
+      if (browserChoice !== undefined && !["chromium", "firefox", "webkit"].includes(browserChoice)) {
+        throw new ConfigError(`--browser must be chromium, firefox, or webkit (got '${browserChoice}')`);
+      }
       const config = await loadConfig(cwd, {
         ...(flags.has("headed") ? { headless: false } : {}),
         ...(cond ? { conditions: cond } : {}),
+        ...(browserChoice ? { browser: browserChoice as "chromium" | "firefox" | "webkit" } : {}),
       });
       const seeds = await loadSeeds(config);
       const world = await loadWorldHandle(config);

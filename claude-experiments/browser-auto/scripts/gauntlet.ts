@@ -6,7 +6,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
 import { startShopServer } from "../fixtures/shop/server.js";
 import { world } from "../fixtures/shop/world.js";
 import { runFlowFile } from "../src/runner/run.js";
@@ -19,7 +19,10 @@ const iterations = Number(process.argv[2] ?? 12);
 
 process.env.BAT_TEST = "1";
 const shop = await startShopServer();
-const browser = await chromium.launch({ headless: true });
+const engineName = process.env.BROWSER ?? "chromium";
+const engine = engineName === "firefox" ? firefox : engineName === "webkit" ? webkit : chromium;
+console.log(`browser engine: ${engineName}`);
+const browser = await engine.launch({ headless: true });
 const root = await mkdtemp(join(tmpdir(), "bat-gauntlet-"));
 const config: BatConfig = {
   baseUrl: shop.url,

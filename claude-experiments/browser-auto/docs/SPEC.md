@@ -115,7 +115,8 @@ match. The runner never picks "the first one."
 | `expect selected "<label>" in <target>` | a `<select>`'s chosen option label |
 | `expect count <kind> <n> [in <target>]` | number of matches |
 | `expect url <path>` | page url path (+query) matches |
-| `expect request <METHOD> <path-pattern> [ok\|<status>]` | this step causes a matching request that resolves with the status (`ok` = 2xx). Armed **before** the action. |
+| `expect request <METHOD> <path-pattern> [ok\|<status>] [containing "<t>"]` | this step causes a matching request that resolves with the status (`ok` = 2xx). `containing` matches the request BODY — how you pin a GraphQL operation. Armed **before** the action. |
+| `expect ws sent "<t>" [on <path-pattern>]` / `expect ws received "<t>" [on <path-pattern>]` | a websocket frame containing `<t>` (optionally on a socket path). Armed **before** the action; settlement waits for it. |
 | `expect appear <target>` | explicit transient watcher: armed before the action, so it catches elements that appear and vanish (toasts) |
 | `expect gone <target>` | target present at act time must be gone after settlement |
 | `let <name> = text in <target>` | capture observed text into `$name` (recorded in trace) |
@@ -158,6 +159,19 @@ navigation never fired, the settled ARIA snapshot, and a per-effect verdict diff
 Any `pageerror` or console error during a step fails the step by default,
 attributed to the action that triggered it (opt-out per flow:
 `allow console-errors`).
+
+**Realtime**: SSE responses (`text/event-stream`) are deliberately long-lived
+and EXEMPT from drain — an SSE app settles normally, and the stream appears in
+traces marked as live. Websocket frames are recorded per step and matched by
+armed `expect ws` effects; frame-driven DOM churn is covered by mutation-quiet.
+
+**Loud non-goals** — bat flows are single-page and dialog-free by design:
+- a popup / new tab fails the step with an explanation (the window is closed);
+- an alert/confirm/prompt dialog is dismissed and fails the step unless the
+  flow opts in with `allow dialogs` (then dismissed + recorded);
+- iframes are unreachable (main frame only); a missing-target error on a page
+  with iframes says so explicitly;
+- drag-and-drop has no grammar — `drag` is an unknown action at parse time.
 
 ### Determinism
 

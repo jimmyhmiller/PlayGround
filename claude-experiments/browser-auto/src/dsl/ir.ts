@@ -50,7 +50,11 @@ export type Effect =
   | { type: "selected"; target: Target; value: string }
   | { type: "count"; kind: TargetKind; name?: string; n: number; within?: Target }
   | { type: "url"; path: string }
-  | { type: "request"; method: string; pathPattern: string; status: "ok" | number }
+  /** bodyContains: substring of the request body — how you pin a GraphQL
+   * operation (`containing "mutation CreateInvoice"`) or a payload field */
+  | { type: "request"; method: string; pathPattern: string; status: "ok" | number; bodyContains?: string }
+  /** websocket frame matcher, armed before the action */
+  | { type: "ws"; dir: "sent" | "received"; text: string; pathPattern?: string }
   | { type: "let"; name: string; from: Target };
 
 export type Given =
@@ -59,7 +63,7 @@ export type Given =
   | { type: "user"; key: string }
   | { type: "clock"; iso: string }
   | { type: "stub"; method: string; pathPattern: string; status: number; body?: unknown }
-  | { type: "allow"; what: "console-errors" };
+  | { type: "allow"; what: "console-errors" | "dialogs" };
 
 export interface Step {
   action: Action;
@@ -115,7 +119,10 @@ export function formatEffect(e: Effect): string {
     case "selected": return `expect selected "${e.value}" in ${formatTarget(e.target)}`;
     case "count": return `expect count ${e.kind}${e.name ? ` "${e.name}"` : ""} ${e.n}${e.within ? ` in ${formatTarget(e.within)}` : ""}`;
     case "url": return `expect url ${e.path}`;
-    case "request": return `expect request ${e.method} ${e.pathPattern} ${e.status}`;
+    case "request":
+      return `expect request ${e.method} ${e.pathPattern} ${e.status}${e.bodyContains !== undefined ? ` containing "${e.bodyContains}"` : ""}`;
+    case "ws":
+      return `expect ws ${e.dir} "${e.text}"${e.pathPattern !== undefined ? ` on ${e.pathPattern}` : ""}`;
     case "let": return `let ${e.name} = text in ${formatTarget(e.from)}`;
   }
 }

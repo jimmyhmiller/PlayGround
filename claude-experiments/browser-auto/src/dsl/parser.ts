@@ -400,15 +400,41 @@ function parseEffect(p: LineParser): Effect | null {
     const path = p.expectPath();
     if (path === null) return null;
     let status: "ok" | number = "ok";
-    if (!p.atEnd()) {
+    let bodyContains: string | undefined;
+    if (!p.atEnd() && !(p.peek()?.t === "word" && (p.peek() as { v: string }).v === "containing")) {
       const t = p.next()!;
       if (t.t === "number") status = t.v;
       else if (t.t === "word" && t.v === "ok") status = "ok";
-      else return p.fail(`expected 'ok' or a status code, got ${show(t)}`);
+      else return p.fail(`expected 'ok', a status code, or 'containing', got ${show(t)}`);
     }
-    return p.expectEnd("expect request")
-      ? { type: "request", method: method.toUpperCase(), pathPattern: path, status }
-      : null;
+    if (p.peek()?.t === "word" && (p.peek() as { v: string }).v === "containing") {
+      p.next();
+      const b = p.expectString("a request-body substring (e.g. a GraphQL operation name)");
+      if (b === null) return null;
+      bodyContains = b;
+    }
+    if (!p.expectEnd("expect request")) return null;
+    const eff: Effect = { type: "request", method: method.toUpperCase(), pathPattern: path, status };
+    if (bodyContains !== undefined) (eff as { bodyContains?: string }).bodyContains = bodyContains;
+    return eff;
+  }
+  if (first?.t === "word" && first.v === "ws") {
+    p.next();
+    const dirWord = p.expectWord("sent", "received");
+    if (dirWord === null) return null;
+    const text = p.expectString("the frame substring");
+    if (text === null) return null;
+    let pathPattern: string | undefined;
+    if (!p.atEnd()) {
+      if (p.expectWord("on") === null) return null;
+      const path = p.expectPath();
+      if (path === null) return null;
+      pathPattern = path;
+    }
+    if (!p.expectEnd("expect ws")) return null;
+    const eff: Effect = { type: "ws", dir: dirWord as "sent" | "received", text };
+    if (pathPattern !== undefined) (eff as { pathPattern?: string }).pathPattern = pathPattern;
+    return eff;
   }
   // plain visibility: expect <target>
   const target = p.parseTarget();
@@ -532,8 +558,9 @@ export function parseFlow(source: string, file: string): Flow {
     }
     if (head.t === "word" && head.v === "allow") {
       p.next();
-      if (p.expectWord("console-errors") !== null && p.expectEnd("allow")) {
-        givens.push({ type: "allow", what: "console-errors" });
+      const what = p.expectWord("console-errors", "dialogs");
+      if (what !== null && p.expectEnd("allow")) {
+        givens.push({ type: "allow", what: what as "console-errors" | "dialogs" });
       }
       continue;
     }
