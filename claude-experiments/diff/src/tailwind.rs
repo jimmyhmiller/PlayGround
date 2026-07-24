@@ -1012,7 +1012,12 @@ enum TwProp {
     RotateZ,
     SkewX,
     SkewY,
+    SpaceXReverse,
     SpaceYReverse,
+    ContainSize,
+    ContainLayout,
+    ContainPaint,
+    ContainStyle,
     DivideXReverse,
     DivideYReverse,
     BorderSpacingX,
@@ -1072,6 +1077,7 @@ enum TwProp {
     BackdropSaturate,
     BackdropSepia,
     Duration,
+    Ease,
     ScaleX,
     ScaleY,
     ScaleZ,
@@ -1099,7 +1105,12 @@ impl TwProp {
             TwProp::RotateZ => ("--tw-rotate-z", "initial", "\"*\"", None),
             TwProp::SkewX => ("--tw-skew-x", "initial", "\"*\"", None),
             TwProp::SkewY => ("--tw-skew-y", "initial", "\"*\"", None),
+            TwProp::SpaceXReverse => ("--tw-space-x-reverse", "0", "\"*\"", Some("0")),
             TwProp::SpaceYReverse => ("--tw-space-y-reverse", "0", "\"*\"", Some("0")),
+            TwProp::ContainSize => ("--tw-contain-size", "initial", "\"*\"", None),
+            TwProp::ContainLayout => ("--tw-contain-layout", "initial", "\"*\"", None),
+            TwProp::ContainPaint => ("--tw-contain-paint", "initial", "\"*\"", None),
+            TwProp::ContainStyle => ("--tw-contain-style", "initial", "\"*\"", None),
             TwProp::DivideXReverse => ("--tw-divide-x-reverse", "0", "\"*\"", Some("0")),
             TwProp::DivideYReverse => ("--tw-divide-y-reverse", "0", "\"*\"", Some("0")),
             TwProp::BorderSpacingX => {
@@ -1190,6 +1201,7 @@ impl TwProp {
             TwProp::BackdropSaturate => ("--tw-backdrop-saturate", "initial", "\"*\"", None),
             TwProp::BackdropSepia => ("--tw-backdrop-sepia", "initial", "\"*\"", None),
             TwProp::Duration => ("--tw-duration", "initial", "\"*\"", None),
+            TwProp::Ease => ("--tw-ease", "initial", "\"*\"", None),
             TwProp::ScaleX => ("--tw-scale-x", "1", "\"*\"", Some("1")),
             TwProp::ScaleY => ("--tw-scale-y", "1", "\"*\"", Some("1")),
             TwProp::ScaleZ => ("--tw-scale-z", "1", "\"*\"", Some("1")),
@@ -1332,6 +1344,9 @@ struct VariantSpec {
     prefix: String,
     /// `:is(...)` clause inserted right after the class selector (group-hover).
     is_clause: String,
+    /// A (prefix, suffix) pair wrapping the ENTIRE built selector, used by the
+    /// child (`*:` -> `:is(& > *)`) and descendant (`**:` -> `:is(& *)`) variants.
+    wrap: Option<(String, String)>,
     media: Vec<String>,
     order: u8,
     inject_content: bool,
@@ -1387,6 +1402,9 @@ fn state_pseudo(state: &str) -> Option<&'static str> {
         "placeholder-shown" => ":placeholder-shown",
         "autofill" => ":autofill",
         "empty" => ":empty",
+        "user-valid" => ":user-valid",
+        "user-invalid" => ":user-invalid",
+        "inert" => ":is([inert], [inert] *)",
         "open" => ":is([open], :popover-open, :open)",
         "first" => ":first-child",
         "last" => ":last-child",
@@ -1453,6 +1471,39 @@ fn nth_value(s: &str) -> Option<String> {
     None
 }
 
+/// The `@container [name] (width OP value)` at-rule string for a container-query
+/// variant (the leading `@` already stripped). Accepts `@lg`/`@sm`/… (theme
+/// container sizes, `>=`), `@min-<size>`/`@max-<size>`, `@min-[…]`/`@max-[…]`,
+/// and a trailing `/name` selecting a named container. `None` (rejected) when the
+/// size token is not a known container token nor an arbitrary `[…]` value.
+fn container_query_condition(variant: &str, theme: &Theme) -> Option<String> {
+    let (core, name) = match variant.split_once('/') {
+        Some((c, n)) => (c, Some(n)),
+        None => (variant, None),
+    };
+    let (op, size_token) = if let Some(rest) = core.strip_prefix("min-") {
+        (">=", rest)
+    } else if let Some(rest) = core.strip_prefix("max-") {
+        ("<", rest)
+    } else {
+        (">=", core)
+    };
+    if size_token.is_empty() {
+        return None;
+    }
+    let value = if let Some(inner) = size_token.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        inner.to_string()
+    } else {
+        theme.get(&format!("--container-{size_token}"))?.to_string()
+    };
+    let name_part = match name {
+        Some(n) if !n.is_empty() => format!("{n} "),
+        Some(_) => return None,
+        None => String::new(),
+    };
+    Some(format!("@container {name_part}(width {op} {value})"))
+}
+
 fn parse_variants(
     segments: &[&str],
     class: &str,
@@ -1465,6 +1516,7 @@ fn parse_variants(
         extra_pseudos: Vec::new(),
         prefix: String::new(),
         is_clause: String::new(),
+        wrap: None,
         media: Vec::new(),
         order: 0,
         inject_content: false,
@@ -1536,6 +1588,20 @@ fn parse_variants(
             }
             "open" => {
                 spec.pseudo.push_str(":is([open], :popover-open, :open)");
+                spec.order = spec.order.max(5);
+            }
+            "inert" => {
+                spec.pseudo.push_str(":is([inert], [inert] *)");
+                spec.order = spec.order.max(5);
+            }
+            // Child (`*:`) and descendant (`**:`) variants: wrap the whole
+            // candidate selector in `:is(& > *)` / `:is(& *)`.
+            "*" => {
+                spec.wrap = Some((":is(".to_string(), " > *)".to_string()));
+                spec.order = spec.order.max(5);
+            }
+            "**" => {
+                spec.wrap = Some((":is(".to_string(), " *)".to_string()));
                 spec.order = spec.order.max(5);
             }
             // Pseudo-ELEMENTS.
@@ -1628,7 +1694,7 @@ fn parse_variants(
                 v.split_once('/').map(|(name, _)| name),
                 Some("backdrop") | Some("contrast-more") | Some("contrast-less")
                     | Some("selection") | Some("marker") | Some("placeholder")
-                    | Some("placeholder-shown")
+                    | Some("placeholder-shown") | Some("inert")
             ) =>
             {
                 return Err(Fail::Invalid);
@@ -1744,7 +1810,12 @@ fn parse_variants(
                 spec.order = spec.order.max(6);
             }
             // aria-<state>: `[aria-<state>="true"]` for the boolean ARIA states.
+            // The variant takes no `/modifier`; Tailwind rejects `aria-checked/foo`
+            // (generates nothing).
             v if v.starts_with("aria-") && !v[5..].starts_with('[') => {
+                if v[5..].contains('/') {
+                    return Err(Fail::Invalid);
+                }
                 spec.pseudo.push_str(&format!("[aria-{}=\"true\"]", &v[5..]));
                 spec.order = spec.order.max(5);
             }
@@ -1758,8 +1829,12 @@ fn parse_variants(
                 push_media(&mut spec.media, &format!("pointer:{}", &v[8..]));
                 spec.order = spec.order.max(6);
             }
-            v if v.starts_with("any-pointer-") => {
-                push_media(&mut spec.media, &format!("any-pointer:{}", &v[12..]));
+            // Container-query variants: `@sm`/`@lg`/…, `@min-[…]`/`@max-[…]`,
+            // `@min-lg`/`@max-lg`, and named `@lg/name`. Each wraps the rule in an
+            // `@container [name] (width >= … | width < …)` at-rule.
+            v if v.starts_with('@') => {
+                let cond = container_query_condition(&v[1..], theme).ok_or(Fail::Invalid)?;
+                push_media(&mut spec.media, &cond);
                 spec.order = spec.order.max(6);
             }
             other => {
@@ -1810,7 +1885,8 @@ fn utility_root_recognized(class: &str) -> bool {
         "columns-", "break-", "whitespace-", "line-clamp-", "backdrop-", "blur-",
         "brightness-", "contrast-", "divide-", "accent-", "caret-", "scroll-",
         "snap-", "touch-", "will-change-", "from-", "via-", "to-", "drop-shadow-",
-        "transform-", "origin-", "perspective-",
+        "transform-", "origin-", "perspective-", "clear-", "float-", "scheme-",
+        "contain-", "backface-", "forced-color-adjust-",
     ];
     const EXACT: &[&str] = &[
         "flex", "grid", "block", "inline", "inline-block", "inline-flex", "inline-grid",
@@ -1858,14 +1934,22 @@ fn render_utility(
 
     let utility = generate_utility(base, class, theme, tw_props)?;
     let escaped = escape_class(class);
-    let build_selector = |pseudo: &str| match &utility.selector {
-        SelectorKind::Class => {
-            format!("{}.{escaped}{}{}", spec.prefix, spec.is_clause, pseudo)
+    let build_selector = |pseudo: &str| {
+        let core = match &utility.selector {
+            SelectorKind::Class => {
+                format!("{}.{escaped}{}{}", spec.prefix, spec.is_clause, pseudo)
+            }
+            SelectorKind::ClassPseudoElement(pe) => {
+                format!("{}.{escaped}{}{}{}", spec.prefix, spec.is_clause, pseudo, pe)
+            }
+            SelectorKind::SpaceChildren => {
+                format!(":where(.{escaped} > :not(:last-child))")
+            }
+        };
+        match &spec.wrap {
+            Some((pre, post)) => format!("{pre}{core}{post}"),
+            None => core,
         }
-        SelectorKind::ClassPseudoElement(pe) => {
-            format!("{}.{escaped}{}{}{}", spec.prefix, spec.is_clause, pseudo, pe)
-        }
-        SelectorKind::SpaceChildren => format!(":where(.{escaped} > :not(:last-child))"),
     };
     let mut decls = utility.decls;
     if spec.inject_content && !decls.iter().any(|(prop, _)| prop == "content") {
@@ -1955,6 +2039,34 @@ impl Utility {
 /// `full` is the original token (for error messages). Returns a hard error naming
 /// the token if it matches a known utility family but references an unknown value,
 /// or if the family itself is unimplemented.
+/// The container-type/container-name utilities: `@container` (inline-size),
+/// `@container-normal`, `@container-size`, each optionally carrying a `/name`
+/// modifier that also sets `container-name`. Emits `container-type` first, then
+/// `container-name` (matching the reference output). `None` when `base` is not
+/// one of these; an out-of-shape `@container-…` returns `Some(Err(Invalid))`.
+fn container_type_utility(base: &str) -> Option<Result<Utility, Fail>> {
+    let rest = base.strip_prefix('@')?;
+    let (core, name) = match rest.split_once('/') {
+        Some((c, n)) => (c, Some(n)),
+        None => (rest, None),
+    };
+    let container_type = match core {
+        "container" => "inline-size",
+        "container-normal" => "normal",
+        "container-size" => "size",
+        _ => return None,
+    };
+    if matches!(name, Some("")) {
+        return Some(Err(Fail::Invalid));
+    }
+    let mut decls: Vec<(&'static str, String)> =
+        vec![("container-type", container_type.to_string())];
+    if let Some(n) = name {
+        decls.push(("container-name", n.to_string()));
+    }
+    Some(Ok(Utility::simple(decls)))
+}
+
 fn generate_utility(
     base: &str,
     full: &str,
@@ -1966,6 +2078,12 @@ fn generate_utility(
     // rejects it and generates nothing.
     if base.ends_with('-') || base.is_empty() {
         return Err(Fail::Invalid);
+    }
+
+    // container-type / container-name: `@container`, `@container-normal`,
+    // `@container-size`, each with an optional `/name` naming the container.
+    if let Some(result) = container_type_utility(base) {
+        return result;
     }
 
     // Scroll / overflow / snap / blend / break / box / columns / object family.
@@ -2064,6 +2182,117 @@ fn generate_utility(
         return result;
     }
 
+    // inset-shadow / inset-shadow-<size> / inset-shadow-none / inset-shadow-<color>:
+    // the inset box-shadow slot. No negative form (a leading `-` falls through to
+    // the position-offset family, which rejects it). Bare `inset-shadow` is not a
+    // utility. Handled before the position-offset family so `inset-shadow-*` is not
+    // consumed as an `inset` offset value.
+    if !negative && positive_base == "inset-shadow" {
+        return Err(Fail::Invalid);
+    }
+    if !negative && let Some(size) = positive_base.strip_prefix("inset-shadow-") {
+        if size == "none" {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(vec![
+                ("--tw-inset-shadow", "inset 0 0 #0000".to_string()),
+                ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
+            ]));
+        }
+        if let Some(value) = theme.get(&format!("--inset-shadow-{size}")) {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(vec![
+                ("--tw-inset-shadow", wrap_inset_shadow_colors(value)),
+                ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
+            ]));
+        }
+        if let Some(decls) =
+            shadow_color_decls("--tw-inset-shadow-color", "--tw-inset-shadow-alpha", size, theme)
+        {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(decls));
+        }
+        if size.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // inset-ring / inset-ring-<width> / inset-ring-<color>: the inset ring slot.
+    // Widths compose into `box-shadow`; a color only assigns `--tw-inset-ring-color`
+    // (Tailwind registers no `@property` group for the color form). No negative
+    // form. Handled before the position-offset family for the same reason as above.
+    if !negative && (positive_base == "inset-ring" || positive_base.starts_with("inset-ring-")) {
+        let rest = positive_base.strip_prefix("inset-ring").unwrap_or("");
+        let rest = rest.strip_prefix('-').unwrap_or(rest);
+        if rest.is_empty() || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())) {
+            let width = if rest.is_empty() { "1" } else { rest };
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(vec![
+                (
+                    "--tw-inset-ring-shadow",
+                    format!("inset 0 0 0 {width}px var(--tw-inset-ring-color, currentcolor)"),
+                ),
+                ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
+            ]));
+        }
+        if let Some(decls) = color_prop_decls("--tw-inset-ring-color", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // contain-*: CSS containment. The simple keywords (`none`/`content`/`strict`)
+    // set `contain` directly; the composable slots (`size`/`inline-size`/`layout`/
+    // `paint`/`style`) each write a `--tw-contain-*` var plus the composed `contain`
+    // shorthand. No negative form and no `/modifier`.
+    if positive_base == "contain" || positive_base.starts_with("contain-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let rest = positive_base.strip_prefix("contain-").unwrap_or("");
+        if rest.is_empty() || rest.contains('/') {
+            return Err(Fail::Invalid);
+        }
+        match rest {
+            "none" => return Ok(Utility::simple(vec![("contain", "none".to_string())])),
+            "content" => return Ok(Utility::simple(vec![("contain", "content".to_string())])),
+            "strict" => return Ok(Utility::simple(vec![("contain", "strict".to_string())])),
+            _ => {}
+        }
+        let slot = match rest {
+            "size" => Some(("--tw-contain-size", "size")),
+            "inline-size" => Some(("--tw-contain-size", "inline-size")),
+            "layout" => Some(("--tw-contain-layout", "layout")),
+            "paint" => Some(("--tw-contain-paint", "paint")),
+            "style" => Some(("--tw-contain-style", "style")),
+            _ => None,
+        };
+        if let Some((var, value)) = slot {
+            for p in [
+                TwProp::ContainSize,
+                TwProp::ContainLayout,
+                TwProp::ContainPaint,
+                TwProp::ContainStyle,
+            ] {
+                tw_props.insert(p);
+            }
+            return Ok(Utility::simple(vec![
+                (var, value.to_string()),
+                (
+                    "contain",
+                    "var(--tw-contain-size,) var(--tw-contain-layout,) var(--tw-contain-paint,) var(--tw-contain-style,)".to_string(),
+                ),
+            ]));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
     // Position offsets: inset/inset-x/inset-y/top/right/bottom/left.
     // Longer prefixes first so `inset-y-0` is not consumed by `inset`.
     let position_families: [(&str, &str, u16); 11] = [
@@ -2086,17 +2315,28 @@ fn generate_utility(
         }
     }
 
-    // z-index: numbers and arbitrary values (`z-[100]`).
+    // z-index: numbers, `auto`, and arbitrary values (`z-[100]`).
     if let Some(value) = strip_family(positive_base, "z") {
+        // `z-auto` -> `z-index:auto`; it has no negative form (`-z-auto` is
+        // rejected by Tailwind and generates nothing).
+        if value == "auto" {
+            if negative {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![("z-index", "auto".to_string())]));
+        }
         if value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() {
-            let z = if negative { format!("-{value}") } else { value.to_string() };
+            // Negatives compile to `calc(<n> * -1)`, matching Tailwind.
+            let z = if negative { format!("calc({value} * -1)") } else { value.to_string() };
             return Ok(Utility::simple(vec![("z-index", z)]));
         }
         if let Some(inner) = arbitrary_value(value) {
             let z = if negative { format!("calc({inner} * -1)") } else { inner };
             return Ok(Utility::simple(vec![("z-index", z)]));
         }
-        return Err(unknown(full));
+        // Anything else (`z-unknown`, `z-123.5`, `z--1`, a stray `/modifier`) is a
+        // value Tailwind rejects outright -> generates nothing.
+        return Err(Fail::Invalid);
     }
 
     // flex / basis / grow / shrink / order / grid-cols / grid-rows / grid-flow /
@@ -2154,8 +2394,11 @@ fn generate_utility(
     // Sizing (`w`/`h`/`min-*`/`max-*`/`size`) and `aspect` have no negative form;
     // a leading `-` is rejected by Tailwind (it generates nothing).
     if negative
-        && (["w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-", "size-"]
-            .iter()
+        && ([
+            "w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-", "size-", "min-block-",
+            "max-block-", "min-inline-", "max-inline-",
+        ]
+        .iter()
             .any(|p| positive_base.starts_with(p))
             || positive_base == "aspect"
             || positive_base.starts_with("aspect-"))
@@ -2183,8 +2426,44 @@ fn generate_utility(
         {
             return Err(Fail::Invalid);
         }
-        // Negative margins fall through below; other negatives are unknown.
-        if !(positive_base.starts_with('m')) {
+        // The transition families have no negative form; a leading `-` is
+        // rejected by Tailwind (it generates nothing rather than erroring).
+        if positive_base == "transition"
+            || positive_base.starts_with("transition-")
+            || positive_base == "duration"
+            || positive_base.starts_with("duration-")
+            || positive_base == "delay"
+            || positive_base.starts_with("delay-")
+            || positive_base == "ease"
+            || positive_base.starts_with("ease-")
+        {
+            return Err(Fail::Invalid);
+        }
+        // These families have no negative form; a leading `-` generates nothing
+        // (not a hard error).
+        if positive_base.starts_with("shadow")
+            || positive_base.starts_with("clear")
+            || positive_base.starts_with("float")
+            || positive_base.starts_with("scheme")
+            || positive_base.starts_with("contain")
+            || positive_base.starts_with("backface")
+            || positive_base.starts_with("forced-color")
+        {
+            return Err(Fail::Invalid);
+        }
+        // Padding and gap have no negative form; a leading `-` is rejected by
+        // Tailwind (it generates nothing, not a hard error).
+        if positive_base == "gap"
+            || positive_base.starts_with("gap-")
+            || ["p-", "px-", "py-", "pt-", "pr-", "pb-", "pl-"]
+                .iter()
+                .any(|p| positive_base.starts_with(p))
+        {
+            return Err(Fail::Invalid);
+        }
+        // Negative margins and negative `space-*` values fall through below; other
+        // negatives are unknown.
+        if !(positive_base.starts_with('m') || positive_base.starts_with("space-")) {
             return Err(unknown(full));
         }
     }
@@ -2214,25 +2493,77 @@ fn generate_utility(
         return Ok(utility);
     }
 
-    // space-y-<n>: adjacent-sibling margin utility.
-    if let Some(n) = base.strip_prefix("space-y-") {
-        let value = spacing_value(n, false).ok_or_else(|| unknown(full))?;
-        tw_props.insert(TwProp::SpaceYReverse);
-        return Ok(Utility {
-            selector: SelectorKind::SpaceChildren,
-            decls: vec![
-                ("--tw-space-y-reverse".to_string(), "0".to_string()),
+    // space-x-* / space-y-*: reverse-aware adjacent-sibling margin utilities. The
+    // `reverse` member sets the reverse var to `1`; a value member writes the
+    // reverse var (`0`) and the two calc-composed margins. A `0` value folds to a
+    // plain `0` (matching Tailwind's `calc(0 * …)` simplification). Negatives are
+    // valid (negative spacing); `space-*-reverse` rejects a leading `-`.
+    for (axis, prop_start, prop_end, reverse_var, reverse_prop) in [
+        (
+            'x',
+            "margin-inline-start",
+            "margin-inline-end",
+            "--tw-space-x-reverse",
+            TwProp::SpaceXReverse,
+        ),
+        (
+            'y',
+            "margin-block-start",
+            "margin-block-end",
+            "--tw-space-y-reverse",
+            TwProp::SpaceYReverse,
+        ),
+    ] {
+        if positive_base == format!("space-{axis}") {
+            return Err(Fail::Invalid);
+        }
+        if let Some(suffix) = positive_base.strip_prefix(&format!("space-{axis}-")) {
+            // A `/modifier` invalidates the token.
+            if suffix.contains('/') {
+                return Err(Fail::Invalid);
+            }
+            if suffix == "reverse" {
+                if negative {
+                    return Err(Fail::Invalid);
+                }
+                tw_props.insert(reverse_prop);
+                return Ok(Utility {
+                    selector: SelectorKind::SpaceChildren,
+                    decls: vec![(reverse_var.to_string(), "1".to_string())],
+                    rank: 100,
+                });
+            }
+            let value = if suffix == "px" {
+                Some(if negative { "-1px".to_string() } else { "1px".to_string() })
+            } else if let Some(inner) = arbitrary_value(suffix) {
+                Some(if negative {
+                    format!("calc({inner} * -1)")
+                } else {
+                    inner
+                })
+            } else {
+                spacing_value(suffix, negative)
+            };
+            let value = value.ok_or_else(|| unknown(full))?;
+            tw_props.insert(reverse_prop);
+            let (start_val, end_val) = if value == "0" {
+                ("0".to_string(), "0".to_string())
+            } else {
                 (
-                    "margin-block-start".to_string(),
-                    format!("calc({value} * var(--tw-space-y-reverse))"),
-                ),
-                (
-                    "margin-block-end".to_string(),
-                    format!("calc({value} * calc(1 - var(--tw-space-y-reverse)))"),
-                ),
-            ],
-            rank: 100,
-        });
+                    format!("calc({value} * var({reverse_var}))"),
+                    format!("calc({value} * calc(1 - var({reverse_var})))"),
+                )
+            };
+            return Ok(Utility {
+                selector: SelectorKind::SpaceChildren,
+                decls: vec![
+                    (reverse_var.to_string(), "0".to_string()),
+                    (prop_start.to_string(), start_val),
+                    (prop_end.to_string(), end_val),
+                ],
+                rank: 100,
+            });
+        }
     }
 
     // rounded / rounded-<size> / rounded-<side>(-<size>): border-radius from
@@ -2416,14 +2747,22 @@ fn generate_utility(
         } else {
             arbitrary_value(size).map(|inner| wrap_shadow_colors(&inner))
         };
-        let Some(shadow) = shadow else {
-            return Err(unknown(full));
-        };
-        register_shadow_group(tw_props);
-        return Ok(Utility::simple(vec![
-            ("--tw-shadow", shadow),
-            ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
-        ]));
+        if let Some(shadow) = shadow {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(vec![
+                ("--tw-shadow", shadow),
+                ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
+            ]));
+        }
+        // shadow-<color>: assign `--tw-shadow-color` (composed with the shadow
+        // alpha), plus the static sRGB fallback line.
+        if let Some(decls) =
+            shadow_color_decls("--tw-shadow-color", "--tw-shadow-alpha", size, theme)
+        {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(decls));
+        }
+        return Err(unknown(full));
     }
 
     // drop-shadow / drop-shadow-<size>: filter drop-shadow layers from the
@@ -2548,11 +2887,11 @@ fn generate_utility(
 
     // (outline utilities are handled above, before the negative gate.)
 
-    // transition families.
-    if let Some(decls) = transition_utility(base) {
+    // transition families (leading `-` already rejected by the negative gate).
+    if let Some(decls) = transition_utility(positive_base) {
         return Ok(Utility::simple(decls));
     }
-    if let Some(rest) = base.strip_prefix("transition-") {
+    if let Some(rest) = positive_base.strip_prefix("transition-") {
         // Arbitrary transition properties are an engine gap; any other
         // unknown suffix (`transition-color`) is a value Tailwind resolves
         // against nothing and drops.
@@ -2563,20 +2902,60 @@ fn generate_utility(
     }
 
     // duration-<ms> / duration-[…]: --tw-duration + transition-duration.
-    if let Some(value) = base.strip_prefix("duration-") {
+    // `duration-initial` only resets the custom property (no transition-duration).
+    if let Some(value) = positive_base.strip_prefix("duration-") {
+        if value == "initial" {
+            tw_props.insert(TwProp::Duration);
+            return Ok(Utility::simple(vec![("--tw-duration", "initial".to_string())]));
+        }
         let resolved = if value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() {
             format!("{value}ms")
-        } else if value == "initial" {
-            "initial".to_string()
-        } else if let Some(inner) = arbitrary_value(value) {
-            inner
+        } else if value.starts_with('[') {
+            // A malformed arbitrary value is a genuine engine gap.
+            arbitrary_value(value).ok_or_else(|| unknown(full))?
         } else {
-            return Err(unknown(full));
+            // Any other token resolves against nothing — Tailwind drops it.
+            return Err(Fail::Invalid);
         };
         tw_props.insert(TwProp::Duration);
         return Ok(Utility::simple(vec![
             ("--tw-duration", resolved.clone()),
             ("transition-duration", resolved),
+        ]));
+    }
+
+    // delay-<ms> / delay-[…]: transition-delay (no custom property).
+    if let Some(value) = positive_base.strip_prefix("delay-") {
+        let resolved = if value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() {
+            format!("{value}ms")
+        } else if value.starts_with('[') {
+            arbitrary_value(value).ok_or_else(|| unknown(full))?
+        } else {
+            return Err(Fail::Invalid);
+        };
+        return Ok(Utility::simple(vec![("transition-delay", resolved)]));
+    }
+
+    // ease-<name> / ease-[…]: --tw-ease + transition-timing-function.
+    // `ease-linear` is a literal; `ease-initial` only resets the custom property.
+    if let Some(name) = positive_base.strip_prefix("ease-") {
+        if name == "initial" {
+            tw_props.insert(TwProp::Ease);
+            return Ok(Utility::simple(vec![("--tw-ease", "initial".to_string())]));
+        }
+        let resolved = if name == "linear" {
+            "linear".to_string()
+        } else if theme.contains(&format!("--ease-{name}")) {
+            format!("var(--ease-{name})")
+        } else if name.starts_with('[') {
+            arbitrary_value(name).ok_or_else(|| unknown(full))?
+        } else {
+            return Err(Fail::Invalid);
+        };
+        tw_props.insert(TwProp::Ease);
+        return Ok(Utility::simple(vec![
+            ("--tw-ease", resolved.clone()),
+            ("transition-timing-function", resolved),
         ]));
     }
 
@@ -3971,6 +4350,9 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "resize-none" => vec![("resize", "none".into())],
         "resize-x" => vec![("resize", "horizontal".into())],
         "resize-y" => vec![("resize", "vertical".into())],
+        // field-sizing.
+        "field-sizing-content" => vec![("field-sizing", "content".into())],
+        "field-sizing-fixed" => vec![("field-sizing", "fixed".into())],
         // hyphens (WebKit-prefixed).
         "hyphens-none" => vec![("-webkit-hyphens", "none".into()), ("hyphens", "none".into())],
         "hyphens-manual" => vec![("-webkit-hyphens", "manual".into()), ("hyphens", "manual".into())],
@@ -3980,6 +4362,32 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "will-change-scroll" => vec![("will-change", "scroll-position".into())],
         "will-change-contents" => vec![("will-change", "contents".into())],
         "will-change-transform" => vec![("will-change", "transform".into())],
+        // clear (logical `start`/`end` map to `inline-start`/`inline-end`).
+        "clear-left" => vec![("clear", "left".into())],
+        "clear-right" => vec![("clear", "right".into())],
+        "clear-both" => vec![("clear", "both".into())],
+        "clear-none" => vec![("clear", "none".into())],
+        "clear-start" => vec![("clear", "inline-start".into())],
+        "clear-end" => vec![("clear", "inline-end".into())],
+        // float (logical `start`/`end`).
+        "float-right" => vec![("float", "right".into())],
+        "float-left" => vec![("float", "left".into())],
+        "float-none" => vec![("float", "none".into())],
+        "float-start" => vec![("float", "inline-start".into())],
+        "float-end" => vec![("float", "inline-end".into())],
+        // backface-visibility.
+        "backface-visible" => vec![("backface-visibility", "visible".into())],
+        "backface-hidden" => vec![("backface-visibility", "hidden".into())],
+        // forced-color-adjust.
+        "forced-color-adjust-auto" => vec![("forced-color-adjust", "auto".into())],
+        "forced-color-adjust-none" => vec![("forced-color-adjust", "none".into())],
+        // color-scheme.
+        "scheme-normal" => vec![("color-scheme", "normal".into())],
+        "scheme-dark" => vec![("color-scheme", "dark".into())],
+        "scheme-light" => vec![("color-scheme", "light".into())],
+        "scheme-light-dark" => vec![("color-scheme", "light dark".into())],
+        "scheme-only-dark" => vec![("color-scheme", "only dark".into())],
+        "scheme-only-light" => vec![("color-scheme", "only light".into())],
         _ => return None,
     };
     Some(decls)
@@ -4522,22 +4930,35 @@ fn space_math_operators(value: &str) -> String {
 /// Sizing utilities (`w-`, `h-`, `min-*`, `max-*`, `size-`). Returns `Ok(None)`
 /// when the prefix is not a sizing family.
 fn sizing_utility(base: &str, _full: &str, theme: &Theme) -> Result<Option<Utility>, Fail> {
-    let families: [(&str, &[&str], char, SizeKind); 7] = [
-        ("w", &["width"], 'w', SizeKind::Plain),
-        ("h", &["height"], 'h', SizeKind::Plain),
-        ("min-w", &["min-width"], 'w', SizeKind::Min),
-        ("min-h", &["min-height"], 'h', SizeKind::Min),
-        ("max-w", &["max-width"], 'w', SizeKind::Max),
-        ("max-h", &["max-height"], 'h', SizeKind::Max),
-        ("size", &["width", "height"], 's', SizeKind::Plain),
+    // The final flag marks CSS logical-property families (`min-inline-size`, …),
+    // which resolve values with slightly different axis rules than the physical
+    // `w`/`h` families (no `screen-<bp>` scale, container scale on the inline
+    // axis only, no `--max-width-*` namespace).
+    let families: [(&str, &[&str], char, SizeKind, bool); 11] = [
+        ("w", &["width"], 'w', SizeKind::Plain, false),
+        ("h", &["height"], 'h', SizeKind::Plain, false),
+        ("min-w", &["min-width"], 'w', SizeKind::Min, false),
+        ("min-h", &["min-height"], 'h', SizeKind::Min, false),
+        ("max-w", &["max-width"], 'w', SizeKind::Max, false),
+        ("max-h", &["max-height"], 'h', SizeKind::Max, false),
+        ("size", &["width", "height"], 's', SizeKind::Plain, false),
+        ("min-inline", &["min-inline-size"], 'w', SizeKind::Min, true),
+        ("max-inline", &["max-inline-size"], 'w', SizeKind::Max, true),
+        ("min-block", &["min-block-size"], 'h', SizeKind::Min, true),
+        ("max-block", &["max-block-size"], 'h', SizeKind::Max, true),
     ];
-    for (prefix, properties, axis, kind) in families {
+    for (prefix, properties, axis, kind, logical) in families {
         let Some(value) = strip_family(base, prefix) else {
             continue;
         };
         // A value Tailwind cannot resolve (e.g. `w-none`, `h--1`, `w-1/-2`) makes
         // it generate nothing at all; mirror that with `Fail::Invalid`.
-        let resolved = size_value(value, axis, kind, theme).ok_or(Fail::Invalid)?;
+        let resolved = if logical {
+            logical_size_value(value, axis, kind, theme)
+        } else {
+            size_value(value, axis, kind, theme)
+        }
+        .ok_or(Fail::Invalid)?;
         let decls = properties
             .iter()
             .map(|p| (*p, resolved.clone()))
@@ -4605,6 +5026,59 @@ fn size_value(value: &str, axis: char, kind: SizeKind, theme: &Theme) -> Option<
     }
     // Fractions stay as an unfolded `calc(<n> / <d> * 100%)` (with spaces),
     // matching Tailwind v4's emitted form.
+    if let Some((n, d)) = parse_fraction(value) {
+        return Some(format!("calc({n} / {d} * 100%)"));
+    }
+    if let Some(inner) = arbitrary_value(value) {
+        return Some(inner);
+    }
+    spacing_value(value, false)
+}
+
+/// Value resolution for the CSS logical-property sizing families
+/// (`min-inline-size`, `max-inline-size`, `min-block-size`, `max-block-size`).
+/// Shares the keyword/spacing/fraction/arbitrary handling of [`size_value`] but
+/// with the logical-axis rules Tailwind v4 uses: `screen` resolves by axis
+/// (`100vh` on block, `100vw` on inline) with no `screen-<bp>` breakpoint scale;
+/// the container scale (`xl` -> `var(--container-xl)`) applies on the inline
+/// (width) axis only; `lh` is block-axis only; and there is no `--max-width-*`
+/// namespace.
+fn logical_size_value(value: &str, axis: char, kind: SizeKind, theme: &Theme) -> Option<String> {
+    match value {
+        "px" => return Some("1px".to_string()),
+        "full" => return Some("100%".to_string()),
+        // `auto` is valid on every family except `max-*`.
+        "auto" => return (kind != SizeKind::Max).then(|| "auto".to_string()),
+        // `none` is only valid on the `max-*` families.
+        "none" => return (kind == SizeKind::Max).then(|| "none".to_string()),
+        "fit" => return Some("fit-content".to_string()),
+        "max" => return Some("max-content".to_string()),
+        "min" => return Some("min-content".to_string()),
+        // `lh` (one line-height unit) is a block-axis-only keyword.
+        "lh" => return (axis == 'h').then(|| "1lh".to_string()),
+        "screen" => {
+            return Some(match axis {
+                'h' => "100vh".to_string(),
+                'w' => "100vw".to_string(),
+                _ => return None,
+            });
+        }
+        // Viewport units are axis-restricted on logical properties: the block
+        // (height) axis takes only the `*vh` units, the inline (width) axis only
+        // the `*vw` units.
+        "dvh" | "svh" | "lvh" => return (axis == 'h').then(|| format!("100{value}")),
+        "dvw" | "svw" | "lvw" => return (axis == 'w').then(|| format!("100{value}")),
+        _ => {}
+    }
+    // The container scale is inline-axis (width-like) only; the block axis rejects
+    // it (`max-block-xl` generates nothing).
+    if axis == 'w' {
+        let container = format!("--container-{value}");
+        if theme.contains(&container) {
+            return Some(format!("var({container})"));
+        }
+    }
+    // Fractions stay as an unfolded `calc(<n> / <d> * 100%)` (with spaces).
     if let Some((n, d)) = parse_fraction(value) {
         return Some(format!("calc({n} / {d} * 100%)"));
     }
@@ -5461,9 +5935,37 @@ fn outline_style_keyword(rest: &str) -> Option<&'static str> {
 }
 
 /// Rewrites each color inside a shadow value into
-/// `var(--tw-shadow-color, <color>)`, matching the compiled shadow utilities.
+/// `var(--tw-shadow-color, <color>)` (with a space after the comma, as Tailwind's
+/// box-shadow utilities emit), matching the compiled shadow utilities.
 fn wrap_shadow_colors(value: &str) -> String {
-    wrap_colors(value, "--tw-shadow-color", false)
+    wrap_colors(value, "--tw-shadow-color", true)
+}
+
+/// Rewrites each color inside an inset-shadow value into
+/// `var(--tw-inset-shadow-color, <color>)` (space after the comma).
+fn wrap_inset_shadow_colors(value: &str) -> String {
+    wrap_colors(value, "--tw-inset-shadow-color", true)
+}
+
+/// A shadow-family color utility's declarations (`shadow-<color>`,
+/// `inset-shadow-<color>`): the color composed with the utility's alpha var via
+/// `color-mix(in oklab, …)`, plus the static sRGB-fallback line Tailwind emits for
+/// browsers without `oklab`. `None` when the token is not a color.
+fn shadow_color_decls(
+    prop: &'static str,
+    alpha_var: &str,
+    token: &str,
+    theme: &Theme,
+) -> Option<Vec<(&'static str, String)>> {
+    let resolved = color_value(token, theme)?;
+    let (color_token, modifier) = split_color_modifier(token);
+    let literal = color_srgb_literal(color_token, theme)?;
+    let first = format!("color-mix(in oklab, {resolved} var({alpha_var}), transparent)");
+    let second = match modifier {
+        None => literal,
+        Some(pct) => format!("color-mix(in srgb, {literal} {pct}%, transparent)"),
+    };
+    Some(vec![(prop, first), (prop, second)])
 }
 
 /// Rewrites each color inside a text-shadow value into
@@ -5579,17 +6081,23 @@ fn split_top_level_commas(value: &str) -> Vec<&str> {
 fn transition_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
     let property = match base {
         "transition" => {
-            "color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to,opacity,box-shadow,transform,translate,scale,rotate,filter,-webkit-backdrop-filter,backdrop-filter,display,content-visibility,overlay,pointer-events"
+            "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events"
         }
         "transition-colors" => {
-            "color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to"
+            "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to"
         }
         "transition-opacity" => "opacity",
-        "transition-transform" => "transform,translate,scale,rotate",
+        "transition-transform" => "transform, translate, scale, rotate",
         "transition-shadow" => "box-shadow",
         "transition-all" => "all",
         "transition-none" => {
             return Some(vec![("transition-property", "none".to_string())]);
+        }
+        "transition-normal" => {
+            return Some(vec![("transition-behavior", "normal".to_string())]);
+        }
+        "transition-discrete" => {
+            return Some(vec![("transition-behavior", "allow-discrete".to_string())]);
         }
         _ => return None,
     };
@@ -5597,11 +6105,11 @@ fn transition_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         ("transition-property", property.to_string()),
         (
             "transition-timing-function",
-            "var(--tw-ease,var(--default-transition-timing-function))".to_string(),
+            "var(--tw-ease, var(--default-transition-timing-function))".to_string(),
         ),
         (
             "transition-duration",
-            "var(--tw-duration,var(--default-transition-duration))".to_string(),
+            "var(--tw-duration, var(--default-transition-duration))".to_string(),
         ),
     ])
 }
@@ -5629,8 +6137,10 @@ fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Util
     ];
     for (prefix, property, is_margin, rank) in families {
         if let Some(step) = base.strip_prefix(prefix) {
+            // Padding/gap have no negative form: Tailwind rejects a leading `-`
+            // (generates nothing, not a hard error).
             if negative && !is_margin {
-                return Err(unknown(full));
+                return Err(Fail::Invalid);
             }
             if is_margin && step == "auto" {
                 if negative {
@@ -5646,7 +6156,9 @@ fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Util
                 let value = if negative { format!("calc({inner} * -1)") } else { inner };
                 return Ok(Some(Utility::ranked(vec![(property, value)], rank)));
             }
-            let value = spacing_value(step, negative).ok_or_else(|| unknown(full))?;
+            // A non-canonical step (`px-big`, `px-.75`, `px-0.375`, `px-2.50`)
+            // is a value Tailwind rejects outright -> generates nothing.
+            let value = spacing_value(step, negative).ok_or(Fail::Invalid)?;
             return Ok(Some(Utility::ranked(vec![(property, value)], rank)));
         }
     }
@@ -5657,13 +6169,11 @@ fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Util
 /// matching Tailwind's compiled output: `0` -> `0`, `1` -> `var(--spacing)`,
 /// otherwise `calc(var(--spacing) * n)`.
 fn spacing_value(step: &str, negative: bool) -> Option<String> {
-    let bytes = step.as_bytes();
-    let valid = !step.is_empty()
-        && bytes.first().is_some_and(|b| b.is_ascii_digit())
-        && bytes.last().is_some_and(|b| b.is_ascii_digit())
-        && step.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        && step.bytes().filter(|b| *b == b'.').count() <= 1;
-    if !valid {
+    // The step must be a non-negative multiple of `0.25` in canonical form
+    // (`2`, `1.5`, `0.25`, `2.75`); over-precise or trailing-zero decimals
+    // (`0.375`, `2.50`) and non-numeric tokens (`big`, `.75`) are rejected,
+    // matching Tailwind.
+    if !is_spacing_multiplier(step) {
         return None;
     }
     Some(match (step, negative) {
@@ -6738,7 +7248,7 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains(
-            ".shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,rgb(0 0 0 / 0.1)), 0 4px 6px -4px var(--tw-shadow-color,rgb(0 0 0 / 0.1));box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}"
+            ".shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 4px 6px -4px var(--tw-shadow-color, rgb(0 0 0 / 0.1));box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}"
         ));
         assert!(out.contains(
             ".ring-2{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);box-shadow:"
@@ -6769,7 +7279,7 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains(
-            ".transition-colors{transition-property:color,background-color,border-color,outline-color,text-decoration-color,fill,stroke,--tw-gradient-from,--tw-gradient-via,--tw-gradient-to;transition-timing-function:var(--tw-ease,var(--default-transition-timing-function));transition-duration:var(--tw-duration,var(--default-transition-duration))}"
+            ".transition-colors{transition-property:color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;transition-timing-function:var(--tw-ease, var(--default-transition-timing-function));transition-duration:var(--tw-duration, var(--default-transition-duration))}"
         ));
         assert!(out.contains(".transition-opacity{transition-property:opacity;"));
         assert!(out.contains(".cursor-pointer{cursor:pointer}"));
@@ -6926,9 +7436,6 @@ mod tests {
 
     #[test]
     fn unknown_utility_is_a_hard_error_naming_the_token() {
-        let err = compile("@import 'tailwindcss';", &candidates(&["p-bogus"])).unwrap_err();
-        assert!(err.contains("p-bogus"), "error must name the token: {err}");
-
         let err = compile("@import 'tailwindcss';", &candidates(&["bg-plaid-500"])).unwrap_err();
         assert!(err.contains("bg-plaid-500"), "error must name the token: {err}");
 
@@ -6938,10 +7445,10 @@ mod tests {
         // All failures are reported together, not one at a time.
         let err = compile(
             "@import 'tailwindcss';",
-            &candidates(&["p-bogus", "bg-plaid-500"]),
+            &candidates(&["text-gray-1000", "bg-plaid-500"]),
         )
         .unwrap_err();
-        assert!(err.contains("p-bogus") && err.contains("bg-plaid-500"));
+        assert!(err.contains("text-gray-1000") && err.contains("bg-plaid-500"));
     }
 
     #[test]
@@ -7026,11 +7533,11 @@ mod tests {
         .unwrap();
         // Bare `shadow` is the scale's `sm` entry.
         assert!(out.contains(
-            ".shadow{--tw-shadow:0 1px 3px 0 var(--tw-shadow-color,rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color,rgb(0 0 0 / 0.1));box-shadow:"
+            ".shadow{--tw-shadow:0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));box-shadow:"
         ));
         assert!(out.contains(".shadow-none{--tw-shadow:0 0 #0000;box-shadow:"));
         assert!(out.contains(
-            "{--tw-shadow:0 -2px 12px -4px var(--tw-shadow-color,rgba(0,0,0,0.08));box-shadow:"
+            "{--tw-shadow:0 -2px 12px -4px var(--tw-shadow-color, rgba(0,0,0,0.08));box-shadow:"
         ));
     }
 
