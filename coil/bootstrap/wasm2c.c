@@ -52,6 +52,13 @@ static uint32_t evalExpr(struct InputStream *in) {
                 value = (uint32_t)InputStream_readLeb128_i32(in);
                 break;
 
+            // memory64 active elem/data segments encode their offset as
+            // i64.const. Segment offsets fit in 32 bits for this module
+            // (linear memory is far below 4 GiB), so truncate to uint32_t.
+            case WasmOpcode_i64_const:
+                value = (uint32_t)InputStream_readLeb128_i64(in);
+                break;
+
             default: panic("unsupported expr opcode");
         }
     }
@@ -65,6 +72,14 @@ static void renderExpr(FILE *out, struct InputStream *in) {
             case WasmOpcode_i32_const: {
                 uint32_t value = (uint32_t)InputStream_readLeb128_i32(in);
                 fprintf(out, "UINT32_C(0x%" PRIX32 ")", value);
+                break;
+            }
+
+            // memory64 globals (__heap_base, __stack_pointer, GOT.* ...) have
+            // i64 initialisers.
+            case WasmOpcode_i64_const: {
+                uint64_t value = (uint64_t)InputStream_readLeb128_i64(in);
+                fprintf(out, "UINT64_C(0x%" PRIX64 ")", value);
                 break;
             }
 
@@ -449,7 +464,14 @@ int main(int argc, char **argv) {
             }
             tables[i].type = ref_type;
             tables[i].limits = InputStream_readLimits(&in);
-            if (tables[i].limits.min != tables[i].limits.max) panic("growable table not supported");
+            // A table with no declared maximum (limit flag 0x04, common for
+            // table64) reports max == UINT32_MAX; it cannot actually grow
+            // without table.grow (unused by this module), so size it to its
+            // minimum. Only reject a table with an EXPLICIT max that differs
+            // from its min (a genuinely growable table).
+            if (tables[i].limits.max != UINT32_MAX &&
+                tables[i].limits.min != tables[i].limits.max)
+                panic("growable table not supported");
             fprintf(out, "static void (*t%" PRIu32 "[UINT32_C(%" PRIu32 ")])(void);\n",
                     i, tables[i].limits.min);
         }
@@ -533,10 +555,22 @@ int main(int argc, char **argv) {
                     fprintf(out, "uint8_t **const %s_%s = &m%" PRIu32 ";\n", mod, name, idx);
                     break;
 
+                case 0x03: // global — expose a pointer so the C runtime can
+                           // read exports such as __heap_base / __stack_pointer.
+                    fprintf(out, "%s%s *const %s_%s = &g%" PRIu32 ";\n",
+                            globals[idx].mut ? "" : "const ",
+                            WasmValType_toC(globals[idx].val_type), mod, name, idx);
+                    break;
+
                 default: panic("unsupported export kind");
             }
             free(name);
         }
+        // Expose the module initializer so the C runtime can force linear
+        // memory + data segments to be allocated (init() is otherwise only
+        // reachable through an exported function's prologue) BEFORE it writes
+        // argv into that memory and calls main.
+        fputs("void wasm_init(void) { init(); }\n", out);
         fputc('\n', out);
     }
 

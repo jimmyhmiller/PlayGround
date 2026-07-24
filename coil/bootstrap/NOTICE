@@ -58,6 +58,11 @@ changes are the minimal, correct handling required to translate it:
       0x03) as `TYPE *const wasm_<name> = &g<idx>;` so the C runtime can
       read exports such as __heap_base. (Upstream handled only function
       and memory exports.)
+    * emit a public `void wasm_init(void) { init(); }`. The module's static
+      init() (which allocates linear memory and installs data segments) is
+      otherwise only reachable through an exported function's prologue; the
+      runtime must run it BEFORE writing argv into linear memory and calling
+      main.
 
   Note on memory64 loads/stores: NO change was needed. Each memory access
   the translator emits indexes the linear-memory buffer with the address

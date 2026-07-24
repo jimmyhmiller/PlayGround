@@ -185,9 +185,12 @@ static struct Limits InputStream_readLimits(struct InputStream *self) {
     struct Limits limits;
     uint8_t kind = InputStream_readByte(self);
     limits.min = InputStream_readLeb128_u32(self);
+    // Flag bit 2 (0x04) marks a 64-bit (memory64 / table64) index type; the
+    // min/max values remain ordinary unsigned LEBs regardless of index width.
+    // MVP: 0x00 (no max) / 0x01 (max). 64-bit: 0x04 (no max) / 0x05 (max).
     switch (kind) {
-        case 0x00: limits.max = UINT32_MAX; break;
-        case 0x01: limits.max = InputStream_readLeb128_u32(self); break;
+        case 0x00: case 0x04: limits.max = UINT32_MAX; break;
+        case 0x01: case 0x05: limits.max = InputStream_readLeb128_u32(self); break;
         default: panic("unsupported limit kind");
     }
     return limits;
