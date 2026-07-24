@@ -1621,6 +1621,14 @@
     (load retval)))
 
 ; ============================ top-level entry ================================
+; The program's argc/argv (set by the driver's `interp` subcommand before the
+; pipeline runs), delivered to a `main` that declares parameters. argv points at
+; the real OS char** (so argv[i] are genuine C strings).
+(defstruct IArgs [(argc i64) (argv i64)])
+(defn iargs-box [] (-> (ptr IArgs)) (alloc-static IArgs))
+(defn set-interp-args [(argc i64) (argv i64)] (-> i64)
+  (let [b (iargs-box)] (store! (field b argc) argc) (store! (field b argv) argv) 0))
+
 ; Compile every mono'd function to bytecode, then run `main` and return its i64
 ; (the process exit code). Registration happens BEFORE compilation so calls
 ; resolve by name regardless of order.
@@ -1651,5 +1659,12 @@
     (let [mi (find-func cx "main")]
       (if (icmp-lt mi 0) (do (idie "no `main` function in program") 1)
         (do (ensure-compiled cx mi)
-            (let [argbuf (alloc-stack (array i64 4))]
-              (vm-exec cx mi (cast (ptr i64) argbuf) 0 0)))))))
+            (let [np (load (field (ial-at [BFunc] (field cx bfuncs) mi) nparams))
+                  ib (iargs-box) argbuf (alloc-stack (array i64 4))]
+              ; a main that takes parameters receives (argc, argv); a nullary main
+              ; gets none. argc widens into the first cell, argv (a char**) the second.
+              (if (icmp-ge np 2)
+                  (do (store! (index (cast (ptr i64) argbuf) 0) (load (field ib argc)))
+                      (store! (index (cast (ptr i64) argbuf) 1) (load (field ib argv)))
+                      (vm-exec cx mi (cast (ptr i64) argbuf) 2 0))
+                (vm-exec cx mi (cast (ptr i64) argbuf) 0 0))))))))

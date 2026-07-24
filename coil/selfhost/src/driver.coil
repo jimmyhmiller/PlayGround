@@ -2021,6 +2021,9 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
          (if (str-eq sub "interp")
              (let [path (need-file argc argv sub)]
                (set-target-arch! (argv-triple argc argv))
+               ; hand the program its own argc/argv: argv[0] = the source file, then
+               ; any extra command-line args (everything after `interp <file>`).
+               (set-interp-args (cast i64 (isub (cast i64 argc) 2)) (cast i64 (index argv 2)))
                (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of interp-src-program)))
          (if (str-eq sub "dump-read")
              (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-read-w)))
