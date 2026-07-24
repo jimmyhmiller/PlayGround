@@ -908,8 +908,35 @@
                   (femit fb 38 (load low) (load width) (load bb))
                   (load vt)))
               (_ (do (idie "bit-set through non-struct pointer") (TInt 64 true)))))))
-      (EMakeDyn [ds vt m inner] (do (idie2 "TODO EMakeDyn: " ds) (TInt 64 true)))
-      (EDynDispatch [ds vt mi cc ps r recv args] (do (idie2 "TODO EDynDispatch: " ds) (TInt 64 true)))
+      (EMakeDyn [ds vtn methods inner]
+        ; a dyn object { data, vtable } (16 bytes). The vtable is a persistent
+        ; malloc'd array of encoded Coil fnptrs, one per method (built once at
+        ; compile time and baked as an immediate — mirrors codegen's data global).
+        (let [nmeth (al-len [(slice u8)] (load methods))
+              vt (cast i64 (interp.malloc (imul (if (icmp-le nmeth 1) 1 nmeth) 8)))
+              (mut i) 0 l (fb-local! fb)]
+          (loop (if (icmp-ge (load i) nmeth) (break)
+            (do (let [mnm (al-get [(slice u8)] (load methods) (load i)) mfi (find-func cx mnm)]
+                  (if (icmp-lt mfi 0) (idie2 "make-dyn: unknown method " mnm) 0)
+                  (ensure-compiled cx mfi)
+                  (store! (cast (ptr i64) (iadd vt (imul (load i) 8))) (iadd (fnptr-base) mfi)))
+                (store! i (iadd (load i) 1)))))
+          (femit fb 31 16 8 0) (femit fb 3 l 0 0)                ; ALLOCZ 16 -> local l
+          (femit fb 2 l 0 0) (compile-expr fb inner) (femit fb 7 8 0 0) (femit fb 4 0 0 0)  ; l[0] = data
+          (femit fb 2 l 0 0) (femit fb 34 8 0 0) (femit fb 1 vt 0 0) (femit fb 7 8 0 0) (femit fb 4 0 0 0) ; l[8] = vtable
+          (femit fb 2 l 0 0)                                     ; push the dyn object
+          (TStruct ds)))
+      (EDynDispatch [ds vtn mi cc params ret recv args]
+        (let [r (fb-local! fb)]
+          (compile-expr fb recv) (femit fb 3 r 0 0)              ; r = receiver dyn object addr
+          ; fnptr = *( *(r+8) + mi*8 )
+          (femit fb 2 r 0 0) (femit fb 34 8 0 0) (femit fb 6 8 0 0)   ; vtable addr
+          (if (icmp-ne (imul mi 8) 0) (femit fb 34 (imul mi 8) 0 0) 0)
+          (femit fb 6 8 0 0)                                     ; fnptr (encoded)
+          (femit fb 2 r 0 0) (femit fb 6 8 0 0)                  ; data ptr (first arg)
+          (compile-args fb args)
+          (femit fb 42 (iadd 1 (al-len [Expr] (load args))) 0 0) ; CALLPTR
+          ret))
       (EErase [tn inner] (do (idie2 "TODO EErase: " tn) (TInt 64 true)))
       (ETypeQuery [q t] (do (idie "TODO ETypeQuery") (TInt 64 true)))
       (_ (do (idie "unimplemented expression kind reached the interpreter compiler") (TInt 64 true))))))
