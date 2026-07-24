@@ -207,12 +207,32 @@ variadic FFI, and calling a real C function address as a Coil `fnptr`.
 
 ## Gate
 
-`selfhost/oracle/interp/gate-interp.sh <coil-bin>` runs `coil interp` over
-`selfhost/oracle/arm64/corpus.txt` and diffs stdout + exit code against the LLVM
-reference snapshots in `selfhost/oracle/arm64/reference` — the same snapshots the
-arm64 backend gate uses. Runtime equality with the compiled program is the
-contract. **54/56** pass. The two residual failures are `examples/args.coil` and
-`examples/everything.coil`, which both `puts(argv[0])`: the reference bakes the
-*compiled binary's* path (`/tmp/coil-arm64-fixed-…`), which an interpreter cannot
-reproduce (fabricating it to match would be a hardcode, not a real result). Both
-programs otherwise run correctly, with the right exit codes and all other output.
+There are two gates, both over `selfhost/oracle/arm64/corpus.txt` (all 44
+`examples/` programs plus the 12 `tests/` programs = 56 entries). Runtime equality
+with the compiled program is the contract.
+
+**`selfhost/oracle/interp/gate-interp-vs-compiled.sh <coil-bin>` — the contract
+gate (56/56).** For every corpus program it BUILDS the program (default backend,
+or `--backend arm64` for the `R`-marked inline-asm `:shim` programs, exactly as the
+corpus declares), runs the compiled binary, and diffs its stdout+exit against
+`coil interp` on the same source. This checks the interpreter against LIVE compiler
+output — the direct, strongest form of "interp == codegen". `argv[0]` is an
+invocation artifact, not program behavior (a compiled binary reports its own
+filesystem path; an interpreter reports the source path it was handed), so the
+compiled side is invoked with `exec -a <srcpath>` and BOTH sides see the identical
+`argv[0]` (= the source path). This normalization is applied **uniformly** to all
+56 programs: for the 54 that never read `argv[0]` it changes nothing; for
+`examples/args.coil` and `examples/everything.coil` (which `puts(argv[0])`) it
+makes the diff a comparison of program *semantics* rather than of where the binary
+happens to live. Nothing is faked, skipped, or special-cased.
+
+**`selfhost/oracle/interp/gate-interp.sh <coil-bin>` — the snapshot gate (54/56).**
+This diffs `coil interp` against the frozen LLVM reference snapshots in
+`selfhost/oracle/arm64/reference` (the same snapshots the arm64 backend gate uses).
+It reports **54/56**: the two "failures" are `examples/args.coil` and
+`examples/everything.coil`, whose snapshots bake the *compiled binary's* path
+(`/tmp/coil-arm64-fixed-…`) as `argv[0]` — a filesystem location an interpreter
+structurally cannot and should not reproduce (fabricating it would be a hardcode,
+not a real result). Both programs otherwise run identically. The contract gate
+above resolves this honestly by normalizing `argv[0]` on both sides rather than
+comparing against a path frozen into a snapshot.
