@@ -57,6 +57,8 @@
 (extern interp.strcmp  [(ptr i8) (ptr i8)] (-> i32))
 (extern interp.read    [i32 (ptr i8) isize] (-> isize))
 (extern interp.abort   [] (-> i64))
+(extern interp.fmod    [f64 f64] (-> f64))
+(extern interp.fmodf   [f32 f32] (-> f32))
 
 ; address of element i of an ArrayList given by pointer (local copy of the a64
 ; helper, renamed to avoid a duplicate generic instantiation clash).
@@ -186,6 +188,23 @@
           (if (icmp-ge (isum-idx cx nm) 0) 8
             (do (idie2 "ialign-of: unknown nominal type: " nm) 8)))))
     (_ 8)))
+
+; bit-struct field info: low bit offset, width, signedness, backing BYTE size.
+(defn ibits-info [(cx (ptr Interp)) (nm (slice u8)) (fname (slice u8))
+                  (lowp (ptr i64)) (widthp (ptr i64)) (signedp (ptr bool)) (backbytesp (ptr i64))] (-> i64)
+  (let [si (istruct-idx cx nm)]
+    (if (icmp-lt si 0) (idie2 "bit access on unknown struct: " nm) 0)
+    (let [e (ial-at [IStruct] (field cx structs) si)]
+      (match-else (load (field e layout))
+        (LBits [backing offs]
+          (let [fi (ifield-idx cx si fname)]
+            (store! lowp (al-get [i64] (load offs) fi))
+            (store! backbytesp (idiv backing 8))
+            (match-else (load (field (ial-at [Field] (load (field e fields)) fi) ty))
+              (TInt [bits sg] (do (store! widthp bits) (store! signedp sg) 0))
+              (TBool [] (do (store! widthp 1) (store! signedp false) 0))
+              (_ (do (idie "bit-struct field with non-int type") 0)))))
+        (_ (do (idie2 "bit access on non-bits struct: " nm) 0))))))
 
 ; field byte offset within struct si (by field index).
 (defn ifield-off [(cx (ptr Interp)) (si i64) (fi i64)] (-> i64)
@@ -864,8 +883,31 @@
           (match-else (load ft)
             (TFn [cc ps r] (load r))
             (_ (do (idie "call-ptr on a non-fnptr value") (TInt 64 true))))))
-      (EBitGet [p fname] (do (idie2 "TODO EBitGet: " fname) (TInt 64 true)))
-      (EBitSet [p fname val] (do (idie2 "TODO EBitSet: " fname) (TInt 64 true)))
+      (EBitGet [p fname]
+        (let [t (alloc-stack Type)]
+          (store! t (compile-expr fb p))
+          (let [pt (alloc-stack Type)]
+            (store! pt (ty-pointee2 t))
+            (match-else (load pt)
+              (TStruct [nm]
+                (let [low (alloc-stack i64) width (alloc-stack i64) sg (alloc-stack bool) bb (alloc-stack i64)]
+                  (ibits-info cx nm fname low width sg bb)
+                  (femit fb 37 (load low) (load width) (ior (if (load sg) 1 0) (ishl (load bb) 1)))
+                  (if (icmp-eq (load width) 1) (TBool) (TInt (load width) (load sg)))))
+              (_ (do (idie "bit-get through non-struct pointer") (TInt 64 true)))))))
+      (EBitSet [p fname val]
+        (let [t (alloc-stack Type)]
+          (store! t (compile-expr fb p))
+          (let [pt (alloc-stack Type) vt (alloc-stack Type)]
+            (store! pt (ty-pointee2 t))
+            (store! vt (compile-expr fb val))
+            (match-else (load pt)
+              (TStruct [nm]
+                (let [low (alloc-stack i64) width (alloc-stack i64) sg (alloc-stack bool) bb (alloc-stack i64)]
+                  (ibits-info cx nm fname low width sg bb)
+                  (femit fb 38 (load low) (load width) (load bb))
+                  (load vt)))
+              (_ (do (idie "bit-set through non-struct pointer") (TInt 64 true)))))))
       (EMakeDyn [ds vt m inner] (do (idie2 "TODO EMakeDyn: " ds) (TInt 64 true)))
       (EDynDispatch [ds vt mi cc ps r recv args] (do (idie2 "TODO EDynDispatch: " ds) (TInt 64 true)))
       (EErase [tn inner] (do (idie2 "TODO EErase: " tn) (TInt 64 true)))
@@ -992,11 +1034,11 @@
         (let [lf (bits->f64 l) rf (bits->f64 r)]
           (f64->bits (cond (icmp-eq op 0) (fadd lf rf) (icmp-eq op 1) (fsub lf rf)
                            (icmp-eq op 2) (fmul lf rf) (icmp-eq op 3) (fdiv lf rf)
-                           (f64-frem-unsupported))))
+                           (interp.fmod lf rf))))
       (let [lf (bits->f32 l) rf (bits->f32 r)]
         (f32->bits (cond (icmp-eq op 0) (fadd lf rf) (icmp-eq op 1) (fsub lf rf)
                          (icmp-eq op 2) (fmul lf rf) (icmp-eq op 3) (fdiv lf rf)
-                         (f32-frem-unsupported)))))))
+                         (interp.fmodf lf rf)))))))
 
 (defn do-cmp [(op i64) (mode i64) (signed i64) (l i64) (r i64)] (-> i64)
   (if (icmp-eq mode 0)
@@ -1501,6 +1543,15 @@
             34 (let [addr (vpop ops spc)] (vpush ops spc (iadd addr a)))  ; FIELDPTR
             35 (let [idx (vpop ops spc) base (vpop ops spc)] (vpush ops spc (iadd base (imul idx a))))  ; INDEX
             36 (do (idie "match: no variant matched (non-exhaustive match reached at runtime)") 0)      ; TRAP
+            37 (let [addr (vpop ops spc) low a width b sg (iand c 1) bb (ishr c 1)]
+                 (let [cont (mem-load addr bb false) v (cast i64 (ishr (cast u64 cont) (cast u64 low)))]
+                   (vpush ops spc (if (icmp-lt width 64) (canon-int v width (icmp-ne sg 0)) v))))       ; BITGET
+            38 (let [val (vpop ops spc) addr (vpop ops spc) low a width b bb c]
+                 (let [fieldmask (if (icmp-ge width 64) -1 (isub (ishl 1 width) 1))
+                       cont (mem-load addr bb false)
+                       cleared (iand cont (ixor (ishl fieldmask low) -1))
+                       merged (ior cleared (ishl (iand val fieldmask) low))]
+                   (mem-store addr merged bb) (vpush ops spc val)))                                     ; BITSET
             40 (let [(mut k) (isub b 1)]
                  (loop (if (icmp-lt (load k) 0) (break)
                    (do (store! (index (cast (ptr i64) argbuf) (load k)) (vpop ops spc))
