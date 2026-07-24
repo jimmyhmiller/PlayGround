@@ -59,6 +59,14 @@
 (extern interp.abort   [] (-> i64))
 (extern interp.fmod    [f64 f64] (-> f64))
 (extern interp.fmodf   [f32 f32] (-> f32))
+; Variadic forwarding. We always pass a fixed tail of 6 word-sized varargs; a
+; real printf/snprintf reads only as many as the format string names, so extra
+; (unused) trailing words are harmless. This is correct for integer / string /
+; char / pointer conversions (the corpus' usage); %f-family (v-register)
+; variadics are NOT supported and are not exercised.
+(extern interp.printf   [(ptr i8) ...] (-> i32))
+(extern interp.snprintf [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern interp.dprintf  [i32 (ptr i8) ...] (-> i32))
 
 ; address of element i of an ArrayList given by pointer (local copy of the a64
 ; helper, renamed to avoid a duplicate generic instantiation clash).
@@ -1087,7 +1095,9 @@
               (icmp-eq op 4) (b01 (fcmp-eq lf rf)) (b01 (fcmp-ne lf rf)))))))
 
 (defn i2f [(v i64) (fbytes i64) (srcsigned i64)] (-> i64)
-  (if (icmp-eq fbytes 4) (f32->bits (cast f32 v)) (f64->bits (cast f64 v))))
+  (if (icmp-ne srcsigned 0)
+      (if (icmp-eq fbytes 4) (f32->bits (cast f32 v)) (f64->bits (cast f64 v)))
+    (if (icmp-eq fbytes 4) (f32->bits (cast f32 (cast u64 v))) (f64->bits (cast f64 (cast u64 v))))))
 (defn f2i [(v i64) (destbits i64) (destsigned i64) (srcfbytes i64)] (-> i64)
   (let [x (if (icmp-eq srcfbytes 4) (cast f64 (bits->f32 v)) (bits->f64 v))]
     (canon-int (cast i64 x) destbits (icmp-ne destsigned 0))))
@@ -1121,6 +1131,15 @@
       (str-eq nm "strcmp")  (cast i64 (interp.strcmp (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
       (str-eq nm "read")    (cast i64 (interp.read (cast i32 (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
       (str-eq nm "abort")   (do (interp.abort) 0)
+      (str-eq nm "printf")  (cast i64 (interp.printf (cast (ptr i8) (load (index buf 0)))
+                                        (load (index buf 1)) (load (index buf 2)) (load (index buf 3))
+                                        (load (index buf 4)) (load (index buf 5)) (load (index buf 6))))
+      (str-eq nm "dprintf") (cast i64 (interp.dprintf (cast i32 (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))
+                                        (load (index buf 2)) (load (index buf 3)) (load (index buf 4))
+                                        (load (index buf 5)) (load (index buf 6)) (load (index buf 7))))
+      (str-eq nm "snprintf") (cast i64 (interp.snprintf (cast (ptr i8) (load (index buf 0))) (load (index buf 1)) (cast (ptr i8) (load (index buf 2)))
+                                        (load (index buf 3)) (load (index buf 4)) (load (index buf 5))
+                                        (load (index buf 6)) (load (index buf 7)) (load (index buf 8))))
       (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))
 
 ; ============================ inline LLVM-IR interpreter ====================
