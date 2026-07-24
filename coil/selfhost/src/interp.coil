@@ -1185,6 +1185,20 @@
       (str-eq nm "div") (let [x (load (index buf 0)) y (load (index buf 1))]
                           (ior (iand (idiv x y) 4294967295) (ishl (irem x y) 32)))
       (str-eq nm "qsort") (interp-qsort cx (load (index buf 0)) (load (index buf 1)) (load (index buf 2)) (load (index buf 3)))
+      ; pthread_create(handle, attr, start, arg): run the Coil start routine
+      ; SYNCHRONOUSLY (the interpreter is single-threaded; sequential execution of
+      ; the workers' atomic ops yields the same race-free final state as genuine
+      ; concurrency for the corpus' contention-free dogfoods). *handle gets a
+      ; nonzero id so join has something; the routine's return is discarded.
+      (str-eq nm "pthread_create")
+        (let [fi (isub (load (index buf 2)) (fnptr-base)) wargs (alloc-stack (array i64 1))]
+          (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
+              (idie "pthread_create: start routine is not a Coil function pointer") 0)
+          (store! (index (cast (ptr i64) wargs) 0) (load (index buf 3)))
+          (vm-exec cx fi (cast (ptr i64) wargs) 1 0)
+          (mem-store (load (index buf 0)) 1 8)
+          0)
+      (str-eq nm "pthread_join") 0
       (str-eq nm "sqrt")  (f64->bits (interp.sqrt (bits->f64 (load (index buf 0)))))
       (str-eq nm "pow")   (f64->bits (interp.pow (bits->f64 (load (index buf 0))) (bits->f64 (load (index buf 1)))))
       (str-eq nm "fabs")  (f64->bits (interp.fabs (bits->f64 (load (index buf 0)))))
