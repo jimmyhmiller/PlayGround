@@ -38,6 +38,7 @@
 (import "metaengine.coil" :use *)
 (import "expander.coil" :use *)
 (import "codegen_a64.coil" :use *)
+(import "interp.coil" :use *)   ; `coil interp` — additive bytecode interpreter (guarded; never in the compile path)
 (import "wasm.coil" :use *)
 (import "codegen_wasm.coil" :use *)   ; native wasm64 (memory64) backend, no LLVM
 (import "../../fmt/rules.coil" :as fmtr)      ; the `coil fmt` formatter (qualified to avoid name clashes)
@@ -458,6 +459,20 @@
     (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
       (Some [_] 1)
       (None []   0))))
+
+; `interp <file>`: run the SAME front-end as `build` (read -> load -> expand ->
+; transforms -> typecheck -> monomorphize), then INTERPRET the mono'd Program with
+; the bytecode VM (interp.coil) instead of emitting an object. `main`'s i64 return
+; IS the process exit code; the program's stdout goes to real stdout via libc FFI.
+; Signature is the mode-3 dump-fn shape so it runs on the big stack (the VM
+; recurses per call frame). On a compile error the diagnostic is already reported
+; and this returns 1. (ADDITIVE — the compile pipeline is byte-unchanged.)
+(defn interp-src-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp] (interp-program a mp))
+      (None []   1))))
 
 ; The LLVM entry points (dump-ir-program / build-object / build-ir-program) live in
 ; selfhost/src/main.coil and are injected here as function pointers (see driver-main /
@@ -2001,6 +2016,12 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
              (let [path (need-file argc argv sub)]
                (set-target-arch! (argv-triple argc argv))
                (if (icmp-eq (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of check-src-program)) 0) 1 0))
+         ; `interp <file>`: run through mono, then interpret. main's i64 return is
+         ; the process exit code (returned straight from the big-stack pipeline).
+         (if (str-eq sub "interp")
+             (let [path (need-file argc argv sub)]
+               (set-target-arch! (argv-triple argc argv))
+               (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of interp-src-program)))
          (if (str-eq sub "dump-read")
              (let [path (need-file argc argv sub)] (run-dump-on-big-stack a (read-src a path) (cwd-slice a) (cstr->slice path) (fnptr-of dump-read-w)))
           (if (str-eq sub "dump-ast")
@@ -2043,5 +2064,5 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
