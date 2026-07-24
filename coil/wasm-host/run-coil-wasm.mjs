@@ -20,9 +20,16 @@ const u8    = () => new Uint8Array(buf());
 const dv    = () => new DataView(buf());
 const PAGE  = 65536;
 
-// ---- bump allocator over linear memory -------------------------------------
+// ---- reclaiming allocator over linear memory --------------------------------
+// A plain bump allocator LEAKS catastrophically here: the in-process bytecode
+// interpreter mallocs a 1 MiB frame buffer (+ operand stack) PER vm-exec call and
+// frees it on return, so with thousands of macro expansions a no-op free exhausts
+// memory. Reclaim by a per-size free list: sizes are rounded up so the interpreter's
+// repeated fixed-size frame allocations reuse the same blocks, bounding memory to the
+// peak concurrent live set rather than the cumulative churn.
 let heap = 0n;                                    // next free offset (BigInt)
-const sizes = new Map();                          // ptr -> size, for realloc
+const sizes = new Map();                          // live ptr -> rounded size
+const freeBins = new Map();                       // size(string) -> [ptr,…] reusable
 const alignUp = (v, a) => (v + (a - 1n)) & ~(a - 1n);
 function ensure(end) {                            // grow memory to cover byte `end`
   const have = BigInt(buf().byteLength);
@@ -32,20 +39,36 @@ function ensure(end) {                            // grow memory to cover byte `
 }
 function malloc(size) {
   size = BigInt(size);
-  if (size === 0n) size = 1n;
+  if (size <= 0n) size = 1n;
+  size = alignUp(size, 16n);                       // bin by 16-byte-rounded size
+  const bin = freeBins.get(size.toString());
+  if (bin && bin.length) { const p = bin.pop(); sizes.set(p, size); return p; }
   const p = alignUp(heap, 16n);
   heap = p + size;
   ensure(heap);
   sizes.set(p, size);
   return p;                                       // BigInt (i64)
 }
+function hostFree(ptr) {
+  ptr = BigInt(ptr);
+  if (ptr === 0n) return;
+  const s = sizes.get(ptr);
+  if (s === undefined) return;                     // unknown/double free: ignore
+  sizes.delete(ptr);
+  const k = s.toString();
+  let bin = freeBins.get(k);
+  if (!bin) { bin = []; freeBins.set(k, bin); }
+  bin.push(ptr);
+}
 function realloc(ptr, size) {
   ptr = BigInt(ptr); size = BigInt(size);
   if (ptr === 0n) return malloc(size);
   const old = sizes.get(ptr) ?? 0n;
+  if (old >= alignUp(size <= 0n ? 1n : size, 16n)) return ptr;   // fits in place
   const np = malloc(size);
   const n = Number(old < size ? old : size);
   u8().copyWithin(Number(np), Number(ptr), Number(ptr) + n);
+  hostFree(ptr);
   return np;
 }
 
@@ -206,9 +229,30 @@ function snprintf(bufPtr, size, fmtPtr, arg) {
   return b.length - 1;                            // chars that would have been written
 }
 
+// minimal printf-family formatter over an argument list (BigInt cells): handles the
+// integer/string/char/hex/pointer conversions a metaprogram would use. %f-family is
+// approximated from the raw i64 bit-pattern reinterpreted as a double.
+function fmtc(fmt, args) {
+  let i = 0;
+  return fmt.replace(/%l?l?[dioux%csfgpX]/g, (m) => {
+    if (m === '%%') return '%';
+    const a = args[i++] ?? 0n;
+    const c = m[m.length - 1];
+    if (c === 'd' || c === 'i') return String(BigInt.asIntN(64, BigInt(a)));
+    if (c === 'u' || c === 'o') return String(BigInt.asUintN(64, BigInt(a)));
+    if (c === 'x') return BigInt.asUintN(64, BigInt(a)).toString(16);
+    if (c === 'X') return BigInt.asUintN(64, BigInt(a)).toString(16).toUpperCase();
+    if (c === 'p') return '0x' + BigInt.asUintN(64, BigInt(a)).toString(16);
+    if (c === 'c') return String.fromCharCode(Number(a) & 0xff);
+    if (c === 's') return cstr(a);
+    if (c === 'f' || c === 'g') { const dv2 = new DataView(new ArrayBuffer(8)); dv2.setBigUint64(0, BigInt.asUintN(64, BigInt(a)), true); return String(dv2.getFloat64(0, true)); }
+    return m;
+  });
+}
+
 const env = {
   // allocation
-  malloc, realloc, free: (p)=>{}, memset:(s,c,n)=>{u8().fill(Number(c)&0xff,Number(s),Number(s)+Number(n));return s;},
+  malloc, realloc, free: (p)=>{ hostFree(p); return 0n; }, memset:(s,c,n)=>{u8().fill(Number(c)&0xff,Number(s),Number(s)+Number(n));return s;},
   memcmp:(a,b,n)=>{const m=u8();a=Number(a);b=Number(b);n=Number(n);for(let i=0;i<n;i++){const d=m[a+i]-m[b+i];if(d)return BigInt(Math.sign(d));}return 0n;},
   // file io
   open: doOpen, read: doRead, write: doWrite, close:(fd)=>{ if(fd>2){try{fs.closeSync(fd);}catch{}} return 0; },
@@ -238,6 +282,21 @@ const env = {
     if(endptr && Number(endptr)!==0) dv().setBigUint64(Number(endptr), BigInt(Number(nptr)+consumed), true);
     return v;
   },
+  // libc used by the in-process bytecode interpreter's FFI table (interp.coil). During
+  // a compile these are imported but only called if a metaprogram/comptime thunk uses
+  // them (macros build Code, folds compute — so mostly unused); implemented for real so
+  // a metaprogram that does print/math behaves correctly.
+  putchar:(c)=>{ process.stdout.write(Buffer.from([Number(c)&0xff])); return Number(c)&0xff; },
+  putc:(c,_s)=>{ process.stdout.write(Buffer.from([Number(c)&0xff])); return Number(c)&0xff; },
+  puts:(p)=>{ process.stdout.write(cstr(p)+'\n'); return 1; },
+  printf:(fmtPtr,...a)=>{ const s=fmtc(cstr(fmtPtr),a); process.stdout.write(s); return s.length; },
+  dprintf:(fd,fmtPtr,...a)=>{ const s=fmtc(cstr(fmtPtr),a); doWrite(Number(fd),0n,0n); (Number(fd)===2?process.stderr:process.stdout).write(s); return s.length; },
+  calloc:(n,sz)=>{ const total=BigInt(n)*BigInt(sz); const p=malloc(total===0n?1n:total); u8().fill(0,Number(p),Number(p)+Number(total)); return p; },
+  atoi:(p)=>{ const v=parseInt(cstr(p),10); return isNaN(v)?0:(v|0); },
+  strcmp:(a,b)=>{ const sa=cstr(a),sb=cstr(b); return sa<sb?-1:(sa>sb?1:0); },
+  strtol:(p,endptr,base)=>{ const v=parseInt(cstr(p),Number(base)||10); if(endptr&&Number(endptr)!==0){} return BigInt(isNaN(v)?0:Math.trunc(v)); },
+  sqrt:(x)=>Math.sqrt(x), pow:(x,y)=>Math.pow(x,y),
+  fmod:(x,y)=>x%y, fmodf:(x,y)=>Math.fround(Math.fround(x)%Math.fround(y)),
   // process
   abort:()=>{ throw new Error('env.abort() called'); }, exit:(c)=>{ throw new ExitSignal(Number(c)); },
   // threads — init/lock are noops (single-threaded); create spawns → WALL1

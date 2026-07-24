@@ -547,8 +547,9 @@
 (defn run-on-big-stack [(ctx (ptr DumpCtx))] (-> i64)
   ; WASM-hosted build: no pthread. The sandbox is single-threaded and the shadow
   ; stack is already the module's whole reserved stack, so run the pipeline inline
-  ; (dump-thread-entry writes ctx.ok exactly as the spawned thread would).
-  (if (meta-wasm-active?)
+  ; (dump-thread-entry writes ctx.ok exactly as the spawned thread would). Covers both
+  ; the side-module (meta-wasm-active?) and interpreter (wasm-sandbox?) wasm entries.
+  (if (or (meta-wasm-active?) (wasm-sandbox?))
       (do (dump-thread-entry (cast (ptr i8) ctx)) (load (field ctx ok)))
   (let [attr (alloc-stack (array i8 64))
         tid  (alloc-stack (ptr i8))]

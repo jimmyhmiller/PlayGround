@@ -262,6 +262,15 @@
     (store! (field b isset) 1) 0))
 (defn meta-interp-active? [] (-> bool) (icmp-ne (load (field (meta-interp-box) isset)) 0))
 
+; ---- wasm-sandbox flag: no pthread. Set by the wasm-hosted entry (main_wasm); makes
+; run-on-big-stack run the pipeline inline (the sandbox is single-threaded and the
+; shadow stack is the whole reserved stack). Distinct from meta-interp-active?, which
+; a NATIVE build may set (COIL_META_INTERP=1) while still wanting the 512 MiB pthread.
+(defstruct WasmSandboxBox [(on i64)])
+(defn wasm-sandbox-box [] (-> (ptr WasmSandboxBox)) (alloc-static WasmSandboxBox))
+(defn set-wasm-sandbox! [(v i64)] (-> i64) (store! (field (wasm-sandbox-box) on) v) 0)
+(defn wasm-sandbox? [] (-> bool) (icmp-ne (load (field (wasm-sandbox-box) on)) 0))
+
 ; ---- unique scratch paths ---------------------------------------------------------
 ; per-process uniqueness from the static box's (ASLR-randomized) address, plus a
 ; counter for multiple engine builds in one process. No extra libc externs needed.
