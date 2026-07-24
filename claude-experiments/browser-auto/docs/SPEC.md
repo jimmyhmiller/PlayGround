@@ -77,6 +77,9 @@ an unobserved action is a compile error, because that is where races hide.
 | `press` | `press "<key>" [in <target>]` |
 | `hover` | `hover <target>` |
 | `upload` | `upload <target> "<relative file path>"` |
+| `drag` | `drag <target> to <target>` |
+| `switch tab` | `switch tab <path-pattern>` (activate an open tab) |
+| `close tab` | `close tab` (return to the most-recent remaining tab) |
 
 ### Targets
 
@@ -87,6 +90,8 @@ for ARIA role kinds. Non-role kinds:
 - `field "<label>"` — getByLabel (form controls)
 - `placeholder "<text>"` — getByPlaceholder
 - `testid "<id>"` — getByTestId. The sole escape hatch.
+- `frame "<name>"` — SCOPE ONLY (via `in`/`of`): an iframe matched by name,
+  title, or src substring; nestable.
 
 Role kinds (v1): `button link heading textbox checkbox radio combobox option
 row cell table list listitem region dialog alert status tab tabpanel menu
@@ -165,13 +170,26 @@ and EXEMPT from drain — an SSE app settles normally, and the stream appears in
 traces marked as live. Websocket frames are recorded per step and matched by
 armed `expect ws` effects; frame-driven DOM churn is covered by mutation-quiet.
 
-**Loud non-goals** — bat flows are single-page and dialog-free by design:
-- a popup / new tab fails the step with an explanation (the window is closed);
-- an alert/confirm/prompt dialog is dismissed and fails the step unless the
-  flow opts in with `allow dialogs` (then dismissed + recorded);
-- iframes are unreachable (main frame only); a missing-target error on a page
-  with iframes says so explicitly;
-- drag-and-drop has no grammar — `drag` is an unknown action at parse time.
+**Tabs / popups** are first-class. `expect tab <path>` is armed before the
+action and gates settlement (an unexpected tab is recorded, not punished);
+`switch tab <path>` makes the matching open tab the active page — all later
+actions, effects, and settlement run there; `close tab` returns to the most
+recently used remaining page.
+
+**Native dialogs** have real vocabulary: `expect dialog "<msg>" accept` /
+`dismiss` / `accept "<prompt text>"` declares the response BEFORE the action,
+so the reply is deterministic data. An undeclared dialog is dismissed and
+fails the step, naming the exact line to add (opt-out: `allow dialogs`).
+
+**iframes** are a scope kind: `click button "Pay" in frame "checkout"` reaches
+into an iframe matched by name / title / src substring; composable and
+nestable. `frame` is scope-only — `click frame "x"` is a parse error.
+
+**Downloads**: `expect download "<name>"` matches by suggested filename and
+saves the file into the run directory as evidence (`download-<name>` in the
+trace).
+
+**Drag-and-drop**: `drag <target> to <target>`.
 
 ### Determinism
 

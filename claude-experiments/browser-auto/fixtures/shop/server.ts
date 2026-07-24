@@ -137,6 +137,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return sendJson(res, 404, { error: `no route ${req.method} ${path}` });
   }
 
+  if (path === "/api/report.csv") {
+    res.writeHead(200, { "content-type": "text/csv", "content-disposition": 'attachment; filename="report.csv"' });
+    res.end("item,qty\nBlue Widget,1\n");
+    return;
+  }
+
   if (path === "/app.js") {
     res.writeHead(200, { "content-type": "text/javascript" });
     res.end(await readFile(join(PUBLIC_DIR, "app.js")));

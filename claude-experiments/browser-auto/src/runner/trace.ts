@@ -27,6 +27,10 @@ export interface StepTrace {
   requests: ObservedRequest[];
   /** websocket frames observed during this step */
   wsFrames?: WsFrame[];
+  /** native dialogs handled during this step */
+  dialogs?: Array<{ dialogType: string; message: string; response: string; declared: boolean }>;
+  /** downloads started during this step */
+  downloads?: Array<{ filename: string; savedAs: string | null }>;
   consoleErrors: ConsoleEntry[];
   navigations: string[];
   effects: EffectVerdict[];
@@ -150,6 +154,14 @@ export function renderReport(trace: FlowTrace): string {
           out.push(`    ${f.dir === "sent" ? "→ sent" : "← received"} ${new URL(f.url).pathname}: ${f.data.slice(0, 120)}`);
         }
         if (s.wsFrames.length > 12) out.push(`    … and ${s.wsFrames.length - 12} more`);
+      }
+      if (s.dialogs?.length) {
+        out.push(`  dialogs during this step:`);
+        for (const d of s.dialogs) out.push(`    ${d.dialogType} "${d.message.slice(0, 80)}" -> ${d.response}${d.declared ? "" : " (UNDECLARED)"}`);
+      }
+      if (s.downloads?.length) {
+        out.push(`  downloads during this step:`);
+        for (const d of s.downloads) out.push(`    ${d.filename}${d.savedAs ? ` -> ${d.savedAs}` : ""}`);
       }
       out.push(`  url: ${s.preUrl}${s.postUrl && s.postUrl !== s.preUrl ? ` -> ${s.postUrl}` : ""}`);
       if (s.ariaSnapshot && !(s.failure && s.failure.includes("semantic tree"))) {

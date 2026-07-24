@@ -27,14 +27,22 @@ const target: fc.Arbitrary<Target> = fc.letrec<{ target: Target }>((tie) => ({
     .map(([base, within]) => (within ? ({ ...base, within } as Target) : (base as Target))),
 })).target;
 
+// a target scoped inside an iframe (frame is scope-only, never a head)
+const frameScoped: fc.Arbitrary<Target> = fc
+  .tuple(kind, name, name)
+  .map(([k, n, frameName]): Target => ({ kind: k, name: n, within: { kind: "frame", name: frameName } }));
+
 const action: fc.Arbitrary<Action> = fc.oneof(
   path.map((p): Action => ({ type: "go", path: p })),
-  fc.tuple(fc.constantFrom("click", "dblclick", "hover") as fc.Arbitrary<"click">, target).map(
+  fc.tuple(fc.constantFrom("click", "dblclick", "hover") as fc.Arbitrary<"click">, fc.oneof(target, frameScoped)).map(
     ([type, t]): Action => ({ type, target: t }),
   ),
   fc.tuple(target, name).map(([t, v]): Action => ({ type: "fill", target: t, value: v })),
   fc.tuple(target, name).map(([t, v]): Action => ({ type: "select", target: t, value: v })),
   fc.tuple(fc.constantFrom("check", "uncheck") as fc.Arbitrary<"check">, target).map(([type, t]): Action => ({ type, target: t })),
+  fc.tuple(target, target).map(([t, to]): Action => ({ type: "drag", target: t, to })),
+  path.map((p): Action => ({ type: "switchTab", path: p })),
+  fc.constant<Action>({ type: "closeTab" }),
 );
 
 // `expect <target>` with a text-kind HEAD is claimed by the `text` effect —
@@ -70,6 +78,15 @@ const effect: fc.Arbitrary<Effect> = fc.oneof(
       if (pathPattern !== undefined) (e as { pathPattern?: string }).pathPattern = pathPattern;
       return e;
     }),
+  path.map((p): Effect => ({ type: "tab", path: p })),
+  fc
+    .tuple(name, fc.constantFrom("accept", "dismiss") as fc.Arbitrary<"accept" | "dismiss">, fc.option(name, { nil: undefined }))
+    .map(([message, response, text]): Effect => {
+      const e: Effect = { type: "dialog", message, response };
+      if (text !== undefined) (e as { text?: string }).text = text;
+      return e;
+    }),
+  name.map((n): Effect => ({ type: "download", name: n })),
 );
 
 describe("DSL round-trip (property-based)", () => {

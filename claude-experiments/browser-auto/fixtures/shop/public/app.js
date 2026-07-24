@@ -204,6 +204,55 @@ function renderTicker() {
   app.replaceChildren(h1, p);
 }
 
+function renderInteractions() {
+  app.innerHTML = `
+    <h1>Interactions</h1>
+    <a href="/terms" target="_blank" rel="opener">Open Terms</a>
+    <button id="del">Delete account</button>
+    <p data-testid="del-status">idle</p>
+    <button id="dl">Download report</button>
+    <ul aria-label="drag-list">
+      <li draggable="true" id="src">Draggable item</li>
+    </ul>
+    <div id="drop" style="border:1px solid #ccc;padding:1rem">Drop zone: <span data-testid="drop-status">empty</span></div>
+    <iframe title="widget" src="/widget" style="width:300px;height:120px"></iframe>
+  `;
+  document.getElementById("del").addEventListener("click", () => {
+    const ok = confirm("Really delete your account?");
+    document.querySelector('[data-testid="del-status"]').textContent = ok ? "deleted" : "cancelled";
+  });
+  document.getElementById("dl").addEventListener("click", () => {
+    const blob = new Blob(["item,qty\nBlue Widget,1\n"], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "report.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  const src = document.getElementById("src");
+  const drop = document.getElementById("drop");
+  src.addEventListener("dragstart", (e) => e.dataTransfer.setData("text", "item"));
+  drop.addEventListener("dragover", (e) => e.preventDefault());
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    document.querySelector('[data-testid="drop-status"]').textContent = "dropped";
+  });
+}
+
+function renderWidget() {
+  document.body.innerHTML = '<button id="pay">Pay now</button><p data-testid="widget-status">ready</p>';
+  document.getElementById("pay").addEventListener("click", () => {
+    document.querySelector('[data-testid="widget-status"]').textContent = "paid";
+  });
+}
+
+function renderTerms() {
+  document.body.innerHTML = "<h1>Terms of Service</h1><p>Be excellent to each other.</p>";
+}
+
 function renderBroken() {
   const h1 = document.createElement("h1");
   h1.textContent = "Broken";
@@ -223,6 +272,9 @@ async function render() {
   if (path === "/flaky-cart") return renderFlakyCart();
   if (path === "/chat") return renderChat();
   if (path === "/ticker") return renderTicker();
+  if (path === "/interactions") return renderInteractions();
+  if (path === "/widget") return renderWidget();
+  if (path === "/terms") return renderTerms();
   return renderProducts();
 }
 

@@ -165,6 +165,52 @@ click button "Save"
     expect(flow.givens).toEqual([{ type: "allow", what: "dialogs" }]);
   });
 
+  it("parses tab, dialog, download, drag, and frame scope", () => {
+    const flow = parseFlow(
+      `flow "t"
+click link "Open"
+  expect tab /terms**
+switch tab /terms
+  expect heading "Terms"
+close tab
+  expect heading "Home"
+click button "Delete"
+  expect dialog "Sure?" accept
+  expect download "report.csv"
+drag listitem "A" to text "Drop"
+  expect text "dropped"
+click button "Pay" in frame "checkout"
+  expect text "paid" in testid "s" in frame "checkout"
+`,
+      "t.flow",
+    );
+    expect(flow.steps[0]!.effects[0]).toEqual({ type: "tab", path: "/terms**" });
+    expect(flow.steps[1]!.action).toEqual({ type: "switchTab", path: "/terms" });
+    expect(flow.steps[2]!.action).toEqual({ type: "closeTab" });
+    expect(flow.steps[3]!.effects).toEqual([
+      { type: "dialog", message: "Sure?", response: "accept" },
+      { type: "download", name: "report.csv" },
+    ]);
+    expect(flow.steps[4]!.action).toEqual({
+      type: "drag",
+      target: { kind: "listitem", name: "A" },
+      to: { kind: "text", name: "Drop" },
+    });
+    expect(flow.steps[5]!.action).toEqual({
+      type: "click",
+      target: { kind: "button", name: "Pay", within: { kind: "frame", name: "checkout" } },
+    });
+  });
+
+  it("parses dialog accept with prompt text", () => {
+    const flow = parseFlow(`flow "t"\nclick button "Name"\n  expect dialog "Your name?" accept "bat"\n`, "t.flow");
+    expect(flow.steps[0]!.effects[0]).toEqual({ type: "dialog", message: "Your name?", response: "accept", text: "bat" });
+  });
+
+  it("rejects frame as a bare target — it is a scope only", () => {
+    expect(() => parseFlow(`flow "t"\nclick frame "x"\n  expect url /y\n`, "t.flow")).toThrowError(/"frame" is a scope/);
+  });
+
   it("parses fill with $var values and trailing-string extraction", () => {
     const flow = parseFlow(
       `flow "t"\ngo /f\n  expect heading "F"\n  let code = text in testid "code"\nfill textbox "Code" in form "redeem" $code\n  expect value $code in textbox "Code"\n`,

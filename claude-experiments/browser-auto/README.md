@@ -45,6 +45,12 @@ Key mechanics:
   referential closure; the world is rebuilt from empty per flow; adapters climb
   a capability ladder (L0 trust-me → L4 time-travel) where every operator you
   provide buys a stronger *checked* guarantee. See `docs/WORLD.md`.
+- **Everything you'd want to test is first-class**: new tabs / popups
+  (`expect tab`, `switch tab`, `close tab`), native dialogs with declared
+  responses (`expect dialog "…" accept`), downloads saved as evidence
+  (`expect download`), iframes as a scope (`… in frame "checkout"`), and
+  drag-and-drop (`drag … to …`) — all armed-before-action and event-driven,
+  no timing anywhere.
 - **Failures are stories**: what was expected, what was observed, the network
   during the step (with response completion order), the page's semantic tree,
   and the exact replay command.

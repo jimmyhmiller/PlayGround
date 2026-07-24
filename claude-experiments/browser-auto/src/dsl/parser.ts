@@ -408,13 +408,24 @@ function parseEffect(p: LineParser): Effect | null {
     if (within !== undefined) eff.within = within;
     return eff;
   }
-  if (first?.t === "word" && first.v === "tab") {
+  // `tab` is both an ARIA role and the new-tab effect. Disambiguate by the
+  // argument: a PATH (/…) means the new-tab effect; a quoted name falls
+  // through to the role-`tab` visibility target.
+  if (first?.t === "word" && first.v === "tab" && p.tokens[p.pos + 1]?.t === "path") {
     p.next();
     const path = p.expectPath();
     if (path === null) return null;
     return p.expectEnd("expect tab") ? { type: "tab", path } : null;
   }
-  if (first?.t === "word" && first.v === "dialog") {
+  // `dialog` is both an ARIA role and the native-dialog effect. Disambiguate by
+  // the accept/dismiss keyword: present → dialog effect; absent → role target.
+  if (
+    first?.t === "word" &&
+    first.v === "dialog" &&
+    p.tokens[p.pos + 1]?.t === "string" &&
+    p.tokens[p.pos + 2]?.t === "word" &&
+    ["accept", "dismiss"].includes((p.tokens[p.pos + 2] as { v: string }).v)
+  ) {
     p.next();
     const message = p.expectString("the dialog message substring");
     if (message === null) return null;

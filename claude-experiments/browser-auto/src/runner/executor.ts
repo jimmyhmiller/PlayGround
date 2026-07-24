@@ -6,6 +6,7 @@ import { composeWorld, WorldError } from "../world/algebra.js";
 import { ConditionEngine, type ConditionProfile } from "./conditions.js";
 import { matchPath, pathOf } from "./patterns.js";
 import { NetworkTracker, RequestMatcher, WsMatcher, settle } from "./settle.js";
+import { DialogRouter, DownloadWatcher, TabMatcher, waitForTab } from "./interactions.js";
 import { TransientHub } from "./transients.js";
 import { ariaSnapshotSafe, buildLocator, interpolate, resolveUnique, TargetError, type Captures } from "./targets.js";
 import {
@@ -541,6 +542,9 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
 interface ArmedWatchers {
   requests: Map<Effect, RequestMatcher>;
   ws: Map<Effect, WsMatcher>;
+  tabs: Map<Effect, TabMatcher>;
+  dialogs: Map<Effect, ReturnType<DialogRouter["arm"]>>;
+  downloads: Map<Effect, ReturnType<DownloadWatcher["arm"]>>;
   appear: Map<Effect, Awaited<ReturnType<TransientHub["arm"]>>>;
   gone: Map<Effect, { presentAtAct: boolean; watcher: Awaited<ReturnType<TransientHub["arm"]>> }>;
 }
@@ -551,7 +555,8 @@ async function evaluateEffect(
   armed: ArmedWatchers,
   remaining: () => number,
 ): Promise<EffectVerdict> {
-  const { page, captures } = ctx;
+  const { captures } = ctx;
+  const page = ctx.session.page;
   const rendered = formatEffect(eff);
   const v = (pass: boolean, observed?: string): EffectVerdict =>
     observed === undefined ? { effect: eff, rendered, pass } : { effect: eff, rendered, pass, observed };
@@ -661,6 +666,32 @@ async function evaluateEffect(
               (eff.pathPattern !== undefined ? ` on ${eff.pathPattern}` : "") +
               ` was observed during this step (watcher was armed before the action)`,
           );
+        }
+        return v(true);
+      }
+      case "tab": {
+        const m = armed.tabs.get(eff);
+        if (!m) return v(false, "internal: no tab matcher was armed for this expectation");
+        if (!m.result.matched) {
+          const open = ctx.session.context.pages().map((p) => p.url() || "about:blank").join(", ");
+          return v(false, `no tab/popup with a url matching ${eff.path} opened (open tabs: ${open})`);
+        }
+        return v(true);
+      }
+      case "dialog": {
+        const m = armed.dialogs.get(eff);
+        if (!m) return v(false, "internal: no dialog matcher was armed for this expectation");
+        if (!m.result.matched) {
+          return v(false, `no dialog whose message contains ${JSON.stringify(eff.message)} appeared during this step`);
+        }
+        return v(true);
+      }
+      case "download": {
+        const m = armed.downloads.get(eff);
+        if (!m) return v(false, "internal: no download matcher was armed for this expectation");
+        if (!(m.result.matched as { filename: string } | null)) {
+          const seen = ctx.session.downloads.records.map((d) => d.filename).join(", ") || "none";
+          return v(false, `no download whose filename contains ${JSON.stringify(eff.name)} started (downloads this step: ${seen})`);
         }
         return v(true);
       }

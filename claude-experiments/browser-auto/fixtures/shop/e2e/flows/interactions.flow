@@ -1,0 +1,36 @@
+# Everything you'd actually want to test: a new tab, a confirm dialog, a
+# download, drag-and-drop, and an iframe — all first-class, all with the same
+# armed-before-action, event-driven, no-timing guarantees.
+flow "rich interactions"
+
+go /interactions
+  expect heading "Interactions"
+  expect button "Delete account"
+
+# target=_blank opens a real tab; assert it, switch to it, act in it, come back
+click link "Open Terms"
+  expect tab /terms
+
+switch tab /terms
+  expect heading "Terms of Service"
+  expect text "Be excellent to each other."
+
+close tab
+  expect heading "Interactions"
+
+# a native confirm(): the response is DECLARED before the click — deterministic
+click button "Delete account"
+  expect dialog "Really delete your account?" accept
+  expect text "deleted" in testid "del-status"
+
+# a real download, saved into the run dir as evidence
+click button "Download report"
+  expect download "report.csv"
+
+# drag-and-drop
+drag listitem "Draggable item" to text "Drop zone"
+  expect text "dropped" in testid "drop-status"
+
+# reach into an iframe by title and act inside it
+click button "Pay now" in frame "widget"
+  expect text "paid" in testid "widget-status" in frame "widget"

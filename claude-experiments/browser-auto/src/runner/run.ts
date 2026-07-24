@@ -74,6 +74,19 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
       ...(config.conditions ? { conditions: config.conditions } : {}),
     };
     const env = await prepareContext(context, page, flow, baseOpts);
+    if (persist) {
+      env.session.downloads.onDownload = async (download, filename) => {
+        const safe = filename.replace(/[^\w.-]+/g, "_") || "download";
+        const dest = join(runDir, `download-${safe}`);
+        try {
+          await download.saveAs(dest);
+          return dest;
+        } catch (e) {
+          if (process.env.BAT_DEBUG) console.error("download saveAs failed:", e instanceof Error ? e.message : e);
+          return null; // failed to save — recorded as unsaved, not falsely claimed
+        }
+      };
+    }
 
     trace = await runSteps(
       flow,
