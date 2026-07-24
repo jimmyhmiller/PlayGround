@@ -119,12 +119,31 @@ opcodes know int-vs-float, width, and signedness.
 | 17 | `I2F`        | a=fbytes b=srcsigned         | int -> float bits |
 | 18 | `F2I`        | a=destbits b=destsigned c=srcfbytes | float -> int (toward zero) |
 | 19 | `F2F`        | a=destbytes b=srcbytes       | f32 <-> f64 |
-| 21 | `MUTCELL`    | a=slot b=size                | v=pop; cell=frame-alloc; store v; locals[a]=cell |
+| 21 | `MUTCELL`    | a=slot b=size c=is_agg       | pop v; cell=frame-alloc; is_agg? memcpy(cell,v,size) : store v; locals[a]=cell |
 | 22 | `FREE`       |                              | addr=pop; real free(addr); push 0 |
 | 23 | `ALLOC_HEAP` | a=size                       | push (i64) malloc(size) |
-| 24 | `ALLOC_STATIC`| a=size                      | addr=malloc(size); zero; push addr |
+| 24 | `ALLOC_STATIC`| a=size                      | addr=malloc(size); zero; push addr (per-call; sites bake a persistent addr instead) |
 | 30 | `STRSLICE`   | a=ptr b=len                  | frame slot {ptr,len}; push its addr |
 | 31 | `ALLOCZ`     | a=size b=align               | frame-alloc + zero; push addr |
+| 32 | `LOADAGG`    | a=size b=align               | addr=pop; slot=frame-alloc; memcpy(slot,addr,size); push slot (by-value copy) |
+| 33 | `STOREAGG`   | a=size                       | src=pop; dst=pop; memcpy(dst,src,size); push 0 |
+| 34 | `FIELDPTR`   | a=offset                     | addr=pop; push addr+offset |
+| 35 | `INDEX`      | a=elemsize                   | idx=pop; base=pop; push base+idx*elemsize |
+| 36 | `TRAP`       |                              | hard-error (non-exhaustive match reached) |
+| 37 | `BITGET`     | a=low b=width c=signed\|(backbytes<<1) | addr=pop; load backing; shift/mask/sign-extend field; push |
+| 38 | `BITSET`     | a=low b=width c=backbytes    | val=pop; addr=pop; clear field, OR (val&mask)<<low, store; push val |
+| 40 | `LLVMIR`     | a=iridx b=nargs              | pop nargs; push ir-run(irs[a], args) (interprets an inline-IR body) |
+| 42 | `CALLPTR`    | a=nargs                      | pop nargs; pop fnptr; decode fidx; push vm-exec(fidx, args) |
+| 43 | `BOXEXT`     | a=size b=align               | v=pop; slot=frame-alloc; store the packed <=8B C aggregate return; push slot |
+
+Aggregates (struct/sum/slice/array/vec) are carried **by address**: a cell holds
+the address of the bytes. `LOADAGG`/`STOREAGG` copy; `FIELDPTR`/`INDEX` are
+pointer arithmetic; `EConstruct`/`EMatch` build and destructure the sum's
+`{i32 tag, payload}` at the same offsets the backends use. A function's aggregate
+return is copied into a caller-provided `retbuf` before its frame is freed.
+Function pointers encode `2^51 + fidx`; `EFnPtrOf`/`EMakeDyn` vtables store that,
+and `CALLPTR` decodes it (real C addresses are not callable). `alloc-static`
+sites allocate one persistent zeroed region at compile time and bake its address.
 
 ### `BIN` / `CMP` operand encoding
 
@@ -163,24 +182,28 @@ module-qualified `interp.*` externs (so the Coil scope name never collides while
 the C symbol is the real one, e.g. `interp.write` -> `write`), with signatures
 matching the compiler's existing declarations of those symbols.
 
-## What is implemented (the slice) and what hard-errors
+## What is implemented and what hard-errors
 
 Implemented end-to-end (verified by `selfhost/oracle/interp/gate-interp.sh`):
-integer + float arithmetic and comparisons, `bool`, casts (int width, int<->float,
-float<->float, pointer/fnptr identity), `let`/`(mut …)` locals, `if`, `do`,
-`loop`/`while`/`for`/`break`/`continue`, direct calls and recursion, `alloc-stack`
-/ heap / static allocation, pointer `load`/`store`, `sizeof`/`alignof`, string and
-cstring literals, spilled refs, and libc FFI.
+integer + float arithmetic and comparisons (incl. unsigned logical right shift and
+float remainder via `fmod`), `bool`, casts (int width, int↔float honouring source
+signedness, float↔float, pointer/fnptr identity), `let`/`(mut …)` locals, `if`,
+`do`, `loop`/`while`/`for`/`break`/`continue`, direct calls and recursion,
+`alloc-stack` / heap / persistent static allocation, pointer `load`/`store`,
+`sizeof`/`alignof`/`offsetof`, string and cstring literals, spilled refs;
+**structs** and **sums** (layout, `EField`, `EIndex`, `EConstruct`, `EMatch`,
+aggregate load/store/return by value), **bit-structs** (`EBitGet`/`EBitSet`),
+**function pointers** (`EFnPtrOf`/`ECallPtr`), **trait objects**
+(`EMakeDyn`/`EDynDispatch` over a compile-time vtable), **inline LLVM IR**
+(`ELlvmIr`: slice extract/insert, vector `fadd/fsub/fmul`/`insertelement`/
+`shufflevector`/fma/reduce, atomic load/store/`atomicrmw`/`cmpxchg` modeled
+sequentially), a by-value `<=8`-byte C **struct return** (`div`), a **qsort** that
+calls its Coil comparator back through the VM, **synchronous pthread** emulation,
+program **argc/argv**, and a broad libc/libm builtin table (mem/string/stdio/math).
 
-**Not yet implemented** (each raises a clear `idie` hard error — never a silent
-stub): structs (`EField`, aggregate load/store, struct layout), sums
-(`EConstruct`, `EMatch`), `EIndex`, bit-structs, trait objects (`EMakeDyn` /
-`EDynDispatch`), function pointers of Coil functions (`EFnPtrOf` / `ECallPtr`),
-inline LLVM IR (`ELlvmIr`), float remainder, variadic FFI, and unsigned-narrow
-logical right shift. These are the natural next extensions: add struct/sum layout
-(port codegen_a64's `g-natural-layout!` / sum `{i32 tag, [words] payload}`
-model), aggregate copy load/store, and the corresponding `compile-expr` arms and
-opcodes, keeping this document in sync.
+Everything still outside the subset raises a clear `idie` hard error — never a
+silent stub: `>8`-byte by-value C struct returns, `%f`-family (v-register)
+variadic FFI, and calling a real C function address as a Coil `fnptr`.
 
 ## Gate
 
@@ -188,5 +211,8 @@ opcodes, keeping this document in sync.
 `selfhost/oracle/arm64/corpus.txt` and diffs stdout + exit code against the LLVM
 reference snapshots in `selfhost/oracle/arm64/reference` — the same snapshots the
 arm64 backend gate uses. Runtime equality with the compiled program is the
-contract. As the interpreter grows toward the whole language, this number climbs
-toward the arm64 gate's.
+contract. **54/56** pass. The two residual failures are `examples/args.coil` and
+`examples/everything.coil`, which both `puts(argv[0])`: the reference bakes the
+*compiled binary's* path (`/tmp/coil-arm64-fixed-…`), which an interpreter cannot
+reproduce (fabricating it to match would be a hardcode, not a real result). Both
+programs otherwise run correctly, with the right exit codes and all other output.
