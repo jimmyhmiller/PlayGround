@@ -745,8 +745,12 @@
       (EZeroed [t]
         (let [tp (alloc-stack Type)]
           (store! tp t)
-          (if (icmp-le (isize-of cx tp) 8) (femit fb 1 0 0 0)
-            (femit fb 31 (isize-of cx tp) (ialign-of cx tp) 0))
+          ; an aggregate zero is a zeroed slot (ADDRESS), regardless of size; a
+          ; scalar zero is the literal 0. (A small struct is still by-address, so
+          ; sizing alone must NOT decide — that pushed a bare 0 that a later
+          ; aggregate copy dereferenced as a null pointer.)
+          (if (ty-is-agg tp) (femit fb 31 (isize-of cx tp) (ialign-of cx tp) 0)
+            (femit fb 1 0 0 0))
           t))
       (EFree [inner] (do (compile-expr fb inner) (femit fb 22 0 0 0) (TInt 64 true)))
       (ESizeOf [t]  (let [tp (alloc-stack Type)] (store! tp t) (femit fb 1 (isize-of cx tp) 0 0) (TInt 64 true)))
