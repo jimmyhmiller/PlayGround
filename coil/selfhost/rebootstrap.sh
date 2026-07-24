@@ -13,6 +13,8 @@
 #   * FIXPOINT : stage2.o == stage3.o byte-identical  (the arm64 backend is fully deterministic)
 #   * GATES    : gate-full  (emitted IR byte-exact vs the reference snapshot, whole corpus)
 #                arm64 gate-run  (built programs produce identical stdout+exit)
+#                gate-meta-engines (compiled-meta == interp-meta: corpus + byte-identical self-build)
+#                gate-wasm  (interp-meta running in a single static wasm module; skips w/o node)
 #
 # Requirements: libLLVM.dylib (brew install llvm) + a C compiler (cc). That's it.
 # (The compiler embeds an LLVM backend, so its binary links libLLVM even when the arm64
@@ -89,6 +91,12 @@ echo "  gate-full:      PASS (IR byte-exact vs reference)"
 echo "  arm64 gate-run: PASS (programs run identically)"
 ./selfhost/oracle/gate-cli.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-cli FAIL — the CLI contract regressed"; exit 1; }
 echo "  gate-cli:       PASS (argv, exit codes, fmt)"
+# Both comptime engines must stay interchangeable: the default COMPILED engine (above
+# gates run it) AND the INTERPRETER engine (COIL_META_INTERP / interp.coil). Keeps the
+# choice open and neither from rotting.
+./selfhost/oracle/gate-meta-engines.sh /tmp/coil-rb2       || { echo "gate-meta-engines FAIL — compiled-meta and interp-meta diverge"; exit 1; }
+# interp-meta running IN wasm (single static module, wasm2c-ready). Skips if no node.
+./selfhost/oracle/gate-wasm.sh /tmp/coil-rb2               || { echo "gate-wasm FAIL — interp-meta-in-wasm self-check regressed"; exit 1; }
 
 DEST="${1:-./coil}"
 cp /tmp/coil-rb2 "$DEST"
