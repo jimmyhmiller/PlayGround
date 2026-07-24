@@ -47,6 +47,16 @@
 (extern interp.putchar [i64] (-> i64))
 (extern interp.write   [i32 (ptr i8) isize] (-> isize))
 (extern interp.puts    [(ptr i8)] (-> i64))
+(extern interp.realloc [(ptr i8) isize] (-> (ptr i8)))
+(extern interp.calloc  [isize isize] (-> (ptr i8)))
+(extern interp.memcpy  [(ptr i8) (ptr i8) isize] (-> (ptr i8)))
+(extern interp.memmove [(ptr i8) (ptr i8) isize] (-> (ptr i8)))
+(extern interp.memset  [(ptr i8) i64 isize] (-> (ptr i8)))
+(extern interp.memcmp  [(ptr i8) (ptr i8) isize] (-> i64))
+(extern interp.strlen  [(ptr i8)] (-> isize))
+(extern interp.strcmp  [(ptr i8) (ptr i8)] (-> i32))
+(extern interp.read    [i32 (ptr i8) isize] (-> isize))
+(extern interp.abort   [] (-> i64))
 
 ; address of element i of an ArrayList given by pointer (local copy of the a64
 ; helper, renamed to avoid a duplicate generic instantiation clash).
@@ -1025,6 +1035,16 @@
       (str-eq nm "exit")    (interp.exit (cast i32 (load (index buf 0))))
       (str-eq nm "malloc")  (cast i64 (interp.malloc (load (index buf 0))))
       (str-eq nm "free")    (do (interp.free (cast (ptr i8) (load (index buf 0)))) 0)
+      (str-eq nm "realloc") (cast i64 (interp.realloc (cast (ptr i8) (load (index buf 0))) (cast isize (load (index buf 1)))))
+      (str-eq nm "calloc")  (cast i64 (interp.calloc (cast isize (load (index buf 0))) (cast isize (load (index buf 1)))))
+      (str-eq nm "memcpy")  (cast i64 (interp.memcpy (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
+      (str-eq nm "memmove") (cast i64 (interp.memmove (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
+      (str-eq nm "memset")  (cast i64 (interp.memset (cast (ptr i8) (load (index buf 0))) (load (index buf 1)) (cast isize (load (index buf 2)))))
+      (str-eq nm "memcmp")  (interp.memcmp (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2))))
+      (str-eq nm "strlen")  (interp.strlen (cast (ptr i8) (load (index buf 0))))
+      (str-eq nm "strcmp")  (cast i64 (interp.strcmp (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
+      (str-eq nm "read")    (cast i64 (interp.read (cast i32 (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
+      (str-eq nm "abort")   (do (interp.abort) 0)
       (do (idie2 "unsupported extern (add it to the interp builtin table): " nm) 0))))
 
 ; ============================ inline LLVM-IR interpreter ====================
