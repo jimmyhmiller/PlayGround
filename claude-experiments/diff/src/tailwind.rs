@@ -1652,6 +1652,28 @@ fn parse_variants(
                 push_media(&mut spec.media, "print");
                 spec.order = spec.order.max(6);
             }
+            // Direction variants: match the element's resolved direction, both via
+            // `:dir()` and the legacy `[dir=…]` attribute (self and descendant).
+            "ltr" => {
+                spec.pseudo
+                    .push_str(":where(:dir(ltr), [dir=\"ltr\"], [dir=\"ltr\"] *)");
+                spec.order = spec.order.max(5);
+            }
+            "rtl" => {
+                spec.pseudo
+                    .push_str(":where(:dir(rtl), [dir=\"rtl\"], [dir=\"rtl\"] *)");
+                spec.order = spec.order.max(5);
+            }
+            // `noscript:` — the `(scripting: none)` media feature.
+            "noscript" => {
+                push_media(&mut spec.media, "scripting:none");
+                spec.order = spec.order.max(6);
+            }
+            // any-pointer media-feature variants (`any-pointer-coarse/fine/none`).
+            "any-pointer-coarse" | "any-pointer-fine" | "any-pointer-none" => {
+                push_media(&mut spec.media, &format!("any-pointer:{}", &variant[12..]));
+                spec.order = spec.order.max(6);
+            }
             "before" | "after" => {
                 spec.pseudo.push(':');
                 spec.pseudo.push_str(variant);
@@ -1695,6 +1717,7 @@ fn parse_variants(
                 Some("backdrop") | Some("contrast-more") | Some("contrast-less")
                     | Some("selection") | Some("marker") | Some("placeholder")
                     | Some("placeholder-shown") | Some("inert")
+                    | Some("ltr") | Some("rtl") | Some("noscript")
             ) =>
             {
                 return Err(Fail::Invalid);
@@ -1932,6 +1955,35 @@ fn render_utility(
         (base, false)
     };
 
+    // The `container` utility is a single rule (`width:100%`) carrying a nested
+    // `@media (width >= <bp>) { max-width: <bp> }` block for every theme
+    // breakpoint, in the theme's source order. It is emitted as raw nested CSS
+    // rather than through the flat declaration path.
+    if base == "container" {
+        let escaped = escape_class(class);
+        let core = format!("{}.{escaped}{}{}", spec.prefix, spec.is_clause, spec.pseudo);
+        let selector = match &spec.wrap {
+            Some((pre, post)) => format!("{pre}{core}{post}"),
+            None => core,
+        };
+        let bang = if important { "!important" } else { "" };
+        let mut body = format!("width:100%{bang};");
+        for name in &theme.order {
+            if name.starts_with("--breakpoint-")
+                && let Some(value) = theme.get(name) {
+                    body.push_str(&format!(
+                        "@media (width >= {value}){{max-width:{value}{bang}}}"
+                    ));
+                }
+        }
+        return Ok(RenderedRule {
+            css: format!("{selector}{{{body}}}"),
+            order: spec.order,
+            media_key: spec.media.join("|"),
+            rank: 100,
+        });
+    }
+
     let utility = generate_utility(base, class, theme, tw_props)?;
     let escaped = escape_class(class);
     let build_selector = |pseudo: &str| {
@@ -2112,6 +2164,30 @@ fn generate_utility(
     // one of these — notably `content-[…]` defers to the generic content handler.
     if let Some(result) = alignment_utility(base) {
         return result;
+    }
+
+    // tab-size: `tab-<integer>` (bare positive integers) and `tab-[<value>]`.
+    // Non-integer / fraction / `/modifier` forms are rejected (generate nothing).
+    if let Some(v) = base.strip_prefix("tab-") {
+        if is_bare_integer(v) {
+            return Ok(Utility::simple(vec![("tab-size", v.to_string())]));
+        }
+        if let Some(inner) = arbitrary_value(v) {
+            return Ok(Utility::simple(vec![("tab-size", inner)]));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // zoom: `zoom-<integer>` → `zoom:<n>%` and `zoom-[<value>]`. Non-integer /
+    // negative / `/modifier` forms are rejected (generate nothing).
+    if let Some(v) = base.strip_prefix("zoom-") {
+        if is_bare_integer(v) {
+            return Ok(Utility::simple(vec![("zoom", format!("{v}%"))]));
+        }
+        if let Some(inner) = arbitrary_value(v) {
+            return Ok(Utility::simple(vec![("zoom", inner)]));
+        }
+        return Err(Fail::Invalid);
     }
 
     // A leading `-` on a non-negatable static keyword utility (e.g. `-contents`,
@@ -2451,6 +2527,23 @@ fn generate_utility(
         {
             return Err(Fail::Invalid);
         }
+        // The font-variant-numeric family has no negative form; a leading `-`
+        // generates nothing (not a hard error, even though `tabular-nums` is a
+        // recognized utility root).
+        if matches!(
+            positive_base,
+            "ordinal"
+                | "slashed-zero"
+                | "lining-nums"
+                | "oldstyle-nums"
+                | "proportional-nums"
+                | "tabular-nums"
+                | "diagonal-fractions"
+                | "stacked-fractions"
+                | "normal-nums"
+        ) {
+            return Err(Fail::Invalid);
+        }
         // Padding and gap have no negative form; a leading `-` is rejected by
         // Tailwind (it generates nothing, not a hard error).
         if positive_base == "gap"
@@ -2714,24 +2807,41 @@ fn generate_utility(
         return Err(Fail::Invalid);
     }
 
-    // tabular-nums (font-variant-numeric composition).
-    if base == "tabular-nums" {
-        for prop in [
+    // font-variant-numeric family: each of ordinal / slashed-zero / lining-nums /
+    // oldstyle-nums / proportional-nums / tabular-nums / diagonal-fractions /
+    // stacked-fractions sets its own `--tw-*` slot and composes
+    // `font-variant-numeric` from the shared var chain; `normal-nums` resets it to
+    // `normal`. None has a negative form (a leading `-` generates nothing).
+    if let Some(var) = match positive_base {
+        "ordinal" => Some("--tw-ordinal"),
+        "slashed-zero" => Some("--tw-slashed-zero"),
+        "lining-nums" | "oldstyle-nums" => Some("--tw-numeric-figure"),
+        "proportional-nums" | "tabular-nums" => Some("--tw-numeric-spacing"),
+        "diagonal-fractions" | "stacked-fractions" => Some("--tw-numeric-fraction"),
+        _ => None,
+    } {
+        for p in [
             TwProp::Ordinal,
             TwProp::SlashedZero,
             TwProp::NumericFigure,
             TwProp::NumericSpacing,
             TwProp::NumericFraction,
         ] {
-            tw_props.insert(prop);
+            tw_props.insert(p);
         }
         return Ok(Utility::simple(vec![
-            ("--tw-numeric-spacing", "tabular-nums".to_string()),
+            (var, positive_base.to_string()),
             (
                 "font-variant-numeric",
                 "var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)".to_string(),
             ),
         ]));
+    }
+    if positive_base == "normal-nums" {
+        return Ok(Utility::simple(vec![(
+            "font-variant-numeric",
+            "normal".to_string(),
+        )]));
     }
 
     // shadow / shadow-<size> / shadow-none / shadow-[…]: box-shadow layers from
@@ -4256,6 +4366,8 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "sticky" => vec![("position", "sticky".into())],
         "visible" => vec![("visibility", "visible".into())],
         "invisible" => vec![("visibility", "hidden".into())],
+        "collapse" => vec![("visibility", "collapse".into())],
+        "isolation-auto" => vec![("isolation", "auto".into())],
         "flex-col" => vec![("flex-direction", "column".into())],
         "flex-col-reverse" => vec![("flex-direction", "column-reverse".into())],
         "flex-row" => vec![("flex-direction", "row".into())],
@@ -4263,10 +4375,10 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "flex-wrap" => vec![("flex-wrap", "wrap".into())],
         "flex-wrap-reverse" => vec![("flex-wrap", "wrap-reverse".into())],
         "flex-nowrap" => vec![("flex-wrap", "nowrap".into())],
-        "flex-1" => vec![("flex", "1".into())],
-        "flex-auto" => vec![("flex", "auto".into())],
-        "flex-initial" => vec![("flex", "0 auto".into())],
-        "flex-none" => vec![("flex", "none".into())],
+        // (`flex-1` / `flex-auto` / `flex-initial` / `flex-none` are handled in
+        // `flex_grid_utility` alongside the dynamic `flex-<n>` / `flex-<fraction>`
+        // forms, so that `flex-1/2` reads as the fraction 1/2, not `flex-1` with a
+        // rejected `/2` modifier.)
         // (align/justify/place alignment utilities live in `alignment_utility`.)
         "list-disc" => vec![("list-style-type", "disc".into())],
         "list-decimal" => vec![("list-style-type", "decimal".into())],
@@ -4274,6 +4386,7 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "uppercase" => vec![("text-transform", "uppercase".into())],
         "lowercase" => vec![("text-transform", "lowercase".into())],
         "capitalize" => vec![("text-transform", "capitalize".into())],
+        "normal-case" => vec![("text-transform", "none".into())],
         "italic" => vec![("font-style", "italic".into())],
         "not-italic" => vec![("font-style", "normal".into())],
         "antialiased" => vec![
@@ -4295,6 +4408,7 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "border-collapse" => vec![("border-collapse", "collapse".into())],
         "border-separate" => vec![("border-collapse", "separate".into())],
         "underline" => vec![("text-decoration-line", "underline".into())],
+        "overline" => vec![("text-decoration-line", "overline".into())],
         "line-through" => vec![("text-decoration-line", "line-through".into())],
         "no-underline" => vec![("text-decoration-line", "none".into())],
         "whitespace-normal" => vec![("white-space", "normal".into())],
@@ -4305,6 +4419,10 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "whitespace-break-spaces" => vec![("white-space", "break-spaces".into())],
         "table" => vec![("display", "table".into())],
         "inline-table" => vec![("display", "inline-table".into())],
+        "table-auto" => vec![("table-layout", "auto".into())],
+        "table-fixed" => vec![("table-layout", "fixed".into())],
+        "caption-top" => vec![("caption-side", "top".into())],
+        "caption-bottom" => vec![("caption-side", "bottom".into())],
         "table-caption" => vec![("display", "table-caption".into())],
         "table-cell" => vec![("display", "table-cell".into())],
         "table-column" => vec![("display", "table-column".into())],
@@ -4934,7 +5052,7 @@ fn sizing_utility(base: &str, _full: &str, theme: &Theme) -> Result<Option<Utili
     // which resolve values with slightly different axis rules than the physical
     // `w`/`h` families (no `screen-<bp>` scale, container scale on the inline
     // axis only, no `--max-width-*` namespace).
-    let families: [(&str, &[&str], char, SizeKind, bool); 11] = [
+    let families: [(&str, &[&str], char, SizeKind, bool); 13] = [
         ("w", &["width"], 'w', SizeKind::Plain, false),
         ("h", &["height"], 'h', SizeKind::Plain, false),
         ("min-w", &["min-width"], 'w', SizeKind::Min, false),
@@ -4946,6 +5064,11 @@ fn sizing_utility(base: &str, _full: &str, theme: &Theme) -> Result<Option<Utili
         ("max-inline", &["max-inline-size"], 'w', SizeKind::Max, true),
         ("min-block", &["min-block-size"], 'h', SizeKind::Min, true),
         ("max-block", &["max-block-size"], 'h', SizeKind::Max, true),
+        // Logical block/inline sizes. Bare `block`/`inline` (and `inline-block`,
+        // `inline-flex`, …) are display keywords resolved earlier by
+        // `keyword_utility`; only `block-<value>`/`inline-<value>` reach here.
+        ("block", &["block-size"], 'h', SizeKind::Plain, true),
+        ("inline", &["inline-size"], 'w', SizeKind::Plain, true),
     ];
     for (prefix, properties, axis, kind, logical) in families {
         let Some(value) = strip_family(base, prefix) else {
@@ -6118,7 +6241,7 @@ fn transition_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
 /// accept `auto` and negatives. Returns `Ok(None)` when the prefix is not a
 /// spacing family, `Err` when it is but the step is invalid.
 fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Utility>, Fail> {
-    let families: [(&str, &str, bool, u16); 15] = [
+    let families: [(&str, &str, bool, u16); 23] = [
         ("gap-", "gap", false, 100),
         ("p-", "padding", false, 20),
         ("px-", "padding-inline", false, 21),
@@ -6127,6 +6250,10 @@ fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Util
         ("pr-", "padding-right", false, 24),
         ("pb-", "padding-bottom", false, 25),
         ("pl-", "padding-left", false, 26),
+        ("ps-", "padding-inline-start", false, 27),
+        ("pe-", "padding-inline-end", false, 28),
+        ("pbs-", "padding-block-start", false, 29),
+        ("pbe-", "padding-block-end", false, 30),
         ("m-", "margin", true, 10),
         ("mx-", "margin-inline", true, 11),
         ("my-", "margin-block", true, 12),
@@ -6134,6 +6261,10 @@ fn spacing_utility(base: &str, full: &str, negative: bool) -> Result<Option<Util
         ("mr-", "margin-right", true, 14),
         ("mb-", "margin-bottom", true, 15),
         ("ml-", "margin-left", true, 16),
+        ("ms-", "margin-inline-start", true, 17),
+        ("me-", "margin-inline-end", true, 18),
+        ("mbs-", "margin-block-start", true, 19),
+        ("mbe-", "margin-block-end", true, 110),
     ];
     for (prefix, property, is_margin, rank) in families {
         if let Some(step) = base.strip_prefix(prefix) {
@@ -6368,10 +6499,22 @@ fn is_text_size(name: &str) -> bool {
 }
 
 /// Escapes a class name for use in a selector: every byte outside
-/// `[A-Za-z0-9_-]` is backslash-escaped.
+/// `[A-Za-z0-9_-]` is backslash-escaped, and a LEADING digit (or a digit right
+/// after a leading `-`) is escaped as its hex code point + a space, per CSS.escape —
+/// a CSS identifier may not start with an unescaped digit, so `2xl:flex` becomes
+/// `\32 xl\:flex` (matching Tailwind), not the invalid `2xl\:flex`.
 fn escape_class(class: &str) -> String {
     let mut out = String::with_capacity(class.len());
-    for c in class.chars() {
+    let chars: Vec<char> = class.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_ascii_digit() && (i == 0 || (i == 1 && chars[0] == '-')) {
+            // ASCII '0'..='9' are code points 0x30..=0x39, so the hex is "3" + the
+            // digit; the trailing space terminates the escape.
+            out.push_str("\\3");
+            out.push(c);
+            out.push(' ');
+            continue;
+        }
         if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             out.push('\\');
         }
