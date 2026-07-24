@@ -128,7 +128,7 @@ pub fn transform_server_fns(
                 // imports/declarations it was the sole user of are swept below.
                 edits.push((server_fn.handler_arg, format!("createClientRpc({})", quote(&id))));
             }
-            Target::Server => {
+            Target::Server | Target::ReactServer => {
                 // Keep the real handler as the second `.handler` arg; prepend the
                 // extracted first arg that runs it in-process via the middleware
                 // chain. A zero-width insert at the argument start preserves the
@@ -164,7 +164,9 @@ pub fn transform_server_fns(
 
     let import = match target {
         Target::Client => format!("import {{ createClientRpc }} from {};\n", quote(CLIENT_RPC_SPECIFIER)),
-        Target::Server => format!("import {{ createServerRpc }} from {};\n", quote(SERVER_RPC_SPECIFIER)),
+        Target::Server | Target::ReactServer => {
+            format!("import {{ createServerRpc }} from {};\n", quote(SERVER_RPC_SPECIFIER))
+        }
     };
     let mut rewritten = apply_edits(source, import, edits);
 
@@ -175,7 +177,7 @@ pub fn transform_server_fns(
     // mirrors the reference plugin extracting each handler into an exported
     // binding. The client build needs no such export (its stub is called
     // directly), so this is server-only.
-    if target == Target::Server {
+    if target != Target::Client {
         let unexported = found
             .iter()
             .filter(|server_fn| !server_fn.exported)
@@ -252,7 +254,7 @@ fn scan_directory(dir: &Path, entries: &mut Vec<ServerFnEntry>) -> Result<(), St
             let name = entry.file_name();
             if matches!(
                 name.to_str(),
-                Some("node_modules" | ".diffpack-output" | ".git" | "dist" | ".output")
+                Some("node_modules" | ".diffpack-output" | ".diffpack-next" | ".git" | "dist" | ".output" | ".next")
             ) {
                 continue;
             }
@@ -514,7 +516,10 @@ fn binding_name(declarator: &oxc_ast::ast::VariableDeclarator<'_>) -> Option<Str
 
 /// Applies non-overlapping `(span, replacement)` edits to `source`, prepending
 /// `preamble`. Insertions are zero-width spans.
-fn apply_edits(source: &str, preamble: String, mut edits: Vec<(Span, String)>) -> String {
+///
+/// `pub(crate)` so the generic RSC `"use server"` transform ([`crate::rsc`]) can
+/// reuse the exact source-edit machinery the server-fn split already relies on.
+pub(crate) fn apply_edits(source: &str, preamble: String, mut edits: Vec<(Span, String)>) -> String {
     edits.sort_by_key(|(span, _)| span.start);
     let mut output = preamble;
     let mut cursor = 0_usize;
@@ -532,7 +537,7 @@ fn apply_edits(source: &str, preamble: String, mut edits: Vec<(Span, String)>) -
     output
 }
 
-fn quote(value: &str) -> String {
+pub(crate) fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("serializing a JavaScript string cannot fail")
 }
 

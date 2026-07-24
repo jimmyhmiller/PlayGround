@@ -23,13 +23,20 @@
 //! * A re-imported chunk carrying the `__diffpack_hmr` marker in its URL registers
 //!   its new factories WITHOUT eager-executing (the register-only guard), so the
 //!   browser can then drive the update through the accept protocol.
-//! * The Fast Refresh transform ([`fast_refresh_footer`], gated by
-//!   [`is_refresh_boundary`]) appends a footer to a client component module that
-//!   registers its exported components with the React Refresh runtime and
-//!   self-accepts, so an edit swaps the component type in the live tree while
-//!   preserving hook state. The dev client build also runs the DEVELOPMENT React
-//!   (the client preamble sets `NODE_ENV=development` before the entry) because
-//!   production React exposes no Fast Refresh renderer hook.
+//! * Fast Refresh is two cooperating pieces. (1) The per-component instrumentation
+//!   is oxc's NATIVE React Refresh transform (`transform::transform_module_with_
+//!   options(refresh=true)`) — the `react-refresh/babel` equivalent done in Rust,
+//!   no Node — injecting the `$RefreshReg$` registrations and `$RefreshSig$` hook
+//!   signatures the runtime needs to detect a compatible edit and preserve state.
+//!   (2) [`fast_refresh_footer`], gated by [`is_refresh_boundary`], appends the HMR
+//!   accept wiring: it self-accepts and, on update, runs the runtime's boundary
+//!   check. That check is fed PLAIN data-property copies of the exports, because
+//!   Diffpack's registry exposes named exports as live-binding GETTERS and some
+//!   react-refresh versions reject getter descriptors (a real ESM namespace reports
+//!   data descriptors there) — without the copy, every `export const Foo` component
+//!   would force a full reload. The dev client build also runs the DEVELOPMENT
+//!   React (the client preamble sets `NODE_ENV=development` before the entry)
+//!   because production React exposes no Fast Refresh renderer hook.
 
 use std::path::Path;
 
@@ -246,10 +253,20 @@ pub fn fast_refresh_footer(module_key: &str) -> String {
   if(typeof window==="undefined")return;
   var RT=window.$RefreshRuntime$;
   if(!RT||!module.hot)return;
+  // Diffpack's registry exposes each named export as a live-binding GETTER. Some
+  // react-refresh versions (e.g. @vitejs/plugin-react v4) reject a boundary whose
+  // exports have getter descriptors (`if(desc&&desc.get)return key`), because a
+  // real ESM namespace reports DATA descriptors there — so they wrongly treat every
+  // `export const Foo` component as a "new export" and force a full reload. Passing
+  // plain data-property copies (getter values read into own data props) makes the
+  // boundary check see the same shape it sees for a native ESM module, so state is
+  // preserved across versions. Identity/component checks are unaffected (the copied
+  // values are the same component references).
+  var __flat=function(o){{return o?Object.assign({{}},o):o;}};
   RT.registerExportsForReactRefresh({key},module.exports);
   module.hot.accept(function(next,prev){{
     if(!next)return;
-    var msg=RT.validateRefreshBoundaryAndEnqueueUpdate({key},prev||module.exports,next);
+    var msg=RT.validateRefreshBoundaryAndEnqueueUpdate({key},__flat(prev||module.exports),__flat(next));
     if(msg)module.hot.invalidate(msg);
   }});
 }})();
@@ -291,6 +308,33 @@ pub fn client_script(ws_path: &str) -> String {
       var msg;try{{msg=JSON.parse(ev.data);}}catch(_){{return;}}
       if(msg.type==="connected")return;
       if(msg.type==="reload"){{location.reload();return;}}
+      if(msg.type==="rsc-refresh"){{
+        // Server-component edit: refetch the CURRENT route's flight (?__rsc=1) and
+        // diff-render it in place through the client Router — no full document
+        // reload, and client-island state is preserved by React reconciliation.
+        // Falls back to a reload pre-hydration (before the Router registers).
+        if(typeof window.__diffpack_navigate==="function"){{window.__diffpack_navigate(location.pathname+location.search,{{push:false}});}}
+        else{{location.reload();}}
+        return;
+      }}
+      if(msg.type==="css"){{
+        // Swap each changed stylesheet in place: clone the matching <link>, point
+        // it at a cache-busted URL, and remove the old node once the new sheet has
+        // loaded. No reload, so all component + DOM state is preserved.
+        for(var c=0;c<msg.hrefs.length;c++){{(function(href){{
+          var links=document.querySelectorAll('link[rel="stylesheet"]');
+          for(var j=0;j<links.length;j++){{
+            var link=links[j];var u;
+            try{{u=new URL(link.href,location.href);}}catch(_){{continue;}}
+            if(u.pathname!==href)continue;
+            var next=link.cloneNode(false);
+            next.href=href+(href.indexOf("?")>=0?"&":"?")+"__hmr_t="+Date.now();
+            next.addEventListener("load",function(){{if(link.parentNode)link.parentNode.removeChild(link);}});
+            link.parentNode.insertBefore(next,link.nextSibling);
+          }}
+        }})(msg.hrefs[c]);}}
+        return;
+      }}
       if(msg.type==="update"){{
         var rt=globalThis[{global}];
         if(!rt){{location.reload();return;}}
@@ -300,6 +344,10 @@ pub fn client_script(ws_path: &str) -> String {
             await import(url+(url.indexOf("?")>=0?"&":"?")+"__diffpack_hmr=1&t="+Date.now());
           }}
           rt.hmrApply(msg.ids);
+          // react-refresh's boundary accept ENQUEUES a debounced performReactRefresh
+          // (~30ms timer), which is otherwise the dominant browser-side HMR latency.
+          // Flush it synchronously now so the DOM updates this task, not a frame+ later.
+          if(RT&&RT.performReactRefresh)RT.performReactRefresh();
         }}catch(err){{console.error("[diffpack hmr]",err);location.reload();}}
       }}
     }});
@@ -342,25 +390,68 @@ pub fn refresh_runtime_source(raw: &str) -> String {
     )
 }
 
-/// Locates `react-refresh`'s runtime under the project's `node_modules`. Vite's
-/// plugin ships a self-contained ESM build of it at
-/// `@vitejs/plugin-react/dist/refresh-runtime.js`; the raw `react-refresh` package
-/// (CJS) is the fallback. Returns the file's text.
+/// Composes the split (@vitejs/plugin-react >= 4.3) Fast Refresh runtime: the
+/// react-refresh CORE (CJS, `react-refresh/cjs/...`) followed by the plugin's
+/// `refreshUtils.js` (CJS — `registerExportsForReactRefresh`,
+/// `validateRefreshBoundaryAndEnqueueUpdate`, `__hmr_import`). Both files read and
+/// write a shared `exports`, so they run in order under one provided
+/// `module`/`exports` in a classic IIFE, and the fully-populated object is
+/// published on `window.$RefreshRuntime$`. Neither file is reimplemented; each runs
+/// verbatim in the CommonJS environment it expects.
+fn composed_cjs_runtime(core: &str, utils: &str) -> String {
+    let readme = "https://github.com/vitejs/vite-plugin-react";
+    let core = core.replace("__README_URL__", readme);
+    let utils = utils.replace("__README_URL__", readme);
+    // The runtime is a blocking `<script src>` that loads BEFORE the client
+    // preamble installs the global `process` shim, and the raw react-refresh CORE
+    // guards its dev warnings on `process.env.NODE_ENV`. Give the IIFE its own local
+    // `process` so the runtime never touches the (not-yet-shimmed) global — a bare
+    // `process` reference here would throw and leave `$RefreshRuntime$` unset,
+    // cascading into `$RefreshSig$ is not defined` when the app's instrumented
+    // modules run. The self-contained (older) runtime pre-inlines NODE_ENV, so it
+    // needs no such shim.
+    format!(
+        "(function(){{\nvar process={{env:{{NODE_ENV:\"development\"}}}};\nvar module={{exports:{{}}}};var exports=module.exports;\n{core}\n{utils}\nwindow.$RefreshRuntime$=module.exports;\n}})();\n"
+    )
+}
+
+/// Locates and prepares the React Fast Refresh runtime under the project's
+/// `node_modules`, handling both @vitejs/plugin-react layouts:
+///
+/// * **Self-contained** (older plugin-react / the v6 line): a single
+///   `dist/refresh-runtime.js` that already bundles the react-refresh core and the
+///   plugin's boundary helpers — handled by [`refresh_runtime_source`].
+/// * **Split** (plugin-react >= 4.3): the core `react-refresh` CJS runtime plus the
+///   plugin's `dist/refreshUtils.js` — composed by [`composed_cjs_runtime`].
+///
+/// The raw `react-refresh` package ALONE is intentionally not accepted: it lacks
+/// `registerExportsForReactRefresh` / `validateRefreshBoundaryAndEnqueueUpdate`
+/// (those are plugin-react additions the HMR footer calls), so serving it would
+/// leave `window.$RefreshRuntime$` half-formed and fail at update time.
 pub fn find_refresh_runtime(project_root: &Path) -> Result<String, String> {
-    let candidates = [
-        project_root.join("node_modules/@vitejs/plugin-react/dist/refresh-runtime.js"),
-        project_root.join("node_modules/react-refresh/cjs/react-refresh-runtime.development.js"),
-    ];
-    for candidate in &candidates {
-        if candidate.is_file() {
-            let raw = std::fs::read_to_string(candidate)
-                .map_err(|error| format!("cannot read {}: {error}", candidate.display()))?;
-            return Ok(refresh_runtime_source(&raw));
-        }
+    let nm = project_root.join("node_modules");
+    let read = |path: &Path| {
+        std::fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    };
+
+    let bundled = nm.join("@vitejs/plugin-react/dist/refresh-runtime.js");
+    if bundled.is_file() {
+        return Ok(refresh_runtime_source(&read(&bundled)?));
     }
+
+    let core = nm.join("react-refresh/cjs/react-refresh-runtime.development.js");
+    let utils = nm.join("@vitejs/plugin-react/dist/refreshUtils.js");
+    if core.is_file() && utils.is_file() {
+        return Ok(composed_cjs_runtime(&read(&core)?, &read(&utils)?));
+    }
+
     Err(format!(
-        "React Fast Refresh runtime not found under {}. Looked for @vitejs/plugin-react/dist/refresh-runtime.js and react-refresh/cjs/react-refresh-runtime.development.js. Install @vitejs/plugin-react (a devDependency of the fixture) so dev-mode Fast Refresh has its client runtime.",
-        project_root.join("node_modules").display()
+        "React Fast Refresh runtime not found under {}. Looked for the self-contained \
+         @vitejs/plugin-react/dist/refresh-runtime.js, and for the split layout \
+         (react-refresh/cjs/react-refresh-runtime.development.js + \
+         @vitejs/plugin-react/dist/refreshUtils.js). Install @vitejs/plugin-react so \
+         dev-mode Fast Refresh has its client runtime.",
+        nm.display()
     ))
 }
 
@@ -375,4 +466,67 @@ pub fn rewrite_import_meta_hot(code: &str, target: Target) -> String {
         return code.to_string();
     }
     code.replace("import.meta.hot", "module.hot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_passes_flattened_exports_to_the_boundary_check() {
+        // The boundary validator must receive plain data-property copies, not the
+        // registry's live-binding GETTER exports — react-refresh v4 rejects getter
+        // descriptors and forces a full reload for every `export const Foo`
+        // component. Regression guard for the state-preservation fix.
+        let footer = fast_refresh_footer("/app/src/components/Navbar.tsx");
+        assert!(footer.contains("__flat"), "footer must define a flatten helper: {footer}");
+        assert!(
+            footer.contains("Object.assign({},o)"),
+            "flatten must copy getter values into own data props: {footer}"
+        );
+        assert!(
+            footer.contains("validateRefreshBoundaryAndEnqueueUpdate({key},__flat("
+                .replace("{key}", &json_string("/app/src/components/Navbar.tsx"))
+                .as_str())
+                || footer.contains("__flat(prev||module.exports),__flat(next)"),
+            "both boundary-check arguments must be flattened: {footer}"
+        );
+    }
+
+    #[test]
+    fn composed_runtime_shims_process_and_publishes_global() {
+        // @vitejs/plugin-react >= 4.3 split layout: the react-refresh core (CJS,
+        // guards on process.env.NODE_ENV) + the plugin's refreshUtils, run under one
+        // shared `exports`, published on window.$RefreshRuntime$. The local process
+        // shim is what keeps the blocking runtime script from throwing before the
+        // client preamble installs the global process shim.
+        let out = composed_cjs_runtime(
+            "var m=process.env.NODE_ENV;exports.register=1;",
+            "exports.validateRefreshBoundaryAndEnqueueUpdate=2;",
+        );
+        assert!(
+            out.contains("var process={env:{NODE_ENV:\"development\"}}"),
+            "must shim process locally: {out}"
+        );
+        assert!(
+            out.contains("window.$RefreshRuntime$=module.exports"),
+            "must publish the composed exports as the global: {out}"
+        );
+        assert!(
+            out.contains("exports.register=1")
+                && out.contains("exports.validateRefreshBoundaryAndEnqueueUpdate=2"),
+            "must include both the core and the utils verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn a_single_named_component_export_is_a_refresh_boundary() {
+        // `export const Navbar = () => {...}` — the shape that broke on real apps.
+        let boundary = is_refresh_boundary(
+            Path::new("/app/src/components/Navbar.tsx"),
+            &["Navbar".to_string()],
+            "export const Navbar = () => null",
+        );
+        assert!(boundary, "a lone uppercase named component export must be a boundary");
+    }
 }

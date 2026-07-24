@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright";
+import type { FrameLocator, Locator, Page } from "playwright";
 import type { Target } from "../dsl/ir.js";
 import { formatTarget } from "../dsl/ir.js";
 
@@ -37,8 +37,23 @@ const NO_NAME_FROM_CONTENT = new Set([
   "tabpanel", "article", "form", "group", "main", "banner", "navigation",
 ]);
 
+function buildScope(page: Page, within: Target | undefined, captures: Captures, exact: boolean): Page | Locator | FrameLocator {
+  if (!within) return page;
+  if (within.kind === "frame") {
+    const outer = buildScope(page, within.within, captures, exact);
+    const name = interpolate(within.name ?? "", captures);
+    // match an iframe by name, title, or src substring
+    const esc = name.replace(/"/g, '\\"');
+    return outer.frameLocator(`iframe[name="${esc}"], iframe[title="${esc}"], iframe[src*="${esc}"]`);
+  }
+  return buildLocator(page, within, captures, exact);
+}
+
 export function buildLocator(page: Page, target: Target, captures: Captures, exact = false): Locator {
-  const scope: Page | Locator = target.within ? buildLocator(page, target.within, captures, exact) : page;
+  if (target.kind === "frame") {
+    throw new TargetError(`"frame" is a scope, not a target — write '<target> in frame "${target.name ?? ""}"'`, undefined, target);
+  }
+  const scope: Page | Locator | FrameLocator = buildScope(page, target.within, captures, exact);
   const name = target.name !== undefined ? interpolate(target.name, captures) : undefined;
   switch (target.kind) {
     case "text":
@@ -88,10 +103,13 @@ export async function resolveUnique(
   } catch {
     const snapshot = await ariaSnapshotSafe(page);
     const frames = page.frames().length - 1;
+    const scopesFrame = (function has(t: Target | undefined): boolean {
+      return !!t && (t.kind === "frame" || has(t.within));
+    })(target);
     throw new TargetError(
       `no visible match for ${formatTarget(target)} (page: ${page.url()})\n` +
-        (frames > 0
-          ? `note: the page contains ${frames} iframe(s) — bat targets the MAIN frame only; content inside iframes is not reachable.\n`
+        (frames > 0 && !scopesFrame
+          ? `note: the page contains ${frames} iframe(s); content inside an iframe is only reachable via '<target> in frame "<name|title|src>"'.\n`
           : "") +
         `The page's semantic tree at failure:\n${indent(snapshot)}`,
       snapshot,

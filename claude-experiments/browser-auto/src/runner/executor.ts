@@ -60,8 +60,7 @@ export function composeFlowWorld(flow: Flow, registry: Map<string, Seed>): World
 }
 
 interface StepContext {
-  page: Page;
-  tracker: NetworkTracker;
+  session: PageSession;
   captures: Captures;
   baseUrl: string;
   budgetMs: number;
@@ -69,7 +68,20 @@ interface StepContext {
   allowConsoleErrors: boolean;
   hub: TransientHub;
   engine: ConditionEngine | null;
-  unmodeled: string[];
+}
+
+/** The active browsing session: which page is current, plus the per-context
+ * routers for tabs/dialogs/downloads. `switch tab` swaps `page` here, and all
+ * subsequent effects and settlement run against the new active page. */
+export interface PageSession {
+  context: BrowserContext;
+  page: Page;
+  tracker: NetworkTracker;
+  dialogs: DialogRouter;
+  downloads: DownloadWatcher;
+  /** every page bat has an event-wired tracker for, keyed by Page */
+  trackers: Map<Page, NetworkTracker>;
+  ensureTracked(p: Page): NetworkTracker;
 }
 
 export interface FlowEnv {
@@ -78,8 +90,7 @@ export interface FlowEnv {
   allowDialogs: boolean;
   hub: TransientHub;
   engine: ConditionEngine | null;
-  /** unmodeled interactions observed (popups, dialogs) — bat fails loudly on these */
-  unmodeled: string[];
+  session: PageSession;
 }
 
 export async function prepareContext(
@@ -100,30 +111,34 @@ export async function prepareContext(
   const allowConsoleErrors = flow.givens.some((g) => g.type === "allow" && g.what === "console-errors");
   const allowDialogs = flow.givens.some((g) => g.type === "allow" && g.what === "dialogs");
 
-  // LOUD NON-GOALS: bat flows are single-page and dialog-free by design.
-  // Popups are closed and fail the step with an explanation; dialogs are
-  // dismissed and fail the step unless `allow dialogs` opts in (then they are
-  // dismissed and recorded).
-  const unmodeled: string[] = [];
-  context.on("page", (p) => {
-    if (p === page) return;
-    const url = p.url();
-    unmodeled.push(
-      `a popup/new tab opened (${url || "about:blank"}) — bat flows are single-page by design; ` +
-        `popups and multi-tab journeys are not supported. The window was closed.`,
-    );
-    void p.close().catch(() => {});
-  });
-  page.on("dialog", (dialog) => {
-    if (!allowDialogs) {
-      unmodeled.push(
-        `the page opened a ${dialog.type()} dialog (${JSON.stringify(dialog.message().slice(0, 120))}) — ` +
-          `bat has no dialog vocabulary; it was dismissed. If dismissing is acceptable app behavior, ` +
-          `add 'allow dialogs' to the flow.`,
-      );
-    }
-    void dialog.dismiss().catch(() => {});
-  });
+  // Tabs, dialogs, and downloads are first-class. New pages are tracked (not
+  // punished); dialogs route to declared responses; downloads are collected.
+  const dialogs = new DialogRouter(allowDialogs);
+  const downloads = new DownloadWatcher();
+  const trackers = new Map<Page, NetworkTracker>();
+  const session: PageSession = {
+    context,
+    page,
+    tracker: new NetworkTracker(page),
+    dialogs,
+    downloads,
+    trackers,
+    ensureTracked(p: Page): NetworkTracker {
+      let t = trackers.get(p);
+      if (!t) {
+        t = new NetworkTracker(p);
+        trackers.set(p, t);
+        dialogs.attach(p);
+        downloads.attach(p);
+      }
+      return t;
+    },
+  };
+  trackers.set(page, session.tracker);
+  dialogs.attach(page);
+  downloads.attach(page);
+  // any new tab/popup gets its own tracker + routers the moment it opens
+  context.on("page", (p) => session.ensureTracked(p));
 
   for (const g of flow.givens) {
     if (g.type === "clock") {
@@ -155,7 +170,7 @@ export async function prepareContext(
       await applySession(context, session, opts.baseUrl);
     }
   }
-  return { clockInstalled, allowConsoleErrors, allowDialogs, hub, engine, unmodeled };
+  return { clockInstalled, allowConsoleErrors, allowDialogs, hub, engine, session };
 }
 
 async function applySession(context: BrowserContext, session: SessionState, baseUrl: string): Promise<void> {
@@ -187,7 +202,7 @@ export async function runSteps(
   stopAfter = flow.steps.length - 1,
   captures: Captures = new Map(),
 ): Promise<FlowTrace> {
-  const tracker = new NetworkTracker(page);
+  const session = env.session;
   const trace: FlowTrace = {
     flow: flow.name,
     file: flow.file,
@@ -212,8 +227,7 @@ export async function runSteps(
       continue;
     }
     const ctx: StepContext = {
-      page,
-      tracker,
+      session,
       captures,
       baseUrl: opts.baseUrl,
       budgetMs: opts.stepBudgetMs,
@@ -221,12 +235,11 @@ export async function runSteps(
       allowConsoleErrors: env.allowConsoleErrors,
       hub: env.hub,
       engine: env.engine,
-      unmodeled: env.unmodeled,
     };
     const stepTrace = await runStep(step, i, ctx);
     const mode = opts.screenshotMode ?? "on-failure";
     if (opts.onScreenshot && mode !== "off" && (stepTrace.status === "fail" || mode === "steps")) {
-      const png = await page.screenshot({ timeout: 5000 }).catch(() => null);
+      const png = await session.page.screenshot({ timeout: 5000 }).catch(() => null);
       if (png) {
         const name = await opts.onScreenshot(i, png);
         if (name) stepTrace.screenshot = name;
@@ -247,7 +260,7 @@ export async function runSteps(
       ]);
       await opts.onCheckpoint({
         step: i,
-        url: page.url(),
+        url: session.page.url(),
         storageState,
         worldFingerprint: worldMeta.fingerprint,
         worldSnapshotId: snapshotId,
@@ -258,13 +271,16 @@ export async function runSteps(
 }
 
 async function runStep(step: Step, index: number, ctx: StepContext): Promise<StepTrace> {
-  const { page, tracker } = ctx;
-  const unmodeledBefore = ctx.unmodeled.length;
+  const { session } = ctx;
+  const actPage = session.page; // the page the action runs on (arm observers here)
+  const tracker = session.ensureTracked(actPage);
   const started = Date.now();
   const deadline = started + ctx.budgetMs;
   const remaining = () => Math.max(1, deadline - Date.now());
   tracker.stepBoundary();
-  const trace = newStepTrace(index, step, page.url());
+  session.dialogs.stepBoundary();
+  session.downloads.stepBoundary();
+  const trace = newStepTrace(index, step, actPage.url());
 
   // ---- collectors for this step
   const consoleHandler = (msg: { type(): string; text(): string }) => {
@@ -276,12 +292,26 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
   const navHandler = (frame: { parentFrame(): unknown; url(): string }) => {
     if (frame.parentFrame() === null) trace.navigations.push(frame.url());
   };
-  page.on("console", consoleHandler);
-  page.on("pageerror", pageErrorHandler);
-  page.on("framenavigated", navHandler);
+  actPage.on("console", consoleHandler);
+  actPage.on("pageerror", pageErrorHandler);
+  actPage.on("framenavigated", navHandler);
 
-  const armed: ArmedWatchers = { requests: new Map(), ws: new Map(), appear: new Map(), gone: new Map() };
-  const allMatchers = () => [...armed.requests.values(), ...armed.ws.values()];
+  const armed: ArmedWatchers = {
+    requests: new Map(),
+    ws: new Map(),
+    appear: new Map(),
+    gone: new Map(),
+    tabs: new Map(),
+    dialogs: new Map(),
+    downloads: new Map(),
+  };
+  const allMatchers = () => [
+    ...armed.requests.values(),
+    ...armed.ws.values(),
+    ...armed.tabs.values(),
+    ...armed.dialogs.values(),
+    ...armed.downloads.values(),
+  ];
   ctx.hub.clear();
 
   try {
@@ -298,7 +328,7 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
               ...(eff.bodyContains !== undefined ? { bodyContains: interpolate(eff.bodyContains, ctx.captures) } : {}),
             },
             tracker,
-            page,
+            actPage,
           ),
         );
       } else if (eff.type === "ws") {
@@ -313,21 +343,32 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
             tracker,
           ),
         );
+      } else if (eff.type === "tab") {
+        armed.tabs.set(eff, new TabMatcher(interpolate(eff.path, ctx.captures), session.context));
+      } else if (eff.type === "dialog") {
+        armed.dialogs.set(
+          eff,
+          session.dialogs.arm(eff, interpolate(eff.message, ctx.captures), eff.text !== undefined ? interpolate(eff.text, ctx.captures) : undefined),
+        );
+      } else if (eff.type === "download") {
+        armed.downloads.set(eff, session.downloads.arm(interpolate(eff.name, ctx.captures)));
       } else if (eff.type === "appear") {
-        const loc = buildLocator(page, eff.target, ctx.captures);
+        const loc = buildLocator(actPage, eff.target, ctx.captures);
         armed.appear.set(eff, await ctx.hub.arm("appear", loc));
       } else if (eff.type === "gone") {
-        const loc = buildLocator(page, eff.target, ctx.captures);
+        const loc = buildLocator(actPage, eff.target, ctx.captures);
         const presentAtAct = await loc.first().isVisible().catch(() => false);
         armed.gone.set(eff, { presentAtAct, watcher: await ctx.hub.arm("gone", loc) });
       }
     }
 
-    // ---- act
+    // ---- act (may switch the active page, e.g. `switch tab`)
     await performAction(step, ctx, remaining);
 
-    // ---- settle
-    const outcome = await settle(page, tracker, {
+    // ---- settle against whatever page is now active
+    const settlePage = session.page;
+    const settleTracker = session.ensureTracked(settlePage);
+    const outcome = await settle(settlePage, settleTracker, {
       budgetMs: remaining(),
       clockInstalled: ctx.clockInstalled,
       matchers: allMatchers(),
@@ -370,17 +411,18 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     const effectsFailed = trace.effects.filter((e) => !e.pass);
     const consoleFailed = !ctx.allowConsoleErrors && trace.consoleErrors.length > 0;
     const settleFailed = !outcome.settled;
-    const unmodeledNow = ctx.unmodeled.slice(unmodeledBefore);
+    // an undeclared native dialog during this step is a real failure
+    const dialogFailed = session.dialogs.unmodeled.slice();
 
-    if (effectsFailed.length || consoleFailed || settleFailed || unmodeledNow.length) {
+    if (effectsFailed.length || consoleFailed || settleFailed || dialogFailed.length) {
       trace.status = "fail";
       const reasons: string[] = [];
       if (effectsFailed.length) reasons.push(`${effectsFailed.length} expectation(s) not met`);
       if (settleFailed) reasons.push("the page never settled within the step budget");
       if (consoleFailed) reasons.push(`the page emitted ${trace.consoleErrors.length} error(s) (use 'allow console-errors' to opt out)`);
-      for (const u of unmodeledNow) reasons.push(u);
+      for (const u of dialogFailed) reasons.push(u);
       trace.failure = `after '${step.source}': ${reasons.join("; ")}`;
-      trace.ariaSnapshot = await ariaSnapshotSafe(page);
+      trace.ariaSnapshot = await ariaSnapshotSafe(session.page);
     } else {
       trace.status = "pass";
     }
@@ -389,21 +431,27 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
     trace.failure = e instanceof Error ? e.message : String(e);
     if (e instanceof TargetError && e.target) trace.failedTarget = e.target;
     if (e instanceof TargetError && e.ariaSnapshot) trace.ariaSnapshot = e.ariaSnapshot;
-    else trace.ariaSnapshot = await ariaSnapshotSafe(page);
+    else trace.ariaSnapshot = await ariaSnapshotSafe(session.page);
   } finally {
-    page.off("console", consoleHandler);
-    page.off("pageerror", pageErrorHandler);
-    page.off("framenavigated", navHandler);
+    actPage.off("console", consoleHandler);
+    actPage.off("pageerror", pageErrorHandler);
+    actPage.off("framenavigated", navHandler);
     for (const m of armed.requests.values()) m.dispose();
     for (const m of armed.ws.values()) m.dispose();
+    for (const m of armed.tabs.values()) m.dispose();
+    for (const m of armed.downloads.values()) m.dispose();
   }
 
-  trace.postUrl = page.url();
-  trace.requests = [...tracker.observed];
-  if (tracker.wsFrames.length) trace.wsFrames = [...tracker.wsFrames];
+  const finalPage = session.page;
+  const finalTracker = session.ensureTracked(finalPage);
+  trace.postUrl = finalPage.url();
+  trace.requests = [...finalTracker.observed];
+  if (session.dialogs.records.length) trace.dialogs = [...session.dialogs.records];
+  if (session.downloads.records.length) trace.downloads = session.downloads.records.map((d) => ({ filename: d.filename, savedAs: d.savedAs }));
+  if (finalTracker.wsFrames.length) trace.wsFrames = [...finalTracker.wsFrames];
   if (ctx.engine) for (const rec of trace.requests) ctx.engine.annotate(rec);
   if (trace.status === "fail") {
-    trace.testids = await page
+    trace.testids = await finalPage
       .$$eval("[data-testid]", (els) => els.map((el) => el.getAttribute("data-testid")).filter((x): x is string => x !== null))
       .catch(() => []);
   }
@@ -413,7 +461,8 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
 
 async function performAction(step: Step, ctx: StepContext, remaining: () => number): Promise<void> {
   const a = step.action;
-  const { page, captures } = ctx;
+  const { session, captures } = ctx;
+  const page = session.page;
   switch (a.type) {
     case "go": {
       const url = new URL(interpolate(a.path, captures), ctx.baseUrl).href;
@@ -458,6 +507,32 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
     case "upload": {
       const loc = await resolveUnique(page, a.target, captures, remaining());
       await loc.setInputFiles(interpolate(a.file, captures), { timeout: remaining() });
+      return;
+    }
+    case "drag": {
+      const source = await resolveUnique(page, a.target, captures, remaining());
+      const dest = await resolveUnique(page, a.to, captures, remaining());
+      await source.dragTo(dest, { timeout: remaining() });
+      return;
+    }
+    case "switchTab": {
+      const target = await waitForTab(session.context, interpolate(a.path, captures), remaining());
+      session.page = target;
+      session.tracker = session.ensureTracked(target);
+      await target.bringToFront().catch(() => {});
+      return;
+    }
+    case "closeTab": {
+      const closing = session.page;
+      const others = session.context.pages().filter((p) => p !== closing && !p.isClosed());
+      if (others.length === 0) {
+        throw new Error("close tab: this is the only open tab — nothing to return to");
+      }
+      await closing.close().catch(() => {});
+      const next = others[others.length - 1]!;
+      session.page = next;
+      session.tracker = session.ensureTracked(next);
+      await next.bringToFront().catch(() => {});
       return;
     }
   }

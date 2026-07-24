@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "date": "2026-07-24T04:11:40.044Z",
+    "cpu": "Apple M2 Max",
+    "node": "v26.5.0",
+    "diffpackCommit": "db173a3c3",
+    "next": "16.2.11"
+  },
+  "fixture": "integration/next-app-router",
+  "cases": {
+    "diffpack-next": {
+      "label": "produces bundles only — NO typecheck/lint/SSG (renders per-request)",
+      "wallMs": [
+        89,
+        82,
+        87
+      ],
+      "wallMedianMs": 87,
+      "peakRssBytes": 40700000,
+      "outputs": {
+        "client (public/)": {
+          "bytes": 620000,
+          "gzipBytes": 125644,
+          "files": 22
+        },
+        "server (server/)": {
+          "bytes": 537416,
+          "gzipBytes": 108842,
+          "files": 6
+        }
+      }
+    },
+    "next-turbopack": {
+      "label": "FULL framework build (typecheck+lint+SSG) via Turbopack",
+      "wallMs": [
+        2681,
+        2727,
+        2674
+      ],
+      "wallMedianMs": 2681,
+      "peakRssBytes": 598000000,
+      "outputs": {
+        "static (.next/static, client)": {
+          "bytes": 732737,
+          "gzipBytes": 273934,
+          "files": 22
+        },
+        "server (.next/server)": {
+          "bytes": 5494892,
+          "gzipBytes": 1419154,
+          "files": 202
+        }
+      }
+    },
+    "next-webpack": {
+      "label": "FULL framework build (typecheck+lint+SSG) via webpack",
+      "wallMs": [
+        7851,
+        7830,
+        7908
+      ],
+      "wallMedianMs": 7851,
+      "peakRssBytes": 590100000,
+      "outputs": {
+        "static (.next/static, client)": {
+          "bytes": 970710,
+          "gzipBytes": 353345,
+          "files": 33
+        },
+        "server (.next/server)": {
+          "bytes": 950409,
+          "gzipBytes": 258693,
+          "files": 73
+        }
+      }
+    }
+  }
+}

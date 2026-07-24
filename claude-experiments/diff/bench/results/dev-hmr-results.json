@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "samples": 8,
+    "starts": 2,
+    "date": "2026-07-24T14:19:16.443Z",
+    "fixture": "integration/next-app-router"
+  },
+  "servers": {
+    "diffpack": {
+      "startup": {
+        "ready": {
+          "n": 2,
+          "median": 448,
+          "p95": 448,
+          "min": 448,
+          "max": 749
+        },
+        "firstByte": {
+          "n": 2,
+          "median": 455,
+          "p95": 455,
+          "min": 455,
+          "max": 757
+        }
+      },
+      "hmr": {
+        "client-text (Fast Refresh)": {
+          "warmup": {
+            "delta": 13.300048828125,
+            "path": "hot"
+          },
+          "warm": {
+            "n": 8,
+            "median": 12.199951171875,
+            "p95": 13.10009765625,
+            "min": 11.60009765625,
+            "max": 14.300048828125
+          },
+          "semantics": "state-preserving hot update",
+          "samplesRaw": [
+            12.5,
+            11.60009765625,
+            14.300048828125,
+            13.10009765625,
+            12.5,
+            12.199951171875,
+            11.89990234375,
+            11.699951171875
+          ]
+        },
+        "server-text (RSC refresh)": {
+          "warmup": {
+            "delta": 24,
+            "path": "hot"
+          },
+          "warm": {
+            "n": 8,
+            "median": 24.89990234375,
+            "p95": 33.5,
+            "min": 22.39990234375,
+            "max": 37.300048828125
+          },
+          "semantics": "state-preserving hot update",
+          "samplesRaw": [
+            25.10009765625,
+            22.39990234375,
+            33.5,
+            29.60009765625,
+            24.39990234375,
+            24.89990234375,
+            37.300048828125,
+            23.5
+          ]
+        }
+      }
+    }
+  }
+}

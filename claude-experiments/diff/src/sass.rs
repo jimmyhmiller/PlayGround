@@ -2644,18 +2644,18 @@ impl ValueParser<'_> {
         }
         let split = unquoted.find(['?', '#']).unwrap_or(unquoted.len());
         let (path_part, suffix) = unquoted.split_at(split);
-        let from_dir = self
-            .ctx
-            .file
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let root_dir = self
-            .compiler
-            .root_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
+        // Canonicalize both directories before diffing. `@import` resolution
+        // canonicalizes the partial's path, but the root file is whatever the
+        // caller passed; if they disagree only by a symlinked prefix (macOS's
+        // `/var` -> `/private/var` temp dirs are the classic case) the relative
+        // diff would walk all the way up and back down through the real path. Real
+        // directories both exist, so canonicalizing them makes the rebase share one
+        // prefix; a path that cannot be canonicalized falls back to itself.
+        let canon = |dir: &Path| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let from_dir = canon(self.ctx.file.parent().unwrap_or_else(|| Path::new(".")));
+        let root_dir = canon(self.compiler.root_file.parent().unwrap_or_else(|| Path::new(".")));
         let target = normalize_path(&from_dir.join(path_part));
-        let rebased = relative_path(root_dir, &target);
+        let rebased = relative_path(&root_dir, &target);
         format!("url(\"{}{suffix}\")", rebased.display())
     }
 

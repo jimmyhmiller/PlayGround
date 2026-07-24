@@ -13,7 +13,7 @@ use crate::transform::Target;
 
 /// The build environments TanStack Start defines. `nitro` is the production
 /// server runtime; `ssr` renders; `client` is the browser build.
-pub const ENVIRONMENTS: [&str; 3] = ["client", "ssr", "nitro"];
+pub const ENVIRONMENTS: [&str; 4] = ["client", "ssr", "nitro", "react-server"];
 
 /// Resolved configuration for one environment.
 #[derive(Debug, Clone)]
@@ -73,6 +73,11 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
     // environments resolve with node conditions.
     let conditions = match environment {
         "client" => ["module", "browser", "production"].as_slice(),
+        // The RSC graph MUST resolve under the `react-server` export condition:
+        // `react-server-dom-webpack/server` maps to the real flight writer only
+        // there (its default `./server.js` throws at import), and `react` itself
+        // resolves to a different build. Otherwise node-like, same as the servers.
+        "react-server" => ["react-server", "node", "production", "wasm", "unwasm"].as_slice(),
         _ => ["node", "production", "wasm", "unwasm"].as_slice(),
     }
     .iter()
@@ -81,6 +86,20 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
 
     let entry = match environment {
         "client" => client_entry,
+        // The react-server graph renders the Server Component tree to a flight
+        // stream; its entry is the dedicated flight-render module `src/rsc-entry.tsx`
+        // (which imports `renderToReadableStream` + the client-references manifest)
+        // when the app provides one, falling back to the server entry otherwise (a
+        // missing entry hard-errors in main.rs).
+        "react-server" => {
+            if src.join("rsc-entry.tsx").is_file() {
+                Some(src.join("rsc-entry.tsx"))
+            } else if src.join("rsc-entry.ts").is_file() {
+                Some(src.join("rsc-entry.ts"))
+            } else {
+                server_entry.clone()
+            }
+        }
         _ => server_entry,
     };
 
@@ -90,6 +109,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
     // runtime stubs.
     let target = match environment {
         "client" => Target::Client,
+        "react-server" => Target::ReactServer,
         _ => Target::Server,
     };
 
@@ -311,6 +331,28 @@ pub fn set_development_mode(config: &mut AppConfig) {
     set_node_env(&mut config.build.defines, "development");
     if let Some(env) = config.build.import_meta_env.as_mut() {
         env.mode = "development".to_string();
+    }
+}
+
+/// The web/SPA analogue of [`set_development_mode`]: switches a
+/// [`derive_web_config`] result to development. HMR instrumentation on,
+/// `process.env.NODE_ENV` defined as `"development"` (so dependencies select
+/// their development builds — React's hook warnings and the Fast Refresh renderer
+/// hook), the `import.meta.env` mode flipped to `development` (so `DEV`/`PROD` fold
+/// the dev way), and the resolve `production` condition swapped for `development`
+/// so packages with a `development`/`production` exports map resolve their dev
+/// entry. Kept as one function for the same reason as `set_development_mode`: these
+/// travel together, and a caller must never set them inconsistently.
+pub fn set_web_development_mode(config: &mut WebConfig) {
+    config.build.hmr = true;
+    set_node_env(&mut config.build.defines, "development");
+    if let Some(env) = config.build.import_meta_env.as_mut() {
+        env.mode = "development".to_string();
+    }
+    for condition in config.build.conditions.iter_mut() {
+        if condition == "production" {
+            *condition = "development".to_string();
+        }
     }
 }
 

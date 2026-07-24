@@ -1,17 +1,22 @@
-// Dev-server live-reload browser oracle (test-only; NEVER referenced by the
-// build). Starts `diffpack dev` (the long-lived, live-rebuild dev server) against
-// the pinned app, loads `/` in real headless Chrome, and proves:
+// Dev-server HMR browser oracle (test-only; NEVER referenced by the build).
+// Starts `diffpack dev` (the long-lived, live-rebuild dev server) against the
+// pinned app, loads `/` in real headless Chrome, and proves the STATE-PRESERVING
+// hot-update workflow — the payoff of diffpack's low diff times:
 //
 //   1. `/` is server-rendered (`Welcome Home!!!` in the INITIAL raw HTML, before
 //      any client JS) and hydrates clean (window.__TSR_ROUTER__ set, no console/
 //      page errors, no server-only leak).
-//   2. Editing src/routes/index.tsx's greeting triggers an AUTOMATIC full-page
-//      reload (the diffpack-injected SSE client calls location.reload) and the
-//      NEW text is now server-rendered AND still hydrates clean.
-//   3. The dev loop's incremental instrumentation proves the edit re-transformed
-//      exactly ONE client module and the incremental emit re-rendered exactly ONE
-//      client chunk from the long-lived process — the incremental-emit thesis
-//      guard exercised live.
+//   2. The diffpack-injected client is the WebSocket HMR + React Fast Refresh
+//      preamble (not a full-page-reload channel).
+//   3. Editing src/routes/index.tsx's greeting produces a STATE-PRESERVING hot
+//      update: the new text swaps into the SAME live document (a page-scoped
+//      window probe survives, and the very same <h3> DOM node now carries the new
+//      text) — NOT a navigation. The server is hot-reloaded IN-PROCESS (no Node
+//      restart), so the new text is also server-rendered on the next raw request.
+//   4. The dev loop's incremental instrumentation proves the edit re-transformed
+//      exactly ONE client module, the incremental emit re-rendered exactly ONE
+//      client chunk, and the whole rebuild landed under the low-diff-time budget —
+//      the incremental thesis exercised live end-to-end.
 //
 // The source file is always restored afterward. Node/Chrome are test oracles
 // only; the build path is native Rust.
@@ -39,7 +44,12 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const INDEX_TSX = join(here, "src", "routes", "index.tsx");
 
 const ORIGINAL_GREETING = "Welcome Home!!!";
-const NEW_GREETING = `Welcome Home LIVE-RELOAD ${Date.now()}`;
+const NEW_GREETING = `Welcome Home HMR ${Date.now()}`;
+// The low-diff-time budget: a leaf edit's whole incremental rebuild (client
+// re-transform + emit + server in-process re-eval) must land well under this.
+// Observed ~16ms on the dev box; the ceiling is generous for a loaded CI host
+// while still being an order of magnitude under a from-scratch build.
+const DIFF_TIME_BUDGET_MS = 250;
 const originalSource = readFileSync(INDEX_TSX, "utf8");
 if (!originalSource.includes(ORIGINAL_GREETING)) {
   console.error(`index.tsx does not contain the expected greeting ${JSON.stringify(ORIGINAL_GREETING)}; refusing to edit`);
@@ -79,15 +89,18 @@ function waitForRebuild(sinceLen, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     const tick = () => {
       const fresh = devLog.slice(sinceLen);
-      const m = fresh.match(/client transformed=(\d+) changed=(\d+) rendered_chunks=(\d+) \| server transformed=(\d+) changed=(\d+) rendered_chunks=(\d+)/);
+      const m = fresh.match(/rebuilt \d+ file\(s\) in ([\d.]+)ms \| client transformed=(\d+) changed=(\d+) rendered_chunks=(\d+) \| server transformed=(\d+) changed=(\d+) rendered_chunks=(\d+) \| (.+?) \| server: (.+)/);
       if (m) {
         return resolve({
-          clientTransformed: Number(m[1]),
-          clientChanged: Number(m[2]),
-          clientRendered: Number(m[3]),
-          serverTransformed: Number(m[4]),
-          serverChanged: Number(m[5]),
-          serverRendered: Number(m[6]),
+          elapsedMs: Number(m[1]),
+          clientTransformed: Number(m[2]),
+          clientChanged: Number(m[3]),
+          clientRendered: Number(m[4]),
+          serverTransformed: Number(m[5]),
+          serverChanged: Number(m[6]),
+          serverRendered: Number(m[7]),
+          clientNote: m[8],
+          serverNote: m[9].split("\n")[0].trim(),
           line: fresh.split("\n").find((l) => l.includes("rebuilt")),
         });
       }
@@ -129,9 +142,9 @@ function instrument(page) {
 async function loadAndHydrate(page, greeting) {
   // Raw server HTML BEFORE any client JS.
   const rawHtml = await (await fetch(BASE + "/")).text();
-  // Not networkidle0: the SSE reload channel is a persistent connection, so the
-  // page never reaches 0 in-flight requests. `load` + an explicit hydration wait
-  // is the correct signal here.
+  // Not networkidle0: the WebSocket HMR channel is a persistent connection, so
+  // the page never reaches 0 in-flight requests. `load` + an explicit hydration
+  // wait is the correct signal here.
   await page.goto(BASE + "/", { waitUntil: "load", timeout: 25000 });
   const hydrated = await page
     .waitForFunction(() => window.__TSR_ROUTER__ !== undefined || window.$_TSR === undefined, { timeout: 12000 })
@@ -158,18 +171,26 @@ try {
   const initial = await loadAndHydrate(page, ORIGINAL_GREETING);
   record("initial: `Welcome Home!!!` server-rendered in raw HTML", initial.ssrHasGreeting, `present=${initial.ssrHasGreeting}`);
   record("initial: hydrated (__TSR_ROUTER__ set)", initial.hydrated && initial.routerPresent, `hydrated=${initial.hydrated}, router=${initial.routerPresent}, h3=${JSON.stringify(initial.h3)}`);
-  record("initial: diffpack live-reload client injected", /EventSource\(\"\/__diffpack_dev\/events\"\)/.test(initial.rawHtml), "SSE client present in served HTML");
+  record(
+    "initial: diffpack WebSocket HMR + Fast Refresh client injected",
+    /new WebSocket\(/.test(initial.rawHtml) && initial.rawHtml.includes("/__diffpack_hmr/ws") && initial.rawHtml.includes("$RefreshRuntime$"),
+    "WebSocket HMR client present in served HTML",
+  );
 
-  // Tag the live window; a full-page reload discards it, proving the reload was a
-  // real navigation (not a client-side state mutation).
+  // Tag the live window and grab a handle to the live <h3> DOM node. A full-page
+  // reload (navigation) discards BOTH: the probe is gone and the handle detaches.
+  // A state-preserving hot update keeps the same document, so the probe survives
+  // and the very same node's text is updated in place.
   await page.evaluate(() => (window.__dev_reload_probe__ = "before-edit"));
+  const h3Before = await page.$("h3");
 
-  // === Phase 2: edit the greeting, await the automatic reload ===
+  // === Phase 2: edit the greeting, await the state-preserving hot update ===
   const logLenBeforeEdit = devLog.length;
   const edited = originalSource.replace(ORIGINAL_GREETING, NEW_GREETING);
   writeFileSync(INDEX_TSX, edited);
 
-  // The dev loop rebuilds and prints its instrumentation; assert incrementality.
+  // The dev loop rebuilds and prints its instrumentation; assert incrementality,
+  // the low-diff-time budget, and in-process (no-restart) server hot reload.
   let rebuild;
   try {
     rebuild = await waitForRebuild(logLenBeforeEdit, 30000);
@@ -183,18 +204,39 @@ try {
       rebuild.clientRendered === 1,
       `client rendered_chunks=${rebuild.clientRendered}`,
     );
+    record(
+      `rebuild under low-diff-time budget (<${DIFF_TIME_BUDGET_MS}ms)`,
+      rebuild.elapsedMs < DIFF_TIME_BUDGET_MS,
+      `elapsed=${rebuild.elapsedMs}ms`,
+    );
+    record(
+      "server hot-reloaded IN-PROCESS (no Node restart, no full reload)",
+      /in-process/.test(rebuild.serverNote) && !/full reload/.test(rebuild.serverNote),
+      `server: ${rebuild.serverNote}`,
+    );
   } catch (e) {
     record("edit changed exactly ONE client module (live incremental)", false, String(e.message || e));
     record("incremental emit re-rendered exactly ONE client chunk (live)", false, "no instrumentation");
+    record(`rebuild under low-diff-time budget (<${DIFF_TIME_BUDGET_MS}ms)`, false, "no instrumentation");
+    record("server hot-reloaded IN-PROCESS (no Node restart, no full reload)", false, "no instrumentation");
   }
 
-  // The injected SSE client should have reloaded the page to the new greeting.
-  const reloaded = await page
+  // The Fast Refresh update swaps the new greeting into the live tree.
+  const updated = await page
     .waitForFunction((g) => document.querySelector("h3")?.textContent === g, { timeout: 20000 }, NEW_GREETING)
     .then(() => true)
     .catch(() => false);
-  const probeCleared = await page.evaluate(() => window.__dev_reload_probe__ === undefined);
-  record("automatic full-page reload fired (window probe cleared)", reloaded && probeCleared, `reloaded=${reloaded}, probeCleared=${probeCleared}`);
+  // State-preserving proof: the page-scoped probe survives AND the SAME <h3> node
+  // grabbed before the edit now carries the new text (a reload would detach it).
+  const probeSurvived = await page.evaluate(() => window.__dev_reload_probe__ === "before-edit");
+  const sameNodeUpdated = await h3Before
+    .evaluate((el, g) => el.isConnected && el.textContent === g, NEW_GREETING)
+    .catch(() => false);
+  record(
+    "state-preserving hot update (no navigation: window probe + same <h3> node survive)",
+    updated && probeSurvived && sameNodeUpdated,
+    `updated=${updated}, probeSurvived=${probeSurvived}, sameNodeUpdated=${sameNodeUpdated}`,
+  );
 
   // === Phase 3: the NEW text is server-rendered AND hydrates clean ===
   const after = await loadAndHydrate(page, NEW_GREETING);

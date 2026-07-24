@@ -14,8 +14,11 @@ pub mod js_reachability;
 pub mod manifest;
 #[cfg(feature = "memory-accounting")]
 pub mod memory;
+pub mod next_adapter;
 pub mod parser;
+pub mod next_font;
 pub mod resource_id;
+pub mod rsc;
 pub mod route_split;
 pub mod sass;
 pub mod route_tree;

@@ -145,6 +145,9 @@ class LineParser {
   parseTarget(): Target | null {
     const first = this.parseOneTarget();
     if (!first) return null;
+    if (first.kind === "frame") {
+      return this.fail(`"frame" is a scope, not a clickable target — write '<target> in frame "..."'`);
+    }
     let head = first;
     let tail = first;
     while (!this.atEnd() && this.peek()!.t === "word" && ["in", "of"].includes((this.peek() as { v: string }).v)) {
@@ -169,7 +172,7 @@ class LineParser {
       const name = this.next()!;
       return { kind, name: name.t === "var" ? `$${name.v}` : (name as { v: string }).v };
     }
-    if (kind === "testid" || kind === "text" || kind === "field" || kind === "placeholder") {
+    if (kind === "testid" || kind === "text" || kind === "field" || kind === "placeholder" || kind === "frame") {
       return this.fail(`target kind "${kind}" requires a quoted name`);
     }
     return { kind };
@@ -188,7 +191,7 @@ function show(t: Token | undefined): string {
   }
 }
 
-const ACTION_WORDS = ["go", "click", "dblclick", "fill", "select", "check", "uncheck", "press", "hover", "upload"] as const;
+const ACTION_WORDS = ["go", "click", "dblclick", "fill", "select", "check", "uncheck", "press", "hover", "upload", "drag", "switch", "close"] as const;
 
 function parseGiven(p: LineParser): Given | null {
   const what = p.next();
@@ -308,6 +311,24 @@ function parseAction(p: LineParser, word: string): Action | null {
       if (!target) return null;
       return p.expectEnd("upload") ? { type: "upload", target, file } : null;
     }
+    case "drag": {
+      const target = p.parseTarget();
+      if (!target) return null;
+      if (p.expectWord("to") === null) return null;
+      const to = p.parseTarget();
+      if (!to) return null;
+      return p.expectEnd("drag") ? { type: "drag", target, to } : null;
+    }
+    case "switch": {
+      if (p.expectWord("tab") === null) return null;
+      const path = p.expectPath();
+      if (path === null) return null;
+      return p.expectEnd("switch tab") ? { type: "switchTab", path } : null;
+    }
+    case "close": {
+      if (p.expectWord("tab") === null) return null;
+      return p.expectEnd("close tab") ? { type: "closeTab" } : null;
+    }
     default:
       return p.fail(`unknown action '${word}' — known: ${ACTION_WORDS.join(", ")}`);
   }
@@ -386,6 +407,33 @@ function parseEffect(p: LineParser): Effect | null {
     if (name !== undefined) eff.name = name;
     if (within !== undefined) eff.within = within;
     return eff;
+  }
+  if (first?.t === "word" && first.v === "tab") {
+    p.next();
+    const path = p.expectPath();
+    if (path === null) return null;
+    return p.expectEnd("expect tab") ? { type: "tab", path } : null;
+  }
+  if (first?.t === "word" && first.v === "dialog") {
+    p.next();
+    const message = p.expectString("the dialog message substring");
+    if (message === null) return null;
+    const response = p.expectWord("accept", "dismiss");
+    if (response === null) return null;
+    let text: string | undefined;
+    if (!p.atEnd() && p.peek()?.t === "string") {
+      text = (p.next() as { v: string }).v;
+    }
+    if (!p.expectEnd("expect dialog")) return null;
+    const eff: Effect = { type: "dialog", message, response: response as "accept" | "dismiss" };
+    if (text !== undefined) (eff as { text?: string }).text = text;
+    return eff;
+  }
+  if (first?.t === "word" && first.v === "download") {
+    p.next();
+    const name = p.expectString("the filename substring");
+    if (name === null) return null;
+    return p.expectEnd("expect download") ? { type: "download", name } : null;
   }
   if (first?.t === "word" && first.v === "url") {
     p.next();

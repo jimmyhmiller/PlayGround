@@ -1,8 +1,10 @@
-// Incremental rebuilds with diffpack's existing `diffpack watch` path (the
-// same incremental engine oracle/benchmark.mjs exercises). Timing is measured
-// from the moment the edited file is renamed into place to diffpack printing
-// its "rebuilt ..." line, which it emits after writing the output bundle — so
-// the measurement INCLUDES inotify detection latency and stdout pipe latency.
+// Incremental rebuilds with diffpack's `diffpack watch` path (the same
+// incremental engine oracle/benchmark.mjs exercises). The reported rebuild time
+// is diffpack's OWN in-process `rebuild=<ms>` field, stamped after the OS watcher
+// delivered the change event — so it measures read + transform + reachability +
+// emit and EXCLUDES OS change-detection latency and stdout-pipe latency. This is
+// the apples-to-apples equivalent of esbuild's in-process `context.rebuild()` and
+// rolldown's `event.duration`, which also exclude watch detection.
 // usage: node incr-diffpack.mjs '<json options>'
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -29,9 +31,12 @@ try {
   for (let editIndex = 0; editIndex < totalEdits; editIndex += 1) {
     const edited = editIndex % 2 === 0;
     const expected = writeContentEdit(corpusDir, options, edited);
-    const started = process.hrtime.bigint();
-    await waitFor(lines, (line) => line.startsWith("rebuilt "));
-    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+    const line = await waitFor(lines, (line) => line.startsWith("rebuilt "));
+    // Parse diffpack's own in-process rebuild time (excludes OS watch detection),
+    // matching how esbuild/rolldown's incremental numbers are measured.
+    const match = line.match(/rebuild=([\d.]+)ms/);
+    if (!match) throw new Error(`diffpack "rebuilt" line missing rebuild=<ms>: ${line}`);
+    const elapsed = Number(match[1]);
     verifyBundleValue(outfile, expected, `diffpack edit ${editIndex}`);
     if (editIndex >= warmupEdits) rebuildMs.push(elapsed);
     // If one rename surfaces as multiple filesystem events, drain the

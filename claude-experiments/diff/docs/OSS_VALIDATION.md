@@ -3,6 +3,45 @@
 Real open-source Vite apps as proving grounds for the Vite-drop-in goal
 (`diffpack build <root> --vite`). Round 1: 2026-07-21.
 
+## Dev workflow / HMR — where low diff times pay off daily (2026-07-22)
+
+`vite build` parity is the cold-start story; the *daily* story is `vite` the
+dev server, and that is where diffpack's sub-10ms incremental diff should be
+the visible win. `diffpack dev` now covers both app shapes:
+
+- **Vite HTML-entry SPA** (the everyday `npm create vite` shape): a single
+  client environment, diffpack's own static server, WebSocket HMR + React Fast
+  Refresh, **no Node process**. Gate: `integration/vite-react-reference/
+  dev-check.mjs` — 10/10. A `src/App.tsx` heading edit hot-swaps in place with
+  **hook state preserved** (a live `useState` counter keeps its value across the
+  update; the same `<h1>` node is reconciled; the page never reloads) with the
+  whole incremental rebuild measured live at ~6ms.
+- **TanStack Start** (client + Node SSR): state-preserving Fast Refresh on the
+  client AND in-process SSR hot reload (the Node PID never restarts). Gate:
+  `integration/tanstack-start-reference/dev-check.mjs` — 12/12, ~16ms per edit.
+
+Both gates assert the sharp incremental signals live from the long-lived
+process (exactly one module re-transformed, one chunk re-rendered) and a
+low-diff-time budget, so a regression that quietly turned a hot update into a
+full rebuild or a reload fails the gate. The SPA oracle additionally gates CSS
+hot-swap without reload and the add-a-new-file-then-import flow, both
+state-preserving.
+
+**Fast Refresh is universal and native.** Per-component instrumentation is oxc's
+built-in React Refresh transform (the `react-refresh/babel` equivalent, no Node),
+paired with a diffpack accept footer that feeds the boundary check plain
+data-property export copies — necessary because diffpack's registry exposes named
+exports as live-binding getters, and `@vitejs/plugin-react` v4's runtime rejects
+getter descriptors (forcing a reload for every `export const Foo`).
+
+**Spot-checked on a real OSS app (2026-07-22).** `diffpack dev` on
+`reduxjs/redux-essentials-example-app` (~1000 modules, RTK, `vite.config.mts`,
+plugin-react v4): serves, mounts, and hot-updates a `src/components/Navbar.tsx`
+named-export component **in place with state preserved** (no reload) in ~20ms.
+Before the transform + getter-copy fix this fell back to a full reload. Promoting
+this into a committed, reusable multi-app HMR harness (redux-essentials, markpad,
+wall-go, ...) is the next generality step (NEXT_STEPS.md #2).
+
 ## Working end-to-end (browser-verified against the Vite reference build)
 
 - **reduxjs/redux-essentials-example-app** — Vite+React+RTK+TS, 1002 modules.

@@ -149,6 +149,13 @@ struct ResolutionCache {
     defines: Arc<Vec<(String, String)>>,
     /// Public base for minted asset URLs (always `/`-terminated).
     base: Arc<str>,
+    /// A REAL directory (the entry module's directory) from which a build-generated
+    /// virtual module's bare-package imports are resolved. A virtual module's id is
+    /// a synthetic specifier (`#diffpack-call-server`), not a filesystem path, so it
+    /// has no directory to walk `node_modules` up from — resolving
+    /// `react-server-dom-webpack/client` off it fails. Virtual modules resolve their
+    /// dependencies as if located here, so bare packages resolve against the project.
+    virtual_import_base: Arc<Path>,
     /// Vite's `assetsInlineLimit` (0 = off).
     asset_inline_limit: usize,
     /// SCSS compile options (Vite `additionalData` + project root), threaded
@@ -178,6 +185,7 @@ impl ResolutionCache {
         import_meta_glob: Option<crate::import_meta_glob::ImportMetaGlob>,
         defines: Vec<(String, String)>,
         base: &str,
+        virtual_import_base: PathBuf,
         asset_inline_limit: usize,
         scss: crate::sass::ScssOptions,
     ) -> Self {
@@ -189,6 +197,7 @@ impl ResolutionCache {
             import_meta_glob: Arc::new(import_meta_glob),
             defines: Arc::new(defines),
             base: Arc::from(base),
+            virtual_import_base: Arc::from(virtual_import_base.as_path()),
             asset_inline_limit,
             scss: Arc::new(scss),
         }
@@ -698,6 +707,10 @@ impl Bundler {
                 config.import_meta_glob.clone(),
                 config.defines.clone(),
                 &config.base,
+                entry_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from(".")),
                 config.asset_inline_limit,
                 config.scss.clone(),
             ),
@@ -963,6 +976,28 @@ impl Bundler {
         let mut summary = EmitSummary::of(&public_dir)?;
         summary.rendered_chunks = stats.rendered_chunks;
         Ok(summary)
+    }
+
+    /// The LEAN incremental client re-emit for an HMR hot update: write only the
+    /// chunk(s) whose bytes actually changed and return how many were rendered.
+    /// Unlike [`Self::emit_public`], it does NOT prune stale files or walk the output
+    /// tree to build a full [`EmitSummary`] — a same-graph edit (the HMR fast path,
+    /// which the caller has already confirmed did not change the module graph)
+    /// produces no stale files, and those two full `public/` directory walks are the
+    /// dominant cost of an otherwise sub-millisecond incremental chunk render.
+    pub fn emit_public_incremental(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_root: &Path,
+        options: EmitOptions,
+    ) -> Result<usize, String> {
+        let options = EmitOptions {
+            format: ModuleFormat::BrowserEsm,
+            ..options
+        };
+        let public_dir = output_root.join("public");
+        let stats = self.emit_environment(reachable, &public_dir, "client.js", options)?;
+        Ok(stats.rendered_chunks)
     }
 
     /// Emits a generic web build directly into `output_dir`: the browser-ESM
@@ -1768,6 +1803,74 @@ impl Bundler {
         })
     }
 
+    /// Derives the client build's client-references manifest (Manifest #1 —
+    /// `bundlerConfig`; see docs/RSC_SPEC.md §1) from the SAME chunk partition emit
+    /// produces, so every `id`/`chunks` value describes the bytes on disk.
+    ///
+    /// Every reachable `"use client"` module becomes one entry keyed by its
+    /// `module_reference_id` (canonical path) — the exact string the react-server
+    /// build's `$$id` prefix carries, so the flight reference and this manifest
+    /// agree on the module. `id` is the module's numeric runtime id (what
+    /// `__webpack_require__` takes over diffpack's registry); `chunks` is `[]` when
+    /// the module lands in the already-loaded main entry chunk, otherwise its single
+    /// hosting split chunk `[chunkFile, chunkFile]` (file name doubles as chunk id);
+    /// `name` is `"*"` (the real export arrives via the `$$id` split).
+    pub fn client_references_manifest(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        entry_file: &str,
+    ) -> Result<crate::rsc::ClientReferencesManifest, String> {
+        let reachable = self.live_modules(reachable);
+        let reachable_dense = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        let mut runtime_ids = vec![None; self.ids.len()];
+        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
+            runtime_ids[dense] = Some(runtime_id);
+        }
+        // The same partition emit used, so a module's `chunks` names the chunk whose
+        // bytes actually carry its factory. A module not in any split chunk is in the
+        // main entry chunk (already loaded), so its `chunks` is empty.
+        let plans = self.chunk_plan(&allowed, entry_file)?;
+        let mut chunk_of: HashMap<DenseModuleId, &str> = HashMap::new();
+        for plan in &plans {
+            for &member in &plan.members {
+                chunk_of.insert(member, plan.file_name.as_str());
+            }
+        }
+        let mut entries = BTreeMap::new();
+        for &dense in &reachable_dense {
+            let Some(module) = self.modules[dense].as_ref() else {
+                continue;
+            };
+            let path = Path::new(self.ids[dense].as_ref());
+            if crate::rsc::detect_directive(path, module.source.as_ref())
+                != Some(crate::rsc::RscDirective::Client)
+            {
+                continue;
+            }
+            let id = runtime_ids[dense]
+                .expect("a reachable module has a runtime id");
+            let chunks = match chunk_of.get(&dense) {
+                // The file name doubles as the chunk id (docs/RSC_SPEC.md §1); the
+                // seam's `__diffpack_chunkFilenames` maps that id to its public URL.
+                Some(file) => vec![(*file).to_string(), (*file).to_string()],
+                None => Vec::new(),
+            };
+            entries.insert(
+                crate::rsc::module_reference_id(path),
+                crate::rsc::ClientReferenceEntry {
+                    id,
+                    chunks,
+                    name: "*".to_string(),
+                },
+            );
+        }
+        Ok(crate::rsc::ClientReferencesManifest { entries })
+    }
+
     /// DEV-ONLY: for each changed module id, its stable runtime id and the chunk
     /// file that (re-)registers its factory, so the dev server can push a targeted
     /// HMR update. Reproduces [`Self::emit_with_options`]'s runtime-id and chunk
@@ -1818,6 +1921,63 @@ impl Bundler {
             });
         }
         Ok(located)
+    }
+
+    /// Render a TINY standalone HMR chunk carrying ONLY the `changed` modules, in the
+    /// split-chunk (register-only) format. A browser Fast Refresh imports this (~1 KB)
+    /// instead of re-importing and re-parsing the whole entry chunk (which bundles the
+    /// entire app + React — ~1 MB — so re-parsing it dominates the browser-side hot
+    /// update). Runtime ids, export demands and chunk names are reconstructed exactly
+    /// as [`Self::emit_with_options`] computed them for the live emit, so the freshly
+    /// registered factory binds against the same global runtime and the same target
+    /// ids already loaded from the entry chunk. `roots` is empty, so the chunk ends in
+    /// `return __runtime;` and only REGISTERS (never re-evaluates) — the browser then
+    /// drives the swap through `hmrApply`. Returns `None` if no changed module is live.
+    pub fn render_hmr_chunk(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        changed: &BTreeSet<ModuleId>,
+        entry_file: &str,
+        options: EmitOptions,
+    ) -> Result<Option<String>, String> {
+        let reachable = self.live_modules(reachable);
+        let reachable_dense = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        let mut runtime_ids = vec![None; self.ids.len()];
+        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
+            runtime_ids[dense] = Some(runtime_id);
+        }
+        // Only live modules can be rendered; a changed-but-tree-shaken module is
+        // dropped (the caller's `hmr_locate` likewise skips it).
+        let changed_dense = changed
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .filter(|dense| allowed.contains(dense))
+            .collect::<Vec<_>>();
+        if changed_dense.is_empty() {
+            return Ok(None);
+        }
+        // Reconstruct the exact render context the live emit used (same ids/demands/
+        // chunk names), so the micro-chunk is byte-compatible with the loaded runtime.
+        let global_demands = self.export_demands(&reachable_dense);
+        let plans = self.chunk_plan(&allowed, entry_file)?;
+        let chunk_names = Self::chunk_names(&plans);
+        let bundle = self.render_best(
+            &changed_dense,
+            &[], // no roots -> the tail is `return __runtime;` (register-only)
+            &chunk_names,
+            &runtime_ids,
+            &global_demands,
+            &[],   // no prerequisite chunk loads
+            false, // not the main chunk (no runtime bootstrap)
+            false, // registry format, never scope-hoisted flat
+            ModuleFormat::BrowserEsm,
+            options.hmr,
+        )?;
+        Ok(Some(bundle.code))
     }
 
     /// Copies every content-hashed asset referenced by a reachable module into
@@ -2388,7 +2548,12 @@ impl Bundler {
         let source = self
             .resolution_cache
             .apply_vite_replacements(path, &source, self.target)?;
-        let mut transformed = transform_module(path, &source, self.target);
+        let mut transformed = crate::transform::transform_module_with_options(
+            path,
+            &source,
+            self.target,
+            self.hmr && self.target == Target::Client,
+        );
         diagnostics.extend(
             transformed
                 .diagnostics
@@ -2753,6 +2918,65 @@ impl Bundler {
         (order.len() == allowed.len()).then_some(order)
     }
 
+    /// The RSC `__webpack_*` seam prelude for the browser entry, or `None` when the
+    /// build hosts no `"use client"` module (so a non-RSC bundle is byte-identical).
+    ///
+    /// Installs, over diffpack's own module registry, the three globals the pinned
+    /// `react-server-dom-webpack/client.browser` reads at module-init:
+    /// `__webpack_require__` (→ `runtime.require(id)`), `__webpack_require__.u` /
+    /// `__webpack_get_script_filename__` (chunk id → public URL), and
+    /// `__webpack_chunk_load__` (id → `import(url)`; the imported chunk
+    /// self-registers its factories). `__diffpack_chunkFilenames` maps every split
+    /// chunk's id (its file name) to its public URL. The runtime is read LAZILY
+    /// inside `__webpack_require__` (it is built by the module-graph IIFE that runs
+    /// after this prelude), and an unknown chunk id is a HARD ERROR, never a silent
+    /// fallback.
+    fn rsc_webpack_seam(
+        &self,
+        reachable: &[DenseModuleId],
+        chunk_names: &HashMap<DenseModuleId, String>,
+    ) -> Option<String> {
+        let has_client_boundary = reachable.iter().any(|&dense| {
+            self.modules[dense].as_ref().is_some_and(|module| {
+                crate::rsc::detect_directive(
+                    Path::new(self.ids[dense].as_ref()),
+                    module.source.as_ref(),
+                ) == Some(crate::rsc::RscDirective::Client)
+            })
+        });
+        if !has_client_boundary {
+            return None;
+        }
+        // Chunk id -> public URL. The chunk's file name doubles as its id (the same
+        // id `client_references_manifest` records), and the URL is `base + file`.
+        let base = self.config.base.trim_end_matches('/');
+        let mut chunk_filenames: BTreeMap<String, String> = BTreeMap::new();
+        for name in chunk_names.values() {
+            let file = name.trim_start_matches("./");
+            chunk_filenames
+                .entry(file.to_string())
+                .or_insert_with(|| format!("{base}/{file}"));
+        }
+        let chunk_filenames_json = serde_json::to_string(&chunk_filenames)
+            .unwrap_or_else(|_| "{}".to_string());
+        let runtime_key = quote(&format!(
+            "__diffpack_runtime:{}",
+            self.ids[self.entry].as_ref()
+        ));
+        Some(format!(
+            r#"globalThis.__diffpack_chunkFilenames=Object.assign(globalThis.__diffpack_chunkFilenames||{{}},{chunk_filenames_json});
+(function(){{
+var __rtKey={runtime_key};
+function __webpack_require__(id){{var rt=globalThis[__rtKey];if(!rt)throw new Error("diffpack rsc seam: runtime "+__rtKey+" is not initialized");return rt.require(id);}}
+__webpack_require__.u=function(c){{return globalThis.__diffpack_chunkFilenames[c];}};
+globalThis.__webpack_require__=__webpack_require__;
+globalThis.__webpack_get_script_filename__=__webpack_require__.u;
+globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunkFilenames[c];if(f===undefined)throw new Error("__webpack_chunk_load__: unknown chunk id "+c);return import(f);}};
+}})();
+"#
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_runtime(
         &self,
@@ -2855,7 +3079,7 @@ impl Bundler {
                 }
             })
             .collect::<String>();
-        let prelude = match format {
+        let mut prelude = match format {
             ModuleFormat::Esm if is_main => {
                 // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE` at
                 // module-init time and caches it as the prefix it matches
@@ -2864,13 +3088,23 @@ impl Bundler {
                 // top of the entry, before the module-graph IIFE. It is a `??=`
                 // default (never clobbers a real value) and a harmless no-op for a
                 // non-TanStack Node bundle.
-                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n"
+                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n".to_string()
             }
             ModuleFormat::BrowserEsm if is_main && self.config.browser_process_shim => {
-                BROWSER_GLOBALS_PRELUDE
+                BROWSER_GLOBALS_PRELUDE.to_string()
             }
-            _ => "",
+            _ => String::new(),
         };
+        // RSC `__webpack_*` seam (docs/RSC_SPEC.md §1): when the CLIENT build hosts
+        // any `"use client"` module, the browser entry installs the webpack globals
+        // `react-server-dom-webpack/client.browser` reads at module-init, mapped
+        // onto diffpack's registry. Gated strictly on a real client boundary so a
+        // non-RSC browser bundle stays byte-identical. Appended to (not replacing)
+        // the prelude so the process shim still runs first.
+        if is_main && format == ModuleFormat::BrowserEsm
+            && let Some(seam) = self.rsc_webpack_seam(reachable, chunk_names) {
+                prelude.push_str(&seam);
+            }
         // Lines the chunk emits before `const __newModules={`: the format's
         // prelude and one `import`/`require` per prerequisite chunk. The module
         // fragments start after them, so the source map's generated lines must be
@@ -4239,7 +4473,12 @@ fn load_uncached(
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
     let source = resolution_cache.apply_vite_replacements(path, &source, target)?;
-    let mut transformed = transform_module(path, &source, target);
+    let mut transformed = crate::transform::transform_module_with_options(
+        path,
+        &source,
+        target,
+        hmr && target == Target::Client,
+    );
     // DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation (client only).
     if hmr {
         transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, target);
@@ -5313,7 +5552,17 @@ fn resolve_special_dependencies(
             externals: Vec::new(),
         };
     }
-    let source_file = PathBuf::from(ResourceId::parse(id).path);
+    // A build-generated virtual module's id is a synthetic specifier, not a real
+    // path, so it has no directory to resolve bare-package imports from. Resolve its
+    // dependencies as if the module lived in the project (the entry's directory), so
+    // `react-server-dom-webpack/client` and the like resolve against `node_modules`.
+    let source_file = if resolution_cache.virtual_modules.contains_key(id) {
+        resolution_cache
+            .virtual_import_base
+            .join("__diffpack_virtual_module__.js")
+    } else {
+        PathBuf::from(ResourceId::parse(id).path)
+    };
     resolve_dependencies(
         resolver,
         resolution_cache,

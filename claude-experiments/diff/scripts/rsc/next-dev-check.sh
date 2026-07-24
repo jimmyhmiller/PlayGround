@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Slice K gate — `diffpack dev` for the Next.js app-router app.
+#
+# `diffpack dev integration/next-app-router` boots the Next dev topology (the SAME
+# three RSC graphs the production build uses — client / react-server / ssr — kept
+# alive per-environment, served by the embedded next orchestrator, with the diffpack
+# reverse proxy in front injecting the Fast Refresh + WebSocket HMR preamble). This
+# gate proves BOTH dev edit classes in a REAL browser (agent-browser):
+#
+#   1. Boot + hydrate: `/` server-renders the app-router document, the diffpack
+#      WebSocket HMR + Fast Refresh preamble is injected, and the `"use client"`
+#      island hydrates (clicking #inc moves its useState count 5 -> 6).
+#   2. Island edit = STATE-PRESERVING Fast Refresh: editing app/Counter.tsx's label
+#      (`count: ` -> `tally: `) pushes a WS `update` (no reload), and the SAME live
+#      node now reads `tally: 6` — the hook state (6) survived, proving Fast Refresh
+#      through the flight-resolved client reference (NOT a remount/reload).
+#   3. Server-component edit = correct reload: editing app/page.tsx's `from-server`
+#      string makes the new text appear in the browser AND in a fresh `curl /` — the
+#      orchestrator spawns a fresh react-server child per GET, so the reload shows the
+#      newly server-rendered content.
+#
+# Native build (Rust); Node + Chrome are only the oracle. The fixture files are always
+# restored (a trap). Exit 0 = gate PASS.
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
+fixture="$repo/integration/next-app-router"
+diffpack="$repo/target/release/diffpack"
+port="${DIFFPACK_NEXT_DEV_PORT:-8968}"
+base="http://127.0.0.1:$port"
+
+counter="$fixture/app/Counter.tsx"
+page="$fixture/app/page.tsx"
+stamp="$(date +%s)"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+echo "== building diffpack (release) =="
+cargo build --release --manifest-path "$repo/Cargo.toml"
+
+# RSC deps + the React Fast Refresh runtime (@vitejs/plugin-react ships the runtime;
+# react-refresh is its core). node_modules is gitignored, so install on demand.
+if [ ! -d "$fixture/node_modules/react-server-dom-webpack" ]; then
+  echo "== installing pinned RSC deps in $fixture =="
+  (cd "$fixture" && npm install --no-audit --no-fund react-server-dom-webpack@19.2.4)
+fi
+if [ ! -f "$fixture/node_modules/@vitejs/plugin-react/dist/refresh-runtime.js" ] \
+   && [ ! -f "$fixture/node_modules/react-refresh/cjs/react-refresh-runtime.development.js" ]; then
+  echo "== installing the React Fast Refresh runtime in $fixture =="
+  (cd "$fixture" && npm install --no-audit --no-fund --save-dev @vitejs/plugin-react react-refresh)
+fi
+
+# Snapshot the fixture files we edit; ALWAYS restore them + reap the dev server.
+cp "$counter" "/tmp/next-dev-counter.$stamp.bak"
+cp "$page" "/tmp/next-dev-page.$stamp.bak"
+devpid=""
+cleanup() {
+  [ -n "$devpid" ] && kill "$devpid" 2>/dev/null || true
+  agent-browser close 2>/dev/null || true
+  cp "/tmp/next-dev-counter.$stamp.bak" "$counter" 2>/dev/null || true
+  cp "/tmp/next-dev-page.$stamp.bak" "$page" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+grep -q "count: " "$counter" || fail "app/Counter.tsx no longer contains 'count: ' — refusing to edit"
+grep -q "from-server" "$page" || fail "app/page.tsx no longer contains 'from-server' — refusing to edit"
+
+echo "== booting: diffpack dev $fixture $port =="
+rm -rf "$fixture/.diffpack-output"
+devlog="$(mktemp)"
+"$diffpack" dev "$fixture" "$port" > "$devlog" 2>&1 &
+devpid=$!
+
+for _ in $(seq 1 120); do
+  curl -s -o /dev/null "$base/" && break
+  # Bail early if the dev server died.
+  kill -0 "$devpid" 2>/dev/null || { cat "$devlog"; fail "dev server exited during startup"; }
+  sleep 1
+done
+curl -s -o /dev/null "$base/" || { cat "$devlog"; fail "dev server did not come up on $base"; }
+echo "dev server up on $base"
+
+# --- Gate D1: SSR document + HMR preamble injected -------------------------------
+html="$(curl -s "$base/")"
+echo "$html" | grep -q "<!DOCTYPE html>" || { echo "$html" | head -5; fail "dev / did not serve the app-router document"; }
+echo "$html" | grep -q 'id="app-shell"' || fail "dev / missing the root layout (#app-shell)"
+echo "$html" | grep -q "/__diffpack_hmr/ws" || fail "dev / missing the WebSocket HMR client (Fast Refresh preamble not injected)"
+echo "$html" | grep -q '\$RefreshRuntime\$' || fail "dev / missing the React Fast Refresh runtime preamble"
+echo "OK (gate D1): dev server SSRs the app-router document with the WS HMR + Fast Refresh preamble injected"
+
+# --- Gate D2: island hydrated + interactive (5 -> 6) -----------------------------
+agent-browser open "$base/" >/dev/null 2>&1
+agent-browser wait "#inc" >/dev/null 2>&1 || fail "dev: #inc island button not present"
+init="$(agent-browser get text '#counter' 2>/dev/null || true)"
+echo "$init" | grep -q "count: 5" || fail "dev: island initial state is not 'count: 5' (got: $init)"
+agent-browser click "#inc" >/dev/null 2>&1
+for _ in $(seq 1 30); do c="$(agent-browser get text '#counter' 2>/dev/null || true)"; echo "$c" | grep -q "count: 6" && break; sleep 0.3; done
+c="$(agent-browser get text '#counter' 2>/dev/null || true)"
+echo "$c" | grep -q "count: 6" || fail "dev: clicking #inc did not increment (hydration failed; got: $c)"
+echo "OK (gate D2): the client island hydrated and is interactive (count 5 -> 6)"
+
+# --- Gate D3: island edit = state-preserving Fast Refresh (no reload) -------------
+# Tag the live document; a lost tag proves a full reload happened.
+agent-browser eval "window.__nextdev='kept-$stamp'" >/dev/null 2>&1
+before_len="$(wc -c < "$devlog")"
+# Edit the island's rendered label. State (count=6) must survive; the label must swap.
+sed -i.tmp 's/count: /tally: /' "$counter" && rm -f "$counter.tmp"
+echo "edited app/Counter.tsx (count: -> tally:); waiting for the Fast Refresh update..."
+for _ in $(seq 1 60); do t="$(agent-browser get text '#counter' 2>/dev/null || true)"; echo "$t" | grep -q "tally:" && break; sleep 0.3; done
+t="$(agent-browser get text '#counter' 2>/dev/null || true)"
+echo "$t" | grep -q "tally: 6" || { tail -20 "$devlog"; fail "island Fast Refresh failed: expected 'tally: 6' (label swapped, state preserved), got: $t"; }
+kept="$(agent-browser eval 'String(window.__nextdev)' 2>/dev/null || true)"
+echo "$kept" | grep -qF "kept-$stamp" || fail "island edit caused a FULL RELOAD (page sentinel lost) — must be a state-preserving hot update, not a reload"
+# The dev loop must have pushed a client HMR update, not a reload.
+tail -c "+$((before_len + 1))" "$devlog" | grep -q "hmr update" || { tail -20 "$devlog"; fail "the dev loop did not push a client HMR update for the island edit"; }
+echo "OK (gate D3): island edit hot-swapped the label on the SAME live node with state preserved (tally: 6, no reload)"
+
+# --- Gate D4: server-component edit = correct reload (new server-rendered text) ---
+marker="from-server-dev-$stamp"
+sed -i.tmp "s/from-server/$marker/" "$page" && rm -f "$page.tmp"
+echo "edited app/page.tsx (from-server -> $marker); waiting for the reload..."
+for _ in $(seq 1 60); do t="$(agent-browser get text '#heading' 2>/dev/null || true)"; echo "$t" | grep -q "$marker" && break; sleep 0.3; done
+t="$(agent-browser get text '#heading' 2>/dev/null || true)"
+echo "$t" | grep -q "$marker" || { tail -20 "$devlog"; fail "server-component edit did not reach the browser (expected '$marker' in #heading, got: $t)"; }
+# A fresh request must also carry the new text (a fresh react-server child rendered it).
+fresh="$(curl -s "$base/" | sed 's/<!--[^>]*-->//g')"
+echo "$fresh" | grep -q "Server:$marker" || { echo "$fresh" | grep -o 'Server:[A-Za-z0-9-]*' | head; fail "server-component edit not server-rendered on a fresh request (expected Server:$marker)"; }
+echo "OK (gate D4): server-component edit re-rendered server-side (new text in the browser AND a fresh curl)"
+
+echo "PASS: diffpack dev for the Next app-router app — SSR + HMR preamble, state-preserving island Fast Refresh, and correct server-component reload, all built natively by diffpack"

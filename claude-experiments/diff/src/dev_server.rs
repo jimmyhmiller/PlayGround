@@ -1,5 +1,6 @@
-//! `diffpack dev`: a long-lived, live-rebuild development server with full-page
-//! browser reload.
+//! `diffpack dev`: a long-lived, live-rebuild development server with
+//! state-preserving Hot Module Replacement (React Fast Refresh + in-process
+//! server hot reload).
 //!
 //! This is where Diffpack's incremental thesis becomes observable. The `build-app`
 //! CLI is a cold process per invocation, so its already-incremental emit path (the
@@ -7,7 +8,8 @@
 //! exercised across edits. The dev server keeps a `Bundler` (plus its reachability
 //! session) alive PER ENVIRONMENT and re-emits on file change, so a leaf edit
 //! re-transforms exactly one module and re-renders exactly one chunk from a
-//! long-lived process.
+//! long-lived process — the payoff being a sub-budget hot update the browser
+//! applies without losing state.
 //!
 //! Architecture (all native Rust; Node runs only the app's own SSR runtime, never
 //! the build):
@@ -15,36 +17,50 @@
 //! 1. Build the client environment (`emit_public` + persist
 //!    `client-manifest.json`) then the server environment (register the TanStack
 //!    manifest + server-fn resolver virtual modules, `emit_server`) exactly as
-//!    `build-app` does, but keep both bundlers alive. The mandatory
+//!    `build-app` does, but keep both bundlers alive and emit with
+//!    `EmitOptions { hmr: true, .. }` (the HMR runtime, version-aware dynamic
+//!    import, and Fast Refresh instrumentation from [`crate::hmr`]). The mandatory
 //!    client-before-server order is preserved (the server manifest needs the
 //!    finished client chunk URLs).
 //! 2. Boot the emitted `server/index.mjs` as a child Node process on an internal
-//!    loopback port (the app's own SSR runtime).
+//!    loopback port, with a sibling in-process HMR control port (the app's own SSR
+//!    runtime, never restarted on a normal edit).
 //! 3. Put a diffpack-native reverse proxy in front on the public dev port. It
-//!    forwards every request to the Node child and injects a tiny SSE live-reload
-//!    client into served HTML. The reload channel (`/__diffpack_dev/events`) is
-//!    diffpack's; Node only runs the app.
+//!    serves the Fast Refresh runtime, upgrades the WebSocket HMR channel
+//!    (`/__diffpack_hmr/ws`), and injects the Fast Refresh preamble + HMR client
+//!    into served HTML. Node only runs the app.
 //! 4. Watch the source tree with `notify`, coalescing duplicate/atomic-save
 //!    events. On a module edit: incrementally rebuild the client bundler ->
 //!    incremental `emit_public` -> re-persist the client manifest -> incrementally
-//!    rebuild the server bundler -> `emit_server` -> restart the Node child ->
-//!    push a full-page reload over the live-reload channel.
+//!    rebuild the server bundler -> `emit_server`, then (A) hot-reload the server
+//!    IN-PROCESS by POSTing the changed module ids/chunks to its control endpoint,
+//!    and (B/C) push a targeted update over the WebSocket channel so the browser
+//!    re-imports exactly the changed chunk and applies the accept / React Fast
+//!    Refresh protocol — preserving component state, no page reload, no Node
+//!    restart. A route-file add/rename/remove re-derives the route tree and falls
+//!    back to a Node restart + full reload (module ids shift); a server change that
+//!    cannot be hot-applied falls back to a full page reload so the browser stays
+//!    correct.
 //!
-//! SCOPE (full-page live reload only). Deferred, with clear hard errors rather
-//! than silent partial handling: React Fast Refresh / state-preserving HMR, CSS
-//! hot-swap without reload, route-tree regeneration on add/rename, new-file
-//! handling, config-change handling, WebSocket-driven partial updates, and error
-//! overlays. An edit class this slice does not handle is a hard error naming what
-//! is unsupported, never a silent/partial rebuild.
+//! SCOPE. Handled: content edits to existing modules (state-preserving HMR);
+//! adding a new file and importing it, plus route-file add/rename/remove and any
+//! edit that grows/shrinks the graph (full rebuild or reload — the module ids
+//! shift, so these cannot be hot-patched); and BOTH app shapes — a TanStack Start
+//! app (client + Node SSR, in-process server HMR) and a plain Vite HTML-entry SPA
+//! (single client environment, static serving, no Node child; see the [`spa`]
+//! module). Deferred, with clear hard errors rather than silent partial handling:
+//! CSS hot-swap without reload (a `.css` edit reloads today), config-change
+//! handling, and error overlays. An edit class this slice does not handle is a hard
+//! error naming what is unsupported, never a silent/partial rebuild.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
 
@@ -84,6 +100,12 @@ impl EnvBuild {
         let transformed = update.transformed_modules;
         let changed = update.delta.changed.len();
         let result = self.session.apply(&update.delta);
+        // A change to the REACHABLE SET (a module added or removed — e.g. an edit
+        // that introduces an `import` of a newly-created file, or drops the last
+        // import of one) re-partitions the chunks and shifts runtime ids. That
+        // cannot be hot-patched: the browser's ESM re-import would fail to bind the
+        // new/removed exports. The caller reloads instead when this is set.
+        let graph_changed = !result.added.is_empty() || !result.removed.is_empty();
         for module in result.removed {
             self.reachable.remove(&module);
         }
@@ -95,6 +117,7 @@ impl EnvBuild {
             transformed,
             changed,
             changed_ids: update.delta.changed.clone(),
+            graph_changed,
         })
     }
 }
@@ -129,6 +152,10 @@ struct Rebuilt {
     /// The canonical ids of the modules whose content changed, so the dev server
     /// can push a targeted HMR update for exactly them.
     changed_ids: BTreeSet<String>,
+    /// Whether the reachable set changed (a module added or removed). When set, the
+    /// chunk partition and runtime ids shift, so the edit must be applied by a full
+    /// reload rather than a hot update.
+    graph_changed: bool,
 }
 
 /// The HMR broadcast fan-out over WebSocket. Each connected browser's upgraded
@@ -159,6 +186,13 @@ impl HmrHub {
     /// Push a full-page reload to every connected browser.
     fn broadcast_reload(&self) {
         self.send(r#"{"type":"reload"}"#);
+    }
+
+    /// Push an in-place RSC refresh (a server-component edit): each browser refetches
+    /// the current route's flight (`?__rsc=1`) and diff-renders it through the client
+    /// Router — no full document reload, client-island state preserved.
+    fn broadcast_rsc_refresh(&self) {
+        self.send(r#"{"type":"rsc-refresh"}"#);
     }
 
     fn client_count(&self) -> usize {
@@ -269,13 +303,36 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Run the dev server. Blocks, serving until the filesystem watcher stops or an
-/// unsupported edit is encountered (a hard error).
+/// Run the dev server. Detects the app kind and dispatches: a TanStack Start app
+/// (client + Node SSR runtime, in-process server HMR) or a plain Vite HTML-entry
+/// SPA (single client environment, static serving, no Node). Blocks, serving until
+/// the filesystem watcher stops or an unsupported edit is encountered (a hard
+/// error).
 pub fn run(options: DevOptions) -> Result<(), String> {
     let project_root = options
         .project_root
         .canonicalize()
         .map_err(|error| format!("cannot open project root {}: {error}", options.project_root.display()))?;
+
+    // A Next.js app-router app has no TanStack/src entry; its "entry" is the
+    // app-router file convention. It needs a THIRD dev topology (three RSC graphs +
+    // the next orchestrator), so dispatch it first, before the TanStack/SPA split.
+    if crate::next_adapter::is_app_router(&project_root) {
+        return next::run_next(&options, &project_root);
+    }
+
+    // App-kind detection. A TanStack Start app renders through its own Node SSR
+    // runtime (`@tanstack/react-start`) and has no static `index.html`; a plain
+    // Vite SPA is rooted at an `index.html` with a `<script type="module">` entry
+    // and no SSR framework. The two need different dev topologies, so pick here.
+    let has_start = project_root
+        .join("node_modules/@tanstack/react-start")
+        .exists();
+    let index_html = project_root.join("index.html");
+    if !has_start && index_html.is_file() {
+        return spa::run_spa(&options, &project_root, &index_html);
+    }
+
     let output_root = project_root.join(".diffpack-output");
     let emit_options = EmitOptions {
         // Dev builds are never minified: HMR re-imports a chunk and reads
@@ -328,7 +385,7 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         let refresh_runtime = Arc::clone(&refresh_runtime);
         std::thread::Builder::new()
             .name("diffpack-dev-proxy".into())
-            .spawn(move || serve_proxy(proxy_listener, node_port, hub, refresh_runtime))
+            .spawn(move || serve_proxy(proxy_listener, node_port, hub, refresh_runtime, None))
             .map_err(|error| format!("cannot start proxy thread: {error}"))?;
     }
     println!(
@@ -383,11 +440,7 @@ fn watch_loop(
             Ok(event) => event,
             Err(_) => return Ok(()), // watcher dropped: clean shutdown.
         };
-        let mut paths = collect_paths(first);
-        let deadline = Instant::now() + Duration::from_millis(60);
-        while let Ok(remaining) = deadline.checked_duration_since(Instant::now()).map_or(Err(mpsc::RecvTimeoutError::Timeout), |timeout| receiver.recv_timeout(timeout)) {
-            paths.extend(collect_paths(remaining));
-        }
+        let paths = coalesce_batch(receiver, first);
 
         let changed = paths
             .into_iter()
@@ -404,27 +457,38 @@ fn watch_loop(
             continue;
         }
 
-        // A route-file add/rename/remove mutates the route tree. Regenerate it
-        // natively and fully rebuild both environments (re-discovering the graph
-        // from the new tree), then push a full-page reload. State-preserving graph
-        // extension / partial HMR is still deferred, but this replaces the prior
-        // hard-error crash with a correct full reload.
+        // Two edit classes shift module ids across the whole graph and so cannot be
+        // hot-patched — both are handled by a full rebuild + reload rather than a
+        // crash:
+        //   * a route-file add/rename/remove, which mutates the route tree (native
+        //     regeneration first), and
+        //   * a NEW non-route file (exists, unknown to both graphs) — adding a
+        //     module is a normal dev action; the subsequent import of it is picked
+        //     up by the re-discovery here (or, if imported later, by the
+        //     graph-changed reload in the incremental path below).
         let route_mutation = changed
             .iter()
             .any(|path| is_route_tree_mutation(path, project_root, client_env, server_env));
-        if route_mutation {
+        let new_file = changed.iter().any(|path| {
+            path.exists()
+                && !client_env.bundler.is_known_module(path)
+                && !server_env.bundler.is_known_module(path)
+        });
+        if route_mutation || new_file {
             let started = Instant::now();
-            crate::route_tree::generate_for_project(project_root)?;
+            if route_mutation {
+                crate::route_tree::generate_for_project(project_root)?;
+            }
             *client_env = build_client(project_root, output_root, client_env.options)?;
             *server_env = build_server(project_root, output_root, server_env.options)?;
-            // A route-tree mutation re-derives both graphs from scratch; the module
-            // ids shift, so this class cannot be hot-patched — restart the Node
-            // child (rare, only on add/rename/remove) and full-reload the browser.
+            // Re-derives both graphs from scratch; the module ids shift, so restart
+            // the Node child (rare) and full-reload the browser.
             restart_node(node, index_mjs, node_port, control_port)?;
             hub.broadcast_reload();
             let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let reason = if route_mutation { "route tree changed" } else { "new file(s)" };
             println!(
-                "[dev] route tree changed ({} file(s)) in {elapsed_ms:.1}ms | regenerated + full rebuild + reload pushed",
+                "[dev] {reason} ({} file(s)) in {elapsed_ms:.1}ms | full rebuild + reload pushed",
                 changed.len(),
             );
             continue;
@@ -438,6 +502,9 @@ fn watch_loop(
         let mut client = EnvCounters::default();
         let mut server_c = EnvCounters::default();
         let mut touched = false;
+        // Whether an edit grew/shrank either graph (added/removed an import). Such an
+        // edit re-partitions the chunks and cannot be hot-patched — reload instead.
+        let mut graph_changed = false;
         // Accumulate the changed module ids per environment so, after re-emit, one
         // targeted HMR update covers the whole coalesced batch.
         let mut client_changed_ids: BTreeSet<String> = BTreeSet::new();
@@ -446,11 +513,13 @@ fn watch_loop(
         for path in &changed {
             // Rebuild whichever environment(s) actually own the module. A route
             // module is in both graphs; a client-only or server-only module is in
-            // just one.
+            // just one. (An unknown path here is a delete of an already-unreachable
+            // file — it belongs to neither graph, so both branches skip it.)
             if client_env.bundler.is_known_module(path) {
                 let rebuilt = client_env.rebuild(path)?;
                 let summary = emit_client(client_env, project_root, output_root)?;
                 client_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                graph_changed |= rebuilt.graph_changed;
                 client.add(&rebuilt, summary.rendered_chunks);
                 touched = true;
             }
@@ -462,12 +531,26 @@ fn watch_loop(
                     server_env.options,
                 )?;
                 server_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                graph_changed |= rebuilt.graph_changed;
                 server_c.add(&rebuilt, summary.rendered_chunks);
                 touched = true;
             }
         }
 
         if !touched {
+            continue;
+        }
+
+        // A graph-structure change (import added/removed) re-partitions chunks:
+        // re-emit already ran above, so a full reload picks up the new partition
+        // correctly where a hot update's ESM re-import would fail to bind.
+        if graph_changed {
+            hub.broadcast_reload();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            println!(
+                "[dev] rebuilt {} file(s) in {elapsed_ms:.1}ms | graph changed (import added/removed) -> full reload",
+                changed.len(),
+            );
             continue;
         }
 
@@ -481,7 +564,7 @@ fn watch_loop(
         // browser re-imports the changed chunk (register-only) and applies the
         // accept/Fast-Refresh protocol, preserving state. If no browser is
         // connected there is nothing to push.
-        let client_update = hmr_push_client(client_env, &client_changed_ids, hub);
+        let client_update = hmr_push_client(client_env, &client_changed_ids, hub, None);
 
         // Fall back to a full page reload only when the server change could not be
         // hot-applied (e.g. a statically-bundled server module), so the browser
@@ -599,15 +682,21 @@ fn hmr_push_client(
     client_env: &EnvBuild,
     changed_ids: &BTreeSet<String>,
     hub: &HmrHub,
+    // When Some(output_root), render a MICRO-CHUNK holding only the changed modules to
+    // `<output_root>/public/client.hmr.js` and point the browser at that (~1 KB)
+    // instead of re-importing the whole entry chunk (~1 MB of app + React, whose
+    // re-parse dominates the browser-side hot update). None keeps the legacy behaviour
+    // of re-importing the located full chunk(s).
+    micro_chunk: Option<&Path>,
 ) -> String {
     if changed_ids.is_empty() {
         return "client: no change".to_string();
     }
-    let located = match client_env.bundler.hmr_locate(
-        &reachable_ids(client_env),
-        changed_ids,
-        "client.js",
-    ) {
+    let reachable = reachable_ids(client_env);
+    let located = match client_env
+        .bundler
+        .hmr_locate(&reachable, changed_ids, "client.js")
+    {
         Ok(located) => located,
         Err(error) => {
             hub.broadcast_reload();
@@ -618,10 +707,33 @@ fn hmr_push_client(
         return "client: no located modules".to_string();
     }
     let ids = located.iter().map(|l| l.runtime_id).collect::<Vec<_>>();
-    let chunks = located
-        .iter()
-        .map(|l| format!("/{}", l.chunk_file))
-        .collect::<BTreeSet<_>>();
+
+    // The chunk(s) the browser re-imports to pick up the new factories.
+    let chunks: BTreeSet<String> = if let Some(output_root) = micro_chunk {
+        match client_env
+            .bundler
+            .render_hmr_chunk(&reachable, changed_ids, "client.js", client_env.options)
+        {
+            Ok(Some(code)) => {
+                let path = output_root.join("public/client.hmr.js");
+                if let Err(error) = std::fs::write(&path, code) {
+                    hub.broadcast_reload();
+                    return format!("client: micro-chunk write failed ({error}); reloaded");
+                }
+                std::iter::once("/client.hmr.js".to_string()).collect()
+            }
+            // No live changed module rendered — nothing to push (defensive; located
+            // was non-empty, so this is unexpected but not a crash).
+            Ok(None) => return "client: no live changed module for micro-chunk".to_string(),
+            Err(error) => {
+                hub.broadcast_reload();
+                return format!("client: micro-chunk render failed ({error}); reloaded");
+            }
+        }
+    } else {
+        located.iter().map(|l| format!("/{}", l.chunk_file)).collect()
+    };
+
     let message = format!(
         "{{\"type\":\"update\",\"ids\":[{}],\"chunks\":[{}]}}",
         ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
@@ -676,19 +788,22 @@ fn post_control(control_port: u16, json: &str) -> Result<(), String> {
 }
 
 /// Classify an edited path and hard-error on any class this slice does not yet
-/// handle, naming exactly what is unsupported. A supported edit is a content edit
-/// to a module already present in the client or server graph.
+/// handle, naming exactly what is unsupported.
+///
+/// By the time this runs, the two structural classes are already handled earlier
+/// in the loop (a route-tree mutation and a brand-new non-route file both take the
+/// full-rebuild + reload path), and a delete of an already-unreachable file is
+/// harmlessly skipped by the incremental loop. What remains genuinely unsupported
+/// is a config-file change (re-deriving aliases/conditions/virtual modules), which
+/// is a clear hard error rather than a silent stale build.
 fn classify_edit(
     path: &Path,
     project_root: &Path,
-    client: &EnvBuild,
-    server: &EnvBuild,
+    _client: &EnvBuild,
+    _server: &EnvBuild,
 ) -> Result<(), String> {
     let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
 
-    // Config changes require re-deriving the whole build config (aliases,
-    // conditions, virtual modules) and a full rebuild — not handled by the
-    // live-reload slice.
     let is_config = matches!(
         name,
         "vite.config.ts" | "vite.config.js" | "package.json"
@@ -696,23 +811,7 @@ fn classify_edit(
         || name.starts_with("diffpack.config");
     if is_config {
         return Err(format!(
-            "unsupported dev edit: config file {} changed. Config-change handling (re-deriving aliases/conditions/virtual modules) is not implemented by the full-page-reload dev slice; restart `diffpack dev` to pick it up.",
-            display_relative(path, project_root)
-        ));
-    }
-
-    // (Route-file add/rename/remove is handled earlier in the loop by native
-    // route-tree regeneration + full rebuild, and the diffpack-generated
-    // `routeTree.gen.ts` is filtered out as self-output — so neither reaches
-    // here.)
-
-    // A NON-route module in neither graph is a new/deleted file the build never
-    // reached. A route file here is handled earlier (route-tree mutation); a
-    // non-route new file needs graph extension from a new root, still deferred.
-    if !client.bundler.is_known_module(path) && !server.bundler.is_known_module(path) {
-        let what = if path.exists() { "new file" } else { "deleted file" };
-        return Err(format!(
-            "unsupported dev edit: {what} {} is not in the client or server module graph. Non-route new-file / graph-extension handling is not implemented by the full-page-reload dev slice (route-file add/rename/remove IS handled via native route-tree regeneration; edits to existing modules only otherwise).",
+            "unsupported dev edit: config file {} changed. Config-change handling (re-deriving aliases/conditions/virtual modules) is not implemented by the dev server; restart `diffpack dev` to pick it up.",
             display_relative(path, project_root)
         ));
     }
@@ -847,6 +946,24 @@ fn register_server_virtual_modules(
         server_fn::RESOLVER_SPECIFIER.to_string(),
         server_fn::generate_resolver_module(&server_fns),
     ));
+
+    // RSC server actions: the native action resolver + endpoint + client transport,
+    // mirroring `build-app`'s server path. The resolver is keyed by the same
+    // `"<moduleId>#<name>"` id the `"use server"` transform bakes into the client
+    // stub and the server registration.
+    let server_actions = crate::rsc::scan_project_server_actions(project_root)?;
+    config.build.virtual_modules.push((
+        crate::rsc::ACTION_RESOLVER_SPECIFIER.to_string(),
+        crate::rsc::generate_action_resolver_module(&server_actions),
+    ));
+    config.build.virtual_modules.push((
+        crate::rsc::ACTION_HANDLER_SPECIFIER.to_string(),
+        crate::rsc::action_handler_module_source().to_string(),
+    ));
+    config.build.virtual_modules.push((
+        crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
+        crate::rsc::call_server_module_source().to_string(),
+    ));
     Ok(())
 }
 
@@ -904,15 +1021,32 @@ fn wait_for_node(port: u16) -> Result<(), String> {
 /// on its own thread: it serves the HMR client assets, upgrades the WebSocket HMR
 /// channel (held open in the hub), and forwards every other request to the Node
 /// child with the Fast Refresh preamble injected into any HTML response.
-fn serve_proxy(listener: TcpListener, node_port: u16, hub: HmrHub, refresh_runtime: Arc<String>) {
+fn serve_proxy(
+    listener: TcpListener,
+    node_port: u16,
+    hub: HmrHub,
+    refresh_runtime: Arc<String>,
+    // When set, a GET whose path maps to an existing regular file under this dir is
+    // served DIRECTLY off disk, bypassing the Node orchestrator hop. This keeps the
+    // browser's HMR chunk fetch (`/client.js?__diffpack_hmr=1`) off the critical path
+    // of a Node round-trip; route documents (no matching file) still forward to Node.
+    static_dir: Option<Arc<PathBuf>>,
+) {
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
         let hub = hub.clone();
         let refresh_runtime = Arc::clone(&refresh_runtime);
+        let static_dir = static_dir.clone();
         let _ = std::thread::Builder::new()
             .name("diffpack-dev-conn".into())
             .spawn(move || {
-                if let Err(error) = handle_connection(stream, node_port, &hub, &refresh_runtime) {
+                if let Err(error) = handle_connection(
+                    stream,
+                    node_port,
+                    &hub,
+                    &refresh_runtime,
+                    static_dir.as_deref().map(|p| p.as_path()),
+                ) {
                     // A dropped browser connection is normal; log at a low volume.
                     let _ = error;
                 }
@@ -930,6 +1064,7 @@ fn handle_connection(
     node_port: u16,
     hub: &HmrHub,
     refresh_runtime: &str,
+    static_dir: Option<&Path>,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(
         stream
@@ -968,6 +1103,19 @@ fn handle_connection(
         return Ok(());
     }
 
+    // Direct static serving (dev fast path): a GET for an existing regular file under
+    // the emitted `public/` dir is served straight off disk, skipping the Node hop.
+    // This is what a browser HMR chunk fetch (`/client.js?__diffpack_hmr=1&t=…`) hits,
+    // so the re-imported chunk lands without a round-trip through the orchestrator.
+    // App-router routes (`/`, `/about`) have no matching file and fall through to Node.
+    if let Some(file) = static_dir
+        .filter(|_| method == "GET")
+        .and_then(|dir| resolve_static_file(dir, path))
+    {
+        write_file(&mut stream, &file)?;
+        return Ok(());
+    }
+
     // Read the request body (for server-fn POSTs) so it forwards intact.
     let body = read_body(&mut reader, &headers)?;
     let upstream = forward_to_node(node_port, &method, &target, &headers, &body)?;
@@ -990,6 +1138,53 @@ fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
         .and_then(|()| stream.write_all(body.as_bytes()))
         .and_then(|()| stream.flush())
         .map_err(|error| format!("cannot write js response: {error}"))
+}
+
+/// Resolve a URL path to an existing regular file under `dir`, or `None`. Guards
+/// against path traversal and empty segments, and returns only regular files — so an
+/// app-router route path (which has no matching file on disk) falls through to Node.
+fn resolve_static_file(dir: &Path, url_path: &str) -> Option<PathBuf> {
+    let rel = url_path.trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|seg| seg == ".." || seg == "." || seg.is_empty()) {
+        return None;
+    }
+    let candidate = dir.join(rel);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Serve a file off disk as a dev HTTP response (no caching, `Connection: close`).
+fn write_file(stream: &mut TcpStream, file: &Path) -> Result<(), String> {
+    let bytes =
+        std::fs::read(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
+    let content_type = match file.extension().and_then(|value| value.to_str()) {
+        Some("js" | "mjs" | "cjs") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("wasm") => "application/wasm",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        bytes.len()
+    );
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|()| stream.write_all(&bytes))
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("cannot write file response: {error}"))
 }
 
 impl HmrHub {
@@ -1284,18 +1479,115 @@ fn rfind_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 // --- watch helpers ------------------------------------------------------------
 
 fn start_watcher(root: &Path) -> Result<Receiver<notify::Result<notify::Event>>, String> {
+    start_watcher_paths(&[(root.to_path_buf(), RecursiveMode::Recursive)])
+}
+
+/// Start a filesystem watcher over several `(path, mode)` roots on one channel.
+/// The SPA path watches `src` recursively AND the project root non-recursively, so
+/// root-level files (`index.html`, `vite.config.*`) are seen without recursing into
+/// `node_modules`.
+fn start_watcher_paths(
+    roots: &[(PathBuf, RecursiveMode)],
+) -> Result<Receiver<notify::Result<notify::Event>>, String> {
     let (events, receiver) = mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |event| {
-        let _ = events.send(event);
+    // TWO event sources feed one channel:
+    //
+    // 1. The OS-native backend (FSEvents on macOS, inotify on Linux) — the RELIABLE
+    //    backstop. It never misses an edit, but macOS FSEvents carries a ~13.5ms fixed
+    //    detect latency even at `latency: 0` (measured), which dominates HMR latency.
+    // 2. A tight custom POLLER (below) — the FAST path. It stats the (small) source
+    //    tree every 2ms comparing full-resolution mtime+len, so it usually detects an
+    //    edit in ~1-2ms, well under the FSEvents floor.
+    //
+    // The poller only needs to be fast-WHEN-it-fires, never complete: FSEvents
+    // guarantees nothing is missed (unlike notify's own `PollWatcher`, which we found
+    // silently drops ~70% of rapid edits). Whichever source sees an edit first drives
+    // the rebuild; the watch loop dedups the other source's echo by (mtime, len), so a
+    // double-detection never causes a second rebuild.
+    let mut watcher = notify::recommended_watcher({
+        let events = events.clone();
+        move |event| {
+            let _ = events.send(event);
+        }
     })
     .map_err(|error| format!("cannot create filesystem watcher: {error}"))?;
-    watcher
-        .watch(root, RecursiveMode::Recursive)
-        .map_err(|error| format!("cannot start filesystem watcher on {}: {error}", root.display()))?;
-    // Leak the watcher so it lives for the whole process (dropping it stops
-    // watching). The dev server runs until killed.
+    for (path, mode) in roots {
+        watcher
+            .watch(path, *mode)
+            .map_err(|error| format!("cannot start filesystem watcher on {}: {error}", path.display()))?;
+    }
+    // Leak the watcher so it lives for the whole process (dropping it stops watching).
     Box::leak(Box::new(watcher));
+    spawn_supplement_poller(roots.to_vec(), events);
     Ok(receiver)
+}
+
+/// The fast supplementary poller (see [`start_watcher_paths`]). Walks the watched
+/// roots every 2ms, and on any file whose full-resolution `(mtime, len)` changed
+/// since the last scan, sends a synthetic modify event down the same channel as the
+/// OS watcher. Detection latency is ~half the interval — far under FSEvents' floor —
+/// while FSEvents remains the never-miss backstop. Deliberately reliable where
+/// notify's `PollWatcher` was not: full-nanosecond `mtime` + `len`, no rounding.
+fn spawn_supplement_poller(
+    roots: Vec<(PathBuf, RecursiveMode)>,
+    events: Sender<notify::Result<notify::Event>>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("diffpack-fast-poll".into())
+        .spawn(move || {
+            let mut snapshot: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
+            let mut first = true;
+            loop {
+                let mut current: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
+                for (root, mode) in &roots {
+                    scan_root(root, *mode, &mut current);
+                }
+                if !first {
+                    for (path, sig) in &current {
+                        if snapshot.get(path) != Some(sig) {
+                            // A synthetic modify event; only `paths` is read downstream.
+                            let event = notify::Event::new(notify::EventKind::Modify(
+                                notify::event::ModifyKind::Any,
+                            ))
+                            .add_path(path.clone());
+                            if events.send(Ok(event)).is_err() {
+                                return; // receiver gone: dev server shutting down.
+                            }
+                        }
+                    }
+                }
+                snapshot = current;
+                first = false;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+}
+
+/// Collect `(mtime, len)` for every regular file under `root` into `out`. Recurses
+/// when `mode` is recursive, but never descends into `node_modules` or the diffpack
+/// output dir (nothing there is a user source edit, and both are large).
+fn scan_root(root: &Path, mode: RecursiveMode, out: &mut HashMap<PathBuf, (SystemTime, u64)>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if mode == RecursiveMode::Recursive {
+                let name = entry.file_name();
+                if name == "node_modules" || name == ".diffpack-output" || name == ".git" {
+                    continue;
+                }
+                scan_root(&path, mode, out);
+            }
+        } else if let Ok(meta) = entry.metadata() {
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            out.insert(path, (mtime, meta.len()));
+        }
+    }
 }
 
 fn collect_paths(event: notify::Result<notify::Event>) -> Vec<PathBuf> {
@@ -1305,12 +1597,46 @@ fn collect_paths(event: notify::Result<notify::Event>) -> Vec<PathBuf> {
     }
 }
 
+/// Coalesce a burst of filesystem events into one batch, given the already-received
+/// `first` event. Blocks only until a short QUIET period elapses with no new event —
+/// an atomic save fires create+modify+rename within a few ms, so a quiet window
+/// collapses that burst into a single rebuild, yet a lone edit (the common case, and
+/// what HMR latency is judged on) returns after just one quiet window instead of a
+/// fixed long debounce. Hard-capped so a pathological continuous event stream cannot
+/// starve the rebuild. Returns every path seen in the burst (unfiltered — the caller
+/// filters to module paths).
+fn coalesce_batch(
+    receiver: &Receiver<notify::Result<notify::Event>>,
+    first: notify::Result<notify::Event>,
+) -> Vec<PathBuf> {
+    // 2ms quiet: FSEvents is created with latency 0 + NoDefer (events delivered
+    // ASAP), so a single in-place write is one event and this window returns almost
+    // immediately; an atomic save's create+rename burst still coalesces (its
+    // inter-event gap is sub-millisecond). Far shorter than the old fixed 60ms window
+    // that taxed every single edit with a full wait for a second event that never came.
+    const QUIET: Duration = Duration::from_millis(2);
+    const CAP: Duration = Duration::from_millis(250);
+    let mut paths = collect_paths(first);
+    let cap_at = Instant::now() + CAP;
+    loop {
+        let window = QUIET.min(cap_at.saturating_duration_since(Instant::now()));
+        if window.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(window) {
+            Ok(event) => paths.extend(collect_paths(event)),
+            Err(_) => break, // quiet window elapsed (or channel closed): burst done.
+        }
+    }
+    paths
+}
+
 fn is_module_path(path: &Path) -> bool {
     // Ignore build output and editor scratch files.
     if path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some(".diffpack-output" | "node_modules" | ".git")
+            Some(".diffpack-output" | ".diffpack-next" | "node_modules" | ".git")
         )
     }) {
         return false;
@@ -1324,8 +1650,19 @@ fn is_module_path(path: &Path) -> bool {
     }
     matches!(
         path.extension().and_then(|extension| extension.to_str()),
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "json" | "css")
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "json" | "css" | "scss" | "sass" | "less")
     )
+}
+
+/// Whether a path is a build-config file whose edit would change derived
+/// aliases/defines/base (not a source module). Handled explicitly by the dev loop
+/// so it is neither mis-treated as a source module nor silently ignored.
+fn is_config_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    name.starts_with("vite.config.")
+        || name == "package.json"
+        || name.starts_with("tsconfig")
+        || name.starts_with("diffpack.config")
 }
 
 fn src_dir(project_root: &Path) -> String {
@@ -1343,6 +1680,1329 @@ fn display_relative(path: &Path, root: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// `diffpack dev` for a plain Vite HTML-entry SPA: a single client environment,
+/// static serving, and the same WebSocket + React Fast Refresh HMR the TanStack
+/// path uses — but NO Node child (an SPA has no SSR runtime). This is the
+/// generalization that makes `diffpack dev` a drop-in for the everyday Vite
+/// dev-server workflow (see docs/NEXT_STEPS.md #2), and where the low incremental
+/// diff time becomes a daily, browser-visible advantage.
+///
+/// Topology: emit the browser-ESM client into `.diffpack-output` (with
+/// `hmr: true`), then run diffpack's own static server on the public dev port. It
+/// serves the emitted chunks/assets, upgrades the WebSocket HMR channel, serves the
+/// Fast Refresh runtime, and returns the app document (the rewritten `index.html`
+/// with the HMR preamble injected) for `/` and any client-routed path. On a source
+/// edit it incrementally rebuilds the client, re-emits, and pushes a targeted
+/// WebSocket update so the browser applies the accept / Fast Refresh protocol in
+/// place — no reload, no state loss.
+mod spa {
+    use super::*;
+    use crate::html_entry::{self, HeadInjection};
+    use std::fs;
+
+    /// Entry point: build the SPA client, start the static+HMR server, and drive
+    /// the incremental rebuild loop. Blocks until the watcher stops or an
+    /// unsupported edit is hit (a hard error).
+    pub fn run_spa(
+        options: &DevOptions,
+        project_root: &Path,
+        index_html: &Path,
+    ) -> Result<(), String> {
+        let output_root = project_root.join(".diffpack-output");
+        // Vite conventions (aliases, base, import.meta.env, sass additionalData)
+        // apply when the project has a Vite config; otherwise it is a bare web
+        // build. Either way dev mode selects the development dependency builds and
+        // turns on HMR instrumentation.
+        let vite = [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.mts",
+            "vite.config.cjs",
+            "vite.config.cts",
+        ]
+        .iter()
+        .any(|name| project_root.join(name).is_file());
+        let mut config = crate::config::derive_web_config(project_root, vite)?;
+        crate::config::set_web_development_mode(&mut config);
+        let base = config.base.clone();
+
+        // Resolve the single module-script entry from index.html (mirrors the
+        // `diffpack build` HTML-entry resolution).
+        let html = html_entry::parse_file(index_html)?;
+        let html_origin = index_html.display().to_string();
+        let entry_script = match html.module_scripts.as_slice() {
+            [only] => only,
+            [] => {
+                return Err(format!(
+                    "{html_origin}: no local <script type=\"module\" src> entry found"
+                ));
+            }
+            many => {
+                return Err(format!(
+                    "{html_origin}: {} module script entries; multiple HTML entries are not supported by `diffpack dev` yet",
+                    many.len()
+                ));
+            }
+        };
+        let entry_path = match entry_script.src.strip_prefix('/') {
+            Some(rest) => project_root.join(rest),
+            None => index_html
+                .parent()
+                .expect("an HTML file has a parent directory")
+                .join(&entry_script.src),
+        };
+        let entry = entry_path.canonicalize().map_err(|error| {
+            format!(
+                "{html_origin}: module script src \"{}\" does not resolve ({}: {error})",
+                entry_script.src,
+                entry_path.display()
+            )
+        })?;
+
+        let emit_options = EmitOptions {
+            // Same rationale as the TanStack dev path: never minify (HMR re-imports
+            // chunks and reads readable Fast Refresh instrumentation).
+            minify: false,
+            source_map: options.source_map,
+            hmr: true,
+            ..EmitOptions::default()
+        };
+
+        println!(
+            "[dev] building SPA client{}...",
+            if vite { " (vite mode)" } else { "" }
+        );
+        let mut client = discover_spa_client(&entry, &config, emit_options)?;
+
+        let (served, _) = emit_spa(&client, project_root, &output_root, &html, &html_origin, &base)?;
+        let served_html = Arc::new(Mutex::new(served));
+
+        let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
+        let hub = HmrHub::default();
+        let listener = TcpListener::bind(("127.0.0.1", options.port))
+            .map_err(|error| format!("cannot bind dev port {}: {error}", options.port))?;
+        {
+            let hub = hub.clone();
+            let refresh_runtime = Arc::clone(&refresh_runtime);
+            let served_html = Arc::clone(&served_html);
+            let output_root = output_root.clone();
+            let base = base.clone();
+            std::thread::Builder::new()
+                .name("diffpack-dev-spa".into())
+                .spawn(move || serve_spa(listener, output_root, base, served_html, hub, refresh_runtime))
+                .map_err(|error| format!("cannot start SPA server thread: {error}"))?;
+        }
+        println!(
+            "[dev] diffpack dev server (SPA) on http://127.0.0.1:{}",
+            options.port
+        );
+
+        // Watch `src` recursively for module edits, and the project root
+        // non-recursively so `index.html` and `vite.config.*` edits are seen
+        // (without recursing into node_modules). When there is no `src` dir the
+        // recursive root already covers the project root.
+        let src_watch = project_root.join(src_dir(project_root));
+        let mut watch_roots = vec![(src_watch.clone(), RecursiveMode::Recursive)];
+        if src_watch != *project_root {
+            watch_roots.push((project_root.to_path_buf(), RecursiveMode::NonRecursive));
+        }
+        let receiver = start_watcher_paths(&watch_roots)?;
+        println!("[dev] watching {}", src_watch.display());
+
+        spa_watch_loop(
+            &receiver,
+            project_root,
+            &output_root,
+            index_html,
+            &entry,
+            &config,
+            emit_options,
+            html,
+            &html_origin,
+            &base,
+            &mut client,
+            &served_html,
+            &hub,
+        )
+    }
+
+    /// (Re)discover the SPA client graph from the entry and wrap it in a fresh
+    /// `EnvBuild`. Used for the initial build and for a structural rebuild (a
+    /// new-file event, whose module ids shift the whole graph).
+    fn discover_spa_client(
+        entry: &Path,
+        config: &crate::config::WebConfig,
+        emit_options: EmitOptions,
+    ) -> Result<EnvBuild, String> {
+        let (bundler, update) = Bundler::discover_direct_with_config(entry, &config.build)?;
+        // A dangling import in a dev build is a real error, but surface it as a
+        // diagnostic (like the TanStack path) rather than aborting the whole server
+        // — the browser overlay work is deferred, so print and continue.
+        for diagnostic in &update.diagnostics {
+            println!("[dev] client known gap: {diagnostic}");
+        }
+        let session = bundler.direct_reachability();
+        let reachable = session.reachable_modules();
+        Ok(EnvBuild {
+            bundler,
+            session,
+            reachable,
+            options: emit_options,
+        })
+    }
+
+    /// Emit the SPA client into `output_root` (the site root), copy the static
+    /// `public/` passthrough, and build the served `index.html`: the original
+    /// document with its module script rewritten to the emitted `index.js`, the
+    /// stylesheet linked when the build produced CSS, and the configured `base`
+    /// applied. The HMR preamble is NOT baked in here — it is injected per response
+    /// so it always reflects the current runtime. Returns `(served_html, summary)`.
+    fn emit_spa(
+        client: &EnvBuild,
+        project_root: &Path,
+        output_root: &Path,
+        html: &html_entry::HtmlEntry,
+        html_origin: &str,
+        base: &str,
+    ) -> Result<(String, EmitSummary), String> {
+        let reachable = reachable_ids(client);
+        let summary = client
+            .bundler
+            .emit_web(&reachable, output_root, "index.js", client.options)?;
+        crate::config::copy_static_public(project_root, output_root)?;
+        let mut injection = HeadInjection {
+            script_urls: vec![format!("{base}index.js")],
+            stylesheet_urls: Vec::new(),
+        };
+        if summary.css_files > 0 {
+            injection.stylesheet_urls.push(format!("{base}index.css"));
+        }
+        let served = html_entry::apply_base(&html.rewrite(html_origin, &injection)?, base);
+        Ok((served, summary))
+    }
+
+    /// The incremental rebuild loop for the SPA: coalesce a burst of filesystem
+    /// events, incrementally rebuild the client, re-emit, and push a targeted HMR
+    /// update. A new file (an existing module the graph never reached) triggers a
+    /// structural rebuild + reload, so adding modules works.
+    #[allow(clippy::too_many_arguments)]
+    fn spa_watch_loop(
+        receiver: &Receiver<notify::Result<notify::Event>>,
+        project_root: &Path,
+        output_root: &Path,
+        index_html: &Path,
+        entry: &Path,
+        config: &crate::config::WebConfig,
+        emit_options: EmitOptions,
+        mut html: html_entry::HtmlEntry,
+        html_origin: &str,
+        base: &str,
+        client: &mut EnvBuild,
+        served_html: &Arc<Mutex<String>>,
+        hub: &HmrHub,
+    ) -> Result<(), String> {
+        // Fingerprint of the emitted stylesheet, so a CSS-only edit is detected and
+        // hot-swapped (the <link> is replaced in place) instead of reloading.
+        let mut css_fingerprint = stylesheet_fingerprint(output_root);
+        // The canonical index.html path, so an edit to it is recognized and the
+        // served document re-parsed.
+        let index_html_canon = index_html.canonicalize().unwrap_or_else(|_| index_html.to_path_buf());
+        loop {
+            let first = match receiver.recv() {
+                Ok(event) => event,
+                Err(_) => return Ok(()),
+            };
+            let paths = coalesce_batch(receiver, first);
+
+            // An index.html edit is not a module edit: re-parse the document and
+            // rebuild the served HTML (new title/meta/entry), then reload. The
+            // reload re-fetches every chunk, so this also covers any module edits
+            // coalesced in the same batch.
+            let index_edited = paths
+                .iter()
+                .any(|path| path.canonicalize().map(|c| c == index_html_canon).unwrap_or(false));
+            if index_edited {
+                match html_entry::parse_file(index_html) {
+                    Ok(fresh) => {
+                        html = fresh;
+                        let (fresh_doc, _) =
+                            emit_spa(client, project_root, output_root, &html, html_origin, base)?;
+                        *served_html.lock().unwrap() = fresh_doc;
+                        css_fingerprint = stylesheet_fingerprint(output_root);
+                        hub.broadcast_reload();
+                        println!("[dev] index.html changed -> re-parsed document + reload");
+                    }
+                    // A transient parse error (mid-edit save) must not kill the
+                    // server; keep serving the last-good document.
+                    Err(error) => eprintln!("[dev] index.html parse error (kept previous): {error}"),
+                }
+                continue;
+            }
+
+            // A config-file edit changes derived aliases/defines/base; live
+            // re-derivation is not implemented, so warn LOUDLY (never silently) and
+            // keep serving the startup config rather than mis-treating the config as
+            // a source module or killing the server.
+            if paths.iter().any(|path| is_config_file(path)) {
+                println!(
+                    "[dev] WARNING: a config file changed (vite.config.* / package.json / tsconfig). Live config re-derivation (aliases/defines/base) is not implemented — the dev server is STILL USING THE CONFIG FROM STARTUP. Restart `diffpack dev` to apply it."
+                );
+            }
+
+            let changed = paths
+                .into_iter()
+                .filter(|path| is_module_path(path) && !is_config_file(path))
+                .collect::<BTreeSet<_>>();
+            if changed.is_empty() {
+                continue;
+            }
+
+            // A file the graph never reached that now EXISTS is a new file: adding a
+            // module (and, in the same or a later save, an import to it) is a normal
+            // dev action, not an error. The new file shifts module ids across the
+            // whole graph, so it cannot be hot-patched — re-discover the client from
+            // the entry, re-emit, and full-reload the browser. (An unknown file that
+            // does NOT exist is a delete of something already unreachable — nothing
+            // to do.)
+            let has_new_file = changed
+                .iter()
+                .any(|path| path.exists() && !client.bundler.is_known_module(path));
+            if has_new_file {
+                let started = Instant::now();
+                *client = discover_spa_client(entry, config, emit_options)?;
+                let (fresh_doc, summary) =
+                    emit_spa(client, project_root, output_root, &html, html_origin, base)?;
+                *served_html.lock().unwrap() = fresh_doc;
+                css_fingerprint = stylesheet_fingerprint(output_root);
+                hub.broadcast_reload();
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                println!(
+                    "[dev] new file(s) in {} change(s) -> structural rebuild ({} modules, {} chunks) + reload in {elapsed_ms:.1}ms",
+                    changed.len(),
+                    client.reachable.len(),
+                    summary.rendered_chunks,
+                );
+                continue;
+            }
+
+            // Every remaining changed path is a known module (an unknown-and-missing
+            // path was a delete of an unreachable file — skip it).
+            let known = changed
+                .iter()
+                .filter(|path| client.bundler.is_known_module(path))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if known.is_empty() {
+                continue;
+            }
+
+            let started = Instant::now();
+            let mut counters = EnvCounters::default();
+            let mut changed_ids: BTreeSet<String> = BTreeSet::new();
+            let mut graph_changed = false;
+            for path in &known {
+                let rebuilt = client.rebuild(path)?;
+                let (fresh_doc, summary) =
+                    emit_spa(client, project_root, output_root, &html, html_origin, base)?;
+                *served_html.lock().unwrap() = fresh_doc;
+                changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                graph_changed |= rebuilt.graph_changed;
+                counters.add(&rebuilt, summary.rendered_chunks);
+            }
+
+            let new_css = stylesheet_fingerprint(output_root);
+            let css_changed = new_css != css_fingerprint;
+            css_fingerprint = new_css;
+
+            // An edit that grew or shrank the reachable set (added/removed an import
+            // of another module) re-partitions the chunks — reload rather than push a
+            // hot update whose ESM re-import would fail to bind the new/removed
+            // exports. Otherwise apply the change surgically: a changed stylesheet is
+            // hot-SWAPPED in place (no reload), and changed JS modules take the Fast
+            // Refresh path. A pure CSS edit therefore preserves ALL component state.
+            let client_update = if graph_changed {
+                hub.broadcast_reload();
+                "client: graph changed (import added/removed) -> full reload".to_string()
+            } else {
+                let js_ids = changed_ids
+                    .iter()
+                    .filter(|id| !is_css_module_id(id))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let mut notes = Vec::new();
+                if css_changed {
+                    let hrefs = vec![format!("{base}index.css")];
+                    push_css(&hrefs, hub);
+                    notes.push(format!(
+                        "css hot-swap -> {} sheet(s), {} browser(s)",
+                        hrefs.len(),
+                        hub.client_count()
+                    ));
+                }
+                if !js_ids.is_empty() {
+                    notes.push(push_spa_update(client, &js_ids, base, hub));
+                }
+                if notes.is_empty() {
+                    "client: no visible change".to_string()
+                } else {
+                    notes.join(" | ")
+                }
+            };
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            // Same parseable instrumentation shape as the TanStack path (minus the
+            // server environment), so the browser oracle can assert incrementality
+            // and the low-diff-time budget live.
+            println!(
+                "[dev] rebuilt {} file(s) in {elapsed_ms:.1}ms | client transformed={} changed={} rendered_chunks={} | {client_update}",
+                known.len(),
+                counters.transformed,
+                counters.changed,
+                counters.rendered_chunks,
+            );
+        }
+    }
+
+    /// Push a targeted client HMR update over the WebSocket channel for the SPA:
+    /// locate the changed modules' chunk files (entry `index.js`), build the
+    /// A cheap content fingerprint of the emitted `index.css`, or `None` when the
+    /// build produced no stylesheet. Compared across edits to detect a CSS-only
+    /// change that should be hot-swapped rather than reloaded.
+    fn stylesheet_fingerprint(output_root: &Path) -> Option<u64> {
+        let bytes = fs::read(output_root.join("index.css")).ok()?;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
+    /// Whether a module id names a stylesheet source (its factory contributes to the
+    /// extracted CSS, not to a JS chunk), so it is applied via a CSS hot-swap rather
+    /// than a JS Fast Refresh update.
+    fn is_css_module_id(id: &str) -> bool {
+        let path = id.split('?').next().unwrap_or(id);
+        [".css", ".scss", ".sass", ".less"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+    }
+
+    /// Broadcast a CSS hot-swap for the given stylesheet hrefs (the browser replaces
+    /// each matching `<link>` in place, preserving all component state).
+    fn push_css(hrefs: &[String], hub: &HmrHub) {
+        let list = hrefs
+            .iter()
+            .map(|href| json_string(href))
+            .collect::<Vec<_>>()
+            .join(",");
+        hub.send(&format!("{{\"type\":\"css\",\"hrefs\":[{list}]}}"));
+    }
+
+    /// base-prefixed chunk URLs the browser re-imports, and broadcast. Returns a
+    /// short log fragment.
+    fn push_spa_update(
+        client: &EnvBuild,
+        changed_ids: &BTreeSet<String>,
+        base: &str,
+        hub: &HmrHub,
+    ) -> String {
+        if changed_ids.is_empty() {
+            return "client: no change".to_string();
+        }
+        let located = match client
+            .bundler
+            .hmr_locate(&reachable_ids(client), changed_ids, "index.js")
+        {
+            Ok(located) => located,
+            Err(error) => {
+                hub.broadcast_reload();
+                return format!("client: locate failed ({error}); reloaded");
+            }
+        };
+        if located.is_empty() {
+            return "client: no located modules".to_string();
+        }
+        let ids = located.iter().map(|l| l.runtime_id).collect::<Vec<_>>();
+        let chunks = located
+            .iter()
+            .map(|l| format!("{base}{}", l.chunk_file))
+            .collect::<BTreeSet<_>>();
+        let message = format!(
+            "{{\"type\":\"update\",\"ids\":[{}],\"chunks\":[{}]}}",
+            ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
+            chunks.iter().map(|chunk| json_string(chunk)).collect::<Vec<_>>().join(","),
+        );
+        hub.send(&message);
+        format!(
+            "client: hmr update -> {} module(s) in {} chunk(s), {} browser(s)",
+            ids.len(),
+            chunks.len(),
+            hub.client_count()
+        )
+    }
+
+    /// Accept loop for the SPA static+HMR server. Each connection is handled on its
+    /// own thread.
+    fn serve_spa(
+        listener: TcpListener,
+        output_root: PathBuf,
+        base: String,
+        served_html: Arc<Mutex<String>>,
+        hub: HmrHub,
+        refresh_runtime: Arc<String>,
+    ) {
+        for connection in listener.incoming() {
+            let Ok(stream) = connection else { continue };
+            let output_root = output_root.clone();
+            let base = base.clone();
+            let served_html = Arc::clone(&served_html);
+            let hub = hub.clone();
+            let refresh_runtime = Arc::clone(&refresh_runtime);
+            let _ = std::thread::Builder::new()
+                .name("diffpack-dev-spa-conn".into())
+                .spawn(move || {
+                    let _ = handle_spa_connection(
+                        stream,
+                        &output_root,
+                        &base,
+                        &served_html,
+                        &hub,
+                        &refresh_runtime,
+                    );
+                });
+        }
+    }
+
+    fn handle_spa_connection(
+        mut stream: TcpStream,
+        output_root: &Path,
+        base: &str,
+        served_html: &Arc<Mutex<String>>,
+        hub: &HmrHub,
+        refresh_runtime: &str,
+    ) -> Result<(), String> {
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|error| format!("cannot clone client socket: {error}"))?,
+        );
+        let (request_line, headers) = read_head(&mut reader)?;
+        let (method, target) = parse_request_line(&request_line)?;
+        let path = target.split('?').next().unwrap_or(&target);
+        let head_only = method.eq_ignore_ascii_case("HEAD");
+
+        // The WebSocket HMR channel (shared framing with the TanStack path).
+        if path == WS_PATH {
+            if let Some((_, key)) = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+            {
+                let accept = ws_accept(key.trim());
+                let response = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .and_then(|()| stream.flush())
+                    .map_err(|error| format!("cannot complete websocket handshake: {error}"))?;
+                hub.send_to(&stream, r#"{"type":"connected"}"#);
+                hub.register(stream);
+                return Ok(());
+            }
+            return Ok(());
+        }
+
+        // The Fast Refresh runtime the preamble imports.
+        if path == REFRESH_RUNTIME_PATH {
+            write_js(&mut stream, refresh_runtime)?;
+            return Ok(());
+        }
+
+        // A static file under the emitted site root (chunks, css, assets, copied
+        // public/ files). Base-prefix stripped; path traversal rejected.
+        if let Some(file) = resolve_static(output_root, base, path) {
+            if file.is_file() {
+                let bytes = fs::read(&file)
+                    .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
+                return write_response(&mut stream, "200 OK", content_type(&file), &bytes, head_only);
+            }
+            // A path that names a concrete file (has an extension) but is missing is
+            // a real 404 — not the SPA document.
+            if looks_like_file(path) {
+                return write_response(
+                    &mut stream,
+                    "404 Not Found",
+                    "text/plain; charset=utf-8",
+                    b"not found",
+                    head_only,
+                );
+            }
+        }
+
+        // SPA fallback: the app document with the HMR preamble injected fresh.
+        let document = served_html.lock().unwrap().clone();
+        let injected = inject_into_html(document.as_bytes());
+        write_response(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            &injected,
+            head_only,
+        )
+    }
+
+    /// Map a request path to a file under the emitted site root, or `None` for the
+    /// document root. Strips the configured `base`, rejects `..` traversal.
+    fn resolve_static(output_root: &Path, base: &str, path: &str) -> Option<PathBuf> {
+        // Strip the base prefix (base always ends with `/`). A path outside the
+        // base is not a static file here.
+        let relative = if base == "/" {
+            path.trim_start_matches('/')
+        } else if let Some(rest) = path.strip_prefix(base) {
+            rest
+        } else if path == base.trim_end_matches('/') {
+            ""
+        } else {
+            path.trim_start_matches('/')
+        };
+        if relative.is_empty() {
+            return None;
+        }
+        // Reject anything that could escape the output root.
+        if relative.split('/').any(|segment| segment == ".." || segment == ".") {
+            return None;
+        }
+        Some(output_root.join(relative))
+    }
+
+    /// Whether a request path names a concrete file (its last segment has an
+    /// extension) rather than a client route.
+    fn looks_like_file(path: &str) -> bool {
+        path.rsplit('/').next().is_some_and(|last| last.contains('.'))
+    }
+
+    /// The MIME type for an emitted file, by extension.
+    fn content_type(path: &Path) -> &'static str {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("js" | "mjs" | "cjs") => "application/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("html") => "text/html; charset=utf-8",
+            Some("json" | "map") => "application/json; charset=utf-8",
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("avif") => "image/avif",
+            Some("ico") => "image/x-icon",
+            Some("woff2") => "font/woff2",
+            Some("woff") => "font/woff",
+            Some("ttf") => "font/ttf",
+            Some("otf") => "font/otf",
+            Some("wasm") => "application/wasm",
+            Some("txt") => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        }
+    }
+
+    /// Write a complete HTTP/1.1 response (dev; no caching, `Connection: close`).
+    fn write_response(
+        stream: &mut TcpStream,
+        status: &str,
+        content_type: &str,
+        body: &[u8],
+        head_only: bool,
+    ) -> Result<(), String> {
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .map_err(|error| format!("cannot write response head: {error}"))?;
+        if !head_only {
+            stream
+                .write_all(body)
+                .map_err(|error| format!("cannot write response body: {error}"))?;
+        }
+        stream
+            .flush()
+            .map_err(|error| format!("cannot flush response: {error}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn resolve_static_maps_under_root_at_default_base() {
+            let root = Path::new("/out");
+            assert_eq!(resolve_static(root, "/", "/index.js"), Some(root.join("index.js")));
+            assert_eq!(
+                resolve_static(root, "/", "/assets/logo-abc123.svg"),
+                Some(root.join("assets/logo-abc123.svg"))
+            );
+            // The document root maps to None (served as the SPA fallback, not a file).
+            assert_eq!(resolve_static(root, "/", "/"), None);
+        }
+
+        #[test]
+        fn resolve_static_strips_a_non_root_base() {
+            let root = Path::new("/out");
+            assert_eq!(
+                resolve_static(root, "/app/", "/app/index.js"),
+                Some(root.join("index.js"))
+            );
+            // The base root itself (no trailing file) is the document.
+            assert_eq!(resolve_static(root, "/app/", "/app"), None);
+        }
+
+        #[test]
+        fn resolve_static_rejects_path_traversal() {
+            let root = Path::new("/out");
+            assert_eq!(resolve_static(root, "/", "/../etc/passwd"), None);
+            assert_eq!(resolve_static(root, "/", "/assets/../../secret"), None);
+        }
+
+        #[test]
+        fn looks_like_file_distinguishes_assets_from_routes() {
+            assert!(looks_like_file("/index.js"));
+            assert!(looks_like_file("/assets/x.png"));
+            // A client route has no extension in its last segment.
+            assert!(!looks_like_file("/about"));
+            assert!(!looks_like_file("/users/42"));
+        }
+
+        #[test]
+        fn config_files_are_recognized_and_modules_are_not() {
+            use super::super::is_config_file;
+            assert!(is_config_file(Path::new("/app/vite.config.ts")));
+            assert!(is_config_file(Path::new("/app/vite.config.mts")));
+            assert!(is_config_file(Path::new("/app/package.json")));
+            assert!(is_config_file(Path::new("/app/tsconfig.app.json")));
+            // Source modules and the app's own JSON data are NOT config.
+            assert!(!is_config_file(Path::new("/app/src/App.tsx")));
+            assert!(!is_config_file(Path::new("/app/src/data.json")));
+        }
+
+        #[test]
+        fn content_type_covers_the_emitted_kinds() {
+            assert_eq!(content_type(Path::new("a/index.js")), "application/javascript; charset=utf-8");
+            assert_eq!(content_type(Path::new("a/index.css")), "text/css; charset=utf-8");
+            assert_eq!(content_type(Path::new("a/logo.svg")), "image/svg+xml");
+            assert_eq!(content_type(Path::new("a/hero.png")), "image/png");
+            assert_eq!(content_type(Path::new("a/blob.bin")), "application/octet-stream");
+        }
+    }
+}
+
+/// `diffpack dev` for a Next.js app-router app (Slice K / spec Slice 5). A Next app
+/// has no TanStack/src entry — its "entry" is the app-router file convention — so it
+/// needs a third dev topology: the SAME three RSC graphs the production `build-app`
+/// path builds (client / react-server / ssr), kept alive per-environment, served by
+/// the emitted next orchestrator (`scripts/rsc/next-server.mjs`, embedded here and
+/// written into the output dir), with the diffpack reverse proxy in front injecting
+/// the Fast Refresh + WebSocket HMR preamble into every served document.
+///
+/// Two edit classes, both browser-visible:
+///  * a `"use client"` island edit → rebuild the client + ssr graphs and push a
+///    state-preserving React Fast Refresh update over the WebSocket (no reload, hook
+///    state preserved) — the island is a generic refresh boundary, so no `hmr.rs`
+///    change is needed;
+///  * a Server-Component edit (page/layout, no directive) → rebuild ONLY the
+///    react-server graph into an isolated `.rsc` root, copy it to `rsc-render`, and
+///    broadcast a reload. The orchestrator spawns a FRESH react-server child per GET,
+///    so the reload (and a fresh `curl`) show the new server-rendered content. This
+///    is honestly a full reload, not in-place HMR — a server component has no client
+///    runtime to hot-swap; documented, not dressed up.
+///
+/// The `.rsc` indirection is load-bearing: the react-server and ssr graphs both emit
+/// a `server/` dir, so re-emitting the react-server graph on a server-component edit
+/// would clobber the ssr bundle the orchestrator holds. Emitting react-server to
+/// `<out>/.rsc/server` and copying to `<out>/rsc-render` keeps them separate.
+mod next {
+    use super::*;
+    use std::fs;
+
+    /// The next orchestrator, embedded so the dev server is self-contained (it does
+    /// not need to locate the diffpack repo at runtime). It is plain Node that wires
+    /// the three emitted bundles + manifests into an HTTP app; it reads only absolute
+    /// paths derived from its `<output-dir>` argv, so running it from the output dir
+    /// is equivalent to running it from the repo.
+    const NEXT_SERVER_MJS: &str = include_str!("../scripts/rsc/next-server.mjs");
+
+    /// Entry point: build the three graphs, boot the orchestrator, put the HMR proxy
+    /// in front, and drive the incremental rebuild loop. Blocks until the watcher
+    /// stops or an unsupported edit is hit (a hard error).
+    pub fn run_next(options: &DevOptions, project_root: &Path) -> Result<(), String> {
+        let output_root = project_root.join(".diffpack-output");
+        // The react-server graph emits here (isolated from the ssr `server/` bundle),
+        // then is copied to `<out>/rsc-render` where the orchestrator reads it.
+        let rsc_root = output_root.join(".rsc");
+        let emit_options = EmitOptions {
+            minify: false,
+            source_map: options.source_map,
+            hmr: true,
+            ..EmitOptions::default()
+        };
+
+        // Build order is load-bearing: client first (its manifest feeds the server
+        // graphs), then react-server (-> rsc-render), then ssr.
+        println!("[dev] next: building client graph...");
+        let mut client = build_next_client(project_root, &output_root, emit_options)?;
+        println!("[dev] next: building react-server graph...");
+        let mut react_server =
+            build_next_react_server(project_root, &output_root, &rsc_root, emit_options)?;
+        println!("[dev] next: building ssr graph...");
+        let mut ssr = build_next_ssr(project_root, &output_root, emit_options)?;
+
+        // Write the orchestrator into the output dir and boot it on an internal port.
+        let next_server_script = output_root.join("next-server.mjs");
+        fs::create_dir_all(&output_root)
+            .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
+        fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
+            format!("cannot write {}: {error}", next_server_script.display())
+        })?;
+        let node_port = free_port()?;
+        let mut node = spawn_next_node(&next_server_script, &output_root, node_port)?;
+        wait_for_node(node_port).inspect_err(|_| {
+            let _ = node.kill();
+        })?;
+        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
+
+        // Fast Refresh runtime (must be present — a missing dep is a hard error now,
+        // not a broken update later).
+        let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
+
+        // The diffpack reverse proxy: serves the HMR client + Fast Refresh runtime,
+        // upgrades the WS channel, and injects the preamble into every HTML document.
+        let hub = HmrHub::default();
+        let proxy_listener = TcpListener::bind(("127.0.0.1", options.port)).map_err(|error| {
+            let _ = node.kill();
+            format!("cannot bind dev port {}: {error}", options.port)
+        })?;
+        {
+            let hub = hub.clone();
+            let refresh_runtime = Arc::clone(&refresh_runtime);
+            // Serve the emitted client `public/` (chunks + assets) directly from the
+            // proxy, so a browser HMR chunk fetch skips the Node orchestrator hop.
+            let static_dir = Some(Arc::new(output_root.join("public")));
+            std::thread::Builder::new()
+                .name("diffpack-dev-next-proxy".into())
+                .spawn(move || {
+                    serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir)
+                })
+                .map_err(|error| format!("cannot start proxy thread: {error}"))?;
+        }
+        println!(
+            "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
+            options.port
+        );
+
+        // Watch app/ recursively (all convention files live there) + the project root
+        // non-recursively (next.config.*), without recursing into node_modules.
+        let app_dir = project_root.join("app");
+        let watch_roots = vec![
+            (app_dir, RecursiveMode::Recursive),
+            (project_root.to_path_buf(), RecursiveMode::NonRecursive),
+        ];
+        let receiver = start_watcher_paths(&watch_roots)?;
+        println!("[dev] watching {}/app", project_root.display());
+
+        let result = next_watch_loop(
+            &receiver,
+            project_root,
+            &output_root,
+            &rsc_root,
+            &next_server_script,
+            node_port,
+            &mut node,
+            &mut client,
+            &mut react_server,
+            &mut ssr,
+            &hub,
+            emit_options,
+        );
+        let _ = node.kill();
+        let _ = node.wait();
+        result
+    }
+
+    /// Build the client graph (browser bundle + RSC seam + Manifest #1), leaving the
+    /// bundler alive. Dev config: development React (Fast Refresh hook) + HMR
+    /// instrumentation.
+    fn build_next_client(
+        project_root: &Path,
+        output_root: &Path,
+        options: EmitOptions,
+    ) -> Result<EnvBuild, String> {
+        let mut config = next_config_dev(project_root, "client")?;
+        // The client needs `#diffpack-call-server` so a `"use server"` client stub
+        // resolves its transport (harmless/unreachable when there is no action).
+        config.build.virtual_modules.push((
+            crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
+            crate::rsc::call_server_module_source().to_string(),
+        ));
+        let build = discover_next_env(config, "client", options)?;
+        emit_next_client(&build, project_root, output_root)?;
+        Ok(build)
+    }
+
+    /// Build the react-server graph (flight render/action bundle) into the isolated
+    /// `.rsc` root, then copy it to `<out>/rsc-render` and preserve its CSS.
+    fn build_next_react_server(
+        project_root: &Path,
+        output_root: &Path,
+        rsc_root: &Path,
+        options: EmitOptions,
+    ) -> Result<EnvBuild, String> {
+        let mut config = next_config_dev(project_root, "react-server")?;
+        register_server_virtual_modules(&mut config, project_root, output_root)?;
+        let build = discover_next_env(config, "react-server", options)?;
+        emit_next_react_server(&build, output_root, rsc_root)?;
+        Ok(build)
+    }
+
+    /// Build the ssr-of-flight graph into `<out>/server`, leaving the bundler alive.
+    fn build_next_ssr(
+        project_root: &Path,
+        output_root: &Path,
+        options: EmitOptions,
+    ) -> Result<EnvBuild, String> {
+        let mut config = next_config_dev(project_root, "ssr")?;
+        register_server_virtual_modules(&mut config, project_root, output_root)?;
+        let build = discover_next_env(config, "ssr", options)?;
+        emit_next_ssr(&build, output_root)?;
+        Ok(build)
+    }
+
+    /// Scaffold `.diffpack-next/` + derive the dev [`AppConfig`] for one environment
+    /// (a Next app-router project is guaranteed here — the caller already detected
+    /// it, so `None` is an internal invariant break, a clear error not a silent skip).
+    fn next_config_dev(project_root: &Path, environment: &str) -> Result<AppConfig, String> {
+        crate::next_adapter::configure_dev(project_root, environment)?.ok_or_else(|| {
+            format!(
+                "next dev: {} is not an app-router project (environment={environment})",
+                project_root.display()
+            )
+        })
+    }
+
+    /// Discover one environment's graph and wrap it in a long-lived [`EnvBuild`].
+    fn discover_next_env(
+        config: AppConfig,
+        label: &str,
+        options: EmitOptions,
+    ) -> Result<EnvBuild, String> {
+        let entry = config
+            .entry
+            .clone()
+            .ok_or_else(|| format!("no {label} entry found for the next app"))?;
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
+        for diagnostic in &update.diagnostics {
+            println!("[dev] next {label} known gap: {diagnostic}");
+        }
+        let session = bundler.direct_reachability();
+        let reachable = session.reachable_modules();
+        Ok(EnvBuild {
+            bundler,
+            session,
+            reachable,
+            options,
+        })
+    }
+
+    /// Emit the client `public/` (chunks + CSS + copied static files + next/image
+    /// variants) and persist both manifests the server graphs consume.
+    fn emit_next_client(
+        client: &EnvBuild,
+        project_root: &Path,
+        output_root: &Path,
+    ) -> Result<EmitSummary, String> {
+        let reachable = reachable_ids(client);
+        let summary = client
+            .bundler
+            .emit_public(&reachable, output_root, client.options)?;
+        config::copy_static_public(project_root, &summary.output_dir)?;
+        // next/image: emit downscaled responsive variants for every public raster.
+        let images = crate::next_adapter::scan_public_images(project_root)?;
+        if !images.is_empty() {
+            crate::next_adapter::emit_image_variants(project_root, &summary.output_dir, &images)?;
+        }
+        // The route -> client-chunk manifest the server build's start-manifest reads.
+        let client_manifest = client
+            .bundler
+            .client_route_manifest(&reachable, "client.js", "/")?;
+        client_manifest.write(&output_root.join(manifest::CLIENT_MANIFEST_FILE))?;
+        // Manifest #1 (client-references): the react-server render resolves each
+        // `"use client"` `$$id` through it, and the orchestrator joins it with the
+        // ssr manifest to build the SSR consumer manifest.
+        let client_references = client
+            .bundler
+            .client_references_manifest(&reachable, "client.js")?;
+        client_references.write(&output_root.join(crate::rsc::CLIENT_REFERENCES_MANIFEST_FILE))?;
+        Ok(summary)
+    }
+
+    /// The LEAN client re-emit for a Fast Refresh hot update: incrementally re-render
+    /// only the chunk(s) whose bytes changed (via `emit_public`), and NOTHING else.
+    /// A same-graph island text edit does not move module ids, so the client-references
+    /// / route manifests are byte-identical, the copied `public/` static assets are
+    /// unchanged, and the next/image variants (e.g. a downscaled `hero.png`) do not
+    /// need re-encoding. Keeping all of that OFF the hot-update critical path is what
+    /// makes the edit-to-update latency competitive; the full emit (`emit_next_client`)
+    /// still runs afterward, off the critical path, so a subsequent full document load
+    /// remains correct.
+    fn emit_next_client_hmr(client: &EnvBuild, output_root: &Path) -> Result<usize, String> {
+        let reachable = reachable_ids(client);
+        client
+            .bundler
+            .emit_public_incremental(&reachable, output_root, client.options)
+    }
+
+    /// Emit the react-server graph into `<rsc_root>/server`, preserve its compiled CSS
+    /// to `<out>/public/rsc.css`, write its own client-references manifest, and copy
+    /// the bundle to `<out>/rsc-render` (where the orchestrator spawns it per GET).
+    fn emit_next_react_server(
+        env: &EnvBuild,
+        output_root: &Path,
+        rsc_root: &Path,
+    ) -> Result<EmitSummary, String> {
+        let reachable = reachable_ids(env);
+        let summary = env.bundler.emit_server(&reachable, rsc_root, env.options)?;
+        // The react-server graph is authoritative for CSS; preserve it to the served,
+        // non-pruned public/rsc.css (the adapter links it into <head>).
+        let css = rsc_root.join("server/server.css");
+        if css.is_file() {
+            let dest = output_root.join("public/rsc.css");
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+            }
+            fs::copy(&css, &dest).map_err(|error| {
+                format!("cannot preserve react-server CSS to {}: {error}", dest.display())
+            })?;
+        }
+        // This build's OWN client-references manifest (its ids) — written under the
+        // `.rsc` root so it never clobbers the ssr build's manifest at `<out>`.
+        let server_references = env
+            .bundler
+            .client_references_manifest(&reachable, "server.mjs")?;
+        server_references.write(&rsc_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
+        // Copy the fresh bundle to rsc-render (the orchestrator's per-request child).
+        replace_dir(&rsc_root.join("server"), &output_root.join("rsc-render"))?;
+        Ok(summary)
+    }
+
+    /// Emit the ssr-of-flight graph into `<out>/server` and write ITS client-references
+    /// manifest (its ids) to `<out>` — the manifest the orchestrator reads as the SSR
+    /// half of the divergent-id module map.
+    fn emit_next_ssr(env: &EnvBuild, output_root: &Path) -> Result<EmitSummary, String> {
+        let reachable = reachable_ids(env);
+        let summary = env.bundler.emit_server(&reachable, output_root, env.options)?;
+        let server_references = env
+            .bundler
+            .client_references_manifest(&reachable, "server.mjs")?;
+        server_references.write(&output_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
+        Ok(summary)
+    }
+
+    /// The incremental rebuild loop. Classifies each coalesced batch and applies the
+    /// smallest correct update: a structural change → full rebuild + orchestrator
+    /// restart + reload; an island edit → client+ssr rebuild + Fast Refresh WS update;
+    /// a server-component edit → react-server rebuild + reload.
+    #[allow(clippy::too_many_arguments)]
+    fn next_watch_loop(
+        receiver: &Receiver<notify::Result<notify::Event>>,
+        project_root: &Path,
+        output_root: &Path,
+        rsc_root: &Path,
+        next_server_script: &Path,
+        node_port: u16,
+        node: &mut Child,
+        client: &mut EnvBuild,
+        react_server: &mut EnvBuild,
+        ssr: &mut EnvBuild,
+        hub: &HmrHub,
+        emit_options: EmitOptions,
+    ) -> Result<(), String> {
+        // Last processed `(mtime, len)` per path, so the FSEvents + fast-poller pair
+        // (see `start_watcher_paths`) never rebuilds twice for one edit: whichever
+        // source fires first is handled and recorded; the other's later echo reads the
+        // same signature and is dropped.
+        let mut processed: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
+        loop {
+            let first = match receiver.recv() {
+                Ok(event) => event,
+                Err(_) => return Ok(()),
+            };
+            let paths = coalesce_batch(receiver, first);
+            let changed = paths
+                .into_iter()
+                .filter(|path| is_module_path(path))
+                .filter(|path| {
+                    // Drop a path whose content signature is unchanged since we last
+                    // processed it (a duplicate event from the other watch source). A
+                    // path we cannot stat (e.g. just deleted) has no signature and is
+                    // kept — a real change to react to.
+                    match std::fs::metadata(path).and_then(|m| Ok((m.modified()?, m.len()))) {
+                        Ok(sig) => {
+                            if processed.get(path) == Some(&sig) {
+                                false
+                            } else {
+                                processed.insert(path.clone(), sig);
+                                true
+                            }
+                        }
+                        Err(_) => true,
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+            if changed.is_empty() {
+                continue;
+            }
+
+            // A config-file edit can't be live re-derived; warn loudly, keep serving.
+            if changed.iter().any(|path| is_config_file(path)) {
+                println!(
+                    "[dev] WARNING: a config file changed (next.config.* / package.json / tsconfig). Live config re-derivation is not implemented — the dev server is STILL USING THE STARTUP CONFIG. Restart `diffpack dev` to apply it."
+                );
+            }
+
+            let known_by_any = |path: &Path| {
+                client.bundler.is_known_module(path)
+                    || react_server.bundler.is_known_module(path)
+                    || ssr.bundler.is_known_module(path)
+            };
+            // A new module (exists, unknown to every graph) shifts ids across the whole
+            // partition and cannot be hot-patched — full rebuild all three + restart +
+            // reload (re-scans islands/routes too, so a new island/route is picked up).
+            let structural = changed
+                .iter()
+                .any(|path| path.exists() && !known_by_any(path));
+            if structural {
+                let started = Instant::now();
+                rebuild_all(
+                    project_root,
+                    output_root,
+                    rsc_root,
+                    client,
+                    react_server,
+                    ssr,
+                    emit_options,
+                )?;
+                restart_next_node(node, next_server_script, output_root, node_port)?;
+                hub.broadcast_reload();
+                println!(
+                    "[dev] next structural change ({} file(s)) in {:.1}ms | full rebuild + reload",
+                    changed.len(),
+                    started.elapsed().as_secs_f64() * 1_000.0,
+                );
+                continue;
+            }
+
+            let started = Instant::now();
+            let mut island_ids: BTreeSet<String> = BTreeSet::new();
+            let mut client_c = EnvCounters::default();
+            let mut server_c = EnvCounters::default();
+            let mut server_reload = false;
+            let mut graph_changed = false;
+            // Islands re-emitted leanly on the critical path; their SSR-of-flight
+            // re-emit is deferred PAST the push (below) so it never inflates the
+            // measured edit-to-update latency — the Fast Refresh hot update never
+            // consults the SSR bundle, only the next full document load does.
+            let mut deferred_ssr: Vec<PathBuf> = Vec::new();
+
+            for path in &changed {
+                let source = fs::read_to_string(path).unwrap_or_default();
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let is_island = crate::rsc::detect_directive(&canonical, &source)
+                    == Some(crate::rsc::RscDirective::Client);
+                if is_island && client.bundler.is_known_module(path) {
+                    // Island edit — CRITICAL PATH: rebuild the client Fast Refresh
+                    // boundary and incrementally re-emit ONLY the changed chunk. A
+                    // same-graph island edit cannot move ids, so the manifests, the
+                    // copied `public/` static assets, and the next/image variants are
+                    // all unchanged — none of that is re-run here (only a structural
+                    // change, handled by `rebuild_all`, touches them). The SSR re-emit
+                    // is deferred past the push.
+                    let rebuilt = client.rebuild(path)?;
+                    let rendered_chunks = emit_next_client_hmr(client, output_root)?;
+                    island_ids.extend(rebuilt.changed_ids.iter().cloned());
+                    graph_changed |= rebuilt.graph_changed;
+                    client_c.add(&rebuilt, rendered_chunks);
+                    if ssr.bundler.is_known_module(path) {
+                        deferred_ssr.push(path.clone());
+                    }
+                } else if react_server.bundler.is_known_module(path) {
+                    // Server-component edit: rebuild ONLY the react-server graph and
+                    // re-publish it to `rsc-render`. The persistent dev worker
+                    // re-imports the bundle (`?v=<mtime>`) on the next `?__rsc=1` flight
+                    // fetch, so it sees this bundle — no orchestrator/worker restart.
+                    let rebuilt = react_server.rebuild(path)?;
+                    let summary = emit_next_react_server(react_server, output_root, rsc_root)?;
+                    graph_changed |= rebuilt.graph_changed;
+                    server_c.add(&rebuilt, summary.rendered_chunks);
+                    server_reload = true;
+                } else {
+                    // Known to neither the client nor the react-server graph as an
+                    // editable leaf (e.g. a shared module the partition places
+                    // elsewhere). Reconciling it precisely is out of scope for the
+                    // fixture — force a correct full rebuild rather than guess.
+                    graph_changed = true;
+                }
+            }
+
+            // A graph-structure change (import added/removed) re-partitions chunks and
+            // shifts ids — the hot update's ESM re-import would fail to bind. Re-emit
+            // already ran; a full rebuild + reload is the correct, non-crashing path.
+            if graph_changed {
+                rebuild_all(
+                    project_root,
+                    output_root,
+                    rsc_root,
+                    client,
+                    react_server,
+                    ssr,
+                    emit_options,
+                )?;
+                restart_next_node(node, next_server_script, output_root, node_port)?;
+                hub.broadcast_reload();
+                println!(
+                    "[dev] next rebuilt {} file(s) in {:.1}ms | graph changed -> full reload",
+                    changed.len(),
+                    started.elapsed().as_secs_f64() * 1_000.0,
+                );
+                continue;
+            }
+
+            // PUSH FIRST — the user-visible edit-to-update event, measured here.
+            let update = if !island_ids.is_empty() {
+                // State-preserving React Fast Refresh (no reload). Push a MICRO-CHUNK
+                // (only the changed modules) so the browser re-parses ~1 KB, not the
+                // ~1 MB entry chunk; served directly off disk by the proxy.
+                hmr_push_client(client, &island_ids, hub, Some(output_root))
+            } else if server_reload {
+                // Server-component edit: an in-place RSC refresh (no full page reload).
+                // The client refetches the current route's flight and diff-renders it;
+                // the fresh react-server bundle is already published to `rsc-render`,
+                // and client-island state is preserved by React reconciliation.
+                hub.broadcast_rsc_refresh();
+                "server component -> in-place RSC refresh (no reload)".to_string()
+            } else {
+                "no visible change".to_string()
+            };
+            let update_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            // OFF THE CRITICAL PATH (after the push, before the next event drains):
+            // finish each island's SSR-of-flight re-emit so a subsequent FULL document
+            // load hydrates against fresh code. Both steps are incremental.
+            for path in &deferred_ssr {
+                let rebuilt = ssr.rebuild(path)?;
+                let summary = emit_next_ssr(ssr, output_root)?;
+                server_c.add(&rebuilt, summary.rendered_chunks);
+            }
+
+            println!(
+                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms (total {:.1}ms) | client transformed={} changed={} rendered_chunks={} | server transformed={} changed={} rendered_chunks={} | {update}",
+                changed.len(),
+                started.elapsed().as_secs_f64() * 1_000.0,
+                client_c.transformed,
+                client_c.changed,
+                client_c.rendered_chunks,
+                server_c.transformed,
+                server_c.changed,
+                server_c.rendered_chunks,
+            );
+        }
+    }
+
+    /// Re-discover and re-emit all three graphs from scratch (used for structural /
+    /// graph-changing edits, where module ids shift across the partition).
+    fn rebuild_all(
+        project_root: &Path,
+        output_root: &Path,
+        rsc_root: &Path,
+        client: &mut EnvBuild,
+        react_server: &mut EnvBuild,
+        ssr: &mut EnvBuild,
+        emit_options: EmitOptions,
+    ) -> Result<(), String> {
+        *client = build_next_client(project_root, output_root, emit_options)?;
+        *react_server = build_next_react_server(project_root, output_root, rsc_root, emit_options)?;
+        *ssr = build_next_ssr(project_root, output_root, emit_options)?;
+        Ok(())
+    }
+
+    /// Spawn the next orchestrator (`node next-server.mjs <output-dir> <port>`) with
+    /// `DIFFPACK_NEXT_DEV=1` so it re-imports the SSR bundle on change. stdout/stderr
+    /// are inherited so orchestrator/worker errors surface in the dev console; stdin is
+    /// a PIPE this process holds open. The orchestrator exits when that stdin closes
+    /// (`next-server.mjs` watches for it), so when `diffpack dev` dies for ANY reason —
+    /// including SIGKILL, where no Rust cleanup runs — the OS closes the pipe and the
+    /// orchestrator (and, in turn, its persistent worker) shuts down instead of
+    /// orphaning. The returned [`Child`] owns the write end; keeping it alive keeps the
+    /// pipe open for the orchestrator's lifetime.
+    fn spawn_next_node(script: &Path, output_root: &Path, port: u16) -> Result<Child, String> {
+        Command::new("node")
+            .arg(script)
+            .arg(output_root)
+            .arg(port.to_string())
+            .env("DIFFPACK_NEXT_DEV", "1")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                format!("cannot start next orchestrator ({}): {error}", script.display())
+            })
+    }
+
+    /// Kill the orchestrator and spawn a fresh one on the same port (used for
+    /// structural rebuilds, where the react-server/ssr bundles are re-derived).
+    fn restart_next_node(
+        node: &mut Child,
+        script: &Path,
+        output_root: &Path,
+        port: u16,
+    ) -> Result<(), String> {
+        let _ = node.kill();
+        let _ = node.wait();
+        *node = spawn_next_node(script, output_root, port)?;
+        wait_for_node(port)
+    }
+
+    /// Replace `dest` with a fresh recursive copy of `src` (used to publish the freshly
+    /// emitted react-server bundle from `.rsc/server` to `rsc-render`).
+    fn replace_dir(src: &Path, dest: &Path) -> Result<(), String> {
+        if dest.exists() {
+            fs::remove_dir_all(dest)
+                .map_err(|error| format!("cannot clear {}: {error}", dest.display()))?;
+        }
+        copy_dir_recursive(src, dest)
+    }
+
+    fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+        fs::create_dir_all(dest)
+            .map_err(|error| format!("cannot create {}: {error}", dest.display()))?;
+        let read = fs::read_dir(src)
+            .map_err(|error| format!("cannot read {}: {error}", src.display()))?;
+        for entry in read {
+            let entry = entry.map_err(|error| format!("cannot read {}: {error}", src.display()))?;
+            let from = entry.path();
+            let to = dest.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("cannot stat {}: {error}", from.display()))?;
+            if file_type.is_dir() {
+                copy_dir_recursive(&from, &to)?;
+            } else {
+                fs::copy(&from, &to).map_err(|error| {
+                    format!("cannot copy {} -> {}: {error}", from.display(), to.display())
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

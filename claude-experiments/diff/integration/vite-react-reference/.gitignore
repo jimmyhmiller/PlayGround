@@ -23,3 +23,13 @@ dist-ssr
 *.sln
 *.sw?
 dist-diffpack
+
+# `diffpack dev` build output.
+.diffpack-output/
+
+# The monorepo root .gitignore blanket-ignores *.svg, but these two logo assets
+# are REQUIRED fixture source: main.tsx/App.tsx import them, and without them the
+# bundle's unresolved imports become throwing shims so the app never mounts.
+# Re-include them here (a file glob, so this scoped negation is valid).
+!src/assets/react.svg
+!src/assets/vite.svg

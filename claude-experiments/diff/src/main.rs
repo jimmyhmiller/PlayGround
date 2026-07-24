@@ -273,8 +273,38 @@ fn run() -> Result<(), String> {
                 .find(|value| !value.to_string_lossy().starts_with("--"))
                 .and_then(|value| value.to_str().map(str::to_string))
                 .unwrap_or_else(|| "client".to_string());
-            let mut config =
-                diffpack::config::derive_config(Path::new(&project_root), &environment)?;
+
+            // `static` — the SSG prerender phase (Full SSG). It builds NO graph: it
+            // reuses the three already-emitted bundles (client / react-server render /
+            // ssr) + their manifests, re-runs native route classification to write the
+            // prerender plan, then spawns the node prerenderer (the app's own React
+            // runtime — the explicitly-allowed oracle, exactly as the orchestrator
+            // renders) to write `.html` + `.rsc` for every static/SSG route.
+            if environment == "static" {
+                let static_export = remaining
+                    .iter()
+                    .any(|value| value.to_str() == Some("--static-export"));
+                return build_static(Path::new(&project_root), static_export);
+            }
+
+            // Next.js app-router apps have no TanStack/src entry; their "entry" is
+            // the app-router file convention (`app/layout.tsx` wrapping
+            // `app/page.tsx`). The next adapter detects such a project, scaffolds the
+            // three RSC entries (+ minimal `next/*` shims) under `.diffpack-next/`,
+            // and returns a ready config; a non-Next project returns `None` and falls
+            // back to the TanStack `derive_config` path unchanged.
+            let mut config = match diffpack::next_adapter::configure(
+                Path::new(&project_root),
+                &environment,
+            )? {
+                Some(next_config) => {
+                    println!(
+                        "next app-router adapter: scaffolded .diffpack-next/ for environment={environment}"
+                    );
+                    next_config
+                }
+                None => diffpack::config::derive_config(Path::new(&project_root), &environment)?,
+            };
             let entry = config
                 .entry
                 .clone()
@@ -303,6 +333,16 @@ fn run() -> Result<(), String> {
             // server's `router-manifest.js` import resolves and loads it. A missing
             // client manifest is a hard, specific error (run the client build first)
             // rather than a silent empty manifest.
+            // RSC server actions — client transport. A `"use server"` module built
+            // for the client is rewritten into `createServerReference(id, callServer)`
+            // stubs importing `callServer` from `#diffpack-call-server`; register the
+            // embedded transport under that specifier so the stub resolves. Harmless
+            // (unreachable) when the app has no `"use server"` module.
+            config.build.virtual_modules.push((
+                diffpack::rsc::CALL_SERVER_SPECIFIER.to_string(),
+                diffpack::rsc::call_server_module_source().to_string(),
+            ));
+
             if config.environment != "client" {
                 let client_manifest_path =
                     output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
@@ -345,6 +385,50 @@ fn run() -> Result<(), String> {
                     "registered {} server function(s) in the native server-fn resolver",
                     server_fns.len(),
                 );
+
+                // RSC server actions — server dispatch. Register the generated action
+                // resolver (`#diffpack-rsc-action-resolver`) that `getServerActionById`
+                // dispatches through, keyed by the same `"<moduleId>#<name>"` id the
+                // client stub and the server registration derive, plus the embedded
+                // `handleServerAction` endpoint (`#diffpack-rsc-action-handler`). The
+                // resolver is generated from a pre-scan of the app source for
+                // `"use server"` modules. Registered before discovery so the subpath
+                // imports resolve to the native modules.
+                let server_actions =
+                    diffpack::rsc::scan_project_server_actions(Path::new(&project_root))?;
+                config.build.virtual_modules.push((
+                    diffpack::rsc::ACTION_RESOLVER_SPECIFIER.to_string(),
+                    diffpack::rsc::generate_action_resolver_module(&server_actions),
+                ));
+                config.build.virtual_modules.push((
+                    diffpack::rsc::ACTION_HANDLER_SPECIFIER.to_string(),
+                    diffpack::rsc::action_handler_module_source().to_string(),
+                ));
+                println!(
+                    "registered {} server action(s) in the native rsc action resolver",
+                    server_actions.len(),
+                );
+
+                // RSC flight — SSR consumer manifest (Manifest #2). The SSR pass
+                // consumes the flight stream with `createFromReadableStream`, which
+                // resolves the client references it carries through this manifest.
+                // It is derived natively from the client build's Manifest #1 (the
+                // client-references manifest), so the SSR graph resolves each
+                // client reference to the real module under diffpack's one runtime-id
+                // scheme. Registered under `#diffpack-rsc-ssr-consumer-manifest`; an
+                // app with no `"use client"` module gets an empty (but valid) map.
+                let client_references_path =
+                    output_root.join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
+                let client_references =
+                    diffpack::rsc::ClientReferencesManifest::read(&client_references_path)?;
+                config.build.virtual_modules.push((
+                    diffpack::rsc::SSR_CONSUMER_MANIFEST_SPECIFIER.to_string(),
+                    client_references.to_ssr_consumer_manifest_module(None),
+                ));
+                println!(
+                    "registered the rsc ssr consumer manifest ({} client reference(s))",
+                    client_references.entries.len(),
+                );
             }
 
             println!(
@@ -384,6 +468,25 @@ fn run() -> Result<(), String> {
                     Path::new(&project_root),
                     &summary.output_dir,
                 )?;
+                // next/image (Slice J): emit downscaled responsive variants for every
+                // raster under `public/` into `<public>/_diffpack-image/`. The runtime
+                // shim's `srcset` points at these static files (no image server). A
+                // no-op for a non-Next project (no public images / no app-router).
+                let public_images =
+                    diffpack::next_adapter::scan_public_images(Path::new(&project_root))?;
+                if !public_images.is_empty() {
+                    let variants = diffpack::next_adapter::emit_image_variants(
+                        Path::new(&project_root),
+                        &summary.output_dir,
+                        &public_images,
+                    )?;
+                    if variants > 0 {
+                        println!(
+                            "emitted {variants} next/image variant file(s) under {}/_diffpack-image",
+                            summary.output_dir.display(),
+                        );
+                    }
+                }
                 // Persist the route -> client chunk mapping so the server build can
                 // generate the TanStack manifest from real emitted chunk URLs.
                 let client_manifest =
@@ -391,6 +494,20 @@ fn run() -> Result<(), String> {
                 let client_manifest_path =
                     output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
                 client_manifest.write(&client_manifest_path)?;
+                // Persist the client-references manifest (Manifest #1 / bundlerConfig)
+                // so the react-server render can resolve each `"use client"` `$$id` to
+                // its client runtime id + hosting chunk. Regenerated on every client
+                // emit (the ids are build-derived; the moduleId key is stable).
+                let client_references =
+                    bundler.client_references_manifest(&reachable, "client.js")?;
+                let client_references_path = output_root
+                    .join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
+                client_references.write(&client_references_path)?;
+                println!(
+                    "wrote {} ({} client reference(s))",
+                    client_references_path.display(),
+                    client_references.entries.len(),
+                );
                 println!(
                     "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
                     summary.output_dir.display(),
@@ -406,6 +523,47 @@ fn run() -> Result<(), String> {
                 );
             } else {
                 let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
+                // The react-server graph is authoritative for the app's CSS (Server
+                // Components render there, so its CSS-Module class scoping matches the
+                // flight-rendered classNames). Preserve its compiled `server.css` to
+                // the served, non-pruned `public/rsc.css` (the SSR build would
+                // otherwise prune it from `server/`); the adapter links it into the
+                // document head. Next injects the route's stylesheets the same way.
+                if config.environment == "react-server" {
+                    let css = output_root.join("server/server.css");
+                    if css.is_file() {
+                        let dest = output_root.join("public/rsc.css");
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent).map_err(|error| {
+                                format!("cannot create {}: {error}", parent.display())
+                            })?;
+                        }
+                        std::fs::copy(&css, &dest).map_err(|error| {
+                            format!("cannot preserve react-server CSS to {}: {error}", dest.display())
+                        })?;
+                        println!("preserved react-server CSS -> {}", dest.display());
+                    }
+                }
+                // Persist THIS server build's own client-references manifest (its
+                // runtime ids + hosting chunks for every `"use client"` module). The
+                // SSR-of-flight pass needs it: the flight carries the CLIENT build's
+                // ids, but the SSR graph resolves references through its OWN registry
+                // under different ids. Joining the client manifest (client ids) with
+                // this one (this build's ids) on the shared canonical module id yields
+                // the `ssrModuleMapping` (Manifest #2's `moduleMap` keyed by client id
+                // -> this build's id). Written under a build-distinct file name so the
+                // react-server render build and the SSR build do not clobber each
+                // other's manifest.
+                let server_references =
+                    bundler.client_references_manifest(&reachable, "server.mjs")?;
+                let server_references_path = output_root
+                    .join(diffpack::rsc::SERVER_REFERENCES_MANIFEST_FILE);
+                server_references.write(&server_references_path)?;
+                println!(
+                    "wrote {} ({} client reference(s) under this build's ids)",
+                    server_references_path.display(),
+                    server_references.entries.len(),
+                );
                 println!(
                     "emitted {}: {} server .mjs, {} .css, {} asset(s)",
                     summary.output_dir.display(),
@@ -564,12 +722,115 @@ fn run() -> Result<(), String> {
                 source_map,
             })
         }
+        // Debug/oracle helpers: expose the RSC `"use server"` transforms and the
+        // generated action resolver as RAW ESM on stdout (no other output), so an
+        // oracle can exercise the exact Rust transform outputs against the real
+        // `react-server-dom-webpack` runtime without a full app build. These print
+        // node-runnable module source; they are inspection tools, not a build path.
+        Some("rsc-transform") => {
+            let file = arguments.next().ok_or_else(|| {
+                "usage: diffpack rsc-transform <file> <client|server|client-ref>".to_string()
+            })?;
+            let which = arguments.next().ok_or_else(|| {
+                "usage: diffpack rsc-transform <file> <client|server|client-ref>".to_string()
+            })?;
+            let path = Path::new(&file);
+            let source = std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let out = match which.to_str() {
+                Some("client") => diffpack::rsc::transform_use_server_client(path, &source)
+                    .ok_or_else(|| {
+                        format!("{} is not a \"use server\" module", path.display())
+                    })?,
+                Some("server") => diffpack::rsc::transform_use_server_server(path, &source)?
+                    .ok_or_else(|| {
+                        format!("{} is not a \"use server\" module", path.display())
+                    })?,
+                // The REACT-SERVER-graph rewrite of a `"use client"` module: its
+                // real code never reaches the server; each export becomes a client
+                // reference the flight render serializes via the manifest.
+                Some("client-ref") => diffpack::rsc::transform_use_client_server(path, &source)
+                    .ok_or_else(|| {
+                        format!("{} is not a \"use client\" module", path.display())
+                    })?,
+                other => {
+                    return Err(format!(
+                        "unknown rsc-transform target {:?}; expected client|server|client-ref",
+                        other
+                    ));
+                }
+            };
+            print!("{out}");
+            Ok(())
+        }
+        // Debug/oracle helper: print the RSC SSR consumer manifest (Manifest #2)
+        // derived natively from a build's emitted `client-references-manifest.json`
+        // (Manifest #1), so an oracle's `createFromReadableStream` resolves the
+        // client references in a flight stream through the same manifest diffpack
+        // wires into the SSR build. Reads `<output-dir>/client-references-manifest.json`.
+        Some("rsc-ssr-manifest") => {
+            let output_dir = arguments.next().ok_or_else(|| {
+                "usage: diffpack rsc-ssr-manifest <.diffpack-output dir>".to_string()
+            })?;
+            let manifest_path = Path::new(&output_dir)
+                .join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
+            let manifest =
+                diffpack::rsc::ClientReferencesManifest::read(&manifest_path)?;
+            let value = manifest.to_ssr_consumer_manifest_json(None);
+            print!(
+                "{}",
+                serde_json::to_string_pretty(&value)
+                    .map_err(|error| format!("cannot serialize ssr consumer manifest: {error}"))?
+            );
+            Ok(())
+        }
+        Some("rsc-resolver") => {
+            let root = arguments.next().ok_or_else(|| {
+                "usage: diffpack rsc-resolver <project-root>".to_string()
+            })?;
+            let entries =
+                diffpack::rsc::scan_project_server_actions(Path::new(&root))?;
+            print!(
+                "{}",
+                diffpack::rsc::generate_action_resolver_module(&entries)
+            );
+            Ok(())
+        }
+        // Conformance helper: for EACH Tailwind candidate class on stdin (one per
+        // line), compile it in isolation against `@import 'tailwindcss'` and print one
+        // NDJSON line `{"class":…,"ok":bool,"css":…,"error":…}`. Per-class isolation is
+        // required because the compiler hard-errors on an unsupported utility, which
+        // would otherwise abort a whole batch. Used by the Tailwind conformance harness
+        // to compare diffpack's native compiler against Tailwind's own test suite.
+        Some("tailwind") => {
+            use std::io::Read as _;
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("cannot read stdin: {error}"))?;
+            for line in input.lines() {
+                let class = line.trim();
+                if class.is_empty() {
+                    continue;
+                }
+                let mut set = std::collections::BTreeSet::new();
+                set.insert(class.to_string());
+                let value = match diffpack::tailwind::compile("@import 'tailwindcss';\n", &set) {
+                    Ok(css) => serde_json::json!({ "class": class, "ok": true, "css": css }),
+                    Err(error) => {
+                        serde_json::json!({ "class": class, "ok": false, "error": error })
+                    }
+                };
+                println!("{value}");
+            }
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|ssr|nitro] [--no-minify] [--sourcemap] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {
@@ -605,6 +866,75 @@ fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mod
     );
 }
 
+/// The embedded SSG node scripts (guest code kept in REAL files under scripts/rsc/,
+/// embedded so the built binary is self-contained; written next to the output so the
+/// sibling `import "./next-render-core.mjs"` resolves regardless of cwd).
+const NEXT_RENDER_CORE_MJS: &str = include_str!("../scripts/rsc/next-render-core.mjs");
+const NEXT_PRERENDER_MJS: &str = include_str!("../scripts/rsc/next-prerender.mjs");
+
+/// `diffpack build-app <root> static` — the SSG prerender phase. Builds NO graph:
+/// reuses the three already-emitted bundles + manifests, re-runs native route
+/// classification to write the prerender plan, then spawns the node prerenderer (the
+/// app's own React runtime — the explicitly-allowed oracle) to write `.html` + `.rsc`
+/// for every static/SSG route. Dynamic routes are recorded, never dropped.
+fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> {
+    let output_root = project_root.join(".diffpack-output");
+
+    // Hard-error (naming which) if any of the four inputs is missing — mirrors the
+    // orchestrator's fail() checks. The SSG render reuses these verbatim.
+    for (label, rel) in [
+        ("react-server render bundle", "rsc-render/server.mjs"),
+        ("SSR bundle", "server/server.mjs"),
+        ("client-references manifest", "client-references-manifest.json"),
+        ("ssr-references manifest", "server-references-manifest.json"),
+    ] {
+        let p = output_root.join(rel);
+        if !p.exists() {
+            return Err(format!(
+                "{label} not found at {} — run the client -> react-server (cp -> rsc-render) -> ssr builds first",
+                p.display(),
+            ));
+        }
+    }
+
+    // Native route classification -> the machine-readable prerender plan.
+    let route_count = diffpack::next_adapter::write_prerender_plan(project_root, &output_root)?;
+    println!(
+        "next SSG: classified {route_count} route(s) -> {}",
+        output_root.join("static/prerender-plan.json").display(),
+    );
+
+    // Materialize the embedded node scripts next to the output.
+    let core_path = output_root.join("next-render-core.mjs");
+    let prerender_path = output_root.join("next-prerender.mjs");
+    std::fs::write(&core_path, NEXT_RENDER_CORE_MJS)
+        .map_err(|error| format!("cannot write {}: {error}", core_path.display()))?;
+    std::fs::write(&prerender_path, NEXT_PRERENDER_MJS)
+        .map_err(|error| format!("cannot write {}: {error}", prerender_path.display()))?;
+
+    // Spawn the prerenderer (the app's own React runtime; the bundling stays native
+    // Rust). Its stdout/stderr stream straight through; a nonzero exit fails the build.
+    let mut command = std::process::Command::new("node");
+    command.arg(&prerender_path).arg(&output_root);
+    if static_export {
+        command.arg("--static-export");
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("cannot spawn node for the SSG prerenderer: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "the SSG prerenderer (node {}) failed with {status}",
+            prerender_path.display(),
+        ));
+    }
+    println!(
+        "next SSG: prerendered static routes -> {}",
+        output_root.join("static").display(),
+    );
+    Ok(())
+}
+
 fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
     let (mut bundler, initial) = Bundler::discover_direct(entry)?;
     let mut session = bundler.direct_reachability();
@@ -634,6 +964,12 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
             .recv()
             .map_err(|_| "filesystem watcher stopped".to_string())?
             .map_err(|error| format!("filesystem watch error: {error}"))?;
+        // `rebuild_started` is stamped AFTER the OS watcher delivered the event, so
+        // `rebuild=<ms>` below is the pure in-process rebuild (read + transform +
+        // reachability + emit) and EXCLUDES OS change-detection latency — the
+        // apples-to-apples equivalent of esbuild's `context.rebuild()` and
+        // rolldown's `event.duration`, which likewise measure only the rebuild.
+        let rebuild_started = Instant::now();
         let paths = event.paths.into_iter().collect::<BTreeSet<_>>();
         for path in paths {
             if !is_module_path(&path) {
@@ -651,12 +987,14 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
             }
             reachable.extend(result.added);
             bundler.emit(&reachable, output)?;
+            let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
             println!(
-                "rebuilt {}: reachable={} transformed={} reachability={:.3}ms",
+                "rebuilt {}: reachable={} transformed={} reachability={:.3}ms rebuild={:.3}ms",
                 path.display(),
                 reachable.len(),
                 update.transformed_modules,
-                reachability_ms
+                reachability_ms,
+                rebuild_ms
             );
             for diagnostic in update.diagnostics {
                 eprintln!("diagnostic: {diagnostic}");

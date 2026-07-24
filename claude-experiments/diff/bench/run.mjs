@@ -12,6 +12,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateCorpus, expectedFreshValue, moduleName, editedModuleIndex, moduleSource } from "./gen.mjs";
@@ -336,11 +337,21 @@ function benchApp() {
 }
 
 function collectMeta() {
-  const cpu = readFileSync("/proc/cpuinfo", "utf8")
-    .split("\n")
-    .find((line) => line.startsWith("model name"))
-    ?.split(": ")[1]
-    ?.trim();
+  let cpu;
+  try {
+    // Linux: /proc/cpuinfo. macOS: sysctl. Fallback: node's os.cpus().
+    cpu = readFileSync("/proc/cpuinfo", "utf8")
+      .split("\n")
+      .find((line) => line.startsWith("model name"))
+      ?.split(": ")[1]
+      ?.trim();
+  } catch {
+    try {
+      cpu = execFileSync("sysctl", ["-n", "machdep.cpu.brand_string"], { encoding: "utf8" }).trim();
+    } catch {
+      cpu = os.cpus()?.[0]?.model?.trim();
+    }
+  }
   const versions = {};
   for (const name of ["esbuild", "rolldown", "@rspack/core", "vite"]) {
     try {

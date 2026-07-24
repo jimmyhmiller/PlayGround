@@ -1,9 +1,9 @@
 {
   "meta": {
-    "date": "2026-07-21T04:45:28.298Z",
-    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
-    "node": "v22.21.0",
-    "diffpackCommit": "4c5bf43a3",
+    "date": "2026-07-23T14:41:50.062Z",
+    "cpu": "Apple M2 Max",
+    "node": "v26.5.0",
+    "diffpackCommit": "5bdc64b5a",
     "versions": {
       "esbuild": "0.28.1",
       "rolldown": "1.2.0",
@@ -21,117 +21,117 @@
         "diffpack": {
           "verified": true,
           "coldMs": [
-            16.8,
-            14.7,
-            16.2,
-            18.2,
-            14.7
+            19.8,
+            18.9,
+            18.5,
+            19.2,
+            18.4
           ],
-          "coldMedianMs": 16.2,
+          "coldMedianMs": 18.9,
           "outputBytes": 33683,
-          "outputGzipBytes": 7385,
+          "outputGzipBytes": 7388,
           "outputFiles": 1,
-          "peakRssBytes": 10342400,
+          "peakRssBytes": 15800000,
           "incremental": {
             "rebuildMs": [
-              3.06,
-              3,
-              3.07,
-              3.4,
-              3.44
+              11.55,
+              9.73,
+              10.86,
+              12.46,
+              10.45
             ],
-            "medianMs": 3.07
+            "medianMs": 10.86
           }
         },
         "esbuild": {
           "verified": true,
           "coldMs": [
-            16.4,
-            16.4,
-            16.2,
-            16.8,
-            17.1
+            25,
+            26.1,
+            25,
+            25.8,
+            25.8
           ],
-          "coldMedianMs": 16.4,
-          "outputBytes": 134703,
-          "outputGzipBytes": 11533,
+          "coldMedianMs": 25.8,
+          "outputBytes": 186703,
+          "outputGzipBytes": 11883,
           "outputFiles": 1,
-          "peakRssBytes": 42876928,
+          "peakRssBytes": 48100000,
           "incremental": {
             "rebuildMs": [
-              19.56,
-              18.96,
-              19.29,
-              19.68,
-              19.18
+              17.26,
+              17.23,
+              17.65,
+              18.5,
+              18.06
             ],
-            "medianMs": 19.29
+            "medianMs": 17.65
           }
         },
         "rolldown": {
           "verified": true,
           "coldMs": [
-            55.7,
-            51.9,
-            54.1,
-            54,
-            54.3
+            75.7,
+            75.6,
+            77.2,
+            74.4,
+            87.5
           ],
-          "coldMedianMs": 54.1,
-          "outputBytes": 43451,
-          "outputGzipBytes": 4669,
+          "coldMedianMs": 75.7,
+          "outputBytes": 56451,
+          "outputGzipBytes": 4831,
           "outputFiles": 1,
-          "peakRssBytes": 112574464,
+          "peakRssBytes": 120200000,
           "incremental": {
             "rebuildMs": [
-              9,
-              10,
-              9,
-              10,
-              9
+              18,
+              19,
+              18,
+              17,
+              18
             ],
-            "medianMs": 9
+            "medianMs": 18
           }
         },
         "rspack": {
           "verified": true,
           "coldMs": [
-            83.4,
-            81.5,
-            81.6,
-            76.6,
-            80.4
+            104.7,
+            98.2,
+            98,
+            97.8,
+            95.2
           ],
-          "coldMedianMs": 81.5,
-          "outputBytes": 51258,
-          "outputGzipBytes": 7617,
+          "coldMedianMs": 98,
+          "outputBytes": 82758,
+          "outputGzipBytes": 7966,
           "outputFiles": 1,
-          "peakRssBytes": 133566464,
+          "peakRssBytes": 118500000,
           "incremental": {
             "rebuildMs": [
-              35.52,
-              31.32,
-              33.27,
-              33.58,
-              31.45
+              56.3,
+              51.98,
+              51.67,
+              60.81,
+              57.68
             ],
-            "medianMs": 33.27
+            "medianMs": 56.3
           }
         },
         "vite": {
           "verified": true,
           "coldMs": [
-            120.3,
-            123.1,
-            121.4,
-            137.6,
-            132.5
+            140.4,
+            138.4,
+            140.9,
+            138.9,
+            136.3
           ],
-          "coldMedianMs": 123.1,
-          "outputBytes": 198,
-          "outputGzipBytes": 163,
+          "coldMedianMs": 138.9,
+          "outputBytes": 250,
+          "outputGzipBytes": 202,
           "outputFiles": 1,
-          "peakRssBytes": 138240000,
+          "peakRssBytes": 149700000,
           "incremental": {
             "skipped": "vite's incremental story is its dev-server HMR (unbundled/on-demand transform), a different axis than batch rebuild time; vite build has no in-process rebuild API"
           }
@@ -147,117 +147,117 @@
         "diffpack": {
           "verified": true,
           "coldMs": [
-            106.5,
-            119.1,
-            120.9,
-            112.8,
-            108.3
+            148.9,
+            158.2,
+            150.6,
+            148,
+            146.1
           ],
-          "coldMedianMs": 112.8,
+          "coldMedianMs": 148.9,
           "outputBytes": 366674,
-          "outputGzipBytes": 75666,
+          "outputGzipBytes": 75567,
           "outputFiles": 1,
-          "peakRssBytes": 47058944,
+          "peakRssBytes": 65300000,
           "incremental": {
             "rebuildMs": [
-              30.05,
-              29.97,
-              30.1,
-              30,
-              30.56
+              47.72,
+              26.87,
+              33.04,
+              42.3,
+              45.8
             ],
-            "medianMs": 30.05
+            "medianMs": 42.3
           }
         },
         "esbuild": {
           "verified": true,
           "coldMs": [
-            145.1,
-            152.3,
-            177.7,
-            170.4,
-            173.6
+            210.1,
+            199.7,
+            513.8,
+            199.1,
+            199
           ],
-          "coldMedianMs": 170.4,
-          "outputBytes": 1386694,
-          "outputGzipBytes": 115623,
+          "coldMedianMs": 199.7,
+          "outputBytes": 1906694,
+          "outputGzipBytes": 122010,
           "outputFiles": 1,
-          "peakRssBytes": 281952256,
+          "peakRssBytes": 287100000,
           "incremental": {
             "rebuildMs": [
-              155.24,
-              152.18,
-              152.58,
-              153.99,
-              134.53
+              164.76,
+              164.38,
+              165.68,
+              164.92,
+              166.66
             ],
-            "medianMs": 152.58
+            "medianMs": 164.92
           }
         },
         "rolldown": {
           "verified": true,
           "coldMs": [
-            169.5,
-            176.9,
-            174.6,
-            162.7,
-            177.3
+            236.6,
+            230.1,
+            232.9,
+            228.4,
+            230
           ],
-          "coldMedianMs": 174.6,
-          "outputBytes": 1606692,
-          "outputGzipBytes": 116463,
+          "coldMedianMs": 230.1,
+          "outputBytes": 2126692,
+          "outputGzipBytes": 123548,
           "outputFiles": 1,
-          "peakRssBytes": 376385536,
+          "peakRssBytes": 508300000,
           "incremental": {
             "rebuildMs": [
-              100,
-              98,
-              101,
-              109,
-              102
+              170,
+              180,
+              170,
+              168,
+              175
             ],
-            "medianMs": 101
+            "medianMs": 170
           }
         },
         "rspack": {
           "verified": true,
           "coldMs": [
-            293.8,
-            294.2,
-            284.5,
-            285.9,
-            298.1
+            350.6,
+            354.4,
+            362.3,
+            365.1,
+            351.3
           ],
-          "coldMedianMs": 293.8,
-          "outputBytes": 527508,
-          "outputGzipBytes": 70981,
+          "coldMedianMs": 354.4,
+          "outputBytes": 845008,
+          "outputGzipBytes": 73969,
           "outputFiles": 1,
-          "peakRssBytes": 291979264,
+          "peakRssBytes": 262200000,
           "incremental": {
             "rebuildMs": [
-              293.21,
-              291.38,
-              308,
-              287.26,
-              272.53
+              289.56,
+              289.78,
+              303.19,
+              295.1,
+              296.63
             ],
-            "medianMs": 291.38
+            "medianMs": 295.1
           }
         },
         "vite": {
           "verified": true,
           "coldMs": [
-            283.4,
-            299.1,
-            325.4,
-            461,
-            431
+            406.4,
+            394.1,
+            399.7,
+            406.6,
+            388.3
           ],
-          "coldMedianMs": 325.4,
-          "outputBytes": 200,
-          "outputGzipBytes": 164,
+          "coldMedianMs": 399.7,
+          "outputBytes": 252,
+          "outputGzipBytes": 203,
           "outputFiles": 1,
-          "peakRssBytes": 438566912,
+          "peakRssBytes": 585800000,
           "incremental": {
             "skipped": "vite's incremental story is its dev-server HMR (unbundled/on-demand transform), a different axis than batch rebuild time; vite build has no in-process rebuild API"
           }
@@ -273,117 +273,117 @@
         "diffpack": {
           "verified": true,
           "coldMs": [
-            37.7,
-            36.5,
-            34.9,
-            33.1,
-            36.1
+            27.8,
+            28.3,
+            28.8,
+            28.8,
+            28.3
           ],
-          "coldMedianMs": 36.1,
-          "outputBytes": 795910,
-          "outputGzipBytes": 66407,
+          "coldMedianMs": 28.3,
+          "outputBytes": 182463,
+          "outputGzipBytes": 14139,
           "outputFiles": 1,
-          "peakRssBytes": 23412736,
+          "peakRssBytes": 32200000,
           "incremental": {
             "rebuildMs": [
-              6.18,
-              6.64,
-              6.46,
-              6.58,
-              6.67
+              10,
+              8.48,
+              10.09,
+              10.97,
+              9.53
             ],
-            "medianMs": 6.58
+            "medianMs": 10
           }
         },
         "esbuild": {
           "verified": true,
           "coldMs": [
-            23.7,
-            24,
-            23.2,
-            21.5,
-            23.8
+            35.6,
+            36.2,
+            36.7,
+            36.7,
+            40
           ],
-          "coldMedianMs": 23.7,
-          "outputBytes": 293577,
-          "outputGzipBytes": 18754,
+          "coldMedianMs": 36.7,
+          "outputBytes": 345577,
+          "outputGzipBytes": 18855,
           "outputFiles": 1,
-          "peakRssBytes": 114966528,
+          "peakRssBytes": 114900000,
           "incremental": {
             "rebuildMs": [
-              20.91,
-              21.1,
-              20.45,
-              17.7,
-              19.26
+              23.05,
+              22.57,
+              20.55,
+              22.87,
+              20.77
             ],
-            "medianMs": 20.45
+            "medianMs": 22.57
           }
         },
         "rolldown": {
           "verified": true,
           "coldMs": [
-            71,
-            76.8,
-            68.2,
-            66.7,
-            70
+            82.2,
+            81.8,
+            86.6,
+            82.4,
+            83.1
           ],
-          "coldMedianMs": 70,
-          "outputBytes": 304047,
-          "outputGzipBytes": 18970,
+          "coldMedianMs": 82.4,
+          "outputBytes": 356047,
+          "outputGzipBytes": 18924,
           "outputFiles": 1,
-          "peakRssBytes": 157028352,
+          "peakRssBytes": 167800000,
           "incremental": {
             "rebuildMs": [
-              16,
-              15,
-              18,
-              17,
-              18
+              21,
+              22,
+              22,
+              21,
+              22
             ],
-            "medianMs": 17
+            "medianMs": 22
           }
         },
         "rspack": {
           "verified": true,
           "coldMs": [
-            111.5,
-            116,
-            104.3,
-            105.5,
-            107.7
+            113.4,
+            113.8,
+            113.3,
+            113.2,
+            114.9
           ],
-          "coldMedianMs": 107.7,
-          "outputBytes": 2304692,
-          "outputGzipBytes": 159985,
+          "coldMedianMs": 113.4,
+          "outputBytes": 2435692,
+          "outputGzipBytes": 165114,
           "outputFiles": 1,
-          "peakRssBytes": 179630080,
+          "peakRssBytes": 160700000,
           "incremental": {
             "rebuildMs": [
-              59.88,
-              64.15,
-              68.67,
-              67.63,
-              70.09
+              91.68,
+              113.21,
+              93.45,
+              111.37,
+              87.76
             ],
-            "medianMs": 67.63
+            "medianMs": 93.45
           }
         },
         "vite": {
           "verified": true,
           "coldMs": [
-            164,
-            165.2,
-            171.4,
-            142.1,
-            145.4
+            147.5,
+            150.4,
+            150.4,
+            149.8,
+            149.4
           ],
-          "coldMedianMs": 164,
-          "outputBytes": 301042,
-          "outputGzipBytes": 18839,
+          "coldMedianMs": 149.8,
+          "outputBytes": 353042,
+          "outputGzipBytes": 18767,
           "outputFiles": 1,
-          "peakRssBytes": 193417216,
+          "peakRssBytes": 209200000,
           "incremental": {
             "skipped": "vite's incremental story is its dev-server HMR (unbundled/on-demand transform), a different axis than batch rebuild time; vite build has no in-process rebuild API"
           }
@@ -399,117 +399,117 @@
         "diffpack": {
           "verified": true,
           "coldMs": [
-            256,
-            262.6,
-            259.9,
-            252.4,
-            271.5
+            203.4,
+            200.6,
+            203,
+            199.1,
+            202.7
           ],
-          "coldMedianMs": 259.9,
-          "outputBytes": 8108819,
-          "outputGzipBytes": 656071,
+          "coldMedianMs": 202.7,
+          "outputBytes": 1874454,
+          "outputGzipBytes": 132776,
           "outputFiles": 1,
-          "peakRssBytes": 172032000,
+          "peakRssBytes": 219900000,
           "incremental": {
             "rebuildMs": [
-              65.8,
-              64.13,
-              62.83,
-              65.25,
-              67
+              63.36,
+              68.97,
+              59.88,
+              63.73,
+              64.05
             ],
-            "medianMs": 65.25
+            "medianMs": 63.73
           }
         },
         "esbuild": {
           "verified": true,
           "coldMs": [
-            288.8,
-            302,
-            302.2,
-            285.9,
-            310.7
+            295.1,
+            300.5,
+            295.5,
+            310,
+            300.9
           ],
-          "coldMedianMs": 302,
-          "outputBytes": 2981068,
-          "outputGzipBytes": 182470,
+          "coldMedianMs": 300.5,
+          "outputBytes": 3501068,
+          "outputGzipBytes": 189025,
           "outputFiles": 1,
-          "peakRssBytes": 972824576,
+          "peakRssBytes": 951000000,
           "incremental": {
             "rebuildMs": [
-              229.84,
-              219.98,
-              206.79,
-              228.9,
-              199.22
+              215.55,
+              208.78,
+              236.45,
+              217.24,
+              224.58
             ],
-            "medianMs": 219.98
+            "medianMs": 217.24
           }
         },
         "rolldown": {
           "verified": true,
           "coldMs": [
-            263.4,
-            260.6,
-            265.7,
-            267.1,
-            262.8
+            274.4,
+            275.7,
+            278.5,
+            280,
+            276.1
           ],
-          "coldMedianMs": 263.4,
-          "outputBytes": 3086038,
-          "outputGzipBytes": 185164,
+          "coldMedianMs": 276.1,
+          "outputBytes": 3606038,
+          "outputGzipBytes": 189312,
           "outputFiles": 1,
-          "peakRssBytes": 812859392,
+          "peakRssBytes": 957000000,
           "incremental": {
             "rebuildMs": [
-              218,
-              166,
-              162,
-              168,
-              165
+              205,
+              203,
+              209,
+              204,
+              202
             ],
-            "medianMs": 166
+            "medianMs": 204
           }
         },
         "rspack": {
           "verified": true,
           "coldMs": [
-            555.6,
-            574.4,
-            585.1,
-            548.7,
-            566.4
+            546.9,
+            547.8,
+            546.8,
+            538.8,
+            538.5
           ],
-          "coldMedianMs": 566.4,
-          "outputBytes": 23322726,
-          "outputGzipBytes": 1638907,
+          "coldMedianMs": 546.8,
+          "outputBytes": 24642726,
+          "outputGzipBytes": 1655748,
           "outputFiles": 1,
-          "peakRssBytes": 666640384,
+          "peakRssBytes": 618000000,
           "incremental": {
             "rebuildMs": [
-              513.33,
-              549.54,
-              554.71,
-              547.72,
-              592.55
+              555.27,
+              552.99,
+              577.99,
+              537.09,
+              544.21
             ],
-            "medianMs": 549.54
+            "medianMs": 552.99
           }
         },
         "vite": {
           "verified": true,
           "coldMs": [
-            433.2,
-            430.3,
-            433,
-            442.2,
-            414.9
+            478.6,
+            479.2,
+            474.5,
+            479.5,
+            469.9
           ],
-          "coldMedianMs": 433,
-          "outputBytes": 3056033,
-          "outputGzipBytes": 183504,
+          "coldMedianMs": 478.6,
+          "outputBytes": 3576033,
+          "outputGzipBytes": 189274,
           "outputFiles": 1,
-          "peakRssBytes": 949276672,
+          "peakRssBytes": 1120000000,
           "incremental": {
             "skipped": "vite's incremental story is its dev-server HMR (unbundled/on-demand transform), a different axis than batch rebuild time; vite build has no in-process rebuild API"
           }
@@ -520,56 +520,56 @@
   "app": {
     "diffpack-client": {
       "wallMs": [
-        436,
-        434,
-        448,
-        453,
-        441
+        509,
+        538,
+        531,
+        542,
+        529
       ],
-      "wallMedianMs": 441,
-      "peakRssBytes": 185036800,
-      "outputBytes": 748676,
-      "outputGzipBytes": 347084,
+      "wallMedianMs": 531,
+      "peakRssBytes": 184800000,
+      "outputBytes": 748913,
+      "outputGzipBytes": 346998,
       "outputFiles": 38
     },
     "diffpack-ssr": {
       "wallMs": [
-        448,
-        494,
-        433,
-        440,
-        444
+        466,
+        463,
+        523,
+        470,
+        466
       ],
-      "wallMedianMs": 444,
-      "peakRssBytes": 186351616,
-      "outputBytes": 732208,
-      "outputGzipBytes": 223358,
+      "wallMedianMs": 466,
+      "peakRssBytes": 182400000,
+      "outputBytes": 731928,
+      "outputGzipBytes": 222921,
       "outputFiles": 42
     },
     "vite-build": {
       "wallMs": [
-        859,
-        862,
-        860,
-        853,
-        874
+        897,
+        898,
+        900,
+        884,
+        900
       ],
-      "wallMedianMs": 860,
-      "peakRssBytes": 392134656,
-      "outputBytes": 1500629,
-      "outputGzipBytes": 516142,
+      "wallMedianMs": 898,
+      "peakRssBytes": 424900000,
+      "outputBytes": 1500643,
+      "outputGzipBytes": 516009,
       "outputFiles": 83
     },
     "npm-run-build (vite build && tsc --noEmit)": {
       "wallMs": [
-        2252,
-        2265,
-        2306,
-        2254,
-        2294
+        2083,
+        2097,
+        2066,
+        2092,
+        2064
       ],
-      "wallMedianMs": 2265,
-      "peakRssBytes": 419606528
+      "wallMedianMs": 2083,
+      "peakRssBytes": 438500000
     }
   }
 }

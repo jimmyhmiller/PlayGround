@@ -67,6 +67,11 @@ const BOX_SHADOW_CHAIN: &str = "var(--tw-inset-shadow), var(--tw-inset-ring-shad
 /// Tailwind v4.
 const FILTER_CHAIN: &str = "var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)";
 
+/// The `transform` composition the rotate/skew slots feed into, verbatim from
+/// Tailwind v4. `transform`, `transform-cpu`, `rotate-x/y/z`, and `skew-*` all
+/// assign this (with `transform-gpu` prepending `translateZ(0)`).
+const TRANSFORM_CHAIN: &str = "var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,)";
+
 /// The `backdrop-filter` composition every backdrop utility assigns, verbatim
 /// from Tailwind v4 (also emitted with the `-webkit-` prefix).
 const BACKDROP_FILTER_CHAIN: &str = "var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,)";
@@ -141,7 +146,18 @@ pub fn compile_with_theme(
     candidate_classes: &BTreeSet<String>,
     app_theme_css: Option<&str>,
 ) -> Result<String, String> {
-    let theme = Theme::parse(app_theme_css.unwrap_or(THEME_CSS));
+    // The base theme (the app's installed `tailwindcss/theme.css` if found, else the
+    // embedded default) EXTENDED with any inline `@theme { … }` blocks the app's own
+    // stylesheet declares. A later declaration overrides an earlier one, so the app's
+    // tokens win — this is what makes create-next-app's default `@theme inline`
+    // (`--font-sans`, `--color-background`, …) resolve for `font-sans`, `bg-*`, etc.
+    let mut theme_src = app_theme_css.unwrap_or(THEME_CSS).to_string();
+    let app_theme = extract_theme_blocks(css);
+    if !app_theme.is_empty() {
+        theme_src.push('\n');
+        theme_src.push_str(&app_theme);
+    }
+    let theme = Theme::parse(&theme_src);
     let mut tw_props: BTreeSet<TwProp> = BTreeSet::new();
 
     // 1. Process the app's own CSS first: strip the framework import, expand
@@ -235,9 +251,18 @@ pub fn compile_with_theme(
         rules.sort();
         let conditions: Vec<&str> = media_key.split('|').filter(|c| !c.is_empty()).collect();
         for condition in &conditions {
-            out.push_str("@media (");
-            out.push_str(condition);
-            out.push_str("){");
+            // A condition already prefixed with `@` is a bare at-rule wrapper
+            // (e.g. `@starting-style`); emit it verbatim. Everything else is a
+            // media-feature/range condition wrapped in `@media (...)`.
+            if let Some(at_rule) = condition.strip_prefix('@') {
+                out.push('@');
+                out.push_str(at_rule);
+                out.push('{');
+            } else {
+                out.push_str("@media ");
+                out.push_str(&format_media_query(condition));
+                out.push('{');
+            }
         }
         for (_, _, css) in &rules {
             out.push_str(css);
@@ -988,6 +1013,10 @@ enum TwProp {
     SkewX,
     SkewY,
     SpaceYReverse,
+    DivideXReverse,
+    DivideYReverse,
+    BorderSpacingX,
+    BorderSpacingY,
     BorderStyle,
     GradientPosition,
     GradientFrom,
@@ -1048,6 +1077,14 @@ enum TwProp {
     ScaleZ,
     OutlineStyle,
     Content,
+    ScrollSnapStrictness,
+    ScrollbarThumb,
+    ScrollbarTrack,
+    PanX,
+    PanY,
+    PinchZoom,
+    TextShadowColor,
+    TextShadowAlpha,
 }
 
 impl TwProp {
@@ -1063,6 +1100,14 @@ impl TwProp {
             TwProp::SkewX => ("--tw-skew-x", "initial", "\"*\"", None),
             TwProp::SkewY => ("--tw-skew-y", "initial", "\"*\"", None),
             TwProp::SpaceYReverse => ("--tw-space-y-reverse", "0", "\"*\"", Some("0")),
+            TwProp::DivideXReverse => ("--tw-divide-x-reverse", "0", "\"*\"", Some("0")),
+            TwProp::DivideYReverse => ("--tw-divide-y-reverse", "0", "\"*\"", Some("0")),
+            TwProp::BorderSpacingX => {
+                ("--tw-border-spacing-x", "0", "\"<length>\"", Some("0"))
+            }
+            TwProp::BorderSpacingY => {
+                ("--tw-border-spacing-y", "0", "\"<length>\"", Some("0"))
+            }
             TwProp::BorderStyle => ("--tw-border-style", "solid", "\"*\"", Some("solid")),
             TwProp::GradientPosition => ("--tw-gradient-position", "initial", "\"*\"", None),
             TwProp::GradientFrom => {
@@ -1150,6 +1195,22 @@ impl TwProp {
             TwProp::ScaleZ => ("--tw-scale-z", "1", "\"*\"", Some("1")),
             TwProp::OutlineStyle => ("--tw-outline-style", "solid", "\"*\"", Some("solid")),
             TwProp::Content => ("--tw-content", "\"\"", "\"*\"", Some("\"\"")),
+            TwProp::ScrollSnapStrictness => {
+                ("--tw-scroll-snap-strictness", "proximity", "\"*\"", Some("proximity"))
+            }
+            TwProp::ScrollbarThumb => {
+                ("--tw-scrollbar-thumb", "#0000", "\"<color>\"", Some("#0000"))
+            }
+            TwProp::ScrollbarTrack => {
+                ("--tw-scrollbar-track", "#0000", "\"<color>\"", Some("#0000"))
+            }
+            TwProp::PanX => ("--tw-pan-x", "initial", "\"*\"", None),
+            TwProp::PanY => ("--tw-pan-y", "initial", "\"*\"", None),
+            TwProp::PinchZoom => ("--tw-pinch-zoom", "initial", "\"*\"", None),
+            TwProp::TextShadowColor => ("--tw-text-shadow-color", "initial", "\"*\"", None),
+            TwProp::TextShadowAlpha => {
+                ("--tw-text-shadow-alpha", "100%", "\"<percentage>\"", Some("100%"))
+            }
         }
     }
 
@@ -1262,6 +1323,13 @@ fn register_gradient_group(tw_props: &mut BTreeSet<TwProp>) {
 /// (which injects `content:var(--tw-content)`).
 struct VariantSpec {
     pseudo: String,
+    /// Additional pseudo suffixes, each producing another rule with the same
+    /// declarations (e.g. `selection:` emits both `& ::selection` and
+    /// `&::selection`; `marker:` emits four).
+    extra_pseudos: Vec<String>,
+    /// A selector fragment placed BEFORE the class selector, as a descendant
+    /// ancestor (`in-<variant>` -> `:where(<fragment>) .class`).
+    prefix: String,
     /// `:is(...)` clause inserted right after the class selector (group-hover).
     is_clause: String,
     media: Vec<String>,
@@ -1272,6 +1340,119 @@ struct VariantSpec {
 /// Output order indices per variant, mirroring the reference stylesheet:
 /// base < before/after < hover < focus < focus-visible < active < disabled
 /// < breakpoints < dark.
+/// Render a media-query condition the way Tailwind v4 formats it: a range query
+/// `width>=40rem` -> `(width >= 40rem)` (the range operator MUST be space-separated to
+/// be valid CSS), a feature query `hover:hover` -> `(hover: hover)`, and a bare feature
+/// `print` -> `print` (no parentheses).
+fn format_media_query(condition: &str) -> String {
+    for op in ["<=", ">=", "<", ">"] {
+        if let Some(pos) = condition.find(op) {
+            let left = condition[..pos].trim();
+            let right = condition[pos + op.len()..].trim();
+            return format!("({left} {op} {right})");
+        }
+    }
+    if let Some(pos) = condition.find(':') {
+        let feature = condition[..pos].trim();
+        let value = condition[pos + 1..].trim();
+        return format!("({feature}: {value})");
+    }
+    condition.to_string()
+}
+
+/// The CSS pseudo-class for a Tailwind state name (used to compose `group-<state>` /
+/// `peer-<state>` selectors). `None` for an unknown state.
+fn state_pseudo(state: &str) -> Option<&'static str> {
+    Some(match state {
+        "hover" => ":hover",
+        "focus" => ":focus",
+        "focus-within" => ":focus-within",
+        "focus-visible" => ":focus-visible",
+        "active" => ":active",
+        "visited" => ":visited",
+        "target" => ":target",
+        "disabled" => ":disabled",
+        "enabled" => ":enabled",
+        "checked" => ":checked",
+        "indeterminate" => ":indeterminate",
+        "default" => ":default",
+        "required" => ":required",
+        "optional" => ":optional",
+        "valid" => ":valid",
+        "invalid" => ":invalid",
+        "in-range" => ":in-range",
+        "out-of-range" => ":out-of-range",
+        "read-only" => ":read-only",
+        "read-write" => ":read-write",
+        "placeholder-shown" => ":placeholder-shown",
+        "autofill" => ":autofill",
+        "empty" => ":empty",
+        "open" => ":is([open], :popover-open, :open)",
+        "first" => ":first-child",
+        "last" => ":last-child",
+        "only" => ":only-child",
+        "odd" => ":nth-child(odd)",
+        "even" => ":nth-child(even)",
+        "first-of-type" => ":first-of-type",
+        "last-of-type" => ":last-of-type",
+        "only-of-type" => ":only-of-type",
+        _ => return None,
+    })
+}
+
+/// The `:is(:where(.group[/name])<state-pseudo><combinator>)` clause for a
+/// `group-<state>` / `peer-<state>` variant (with an optional `/name` selecting a
+/// named marker class). `peer` uses the following-sibling combinator `~ *`; a
+/// `group` uses the descendant combinator ` *`. `None` for an unknown state.
+fn group_peer_clause(v: &str) -> Option<String> {
+    let (marker, rest) = v.split_once('-')?;
+    let (state, name) = match rest.split_once('/') {
+        Some((s, n)) => (s, Some(n)),
+        None => (rest, None),
+    };
+    let pseudo = state_pseudo(state)?;
+    let marker_class = match name {
+        Some(n) => format!("{marker}/{n}"),
+        None => marker.to_string(),
+    };
+    let escaped = escape_class(&marker_class);
+    let combinator = if marker == "peer" { " ~ *" } else { " *" };
+    Some(format!(":is(:where(.{escaped}){pseudo}{combinator})"))
+}
+
+/// The selector fragment a variant contributes when composed inside `not-<v>`,
+/// `has-<v>`, or `in-<v>`. `checked` -> `:checked`; `group-focus/name` ->
+/// `:is(:where(.group\/name):focus *)`; nesting like `has-checked` composes.
+/// `None` when the inner variant has no such composable selector form.
+fn variant_fragment(v: &str) -> Option<String> {
+    if let Some(pseudo) = state_pseudo(v) {
+        return Some(pseudo.to_string());
+    }
+    if v.starts_with("group-") || v.starts_with("peer-") {
+        return group_peer_clause(v);
+    }
+    if let Some(inner) = v.strip_prefix("has-") {
+        return Some(format!(":has({})", variant_fragment(inner)?));
+    }
+    if let Some(inner) = v.strip_prefix("not-") {
+        return Some(format!(":not({})", variant_fragment(inner)?));
+    }
+    None
+}
+
+/// The value inside an `nth-*` positional pseudo: a bare positive integer
+/// (`3`) or an arbitrary `[…]` microsyntax value (`[2n+1]`). `None` (rejected)
+/// for negatives, non-numeric bare words, or `/`-modified tokens.
+fn nth_value(s: &str) -> Option<String> {
+    if let Some(inner) = s.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+        return Some(inner.to_string());
+    }
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(s.to_string());
+    }
+    None
+}
+
 fn parse_variants(
     segments: &[&str],
     class: &str,
@@ -1281,6 +1462,8 @@ fn parse_variants(
 ) -> Result<VariantSpec, Fail> {
     let mut spec = VariantSpec {
         pseudo: String::new(),
+        extra_pseudos: Vec::new(),
+        prefix: String::new(),
         is_clause: String::new(),
         media: Vec::new(),
         order: 0,
@@ -1319,6 +1502,90 @@ fn parse_variants(
                 spec.pseudo.push_str(":disabled");
                 spec.order = spec.order.max(5);
             }
+            // Structural / form / state pseudo-CLASSES: append the pseudo verbatim.
+            // A few Tailwind names diverge from the CSS pseudo (`first` ->
+            // `:first-child`), so map those explicitly.
+            "checked" | "enabled" | "default" | "indeterminate" | "required" | "valid"
+            | "invalid" | "in-range" | "out-of-range" | "read-only" | "read-write"
+            | "autofill" | "placeholder-shown" | "focus-within" | "visited" | "target"
+            | "empty" | "optional" | "user-valid" | "user-invalid" | "popover-open"
+            | "first-of-type" | "last-of-type" | "only-of-type" => {
+                spec.pseudo.push(':');
+                spec.pseudo.push_str(variant);
+                spec.order = spec.order.max(5);
+            }
+            "first" => {
+                spec.pseudo.push_str(":first-child");
+                spec.order = spec.order.max(5);
+            }
+            "last" => {
+                spec.pseudo.push_str(":last-child");
+                spec.order = spec.order.max(5);
+            }
+            "only" => {
+                spec.pseudo.push_str(":only-child");
+                spec.order = spec.order.max(5);
+            }
+            "odd" => {
+                spec.pseudo.push_str(":nth-child(odd)");
+                spec.order = spec.order.max(5);
+            }
+            "even" => {
+                spec.pseudo.push_str(":nth-child(even)");
+                spec.order = spec.order.max(5);
+            }
+            "open" => {
+                spec.pseudo.push_str(":is([open], :popover-open, :open)");
+                spec.order = spec.order.max(5);
+            }
+            // Pseudo-ELEMENTS.
+            "first-letter" | "first-line" | "placeholder" | "details-content" => {
+                spec.pseudo.push_str("::");
+                spec.pseudo.push_str(variant);
+                spec.order = spec.order.max(1);
+            }
+            "file" => {
+                spec.pseudo.push_str("::file-selector-button");
+                spec.order = spec.order.max(1);
+            }
+            // Media-feature variants: no selector change, a media wrapper (formatted by
+            // `format_media_query`). `print` renders parenthesis-free.
+            "motion-safe" => {
+                push_media(&mut spec.media, "prefers-reduced-motion:no-preference");
+                spec.order = spec.order.max(6);
+            }
+            "motion-reduce" => {
+                push_media(&mut spec.media, "prefers-reduced-motion:reduce");
+                spec.order = spec.order.max(6);
+            }
+            "contrast-more" => {
+                push_media(&mut spec.media, "prefers-contrast:more");
+                spec.order = spec.order.max(6);
+            }
+            "contrast-less" => {
+                push_media(&mut spec.media, "prefers-contrast:less");
+                spec.order = spec.order.max(6);
+            }
+            "inverted-colors" => {
+                push_media(&mut spec.media, "inverted-colors:inverted");
+                spec.order = spec.order.max(6);
+            }
+            "forced-colors" => {
+                push_media(&mut spec.media, "forced-colors:active");
+                spec.order = spec.order.max(6);
+            }
+            "portrait" => {
+                push_media(&mut spec.media, "orientation:portrait");
+                spec.order = spec.order.max(6);
+            }
+            "landscape" => {
+                push_media(&mut spec.media, "orientation:landscape");
+                spec.order = spec.order.max(6);
+            }
+            "print" => {
+                push_media(&mut spec.media, "print");
+                spec.order = spec.order.max(6);
+            }
             "before" | "after" => {
                 spec.pseudo.push(':');
                 spec.pseudo.push_str(variant);
@@ -1328,6 +1595,43 @@ fn parse_variants(
             }
             "backdrop" => {
                 spec.pseudo.push_str("::backdrop");
+            }
+            // `selection:` emits the utility under both `& ::selection` (any
+            // descendant) and `&::selection` (the element itself).
+            "selection" => {
+                spec.pseudo.push_str(" ::selection");
+                spec.extra_pseudos = vec!["::selection".to_string()];
+                spec.order = spec.order.max(1);
+            }
+            // `marker:` emits the utility under the `::marker` and legacy
+            // `::-webkit-details-marker` pseudo-elements, each both as a
+            // descendant (` ::marker`) and directly (`::marker`): four rules.
+            "marker" => {
+                spec.pseudo.push_str(" ::-webkit-details-marker");
+                spec.extra_pseudos = vec![
+                    " ::marker".to_string(),
+                    "::-webkit-details-marker".to_string(),
+                    "::marker".to_string(),
+                ];
+                spec.order = spec.order.max(1);
+            }
+            // `@starting-style` transition variant: a bare at-rule wrapper (no
+            // condition), carried through the media list with an `@` sentinel.
+            "starting" => {
+                push_media(&mut spec.media, "@starting-style");
+                spec.order = spec.order.max(1);
+            }
+            // These built-in variants take no `/modifier`; Tailwind rejects
+            // `backdrop/foo`, `contrast-more/foo`, `contrast-less/foo` and
+            // generates nothing.
+            v if matches!(
+                v.split_once('/').map(|(name, _)| name),
+                Some("backdrop") | Some("contrast-more") | Some("contrast-less")
+                    | Some("selection") | Some("marker") | Some("placeholder")
+                    | Some("placeholder-shown")
+            ) =>
+            {
+                return Err(Fail::Invalid);
             }
             name if custom_variants.contains_key(name) => {
                 // A `@custom-variant` overrides any built-in meaning: the
@@ -1352,6 +1656,111 @@ fn parse_variants(
                     .position(|b| *b == bp)
                     .unwrap() as u8;
                 spec.order = spec.order.max(7 + index);
+            }
+            // not-<variant>: negate the inner variant's selector fragment,
+            // appended as a `:not(...)` pseudo. `not-open` -> `:not(:is([open], …))`.
+            // Tailwind rejects it when the inner variant has no composable form.
+            v if v.starts_with("not-") => {
+                let frag = variant_fragment(&v[4..]).ok_or(Fail::Invalid)?;
+                spec.pseudo.push_str(&format!(":not({frag})"));
+                spec.order = spec.order.max(5);
+            }
+            // has-<variant>: `:has(<inner-fragment>)`. `has-checked` -> `:has(:checked)`.
+            v if v.starts_with("has-") => {
+                let frag = variant_fragment(&v[4..]).ok_or(Fail::Invalid)?;
+                spec.pseudo.push_str(&format!(":has({frag})"));
+                spec.order = spec.order.max(5);
+            }
+            // in-<variant>: the inner fragment becomes a `:where(...)` ancestor
+            // placed before the class selector.
+            v if v.starts_with("in-") => {
+                let frag = variant_fragment(&v[3..]).ok_or(Fail::Invalid)?;
+                spec.prefix = format!(":where({frag}) ");
+                spec.order = spec.order.max(5);
+            }
+            // nth-<n> / nth-last-<n> / nth-of-type-<n> / nth-last-of-type-<n>:
+            // a positional pseudo taking a bare positive integer or `[…]` value.
+            v if v.starts_with("nth-") => {
+                let rest = &v[4..];
+                let (func, num) = if let Some(n) = rest.strip_prefix("last-of-type-") {
+                    (":nth-last-of-type", n)
+                } else if let Some(n) = rest.strip_prefix("of-type-") {
+                    (":nth-of-type", n)
+                } else if let Some(n) = rest.strip_prefix("last-") {
+                    (":nth-last-child", n)
+                } else {
+                    (":nth-child", rest)
+                };
+                let value = nth_value(num).ok_or(Fail::Invalid)?;
+                spec.pseudo.push_str(&format!("{func}({value})"));
+                spec.order = spec.order.max(5);
+            }
+            // supports-<feature> / supports-[…]: an `@supports` feature query. A
+            // bare feature name probes `(<feature>: var(--tw))`; an arbitrary
+            // value is used verbatim (a full declaration or bare property name).
+            v if v.starts_with("supports-") => {
+                let rest = &v[9..];
+                if rest.contains('/') {
+                    return Err(Fail::Invalid);
+                }
+                let cond = if let Some(inner) =
+                    rest.strip_prefix('[').and_then(|x| x.strip_suffix(']'))
+                {
+                    if inner.contains(':') {
+                        inner.to_string()
+                    } else {
+                        format!("{inner}: var(--tw)")
+                    }
+                } else if rest.is_empty() {
+                    return Err(Fail::Invalid);
+                } else {
+                    format!("{rest}: var(--tw)")
+                };
+                push_media(&mut spec.media, &format!("@supports ({cond})"));
+                spec.order = spec.order.max(6);
+            }
+            // group-<state> / peer-<state>: the state pseudo inside a `:is()` clause
+            // rooted at a `.group`/`.peer` ancestor (peer is a following sibling `~`).
+            v if v.starts_with("group-") || v.starts_with("peer-") => {
+                spec.is_clause = group_peer_clause(v).ok_or_else(|| {
+                    Fail::Unsupported(format!(
+                        "unsupported `{v}:` variant in `{class}`: unknown group/peer state"
+                    ))
+                })?;
+                let state = v.split_once('-').unwrap().1;
+                if state.split('/').next() == Some("hover") {
+                    push_media(&mut spec.media, "hover:hover");
+                }
+                spec.order = spec.order.max(2);
+            }
+            // min-<bp> / max-<bp>: width range media queries from the theme breakpoints.
+            v if v.starts_with("min-") || v.starts_with("max-") => {
+                let (kind, bp) = v.split_once('-').unwrap();
+                let value = theme.get(&format!("--breakpoint-{bp}")).ok_or_else(|| {
+                    Fail::Unsupported(format!("unknown breakpoint `{v}:` in `{class}`"))
+                })?;
+                let op = if kind == "min" { ">=" } else { "<" };
+                push_media(&mut spec.media, &format!("width{op}{value}"));
+                spec.order = spec.order.max(6);
+            }
+            // aria-<state>: `[aria-<state>="true"]` for the boolean ARIA states.
+            v if v.starts_with("aria-") && !v[5..].starts_with('[') => {
+                spec.pseudo.push_str(&format!("[aria-{}=\"true\"]", &v[5..]));
+                spec.order = spec.order.max(5);
+            }
+            // data-<name>: `[data-<name>]` attribute presence.
+            v if v.starts_with("data-") && !v[5..].starts_with('[') => {
+                spec.pseudo.push_str(&format!("[data-{}]", &v[5..]));
+                spec.order = spec.order.max(5);
+            }
+            // pointer / any-pointer media-feature variants.
+            v if v.starts_with("pointer-") => {
+                push_media(&mut spec.media, &format!("pointer:{}", &v[8..]));
+                spec.order = spec.order.max(6);
+            }
+            v if v.starts_with("any-pointer-") => {
+                push_media(&mut spec.media, &format!("any-pointer:{}", &v[12..]));
+                spec.order = spec.order.max(6);
             }
             other => {
                 // `!` can never appear in a variant segment (the important
@@ -1401,6 +1810,7 @@ fn utility_root_recognized(class: &str) -> bool {
         "columns-", "break-", "whitespace-", "line-clamp-", "backdrop-", "blur-",
         "brightness-", "contrast-", "divide-", "accent-", "caret-", "scroll-",
         "snap-", "touch-", "will-change-", "from-", "via-", "to-", "drop-shadow-",
+        "transform-", "origin-", "perspective-",
     ];
     const EXACT: &[&str] = &[
         "flex", "grid", "block", "inline", "inline-block", "inline-flex", "inline-grid",
@@ -1448,9 +1858,14 @@ fn render_utility(
 
     let utility = generate_utility(base, class, theme, tw_props)?;
     let escaped = escape_class(class);
-    let selector = match utility.selector {
-        SelectorKind::Class => format!(".{escaped}{}{}", spec.is_clause, spec.pseudo),
-        SelectorKind::SpaceChildren => format!(":where(.{escaped}>:not(:last-child))"),
+    let build_selector = |pseudo: &str| match &utility.selector {
+        SelectorKind::Class => {
+            format!("{}.{escaped}{}{}", spec.prefix, spec.is_clause, pseudo)
+        }
+        SelectorKind::ClassPseudoElement(pe) => {
+            format!("{}.{escaped}{}{}{}", spec.prefix, spec.is_clause, pseudo, pe)
+        }
+        SelectorKind::SpaceChildren => format!(":where(.{escaped} > :not(:last-child))"),
     };
     let mut decls = utility.decls;
     if spec.inject_content && !decls.iter().any(|(prop, _)| prop == "content") {
@@ -1462,8 +1877,14 @@ fn render_utility(
         .map(|(prop, value)| format!("{prop}:{value}{bang}"))
         .collect::<Vec<_>>()
         .join(";");
+    // Most variants produce one rule; a few (e.g. `selection:`) emit the same
+    // declarations under a second selector.
+    let mut css = format!("{}{{{}}}", build_selector(&spec.pseudo), body);
+    for extra in &spec.extra_pseudos {
+        css.push_str(&format!("{}{{{}}}", build_selector(extra), body));
+    }
     Ok(RenderedRule {
-        css: format!("{selector}{{{body}}}"),
+        css,
         order: spec.order,
         media_key: spec.media.join("|"),
         rank: utility.rank,
@@ -1495,6 +1916,9 @@ fn split_variants(class: &str) -> Vec<&str> {
 enum SelectorKind {
     Class,
     SpaceChildren,
+    /// `.class<pseudo-element>` — a utility that bakes a pseudo-element into its
+    /// own selector (e.g. `placeholder-<color>` targets `::placeholder`).
+    ClassPseudoElement(String),
 }
 
 struct Utility {
@@ -1544,8 +1968,57 @@ fn generate_utility(
         return Err(Fail::Invalid);
     }
 
-    if let Some(decls) = keyword_utility(base) {
-        return Ok(Utility::simple(decls));
+    // Scroll / overflow / snap / blend / break / box / columns / object family.
+    if let Some(result) = scroll_overflow_utility(base, theme, tw_props) {
+        return result;
+    }
+
+    // Static keyword utilities. None of them accept a `/<modifier>`; Tailwind
+    // rejects `flex/foo`, `select-none/foo`, `text-wrap/foo`, … (generates
+    // nothing).
+    {
+        let (kw_core, kw_has_mod) = match base.split_once('/') {
+            Some((core, _)) => (core, true),
+            None => (base, false),
+        };
+        if let Some(decls) = keyword_utility(kw_core) {
+            if kw_has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(decls));
+        }
+    }
+
+    // Alignment: justify-content/items/self, align-content/items/self,
+    // place-content/items/self. Returns `None` (falls through) when `base` is not
+    // one of these — notably `content-[…]` defers to the generic content handler.
+    if let Some(result) = alignment_utility(base) {
+        return result;
+    }
+
+    // A leading `-` on a non-negatable static keyword utility (e.g. `-contents`,
+    // `-flex`, `-block`) is rejected by Tailwind and generates nothing.
+    if let Some(rest) = base.strip_prefix('-')
+        && keyword_utility(rest).is_some() {
+            return Err(Fail::Invalid);
+        }
+
+    // not-sr-only: the inverse of sr-only, restoring normal flow.
+    if base == "not-sr-only" {
+        return Ok(Utility::simple(vec![
+            ("position", "static".to_string()),
+            ("width", "auto".to_string()),
+            ("height", "auto".to_string()),
+            ("padding", "0".to_string()),
+            ("margin", "0".to_string()),
+            ("overflow", "visible".to_string()),
+            ("clip-path", "none".to_string()),
+            ("white-space", "normal".to_string()),
+        ]));
+    }
+    // A leading `-` on the sr-only composites is rejected (generates nothing).
+    if base == "-not-sr-only" || base == "-sr-only" {
+        return Err(Fail::Invalid);
     }
 
     // sr-only: the screen-reader-only composite.
@@ -1577,34 +2050,29 @@ fn generate_utility(
         None => (false, base),
     };
 
-    // Translate: translate-x-/translate-y- over fractions, spacing, px, full.
-    if let Some(rest) = positive_base.strip_prefix("translate-") {
-        if let Some((axis @ ("x" | "y"), value)) = rest.split_once('-') {
-            let resolved = translate_value(value, negative).ok_or_else(|| unknown(full))?;
-            for prop in [TwProp::TranslateX, TwProp::TranslateY, TwProp::TranslateZ] {
-                tw_props.insert(prop);
-            }
-            let var = format!("--tw-translate-{axis}");
-            return Ok(Utility {
-                selector: SelectorKind::Class,
-                decls: vec![
-                    (var, resolved),
-                    (
-                        "translate".to_string(),
-                        "var(--tw-translate-x) var(--tw-translate-y)".to_string(),
-                    ),
-                ],
-                rank: 100,
-            });
-        }
-        return Err(unknown(full));
+    // The `mask-*` family (gradient masks, edge masks, clip/origin/position/type).
+    // Handled before the generic negative gate below because `mask-linear-*` and
+    // `mask-conic-*` accept a leading `-` for a negative angle.
+    if positive_base == "mask" || positive_base.starts_with("mask-") {
+        return mask_utility(positive_base, negative);
+    }
+
+    // The transform family: translate / scale / rotate / skew / transform /
+    // perspective / (perspective-)origin. All share the leading `-` negative
+    // strip above; each rejects a leading `-` where Tailwind does.
+    if let Some(result) = transform_family_utility(positive_base, negative, theme, tw_props) {
+        return result;
     }
 
     // Position offsets: inset/inset-x/inset-y/top/right/bottom/left.
     // Longer prefixes first so `inset-y-0` is not consumed by `inset`.
-    let position_families: [(&str, &str, u16); 7] = [
+    let position_families: [(&str, &str, u16); 11] = [
         ("inset-x", "inset-inline", 31),
         ("inset-y", "inset-block", 32),
+        ("inset-bs", "inset-block-start", 37),
+        ("inset-be", "inset-block-end", 38),
+        ("inset-s", "inset-inline-start", 39),
+        ("inset-e", "inset-inline-end", 40),
         ("inset", "inset", 30),
         ("top", "top", 33),
         ("right", "right", 34),
@@ -1613,7 +2081,7 @@ fn generate_utility(
     ];
     for (prefix, property, rank) in position_families {
         if let Some(value) = strip_family(positive_base, prefix) {
-            let resolved = offset_value(value, negative).ok_or_else(|| unknown(full))?;
+            let resolved = offset_value(value, negative).ok_or(Fail::Invalid)?;
             return Ok(Utility::ranked(vec![(property, resolved)], rank));
         }
     }
@@ -1631,7 +2099,90 @@ fn generate_utility(
         return Err(unknown(full));
     }
 
+    // flex / basis / grow / shrink / order / grid-cols / grid-rows / grid-flow /
+    // auto-cols / auto-rows / col / row families (some accept a leading `-`).
+    if let Some(utility) = flex_grid_utility(positive_base, full, negative, theme)? {
+        return Ok(utility);
+    }
+
+    // Outline family (outline / outline-<width> / outline-none / outline-hidden /
+    // outline-<style> / outline-offset-<n> / outline-<color>). Handled before the
+    // generic negative gate because `outline-offset-*` accepts a leading `-`.
+    if positive_base == "outline" || positive_base.starts_with("outline-") {
+        return outline_utility(positive_base, full, negative, theme, tw_props);
+    }
+
+    // The background family (`bg-*`) has no negative form; a leading `-` is
+    // rejected by Tailwind (it generates nothing, not a hard error).
+    if negative && (positive_base == "bg" || positive_base.starts_with("bg-")) {
+        return Err(Fail::Invalid);
+    }
+
+    // border / divide / ring / rounded reject a leading `-` outright: Tailwind
+    // generates nothing (not a hard error).
+    if negative
+        && (positive_base == "border"
+            || positive_base.starts_with("border-")
+            || positive_base == "divide"
+            || positive_base.starts_with("divide-")
+            || positive_base == "ring"
+            || positive_base.starts_with("ring-")
+            || positive_base == "rounded"
+            || positive_base.starts_with("rounded-"))
+    {
+        return Err(Fail::Invalid);
+    }
+
+    // Typography / interactivity families. `underline-offset` accepts a negative
+    // numeric value (`-underline-offset-4` -> `calc(4px * -1)`); every other
+    // family in this group rejects a leading `-` (Tailwind generates nothing).
     if negative {
+        if let Some(rest) = positive_base.strip_prefix("underline-offset-") {
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return Ok(Utility::simple(vec![(
+                    "text-underline-offset",
+                    format!("calc({rest}px * -1)"),
+                )]));
+            }
+            return Err(Fail::Invalid);
+        }
+        if is_typography_interactivity_family(positive_base) {
+            return Err(Fail::Invalid);
+        }
+    }
+
+    // Sizing (`w`/`h`/`min-*`/`max-*`/`size`) and `aspect` have no negative form;
+    // a leading `-` is rejected by Tailwind (it generates nothing).
+    if negative
+        && (["w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-", "size-"]
+            .iter()
+            .any(|p| positive_base.starts_with(p))
+            || positive_base == "aspect"
+            || positive_base.starts_with("aspect-"))
+    {
+        return Err(Fail::Invalid);
+    }
+
+    // The filter / backdrop-filter chains and `opacity` have no negative form; a
+    // leading `-` is rejected by Tailwind (it generates nothing, not an error).
+    if negative
+        && (matches!(
+            positive_base,
+            "filter" | "filter-none" | "backdrop-filter" | "backdrop-filter-none"
+        ) || positive_base.starts_with("opacity-"))
+    {
+        return Err(Fail::Invalid);
+    }
+
+    if negative {
+        // Gradient color stops reject a leading `-` outright (Tailwind generates
+        // nothing rather than erroring).
+        if ["from-", "via-", "to-"]
+            .iter()
+            .any(|p| positive_base.starts_with(p))
+        {
+            return Err(Fail::Invalid);
+        }
         // Negative margins fall through below; other negatives are unknown.
         if !(positive_base.starts_with('m')) {
             return Err(unknown(full));
@@ -1640,9 +2191,6 @@ fn generate_utility(
 
     // Sizing: w/h/min-w/min-h/max-w/max-h/size.
     if let Some(utility) = sizing_utility(positive_base, full, theme)? {
-        if negative {
-            return Err(unknown(full));
-        }
         return Ok(utility);
     }
 
@@ -1687,36 +2235,6 @@ fn generate_utility(
         });
     }
 
-    // grid-template-columns/rows.
-    if let Some(value) = base.strip_prefix("grid-cols-") {
-        let resolved = grid_template_value(value).ok_or_else(|| unknown(full))?;
-        return Ok(Utility::simple(vec![("grid-template-columns", resolved)]));
-    }
-    if let Some(value) = base.strip_prefix("grid-rows-") {
-        let resolved = grid_template_value(value).ok_or_else(|| unknown(full))?;
-        return Ok(Utility::simple(vec![("grid-template-rows", resolved)]));
-    }
-
-    // flex-shrink / flex-grow.
-    if base == "shrink" {
-        return Ok(Utility::simple(vec![("flex-shrink", "1".to_string())]));
-    }
-    if let Some(n) = base.strip_prefix("shrink-") {
-        if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
-            return Ok(Utility::simple(vec![("flex-shrink", n.to_string())]));
-        }
-        return Err(unknown(full));
-    }
-    if base == "grow" {
-        return Ok(Utility::simple(vec![("flex-grow", "1".to_string())]));
-    }
-    if let Some(n) = base.strip_prefix("grow-") {
-        if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
-            return Ok(Utility::simple(vec![("flex-grow", n.to_string())]));
-        }
-        return Err(unknown(full));
-    }
-
     // rounded / rounded-<size> / rounded-<side>(-<size>): border-radius from
     // the theme radius scale, whole-box or per side/corner.
     if base == "rounded" {
@@ -1748,17 +2266,36 @@ fn generate_utility(
         return Err(unknown(full));
     }
 
-    // opacity-<n>: percentage over 100.
-    if let Some(n) = base.strip_prefix("opacity-") {
-        if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
-            let value: u32 = n.parse().map_err(|_| unknown(full))?;
-            return Ok(Utility::simple(vec![("opacity", percent_fraction(value))]));
+    // opacity-<n>: a percentage. The bare value is a multiple of 0.25, emitted as
+    // `<n>%`; an arbitrary `[…]` value passes through raw (an explicit `type:`
+    // hint always resolves, otherwise the value must read as a `<number>` or
+    // `<percentage>` — a bare `var()`/function is rejected). Anything else
+    // (non-multiples, negatives) is a value Tailwind rejects outright.
+    if let Some(value) = base.strip_prefix("opacity-") {
+        if is_spacing_multiplier(value) {
+            return Ok(Utility::simple(vec![("opacity", format!("{value}%"))]));
         }
-        return Err(unknown(full));
+        if let Some(inner) = arbitrary_value(value) {
+            if let Some((_, rest)) = split_data_type_hint(&inner) {
+                return Ok(Utility::simple(vec![("opacity", rest.to_string())]));
+            }
+            if is_number_or_percentage(&inner) {
+                return Ok(Utility::simple(vec![("opacity", inner)]));
+            }
+        }
+        return Err(Fail::Invalid);
     }
 
-    // line-clamp-<n>.
+    // line-clamp-<n> / line-clamp-none.
     if let Some(n) = base.strip_prefix("line-clamp-") {
+        if n == "none" {
+            return Ok(Utility::simple(vec![
+                ("overflow", "visible".to_string()),
+                ("display", "block".to_string()),
+                ("-webkit-box-orient", "horizontal".to_string()),
+                ("-webkit-line-clamp", "unset".to_string()),
+            ]));
+        }
         if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
             return Ok(Utility::simple(vec![
                 ("overflow", "hidden".to_string()),
@@ -1767,18 +2304,43 @@ fn generate_utility(
                 ("-webkit-line-clamp", n.to_string()),
             ]));
         }
-        return Err(unknown(full));
+        if n.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
     }
 
-    // underline-offset-<n>.
-    if let Some(n) = base.strip_prefix("underline-offset-") {
-        if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
+    // underline-offset-<n> / underline-offset-auto. The bare `underline-offset`
+    // and any non-numeric/non-`auto` value are rejected (Tailwind emits nothing);
+    // a `/<modifier>` is likewise rejected. Negatives are handled in the group's
+    // negative gate above.
+    if base == "underline-offset" {
+        return Err(Fail::Invalid);
+    }
+    if let Some(rest) = base.strip_prefix("underline-offset-") {
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        if has_mod {
+            return Err(Fail::Invalid);
+        }
+        if core == "auto" {
             return Ok(Utility::simple(vec![(
                 "text-underline-offset",
-                format!("{n}px"),
+                "auto".to_string(),
             )]));
         }
-        return Err(unknown(full));
+        if !core.is_empty() && core.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(Utility::simple(vec![(
+                "text-underline-offset",
+                format!("{core}px"),
+            )]));
+        }
+        if core.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
     }
 
     // leading-<value>: --tw-leading + line-height.
@@ -1798,17 +2360,27 @@ fn generate_utility(
         ]));
     }
 
-    // tracking-<name>: --tw-tracking + letter-spacing.
+    // tracking-<name>: --tw-tracking + letter-spacing. Takes no `/<modifier>`.
     if let Some(rest) = base.strip_prefix("tracking-") {
-        let var = format!("--tracking-{rest}");
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        let var = format!("--tracking-{core}");
         if theme.contains(&var) {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
             tw_props.insert(TwProp::Tracking);
             return Ok(Utility::simple(vec![
                 ("--tw-tracking", format!("var({var})")),
                 ("letter-spacing", format!("var({var})")),
             ]));
         }
-        return Err(unknown(full));
+        if core.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
     }
 
     // tabular-nums (font-variant-numeric composition).
@@ -1914,26 +2486,67 @@ fn generate_utility(
         ]));
     }
 
+    // blur / blur-<size> / blur-none / blur-[…]: the `filter` blur family
+    // (mirrors `backdrop-blur`, composing into the `--tw-blur` filter slot).
+    if base == "blur" || base.starts_with("blur-") {
+        let size = base.strip_prefix("blur-").unwrap_or("");
+        let blur = if size.is_empty() {
+            let value = theme.get("--blur-sm").ok_or_else(|| unknown(full))?;
+            format!("blur({value})")
+        } else if size == "none" {
+            // `--tw-blur: ;` — the empty (whitespace) value clearing the slot.
+            " ".to_string()
+        } else if theme.contains(&format!("--blur-{size}")) {
+            format!("blur(var(--blur-{size}))")
+        } else if let Some(inner) = arbitrary_value(size) {
+            format!("blur({inner})")
+        } else {
+            return Err(unknown(full));
+        };
+        register_filter_group(tw_props);
+        return Ok(Utility::simple(vec![
+            ("--tw-blur", blur),
+            ("filter", FILTER_CHAIN.to_string()),
+        ]));
+    }
+
+    // filter / filter-none: the composed filter chain (or its reset). The chain
+    // form registers every `--tw-*` filter slot; the reset registers nothing.
+    if base == "filter" {
+        register_filter_group(tw_props);
+        return Ok(Utility::simple(vec![("filter", FILTER_CHAIN.to_string())]));
+    }
+    if base == "filter-none" {
+        return Ok(Utility::simple(vec![("filter", "none".to_string())]));
+    }
+
+    // backdrop-filter / backdrop-filter-none: the composed backdrop-filter chain
+    // (prefixed for WebKit) or its reset.
+    if base == "backdrop-filter" {
+        register_backdrop_group(tw_props);
+        return Ok(Utility::simple(vec![
+            ("-webkit-backdrop-filter", BACKDROP_FILTER_CHAIN.to_string()),
+            ("backdrop-filter", BACKDROP_FILTER_CHAIN.to_string()),
+        ]));
+    }
+    if base == "backdrop-filter-none" {
+        return Ok(Utility::simple(vec![
+            ("-webkit-backdrop-filter", "none".to_string()),
+            ("backdrop-filter", "none".to_string()),
+        ]));
+    }
+
     // ring / ring-<n> / ring-inset / ring-offset-<n> / ring-<color>.
     if base == "ring" || base.starts_with("ring-") {
         return ring_utility(base, full, theme, tw_props);
     }
 
-    // outline / outline-none.
-    if base == "outline" {
-        tw_props.insert(TwProp::OutlineStyle);
-        return Ok(Utility::simple(vec![
-            ("outline-style", "var(--tw-outline-style)".to_string()),
-            ("outline-width", "1px".to_string()),
-        ]));
+    // divide-x / divide-y (widths + reverse), divide-<style>, divide-<color>.
+    if base == "divide" || base.starts_with("divide-") {
+        return divide_utility(base, full, theme, tw_props);
     }
-    if base == "outline-none" {
-        tw_props.insert(TwProp::OutlineStyle);
-        return Ok(Utility::simple(vec![
-            ("--tw-outline-style", "none".to_string()),
-            ("outline-style", "none".to_string()),
-        ]));
-    }
+
+    // (outline utilities are handled above, before the negative gate.)
 
     // transition families.
     if let Some(decls) = transition_utility(base) {
@@ -1984,7 +2597,7 @@ fn generate_utility(
     if let Some(value) = base.strip_prefix("aspect-") {
         let resolved = match value {
             "auto" => Some("auto".to_string()),
-            "square" => Some("1".to_string()),
+            "square" => Some("1 / 1".to_string()),
             "video" if theme.contains("--aspect-video") => {
                 Some("var(--aspect-video)".to_string())
             }
@@ -2015,55 +2628,17 @@ fn generate_utility(
         return Err(Fail::Invalid);
     }
 
-    // scale-<n> / scale-[…]: all three axes plus the `scale` shorthand.
-    if let Some(value) = base.strip_prefix("scale-") {
-        let resolved = if value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() {
-            format!("{value}%")
-        } else if let Some(inner) = arbitrary_value(value) {
-            inner
-        } else {
-            return Err(unknown(full));
-        };
-        for prop in [TwProp::ScaleX, TwProp::ScaleY, TwProp::ScaleZ] {
-            tw_props.insert(prop);
-        }
-        return Ok(Utility::simple(vec![
-            ("--tw-scale-x", resolved.clone()),
-            ("--tw-scale-y", resolved.clone()),
-            ("--tw-scale-z", resolved),
-            ("scale", "var(--tw-scale-x) var(--tw-scale-y)".to_string()),
-        ]));
-    }
-
-    // transform: composes the rotate/skew slots (translate/scale have their own
-    // properties in v4).
-    if base == "transform" {
-        for prop in [
-            TwProp::RotateX,
-            TwProp::RotateY,
-            TwProp::RotateZ,
-            TwProp::SkewX,
-            TwProp::SkewY,
-        ] {
-            tw_props.insert(prop);
-        }
-        return Ok(Utility::simple(vec![(
-            "transform",
-            "var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,)"
-                .to_string(),
-        )]));
-    }
-
     // Gradient color stops: from-*/via-*/to-* colors or stop positions. A value
     // that is neither resolves against nothing — Tailwind generates no rule.
     for (family, rank) in [("from", 102u16), ("via", 103), ("to", 104)] {
         let Some(value) = strip_family(base, family) else {
             continue;
         };
-        // Stop positions: `from-10%`.
+        // Stop positions: `from-10%`. Tailwind only accepts a bare non-negative
+        // integer percentage here; decimals (`25.5%`) and negatives are rejected.
         if let Some(pct) = value.strip_suffix('%')
             && !pct.is_empty()
-            && pct.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            && pct.bytes().all(|b| b.is_ascii_digit())
         {
             register_gradient_group(tw_props);
             return Ok(Utility::ranked(
@@ -2071,25 +2646,24 @@ fn generate_utility(
                 rank + 3,
             ));
         }
-        let Some(color) = color_value(value, theme) else {
+        let color_prop = match family {
+            "from" => "--tw-gradient-from",
+            "via" => "--tw-gradient-via",
+            _ => "--tw-gradient-to",
+        };
+        let Some(color_decls) = gradient_color_decls(color_prop, value, theme) else {
             return Err(Fail::Invalid);
         };
         register_gradient_group(tw_props);
-        let decls: Vec<(&str, String)> = match family {
-            "from" => vec![
-                ("--tw-gradient-from", color),
-                ("--tw-gradient-stops", GRADIENT_STOPS.to_string()),
-            ],
-            "via" => vec![
-                ("--tw-gradient-via", color),
-                ("--tw-gradient-via-stops", GRADIENT_VIA_STOPS.to_string()),
-                ("--tw-gradient-stops", "var(--tw-gradient-via-stops)".to_string()),
-            ],
-            _ => vec![
-                ("--tw-gradient-to", color),
-                ("--tw-gradient-stops", GRADIENT_STOPS.to_string()),
-            ],
-        };
+        let mut decls: Vec<(&str, String)> = color_decls;
+        match family {
+            "from" => decls.push(("--tw-gradient-stops", GRADIENT_STOPS.to_string())),
+            "via" => {
+                decls.push(("--tw-gradient-via-stops", GRADIENT_VIA_STOPS.to_string()));
+                decls.push(("--tw-gradient-stops", "var(--tw-gradient-via-stops)".to_string()));
+            }
+            _ => decls.push(("--tw-gradient-stops", GRADIENT_STOPS.to_string())),
+        }
         return Ok(Utility::ranked(decls, rank));
     }
 
@@ -2103,10 +2677,185 @@ fn generate_utility(
         ]));
     }
 
-    // accent-<color>.
+    // accent-<color> (with optional `/<pct>` opacity modifier).
     if let Some(rest) = base.strip_prefix("accent-") {
-        let value = color_value(rest, theme).ok_or_else(|| unknown(full))?;
-        return Ok(Utility::simple(vec![("accent-color", value)]));
+        if let Some(decls) = color_prop_decls("accent-color", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // placeholder-<color> (with optional `/<pct>` opacity modifier): the input
+    // placeholder text color, baked onto the `::placeholder` pseudo-element.
+    if let Some(rest) = base.strip_prefix("placeholder-") {
+        if let Some(decls) = color_prop_decls("color", rest, theme) {
+            return Ok(Utility {
+                selector: SelectorKind::ClassPseudoElement("::placeholder".to_string()),
+                decls: decls
+                    .into_iter()
+                    .map(|(prop, value)| (prop.to_string(), value))
+                    .collect(),
+                rank: 100,
+            });
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // caret-<color> (with optional `/<pct>` opacity modifier).
+    if let Some(rest) = base.strip_prefix("caret-") {
+        if let Some(decls) = color_prop_decls("caret-color", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // fill-<color> / fill-none (SVG fill; color takes a `/<pct>` modifier).
+    if let Some(rest) = base.strip_prefix("fill-") {
+        if let Some(decls) = color_prop_decls("fill", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest == "none" {
+            return Ok(Utility::simple(vec![("fill", "none".to_string())]));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // stroke-<color> / stroke-none / stroke-<width> (SVG stroke).
+    if let Some(rest) = base.strip_prefix("stroke-") {
+        if let Some(decls) = color_prop_decls("stroke", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest == "none" {
+            return Ok(Utility::simple(vec![("stroke", "none".to_string())]));
+        }
+        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(Utility::simple(vec![("stroke-width", rest.to_string())]));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // decoration-<style>/<thickness>/<color>: text-decoration-* utilities.
+    if let Some(rest) = base.strip_prefix("decoration-") {
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        if matches!(core, "solid" | "double" | "dotted" | "dashed" | "wavy") {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![("text-decoration-style", core.to_string())]));
+        }
+        if matches!(core, "auto" | "from-font") {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![(
+                "text-decoration-thickness",
+                core.to_string(),
+            )]));
+        }
+        if !core.is_empty() && core.bytes().all(|b| b.is_ascii_digit()) {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![(
+                "text-decoration-thickness",
+                format!("{core}px"),
+            )]));
+        }
+        if let Some(decls) = color_prop_decls("text-decoration-color", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // list-*: the valid `list-inside`/`list-outside`/`list-item`/`list-disc`/
+    // `list-decimal`/`list-none`/`list-image-none` keywords are handled in
+    // `keyword_utility`; any other `list-*` value Tailwind rejects (an arbitrary
+    // `list-[…]` is an engine gap).
+    if let Some(rest) = base.strip_prefix("list-") {
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // touch-action: the simple keywords plus the composed `pan-*`/`pinch-zoom`
+    // slots. Takes no `/<modifier>`.
+    if let Some(rest) = base.strip_prefix("touch-") {
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        if has_mod {
+            return Err(Fail::Invalid);
+        }
+        if matches!(core, "auto" | "none" | "manipulation") {
+            return Ok(Utility::simple(vec![("touch-action", core.to_string())]));
+        }
+        let slot = match core {
+            "pan-x" => Some(("--tw-pan-x", "pan-x")),
+            "pan-left" => Some(("--tw-pan-x", "pan-left")),
+            "pan-right" => Some(("--tw-pan-x", "pan-right")),
+            "pan-y" => Some(("--tw-pan-y", "pan-y")),
+            "pan-up" => Some(("--tw-pan-y", "pan-up")),
+            "pan-down" => Some(("--tw-pan-y", "pan-down")),
+            "pinch-zoom" => Some(("--tw-pinch-zoom", "pinch-zoom")),
+            _ => None,
+        };
+        if let Some((var, value)) = slot {
+            for prop in [TwProp::PanX, TwProp::PanY, TwProp::PinchZoom] {
+                tw_props.insert(prop);
+            }
+            return Ok(Utility::simple(vec![
+                (var, value.to_string()),
+                (
+                    "touch-action",
+                    "var(--tw-pan-x,) var(--tw-pan-y,) var(--tw-pinch-zoom,)".to_string(),
+                ),
+            ]));
+        }
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // text-shadow / text-shadow-<size> / text-shadow-none: the theme text-shadow
+    // scale, colors wrapped for `--tw-text-shadow-color`.
+    if base == "text-shadow" || base.starts_with("text-shadow-") {
+        let size = base.strip_prefix("text-shadow-").unwrap_or("");
+        if size == "none" {
+            return Ok(Utility::simple(vec![("text-shadow", "none".to_string())]));
+        }
+        if let Some(value) = theme.get(&format!("--text-shadow-{size}")) {
+            tw_props.insert(TwProp::TextShadowColor);
+            tw_props.insert(TwProp::TextShadowAlpha);
+            return Ok(Utility::simple(vec![(
+                "text-shadow",
+                wrap_text_shadow_colors(value),
+            )]));
+        }
+        return Err(unknown(full));
     }
 
     // bg-gradient-to-<dir> (v3 spelling) / bg-linear-to-<dir>: the linear
@@ -2139,66 +2888,977 @@ fn generate_utility(
         ));
     }
 
-    // bg-<color>.
-    if let Some(color) = base.strip_prefix("bg-") {
-        let value = color_value(color, theme).ok_or_else(|| unknown(full))?;
-        return Ok(Utility::simple(vec![("background-color", value)]));
+    // bg-clip-<box> (background-clip) / bg-origin-<box> (background-origin).
+    // Neither accepts an opacity `/<modifier>` (Tailwind rejects `bg-clip-border/foo`).
+    for (prefix, prop) in [
+        ("bg-clip-", "background-clip"),
+        ("bg-origin-", "background-origin"),
+    ] {
+        if let Some(rest) = base.strip_prefix(prefix) {
+            let (core, has_mod) = match rest.split_once('/') {
+                Some((c, _)) => (c, true),
+                None => (rest, false),
+            };
+            let value = match (prefix, core) {
+                ("bg-clip-", "border") => Some("border-box"),
+                ("bg-clip-", "content") => Some("content-box"),
+                ("bg-clip-", "padding") => Some("padding-box"),
+                ("bg-clip-", "text") => Some("text"),
+                ("bg-origin-", "border") => Some("border-box"),
+                ("bg-origin-", "content") => Some("content-box"),
+                ("bg-origin-", "padding") => Some("padding-box"),
+                _ => None,
+            };
+            if let Some(value) = value {
+                if has_mod {
+                    return Err(Fail::Invalid);
+                }
+                return Ok(Utility::simple(vec![(prop, value.to_string())]));
+            }
+            // Not a valid box keyword: fall through to the color / unknown path.
+        }
     }
 
-    // font-<weight> (or font-<family>).
+    // bg-<color> (with optional `/<pct>` opacity modifier). The `/<pct>` modifier
+    // additionally emits the static `color-mix(in srgb, …)` fallback Tailwind ships
+    // for pre-`oklab` browsers (via `color_prop_decls`).
+    if let Some(color) = base.strip_prefix("bg-") {
+        if let Some(decls) = color_prop_decls("background-color", color, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        // A `family-shade`-shaped unknown color (`bg-plaid-500`) is a likely typo —
+        // a hard error naming the token. A bare word (`bg-clip`, `bg-position`,
+        // `bg-unknown`) or a color with an invalid `/<modifier>` (`bg-current/half`,
+        // `bg-red-500/half`) is simply not a utility: Tailwind emits nothing.
+        if color.starts_with('[') || (color.contains('-') && !color.contains('/')) {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // font-<weight> / font-<family> / font-stretch-<value>.
     if let Some(rest) = base.strip_prefix("font-") {
-        if is_font_weight(rest) {
+        // font-stretch-<percentage|keyword>.
+        if rest == "stretch" {
+            return Err(Fail::Invalid);
+        }
+        if let Some(stretch) = rest.strip_prefix("stretch-") {
+            let (core, has_mod) = match stretch.split_once('/') {
+                Some((c, _)) => (c, true),
+                None => (stretch, false),
+            };
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            if let Some(value) = font_stretch_value(core) {
+                return Ok(Utility::simple(vec![("font-stretch", value)]));
+            }
+            if core.starts_with('[') {
+                return Err(unknown(full));
+            }
+            return Err(Fail::Invalid);
+        }
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        if is_font_weight(core) {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
             tw_props.insert(TwProp::FontWeight);
-            let var = format!("--font-weight-{rest}");
+            let var = format!("--font-weight-{core}");
             return Ok(Utility::simple(vec![
                 ("--tw-font-weight", format!("var({var})")),
                 ("font-weight", format!("var({var})")),
             ]));
         }
-        if matches!(rest, "sans" | "serif" | "mono") {
+        if matches!(core, "sans" | "serif" | "mono") {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
             return Ok(Utility::simple(vec![(
                 "font-family",
-                format!("var(--font-{rest})"),
+                format!("var(--font-{core})"),
             )]));
         }
-        return Err(unknown(full));
+        if rest.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
     }
 
-    // text-<align>/<overflow>/<size>/<color>/[arbitrary].
+    // text-<align>/<overflow>/<size>/<color>/[arbitrary]. Alignment, overflow, and
+    // size take no `/<modifier>`; a color does (its `/<pct>` opacity).
     if let Some(rest) = base.strip_prefix("text-") {
-        if matches!(rest, "left" | "center" | "right" | "justify" | "start" | "end") {
-            return Ok(Utility::simple(vec![("text-align", rest.to_string())]));
+        let (core, has_mod) = match rest.split_once('/') {
+            Some((c, _)) => (c, true),
+            None => (rest, false),
+        };
+        if matches!(core, "left" | "center" | "right" | "justify" | "start" | "end") {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![("text-align", core.to_string())]));
         }
-        if rest == "ellipsis" || rest == "clip" {
-            return Ok(Utility::simple(vec![("text-overflow", rest.to_string())]));
+        if core == "ellipsis" || core == "clip" {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Utility::simple(vec![("text-overflow", core.to_string())]));
         }
-        if is_text_size(rest) {
-            let size = format!("--text-{rest}");
-            let leading = format!("--text-{rest}--line-height");
+        if is_text_size(core) {
+            if has_mod {
+                return Err(Fail::Invalid);
+            }
+            let size = format!("--text-{core}");
+            let leading = format!("--text-{core}--line-height");
             return Ok(Utility::simple(vec![
                 ("font-size", format!("var({size})")),
                 (
                     "line-height",
-                    format!("var(--tw-leading,var({leading}))"),
+                    format!("var(--tw-leading, var({leading}))"),
                 ),
             ]));
         }
         if rest.starts_with('[') {
-            // `text-[color:…]` is a color; a bare arbitrary value is a size.
-            if let Some(value) = color_value(rest, theme) {
-                return Ok(Utility::simple(vec![("color", value)]));
+            // `text-[color:…]` is a color (with optional `/<pct>`); a bare
+            // arbitrary value is a size.
+            if let Some(decls) = color_prop_decls("color", rest, theme) {
+                return Ok(Utility::simple(decls));
             }
             let inner = arbitrary_value(rest).ok_or_else(|| unknown(full))?;
             return Ok(Utility::simple(vec![("font-size", inner)]));
         }
-        let value = color_value(rest, theme).ok_or_else(|| unknown(full))?;
-        return Ok(Utility::simple(vec![("color", value)]));
+        // text-<color> (with optional `/<pct>` opacity modifier).
+        if let Some(decls) = color_prop_decls("color", rest, theme) {
+            return Ok(Utility::simple(decls));
+        }
+        // An unknown value shaped like a `family-shade` color reference
+        // (`text-gray-1000`) is a likely typo — a hard error naming the token.
+        // A bare word (`text-trim`) is simply not a utility: Tailwind emits
+        // nothing.
+        if core.contains('-') || core.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
     }
 
     Err(unknown(full))
 }
 
+// ---------------------------------------------------------------------------
+// The transform family: translate / scale / rotate / skew / transform /
+// perspective / transform-origin / perspective-origin. `positive_base` has had
+// the negative-marking leading `-` removed; `negative` records whether it was
+// present. Returns `None` when the base is not in this family (fall through);
+// otherwise `Some(Ok(..))` for a generated rule or `Some(Err(Fail::Invalid))`
+// for a token Tailwind rejects and drops (an unknown value, a stray modifier,
+// or a `-` on a non-negatable form).
+fn transform_family_utility(
+    positive_base: &str,
+    negative: bool,
+    theme: &Theme,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Option<Result<Utility, Fail>> {
+    // perspective-origin-* must be checked before the generic perspective-*.
+    if let Some(rest) = positive_base.strip_prefix("perspective-origin-") {
+        return Some(origin_like("perspective-origin", rest, negative));
+    }
+    if positive_base == "perspective" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(rest) = positive_base.strip_prefix("perspective-") {
+        return Some(perspective_utility(rest, negative, theme));
+    }
+
+    // transform-origin.
+    if let Some(rest) = positive_base.strip_prefix("origin-") {
+        return Some(origin_like("transform-origin", rest, negative));
+    }
+
+    // transform / transform-*.
+    if positive_base == "transform" {
+        if negative {
+            return Some(Err(Fail::Invalid));
+        }
+        register_rotate_skew(tw_props);
+        return Some(Ok(Utility::simple(vec![(
+            "transform",
+            TRANSFORM_CHAIN.to_string(),
+        )])));
+    }
+    if let Some(rest) = positive_base.strip_prefix("transform-") {
+        return Some(transform_variant_utility(rest, negative, tw_props));
+    }
+
+    // rotate / rotate-x/y/z.
+    if positive_base == "rotate" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(rest) = positive_base.strip_prefix("rotate-") {
+        return Some(rotate_utility(rest, negative, tw_props));
+    }
+
+    // skew / skew-x/y.
+    if positive_base == "skew" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(rest) = positive_base.strip_prefix("skew-") {
+        return Some(skew_utility(rest, negative, tw_props));
+    }
+
+    // scale / scale-x/y/z / scale-3d.
+    if positive_base == "scale" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(rest) = positive_base.strip_prefix("scale-") {
+        return Some(scale_utility(rest, negative, tw_props));
+    }
+
+    // translate / translate-x/y/z / translate-3d.
+    if positive_base == "translate" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(rest) = positive_base.strip_prefix("translate-") {
+        return Some(translate_utility(rest, negative, tw_props));
+    }
+
+    None
+}
+
+fn register_rotate_skew(tw_props: &mut BTreeSet<TwProp>) {
+    for prop in [
+        TwProp::RotateX,
+        TwProp::RotateY,
+        TwProp::RotateZ,
+        TwProp::SkewX,
+        TwProp::SkewY,
+    ] {
+        tw_props.insert(prop);
+    }
+}
+
+fn register_scale(tw_props: &mut BTreeSet<TwProp>) {
+    for prop in [TwProp::ScaleX, TwProp::ScaleY, TwProp::ScaleZ] {
+        tw_props.insert(prop);
+    }
+}
+
+fn register_translate(tw_props: &mut BTreeSet<TwProp>) {
+    for prop in [TwProp::TranslateX, TwProp::TranslateY, TwProp::TranslateZ] {
+        tw_props.insert(prop);
+    }
+}
+
+/// A bare integer angle (`45` -> `45deg`) or a bracketed arbitrary value,
+/// negated as `calc(<v> * -1)`. Decimals and any other form are rejected —
+/// Tailwind only accepts integers or arbitrary values here.
+fn angle_value(value: &str, negative: bool) -> Option<String> {
+    let raw = if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{value}deg")
+    } else {
+        arbitrary_value(value)?
+    };
+    Some(if negative {
+        format!("calc({raw} * -1)")
+    } else {
+        raw
+    })
+}
+
+/// A per-axis scale value: a bare integer percentage (`50` -> `50%`) or a
+/// bracketed arbitrary value, negated as `calc(<v> * -1)`.
+fn scale_axis_value(value: &str, negative: bool) -> Option<String> {
+    let raw = if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{value}%")
+    } else {
+        arbitrary_value(value)?
+    };
+    Some(if negative {
+        format!("calc({raw} * -1)")
+    } else {
+        raw
+    })
+}
+
+/// The `translate-z` value type: spacing-scale numbers, `px`, or an arbitrary
+/// value — but NOT fractions or `full` (those are percentage forms the Z axis
+/// does not accept).
+fn translate_z_value(value: &str, negative: bool) -> Option<String> {
+    if value == "px" {
+        return Some(if negative { "-1px" } else { "1px" }.to_string());
+    }
+    if let Some(inner) = arbitrary_value(value) {
+        return Some(if negative {
+            format!("calc({inner} * -1)")
+        } else {
+            inner
+        });
+    }
+    spacing_value(value, negative)
+}
+
+/// The shared `transform-origin` / `perspective-origin` keyword table (both
+/// families map the same position words to the same values).
+fn transform_origin_keyword(rest: &str) -> Option<&'static str> {
+    Some(match rest {
+        "center" => "center",
+        "top" => "top",
+        "top-right" => "100% 0",
+        "right" => "100%",
+        "bottom-right" => "100% 100%",
+        "bottom" => "bottom",
+        "bottom-left" => "0 100%",
+        "left" => "0",
+        "top-left" => "0 0",
+        _ => return None,
+    })
+}
+
+/// `origin-*` (transform-origin) and `perspective-origin-*` share one shape:
+/// a position keyword or an arbitrary value; never negatable.
+fn origin_like(property: &'static str, rest: &str, negative: bool) -> Result<Utility, Fail> {
+    if negative {
+        return Err(Fail::Invalid);
+    }
+    let value = transform_origin_keyword(rest)
+        .map(|s| s.to_string())
+        .or_else(|| arbitrary_value(rest))
+        .ok_or(Fail::Invalid)?;
+    Ok(Utility::simple(vec![(property, value)]))
+}
+
+/// `perspective-<token>`: `none`, a theme `--perspective-*` name, or an
+/// arbitrary value. Bare numbers resolve against nothing. Never negatable.
+fn perspective_utility(rest: &str, negative: bool, theme: &Theme) -> Result<Utility, Fail> {
+    if negative {
+        return Err(Fail::Invalid);
+    }
+    let value = if rest == "none" {
+        "none".to_string()
+    } else if theme.contains(&format!("--perspective-{rest}")) {
+        format!("var(--perspective-{rest})")
+    } else if let Some(inner) = arbitrary_value(rest) {
+        inner
+    } else {
+        return Err(Fail::Invalid);
+    };
+    Ok(Utility::simple(vec![("perspective", value)]))
+}
+
+/// The static `transform-*` variants: `none`/`cpu`/`gpu` (the `transform`
+/// property), `flat`/`3d` (transform-style), the `transform-box` words, and an
+/// arbitrary value. Never negatable. Only bare `transform`, `transform-cpu`,
+/// `transform-gpu`, and `transform-[…]` reference the rotate/skew slots — but
+/// Tailwind registers the `@property` set only for bare `transform` and the
+/// arbitrary form, not for `cpu`/`gpu`.
+fn transform_variant_utility(
+    rest: &str,
+    negative: bool,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    if negative {
+        return Err(Fail::Invalid);
+    }
+    let decls: Vec<(&str, String)> = match rest {
+        "none" => vec![("transform", "none".to_string())],
+        "cpu" => vec![("transform", TRANSFORM_CHAIN.to_string())],
+        "gpu" => vec![("transform", format!("translateZ(0) {TRANSFORM_CHAIN}"))],
+        "flat" => vec![("transform-style", "flat".to_string())],
+        "3d" => vec![("transform-style", "preserve-3d".to_string())],
+        "content" => vec![("transform-box", "content-box".to_string())],
+        "border" => vec![("transform-box", "border-box".to_string())],
+        "fill" => vec![("transform-box", "fill-box".to_string())],
+        "stroke" => vec![("transform-box", "stroke-box".to_string())],
+        "view" => vec![("transform-box", "view-box".to_string())],
+        _ => {
+            let inner = arbitrary_value(rest).ok_or(Fail::Invalid)?;
+            register_rotate_skew(tw_props);
+            return Ok(Utility::simple(vec![("transform", inner)]));
+        }
+    };
+    Ok(Utility::simple(decls))
+}
+
+/// `rotate-*`: bare `rotate-<angle>` sets the `rotate` property directly;
+/// `rotate-x/y/z-<angle>` set a `--tw-rotate-*` slot wrapped in `rotate{X,Y,Z}()`
+/// and feed the transform chain; `rotate-none` clears the property.
+fn rotate_utility(
+    rest: &str,
+    negative: bool,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    if rest == "none" {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        return Ok(Utility::simple(vec![("rotate", "none".to_string())]));
+    }
+    if let Some((axis @ ("x" | "y" | "z"), value)) = rest.split_once('-') {
+        let angle = angle_value(value, negative).ok_or(Fail::Invalid)?;
+        let func = match axis {
+            "x" => "rotateX",
+            "y" => "rotateY",
+            _ => "rotateZ",
+        };
+        register_rotate_skew(tw_props);
+        return Ok(Utility {
+            selector: SelectorKind::Class,
+            decls: vec![
+                (format!("--tw-rotate-{axis}"), format!("{func}({angle})")),
+                ("transform".to_string(), TRANSFORM_CHAIN.to_string()),
+            ],
+            rank: 100,
+        });
+    }
+    let angle = angle_value(rest, negative).ok_or(Fail::Invalid)?;
+    Ok(Utility::simple(vec![("rotate", angle)]))
+}
+
+/// `skew-*`: bare `skew-<angle>` sets both axes; `skew-x/y-<angle>` sets one.
+/// Each slot is wrapped in `skew{X,Y}()` and feeds the transform chain.
+fn skew_utility(
+    rest: &str,
+    negative: bool,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    if let Some((axis @ ("x" | "y"), value)) = rest.split_once('-') {
+        let angle = angle_value(value, negative).ok_or(Fail::Invalid)?;
+        let func = if axis == "x" { "skewX" } else { "skewY" };
+        register_rotate_skew(tw_props);
+        return Ok(Utility {
+            selector: SelectorKind::Class,
+            decls: vec![
+                (format!("--tw-skew-{axis}"), format!("{func}({angle})")),
+                ("transform".to_string(), TRANSFORM_CHAIN.to_string()),
+            ],
+            rank: 100,
+        });
+    }
+    let angle = angle_value(rest, negative).ok_or(Fail::Invalid)?;
+    register_rotate_skew(tw_props);
+    Ok(Utility {
+        selector: SelectorKind::Class,
+        decls: vec![
+            ("--tw-skew-x".to_string(), format!("skewX({angle})")),
+            ("--tw-skew-y".to_string(), format!("skewY({angle})")),
+            ("transform".to_string(), TRANSFORM_CHAIN.to_string()),
+        ],
+        rank: 100,
+    })
+}
+
+/// `scale-*`: `scale-3d` engages all three axes; `scale-x/y/z-<n>` set one slot;
+/// bare `scale-<int>` sets all three `--tw-scale-*` slots (the shorthand still
+/// lists only x/y); bare `scale-[…]` assigns the `scale` property directly.
+fn scale_utility(
+    rest: &str,
+    negative: bool,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    if rest == "3d" {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        register_scale(tw_props);
+        return Ok(Utility::simple(vec![(
+            "scale",
+            "var(--tw-scale-x) var(--tw-scale-y) var(--tw-scale-z)".to_string(),
+        )]));
+    }
+    if let Some((axis @ ("x" | "y" | "z"), value)) = rest.split_once('-') {
+        let resolved = scale_axis_value(value, negative).ok_or(Fail::Invalid)?;
+        register_scale(tw_props);
+        let shorthand = if axis == "z" {
+            "var(--tw-scale-x) var(--tw-scale-y) var(--tw-scale-z)"
+        } else {
+            "var(--tw-scale-x) var(--tw-scale-y)"
+        };
+        return Ok(Utility {
+            selector: SelectorKind::Class,
+            decls: vec![
+                (format!("--tw-scale-{axis}"), resolved),
+                ("scale".to_string(), shorthand.to_string()),
+            ],
+            rank: 100,
+        });
+    }
+    // Bare arbitrary values assign `scale` directly (no `--tw-*` slots).
+    if let Some(inner) = arbitrary_value(rest) {
+        let value = if negative {
+            format!("calc({inner} * -1)")
+        } else {
+            inner
+        };
+        return Ok(Utility::simple(vec![("scale", value)]));
+    }
+    // Bare integers set all three axes.
+    if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+        let value = if negative {
+            format!("calc({rest}% * -1)")
+        } else {
+            format!("{rest}%")
+        };
+        register_scale(tw_props);
+        return Ok(Utility::simple(vec![
+            ("--tw-scale-x", value.clone()),
+            ("--tw-scale-y", value.clone()),
+            ("--tw-scale-z", value),
+            ("scale", "var(--tw-scale-x) var(--tw-scale-y)".to_string()),
+        ]));
+    }
+    Err(Fail::Invalid)
+}
+
+/// `translate-*`: `translate-none` clears; `translate-3d` engages all three
+/// axes; `translate-x/y-<v>` and bare `translate-<v>` take fractions / spacing /
+/// `px` / `full` / arbitrary; `translate-z-<v>` takes spacing / `px` / arbitrary
+/// only.
+fn translate_utility(
+    rest: &str,
+    negative: bool,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    if rest == "none" {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        return Ok(Utility::simple(vec![("translate", "none".to_string())]));
+    }
+    if rest == "3d" {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        register_translate(tw_props);
+        return Ok(Utility::simple(vec![(
+            "translate",
+            "var(--tw-translate-x) var(--tw-translate-y) var(--tw-translate-z)".to_string(),
+        )]));
+    }
+    if let Some((axis @ ("x" | "y" | "z"), value)) = rest.split_once('-') {
+        let resolved = if axis == "z" {
+            translate_z_value(value, negative)
+        } else {
+            translate_value(value, negative)
+        }
+        .ok_or(Fail::Invalid)?;
+        register_translate(tw_props);
+        let shorthand = if axis == "z" {
+            "var(--tw-translate-x) var(--tw-translate-y) var(--tw-translate-z)"
+        } else {
+            "var(--tw-translate-x) var(--tw-translate-y)"
+        };
+        return Ok(Utility {
+            selector: SelectorKind::Class,
+            decls: vec![
+                (format!("--tw-translate-{axis}"), resolved),
+                ("translate".to_string(), shorthand.to_string()),
+            ],
+            rank: 100,
+        });
+    }
+    let resolved = translate_value(rest, negative).ok_or(Fail::Invalid)?;
+    register_translate(tw_props);
+    Ok(Utility::simple(vec![
+        ("--tw-translate-x", resolved.clone()),
+        ("--tw-translate-y", resolved),
+        ("translate", "var(--tw-translate-x) var(--tw-translate-y)".to_string()),
+    ]))
+}
+
 /// Single-keyword utilities.
+/// A CSS blend-mode keyword (shared by `mix-blend-*` and `bg-blend-*`). `plus`
+/// enables the compositing-only `plus-darker`/`plus-lighter` modes that only
+/// `mix-blend-mode` accepts.
+fn blend_mode(value: &str, plus: bool) -> Option<&'static str> {
+    Some(match value {
+        "normal" => "normal",
+        "multiply" => "multiply",
+        "screen" => "screen",
+        "overlay" => "overlay",
+        "darken" => "darken",
+        "lighten" => "lighten",
+        "color-dodge" => "color-dodge",
+        "color-burn" => "color-burn",
+        "hard-light" => "hard-light",
+        "soft-light" => "soft-light",
+        "difference" => "difference",
+        "exclusion" => "exclusion",
+        "hue" => "hue",
+        "saturation" => "saturation",
+        "color" => "color",
+        "luminosity" => "luminosity",
+        "plus-darker" if plus => "plus-darker",
+        "plus-lighter" if plus => "plus-lighter",
+        _ => return None,
+    })
+}
+
+/// The `object-position` keyword for an `object-<value>` value, or `None` if the
+/// value is not a position keyword (the caller then tries `object-fit`).
+fn object_position(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "top" => "top",
+        "bottom" => "bottom",
+        "left" => "left",
+        "right" => "right",
+        "center" => "center",
+        "left-top" | "top-left" => "left top",
+        "left-bottom" | "bottom-left" => "left bottom",
+        "right-top" | "top-right" => "right top",
+        "right-bottom" | "bottom-right" => "right bottom",
+        _ => return None,
+    })
+}
+
+/// Static keyword utilities in the scroll/overflow/snap/blend/break/box group,
+/// keyed by the base (no negative prefix, no `/modifier`). The `bool` is whether
+/// the utility registers the `--tw-scroll-snap-strictness` property.
+fn scroll_overflow_static(base: &str) -> Option<(Vec<(&'static str, String)>, bool)> {
+    let decls: Vec<(&'static str, String)> = match base {
+        "isolate" => vec![("isolation", "isolate".into())],
+        "box-border" => vec![("box-sizing", "border-box".into())],
+        "box-content" => vec![("box-sizing", "content-box".into())],
+        "box-decoration-clone" => vec![
+            ("-webkit-box-decoration-break", "clone".into()),
+            ("box-decoration-break", "clone".into()),
+        ],
+        "box-decoration-slice" => vec![
+            ("-webkit-box-decoration-break", "slice".into()),
+            ("box-decoration-break", "slice".into()),
+        ],
+        "break-all" => vec![("word-break", "break-all".into())],
+        "break-keep" => vec![("word-break", "keep-all".into())],
+        "break-normal" => {
+            vec![("overflow-wrap", "normal".into()), ("word-break", "normal".into())]
+        }
+        "break-words" => vec![("overflow-wrap", "break-word".into())],
+        "overflow-auto" => vec![("overflow", "auto".into())],
+        "overflow-hidden" => vec![("overflow", "hidden".into())],
+        "overflow-clip" => vec![("overflow", "clip".into())],
+        "overflow-visible" => vec![("overflow", "visible".into())],
+        "overflow-scroll" => vec![("overflow", "scroll".into())],
+        "overflow-x-auto" => vec![("overflow-x", "auto".into())],
+        "overflow-x-hidden" => vec![("overflow-x", "hidden".into())],
+        "overflow-x-clip" => vec![("overflow-x", "clip".into())],
+        "overflow-x-visible" => vec![("overflow-x", "visible".into())],
+        "overflow-x-scroll" => vec![("overflow-x", "scroll".into())],
+        "overflow-y-auto" => vec![("overflow-y", "auto".into())],
+        "overflow-y-hidden" => vec![("overflow-y", "hidden".into())],
+        "overflow-y-clip" => vec![("overflow-y", "clip".into())],
+        "overflow-y-visible" => vec![("overflow-y", "visible".into())],
+        "overflow-y-scroll" => vec![("overflow-y", "scroll".into())],
+        "overscroll-auto" => vec![("overscroll-behavior", "auto".into())],
+        "overscroll-contain" => vec![("overscroll-behavior", "contain".into())],
+        "overscroll-none" => vec![("overscroll-behavior", "none".into())],
+        "overscroll-x-auto" => vec![("overscroll-behavior-x", "auto".into())],
+        "overscroll-x-contain" => vec![("overscroll-behavior-x", "contain".into())],
+        "overscroll-x-none" => vec![("overscroll-behavior-x", "none".into())],
+        "overscroll-y-auto" => vec![("overscroll-behavior-y", "auto".into())],
+        "overscroll-y-contain" => vec![("overscroll-behavior-y", "contain".into())],
+        "overscroll-y-none" => vec![("overscroll-behavior-y", "none".into())],
+        "scroll-auto" => vec![("scroll-behavior", "auto".into())],
+        "scroll-smooth" => vec![("scroll-behavior", "smooth".into())],
+        "snap-none" => vec![("scroll-snap-type", "none".into())],
+        "snap-x" => {
+            return Some((
+                vec![("scroll-snap-type", "x var(--tw-scroll-snap-strictness)".into())],
+                true,
+            ))
+        }
+        "snap-y" => {
+            return Some((
+                vec![("scroll-snap-type", "y var(--tw-scroll-snap-strictness)".into())],
+                true,
+            ))
+        }
+        "snap-both" => {
+            return Some((
+                vec![("scroll-snap-type", "both var(--tw-scroll-snap-strictness)".into())],
+                true,
+            ))
+        }
+        "snap-mandatory" => {
+            return Some((vec![("--tw-scroll-snap-strictness", "mandatory".into())], true))
+        }
+        "snap-proximity" => {
+            return Some((vec![("--tw-scroll-snap-strictness", "proximity".into())], true))
+        }
+        "snap-start" => vec![("scroll-snap-align", "start".into())],
+        "snap-end" => vec![("scroll-snap-align", "end".into())],
+        "snap-center" => vec![("scroll-snap-align", "center".into())],
+        "snap-align-none" => vec![("scroll-snap-align", "none".into())],
+        "snap-normal" => vec![("scroll-snap-stop", "normal".into())],
+        "snap-always" => vec![("scroll-snap-stop", "always".into())],
+        "scrollbar-auto" => vec![("scrollbar-width", "auto".into())],
+        "scrollbar-thin" => vec![("scrollbar-width", "thin".into())],
+        "scrollbar-none" => vec![("scrollbar-width", "none".into())],
+        "scrollbar-gutter-auto" => vec![("scrollbar-gutter", "auto".into())],
+        "scrollbar-gutter-stable" => vec![("scrollbar-gutter", "stable".into())],
+        "scrollbar-gutter-both" => vec![("scrollbar-gutter", "stable both-edges".into())],
+        _ => return None,
+    };
+    Some((decls, false))
+}
+
+/// The `--tw-scrollbar-thumb`/`--tw-scrollbar-track` declaration(s) for a color
+/// token (with optional `/<pct>` modifier). A plain token yields one `var(...)`
+/// declaration; a modifier yields the `color-mix(in oklab, …)` value plus the
+/// static sRGB fallback Tailwind emits for browsers without `oklab`.
+fn scrollbar_color_decls(var: &str, token: &str, theme: &Theme) -> Option<Vec<(String, String)>> {
+    let resolved = color_value(token, theme)?;
+    let (color_token, modifier) = split_color_modifier(token);
+    match modifier {
+        None => Some(vec![(var.to_string(), resolved)]),
+        Some(pct) => {
+            // The static fallback resolves the theme color to its literal value.
+            let literal = match color_token {
+                "transparent" => "transparent".to_string(),
+                "current" => "currentcolor".to_string(),
+                "inherit" => "inherit".to_string(),
+                _ if color_token.starts_with('[') => {
+                    
+                    arbitrary_value(color_token)?
+                }
+                _ => theme.get(&format!("--color-{color_token}"))?.to_string(),
+            };
+            Some(vec![
+                (var.to_string(), resolved),
+                (
+                    var.to_string(),
+                    format!("color-mix(in srgb, {literal} {pct}%, transparent)"),
+                ),
+            ])
+        }
+    }
+}
+
+/// The scroll/overflow/snap/blend/break/box/columns/object family. Returns `None`
+/// when `base` is not one of these families (fall through to the rest of the
+/// generator), `Some(Err(Fail::Invalid))` for a token in the family that Tailwind
+/// itself rejects (it generates nothing), and `Some(Ok(..))` for a match.
+fn scroll_overflow_utility(
+    base: &str,
+    theme: &Theme,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Option<Result<Utility, Fail>> {
+    let (negative, b) = match base.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, base),
+    };
+
+    // Color scrollbar utilities accept a `/<pct>` modifier, so handle them before
+    // splitting the generic modifier off.
+    for (prefix, var) in [
+        ("scrollbar-thumb-", "--tw-scrollbar-thumb"),
+        ("scrollbar-track-", "--tw-scrollbar-track"),
+    ] {
+        if let Some(token) = b.strip_prefix(prefix) {
+            if negative {
+                return Some(Err(Fail::Invalid));
+            }
+            match scrollbar_color_decls(var, token, theme) {
+                Some(mut decls) => {
+                    tw_props.insert(TwProp::ScrollbarThumb);
+                    tw_props.insert(TwProp::ScrollbarTrack);
+                    decls.push((
+                        "scrollbar-color".to_string(),
+                        "var(--tw-scrollbar-thumb) var(--tw-scrollbar-track)".to_string(),
+                    ));
+                    return Some(Ok(Utility {
+                        selector: SelectorKind::Class,
+                        decls,
+                        rank: 100,
+                    }));
+                }
+                None => return Some(Err(Fail::Invalid)),
+            }
+        }
+    }
+    if matches!(b, "scrollbar-thumb" | "scrollbar-track" | "scrollbar" | "scrollbar-gutter") {
+        return Some(Err(Fail::Invalid));
+    }
+
+    let (core, has_mod) = match b.split_once('/') {
+        Some((c, m)) => (c, Some(m)),
+        None => (b, None),
+    };
+
+    // Static keyword utilities.
+    if let Some((decls, snap_prop)) = scroll_overflow_static(core) {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        if snap_prop {
+            tw_props.insert(TwProp::ScrollSnapStrictness);
+        }
+        return Some(Ok(Utility::simple(decls)));
+    }
+
+    // Bare family names (and their `x`/`y` axes) generate nothing.
+    if matches!(
+        core,
+        "box" | "box-decoration"
+            | "break-after" | "break-before" | "break-inside"
+            | "overflow-x" | "overflow-y" | "overscroll-x" | "overscroll-y"
+            | "mix-blend" | "bg-blend" | "snap"
+    ) {
+        return Some(Err(Fail::Invalid));
+    }
+
+    // mix-blend-* / bg-blend-*.
+    if let Some(v) = core.strip_prefix("mix-blend-") {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        return Some(match blend_mode(v, true) {
+            Some(m) => Ok(Utility::simple(vec![("mix-blend-mode", m.to_string())])),
+            None => Err(Fail::Invalid),
+        });
+    }
+    if let Some(v) = core.strip_prefix("bg-blend-") {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        return Some(match blend_mode(v, false) {
+            Some(m) => Ok(Utility::simple(vec![("background-blend-mode", m.to_string())])),
+            None => Err(Fail::Invalid),
+        });
+    }
+
+    // break-after / break-before / break-inside value families.
+    for (prefix, property) in [
+        ("break-after-", "break-after"),
+        ("break-before-", "break-before"),
+    ] {
+        if let Some(v) = core.strip_prefix(prefix) {
+            if negative || has_mod.is_some() {
+                return Some(Err(Fail::Invalid));
+            }
+            let ok = matches!(
+                v,
+                "auto" | "avoid" | "all" | "avoid-page" | "page" | "left" | "right" | "column"
+            );
+            return Some(if ok {
+                Ok(Utility::simple(vec![(property, v.to_string())]))
+            } else {
+                Err(Fail::Invalid)
+            });
+        }
+    }
+    if let Some(v) = core.strip_prefix("break-inside-") {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        let ok = matches!(v, "auto" | "avoid" | "avoid-page" | "avoid-column");
+        return Some(if ok {
+            Ok(Utility::simple(vec![("break-inside", v.to_string())]))
+        } else {
+            Err(Fail::Invalid)
+        });
+    }
+
+    // object-* : object-fit keyword, object-position keyword, or arbitrary value.
+    if let Some(v) = core.strip_prefix("object-") {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        if matches!(v, "contain" | "cover" | "fill" | "none" | "scale-down") {
+            return Some(Ok(Utility::simple(vec![("object-fit", v.to_string())])));
+        }
+        if let Some(pos) = object_position(v) {
+            return Some(Ok(Utility::simple(vec![("object-position", pos.to_string())])));
+        }
+        if let Some(inner) = arbitrary_value(v) {
+            return Some(Ok(Utility::simple(vec![("object-position", inner)])));
+        }
+        return Some(Err(Fail::Invalid));
+    }
+
+    // columns-* : a bare number, the container scale, `auto`, or an arbitrary value.
+    if core == "columns" {
+        return Some(Err(Fail::Invalid));
+    }
+    if let Some(v) = core.strip_prefix("columns-") {
+        if negative || has_mod.is_some() {
+            return Some(Err(Fail::Invalid));
+        }
+        if v == "auto" {
+            return Some(Ok(Utility::simple(vec![("columns", "auto".to_string())])));
+        }
+        if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(Ok(Utility::simple(vec![("columns", v.to_string())])));
+        }
+        let container = format!("--container-{v}");
+        if theme.contains(&container) {
+            return Some(Ok(Utility::simple(vec![("columns", format!("var({container})"))])));
+        }
+        if let Some(inner) = arbitrary_value(v) {
+            return Some(Ok(Utility::simple(vec![("columns", inner)])));
+        }
+        return Some(Err(Fail::Invalid));
+    }
+
+    // scroll-margin / scroll-padding scale (and reject unknown `scroll-*`).
+    if let Some(rest) = core.strip_prefix("scroll-") {
+        const SCROLL_SPACING: &[(&str, &str, bool)] = &[
+            ("mbs", "scroll-margin-block-start", true),
+            ("mbe", "scroll-margin-block-end", true),
+            ("mx", "scroll-margin-inline", true),
+            ("my", "scroll-margin-block", true),
+            ("ms", "scroll-margin-inline-start", true),
+            ("me", "scroll-margin-inline-end", true),
+            ("mt", "scroll-margin-top", true),
+            ("mr", "scroll-margin-right", true),
+            ("mb", "scroll-margin-bottom", true),
+            ("ml", "scroll-margin-left", true),
+            ("m", "scroll-margin", true),
+            ("pbs", "scroll-padding-block-start", false),
+            ("pbe", "scroll-padding-block-end", false),
+            ("px", "scroll-padding-inline", false),
+            ("py", "scroll-padding-block", false),
+            ("ps", "scroll-padding-inline-start", false),
+            ("pe", "scroll-padding-inline-end", false),
+            ("pt", "scroll-padding-top", false),
+            ("pr", "scroll-padding-right", false),
+            ("pb", "scroll-padding-bottom", false),
+            ("pl", "scroll-padding-left", false),
+            ("p", "scroll-padding", false),
+        ];
+        for &(prefix, property, is_margin) in SCROLL_SPACING {
+            // Bare family name (`scroll-m`) generates nothing.
+            if rest == prefix {
+                return Some(Err(Fail::Invalid));
+            }
+            if let Some(step) = rest.strip_prefix(prefix).and_then(|r| r.strip_prefix('-')) {
+                if has_mod.is_some() {
+                    return Some(Err(Fail::Invalid));
+                }
+                if negative && !is_margin {
+                    return Some(Err(Fail::Invalid));
+                }
+                if step == "px" {
+                    let value = if negative { "-1px" } else { "1px" };
+                    return Some(Ok(Utility::simple(vec![(property, value.to_string())])));
+                }
+                if let Some(inner) = arbitrary_value(step) {
+                    let value = if negative { format!("calc({inner} * -1)") } else { inner };
+                    return Some(Ok(Utility::simple(vec![(property, value)])));
+                }
+                return Some(match spacing_value(step, negative) {
+                    Some(value) => Ok(Utility::simple(vec![(property, value)])),
+                    None => Err(Fail::Invalid),
+                });
+            }
+        }
+        // Any other `scroll-*` token is not a utility.
+        return Some(Err(Fail::Invalid));
+    }
+
+    None
+}
+
 fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
     let decls: Vec<(&'static str, String)> = match base {
         "block" => vec![("display", "block".into())],
@@ -2215,23 +3875,20 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "absolute" => vec![("position", "absolute".into())],
         "relative" => vec![("position", "relative".into())],
         "sticky" => vec![("position", "sticky".into())],
-        "isolate" => vec![("isolation", "isolate".into())],
         "visible" => vec![("visibility", "visible".into())],
         "invisible" => vec![("visibility", "hidden".into())],
         "flex-col" => vec![("flex-direction", "column".into())],
+        "flex-col-reverse" => vec![("flex-direction", "column-reverse".into())],
         "flex-row" => vec![("flex-direction", "row".into())],
+        "flex-row-reverse" => vec![("flex-direction", "row-reverse".into())],
         "flex-wrap" => vec![("flex-wrap", "wrap".into())],
+        "flex-wrap-reverse" => vec![("flex-wrap", "wrap-reverse".into())],
         "flex-nowrap" => vec![("flex-wrap", "nowrap".into())],
         "flex-1" => vec![("flex", "1".into())],
-        "items-center" => vec![("align-items", "center".into())],
-        "items-start" => vec![("align-items", "flex-start".into())],
-        "items-end" => vec![("align-items", "flex-end".into())],
-        "items-stretch" => vec![("align-items", "stretch".into())],
-        "items-baseline" => vec![("align-items", "baseline".into())],
-        "justify-center" => vec![("justify-content", "center".into())],
-        "justify-between" => vec![("justify-content", "space-between".into())],
-        "justify-start" => vec![("justify-content", "flex-start".into())],
-        "justify-end" => vec![("justify-content", "flex-end".into())],
+        "flex-auto" => vec![("flex", "auto".into())],
+        "flex-initial" => vec![("flex", "0 auto".into())],
+        "flex-none" => vec![("flex", "none".into())],
+        // (align/justify/place alignment utilities live in `alignment_utility`.)
         "list-disc" => vec![("list-style-type", "disc".into())],
         "list-decimal" => vec![("list-style-type", "decimal".into())],
         "list-none" => vec![("list-style-type", "none".into())],
@@ -2240,6 +3897,24 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "capitalize" => vec![("text-transform", "capitalize".into())],
         "italic" => vec![("font-style", "italic".into())],
         "not-italic" => vec![("font-style", "normal".into())],
+        "antialiased" => vec![
+            ("-webkit-font-smoothing", "antialiased".into()),
+            ("-moz-osx-font-smoothing", "grayscale".into()),
+        ],
+        "subpixel-antialiased" => vec![
+            ("-webkit-font-smoothing", "auto".into()),
+            ("-moz-osx-font-smoothing", "auto".into()),
+        ],
+        // Border-STYLE keywords set both the modern `--tw-border-style` (which the
+        // border-WIDTH utilities read) and `border-style` directly, matching v4.
+        "border-solid" => vec![("--tw-border-style", "solid".into()), ("border-style", "solid".into())],
+        "border-dashed" => vec![("--tw-border-style", "dashed".into()), ("border-style", "dashed".into())],
+        "border-dotted" => vec![("--tw-border-style", "dotted".into()), ("border-style", "dotted".into())],
+        "border-double" => vec![("--tw-border-style", "double".into()), ("border-style", "double".into())],
+        "border-hidden" => vec![("--tw-border-style", "hidden".into()), ("border-style", "hidden".into())],
+        "border-none" => vec![("--tw-border-style", "none".into()), ("border-style", "none".into())],
+        "border-collapse" => vec![("border-collapse", "collapse".into())],
+        "border-separate" => vec![("border-collapse", "separate".into())],
         "underline" => vec![("text-decoration-line", "underline".into())],
         "line-through" => vec![("text-decoration-line", "line-through".into())],
         "no-underline" => vec![("text-decoration-line", "none".into())],
@@ -2260,19 +3935,6 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         "table-row" => vec![("display", "table-row".into())],
         "table-row-group" => vec![("display", "table-row-group".into())],
         "flow-root" => vec![("display", "flow-root".into())],
-        "box-border" => vec![("box-sizing", "border-box".into())],
-        "box-content" => vec![("box-sizing", "content-box".into())],
-        "break-all" => vec![("word-break", "break-all".into())],
-        "break-words" => vec![("overflow-wrap", "break-word".into())],
-        "overflow-auto" => vec![("overflow", "auto".into())],
-        "overflow-hidden" => vec![("overflow", "hidden".into())],
-        "overflow-visible" => vec![("overflow", "visible".into())],
-        "overflow-scroll" => vec![("overflow", "scroll".into())],
-        "overflow-clip" => vec![("overflow", "clip".into())],
-        "overflow-x-auto" => vec![("overflow-x", "auto".into())],
-        "overflow-y-auto" => vec![("overflow-y", "auto".into())],
-        "overflow-x-hidden" => vec![("overflow-x", "hidden".into())],
-        "overflow-y-hidden" => vec![("overflow-y", "hidden".into())],
         "select-none" => {
             vec![("-webkit-user-select", "none".into()), ("user-select", "none".into())]
         }
@@ -2287,9 +3949,396 @@ fn keyword_utility(base: &str) -> Option<Vec<(&'static str, String)>> {
         }
         "pointer-events-none" => vec![("pointer-events", "none".into())],
         "pointer-events-auto" => vec![("pointer-events", "auto".into())],
+        // list-style position / marker display / image reset.
+        "list-inside" => vec![("list-style-position", "inside".into())],
+        "list-outside" => vec![("list-style-position", "outside".into())],
+        "list-item" => vec![("display", "list-item".into())],
+        "list-image-none" => vec![("list-style-image", "none".into())],
+        // text-wrap.
+        "text-wrap" => vec![("text-wrap", "wrap".into())],
+        "text-nowrap" => vec![("text-wrap", "nowrap".into())],
+        "text-balance" => vec![("text-wrap", "balance".into())],
+        "text-pretty" => vec![("text-wrap", "pretty".into())],
+        // overflow-wrap (`wrap-*`).
+        "wrap-normal" => vec![("overflow-wrap", "normal".into())],
+        "wrap-break-word" => vec![("overflow-wrap", "break-word".into())],
+        "wrap-anywhere" => vec![("overflow-wrap", "anywhere".into())],
+        // appearance.
+        "appearance-none" => vec![("appearance", "none".into())],
+        "appearance-auto" => vec![("appearance", "auto".into())],
+        // resize.
+        "resize" => vec![("resize", "both".into())],
+        "resize-none" => vec![("resize", "none".into())],
+        "resize-x" => vec![("resize", "horizontal".into())],
+        "resize-y" => vec![("resize", "vertical".into())],
+        // hyphens (WebKit-prefixed).
+        "hyphens-none" => vec![("-webkit-hyphens", "none".into()), ("hyphens", "none".into())],
+        "hyphens-manual" => vec![("-webkit-hyphens", "manual".into()), ("hyphens", "manual".into())],
+        "hyphens-auto" => vec![("-webkit-hyphens", "auto".into()), ("hyphens", "auto".into())],
+        // will-change.
+        "will-change-auto" => vec![("will-change", "auto".into())],
+        "will-change-scroll" => vec![("will-change", "scroll-position".into())],
+        "will-change-contents" => vec![("will-change", "contents".into())],
+        "will-change-transform" => vec![("will-change", "transform".into())],
         _ => return None,
     };
     Some(decls)
+}
+
+/// How an alignment family maps the `start`/`end` keywords.
+#[derive(Clone, Copy)]
+enum PosStyle {
+    /// `start`→`flex-start`, `end`→`flex-end` (the flex content-/self-position
+    /// group: align-content/items/self, justify-content, justify-self).
+    Flex,
+    /// `start`→`start`, `end`→`end` (the grid group: justify-items, place-*).
+    Grid,
+}
+
+/// Which keyword values a particular alignment utility accepts, on top of the
+/// always-allowed `center`/`center-safe`/`start`/`end`/`end-safe`/`stretch`.
+struct AlignSpec {
+    prop: &'static str,
+    style: PosStyle,
+    normal: bool,
+    auto: bool,
+    baseline: bool,
+    baseline_last: bool,
+    /// `between`/`around`/`evenly` (the distributed-content keywords).
+    distributed: bool,
+}
+
+/// Resolves an alignment value keyword to its CSS value under `spec`, or `None`
+/// when the keyword is not valid for that utility (Tailwind then emits nothing).
+fn resolve_align_value(value: &str, spec: &AlignSpec) -> Option<String> {
+    let flex = matches!(spec.style, PosStyle::Flex);
+    let css = match value {
+        "center" => "center".to_string(),
+        "center-safe" => "safe center".to_string(),
+        "start" => if flex { "flex-start" } else { "start" }.to_string(),
+        "end" => if flex { "flex-end" } else { "end" }.to_string(),
+        "end-safe" => if flex { "safe flex-end" } else { "safe end" }.to_string(),
+        "stretch" => "stretch".to_string(),
+        "normal" if spec.normal => "normal".to_string(),
+        "auto" if spec.auto => "auto".to_string(),
+        "baseline" if spec.baseline => "baseline".to_string(),
+        "baseline-last" if spec.baseline_last => "last baseline".to_string(),
+        "between" if spec.distributed => "space-between".to_string(),
+        "around" if spec.distributed => "space-around".to_string(),
+        "evenly" if spec.distributed => "space-evenly".to_string(),
+        _ => return None,
+    };
+    Some(css)
+}
+
+/// The alignment family: `justify-content`/`justify-items`/`justify-self`,
+/// `align-content`/`align-items`/`align-self`, `place-content`/`place-items`/
+/// `place-self`. None of these accept a negative prefix or a `/modifier`.
+///
+/// Returns `None` when `base` is not one of these (fall through to the generic
+/// generator — importantly `content-[…]`/`content-none`), `Some(Err(Invalid))`
+/// for a token Tailwind itself rejects, and `Some(Ok(..))` for a match.
+fn alignment_utility(base: &str) -> Option<Result<Utility, Fail>> {
+    let negative = base.starts_with('-');
+    let stem = base.strip_prefix('-').unwrap_or(base);
+    let (core, has_mod) = match stem.split_once('/') {
+        Some((c, _)) => (c, true),
+        None => (stem, false),
+    };
+
+    // Bare family names generate nothing. (`justify-items`/`justify-self` are
+    // caught below by the `justify-` fallthrough returning an unknown value.)
+    if matches!(core, "place-content" | "place-items" | "place-self") {
+        return Some(Err(Fail::Invalid));
+    }
+
+    // Longest family prefix wins.
+    let (spec, value) = if let Some(v) = core.strip_prefix("justify-items-") {
+        (AlignSpec { prop: "justify-items", style: PosStyle::Grid, normal: true, auto: false, baseline: false, baseline_last: false, distributed: false }, v)
+    } else if let Some(v) = core.strip_prefix("justify-self-") {
+        (AlignSpec { prop: "justify-self", style: PosStyle::Flex, normal: false, auto: true, baseline: false, baseline_last: false, distributed: false }, v)
+    } else if let Some(v) = core.strip_prefix("justify-") {
+        (AlignSpec { prop: "justify-content", style: PosStyle::Flex, normal: true, auto: false, baseline: false, baseline_last: false, distributed: true }, v)
+    } else if let Some(v) = core.strip_prefix("place-content-") {
+        (AlignSpec { prop: "place-content", style: PosStyle::Grid, normal: false, auto: false, baseline: true, baseline_last: false, distributed: true }, v)
+    } else if let Some(v) = core.strip_prefix("place-items-") {
+        (AlignSpec { prop: "place-items", style: PosStyle::Grid, normal: false, auto: false, baseline: true, baseline_last: false, distributed: false }, v)
+    } else if let Some(v) = core.strip_prefix("place-self-") {
+        (AlignSpec { prop: "place-self", style: PosStyle::Grid, normal: false, auto: true, baseline: false, baseline_last: false, distributed: false }, v)
+    } else if let Some(v) = core.strip_prefix("content-") {
+        // `content-` is shared with the CSS `content` property utility
+        // (`content-['…']`, `content-none`). Only recognized align-content
+        // keywords are ours; hand anything else to the generic generator.
+        let spec = AlignSpec { prop: "align-content", style: PosStyle::Flex, normal: true, auto: false, baseline: true, baseline_last: false, distributed: true };
+        return Some(match resolve_align_value(v, &spec) {
+            Some(css) if !negative && !has_mod => Ok(Utility::simple(vec![(spec.prop, css)])),
+            Some(_) => Err(Fail::Invalid),
+            None => {
+                if v.starts_with('[') || v.starts_with('(') || v == "none" {
+                    return None;
+                }
+                Err(Fail::Invalid)
+            }
+        });
+    } else if let Some(v) = core.strip_prefix("items-") {
+        (AlignSpec { prop: "align-items", style: PosStyle::Flex, normal: false, auto: false, baseline: true, baseline_last: true, distributed: false }, v)
+    } else if let Some(v) = core.strip_prefix("self-") {
+        (AlignSpec { prop: "align-self", style: PosStyle::Flex, normal: false, auto: true, baseline: true, baseline_last: true, distributed: false }, v)
+    } else {
+        return None;
+    };
+
+    if negative || has_mod {
+        return Some(Err(Fail::Invalid));
+    }
+    Some(match resolve_align_value(value, &spec) {
+        Some(css) => Ok(Utility::simple(vec![(spec.prop, css)])),
+        None => Err(Fail::Invalid),
+    })
+}
+
+/// The `mask-*` utility family. `pb` is the base with any leading `-` stripped;
+/// `negative` records whether that `-` was present (only the linear/conic angle
+/// utilities use it). Returns `Err(Fail::Invalid)` for every token Tailwind itself
+/// rejects (a bad value, a stray `/modifier`, a negative where none is allowed),
+/// so those generate nothing — matching the reference.
+fn mask_utility(pb: &str, negative: bool) -> Result<Utility, Fail> {
+    // No `mask-*` utility here takes an opacity/`/…` modifier; a slash makes the
+    // token invalid (`mask-none/foo`, `mask-clip-border/foo`, `mask-conic-45/foo`).
+    if pb.contains('/') {
+        return Err(Fail::Invalid);
+    }
+
+    // The shared trailing declarations every gradient/edge mask emits.
+    fn tail(decls: &mut Vec<(String, String)>) {
+        decls.push(("mask-composite".into(), "intersect".into()));
+        decls.push((
+            "mask-image".into(),
+            "var(--tw-mask-linear), var(--tw-mask-radial), var(--tw-mask-conic)".into(),
+        ));
+    }
+    let ok = |decls: Vec<(String, String)>| {
+        Ok(Utility { selector: SelectorKind::Class, decls, rank: 100 })
+    };
+    let d = |p: &str, v: &str| (p.to_string(), v.to_string());
+
+    // Static keyword utilities. All reject a leading `-`.
+    if !negative {
+        let kw: Option<(&str, &str)> = match pb {
+            "mask-none" => Some(("mask-image", "none")),
+            "mask-clip-border" => Some(("mask-clip", "border-box")),
+            "mask-clip-content" => Some(("mask-clip", "content-box")),
+            "mask-clip-fill" => Some(("mask-clip", "fill-box")),
+            "mask-clip-padding" => Some(("mask-clip", "padding-box")),
+            "mask-clip-stroke" => Some(("mask-clip", "stroke-box")),
+            "mask-clip-view" => Some(("mask-clip", "view-box")),
+            "mask-no-clip" => Some(("mask-clip", "no-clip")),
+            "mask-origin-border" => Some(("mask-origin", "border-box")),
+            "mask-origin-content" => Some(("mask-origin", "content-box")),
+            "mask-origin-fill" => Some(("mask-origin", "fill-box")),
+            "mask-origin-padding" => Some(("mask-origin", "padding-box")),
+            "mask-origin-stroke" => Some(("mask-origin", "stroke-box")),
+            "mask-origin-view" => Some(("mask-origin", "view-box")),
+            "mask-circle" => Some(("--tw-mask-radial-shape", "circle")),
+            "mask-ellipse" => Some(("--tw-mask-radial-shape", "ellipse")),
+            "mask-radial-closest-corner" => Some(("--tw-mask-radial-size", "closest-corner")),
+            "mask-radial-closest-side" => Some(("--tw-mask-radial-size", "closest-side")),
+            "mask-radial-farthest-corner" => Some(("--tw-mask-radial-size", "farthest-corner")),
+            "mask-radial-farthest-side" => Some(("--tw-mask-radial-size", "farthest-side")),
+            "mask-radial-at-top" => Some(("--tw-mask-radial-position", "top")),
+            "mask-radial-at-bottom" => Some(("--tw-mask-radial-position", "bottom")),
+            "mask-radial-at-left" => Some(("--tw-mask-radial-position", "left")),
+            "mask-radial-at-right" => Some(("--tw-mask-radial-position", "right")),
+            "mask-radial-at-top-left" => Some(("--tw-mask-radial-position", "top left")),
+            "mask-radial-at-top-right" => Some(("--tw-mask-radial-position", "top right")),
+            "mask-radial-at-bottom-left" => Some(("--tw-mask-radial-position", "bottom left")),
+            "mask-radial-at-bottom-right" => Some(("--tw-mask-radial-position", "bottom right")),
+            _ => None,
+        };
+        if let Some((prop, value)) = kw {
+            return ok(vec![d(prop, value)]);
+        }
+    }
+
+    // Linear / conic angle utilities: `mask-linear-<n>`, `mask-conic-<n>`, and
+    // their negative forms `-mask-linear-<n>`.
+    for (prefix, axis) in [("mask-linear-", "linear"), ("mask-conic-", "conic")] {
+        // Guard the from/to gradient prefixes so they are not consumed here.
+        if pb.starts_with(&format!("{prefix}from-")) || pb.starts_with(&format!("{prefix}to-")) {
+            continue;
+        }
+        if let Some(value) = pb.strip_prefix(prefix) {
+            let angle = mask_angle_value(value, negative).ok_or(Fail::Invalid)?;
+            let gradient = if axis == "linear" {
+                "linear-gradient(var(--tw-mask-linear-stops, var(--tw-mask-linear-position)))"
+            } else {
+                "conic-gradient(var(--tw-mask-conic-stops, var(--tw-mask-conic-position)))"
+            };
+            let mut decls = vec![
+                d(&format!("--tw-mask-{axis}-position"), &angle),
+                d(&format!("--tw-mask-{axis}"), gradient),
+            ];
+            tail(&mut decls);
+            return ok(decls);
+        }
+    }
+
+    // Everything below is a from/to stop and requires a non-negative position.
+    if negative {
+        return Err(Fail::Invalid);
+    }
+
+    // Linear / radial / conic gradient stops: `mask-<axis>-from-<v>` / `-to-<v>`.
+    for axis in ["linear", "radial", "conic"] {
+        for (kind, kind_prefix) in [("from", "from-"), ("to", "to-")] {
+            let prefix = format!("mask-{axis}-{kind_prefix}");
+            let Some(value) = pb.strip_prefix(&prefix) else { continue };
+            let pos = mask_stop_position(value).ok_or(Fail::Invalid)?;
+            let stops = match axis {
+                "linear" => "var(--tw-mask-linear-position), var(--tw-mask-linear-from-color) \
+                     var(--tw-mask-linear-from-position), var(--tw-mask-linear-to-color) \
+                     var(--tw-mask-linear-to-position)".to_string(),
+                "radial" => "var(--tw-mask-radial-shape) var(--tw-mask-radial-size) at \
+                     var(--tw-mask-radial-position), var(--tw-mask-radial-from-color) \
+                     var(--tw-mask-radial-from-position), var(--tw-mask-radial-to-color) \
+                     var(--tw-mask-radial-to-position)".to_string(),
+                _ => "from var(--tw-mask-conic-position), var(--tw-mask-conic-from-color) \
+                     var(--tw-mask-conic-from-position), var(--tw-mask-conic-to-color) \
+                     var(--tw-mask-conic-to-position)".to_string(),
+            };
+            let gradient_fn = match axis {
+                "linear" => "linear-gradient",
+                "radial" => "radial-gradient",
+                _ => "conic-gradient",
+            };
+            let mut decls = vec![
+                d(&format!("--tw-mask-{axis}-stops"), &stops),
+                d(&format!("--tw-mask-{axis}"), &format!("{gradient_fn}(var(--tw-mask-{axis}-stops))")),
+                d(&format!("--tw-mask-{axis}-{kind}-position"), &pos),
+            ];
+            tail(&mut decls);
+            return ok(decls);
+        }
+    }
+
+    // Edge masks: `mask-t/r/b/l/x/y-from/to-<v>`. `x` = left+right, `y` = bottom+top.
+    for (tok, sides) in [
+        ("t", &["top"][..]),
+        ("r", &["right"][..]),
+        ("b", &["bottom"][..]),
+        ("l", &["left"][..]),
+        ("x", &["left", "right"][..]),
+        ("y", &["bottom", "top"][..]),
+    ] {
+        let Some(rest) = pb.strip_prefix(&format!("mask-{tok}-")) else { continue };
+        let (kind, value) = if let Some(v) = rest.strip_prefix("from-") {
+            ("from", v)
+        } else if let Some(v) = rest.strip_prefix("to-") {
+            ("to", v)
+        } else {
+            return Err(Fail::Invalid);
+        };
+        let pos = mask_stop_position(value).ok_or(Fail::Invalid)?;
+        let mut decls = Vec::new();
+        for side in sides {
+            decls.push(d(&format!("--tw-mask-{side}-{kind}-position"), &pos));
+            decls.push(d(
+                &format!("--tw-mask-{side}"),
+                &format!(
+                    "linear-gradient(to {side}, var(--tw-mask-{side}-from-color) \
+                     var(--tw-mask-{side}-from-position), var(--tw-mask-{side}-to-color) \
+                     var(--tw-mask-{side}-to-position))"
+                ),
+            ));
+        }
+        decls.push(d(
+            "--tw-mask-linear",
+            "var(--tw-mask-left), var(--tw-mask-right), var(--tw-mask-bottom), var(--tw-mask-top)",
+        ));
+        tail(&mut decls);
+        return ok(decls);
+    }
+
+    Err(Fail::Invalid)
+}
+
+/// A `mask-*-from/to-<v>` stop position. A bare number must be a spacing multiplier
+/// (a non-negative multiple of `0.25`, canonical form) and compiles to
+/// `calc(var(--spacing) * <n>)`, with `0` special-cased to `0px`. A percentage must
+/// be a non-negative integer and passes through literally. Everything else (`.5`,
+/// `2.8175`, `2.5%`, negatives, `unknown`) is rejected, matching Tailwind.
+fn mask_stop_position(value: &str) -> Option<String> {
+    if let Some(pct) = value.strip_suffix('%') {
+        let ok = !pct.is_empty() && pct.bytes().all(|b| b.is_ascii_digit());
+        return ok.then(|| value.to_string());
+    }
+    if value == "0" {
+        return Some("0px".to_string());
+    }
+    is_spacing_multiplier(value).then(|| format!("calc(var(--spacing) * {value})"))
+}
+
+/// A non-negative multiple of `0.25` in canonical form: an integer, or an integer
+/// part followed by `.25`, `.5`, or `.75`. (`1.0`, `.5`, `3.7`, `1.125` all fail.)
+fn is_spacing_multiplier(s: &str) -> bool {
+    match s.split_once('.') {
+        Some((int, frac)) => {
+            !int.is_empty()
+                && int.bytes().all(|b| b.is_ascii_digit())
+                && matches!(frac, "25" | "5" | "75")
+        }
+        None => !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+/// Splits a leading Tailwind data-type hint (`length:`, `number:`, `color:`, …)
+/// off an arbitrary value's inner text. The hint is lowercase letters/`-` before
+/// the first `:`; `var(--x)` (no top-level `:`) and `min(1px:…)`-style functions
+/// (a `(` inside the "hint") yield `None`.
+fn split_data_type_hint(s: &str) -> Option<(&str, &str)> {
+    let colon = s.find(':')?;
+    let hint = &s[..colon];
+    if !hint.is_empty() && hint.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+        Some((hint, &s[colon + 1..]))
+    } else {
+        None
+    }
+}
+
+/// Whether a raw value reads as a CSS `<number>` or `<percentage>`: optional sign,
+/// digits with at most one decimal point, optional trailing `%`. (`0.5`, `.5`,
+/// `50%`, `2` pass; `var(--x)`, `5px`, `1.2.3` fail.)
+fn is_number_or_percentage(s: &str) -> bool {
+    let body = s.strip_suffix('%').unwrap_or(s);
+    let body = body.strip_prefix(['-', '+']).unwrap_or(body);
+    if body.is_empty() {
+        return false;
+    }
+    let mut dots = 0;
+    for b in body.bytes() {
+        match b {
+            b'0'..=b'9' => {}
+            b'.' => dots += 1,
+            _ => return false,
+        }
+    }
+    dots <= 1
+}
+
+/// A `mask-linear-<n>` / `mask-conic-<n>` angle. `<n>` must be a non-negative
+/// integer. `0` -> `0deg`, `±1` -> `±1deg`, otherwise `calc(1deg * <±n>)`.
+fn mask_angle_value(value: &str, negative: bool) -> Option<String> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if value == "0" {
+        return Some("0deg".to_string());
+    }
+    if value == "1" {
+        return Some(if negative { "-1deg" } else { "1deg" }.to_string());
+    }
+    let signed = if negative { format!("-{value}") } else { value.to_string() };
+    Some(format!("calc(1deg * {signed})"))
 }
 
 fn unknown(full: &str) -> Fail {
@@ -2316,8 +4365,13 @@ fn offset_value(value: &str, negative: bool) -> Option<String> {
     if value == "full" {
         return Some(if negative { "-100%" } else { "100%" }.to_string());
     }
-    if let Some(percent) = fraction_percent(value) {
-        return Some(if negative { format!("-{percent}") } else { percent });
+    if let Some((numerator, denominator)) = parse_fraction(value) {
+        let inner = format!("calc({numerator} / {denominator} * 100%)");
+        return Some(if negative {
+            format!("calc({inner} * -1)")
+        } else {
+            inner
+        });
     }
     if let Some(inner) = arbitrary_value(value) {
         return Some(if negative {
@@ -2363,14 +4417,6 @@ fn parse_fraction(value: &str) -> Option<(u32, u32)> {
     (d != 0).then_some((n, d))
 }
 
-/// A fraction as a folded percentage (`1/2` -> `50%`), matching the reference
-/// minifier's constant folding.
-fn fraction_percent(value: &str) -> Option<String> {
-    let (n, d) = parse_fraction(value)?;
-    let percent = (n as f64) * 100.0 / (d as f64);
-    Some(format!("{}%", format_number(percent)))
-}
-
 /// Formats a float without a trailing `.0` and with at most four decimals.
 fn format_number(value: f64) -> String {
     if (value - value.round()).abs() < 1e-9 {
@@ -2378,20 +4424,6 @@ fn format_number(value: f64) -> String {
     } else {
         let s = format!("{value:.4}");
         s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
-/// An `opacity-<n>` percentage as a fraction, minified without a leading zero
-/// (`45` -> `.45`), matching the reference output.
-fn percent_fraction(value: u32) -> String {
-    if value.is_multiple_of(100) {
-        return (value / 100).to_string();
-    }
-    let s = format_number(value as f64 / 100.0);
-    if let Some(stripped) = s.strip_prefix("0.") {
-        format!(".{stripped}")
-    } else {
-        s
     }
 }
 
@@ -2489,21 +4521,23 @@ fn space_math_operators(value: &str) -> String {
 
 /// Sizing utilities (`w-`, `h-`, `min-*`, `max-*`, `size-`). Returns `Ok(None)`
 /// when the prefix is not a sizing family.
-fn sizing_utility(base: &str, full: &str, theme: &Theme) -> Result<Option<Utility>, Fail> {
-    let families: [(&str, &[&str], char); 7] = [
-        ("w", &["width"], 'w'),
-        ("h", &["height"], 'h'),
-        ("min-w", &["min-width"], 'w'),
-        ("min-h", &["min-height"], 'h'),
-        ("max-w", &["max-width"], 'w'),
-        ("max-h", &["max-height"], 'h'),
-        ("size", &["width", "height"], 's'),
+fn sizing_utility(base: &str, _full: &str, theme: &Theme) -> Result<Option<Utility>, Fail> {
+    let families: [(&str, &[&str], char, SizeKind); 7] = [
+        ("w", &["width"], 'w', SizeKind::Plain),
+        ("h", &["height"], 'h', SizeKind::Plain),
+        ("min-w", &["min-width"], 'w', SizeKind::Min),
+        ("min-h", &["min-height"], 'h', SizeKind::Min),
+        ("max-w", &["max-width"], 'w', SizeKind::Max),
+        ("max-h", &["max-height"], 'h', SizeKind::Max),
+        ("size", &["width", "height"], 's', SizeKind::Plain),
     ];
-    for (prefix, properties, axis) in families {
+    for (prefix, properties, axis, kind) in families {
         let Some(value) = strip_family(base, prefix) else {
             continue;
         };
-        let resolved = size_value(value, axis, theme).ok_or_else(|| unknown(full))?;
+        // A value Tailwind cannot resolve (e.g. `w-none`, `h--1`, `w-1/-2`) makes
+        // it generate nothing at all; mirror that with `Fail::Invalid`.
+        let resolved = size_value(value, axis, kind, theme).ok_or(Fail::Invalid)?;
         let decls = properties
             .iter()
             .map(|p| (*p, resolved.clone()))
@@ -2513,15 +4547,34 @@ fn sizing_utility(base: &str, full: &str, theme: &Theme) -> Result<Option<Utilit
     Ok(None)
 }
 
+/// Whether a sizing family is a `min-*`, `max-*`, or the plain `w`/`h`/`size`.
+/// Governs which keyword values are accepted (`auto` on all but `max-*`, `none`
+/// only on `max-*`).
+#[derive(Clone, Copy, PartialEq)]
+enum SizeKind {
+    Plain,
+    Min,
+    Max,
+}
+
 /// A sizing value: spacing steps, `px`, `full`, `screen` (axis-aware), `auto`,
-/// `none`, fractions, the container scale (`sm` -> `var(--container-sm)`),
-/// `screen-<bp>` (`var(--breakpoint-md)`), and arbitrary lengths.
-fn size_value(value: &str, axis: char, theme: &Theme) -> Option<String> {
+/// `none`, `fit`/`min`/`max` content keywords, `lh` (height only), fractions
+/// (kept as `calc(<n> / <d> * 100%)`), the container scale
+/// (`sm` -> `var(--container-sm)`), `screen-<bp>` (`var(--breakpoint-md)`), and
+/// arbitrary lengths.
+fn size_value(value: &str, axis: char, kind: SizeKind, theme: &Theme) -> Option<String> {
     match value {
         "px" => return Some("1px".to_string()),
         "full" => return Some("100%".to_string()),
-        "auto" => return Some("auto".to_string()),
-        "none" => return Some("none".to_string()),
+        // `auto` is valid everywhere except the `max-*` families.
+        "auto" => return (kind != SizeKind::Max).then(|| "auto".to_string()),
+        // `none` is only valid on the `max-*` families (`max-w-none`).
+        "none" => return (kind == SizeKind::Max).then(|| "none".to_string()),
+        "fit" => return Some("fit-content".to_string()),
+        "max" => return Some("max-content".to_string()),
+        "min" => return Some("min-content".to_string()),
+        // `lh` (one line-height unit) is a height-axis-only keyword.
+        "lh" => return (axis == 'h').then(|| "1lh".to_string()),
         "screen" => {
             return Some(match axis {
                 'h' => "100vh".to_string(),
@@ -2540,12 +4593,20 @@ fn size_value(value: &str, axis: char, theme: &Theme) -> Option<String> {
         let var = format!("--breakpoint-{bp}");
         return theme.contains(&var).then(|| format!("var({var})"));
     }
+    // The `--max-width-*` namespace (e.g. `max-w-prose` -> `65ch`) is
+    // max-width-only and inlines its literal theme value.
+    if kind == SizeKind::Max && axis == 'w'
+        && let Some(v) = theme.get(&format!("--max-width-{value}")) {
+            return Some(v.to_string());
+        }
     let container = format!("--container-{value}");
     if theme.contains(&container) {
         return Some(format!("var({container})"));
     }
-    if let Some(percent) = fraction_percent(value) {
-        return Some(percent);
+    // Fractions stay as an unfolded `calc(<n> / <d> * 100%)` (with spaces),
+    // matching Tailwind v4's emitted form.
+    if let Some((n, d)) = parse_fraction(value) {
+        return Some(format!("calc({n} / {d} * 100%)"));
     }
     if let Some(inner) = arbitrary_value(value) {
         return Some(inner);
@@ -2553,12 +4614,271 @@ fn size_value(value: &str, axis: char, theme: &Theme) -> Option<String> {
     spacing_value(value, false)
 }
 
-/// `grid-template-*` values: a track count or an arbitrary track list.
+/// `grid-template-*` values: `none`, `subgrid`, a positive track count
+/// (`12` -> `repeat(12, minmax(0, 1fr))`), or an arbitrary track list. A zero or
+/// non-positive count is rejected (Tailwind generates nothing for `grid-cols-0`).
 fn grid_template_value(value: &str) -> Option<String> {
-    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(format!("repeat({value},minmax(0,1fr))"));
+    match value {
+        "none" => return Some("none".to_string()),
+        "subgrid" => return Some("subgrid".to_string()),
+        _ => {}
+    }
+    if is_bare_integer(value) {
+        // `grid-cols-0` is invalid — the count must be at least 1.
+        if value.bytes().any(|b| b != b'0') {
+            return Some(format!("repeat({value}, minmax(0, 1fr))"));
+        }
+        return None;
     }
     arbitrary_value(value)
+}
+
+/// Whether a token is a bare, unsigned base-10 integer (no sign, no decimal).
+fn is_bare_integer(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The `flex` / `basis` / `grow` / `shrink` / `order` / `grid` / `col` / `row`
+/// utility families. `base` is the class with any leading `-` already stripped;
+/// `negative` records whether that `-` was present (only `order`, `col`, and
+/// `row` accept it). Returns `Ok(None)` when `base` belongs to none of these
+/// families (fall through), `Err(Fail::Invalid)` for a candidate Tailwind itself
+/// rejects (generating nothing), and `Ok(Some(_))` for a real utility.
+fn flex_grid_utility(
+    base: &str,
+    _full: &str,
+    negative: bool,
+    theme: &Theme,
+) -> Result<Option<Utility>, Fail> {
+    // Bare `flex`/`grid` are display keywords (handled positively in
+    // `keyword_utility`); they reach here only as the non-negatable `-flex` /
+    // `-grid`, which are invalid.
+    if base == "flex" || base == "grid" {
+        return Err(Fail::Invalid);
+    }
+    // --- flex-<n> / flex-<fraction> / flex-auto|none|initial (keywords handled
+    //     in `keyword_utility`; this covers the dynamic + arbitrary forms). ---
+    if let Some(v) = base.strip_prefix("flex-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let value = match v {
+            "auto" => "auto".to_string(),
+            "initial" => "0 auto".to_string(),
+            "none" => "none".to_string(),
+            _ => {
+                if let Some((n, d)) = parse_fraction(v) {
+                    format!("calc({n}/{d} * 100%)")
+                } else if is_bare_integer(v) {
+                    v.to_string()
+                } else if let Some(inner) = arbitrary_value(v) {
+                    inner
+                } else {
+                    return Err(Fail::Invalid);
+                }
+            }
+        };
+        return Ok(Some(Utility::simple(vec![("flex", value)])));
+    }
+
+    // --- basis-<value>: flex-basis. Fractions are kept as an unfolded
+    //     `calc(<n> / <d> * 100%)` (with spaces, unlike the `flex` shorthand). ---
+    if base == "basis" {
+        return Err(Fail::Invalid);
+    }
+    if let Some(v) = base.strip_prefix("basis-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let value = match v {
+            "auto" => "auto".to_string(),
+            "full" => "100%".to_string(),
+            "px" => "1px".to_string(),
+            _ => {
+                if let Some((n, d)) = parse_fraction(v) {
+                    format!("calc({n} / {d} * 100%)")
+                } else if theme.contains(&format!("--container-{v}")) {
+                    format!("var(--container-{v})")
+                } else if let Some(sp) = spacing_value(v, false) {
+                    sp
+                } else if let Some(inner) = arbitrary_value(v) {
+                    inner
+                } else {
+                    return Err(Fail::Invalid);
+                }
+            }
+        };
+        return Ok(Some(Utility::simple(vec![("flex-basis", value)])));
+    }
+
+    // --- grow / shrink: flex-grow / flex-shrink (non-negatable, integer only). ---
+    for (name, property) in [("grow", "flex-grow"), ("shrink", "flex-shrink")] {
+        if base == name {
+            if negative {
+                return Err(Fail::Invalid);
+            }
+            return Ok(Some(Utility::simple(vec![(property, "1".to_string())])));
+        }
+        if let Some(v) = base.strip_prefix(name).and_then(|r| r.strip_prefix('-')) {
+            if negative {
+                return Err(Fail::Invalid);
+            }
+            let value = if is_bare_integer(v) {
+                v.to_string()
+            } else if let Some(inner) = arbitrary_value(v) {
+                inner
+            } else {
+                return Err(Fail::Invalid);
+            };
+            return Ok(Some(Utility::simple(vec![(property, value)])));
+        }
+    }
+
+    // --- order-<n> / order-first|last|none (negatable: `-order-4`). ---
+    if base == "order" {
+        return Err(Fail::Invalid);
+    }
+    if let Some(v) = base.strip_prefix("order-") {
+        let value = match v {
+            "first" if !negative => "-9999".to_string(),
+            "last" if !negative => "9999".to_string(),
+            "none" if !negative => "0".to_string(),
+            _ => {
+                if is_bare_integer(v) {
+                    negate_line(v, negative)
+                } else if let Some(inner) = arbitrary_value(v) {
+                    negate_line(&inner, negative)
+                } else {
+                    return Err(Fail::Invalid);
+                }
+            }
+        };
+        return Ok(Some(Utility::simple(vec![("order", value)])));
+    }
+
+    // --- grid-cols / grid-rows / grid-flow / auto-cols / auto-rows. ---
+    if base == "grid-cols" || base == "grid-rows" {
+        return Err(Fail::Invalid);
+    }
+    if let Some(v) = base.strip_prefix("grid-cols-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let value = grid_template_value(v).ok_or(Fail::Invalid)?;
+        return Ok(Some(Utility::simple(vec![("grid-template-columns", value)])));
+    }
+    if let Some(v) = base.strip_prefix("grid-rows-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let value = grid_template_value(v).ok_or(Fail::Invalid)?;
+        return Ok(Some(Utility::simple(vec![("grid-template-rows", value)])));
+    }
+    if base == "grid-flow" {
+        return Err(Fail::Invalid);
+    }
+    if let Some(v) = base.strip_prefix("grid-flow-") {
+        if negative {
+            return Err(Fail::Invalid);
+        }
+        let value = match v {
+            "row" => "row",
+            "col" => "column",
+            "dense" => "dense",
+            "row-dense" => "row dense",
+            "col-dense" => "column dense",
+            _ => return Err(Fail::Invalid),
+        };
+        return Ok(Some(Utility::simple(vec![("grid-auto-flow", value.to_string())])));
+    }
+    for (prefix, property) in [
+        ("auto-cols-", "grid-auto-columns"),
+        ("auto-rows-", "grid-auto-rows"),
+    ] {
+        if let Some(v) = base.strip_prefix(prefix) {
+            if negative {
+                return Err(Fail::Invalid);
+            }
+            let value = match v {
+                "auto" => "auto".to_string(),
+                "min" => "min-content".to_string(),
+                "max" => "max-content".to_string(),
+                "fr" => "minmax(0, 1fr)".to_string(),
+                _ => arbitrary_value(v).ok_or(Fail::Invalid)?,
+            };
+            return Ok(Some(Utility::simple(vec![(property, value)])));
+        }
+    }
+
+    // --- col-* -> grid-column(-start|-end); row-* -> grid-row(-start|-end).
+    //     Span / start / end are matched before the bare axis prefix. ---
+    for (axis, main, start, end) in [
+        ("col", "grid-column", "grid-column-start", "grid-column-end"),
+        ("row", "grid-row", "grid-row-start", "grid-row-end"),
+    ] {
+        let span_bare = format!("{axis}-span");
+        let span_prefix = format!("{axis}-span-");
+        if base == span_bare {
+            return Err(Fail::Invalid);
+        }
+        if let Some(v) = base.strip_prefix(span_prefix.as_str()) {
+            if negative {
+                return Err(Fail::Invalid);
+            }
+            let value = if v == "full" {
+                "1 / -1".to_string()
+            } else if is_bare_integer(v) {
+                format!("span {v} / span {v}")
+            } else if let Some(inner) = arbitrary_value(v) {
+                format!("span {inner} / span {inner}")
+            } else {
+                return Err(Fail::Invalid);
+            };
+            return Ok(Some(Utility::simple(vec![(main, value)])));
+        }
+        for (kind, property) in [("start", start), ("end", end)] {
+            let bare = format!("{axis}-{kind}");
+            let prefix = format!("{axis}-{kind}-");
+            if base == bare {
+                return Err(Fail::Invalid);
+            }
+            if let Some(v) = base.strip_prefix(prefix.as_str()) {
+                let value = grid_line_value(v, negative).ok_or(Fail::Invalid)?;
+                return Ok(Some(Utility::simple(vec![(property, value)])));
+            }
+        }
+        // Bare `col`/`row` is invalid; `col-<n>` / `col-auto` set grid-column.
+        if base == axis {
+            return Err(Fail::Invalid);
+        }
+        if let Some(v) = base.strip_prefix(format!("{axis}-").as_str()) {
+            let value = grid_line_value(v, negative).ok_or(Fail::Invalid)?;
+            return Ok(Some(Utility::simple(vec![(main, value)])));
+        }
+    }
+
+    Ok(None)
+}
+
+/// A `grid-column`/`grid-row` line value: `auto` (non-negatable), a bare integer,
+/// or an arbitrary value — with an optional leading `-` folded to `calc(<v> * -1)`.
+fn grid_line_value(value: &str, negative: bool) -> Option<String> {
+    if value == "auto" {
+        return (!negative).then(|| "auto".to_string());
+    }
+    if is_bare_integer(value) {
+        return Some(negate_line(value, negative));
+    }
+    arbitrary_value(value).map(|inner| negate_line(&inner, negative))
+}
+
+/// Applies a Tailwind negative to a line/order value: `calc(<v> * -1)`.
+fn negate_line(value: &str, negative: bool) -> String {
+    if negative {
+        format!("calc({value} * -1)")
+    } else {
+        value.to_string()
+    }
 }
 
 /// Border utilities: bare side shorthands (`border`, `border-b`), side widths
@@ -2572,6 +4892,18 @@ fn border_utility(
 ) -> Result<Utility, Fail> {
     let rest = base.strip_prefix("border").unwrap_or("");
     let rest = rest.strip_prefix('-').unwrap_or(rest);
+
+    // A remaining leading `-` (e.g. `border--0`) is a negative width, which
+    // Tailwind rejects outright.
+    if rest.starts_with('-') {
+        return Err(Fail::Invalid);
+    }
+
+    // `border-spacing` / `border-spacing-x` / `border-spacing-y` (table cell
+    // spacing) — resolved from the spacing scale.
+    if rest == "spacing" || rest.starts_with("spacing-") {
+        return border_spacing_utility(rest, full, tw_props);
+    }
 
     // Bare `border` / `border-<side>`.
     if let Some(props) = border_side_decls(rest, "1px") {
@@ -2600,8 +4932,88 @@ fn border_utility(
         return Ok(Utility::ranked(vec![(property, value)], 43));
     }
     // `border-<color>`.
-    let value = color_value(rest, theme).ok_or_else(|| unknown(full))?;
-    Ok(Utility::ranked(vec![("border-color", value)], 42))
+    if let Some(value) = color_value(rest, theme) {
+        return Ok(Utility::ranked(vec![("border-color", value)], 42));
+    }
+    // Arbitrary widths/colors are an engine gap; any other unrecognized token
+    // (a stray `/modifier`, an unknown value) is one Tailwind rejects outright.
+    if rest.starts_with('[') {
+        return Err(unknown(full));
+    }
+    Err(Fail::Invalid)
+}
+
+/// `border-spacing[-x|-y]-<n>`: sets `--tw-border-spacing-x`/`y` from the spacing
+/// scale (both @property registered) plus the `border-spacing` shorthand.
+fn border_spacing_utility(
+    rest: &str,
+    _full: &str,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    // Which axis (or both), and the spacing step.
+    let (set_x, set_y, step) = if let Some(step) = rest.strip_prefix("spacing-x-") {
+        (true, false, step)
+    } else if let Some(step) = rest.strip_prefix("spacing-y-") {
+        (false, true, step)
+    } else if let Some(step) = rest.strip_prefix("spacing-") {
+        (true, true, step)
+    } else {
+        // Bare `border-spacing` / `border-spacing-x` — Tailwind generates nothing.
+        return Err(Fail::Invalid);
+    };
+    let value = spacing_value(step, false).ok_or(Fail::Invalid)?;
+    // Both custom properties are always registered.
+    tw_props.insert(TwProp::BorderSpacingX);
+    tw_props.insert(TwProp::BorderSpacingY);
+    let mut decls: Vec<(String, String)> = Vec::new();
+    if set_x {
+        decls.push(("--tw-border-spacing-x".to_string(), value.clone()));
+    }
+    if set_y {
+        decls.push(("--tw-border-spacing-y".to_string(), value.clone()));
+    }
+    decls.push((
+        "border-spacing".to_string(),
+        "var(--tw-border-spacing-x) var(--tw-border-spacing-y)".to_string(),
+    ));
+    Ok(Utility {
+        selector: SelectorKind::Class,
+        decls,
+        rank: 100,
+    })
+}
+
+/// The `--tw-gradient-{from,via,to}` declaration(s) for a color stop token (with
+/// optional `/<pct>` modifier). A plain token yields one declaration; a modifier
+/// yields the `color-mix(in oklab, …)` value plus the static sRGB fallback
+/// Tailwind emits for browsers without `oklab`.
+fn gradient_color_decls(
+    prop: &'static str,
+    token: &str,
+    theme: &Theme,
+) -> Option<Vec<(&'static str, String)>> {
+    let resolved = color_value(token, theme)?;
+    let (color_token, modifier) = split_color_modifier(token);
+    match modifier {
+        None => Some(vec![(prop, resolved)]),
+        Some(pct) => {
+            // The static fallback resolves the theme color to its literal value.
+            let literal = match color_token {
+                "transparent" => "transparent".to_string(),
+                "current" => "currentcolor".to_string(),
+                "inherit" => "inherit".to_string(),
+                _ if color_token.starts_with('[') => arbitrary_value(color_token)?,
+                _ => theme.get(&format!("--color-{color_token}"))?.to_string(),
+            };
+            Some(vec![
+                (prop, resolved),
+                (
+                    prop,
+                    format!("color-mix(in srgb, {literal} {pct}%, transparent)"),
+                ),
+            ])
+        }
+    }
 }
 
 /// The `--tw-gradient-*-position` property a `from-`/`via-`/`to-` stop
@@ -2642,7 +5054,7 @@ fn border_side_decls(side: &str, width: &str) -> Option<Vec<(&'static str, Strin
 fn radius_value(size: &str, theme: &Theme) -> Option<String> {
     match size {
         "" => return Some("0.25rem".to_string()),
-        "full" => return Some("3.40282e38px".to_string()),
+        "full" => return Some("calc(infinity * 1px)".to_string()),
         "none" => return Some("0".to_string()),
         _ => {}
     }
@@ -2726,7 +5138,7 @@ fn ring_utility(
             (
                 "--tw-ring-shadow",
                 format!(
-                    "var(--tw-ring-inset,) 0 0 0 calc({width}px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor)"
+                    "var(--tw-ring-inset,) 0 0 0 calc({width}px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor)"
                 ),
             ),
             ("box-shadow", BOX_SHADOW_CHAIN.to_string()),
@@ -2739,7 +5151,9 @@ fn ring_utility(
             "inset".to_string(),
         )]));
     }
-    if let Some(n) = rest.strip_prefix("offset-") {
+    if rest == "offset" || rest.starts_with("offset-") {
+        let n = rest.strip_prefix("offset-").unwrap_or("");
+        // ring-offset-<width>: a plain integer.
         if n.bytes().all(|b| b.is_ascii_digit()) && !n.is_empty() {
             register_shadow_group(tw_props);
             return Ok(Utility::simple(vec![
@@ -2750,25 +5164,321 @@ fn ring_utility(
                 ),
             ]));
         }
+        // ring-offset-<color> (with optional `/<pct>` modifier).
+        if let Some(decls) = color_prop_decls("--tw-ring-offset-color", n, theme) {
+            register_shadow_group(tw_props);
+            return Ok(Utility::simple(decls));
+        }
+        // Arbitrary widths/colors are an engine gap; everything else (bare
+        // `ring-offset`, `ring-offset-inset`, `ring-offset-unknown`) is a token
+        // Tailwind rejects outright.
+        if n.starts_with('[') {
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+    if let Some(decls) = color_prop_decls("--tw-ring-color", rest, theme) {
+        register_shadow_group(tw_props);
+        return Ok(Utility::simple(decls));
+    }
+    if rest.starts_with('[') {
         return Err(unknown(full));
     }
-    if let Some(value) = color_value(rest, theme) {
-        register_shadow_group(tw_props);
-        return Ok(Utility::simple(vec![("--tw-ring-color", value)]));
+    Err(Fail::Invalid)
+}
+
+/// A color utility's declaration(s) for `prop`: a plain token yields one
+/// `(prop, value)`; a `/<pct>` modifier yields the `color-mix(in oklab, …)` value
+/// plus the static `color-mix(in srgb, …)` fallback Tailwind emits for browsers
+/// without `oklab`. Returns `None` when the token is not a color.
+fn color_prop_decls(
+    prop: &'static str,
+    token: &str,
+    theme: &Theme,
+) -> Option<Vec<(&'static str, String)>> {
+    let resolved = color_value(token, theme)?;
+    let (color_token, modifier) = split_color_modifier(token);
+    match modifier {
+        None => Some(vec![(prop, resolved)]),
+        Some(pct) => {
+            let literal = color_srgb_literal(color_token, theme)?;
+            Some(vec![
+                (prop, resolved),
+                (
+                    prop,
+                    format!("color-mix(in srgb, {literal} {pct}%, transparent)"),
+                ),
+            ])
+        }
     }
-    Err(unknown(full))
+}
+
+/// The literal sRGB-fallback color for a color token (resolving a theme color to
+/// its published value), used by the static `color-mix(in srgb, …)` fallback.
+fn color_srgb_literal(color_token: &str, theme: &Theme) -> Option<String> {
+    Some(match color_token {
+        "transparent" => "transparent".to_string(),
+        "current" => "currentcolor".to_string(),
+        "inherit" => "inherit".to_string(),
+        _ if color_token.starts_with('[') => arbitrary_value(color_token)?,
+        _ => theme.get(&format!("--color-{color_token}"))?.to_string(),
+    })
+}
+
+/// Divide utilities: `divide-x`/`divide-y` (per-axis child border widths with a
+/// `reverse` flag), `divide-<style>`, and `divide-<color>`. All target the
+/// between-children selector `:where(.divide-* > :not(:last-child))`.
+fn divide_utility(
+    base: &str,
+    full: &str,
+    theme: &Theme,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    let rest = match base.strip_prefix("divide-") {
+        Some(rest) => rest,
+        // Bare `divide` is not a utility; Tailwind generates nothing.
+        None => return Err(Fail::Invalid),
+    };
+
+    // `divide-x` / `divide-y` axis widths and the `reverse` flag.
+    for (axis, reverse_var, reverse_prop) in [
+        ('x', "--tw-divide-x-reverse", TwProp::DivideXReverse),
+        ('y', "--tw-divide-y-reverse", TwProp::DivideYReverse),
+    ] {
+        let prefix = format!("{axis}");
+        if rest == prefix || rest.strip_prefix(&prefix).is_some_and(|r| r.starts_with('-')) {
+            let suffix = rest.strip_prefix(&prefix).unwrap_or("");
+            let suffix = suffix.strip_prefix('-').unwrap_or(suffix);
+            if suffix == "reverse" {
+                tw_props.insert(reverse_prop);
+                return Ok(Utility {
+                    selector: SelectorKind::SpaceChildren,
+                    decls: vec![(reverse_var.to_string(), "1".to_string())],
+                    rank: 100,
+                });
+            }
+            // `divide-x` (empty suffix) is width 1px; `divide-x-<n>` is `<n>px`
+            // (including `divide-x-0` -> `0px`). Only bare integers are valid.
+            let width = if suffix.is_empty() {
+                "1".to_string()
+            } else if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                suffix.to_string()
+            } else {
+                return Err(Fail::Invalid);
+            };
+            tw_props.insert(reverse_prop);
+            tw_props.insert(TwProp::BorderStyle);
+            let decls = if axis == 'x' {
+                vec![
+                    (reverse_var.to_string(), "0".to_string()),
+                    (
+                        "border-inline-style".to_string(),
+                        "var(--tw-border-style)".to_string(),
+                    ),
+                    (
+                        "border-inline-start-width".to_string(),
+                        format!("calc({width}px * var({reverse_var}))"),
+                    ),
+                    (
+                        "border-inline-end-width".to_string(),
+                        format!("calc({width}px * calc(1 - var({reverse_var})))"),
+                    ),
+                ]
+            } else {
+                vec![
+                    (reverse_var.to_string(), "0".to_string()),
+                    (
+                        "border-bottom-style".to_string(),
+                        "var(--tw-border-style)".to_string(),
+                    ),
+                    (
+                        "border-top-style".to_string(),
+                        "var(--tw-border-style)".to_string(),
+                    ),
+                    (
+                        "border-top-width".to_string(),
+                        format!("calc({width}px * var({reverse_var}))"),
+                    ),
+                    (
+                        "border-bottom-width".to_string(),
+                        format!("calc({width}px * calc(1 - var({reverse_var})))"),
+                    ),
+                ]
+            };
+            return Ok(Utility {
+                selector: SelectorKind::SpaceChildren,
+                decls,
+                rank: 100,
+            });
+        }
+    }
+
+    // `divide-<style>`: writes `--tw-border-style` and `border-style`.
+    if let Some(style) = divide_border_style(rest) {
+        return Ok(Utility {
+            selector: SelectorKind::SpaceChildren,
+            decls: vec![
+                ("--tw-border-style".to_string(), style.to_string()),
+                ("border-style".to_string(), style.to_string()),
+            ],
+            rank: 100,
+        });
+    }
+
+    // `divide-<color>`.
+    if let Some(decls) = color_prop_decls("border-color", rest, theme) {
+        return Ok(Utility {
+            selector: SelectorKind::SpaceChildren,
+            decls: decls
+                .into_iter()
+                .map(|(p, v)| (p.to_string(), v))
+                .collect(),
+            rank: 100,
+        });
+    }
+    if rest.starts_with('[') {
+        return Err(unknown(full));
+    }
+    Err(Fail::Invalid)
+}
+
+/// The border-style keyword a `divide-<style>` sets, or `None`.
+fn divide_border_style(rest: &str) -> Option<&'static str> {
+    Some(match rest {
+        "solid" => "solid",
+        "dashed" => "dashed",
+        "dotted" => "dotted",
+        "double" => "double",
+        "none" => "none",
+        _ => return None,
+    })
+}
+
+/// Outline utilities: `outline` (width 1px), `outline-<width>`, `outline-none`,
+/// `outline-hidden`, `outline-<style>`, `outline-offset-<n>` (the only negatable
+/// member), and `outline-<color>`.
+fn outline_utility(
+    base: &str,
+    full: &str,
+    negative: bool,
+    theme: &Theme,
+    tw_props: &mut BTreeSet<TwProp>,
+) -> Result<Utility, Fail> {
+    // `outline-offset-<value>` — the one outline utility that accepts a `-`.
+    if base == "outline-offset" || base.starts_with("outline-offset-") {
+        let Some(v) = base.strip_prefix("outline-offset-") else {
+            return Err(Fail::Invalid);
+        };
+        // A `/modifier` is invalid on outline-offset.
+        if v.contains('/') {
+            return Err(Fail::Invalid);
+        }
+        if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+            let value = if negative {
+                format!("calc({v}px * -1)")
+            } else {
+                format!("{v}px")
+            };
+            return Ok(Utility::simple(vec![("outline-offset", value)]));
+        }
+        if v.starts_with('[') {
+            if let Some(inner) = arbitrary_value(v) {
+                let value = if negative {
+                    format!("calc({inner} * -1)")
+                } else {
+                    inner
+                };
+                return Ok(Utility::simple(vec![("outline-offset", value)]));
+            }
+            return Err(unknown(full));
+        }
+        return Err(Fail::Invalid);
+    }
+
+    // Every other outline utility rejects a leading `-`.
+    if negative {
+        return Err(Fail::Invalid);
+    }
+
+    if base == "outline" {
+        tw_props.insert(TwProp::OutlineStyle);
+        return Ok(Utility::simple(vec![
+            ("outline-style", "var(--tw-outline-style)".to_string()),
+            ("outline-width", "1px".to_string()),
+        ]));
+    }
+    if base == "outline-none" {
+        return Ok(Utility::simple(vec![
+            ("--tw-outline-style", "none".to_string()),
+            ("outline-style", "none".to_string()),
+        ]));
+    }
+    if base == "outline-hidden" {
+        return Ok(Utility::simple(vec![
+            ("--tw-outline-style", "none".to_string()),
+            ("outline-style", "none".to_string()),
+            ("outline", "2px solid transparent".to_string()),
+            ("outline-offset", "2px".to_string()),
+        ]));
+    }
+    let rest = base.strip_prefix("outline-").unwrap_or("");
+
+    // `outline-<style>`.
+    if let Some(style) = outline_style_keyword(rest) {
+        return Ok(Utility::simple(vec![
+            ("--tw-outline-style", style.to_string()),
+            ("outline-style", style.to_string()),
+        ]));
+    }
+    // `outline-<width>`: a bare integer.
+    if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+        tw_props.insert(TwProp::OutlineStyle);
+        return Ok(Utility::simple(vec![
+            ("outline-style", "var(--tw-outline-style)".to_string()),
+            ("outline-width", format!("{rest}px")),
+        ]));
+    }
+    // `outline-<color>` (with optional `/<pct>` modifier).
+    if let Some(decls) = color_prop_decls("outline-color", rest, theme) {
+        return Ok(Utility::simple(decls));
+    }
+    // Arbitrary outline width/color are an engine gap.
+    if rest.starts_with('[') {
+        return Err(unknown(full));
+    }
+    Err(Fail::Invalid)
+}
+
+/// The outline-style keyword a `outline-<style>` sets, or `None`.
+fn outline_style_keyword(rest: &str) -> Option<&'static str> {
+    Some(match rest {
+        "solid" => "solid",
+        "dashed" => "dashed",
+        "dotted" => "dotted",
+        "double" => "double",
+        _ => return None,
+    })
 }
 
 /// Rewrites each color inside a shadow value into
 /// `var(--tw-shadow-color, <color>)`, matching the compiled shadow utilities.
 fn wrap_shadow_colors(value: &str) -> String {
-    wrap_colors(value, "--tw-shadow-color")
+    wrap_colors(value, "--tw-shadow-color", false)
+}
+
+/// Rewrites each color inside a text-shadow value into
+/// `var(--tw-text-shadow-color, <color>)` (with a space after the comma, as
+/// Tailwind's text-shadow utilities emit).
+fn wrap_text_shadow_colors(value: &str) -> String {
+    wrap_colors(value, "--tw-text-shadow-color", true)
 }
 
 /// Rewrites every color token in a shadow-like value list (hex literals and
 /// color-function calls) into `var(<var>, <color>)`. Lengths, `inset`, and
-/// non-color functions (`var(…)`, `calc(…)`) pass through untouched.
-fn wrap_colors(value: &str, var: &str) -> String {
+/// non-color functions (`var(…)`, `calc(…)`) pass through untouched. `spaced`
+/// inserts a space after the `var()` fallback comma.
+fn wrap_colors(value: &str, var: &str, spaced: bool) -> String {
+    let sep = if spaced { ", " } else { "," }; // the `var()` fallback separator
     const COLOR_FNS: &[&str] = &[
         "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color",
     ];
@@ -2782,7 +5492,7 @@ fn wrap_colors(value: &str, var: &str) -> String {
             while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
                 j += 1;
             }
-            out.push_str(&format!("var({var},{})", &value[i..j]));
+            out.push_str(&format!("var({var}{sep}{})", &value[i..j]));
             i = j;
         } else if b.is_ascii_alphabetic() {
             let mut j = i;
@@ -2809,7 +5519,7 @@ fn wrap_colors(value: &str, var: &str) -> String {
                 let end = (k + 1).min(bytes.len());
                 let call = &value[i..end];
                 if COLOR_FNS.contains(&name) {
-                    out.push_str(&format!("var({var},{call})"));
+                    out.push_str(&format!("var({var}{sep}{call})"));
                 } else {
                     out.push_str(call);
                 }
@@ -2835,7 +5545,7 @@ fn drop_shadow_layers(value: &str, sized: bool) -> String {
         .map(|layer| {
             let layer = layer.trim();
             if sized {
-                format!("drop-shadow({})", wrap_colors(layer, "--tw-drop-shadow-color"))
+                format!("drop-shadow({})", wrap_colors(layer, "--tw-drop-shadow-color", false))
             } else {
                 format!("drop-shadow({layer})")
             }
@@ -2973,6 +5683,18 @@ fn color_value(token: &str, theme: &Theme) -> Option<String> {
     let base = if let Some(inner) = token.strip_prefix("[color:") {
         let inner = inner.strip_suffix(']')?;
         arbitrary_value(&format!("[{inner}]"))?
+    } else if token.starts_with('[') {
+        // A bare arbitrary value: for a COLOR utility this is `bg-[#383838]`,
+        // `bg-[rgb(0_0_0)]`, `border-[hsl(...)]`. But `color_value` is shared with
+        // `text-`, where `text-[11px]` is a SIZE — so only accept a value that clearly
+        // reads as a color (a hex or a CSS color function); anything else returns
+        // `None` and falls through to the size/length family. `var(...)` without the
+        // explicit `[color:var(...)]` hint is likewise left ambiguous (unhandled here).
+        let inner = arbitrary_value(token)?;
+        if !looks_like_color(&inner) {
+            return None;
+        }
+        inner
     } else {
         match token {
             "transparent" => "transparent".to_string(),
@@ -2995,17 +5717,63 @@ fn color_value(token: &str, theme: &Theme) -> Option<String> {
 
 /// Splits a trailing `/<pct>` opacity modifier off a color token (bracket-aware:
 /// the `/` must sit outside any `[…]`).
-fn split_color_modifier(token: &str) -> (&str, Option<&str>) {
+/// Whether a bare arbitrary value reads as a color literal (a hex, or a CSS color
+/// function) rather than a length/number — used to keep `text-[11px]` (a size) out of
+/// the color path while letting `bg-[#383838]` / `text-[rgb(...)]` through.
+fn looks_like_color(value: &str) -> bool {
+    let v = value.trim();
+    v.starts_with('#')
+        || [
+            "rgb(", "rgba(", "hsl(", "hsla(", "oklch(", "oklab(", "lab(", "lch(", "hwb(",
+            "color(",
+        ]
+        .iter()
+        .any(|func| v.starts_with(func))
+}
+
+fn split_color_modifier(token: &str) -> (&str, Option<String>) {
     if let Some(pos) = token.rfind('/') {
+        // The `/` must be OUTSIDE any arbitrary-value brackets (a `bg-[url(a/b)]`
+        // slash is part of the value, not an opacity modifier).
         let after_brackets = token[..pos].matches('[').count() == token[..pos].matches(']').count();
+        if !after_brackets {
+            return (token, None);
+        }
         let suffix = &token[pos + 1..];
-        let numeric = !suffix.is_empty()
-            && suffix.bytes().all(|b| b.is_ascii_digit() || b == b'.');
-        if after_brackets && numeric {
-            return (&token[..pos], Some(suffix));
+        if suffix.is_empty() {
+            return (token, None);
+        }
+        // Arbitrary bracketed opacity: `/[.04]`, `/[0.145]`, `/[50%]`.
+        if let Some(inner) = suffix.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            return match arbitrary_opacity_percent(inner) {
+                Some(pct) => (&token[..pos], Some(pct)),
+                None => (token, None),
+            };
+        }
+        // Bare numeric percentage: `/10` -> "10".
+        if suffix.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+            return (&token[..pos], Some(suffix.to_string()));
         }
     }
     (token, None)
+}
+
+/// The percentage NUMBER (no `%`) for a bracketed color-opacity modifier's inner
+/// text: `50%` -> `50`, a bare fraction `.04` -> `4` (×100, as Tailwind does),
+/// `0.145` -> `14.5`. Returns `None` if it is not a plain number/percentage.
+fn arbitrary_opacity_percent(inner: &str) -> Option<String> {
+    let inner = inner.trim();
+    if let Some(pct) = inner.strip_suffix('%') {
+        return Some(pct.trim().to_string());
+    }
+    let fraction: f64 = inner.parse().ok()?;
+    // Round to 4 decimals to shed binary-float noise (0.145×100 = 14.4999…), then
+    // trim trailing zeros and a dangling dot: 14.5000 -> 14.5, 4.0000 -> 4.
+    let mut s = format!("{:.4}", fraction * 100.0);
+    if s.contains('.') {
+        s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    Some(s)
 }
 
 fn is_cursor_keyword(kw: &str) -> bool {
@@ -3018,6 +5786,52 @@ fn is_cursor_keyword(kw: &str) -> bool {
             | "nw-resize" | "se-resize" | "sw-resize" | "ew-resize" | "ns-resize"
             | "nesw-resize" | "nwse-resize" | "zoom-in" | "zoom-out"
     )
+}
+
+/// Whether `base` (already stripped of any leading `-`) belongs to a
+/// typography/interactivity family that has no negative form. Used by the
+/// group's negative gate to reject `-cursor-*`, `-text-*`, `-font-*`, … the way
+/// Tailwind does (generating nothing) rather than hard-erroring.
+fn is_typography_interactivity_family(base: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "text-", "font-", "leading-", "tracking-", "list-", "decoration-",
+        "underline-", "whitespace-", "align-", "accent-", "caret-", "cursor-",
+        "pointer-events-", "select-", "touch-", "will-change-", "fill-",
+        "stroke-", "line-clamp-", "hyphens-", "wrap-", "content-",
+    ];
+    PREFIXES.iter().any(|p| base.starts_with(p))
+        || matches!(base, "underline" | "resize" | "appearance")
+        || base.starts_with("resize-")
+        || base.starts_with("appearance-")
+}
+
+/// The `font-stretch-<value>` CSS value: a named keyword, or an integer
+/// percentage in the 50–200% range. Anything else is rejected.
+fn font_stretch_value(core: &str) -> Option<String> {
+    if matches!(
+        core,
+        "ultra-condensed"
+            | "extra-condensed"
+            | "condensed"
+            | "semi-condensed"
+            | "normal"
+            | "semi-expanded"
+            | "expanded"
+            | "extra-expanded"
+            | "ultra-expanded"
+    ) {
+        return Some(core.to_string());
+    }
+    let digits = core.strip_suffix('%')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u32 = digits.parse().ok()?;
+    if (50..=200).contains(&n) {
+        Some(format!("{n}%"))
+    } else {
+        None
+    }
 }
 
 fn is_font_weight(name: &str) -> bool {
@@ -3065,7 +5879,7 @@ struct UserCss {
     /// `@custom-variant` definitions: variant name -> `&`-rooted template.
     custom_variants: std::collections::BTreeMap<String, String>,
     /// The `@layer base` body: the app's base rules (with `@apply` expanded) plus
-    /// their `dark:` companions as `@media (prefers-color-scheme:dark)` rules
+    /// their `dark:` companions as `@media (prefers-color-scheme: dark)` rules
     /// (or the custom `dark` template's selector form when one is defined).
     base_layer: String,
     /// Plain (unlayered) rules passed through after the layers, in source order.
@@ -3109,7 +5923,7 @@ fn process_user_css(
             out.push_str(&transformed);
             out.push_str(body);
         } else {
-            out.push_str("@media (prefers-color-scheme:dark){");
+            out.push_str("@media (prefers-color-scheme: dark){");
             out.push_str(dark_rule);
             out.push('}');
         }
@@ -3118,6 +5932,9 @@ fn process_user_css(
         match item {
             TopItem::Import => {}
             TopItem::CustomVariant { .. } => {}
+            // `@theme` tokens are merged into the theme in `compile_with_theme` and
+            // emitted (when referenced) by the theme layer — nothing to output here.
+            TopItem::Theme => {}
             TopItem::Verbatim(block) => {
                 collect_selector_classes(&block, &mut defined_classes);
                 postlude.push_str(&block);
@@ -3200,11 +6017,43 @@ enum TopItem {
     /// A top-level block passed through verbatim (`@keyframes`, `@media`,
     /// `@supports`, `@font-face`) — app CSS the compiler has no opinion on.
     Verbatim(String),
+    /// `@theme [inline|reference|static] { --token: value; … }` — Tailwind v4
+    /// design tokens declared inline in the app's stylesheet (create-next-app's
+    /// default `globals.css` uses `@theme inline`). Its declarations extend the
+    /// theme (so `font-sans`, `bg-foreground`, … resolve) and its referenced tokens
+    /// are emitted into the theme-layer `:root` by [`Theme::render`]; the block
+    /// itself produces no separate output here (only consumed so the parse does not
+    /// error; the token text is pulled out separately by `extract_theme_blocks`).
+    Theme,
 }
 
 /// Splits the entry into top-level items: `@import` statements, `@layer …{…}`
 /// blocks, and plain style rules (passed through). Errors on any other
 /// top-level at-rule.
+/// Concatenate the bodies of every top-level `@theme [modifiers] { … }` block in
+/// `css`, so the tokens can be merged into the theme (see [`compile_with_theme`]).
+/// Malformed/unterminated blocks are skipped (the full parse in
+/// [`parse_top_level`] reports the real error).
+fn extract_theme_blocks(css: &str) -> String {
+    let mut out = String::new();
+    let mut search = 0;
+    while let Some(rel) = css[search..].find("@theme") {
+        let at = search + rel;
+        let Some(brace_rel) = css[at..].find('{') else {
+            break;
+        };
+        match read_braced(css, at + brace_rel) {
+            Ok((body, end)) => {
+                out.push_str(&body);
+                out.push('\n');
+                search = end;
+            }
+            Err(_) => break,
+        }
+    }
+    out
+}
+
 fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
     let mut items = Vec::new();
     let bytes = css.as_bytes();
@@ -3227,6 +6076,18 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             let names = css[i + 6..i + brace].trim().to_string();
             let (body, end) = read_braced(css, i + brace)?;
             items.push(TopItem::Layer { names, body });
+            i = end;
+            continue;
+        }
+        if css[i..].starts_with("@theme") {
+            // `@theme [inline|reference|static] { … }` — any modifiers between the
+            // keyword and the `{` are accepted and ignored (the tokens are merged
+            // into the theme regardless; see `extract_theme_blocks`).
+            let brace = css[i..]
+                .find('{')
+                .ok_or_else(|| "malformed @theme (no `{`)".to_string())?;
+            let (_body, end) = read_braced(css, i + brace)?;
+            items.push(TopItem::Theme);
             i = end;
             continue;
         }
@@ -3575,7 +6436,7 @@ mod tests {
     fn text_size_emits_font_size_and_line_height() {
         let out = compile("@import 'tailwindcss';", &candidates(&["text-lg"])).unwrap();
         assert!(out.contains(
-            ".text-lg{font-size:var(--text-lg);line-height:var(--tw-leading,var(--text-lg--line-height))}"
+            ".text-lg{font-size:var(--text-lg);line-height:var(--tw-leading, var(--text-lg--line-height))}"
         ));
         assert!(out.contains("--text-lg:1.125rem"));
         assert!(out.contains("--text-lg--line-height"));
@@ -3589,21 +6450,21 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains(
-            "@media (hover:hover){.hover\\:text-blue-600:hover{color:var(--color-blue-600)}}"
+            "@media (hover: hover){.hover\\:text-blue-600:hover{color:var(--color-blue-600)}}"
         ));
         assert!(out.contains(
-            "@media (prefers-color-scheme:dark){.dark\\:bg-gray-700{background-color:var(--color-gray-700)}}"
+            "@media (prefers-color-scheme: dark){.dark\\:bg-gray-700{background-color:var(--color-gray-700)}}"
         ));
     }
 
     #[test]
     fn space_y_emits_reverse_variable_and_child_selector() {
         let out = compile("@import 'tailwindcss';", &candidates(&["space-y-2"])).unwrap();
-        assert!(out.contains(":where(.space-y-2>:not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}"));
+        assert!(out.contains(":where(.space-y-2 > :not(:last-child)){--tw-space-y-reverse:0;margin-block-start:calc(calc(var(--spacing) * 2) * var(--tw-space-y-reverse));margin-block-end:calc(calc(var(--spacing) * 2) * calc(1 - var(--tw-space-y-reverse)))}"));
         assert!(out.contains("@property --tw-space-y-reverse{syntax:\"*\";inherits:false;initial-value:0}"));
         // Fractional steps are part of the same scale.
         let out = compile("@import 'tailwindcss';", &candidates(&["space-y-1.5"])).unwrap();
-        assert!(out.contains(":where(.space-y-1\\.5>:not(:last-child))"));
+        assert!(out.contains(":where(.space-y-1\\.5 > :not(:last-child))"));
         assert!(out.contains("calc(var(--spacing) * 1.5)"));
     }
 
@@ -3633,7 +6494,7 @@ mod tests {
             ".border-l-2{border-left-style:var(--tw-border-style);border-left-width:2px}"
         ));
         assert!(out.contains(
-            "@media (width>=48rem){.md\\:border-t-0{border-top-style:var(--tw-border-style);border-top-width:0}}"
+            "@media (width >= 48rem){.md\\:border-t-0{border-top-style:var(--tw-border-style);border-top-width:0}}"
         ));
         assert!(out.contains(".border-l-amber-500{border-left-color:var(--color-amber-500)}"));
         assert!(out.contains(".border-transparent{border-color:transparent}"));
@@ -3662,7 +6523,7 @@ mod tests {
         assert!(out.contains(".relative{position:relative}"));
         assert!(out.contains(".fixed{position:fixed}"));
         assert!(out.contains(".inset-0{inset:0}"));
-        assert!(out.contains(".top-1\\/2{top:50%}"));
+        assert!(out.contains(".top-1\\/2{top:calc(1 / 2 * 100%)}"));
         assert!(out.contains(".left-0{left:0}"));
         assert!(out.contains(".-left-1{left:calc(var(--spacing) * -1)}"));
         assert!(out.contains(".-left-\\[100vw\\]{left:calc(100vw * -1)}"));
@@ -3744,7 +6605,7 @@ mod tests {
         assert!(out.contains(".gap-x-3{column-gap:calc(var(--spacing) * 3)}"));
         assert!(out.contains(".gap-y-2{row-gap:calc(var(--spacing) * 2)}"));
         assert!(out.contains(".gap-0\\.5{gap:calc(var(--spacing) * 0.5)}"));
-        assert!(out.contains(".grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}"));
+        assert!(out.contains(".grid-cols-2{grid-template-columns:repeat(2, minmax(0, 1fr))}"));
         assert!(out.contains(".grid-cols-\\[auto_1fr\\]{grid-template-columns:auto 1fr}"));
     }
 
@@ -3766,7 +6627,7 @@ mod tests {
             ".bg-\\[color\\:var\\(--panel\\)\\]{background-color:var(--panel)}"
         ));
         assert!(out.contains(
-            ".bg-amber-500\\/10{background-color:color-mix(in oklab, var(--color-amber-500) 10%, transparent)}"
+            ".bg-amber-500\\/10{background-color:color-mix(in oklab, var(--color-amber-500) 10%, transparent);background-color:color-mix(in srgb, oklch(76.9% 0.188 70.08) 10%, transparent)}"
         ));
         assert!(out.contains(".bg-transparent{background-color:transparent}"));
         assert!(out.contains(".text-\\[color\\:var\\(--muted\\)\\]{color:var(--muted)}"));
@@ -3775,6 +6636,57 @@ mod tests {
             ".accent-\\[color\\:var\\(--accent\\)\\]{accent-color:var(--accent)}"
         ));
         assert!(out.contains("--color-amber-500:"));
+    }
+
+    // The exact Tailwind surface the UNMODIFIED create-next-app default template
+    // uses (its `globals.css` `@theme inline` block + `app/page.tsx` classes) — a
+    // real-world app that must build. Regression guard for that support.
+    #[test]
+    fn create_next_app_default_tailwind_surface() {
+        let css = "@import \"tailwindcss\";\n\
+                   :root { --background: #ffffff; --foreground: #171717; }\n\
+                   @theme inline {\n\
+                     --color-background: var(--background);\n\
+                     --color-foreground: var(--foreground);\n\
+                     --font-sans: var(--font-geist-sans);\n\
+                   }\n\
+                   body { background: var(--background); }";
+        let out = compile(
+            css,
+            &candidates(&[
+                "bg-[#383838]",
+                "hover:bg-[#383838]",
+                "dark:hover:bg-[#ccc]",
+                "bg-black/[.04]",
+                "border-black/[.08]",
+                "dark:border-white/[.145]",
+                "bg-foreground",
+                "text-background",
+                "font-sans",
+                "antialiased",
+                "border-solid",
+            ]),
+        )
+        .unwrap();
+        // Bare arbitrary hex color (with and without variants).
+        assert!(out.contains(".bg-\\[\\#383838\\]{background-color:#383838}"));
+        assert!(out.contains(".hover\\:bg-\\[\\#383838\\]:hover{background-color:#383838}"));
+        // Arbitrary opacity modifier: `.04` -> 4%, `.08` -> 8%, `.145` -> 14.5%.
+        assert!(out.contains(
+            ".bg-black\\/\\[\\.04\\]{background-color:color-mix(in oklab, var(--color-black) 4%, transparent);background-color:color-mix(in srgb, #000 4%, transparent)}"
+        ));
+        assert!(out.contains(
+            ".border-black\\/\\[\\.08\\]{border-color:color-mix(in oklab, var(--color-black) 8%, transparent)}"
+        ));
+        assert!(out.contains("14.5%"));
+        // `@theme inline` tokens resolve for utilities + emit their :root vars.
+        assert!(out.contains(".bg-foreground{background-color:var(--color-foreground)}"));
+        assert!(out.contains(".font-sans{font-family:var(--font-sans)}"));
+        assert!(out.contains("--color-foreground:var(--foreground)"));
+        assert!(out.contains("--font-sans:var(--font-geist-sans)"));
+        // Static keyword utilities the template relies on.
+        assert!(out.contains("-webkit-font-smoothing:antialiased"));
+        assert!(out.contains(".border-solid{--tw-border-style:solid;border-style:solid}"));
     }
 
     #[test]
@@ -3829,7 +6741,7 @@ mod tests {
             ".shadow-lg{--tw-shadow:0 10px 15px -3px var(--tw-shadow-color,rgb(0 0 0 / 0.1)), 0 4px 6px -4px var(--tw-shadow-color,rgb(0 0 0 / 0.1));box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)}"
         ));
         assert!(out.contains(
-            ".ring-2{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:"
+            ".ring-2{--tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);box-shadow:"
         ));
         assert!(out.contains(".ring-inset{--tw-ring-inset:inset}"));
         assert!(out.contains(
@@ -3864,8 +6776,8 @@ mod tests {
         assert!(out.contains(".cursor-col-resize{cursor:col-resize}"));
         assert!(out.contains(".select-none{-webkit-user-select:none;user-select:none}"));
         assert!(out.contains(".pointer-events-none{pointer-events:none}"));
-        assert!(out.contains(".opacity-45{opacity:.45}"));
-        assert!(out.contains(".opacity-0{opacity:0}"));
+        assert!(out.contains(".opacity-45{opacity:45%}"));
+        assert!(out.contains(".opacity-0{opacity:0%}"));
         assert!(out.contains("--default-transition-duration:"));
     }
 
@@ -3877,7 +6789,7 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains(".rounded{border-radius:0.25rem}"));
-        assert!(out.contains(".rounded-full{border-radius:3.40282e38px}"));
+        assert!(out.contains(".rounded-full{border-radius:calc(infinity * 1px)}"));
         assert!(out.contains(".rounded-md{border-radius:var(--radius-md)}"));
         assert!(out.contains(
             ".sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border-width:0}"
@@ -3900,9 +6812,9 @@ mod tests {
             ".focus\\:outline-none:focus{--tw-outline-style:none;outline-style:none}"
         ));
         assert!(out.contains(".focus-visible\\:ring-2:focus-visible{--tw-ring-shadow:"));
-        assert!(out.contains(".disabled\\:opacity-50:disabled{opacity:.5}"));
+        assert!(out.contains(".disabled\\:opacity-50:disabled{opacity:50%}"));
         assert!(out.contains(
-            "@media (hover:hover){.disabled\\:hover\\:bg-transparent:disabled:hover{background-color:transparent}}"
+            "@media (hover: hover){.disabled\\:hover\\:bg-transparent:disabled:hover{background-color:transparent}}"
         ));
         // The plain-disabled rule must precede the hover-media companion.
         let disabled = out.find(".disabled\\:opacity-50:disabled").unwrap();
@@ -3934,10 +6846,10 @@ mod tests {
             ".before\\:content-\\[\\'\\'\\]:before{--tw-content:'';content:var(--tw-content)}"
         ));
         assert!(out.contains(
-            ".backdrop\\:bg-black\\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent)}"
+            ".backdrop\\:bg-black\\/40::backdrop{background-color:color-mix(in oklab, var(--color-black) 40%, transparent);background-color:color-mix(in srgb, #000 40%, transparent)}"
         ));
         assert!(out.contains(
-            "@media (hover:hover){.group-hover\\:opacity-100:is(:where(.group):hover *){opacity:1}}"
+            "@media (hover: hover){.group-hover\\:opacity-100:is(:where(.group):hover *){opacity:100%}}"
         ));
         // `group` itself is a marker class: no rule, no error.
         assert!(!out.contains(".group{"));
@@ -3951,17 +6863,17 @@ mod tests {
             &candidates(&["md:flex-row", "sm:px-2", "lg:grid-cols-3"]),
         )
         .unwrap();
-        assert!(out.contains("@media (width>=48rem){.md\\:flex-row{flex-direction:row}}"));
+        assert!(out.contains("@media (width >= 48rem){.md\\:flex-row{flex-direction:row}}"));
         assert!(out.contains(
-            "@media (width>=40rem){.sm\\:px-2{padding-inline:calc(var(--spacing) * 2)}}"
+            "@media (width >= 40rem){.sm\\:px-2{padding-inline:calc(var(--spacing) * 2)}}"
         ));
         assert!(out.contains(
-            "@media (width>=64rem){.lg\\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}}"
+            "@media (width >= 64rem){.lg\\:grid-cols-3{grid-template-columns:repeat(3, minmax(0, 1fr))}}"
         ));
         // Breakpoint blocks come in ascending width order.
-        let sm = out.find("width>=40rem").unwrap();
-        let md = out.find("width>=48rem").unwrap();
-        let lg = out.find("width>=64rem").unwrap();
+        let sm = out.find("width >= 40rem").unwrap();
+        let md = out.find("width >= 48rem").unwrap();
+        let lg = out.find("width >= 64rem").unwrap();
         assert!(sm < md && md < lg);
     }
 
@@ -3996,7 +6908,7 @@ mod tests {
         assert!(out.contains("html, body{color:var(--color-gray-900);background-color:var(--color-gray-50)}") ||
                 out.contains("html, body{background-color:var(--color-gray-50);color:var(--color-gray-900)}"));
         // The dark applies land in a dark media rule with the same selector.
-        assert!(out.contains("@media (prefers-color-scheme:dark){html, body{"));
+        assert!(out.contains("@media (prefers-color-scheme: dark){html, body{"));
         assert!(out.contains("--color-gray-950"));
         assert!(out.contains("--color-gray-200"));
         // The referenced gray tokens are emitted in the theme layer.
@@ -4034,9 +6946,18 @@ mod tests {
 
     #[test]
     fn unknown_variant_is_a_hard_error() {
-        let err =
-            compile("@import 'tailwindcss';", &candidates(&["aria-checked:flex"])).unwrap_err();
-        assert!(err.contains("aria-checked"), "error must name the variant: {err}");
+        // A genuinely unimplemented variant still hard-errors (naming it), never
+        // silently drops. (`aria-checked`, `group-focus`, `supports-*`, etc. are
+        // now supported; a group/peer ARIA state is a real remaining gap.)
+        let err = compile(
+            "@import 'tailwindcss';",
+            &candidates(&["group-aria-checked:flex"]),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("group-aria-checked"),
+            "error must name the variant: {err}"
+        );
     }
 
     #[test]
@@ -4209,7 +7130,7 @@ mod tests {
         ));
         assert!(out.contains(".rounded-tl-sm{border-top-left-radius:var(--radius-sm)}"));
         assert!(out.contains(
-            ".rounded-e-full{border-start-end-radius:3.40282e38px;border-end-end-radius:3.40282e38px}"
+            ".rounded-e-full{border-start-end-radius:calc(infinity * 1px);border-end-end-radius:calc(infinity * 1px)}"
         ));
         assert!(out.contains(
             ".rounded-r{border-top-right-radius:0.25rem;border-bottom-right-radius:0.25rem}"
@@ -4238,7 +7159,7 @@ mod tests {
             &candidates(&["aspect-square", "aspect-video", "aspect-16/9", "aspect-ratio-1"]),
         )
         .unwrap();
-        assert!(out.contains(".aspect-square{aspect-ratio:1}"));
+        assert!(out.contains(".aspect-square{aspect-ratio:1 / 1}"));
         assert!(out.contains(".aspect-video{aspect-ratio:var(--aspect-video)}"));
         assert!(out.contains(".aspect-16\\/9{aspect-ratio:16/9}"));
         // `aspect-ratio-1` resolves against nothing: no rule, no error.

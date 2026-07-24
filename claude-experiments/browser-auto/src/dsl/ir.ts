@@ -11,7 +11,8 @@ export const ROLE_KINDS = [
   "navigation", "main", "article", "form", "group",
 ] as const;
 
-export const SPECIAL_KINDS = ["text", "field", "placeholder", "testid"] as const;
+/** `frame` is a SCOPE: valid only after `in`/`of` (e.g. `button "Pay" in frame "checkout"`) */
+export const SPECIAL_KINDS = ["text", "field", "placeholder", "testid", "frame"] as const;
 
 export type TargetKind = (typeof ROLE_KINDS)[number] | (typeof SPECIAL_KINDS)[number];
 
@@ -32,7 +33,12 @@ export type Action =
   | { type: "select"; target: Target; value: string }
   | { type: "check" | "uncheck"; target: Target }
   | { type: "press"; key: string; target?: Target }
-  | { type: "upload"; target: Target; file: string };
+  | { type: "upload"; target: Target; file: string }
+  | { type: "drag"; target: Target; to: Target }
+  /** make the open tab whose url matches the pattern the ACTIVE page */
+  | { type: "switchTab"; path: string }
+  /** close the active tab; the most recently used remaining page activates */
+  | { type: "closeTab" };
 
 export type Effect =
   /** NOTE: a `visible` effect whose target's HEAD kind is `text` is not
@@ -53,6 +59,12 @@ export type Effect =
   /** bodyContains: substring of the request body — how you pin a GraphQL
    * operation (`containing "mutation CreateInvoice"`) or a payload field */
   | { type: "request"; method: string; pathPattern: string; status: "ok" | number; bodyContains?: string }
+  /** a new tab/popup opened whose url matches; armed before the action */
+  | { type: "tab"; path: string }
+  /** a native dialog appeared; the declared response is applied when it does */
+  | { type: "dialog"; message: string; response: "accept" | "dismiss"; text?: string }
+  /** a download started whose suggested filename contains the text */
+  | { type: "download"; name: string }
   /** websocket frame matcher, armed before the action */
   | { type: "ws"; dir: "sent" | "received"; text: string; pathPattern?: string }
   | { type: "let"; name: string; from: Target };
@@ -101,6 +113,9 @@ export function formatAction(a: Action): string {
     case "check": case "uncheck": return `${a.type} ${formatTarget(a.target)}`;
     case "press": return a.target ? `press "${a.key}" in ${formatTarget(a.target)}` : `press "${a.key}"`;
     case "upload": return `upload ${formatTarget(a.target)} "${a.file}"`;
+    case "drag": return `drag ${formatTarget(a.target)} to ${formatTarget(a.to)}`;
+    case "switchTab": return `switch tab ${a.path}`;
+    case "closeTab": return `close tab`;
   }
 }
 
@@ -123,6 +138,12 @@ export function formatEffect(e: Effect): string {
       return `expect request ${e.method} ${e.pathPattern} ${e.status}${e.bodyContains !== undefined ? ` containing "${e.bodyContains}"` : ""}`;
     case "ws":
       return `expect ws ${e.dir} "${e.text}"${e.pathPattern !== undefined ? ` on ${e.pathPattern}` : ""}`;
+    case "tab":
+      return `expect tab ${e.path}`;
+    case "dialog":
+      return `expect dialog "${e.message}" ${e.response}${e.text !== undefined ? ` "${e.text}"` : ""}`;
+    case "download":
+      return `expect download "${e.name}"`;
     case "let": return `let ${e.name} = text in ${formatTarget(e.from)}`;
   }
 }

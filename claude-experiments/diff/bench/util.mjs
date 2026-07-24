@@ -47,16 +47,24 @@ export function timeProcess(command, args, options = {}) {
   return { elapsedMs, stdout: result.stdout, stderr: result.stderr };
 }
 
-// Peak RSS (bytes) of a standalone process via /usr/bin/time -v.
+const RSS_UNIT_BYTES = { B: 1, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12, KIB: 1024, MIB: 1024 ** 2, GIB: 1024 ** 3, TIB: 1024 ** 4 };
+
+// Peak RSS (bytes) of a standalone process. Uses `vtime -m` when available (works
+// on macOS, where `ru_maxrss` is bytes and GNU `time -v` is absent), and falls
+// back to GNU `/usr/bin/time -v` (Linux CI). Both are external process wrappers, so
+// the measurement is out-of-process and unaffected by the harness.
 export function peakRss(command, args, options = {}) {
-  const result = spawnSync("/usr/bin/time", ["-v", command, ...args], {
-    encoding: "utf8",
-    ...options,
-  });
+  const vt = spawnSync("vtime", ["-m", command, ...args], { encoding: "utf8", ...options });
+  if (!vt.error && vt.status === 0) {
+    const m = (vt.stderr + vt.stdout).match(/Max memory \(RSS\)[^\d]*([\d.]+)\s*([KMGT]?i?B)/i);
+    if (m) return Math.round(Number(m[1]) * (RSS_UNIT_BYTES[m[2].toUpperCase()] ?? 1));
+    throw new Error(`could not parse vtime -m output:\n${vt.stderr}`);
+  }
+  const result = spawnSync("/usr/bin/time", ["-v", command, ...args], { encoding: "utf8", ...options });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(
-      `/usr/bin/time -v ${command} exited ${result.status}\nstderr:\n${result.stderr}`,
+      `neither vtime nor /usr/bin/time -v could measure ${command} (exit ${result.status})\nstderr:\n${result.stderr}`,
     );
   }
   const match = result.stderr.match(/Maximum resident set size \(kbytes\): (\d+)/);
