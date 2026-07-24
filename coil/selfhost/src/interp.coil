@@ -696,7 +696,11 @@
           (let [sz (isize-of cx tp) al (ialign-of cx tp)]
             (cond (icmp-eq storage 0) (femit fb 5 sz al 0)     ; stack (uninit)
                   (icmp-eq storage 2) (femit fb 23 sz 0 0)     ; heap malloc
-                  (femit fb 24 sz 0 0))                        ; static (malloc+zero)
+                  ; static: allocate ONCE at compile time (one persistent, zeroed
+                  ; region per alloc-static site, shared across all executions —
+                  ; mirrors codegen's per-site zeroed global) and bake its address.
+                  (let [addr (cast i64 (interp.malloc sz))]
+                    (memzero addr sz) (femit fb 1 addr 0 0)))
             (TPtr (box-type a t)))))
       (EZeroed [t]
         (let [tp (alloc-stack Type)]
@@ -824,17 +828,20 @@
               (load rty)))))
       (ELlvmIr [result args body]
         (let [n (al-len [Expr] (load args)) (mut i) 0
-              iri (al-len [IIr] (load (field cx irs)))
               ir0 (alloc-stack IIr)]
           (store! (field ir0 body) body)
           (store! (field ir0 argtys) (al-new [Type] a))
           (store! (field ir0 result) result)
+          ; compile args FIRST (nested llvm-ir may register its own IIrs), then
+          ; register this body and read the index back — capturing it before the
+          ; args would use the nested body's slot instead.
           (loop (if (icmp-ge (load i) n) (break)
             (do (let [t (compile-expr fb (ial-at [Expr] args (load i)))]
                   (al-push! (mut (field ir0 argtys)) t))
                 (store! i (iadd (load i) 1)))))
-          (al-push! (mut (field cx irs)) (load ir0))
-          (femit fb 40 iri n 0)
+          (let [iri (al-len [IIr] (load (field cx irs)))]
+            (al-push! (mut (field cx irs)) (load ir0))
+            (femit fb 40 iri n 0))
           result))
       (EOffsetOf [t fname]
         (match-else t
@@ -978,7 +985,7 @@
                     (icmp-eq op 8) (ior l r)
                     (icmp-eq op 9) (ixor l r)
                     (icmp-eq op 10) (ishl l r)
-                    (icmp-eq op 11) (ishr l r)
+                    (icmp-eq op 11) (if signed (ishr l r) (cast i64 (ishr (cast u64 l) (cast u64 r))))
                     (idie "do-bin: bad integer op"))]
         (canon-int v bits signed))
     (if (icmp-eq mode 2)
