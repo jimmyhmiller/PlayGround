@@ -24,6 +24,10 @@ export interface RunOptions {
   world: WorldHandle;
   /** simulated bad conditions (seeded latency / failure injection) */
   conditions?: ConditionProfile;
+  /** when to capture screenshots (default "on-failure") */
+  screenshotMode?: "on-failure" | "steps" | "off";
+  /** persist a step screenshot; returns the stored filename (or null) */
+  onScreenshot?: (stepIndex: number, png: Buffer) => Promise<string | null> | string | null;
   /** called after each step with the checkpoint (for persistence) */
   onCheckpoint?: (cp: Checkpoint) => Promise<void> | void;
   /** replay support: skip full trace verbosity for fast-forwarded steps */
@@ -189,6 +193,14 @@ export async function runSteps(
       engine: env.engine,
     };
     const stepTrace = await runStep(step, i, ctx);
+    const mode = opts.screenshotMode ?? "on-failure";
+    if (opts.onScreenshot && mode !== "off" && (stepTrace.status === "fail" || mode === "steps")) {
+      const png = await page.screenshot({ timeout: 5000 }).catch(() => null);
+      if (png) {
+        const name = await opts.onScreenshot(i, png);
+        if (name) stepTrace.screenshot = name;
+      }
+    }
     trace.steps.push(stepTrace);
     if (stepTrace.status === "fail") {
       trace.status = "fail";

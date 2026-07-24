@@ -64,6 +64,36 @@ Key mechanics:
   attributed per request — a chaos-induced failure can never masquerade as a
   real one. Latency alone never fails a flow; that invariant is executable.
 
+## The claim, property-tested
+
+Flakiness is an outcome that depends on timing the test did not mean to
+encode. So the claim is a property, and it's in the suite
+(`src/timing.property.test.ts`):
+
+> ∀ timing profiles P (server latency 0ms–3s, toast lifetimes 60–400ms):
+> bat(buy.flow, P) = pass — while the same journey written as raw Playwright
+> with explicit 1.5s tolerances has an outcome that is a function of P.
+
+The world algebra's laws (commutativity, associativity, idempotence, canonical
+fingerprints, symmetric conflicts) and the DSL round-trip
+(`parse(format(step)) ≡ step`) are verified with fast-check across ~1,500
+generated cases per run.
+
+## CI
+
+`bat run --junit` writes `.bat/junit.xml`; on GitHub Actions, failures emit
+`::error` annotations on the flow file/line and a job-summary report
+automatically. Failing steps capture screenshots into the run directory
+(config `screenshots`: `on-failure` default, `steps`, `off`).
+
+## Inspecting runs: `bat ui`
+
+`bat ui --config <app>` serves a local viewer over `.bat/runs`: every run's
+steps with per-effect verdicts, the network table (completion order, injected
+conditions, streaming), page-error attribution, failure screenshots, the
+semantic tree, the "why this failed" explanation — and a button to replay the
+failing step (headed) right from the report.
+
 ## Try it
 
 ```sh

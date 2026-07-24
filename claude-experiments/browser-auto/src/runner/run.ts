@@ -83,6 +83,11 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
               onCheckpoint: async (cp: Checkpoint) => {
                 await writeFile(join(runDir, `checkpoint-${cp.step}.json`), JSON.stringify(cp), "utf8");
               },
+              onScreenshot: async (stepIndex: number, png: Buffer) => {
+                const name = `step-${stepIndex + 1}.png`;
+                await writeFile(join(runDir, name), png);
+                return name;
+              },
             }
           : {}),
       },

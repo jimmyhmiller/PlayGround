@@ -21,9 +21,14 @@ usage:
   bat replay <flow>:<step>    replay one step (add --fast to restore from checkpoint)
   bat inspect <url>           dump a page's semantic tree (write targets from ground truth)
   bat doctor                  world adapter capability level + the next rung
+  bat ui                      local viewer for runs: steps, verdicts, network,
+                              screenshots, explanations, one-click replay
 options:
   --headed                    show the browser
   --config <dir>              project root containing bat.config.json (default: cwd)
+  --junit                     run: also write .bat/junit.xml (CI)
+  --port <n>                  ui: port (default 8123)
+ci: on GitHub Actions, run emits ::error annotations and a job summary automatically
 conditions (simulated bad conditions, always recorded and attributed):
   --latency <lo>-<hi>         inject lo..hi ms of latency per request
   --fail-rate <p>             fail p (0..1) of requests at the network level
@@ -40,7 +45,7 @@ async function main(): Promise<number> {
 
   const flags = new Set<string>();
   const values = new Map<string, string>();
-  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed"]);
+  const VALUE_FLAGS = new Set(["config", "latency", "fail-rate", "seed", "port"]);
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -116,9 +121,11 @@ async function main(): Promise<number> {
       }
       const browser = await launchBrowser(config);
       let failed = 0;
+      const ciRuns: Array<{ trace: import("./runner/trace.js").FlowTrace; runDir: string }> = [];
       try {
         for (const file of files) {
-          const { trace, reportPath } = await runFlowFile(file, { config, world, seeds, browser });
+          const { trace, runDir, reportPath } = await runFlowFile(file, { config, world, seeds, browser });
+          ciRuns.push({ trace, runDir });
           if (trace.status === "pass") {
             console.log(`✓ ${trace.flow} (${trace.steps.length} steps)`);
           } else {
@@ -129,6 +136,15 @@ async function main(): Promise<number> {
         }
       } finally {
         await browser.close();
+      }
+      const { renderJUnit, emitCi } = await import("./runner/ci.js");
+      await emitCi(ciRuns);
+      if (flags.has("junit")) {
+        const junitPath = resolve(config.root, ".bat", "junit.xml");
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(resolve(config.root, ".bat"), { recursive: true });
+        await writeFile(junitPath, renderJUnit(ciRuns), "utf8");
+        console.log(`junit: ${junitPath}`);
       }
       return failed ? 1 : 0;
     }
@@ -185,6 +201,16 @@ async function main(): Promise<number> {
       } finally {
         await browser.close();
       }
+    }
+
+    case "ui": {
+      const config = await loadConfig(cwd);
+      const { startUiServer } = await import("./ui/server.js");
+      const port = values.has("port") ? Number(values.get("port")) : 8123;
+      await startUiServer(config, port);
+      console.log(`bat ui: http://localhost:${port}  (runs from ${config.root}/.bat/runs)`);
+      await new Promise(() => {}); // serve until interrupted
+      return 0;
     }
 
     case "init": {

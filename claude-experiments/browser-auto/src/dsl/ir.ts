@@ -35,6 +35,9 @@ export type Action =
   | { type: "upload"; target: Target; file: string };
 
 export type Effect =
+  /** NOTE: a `visible` effect whose target's HEAD kind is `text` is not
+   * surface-representable: `expect text "x"` belongs to the `text` effect,
+   * which has equivalent meaning. Construct that shape only via the IR. */
   | { type: "visible"; target: Target }
   | { type: "absent"; target: Target }
   /** armed BEFORE the action — catches transients (toasts) */

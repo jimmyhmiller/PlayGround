@@ -8,9 +8,37 @@ import { world } from "./world.js";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "public");
 
-/** Random server-side latency — the whole point of the fixture. */
+/** Server-side latency — the whole point of the fixture. Configurable and
+ * seedable so property tests can quantify over timing profiles. */
+export interface ShopTiming {
+  /** [min, max] added ms per API request */
+  apiLatencyMs: [number, number];
+  /** how long the client-side toast lives (injected into the page) */
+  toastMs: number;
+  /** PRNG seed; same profile = same latency sequence */
+  seed: number;
+}
+
+let timing: ShopTiming = { apiLatencyMs: [50, 400], toastMs: 150, seed: 0 };
+let rng = () => Math.random();
+
+export function setShopTiming(profile: ShopTiming): void {
+  timing = profile;
+  let s = profile.seed | 0;
+  rng =
+    profile.seed === 0
+      ? () => Math.random()
+      : () => {
+          s = (s + 0x6d2b79f5) | 0;
+          let t = Math.imul(s ^ (s >>> 15), 1 | s);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+}
+
 function jitter(): Promise<void> {
-  const ms = 50 + Math.random() * 350;
+  const [lo, hi] = timing.apiLatencyMs;
+  const ms = lo + rng() * (hi - lo);
   return new Promise((r) => setTimeout(r, ms));
 }
 
@@ -100,9 +128,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     res.end(await readFile(join(PUBLIC_DIR, "app.js")));
     return;
   }
-  // SPA: every page path serves the shell
+  // SPA: every page path serves the shell (timing config injected as data)
   res.writeHead(200, { "content-type": "text/html" });
-  res.end(await readFile(join(PUBLIC_DIR, "index.html")));
+  const html = (await readFile(join(PUBLIC_DIR, "index.html"), "utf8")).replace(
+    "</head>",
+    `<script>window.__batTiming = ${JSON.stringify({ toastMs: timing.toastMs })}</script></head>`,
+  );
+  res.end(html);
 }
 
 export async function startShopServer(port = 0): Promise<{ url: string; server: Server; close: () => Promise<void> }> {

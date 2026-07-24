@@ -12,7 +12,7 @@
     "./server": "./dist/server/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p dist/runner/inject && cp src/runner/inject/*.js dist/runner/inject/",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/runner/inject dist/ui/static && cp src/runner/inject/*.js dist/runner/inject/ && cp src/ui/static/* dist/ui/static/",
     "test": "vitest run",
     "test:watch": "vitest",
     "bat": "tsx src/cli.ts"
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "fast-check": "^4.9.0",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"

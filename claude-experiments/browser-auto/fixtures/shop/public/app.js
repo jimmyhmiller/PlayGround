@@ -24,7 +24,7 @@ function toast(message) {
   el.setAttribute("role", "status");
   el.textContent = message;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 150);
+  setTimeout(() => el.remove(), window.__batTiming?.toastMs ?? 150);
 }
 
 function money(cents) {

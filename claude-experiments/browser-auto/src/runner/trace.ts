@@ -41,6 +41,8 @@ export interface StepTrace {
   ariaSnapshot?: string;
   /** the unresolved action target, when the action itself failed */
   failedTarget?: Target;
+  /** screenshot filename (relative to the run dir), when captured */
+  screenshot?: string;
   /** data-testids present on the page at failure time */
   testids?: string[];
   durationMs: number;
@@ -145,6 +147,7 @@ export function renderReport(trace: FlowTrace): string {
         out.push(`  the page's semantic tree at failure:`);
         out.push(indent(s.ariaSnapshot, 4));
       }
+      if (s.screenshot) out.push(`  screenshot: ${s.screenshot}`);
       out.push("");
       out.push(`  replay just this step: bat replay ${trace.file}:${s.index + 1}`);
     }
