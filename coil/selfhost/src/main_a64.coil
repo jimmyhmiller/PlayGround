@@ -90,6 +90,20 @@
   (cast (ptr i8) (ip/interp-build a mp)))
 (defn meta-run-interp [(cx (ptr i8)) (sym (ptr i8)) (argv (ptr i64)) (argc i64)] (-> (ptr i8))
   (cast (ptr i8) (ip/interp-call-entry (cast (ptr ip/Interp) cx) (cstr->slice sym) argv argc)))
+; comptime fold via interpreter: run coil.ct.thunk (scalar bits -> cell, or aggregate
+; written through cell as a buf for kind 0) + coil.ct.status if present -> status code.
+(defn meta-run-ct-interp [(cxp (ptr i8)) (kind i64) (cell (ptr i8))] (-> i64)
+  (let [icx (cast (ptr ip/Interp) cxp)]
+    (do
+      (if (icmp-eq kind 0)
+          (let [argbuf (alloc-stack (array i64 1))]
+            (store! (index (cast (ptr i64) argbuf) 0) (cast i64 cell))
+            (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) argbuf) 1))
+        (let [r (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) 0) 0)]
+          (store! (cast (ptr i64) cell) r) 0))
+      (if (ip/interp-has-entry? icx "coil.ct.status")
+          (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)
+        0))))
 (defn meta-interp-env? [] (-> bool)
   (let [v (getenv c"COIL_META_INTERP")]
     (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
@@ -100,7 +114,7 @@
   ; opt-in interpreter meta path: register the run hooks + the interp extern/abort
   ; hooks. Off by default ⇒ the native dylib/JIT path is byte-unchanged.
   (if (meta-interp-env?)
-      (do (set-meta-interp! (fnptr-of meta-build-interp) (fnptr-of meta-run-interp))
+      (do (set-meta-interp! (fnptr-of meta-build-interp) (fnptr-of meta-run-interp) (fnptr-of meta-run-ct-interp))
           (ip/set-interp-extern-hook! (fnptr-of mh/mh-interp-dispatch))
           (ip/set-interp-abort-check! (fnptr-of mh/mh-interp-halted?)) 0)
     0)

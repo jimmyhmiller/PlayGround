@@ -457,8 +457,50 @@
                           (Err [d] (cte-box a (Err [Expr Diag] d)))
                           (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
 
+; ============================ INTERPRETER comptime fold path ====================
+; When the metaprogram engine is in interpreter mode, fold a (comptime …) by building
+; the fold sub-program into an Interp context (the same build hook macros use) and
+; interpreting coil.ct.thunk / coil.ct.status — pure computation, no dylib/JIT/wasm.
+; The interpreter has a real memory model and does float arithmetic, so folds the wasm
+; side-module backend hard-errored on (float math) work here too.
+(defn cte-run-interp [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (match (monomorphize a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [mp]
+      (do (sort-mono-program a mp)
+        (let [icx (call-ptr (load (field (meta-interp-box) build)) a mp)
+              cell (alloc-stack (array i8 8))
+              st (call-ptr (load (field (meta-interp-box) run-ct)) icx kind (cast (ptr i8) cell))]
+          (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+            (let [cv (cte-cell->ctval (cast (ptr i8) cell) kind tp)
+                  lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+              (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                (Err [d] (cte-box a (Err [Expr Diag] d)))
+                (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
+
+(defn cte-run-agg-interp [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
+  (match (monomorphize a sub)
+    (Err [d] (cte-box a (Err [Expr Diag] d)))
+    (Ok [mp]
+      (do (sort-mono-program a mp)
+        (let [tp (alloc-stack Type)] (store! tp t0)
+          (match (raw-alloc a (iadd (cte-ty-size cx tp) 64) 16)
+            (None [] (cte-box a (Err [Expr Diag] (derr "comptime: out of memory allocating the comptime readback buffer"))))
+            (Some [buf]
+              (let [icx (call-ptr (load (field (meta-interp-box) build)) a mp)
+                    st (call-ptr (load (field (meta-interp-box) run-ct)) icx 0 buf)]
+                (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
+                  (match (cte-read cx tp buf 0 a)
+                    (None [] (cast (ptr i8) 0))
+                    (Some [cv]
+                      (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
+                        (match (build-value a (new-cell cv) lo hi src ctxt cx)
+                          (Err [d] (cte-box a (Err [Expr Diag] d)))
+                          (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))
+
 ; run the entry, reconstruct a literal from the scalar it returns.
 (defn cte-run [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (kind i64) (tp (ptr Type))] (-> (ptr i8))
+  (if (meta-interp-active?) (cte-run-interp a sub cx inner kind tp)
   (if (meta-wasm-active?) (cte-run-wasm a sub cx inner kind tp)
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
@@ -472,7 +514,7 @@
           (if (icmp-ne st 0) (cte-box a (Err [Expr Diag] (derr (ct-divzero-msg (icmp-eq st 2)))))
             (match (build-value a (new-cell cv) lo hi src ctxt cx)
               (Err [d] (cte-box a (Err [Expr Diag] d)))
-              (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))
+              (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))
 
 ; ============================ AGGREGATE readback (interp deletion step 3a) =========
 ; The scalar path above reads int/bool/f64 out of the return register. An AGGREGATE
@@ -764,6 +806,7 @@
   0)
 ; run the entry write-through into a heap buffer, then read the aggregate back.
 (defn cte-run-agg [(a (ptr Allocator)) (sub (ptr Program)) (cx (ptr CtCtx)) (inner (ptr Expr)) (t0 Type)] (-> (ptr i8))
+  (if (meta-interp-active?) (cte-run-agg-interp a sub cx inner t0)
   (if (meta-wasm-active?) (cte-run-agg-wasm a sub cx inner t0)
   (match (cte-entry a sub)
     (Err [d] (cte-box a (Err [Expr Diag] d)))
@@ -783,7 +826,7 @@
                         (let [lo (load (field inner lo)) hi (load (field inner hi)) src (load (field inner source)) ctxt (load (field inner ctxt))]
                           (match (build-value a (new-cell cv) lo hi src ctxt cx)
                             (Err [d] (cte-box a (Err [Expr Diag] d)))
-                            (Ok [lit] (cte-box a (Ok [Expr Diag] lit))))))))))))))))))
+                            (Ok [lit] (cte-box a (Ok [Expr Diag] lit)))))))))))))))))))
 
 ; the registered hook (comptime.coil::ct-fold-hook). null = declined.
 (defn comptime-fold-one [(a (ptr Allocator)) (inner (ptr Expr)) (cx (ptr CtCtx))] (-> (ptr i8))

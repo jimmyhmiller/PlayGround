@@ -1770,6 +1770,11 @@
       (do (ensure-compiled cx fi)
           (vm-exec cx fi argv argc 0)))))
 
+; Does the context define an entry with this coil function name? (e.g. the comptime
+; div-by-zero guard's coil.ct.status is present only when the sub-program had a div/rem.)
+(defn interp-has-entry? [(cx (ptr Interp)) (nm (slice u8))] (-> bool)
+  (icmp-ge (find-func cx nm) 0))
+
 ; Compile every mono'd function to bytecode, then run `main` and return its i64
 ; (the process exit code). Registration happens BEFORE compilation so calls
 ; resolve by name regardless of order.

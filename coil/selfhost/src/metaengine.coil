@@ -245,15 +245,21 @@
 ; result Code handle. The metashim mh_* callbacks the interpreter makes are dispatched
 ; back into the compiler via interp.coil's registered extern hook (main wires it).
 ; Registered only in the interp-mode entry ⇒ native dylib/wasm builds never reference it.
+; run-ct interprets a COMPTIME fold context (comptime_eval.coil): given a built Interp
+; cx, run coil.ct.thunk (scalar → bits into cell; aggregate → written through cell as a
+; buf for kind 0) and coil.ct.status if present, returning the div-by-zero status.
 (defstruct MetaInterpBox
   [(isset i64)
-   (build (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
-   (run   (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))])
+   (build  (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
+   (run    (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))
+   (run-ct (fnptr c [(ptr i8) i64 (ptr i8)] i64))])
 (defn meta-interp-box [] (-> (ptr MetaInterpBox)) (alloc-static MetaInterpBox))
-(defn set-meta-interp! [(build (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
-                        (run   (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))] (-> i64)
+(defn set-meta-interp! [(build  (fnptr c [(ptr Allocator) (ptr Program)] (ptr i8)))
+                        (run    (fnptr c [(ptr i8) (ptr i8) (ptr i64) i64] (ptr i8)))
+                        (run-ct (fnptr c [(ptr i8) i64 (ptr i8)] i64))] (-> i64)
   (let [b (meta-interp-box)]
-    (store! (field b build) build) (store! (field b run) run) (store! (field b isset) 1) 0))
+    (store! (field b build) build) (store! (field b run) run) (store! (field b run-ct) run-ct)
+    (store! (field b isset) 1) 0))
 (defn meta-interp-active? [] (-> bool) (icmp-ne (load (field (meta-interp-box) isset)) 0))
 
 ; ---- unique scratch paths ---------------------------------------------------------
