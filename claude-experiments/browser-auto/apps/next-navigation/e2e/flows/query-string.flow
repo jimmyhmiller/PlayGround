@@ -1,0 +1,12 @@
+# Next test: 'should set query correctly' (navigation.test.ts:10).
+# Theirs polls with retry() until the div text updates; bat's expect on the
+# shallow router update is armed and settles on the transition — no polling.
+flow "set query correctly"
+
+go /
+  expect text "empty-query"
+  expect link "set Query"
+
+click link "set Query"
+  expect url /?a=b&c=d
+  expect text "a=b&c=d"

@@ -1,0 +1,11 @@
+# Next tests: 'redirect from next.config.js with link navigation' and
+# 'redirect from middleware with link navigation'.
+flow "config and middleware redirects"
+
+go /redirect/a
+  expect url /redirect-dest
+  expect heading "redirect-dest"
+
+go /redirect-middleware-to-dashboard
+  expect url /redirect-dest
+  expect heading "redirect-dest"

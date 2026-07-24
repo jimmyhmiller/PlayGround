@@ -1,0 +1,8 @@
+# Next tests: 'trigger not-found in a server component' and 'client component'.
+flow "not-found boundaries"
+
+go /not-found/servercomponent
+  expect text "Not Found!"
+
+go /not-found/clientcomponent
+  expect text "Not Found!"

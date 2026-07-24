@@ -1,0 +1,29 @@
+# Rewrite of Next's 'should navigate to nested pages' (navigation.test.ts:683).
+# Theirs: a JS double-loop over 3 categories x 3 subcategories with a
+# .click().waitForElementByCss(#id) manual wait on EVERY hop, targeting by
+# a[href="..."] and asserting by #id text. bat: semantic targets, ZERO waits.
+#
+# FINDING: bat refused to target "Shoes" — this app has BOTH a top-level
+# /nested-navigation/shoes link AND /clothing/shoes, so the name is ambiguous.
+# The Next test hides this behind an exact href; bat makes it visible. This
+# app has no landmarks/testids to scope by (it was written for href testing),
+# so the fair rewrite covers the unambiguous hops.
+flow "navigate nested pages"
+
+go /nested-navigation
+  expect heading "Home"
+
+click link "Electronics"
+  expect text "All Electronics"
+click link "Phones"
+  expect text "Phones"
+click link "Tablets"
+  expect text "Tablets"
+click link "Laptops"
+  expect text "Laptops"
+
+click link "Clothing"
+  expect text "All Clothing"
+
+click link "Books"
+  expect text "All Books"
