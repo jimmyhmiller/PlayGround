@@ -287,6 +287,16 @@ fn run() -> Result<(), String> {
                 return build_static(Path::new(&project_root), static_export);
             }
 
+            // `production` — the one-command production build: run every graph in
+            // order and lay them out into a single coherent, servable output
+            // (`public/` + `server/` + `rsc-render/` + manifests + the production
+            // server entry), so `diffpack start <out>` boots a deployable app. This
+            // replaces the previous manual client -> react-server -> `cp` -> ssr shell
+            // dance and is the only supported build->deploy path for a DYNAMIC app.
+            if environment == "production" {
+                return build_production(Path::new(&project_root), &remaining);
+            }
+
             // Next.js app-router apps have no TanStack/src entry; their "entry" is
             // the app-router file convention (`app/layout.tsx` wrapping
             // `app/page.tsx`). The next adapter detects such a project, scaffolds the
@@ -825,8 +835,132 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        // Boot the production server for a `diffpack build-app <root> production`
+        // output. Runs the emitted orchestrator (`next-server.mjs`) in PRODUCTION mode
+        // (a persistent react-server worker pool — no per-request Node spawn, no dev
+        // re-imports), serving the built app. For a non-Next (TanStack/SPA) output it
+        // boots `server/index.mjs`.
+        Some("start") => {
+            let output_dir = arguments
+                .next()
+                .ok_or_else(|| "usage: diffpack start <.diffpack-output dir> [port]".to_string())?;
+            let port = arguments
+                .next()
+                .and_then(|value| value.to_str().map(str::to_string))
+                .unwrap_or_else(|| "3000".to_string());
+            let out = Path::new(&output_dir);
+            let next_server = out.join("next-server.mjs");
+            let entry = if next_server.exists() {
+                next_server
+            } else {
+                out.join("server/index.mjs")
+            };
+            if !entry.exists() {
+                return Err(format!(
+                    "no production server entry in {} — run `diffpack build-app <root> production` first",
+                    out.display()
+                ));
+            }
+            let status = std::process::Command::new("node")
+                .arg(&entry)
+                .arg(out)
+                .arg(&port)
+                .status()
+                .map_err(|error| format!("cannot start node server ({}): {error}", entry.display()))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("production server exited with {status}"))
+            }
+        }
         _ => Err(usage()),
     }
+}
+
+/// Recursively copy `src` into `dest` (used to publish the react-server bundle from
+/// `server/` to `rsc-render/` before the ssr build overwrites `server/`).
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest)
+        .map_err(|error| format!("cannot create {}: {error}", dest.display()))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|error| format!("cannot read {}: {error}", src.display()))?
+    {
+        let entry = entry.map_err(|error| format!("cannot read entry in {}: {error}", src.display()))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("cannot stat {}: {error}", from.display()))?;
+        if kind.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|error| format!("cannot copy {} -> {}: {error}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `diffpack build-app <root> production` — the one-command production build. Builds
+/// every graph in order (self-invoking the per-environment build so each runs exactly
+/// as it does standalone) and assembles a single deployable output.
+fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate the diffpack binary: {error}"))?;
+    let root = project_root.to_string_lossy().to_string();
+    let passthrough: Vec<String> = flags
+        .iter()
+        .filter_map(|f| f.to_str())
+        .filter(|f| f.starts_with("--") && *f != "--static-export")
+        .map(str::to_string)
+        .collect();
+    let run = |environment: &str| -> Result<(), String> {
+        let status = std::process::Command::new(&exe)
+            .arg("build-app")
+            .arg(&root)
+            .arg(environment)
+            .args(&passthrough)
+            .status()
+            .map_err(|error| format!("cannot run build-app {environment}: {error}"))?;
+        if !status.success() {
+            return Err(format!("build-app {environment} failed ({status})"));
+        }
+        Ok(())
+    };
+    let out = project_root.join(".diffpack-output");
+    if diffpack::next_adapter::is_app_router(project_root) {
+        println!("=== production build (next app-router): client -> react-server -> ssr ===");
+        run("client")?;
+        run("react-server")?;
+        // Publish the react-server bundle to `rsc-render/` BEFORE the ssr build
+        // overwrites `server/` — the orchestrator reads the two from distinct dirs.
+        let server = out.join("server");
+        let rsc_render = out.join("rsc-render");
+        let _ = std::fs::remove_dir_all(&rsc_render);
+        copy_dir_recursive(&server, &rsc_render)?;
+        run("ssr")?;
+        std::fs::write(
+            out.join("next-server.mjs"),
+            include_str!("../scripts/rsc/next-server.mjs"),
+        )
+        .map_err(|error| format!("cannot write production server: {error}"))?;
+        println!(
+            "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]",
+            out.display(),
+            out.display()
+        );
+    } else {
+        println!("=== production build: client -> ssr ===");
+        run("client")?;
+        run("ssr")?;
+        println!(
+            "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]  (node {}/server/index.mjs)",
+            out.display(),
+            out.display(),
+            out.display()
+        );
+    }
+    Ok(())
 }
 
 fn usage() -> String {

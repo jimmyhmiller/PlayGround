@@ -25,6 +25,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
+import os from "node:os";
 
 // DEV (`diffpack dev`): the diffpack dev server re-emits the SSR bundle in place on a
 // client-island edit, but Node caches an ESM module by URL forever. In dev we
@@ -113,22 +114,35 @@ async function getRenderFlightToDocument() {
 // both modes.
 await getRenderFlightToDocument();
 
-// --- DEV: one long-lived react-server `serve` worker ------------------------------
-// In `diffpack dev`, spawning a fresh Node child per `?__rsc=1` render pays the whole
-// cold-start cost on every server-component HMR edit. Instead we spawn ONE persistent
-// worker (`rsc-render/server.mjs serve`) that stays warm and answers render/action
-// requests over newline-delimited JSON on its stdin/stdout; the worker re-imports its
-// own bundle with `?v=<mtime>` whenever diffpack re-emits it, so a server edit is
-// picked up WITHOUT a respawn. Same isolation (separate process, own React), no spawn.
-let devWorker = null;
-function ensureDevWorker() {
-  if (devWorker) return devWorker;
+// --- Persistent react-server worker POOL (dev + production) -----------------------
+// Spawning a fresh Node child per `?__rsc=1` render pays the whole cold-start cost on
+// EVERY request — ruinous for production latency and memory. Instead we keep a pool of
+// long-lived `serve` workers (`rsc-render/server.mjs serve`) that stay warm and answer
+// render/action requests over newline-delimited JSON on stdin/stdout. DEV runs ONE
+// worker (a single browser) which re-imports its bundle with `?v=<mtime>` on a diffpack
+// re-emit so a server-component edit is picked up without a respawn; PRODUCTION runs a
+// small pool (round-robined) so concurrent requests render in parallel, with the bundle
+// mtime stable so each worker imports it exactly once. Same process isolation, no
+// per-request spawn.
+// Pool size trades memory for render concurrency. Each worker is a separate Node
+// process (~one Node baseline + the react-server bundle), so memory scales with the
+// count. Default to a small pool that keeps steady-state RSS below a single-process
+// Next server while still rendering a couple of requests in parallel; override with
+// DIFFPACK_RSC_WORKERS for high-concurrency deployments. DEV is always 1.
+const POOL_SIZE = DEV
+  ? 1
+  : Math.max(1, Number(process.env.DIFFPACK_RSC_WORKERS) || 2);
+let workerPool = null;
+let poolCursor = 0;
+
+function spawnWorker() {
   const child = spawn(process.execPath, [rscRenderEntry, "serve"], {
-    stdio: ["pipe", "pipe", "inherit"], // worker stderr -> dev console
+    stdio: ["pipe", "pipe", "inherit"], // worker stderr -> server log
   });
   const pending = new Map();
   let seq = 0;
   let buffer = "";
+  const worker = { dead: false, call: null };
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
@@ -150,38 +164,43 @@ function ensureDevWorker() {
       }
     }
   });
-  child.on("exit", (code) => {
-    devWorker = null;
-    for (const settle of pending.values()) settle({ error: `react-server worker exited (${code})` });
+  const fail = (reason) => {
+    worker.dead = true;
+    for (const settle of pending.values()) settle({ error: reason });
     pending.clear();
-  });
-  child.on("error", (error) => {
-    devWorker = null;
-    for (const settle of pending.values()) settle({ error: `react-server worker error: ${error}` });
-    pending.clear();
-  });
-  devWorker = {
-    call(req) {
-      return new Promise((resolve, reject) => {
-        const id = ++seq;
-        pending.set(id, (msg) => {
-          if (msg.error) {
-            reject(new Error(`react-server worker: ${msg.error}`));
-            return;
-          }
-          resolve({
-            flight: Buffer.from(msg.flight || "", "base64"),
-            status: msg.status || 200,
-            params: msg.params || {},
-            redirect: msg.redirect,
-            notFound: msg.notFound,
-          });
-        });
-        child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
-      });
-    },
   };
-  return devWorker;
+  child.on("exit", (code) => fail(`react-server worker exited (${code})`));
+  child.on("error", (error) => fail(`react-server worker error: ${error}`));
+  worker.call = (req) =>
+    new Promise((resolve, reject) => {
+      const id = ++seq;
+      pending.set(id, (msg) => {
+        if (msg.error) {
+          reject(new Error(`react-server worker: ${msg.error}`));
+          return;
+        }
+        resolve({
+          flight: Buffer.from(msg.flight || "", "base64"),
+          status: msg.status || 200,
+          params: msg.params || {},
+          redirect: msg.redirect,
+          notFound: msg.notFound,
+        });
+      });
+      child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
+    });
+  return worker;
+}
+
+// The next warm worker, round-robined; a crashed worker is respawned on demand.
+function nextWorker() {
+  if (!workerPool) workerPool = Array.from({ length: POOL_SIZE }, spawnWorker);
+  for (let i = 0; i < workerPool.length; i += 1) {
+    if (workerPool[i].dead) workerPool[i] = spawnWorker();
+  }
+  const worker = workerPool[poolCursor % workerPool.length];
+  poolCursor += 1;
+  return worker;
 }
 
 // --- Spawn the react-server child for a flight (render or action) ----------------
@@ -189,36 +208,35 @@ function ensureDevWorker() {
 // (guarded on the child side): a 404 renders its flight AND exits 0, carrying its
 // HTTP status only over fd 3 — so we must NOT infer failure from a non-zero exit for
 // a 404 (the child never exits non-zero for one). Resolves `{flight,status,params}`.
-// In DEV this routes to the persistent worker (same resolved shape); PROD/SSG spawns.
+// Render + action always route through the persistent worker pool (dev AND prod), so
+// no request pays a Node cold start; other ops fall through to a one-shot spawn.
 function runReactServer(args, stdinBody) {
-  if (DEV) {
-    const op = args[0];
-    if (op === "render") {
-      let reqCtx = {};
-      if (stdinBody != null && String(stdinBody).trim()) {
-        try {
-          reqCtx = JSON.parse(String(stdinBody));
-        } catch {
-          reqCtx = {};
-        }
+  const op = args[0];
+  if (op === "render") {
+    let reqCtx = {};
+    if (stdinBody != null && String(stdinBody).trim()) {
+      try {
+        reqCtx = JSON.parse(String(stdinBody));
+      } catch {
+        reqCtx = {};
       }
-      return ensureDevWorker().call({
-        op: "render",
-        pathname: args[1],
-        manifestPath: args[2],
-        reqCtx,
-      });
     }
-    if (op === "action") {
-      return ensureDevWorker().call({
-        op: "action",
-        actionId: args[1],
-        manifestPath: args[2],
-        body: stdinBody != null ? String(stdinBody) : "",
-      });
-    }
-    // Unknown op falls through to a one-shot spawn (defensive; not reached today).
+    return nextWorker().call({
+      op: "render",
+      pathname: args[1],
+      manifestPath: args[2],
+      reqCtx,
+    });
   }
+  if (op === "action") {
+    return nextWorker().call({
+      op: "action",
+      actionId: args[1],
+      manifestPath: args[2],
+      body: stdinBody != null ? String(stdinBody) : "",
+    });
+  }
+  // Unknown op falls through to a one-shot spawn (defensive; not reached today).
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [rscRenderEntry, ...args], {
       stdio: ["pipe", "pipe", "pipe", "pipe"],
