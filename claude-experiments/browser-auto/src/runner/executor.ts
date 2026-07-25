@@ -25,6 +25,8 @@ export interface RunOptions {
   world: WorldHandle;
   /** simulated bad conditions (seeded latency / failure injection) */
   conditions?: ConditionProfile;
+  /** simulate a slow CPU (chromium only): JS runs N× slower */
+  cpuThrottle?: number;
   /** when to capture screenshots (default "on-failure") */
   screenshotMode?: "on-failure" | "steps" | "off";
   /** persist a step screenshot; returns the stored filename (or null) */
@@ -106,6 +108,16 @@ export async function prepareContext(
   opts: RunOptions,
 ): Promise<FlowEnv> {
   const hub = await TransientHub.install(context);
+  // slow-CPU perturbation (chromium only): apply BEFORE any navigation so the
+  // initial load runs throttled too — maximizes exposure of timing races.
+  if (opts.cpuThrottle && opts.cpuThrottle > 1) {
+    try {
+      const cdp = await context.newCDPSession(page);
+      await (cdp.send as (m: string, p: unknown) => Promise<unknown>)("Emulate.setCPUThrottlingRate", { rate: opts.cpuThrottle });
+    } catch {
+      // non-chromium engines have no CDP; the perturbation is simply unavailable
+    }
+  }
   // conditions first: stubs are registered after and therefore win —
   // stubbed traffic is hermetic and immune to chaos
   let engine: ConditionEngine | null = null;

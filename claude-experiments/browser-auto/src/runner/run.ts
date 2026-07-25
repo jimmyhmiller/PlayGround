@@ -72,6 +72,7 @@ export async function runFlow(flow: Flow, deps: RunDeps, options: RunFlowOptions
       seedRegistry: seeds,
       world,
       ...(config.conditions ? { conditions: config.conditions } : {}),
+      ...(config.cpuThrottle ? { cpuThrottle: config.cpuThrottle } : {}),
     };
     const env = await prepareContext(context, page, flow, baseOpts);
     if (persist) {
@@ -224,6 +225,7 @@ export async function replayStep(
       seedRegistry: seeds,
       world,
       ...(config.conditions ? { conditions: config.conditions } : {}),
+      ...(config.cpuThrottle ? { cpuThrottle: config.cpuThrottle } : {}),
     };
     const flowForPrepare = checkpoint ? { ...flow, givens: flow.givens.filter((g) => g.type !== "user") } : flow;
     const env = await prepareContext(context, page, flowForPrepare, baseOpts);

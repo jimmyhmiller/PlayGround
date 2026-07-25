@@ -84,10 +84,14 @@ const scenarios: Array<{ name: string; run: (deps: RunDeps) => Promise<Outcome> 
 ];
 
 // timing perturbations: plain (catches tracker-vs-first-fetch races) + latency
-const allPerturbations: Array<{ label: string; conditions?: BatConfig["conditions"] }> = [
+const allPerturbations: Array<{ label: string; conditions?: BatConfig["conditions"]; cpuThrottle?: number }> = [
   { label: "plain" },
   { label: "latency+50-400", conditions: { latencyMs: [50, 400], seed: 1 } },
   { label: "latency+300-900", conditions: { latencyMs: [300, 900], seed: 2 } },
+  // slow-CPU: the axis most likely to expose bat-runtime timing races, since
+  // the JS-vs-event ordering that hid the --fast replay flake is CPU-sensitive
+  { label: "cpu-throttle-4x", cpuThrottle: 4 },
+  { label: "cpu-throttle-6x + latency", cpuThrottle: 6, conditions: { latencyMs: [50, 300], seed: 3 } },
 ];
 // PLAIN_ONLY: the tracker-vs-first-fetch race only appears without latency
 const perturbations = process.env.PLAIN_ONLY ? allPerturbations.slice(0, 1) : allPerturbations;
@@ -109,7 +113,14 @@ let failures = 0;
 const seen = new Set<string>();
 for (let i = 0; i < iterations; i++) {
   for (const pert of perturbations) {
-    const config = { ...baseConfig, ...(pert.conditions ? { conditions: pert.conditions } : {}), rerunsOnFailure: 0 };
+    const config = {
+      ...baseConfig,
+      ...(pert.conditions ? { conditions: pert.conditions } : {}),
+      ...(pert.cpuThrottle ? { cpuThrottle: pert.cpuThrottle } : {}),
+      // slow CPU legitimately needs more wall-clock; physics scales, semantics don't
+      stepBudgetMs: pert.cpuThrottle ? 30000 : baseConfig.stepBudgetMs,
+      rerunsOnFailure: 0,
+    };
     const deps: RunDeps = { config, world: localWorldHandle(world), seeds, browser };
     for (const sc of scenarios) {
       total++;

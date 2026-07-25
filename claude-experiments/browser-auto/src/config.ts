@@ -16,6 +16,9 @@ export interface BatConfig {
   conditions?: { latencyMs?: [number, number]; failRate?: number; seed: number };
   /** automatic reruns used to triage a failure (default 4; 0 = fast-path checks only) */
   rerunsOnFailure?: number;
+  /** simulate a slow CPU (chromium only): JS runs N× slower. A robustness
+   * perturbation — settlement/timing must survive it. Ignored on firefox/webkit. */
+  cpuThrottle?: number;
   /** browser engine (default chromium) */
   browser?: "chromium" | "firefox" | "webkit";
   /** parallel workers (default 1). >1 requires an `app` spec — isolation is structural. */
@@ -78,6 +81,7 @@ export async function loadConfig(cwd: string, overrides: Partial<BatConfig> = {}
     headless: typeof parsed.headless === "boolean" ? parsed.headless : DEFAULTS.headless,
     ...(conditions ? { conditions } : {}),
     ...(typeof parsed.rerunsOnFailure === "number" ? { rerunsOnFailure: parsed.rerunsOnFailure } : {}),
+    ...(typeof parsed.cpuThrottle === "number" ? { cpuThrottle: parsed.cpuThrottle } : {}),
     ...(typeof parsed.workers === "number" ? { workers: parsed.workers } : {}),
     ...(parsed.browser === "chromium" || parsed.browser === "firefox" || parsed.browser === "webkit"
       ? { browser: parsed.browser }
