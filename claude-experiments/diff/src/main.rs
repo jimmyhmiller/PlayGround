@@ -710,9 +710,12 @@ fn run() -> Result<(), String> {
             let no_minify = remaining
                 .iter()
                 .any(|value| value.to_str() == Some("--no-minify"));
-            let source_map = remaining
+            // Dev source maps default ON so a runtime-error stack frame in the error
+            // overlay resolves back to the original source; `--no-sourcemap` opts out.
+            // (Production `build-app` keeps its opt-in `--sourcemap` default-off.)
+            let source_map = !remaining
                 .iter()
-                .any(|value| value.to_str() == Some("--sourcemap"));
+                .any(|value| value.to_str() == Some("--no-sourcemap"));
             // Optional explicit port; positional non-flag argument, default 3000.
             let port = remaining
                 .iter()
@@ -970,7 +973,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
 }
 
 fn usage() -> String {
-    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--no-sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {

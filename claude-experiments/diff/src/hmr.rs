@@ -307,8 +307,14 @@ pub fn client_script(ws_path: &str) -> String {
     socket.addEventListener("message",async function(ev){{
       var msg;try{{msg=JSON.parse(ev.data);}}catch(_){{return;}}
       if(msg.type==="connected")return;
-      if(msg.type==="reload"){{location.reload();return;}}
+      // Dev error overlay: a Rust build error is surfaced in the browser instead of
+      // killing the dev server; a subsequent good build clears it. (No-op when the
+      // overlay script is absent, e.g. a non-HTML client.)
+      if(msg.type==="build-error"){{if(window.__diffpackOverlay)window.__diffpackOverlay.showBuild(msg);return;}}
+      if(msg.type==="build-ok"){{if(window.__diffpackOverlay)window.__diffpackOverlay.clear();return;}}
+      if(msg.type==="reload"){{if(window.__diffpackOverlay)window.__diffpackOverlay.clear();location.reload();return;}}
       if(msg.type==="rsc-refresh"){{
+        if(window.__diffpackOverlay)window.__diffpackOverlay.clear();
         // Server-component edit: refetch the CURRENT route's flight (?__rsc=1) and
         // diff-render it in place through the client Router — no full document
         // reload, and client-island state is preserved by React reconciliation.
@@ -348,6 +354,9 @@ pub fn client_script(ws_path: &str) -> String {
           // (~30ms timer), which is otherwise the dominant browser-side HMR latency.
           // Flush it synchronously now so the DOM updates this task, not a frame+ later.
           if(RT&&RT.performReactRefresh)RT.performReactRefresh();
+          // A successful hot update supersedes any error overlay (e.g. a runtime error
+          // the edit just fixed).
+          if(window.__diffpackOverlay)window.__diffpackOverlay.clear();
         }}catch(err){{console.error("[diffpack hmr]",err);location.reload();}}
       }}
     }});
@@ -365,6 +374,153 @@ pub fn client_script(ws_path: &str) -> String {
         global = json_string(RUNTIME_GLOBAL),
     )
 }
+
+/// The dev-only error overlay: a CLASSIC inline script that catches build errors
+/// (pushed over the HMR WebSocket by [`client_script`]), uncaught runtime errors,
+/// and unhandled promise rejections, and renders a full-screen overlay showing the
+/// message plus a source-mapped stack.
+///
+/// React 19 re-throws an uncaught render/hydration error to `window.onerror`, so
+/// nothing in the app entry needs instrumenting; the overlay just listens on the
+/// browser globals. Stack frames pointing at a generated chunk (`/client.js:LINE:COL`)
+/// are mapped back to their original source with a tiny in-browser VLQ base64
+/// source-map consumer that fetches the chunk's sibling `.map` (which the dev bundler
+/// emits with `diffpack:///` project-relative `sources` and inline `sourcesContent`).
+/// Diffpack's dev maps are line-granular (one token per generated line, at column 0),
+/// so the overlay honestly shows the original file + line and DROPS the column rather
+/// than fabricating a precision the map does not carry.
+///
+/// Like [`client_script`], the overlay's own `<script>` node removes itself during
+/// parse so React 19 hydrates a `<head>` identical to what it server-rendered, and
+/// the overlay DOM is created LAZILY (only on the first error, appended to
+/// `document.body`), so it can never reintroduce a hydration mismatch.
+pub fn overlay_script() -> String {
+    // No interpolation is needed (the overlay fetches relative to `location`), so this
+    // is a plain raw literal rather than a `format!` — no brace escaping.
+    OVERLAY_SCRIPT.to_string()
+}
+
+/// The overlay client body. Publishes `window.__diffpackOverlay` with `showBuild`,
+/// `showRuntime`, `clear`, and `mapStack`.
+const OVERLAY_SCRIPT: &str = r#"(function(){
+  var self=document.currentScript;
+  // VLQ base64 alphabet + decoder (source-map v3 `mappings` are base64-VLQ).
+  var B64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  function decodeVlq(str){
+    var out=[],shift=0,value=0;
+    for(var i=0;i<str.length;i++){
+      var digit=B64.indexOf(str.charAt(i));
+      if(digit<0)continue;
+      var cont=digit&32;digit&=31;
+      value+=digit<<shift;
+      if(cont){shift+=5;}
+      else{var neg=value&1;value>>=1;out.push(neg?-value:value);value=0;shift=0;}
+    }
+    return out;
+  }
+  // Parse the `mappings` string into per-generated-line segments. genColumn resets
+  // each line; sourceIndex/origLine/origColumn are cumulative across the whole map.
+  function parseMappings(mappings){
+    var lines=(mappings||"").split(";");
+    var srcIdx=0,origLine=0,origCol=0,result=[];
+    for(var i=0;i<lines.length;i++){
+      var segs=lines[i].split(","),genCol=0,lineSegs=[];
+      for(var j=0;j<segs.length;j++){
+        if(!segs[j])continue;
+        var f=decodeVlq(segs[j]);
+        if(f.length>=1)genCol+=f[0];
+        if(f.length>=4){srcIdx+=f[1];origLine+=f[2];origCol+=f[3];lineSegs.push({genCol:genCol,src:srcIdx,line:origLine,col:origCol});}
+      }
+      result.push(lineSegs);
+    }
+    return result;
+  }
+  function makeConsumer(map){
+    var parsed=parseMappings(map.mappings),sources=map.sources||[];
+    return function(genLine,genCol){
+      var segs=parsed[genLine-1];
+      if(!segs||!segs.length)return null;
+      var best=segs[0];
+      for(var i=0;i<segs.length;i++){if(segs[i].genCol<=genCol)best=segs[i];else break;}
+      var src=sources[best.src]||"";
+      // Strip the diffpack:/// label to a project-relative path for display.
+      return {source:src.replace(/^diffpack:\/\/\//,""),line:best.line+1};
+    };
+  }
+  // Rewrite every `URL:LINE:COL` frame in a stack to `originalSource:LINE` by
+  // fetching each unique chunk's sibling .map (served off disk by the dev proxy).
+  var FRAME="((?:https?://|/)[^\\s()]+?):(\\d+):(\\d+)";
+  async function mapStack(stack){
+    if(!stack)return stack;
+    var urls={},re=new RegExp(FRAME,"g"),m;
+    while((m=re.exec(stack)))urls[m[1]]=1;
+    var consumers={};
+    await Promise.all(Object.keys(urls).map(async function(u){
+      try{
+        var path=u;try{path=new URL(u,location.href).pathname;}catch(_){}
+        var res=await fetch(path+".map");
+        if(!res.ok)return;
+        consumers[u]=makeConsumer(await res.json());
+      }catch(_){}
+    }));
+    return stack.replace(new RegExp(FRAME,"g"),function(whole,u,line,col){
+      var c=consumers[u];if(!c)return whole;
+      var pos=c(parseInt(line,10),parseInt(col,10));
+      // Line-granular map: original file + line, column dropped honestly.
+      return pos?pos.source+":"+pos.line:whole;
+    });
+  }
+  var overlayEl=null;
+  function ensureOverlay(){
+    if(overlayEl&&overlayEl.parentNode)return overlayEl;
+    overlayEl=document.createElement("div");
+    overlayEl.id="__diffpack-overlay";
+    overlayEl.setAttribute("style","position:fixed;inset:0;z-index:2147483647;background:rgba(18,18,18,0.96);color:#e8e8e8;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:24px;overflow:auto;white-space:pre-wrap;box-sizing:border-box;");
+    var parent=document.body||document.documentElement;
+    parent.appendChild(overlayEl);
+    return overlayEl;
+  }
+  function header(text){
+    var h=document.createElement("div");
+    h.setAttribute("style","color:#ff6b6b;font-weight:bold;font-size:15px;margin-bottom:12px;");
+    h.textContent=text;
+    return h;
+  }
+  function showBuild(payload){
+    var el=ensureOverlay();el.textContent="";
+    el.appendChild(header("Build error"));
+    var body=document.createElement("div");
+    body.textContent=(payload&&payload.message)||"unknown build error";
+    el.appendChild(body);
+  }
+  function showRuntime(err){
+    var el=ensureOverlay();el.textContent="";
+    el.appendChild(header("Runtime error"));
+    var msg=document.createElement("div");
+    msg.setAttribute("style","margin-bottom:12px;");
+    msg.textContent=(err&&(err.message||String(err)))||"unknown error";
+    el.appendChild(msg);
+    var stackEl=document.createElement("div");
+    var raw=(err&&err.stack)||"";
+    stackEl.textContent=raw;
+    el.appendChild(stackEl);
+    if(raw)mapStack(raw).then(function(mapped){stackEl.textContent=mapped;}).catch(function(){});
+  }
+  function clear(){if(overlayEl&&overlayEl.parentNode)overlayEl.parentNode.removeChild(overlayEl);overlayEl=null;}
+  window.__diffpackOverlay={showBuild:showBuild,showRuntime:showRuntime,clear:clear,mapStack:mapStack};
+  window.addEventListener("error",function(ev){
+    var err=ev.error||{message:ev.message,stack:ev.filename?ev.filename+":"+ev.lineno+":"+ev.colno:""};
+    showRuntime(err);
+  });
+  window.addEventListener("unhandledrejection",function(ev){
+    var r=ev.reason;
+    showRuntime(r&&typeof r==="object"?r:{message:String(r)});
+  });
+  // Remove this inline node during parse (before hydration) so React sees a clean
+  // <head>; the listeners and window.__diffpackOverlay persist after removal.
+  if(self)self.remove();
+})();
+"#;
 
 /// JSON-encode a string for safe embedding as a JS string literal.
 fn json_string(value: &str) -> String {
@@ -516,6 +672,52 @@ mod tests {
             out.contains("exports.register=1")
                 && out.contains("exports.validateRefreshBoundaryAndEnqueueUpdate=2"),
             "must include both the core and the utils verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn overlay_script_installs_listeners_and_a_vlq_consumer() {
+        // The dev error overlay must catch both uncaught errors and unhandled
+        // rejections, publish its control surface, and carry an in-browser VLQ
+        // base64 source-map consumer so generated-chunk frames resolve to source.
+        let script = overlay_script();
+        assert!(script.contains("window.__diffpackOverlay"), "must publish the overlay: {script}");
+        assert!(
+            script.contains("addEventListener(\"error\""),
+            "must listen for uncaught errors: {script}"
+        );
+        assert!(
+            script.contains("addEventListener(\"unhandledrejection\""),
+            "must listen for unhandled rejections: {script}"
+        );
+        // VLQ base64 source-map consumer markers: the decoder and its alphabet.
+        assert!(script.contains("function decodeVlq"), "must define a VLQ decoder: {script}");
+        assert!(
+            script.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"),
+            "must carry the VLQ base64 alphabet: {script}"
+        );
+        assert!(script.contains("function mapStack"), "must map stacks to original source: {script}");
+        // The overlay DOM is created lazily (never at parse time) so it cannot cause a
+        // React 19 hydration mismatch, and the script node self-removes.
+        assert!(
+            script.contains("document.createElement(\"div\")") && script.contains("self.remove()"),
+            "overlay DOM must be lazy and the script node must self-remove: {script}"
+        );
+    }
+
+    #[test]
+    fn client_script_dispatches_build_error_and_build_ok() {
+        // The HMR client transports Rust build errors to the overlay (show) and the
+        // recovery signal that clears it (build-ok), so a syntax error no longer kills
+        // dev — it is surfaced in the browser and cleared on the next good build.
+        let script = client_script("/__diffpack_hmr/ws");
+        assert!(
+            script.contains("msg.type===\"build-error\"") && script.contains("showBuild(msg)"),
+            "must show the overlay on a build error: {script}"
+        );
+        assert!(
+            script.contains("msg.type===\"build-ok\"") && script.contains("__diffpackOverlay.clear()"),
+            "must clear the overlay on build recovery: {script}"
         );
     }
 

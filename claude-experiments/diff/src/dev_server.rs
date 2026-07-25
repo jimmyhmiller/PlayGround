@@ -195,6 +195,20 @@ impl HmrHub {
         self.send(r#"{"type":"rsc-refresh"}"#);
     }
 
+    /// Surface an edit-time Rust build error in the browser overlay instead of
+    /// crashing dev. The message is JSON-escaped for safe embedding.
+    fn broadcast_build_error(&self, message: &str) {
+        self.send(&format!(
+            "{{\"type\":\"build-error\",\"message\":{}}}",
+            json_string(message)
+        ));
+    }
+
+    /// Signal the browser to clear the build-error overlay after a good rebuild.
+    fn broadcast_build_ok(&self) {
+        self.send(r#"{"type":"build-ok"}"#);
+    }
+
     fn client_count(&self) -> usize {
         self.clients.lock().unwrap().len()
     }
@@ -433,6 +447,9 @@ fn watch_loop(
     server_env: &mut EnvBuild,
     hub: &HmrHub,
 ) -> Result<(), String> {
+    // Whether a build-error overlay is currently shown in the browser, so the next
+    // good rebuild clears it (build-ok).
+    let mut build_error_showing = false;
     loop {
         // Block for the first event, then coalesce a short burst (atomic saves
         // fire create+modify+rename in quick succession).
@@ -494,10 +511,6 @@ fn watch_loop(
             continue;
         }
 
-        for path in &changed {
-            classify_edit(path, project_root, client_env, server_env)?;
-        }
-
         let started = Instant::now();
         let mut client = EnvCounters::default();
         let mut server_c = EnvCounters::default();
@@ -510,31 +523,51 @@ fn watch_loop(
         let mut client_changed_ids: BTreeSet<String> = BTreeSet::new();
         let mut server_changed_ids: BTreeSet<String> = BTreeSet::new();
 
-        for path in &changed {
-            // Rebuild whichever environment(s) actually own the module. A route
-            // module is in both graphs; a client-only or server-only module is in
-            // just one. (An unknown path here is a delete of an already-unreachable
-            // file — it belongs to neither graph, so both branches skip it.)
-            if client_env.bundler.is_known_module(path) {
-                let rebuilt = client_env.rebuild(path)?;
-                let summary = emit_client(client_env, project_root, output_root)?;
-                client_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
-                graph_changed |= rebuilt.graph_changed;
-                client.add(&rebuilt, summary.rendered_chunks);
-                touched = true;
+        // Catch edit-time build errors (e.g. a syntax error in the edited module) and
+        // surface them in the browser overlay instead of killing the dev server; the
+        // loop keeps serving and clears the overlay on the next good rebuild. The
+        // initial and full/route rebuilds stay hard errors (fail fast).
+        let batch = (|| -> Result<(), String> {
+            for path in &changed {
+                classify_edit(path, project_root, client_env, server_env)?;
             }
-            if server_env.bundler.is_known_module(path) {
-                let rebuilt = server_env.rebuild(path)?;
-                let summary = server_env.bundler.emit_server(
-                    &reachable_ids(server_env),
-                    output_root,
-                    server_env.options,
-                )?;
-                server_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
-                graph_changed |= rebuilt.graph_changed;
-                server_c.add(&rebuilt, summary.rendered_chunks);
-                touched = true;
+            for path in &changed {
+                // Rebuild whichever environment(s) actually own the module. A route
+                // module is in both graphs; a client-only or server-only module is in
+                // just one. (An unknown path here is a delete of an already-unreachable
+                // file — it belongs to neither graph, so both branches skip it.)
+                if client_env.bundler.is_known_module(path) {
+                    let rebuilt = client_env.rebuild(path)?;
+                    let summary = emit_client(client_env, project_root, output_root)?;
+                    client_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                    graph_changed |= rebuilt.graph_changed;
+                    client.add(&rebuilt, summary.rendered_chunks);
+                    touched = true;
+                }
+                if server_env.bundler.is_known_module(path) {
+                    let rebuilt = server_env.rebuild(path)?;
+                    let summary = server_env.bundler.emit_server(
+                        &reachable_ids(server_env),
+                        output_root,
+                        server_env.options,
+                    )?;
+                    server_changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                    graph_changed |= rebuilt.graph_changed;
+                    server_c.add(&rebuilt, summary.rendered_chunks);
+                    touched = true;
+                }
             }
+            Ok(())
+        })();
+        if let Err(error) = batch {
+            eprintln!("[dev] build error (kept serving): {error}");
+            hub.broadcast_build_error(&error);
+            build_error_showing = true;
+            continue;
+        }
+        if build_error_showing {
+            hub.broadcast_build_ok();
+            build_error_showing = false;
         }
 
         if !touched {
@@ -1290,14 +1323,24 @@ fn parse_response(raw: Vec<u8>) -> Result<UpstreamResponse, String> {
 /// HMR client, then re-serialize with a correct `Content-Length`, no chunked
 /// framing, and `Connection: close`.
 fn maybe_inject_hmr(mut response: UpstreamResponse) -> Vec<u8> {
-    let is_html = response
+    let content_type = response
         .headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-        .map(|(_, value)| value.to_ascii_lowercase().contains("text/html"))
-        .unwrap_or(false);
+        .map(|(_, value)| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_html = content_type.contains("text/html");
     if is_html {
         response.body = inject_into_html(&response.body);
+    } else if is_server_error(&response.status_line) && content_type.contains("text/plain") {
+        // A dev SSR crash: the upstream Node server returns a 5xx with a plain-text
+        // error (no HTML document), which the HTML injection above would skip. Wrap
+        // the error in a minimal HTML document carrying the HMR preamble + a trigger
+        // that shows it in the error overlay, so an SSR failure surfaces the same way
+        // a build or runtime error does. Dev/proxy-only — `build-app` never runs this.
+        let error_text = String::from_utf8_lossy(&response.body).into_owned();
+        response.body = synthesize_ssr_error_document(&error_text).into_bytes();
+        set_content_type_html(&mut response.headers);
     }
 
     let mut out = Vec::new();
@@ -1319,6 +1362,49 @@ fn maybe_inject_hmr(mut response: UpstreamResponse) -> Vec<u8> {
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(&response.body);
     out
+}
+
+/// Whether an HTTP status line (`HTTP/1.1 500 Internal Server Error`) is a 5xx.
+fn is_server_error(status_line: &str) -> bool {
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.chars().next())
+        == Some('5')
+}
+
+/// Rewrite (or add) the `Content-Type` header to HTML, used when wrapping a plain-text
+/// SSR error in an HTML overlay document.
+fn set_content_type_html(headers: &mut Vec<(String, String)>) {
+    let mut found = false;
+    for (name, value) in headers.iter_mut() {
+        if name.eq_ignore_ascii_case("content-type") {
+            *value = "text/html; charset=utf-8".to_string();
+            found = true;
+        }
+    }
+    if !found {
+        headers.push(("Content-Type".to_string(), "text/html; charset=utf-8".to_string()));
+    }
+}
+
+/// Minimal `text/html` document that carries the HMR preamble (so the overlay client
+/// is installed) and a trigger that renders the SSR error in the overlay. The error
+/// text lives in a hidden `<pre>` the trigger reads via `textContent`, so it never
+/// needs JS-string escaping — only HTML-escaping into the element.
+fn synthesize_ssr_error_document(error: &str) -> String {
+    format!(
+        "<!doctype html><html><head>{preamble}</head><body><pre id=\"__diffpack_ssr_error\" style=\"display:none\">{escaped}</pre><script>if(window.__diffpackOverlay)window.__diffpackOverlay.showBuild({{message:document.getElementById(\"__diffpack_ssr_error\").textContent}});</script></body></html>",
+        preamble = hmr_preamble(),
+        escaped = html_escape(error),
+    )
+}
+
+/// HTML-escape text for safe embedding in an element's content.
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Insert the Fast Refresh preamble + WebSocket HMR client at the TOP of `<head>`.
@@ -1358,8 +1444,9 @@ fn inject_into_html(body: &[u8]) -> Vec<u8> {
 /// synchronously, before the async entry module.
 fn hmr_preamble() -> String {
     format!(
-        "<script src=\"{REFRESH_RUNTIME_PATH}\"></script><script>{}</script>",
-        crate::hmr::client_script(WS_PATH)
+        "<script src=\"{REFRESH_RUNTIME_PATH}\"></script><script>{}</script><script>{}</script>",
+        crate::hmr::client_script(WS_PATH),
+        crate::hmr::overlay_script(),
     )
 }
 
@@ -1910,6 +1997,9 @@ mod spa {
         // The canonical index.html path, so an edit to it is recognized and the
         // served document re-parsed.
         let index_html_canon = index_html.canonicalize().unwrap_or_else(|_| index_html.to_path_buf());
+        // Whether a build-error overlay is currently shown, so the next good rebuild
+        // clears it (build-ok).
+        let mut build_error_showing = false;
         loop {
             let first = match receiver.recv() {
                 Ok(event) => event,
@@ -2003,14 +2093,31 @@ mod spa {
             let mut counters = EnvCounters::default();
             let mut changed_ids: BTreeSet<String> = BTreeSet::new();
             let mut graph_changed = false;
-            for path in &known {
-                let rebuilt = client.rebuild(path)?;
-                let (fresh_doc, summary) =
-                    emit_spa(client, project_root, output_root, &html, html_origin, base)?;
-                *served_html.lock().unwrap() = fresh_doc;
-                changed_ids.extend(rebuilt.changed_ids.iter().cloned());
-                graph_changed |= rebuilt.graph_changed;
-                counters.add(&rebuilt, summary.rendered_chunks);
+            // Catch edit-time build errors (e.g. a syntax error) and show them in the
+            // browser overlay instead of killing the dev server; keep serving and
+            // clear the overlay on the next good rebuild. Structural rebuilds above
+            // stay hard errors (fail fast).
+            let batch = (|| -> Result<(), String> {
+                for path in &known {
+                    let rebuilt = client.rebuild(path)?;
+                    let (fresh_doc, summary) =
+                        emit_spa(client, project_root, output_root, &html, html_origin, base)?;
+                    *served_html.lock().unwrap() = fresh_doc;
+                    changed_ids.extend(rebuilt.changed_ids.iter().cloned());
+                    graph_changed |= rebuilt.graph_changed;
+                    counters.add(&rebuilt, summary.rendered_chunks);
+                }
+                Ok(())
+            })();
+            if let Err(error) = batch {
+                eprintln!("[dev] build error (kept serving): {error}");
+                hub.broadcast_build_error(&error);
+                build_error_showing = true;
+                continue;
+            }
+            if build_error_showing {
+                hub.broadcast_build_ok();
+                build_error_showing = false;
             }
 
             let new_css = stylesheet_fingerprint(output_root);
@@ -2732,6 +2839,9 @@ mod next {
         // source fires first is handled and recorded; the other's later echo reads the
         // same signature and is dropped.
         let mut processed: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
+        // Whether a build-error overlay is currently shown, so the next good rebuild
+        // clears it (build-ok).
+        let mut build_error_showing = false;
         loop {
             let first = match receiver.recv() {
                 Ok(event) => event,
@@ -2814,44 +2924,57 @@ mod next {
             // consults the SSR bundle, only the next full document load does.
             let mut deferred_ssr: Vec<PathBuf> = Vec::new();
 
-            for path in &changed {
-                let source = fs::read_to_string(path).unwrap_or_default();
-                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                let is_island = crate::rsc::detect_directive(&canonical, &source)
-                    == Some(crate::rsc::RscDirective::Client);
-                if is_island && client.bundler.is_known_module(path) {
-                    // Island edit — CRITICAL PATH: rebuild the client Fast Refresh
-                    // boundary and incrementally re-emit ONLY the changed chunk. A
-                    // same-graph island edit cannot move ids, so the manifests, the
-                    // copied `public/` static assets, and the next/image variants are
-                    // all unchanged — none of that is re-run here (only a structural
-                    // change, handled by `rebuild_all`, touches them). The SSR re-emit
-                    // is deferred past the push.
-                    let rebuilt = client.rebuild(path)?;
-                    let rendered_chunks = emit_next_client_hmr(client, output_root)?;
-                    island_ids.extend(rebuilt.changed_ids.iter().cloned());
-                    graph_changed |= rebuilt.graph_changed;
-                    client_c.add(&rebuilt, rendered_chunks);
-                    if ssr.bundler.is_known_module(path) {
-                        deferred_ssr.push(path.clone());
+            // Catch edit-time build errors (e.g. a syntax error in the edited island or
+            // server component) and surface them in the browser overlay instead of
+            // killing the dev server; keep serving and clear the overlay on the next
+            // good rebuild. The full rebuilds (`rebuild_all`) stay hard errors.
+            let batch = (|| -> Result<(), String> {
+                for path in &changed {
+                    let source = fs::read_to_string(path).unwrap_or_default();
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    let is_island = crate::rsc::detect_directive(&canonical, &source)
+                        == Some(crate::rsc::RscDirective::Client);
+                    if is_island && client.bundler.is_known_module(path) {
+                        // Island edit — CRITICAL PATH: rebuild the client Fast Refresh
+                        // boundary and incrementally re-emit ONLY the changed chunk. A
+                        // same-graph island edit cannot move ids, so the manifests, the
+                        // copied `public/` static assets, and the next/image variants are
+                        // all unchanged — none of that is re-run here (only a structural
+                        // change, handled by `rebuild_all`, touches them). The SSR re-emit
+                        // is deferred past the push.
+                        let rebuilt = client.rebuild(path)?;
+                        let rendered_chunks = emit_next_client_hmr(client, output_root)?;
+                        island_ids.extend(rebuilt.changed_ids.iter().cloned());
+                        graph_changed |= rebuilt.graph_changed;
+                        client_c.add(&rebuilt, rendered_chunks);
+                        if ssr.bundler.is_known_module(path) {
+                            deferred_ssr.push(path.clone());
+                        }
+                    } else if react_server.bundler.is_known_module(path) {
+                        // Server-component edit: rebuild ONLY the react-server graph and
+                        // re-publish it to `rsc-render`. The persistent dev worker
+                        // re-imports the bundle (`?v=<mtime>`) on the next `?__rsc=1` flight
+                        // fetch, so it sees this bundle — no orchestrator/worker restart.
+                        let rebuilt = react_server.rebuild(path)?;
+                        let summary = emit_next_react_server(react_server, output_root, rsc_root)?;
+                        graph_changed |= rebuilt.graph_changed;
+                        server_c.add(&rebuilt, summary.rendered_chunks);
+                        server_reload = true;
+                    } else {
+                        // Known to neither the client nor the react-server graph as an
+                        // editable leaf (e.g. a shared module the partition places
+                        // elsewhere). Reconciling it precisely is out of scope for the
+                        // fixture — force a correct full rebuild rather than guess.
+                        graph_changed = true;
                     }
-                } else if react_server.bundler.is_known_module(path) {
-                    // Server-component edit: rebuild ONLY the react-server graph and
-                    // re-publish it to `rsc-render`. The persistent dev worker
-                    // re-imports the bundle (`?v=<mtime>`) on the next `?__rsc=1` flight
-                    // fetch, so it sees this bundle — no orchestrator/worker restart.
-                    let rebuilt = react_server.rebuild(path)?;
-                    let summary = emit_next_react_server(react_server, output_root, rsc_root)?;
-                    graph_changed |= rebuilt.graph_changed;
-                    server_c.add(&rebuilt, summary.rendered_chunks);
-                    server_reload = true;
-                } else {
-                    // Known to neither the client nor the react-server graph as an
-                    // editable leaf (e.g. a shared module the partition places
-                    // elsewhere). Reconciling it precisely is out of scope for the
-                    // fixture — force a correct full rebuild rather than guess.
-                    graph_changed = true;
                 }
+                Ok(())
+            })();
+            if let Err(error) = batch {
+                eprintln!("[dev] build error (kept serving): {error}");
+                hub.broadcast_build_error(&error);
+                build_error_showing = true;
+                continue;
             }
 
             // A graph-structure change (import added/removed) re-partitions chunks and
@@ -2898,10 +3021,23 @@ mod next {
             // OFF THE CRITICAL PATH (after the push, before the next event drains):
             // finish each island's SSR-of-flight re-emit so a subsequent FULL document
             // load hydrates against fresh code. Both steps are incremental.
-            for path in &deferred_ssr {
-                let rebuilt = ssr.rebuild(path)?;
-                let summary = emit_next_ssr(ssr, output_root)?;
-                server_c.add(&rebuilt, summary.rendered_chunks);
+            let deferred = (|| -> Result<(), String> {
+                for path in &deferred_ssr {
+                    let rebuilt = ssr.rebuild(path)?;
+                    let summary = emit_next_ssr(ssr, output_root)?;
+                    server_c.add(&rebuilt, summary.rendered_chunks);
+                }
+                Ok(())
+            })();
+            if let Err(error) = deferred {
+                eprintln!("[dev] build error (kept serving): {error}");
+                hub.broadcast_build_error(&error);
+                build_error_showing = true;
+                continue;
+            }
+            if build_error_showing {
+                hub.broadcast_build_ok();
+                build_error_showing = false;
             }
 
             println!(
@@ -3016,6 +3152,8 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("$RefreshRuntime$"));
         assert!(text.contains("WebSocket"));
+        // The dev error overlay is injected alongside the HMR client.
+        assert!(text.contains("__diffpackOverlay"), "overlay must be injected: {text}");
         // Injected inside <head>, before the title, so it runs before app modules.
         let head = text.find("<head>").unwrap();
         let snippet = text.find("$RefreshRuntime$").unwrap();
@@ -3078,5 +3216,40 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("$RefreshRuntime$"));
         assert!(text.contains("Content-Length: 14"));
+    }
+
+    #[test]
+    fn a_500_text_plain_becomes_an_html_overlay_document() {
+        // A dev SSR crash returns a 5xx text/plain error with no HTML document. The
+        // proxy wraps it in a minimal HTML doc carrying the HMR preamble + overlay so
+        // the failure is surfaced the same way a build/runtime error is.
+        let response = UpstreamResponse {
+            status_line: "HTTP/1.1 500 Internal Server Error".to_string(),
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            body: b"ReferenceError: boom is not defined\n    at render (/server.js:1:1)".to_vec(),
+        };
+        let out = maybe_inject_hmr(response);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("text/html"), "must be re-typed as HTML: {text}");
+        assert!(text.contains("__diffpackOverlay"), "must carry the overlay: {text}");
+        assert!(text.contains("showBuild"), "must trigger the overlay: {text}");
+        assert!(
+            text.contains("ReferenceError: boom is not defined"),
+            "must embed the SSR error text: {text}"
+        );
+    }
+
+    #[test]
+    fn non_5xx_text_plain_is_left_untouched() {
+        // A normal (2xx) text/plain response must not be wrapped in an overlay doc.
+        let response = UpstreamResponse {
+            status_line: "HTTP/1.1 200 OK".to_string(),
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            body: b"plain body".to_vec(),
+        };
+        let out = maybe_inject_hmr(response);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("__diffpackOverlay"), "2xx text/plain must not be wrapped: {text}");
+        assert!(text.contains("plain body"));
     }
 }
