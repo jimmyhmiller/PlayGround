@@ -12,13 +12,19 @@ and **fully explainable when they fail**. Built on Playwright.
    runtime waits on *events* (a named network response, a router transition,
    an element appearing), never on clocks.
 
-2. **The DSL is data, not code.** No conditionals, no closures, no runtime
-   control flow. A flow file parses to a flat JSON plan (the IR). Steps are
-   serializable records, which is what buys atomic replay, perfect traces, and
-   agent-writability. The one iteration construct — `for` over a *literal*
-   table — is unrolled at **parse time** into flat steps, so the step count is
-   known before the browser launches and every guarantee above still holds.
-   There is deliberately no way to loop over dynamic (runtime-sized) data.
+2. **The DSL is data, not code.** No conditionals, no closures, no arbitrary
+   control flow. A flow parses to steps that are serializable records — what
+   buys perfect traces and agent-writability. Iteration comes in two forms,
+   both of which keep determinism (the real requirement) intact:
+   - `for` over a **literal table** is unrolled at *parse* time into flat steps.
+   - `for each` over a **live collection** expands at *runtime*: it reads the
+     matching elements from the settled page and runs its body per element.
+     Determinism is preserved because the collection is read from a settled
+     point, which is reproducible given the seeded world + prior steps — the
+     same property the fallback replay tier already relies on. Each element is
+     pinned with an injected marker so an iteration survives the DOM mutating
+     underneath it (removing rows, re-rendering). Every executed iteration is
+     an ordinary settled, explained, contiguously-numbered step.
 
 ## Flow grammar
 
@@ -87,8 +93,30 @@ do
 - Unrolled steps carry an **iteration label** — a failure reports
   `step 3 … [iteration 2/3: $cat="Clothing"]` and `bat replay flow:3` replays
   exactly that iteration. This is the payoff of unrolling over a runtime loop.
-- `for` may not nest, and cannot iterate captured (`let`) or runtime data — the
-  table must be literal, because the flat IR's step count must be known up front.
+- literal `for` loops may nest (cartesian unroll).
+
+### `for each` — runtime iteration over a live collection
+
+When the number of items is only known at runtime (rows in a cart, search
+results, a list that grows or shrinks), `for each` iterates the actual page:
+
+```
+for each row in table "cart-items" as $row
+  click button "Remove" in $row
+    expect gone $row
+```
+
+- The collection target (`row in table "cart-items"`) is resolved against the
+  **settled** page; its match count is whatever is on the page.
+- `as $var` binds each element; use `$var` as a **scope** in the body
+  (`in $row`, `of $row`). It is not a string — it names an element.
+- Each element is **pinned** (an injected marker attribute) at loop entry, so
+  removing/​reordering rows during the body does not misalign later iterations.
+- Every iteration's body steps are ordinary steps — settled, explained, and
+  labelled `[iteration k/N: $row="…"]`. An empty collection runs the body zero
+  times (not a failure); the container step reports `(N matches)`.
+- `for each` cannot iterate `let`-captured strings (use `for` for literal data);
+  its collection must be a live page target.
 
 ### Actions
 

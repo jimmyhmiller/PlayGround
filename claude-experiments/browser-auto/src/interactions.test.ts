@@ -97,6 +97,42 @@ switch tab /nope
     expect(trace.steps.find((s) => s.status === "fail")!.failure).toMatch(/no open tab matches/);
   }, 60000);
 
+  it("`for each` iterates a runtime-sized list and survives the DOM mutating", async () => {
+    // add 2 items, then drain the cart with a runtime loop that removes each
+    // row (the DOM shrinks under the loop — pins must keep iterations correct)
+    const flow = parseFlow(
+      `flow "drain cart"
+given seed "catalog-basic"
+go /
+  expect heading "Products"
+click button "Add to cart" in listitem "Blue Widget"
+  expect text "1" in testid "cart-count"
+click button "Add to cart" in listitem "Red Widget"
+  expect text "2" in testid "cart-count"
+go /manage-cart
+  expect text "2" in testid "count"
+for each row in table "cart-items" as $row
+  click button "Remove" in $row
+    expect gone $row
+go /manage-cart
+  expect text "0" in testid "count"
+`,
+      "inline.flow",
+    );
+    const { trace } = await runFlow(flow, deps);
+    if (trace.status !== "pass") throw new Error(renderReport(trace));
+    // the parsed flow has 6 items but executed 8 steps (container + 2 iterations)
+    const loopContainer = trace.steps.find((s) => s.source.startsWith("for each"));
+    expect(loopContainer?.source).toContain("(2 matches)");
+    const iters = trace.steps.filter((s) => s.iteration?.includes("Remove"));
+    expect(iters).toHaveLength(2);
+    // iteration 2 targeted the second row even though row 1 was removed first
+    expect(iters[1]!.iteration).toContain("Red Widget");
+    expect(iters.every((s) => s.status === "pass")).toBe(true);
+    // steps are contiguously numbered despite the runtime expansion
+    expect(trace.steps.map((s) => s.index)).toEqual(trace.steps.map((_, i) => i));
+  }, 60000);
+
   it("declared dialog data reaches the app (accept with prompt text is deterministic)", async () => {
     // covered structurally by the main flow's confirm(); assert the record shape
     const { trace } = await runFlowFile(INTERACTIONS, deps);

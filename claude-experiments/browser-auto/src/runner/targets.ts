@@ -11,6 +11,10 @@ export class TargetError extends Error {
 
 export type Captures = Map<string, string>;
 
+/** Active `for each` pins: loop var name -> the marker key of the current
+ * iteration's element. Resolved by buildLocator for `ref`/`__pin` targets. */
+export type LoopPins = Map<string, string>;
+
 export function interpolate(s: string, captures: Captures): string {
   return s.replace(/\$([A-Za-z_][\w-]*)/g, (whole, name: string) => {
     const v = captures.get(name);
@@ -37,23 +41,36 @@ const NO_NAME_FROM_CONTENT = new Set([
   "tabpanel", "article", "form", "group", "main", "banner", "navigation",
 ]);
 
-function buildScope(page: Page, within: Target | undefined, captures: Captures, exact: boolean): Page | Locator | FrameLocator {
+/** attribute bat injects to pin a `for each` element across DOM mutation */
+export const LOOP_MARKER = "data-bat-loop";
+
+function buildScope(page: Page, within: Target | undefined, captures: Captures, exact: boolean, pins?: LoopPins): Page | Locator | FrameLocator {
   if (!within) return page;
   if (within.kind === "frame") {
-    const outer = buildScope(page, within.within, captures, exact);
+    const outer = buildScope(page, within.within, captures, exact, pins);
     const name = interpolate(within.name ?? "", captures);
     // match an iframe by name, title, or src substring
     const esc = name.replace(/"/g, '\\"');
     return outer.frameLocator(`iframe[name="${esc}"], iframe[title="${esc}"], iframe[src*="${esc}"]`);
   }
-  return buildLocator(page, within, captures, exact);
+  return buildLocator(page, within, captures, exact, pins);
 }
 
-export function buildLocator(page: Page, target: Target, captures: Captures, exact = false): Locator {
+export function buildLocator(page: Page, target: Target, captures: Captures, exact = false, pins?: LoopPins): Locator {
+  if (target.kind === "ref") {
+    const key = pins?.get(target.name ?? "");
+    if (key === undefined) {
+      throw new TargetError(`$${target.name} is only valid inside its 'for each' loop`, undefined, target);
+    }
+    return page.locator(`[${LOOP_MARKER}="${key}"]`);
+  }
+  if (target.kind === "__pin") {
+    return page.locator(`[${LOOP_MARKER}="${target.name}"]`);
+  }
   if (target.kind === "frame") {
     throw new TargetError(`"frame" is a scope, not a target — write '<target> in frame "${target.name ?? ""}"'`, undefined, target);
   }
-  const scope: Page | Locator | FrameLocator = buildScope(page, target.within, captures, exact);
+  const scope: Page | Locator | FrameLocator = buildScope(page, target.within, captures, exact, pins);
   const name = target.name !== undefined ? interpolate(target.name, captures) : undefined;
   switch (target.kind) {
     case "text":
@@ -96,8 +113,9 @@ export async function resolveUnique(
   target: Target,
   captures: Captures,
   budgetMs: number,
+  pins?: LoopPins,
 ): Promise<Locator> {
-  const locator = buildLocator(page, target, captures);
+  const locator = buildLocator(page, target, captures, false, pins);
   try {
     await locator.first().waitFor({ state: "visible", timeout: budgetMs });
   } catch {

@@ -1,0 +1,25 @@
+# A RUNTIME loop: the number of cart rows is only known when the page loads.
+# `for each` resolves the live list, pins each row, and removes it — the DOM
+# shrinks underneath the loop, and the pins keep each iteration correct.
+flow "drain the cart with a runtime loop"
+
+given seed "catalog-basic"
+
+go /
+  expect heading "Products"
+click button "Add to cart" in listitem "Blue Widget"
+  expect text "1" in testid "cart-count"
+click button "Add to cart" in listitem "Red Widget"
+  expect text "2" in testid "cart-count"
+
+go /manage-cart
+  expect heading "Manage Cart"
+  expect text "2" in testid "count"
+
+for each row in table "cart-items" as $row
+  click button "Remove" in $row
+    expect gone $row
+
+go /manage-cart
+  expect heading "Manage Cart"
+  expect text "0" in testid "count"

@@ -7,6 +7,7 @@ import {
   type Step,
   type Target,
   type TargetKind,
+  formatTarget,
   requiresEffects,
 } from "./ir.js";
 
@@ -162,6 +163,7 @@ class LineParser {
 
   private parseOneTarget(): Target | null {
     const t = this.next();
+    if (t?.t === "var") return { kind: "ref", name: t.v }; // a `for each` loop variable used as a scope
     if (t?.t !== "word") return this.fail(`expected a target kind (e.g. button, link, testid), got ${show(t)}`);
     if (!ALL_KINDS.includes(t.v)) {
       return this.fail(`unknown target kind "${t.v}" — known kinds: ${ALL_KINDS.join(", ")}`);
@@ -528,36 +530,63 @@ function collectStringFields(obj: unknown, out: string[]): void {
   }
 }
 
-function staticChecks(flow: Flow, problems: string[]): void {
-  const defined = new Set<string>();
-  for (const step of flow.steps) {
+/** collect every ref-target var name reachable in an object (loop scopes) */
+function collectRefVars(obj: unknown, out: string[]): void {
+  if (Array.isArray(obj)) { obj.forEach((v) => collectRefVars(v, out)); return; }
+  if (obj && typeof obj === "object") {
+    const t = obj as { kind?: unknown; name?: unknown };
+    if (t.kind === "ref" && typeof t.name === "string") out.push(t.name);
+    for (const v of Object.values(obj)) collectRefVars(v, out);
+  }
+}
+
+function checkSteps(steps: Step[], defined: Set<string>, loopScopes: Set<string>, problems: string[]): void {
+  for (const step of steps) {
     if (requiresEffects(step.action) && step.effects.length === 0) {
       problems.push(
         `line ${step.line}: '${step.source.trim()}' declares no effects — every action must expect at least one ` +
           `observable effect (an unobserved action is where races hide)`,
       );
     }
+    // string $var interpolation (from `let`) + ref-target ($scope) uses.
+    // For a forEach, check only its COLLECTION here — the body is a separate
+    // scope, checked recursively below.
     const used: string[] = [];
-    collectStringFields(step.action, used);
-    for (const e of step.effects) {
-      if (e.type === "let") continue;
-      collectStringFields(e, used);
+    const refVars: string[] = [];
+    if (step.action.type === "forEach") {
+      collectStringFields(step.action.collection, used);
+      collectRefVars(step.action.collection, refVars);
+    } else {
+      collectStringFields(step.action, used);
+      collectRefVars(step.action, refVars);
+      for (const e of step.effects) {
+        if (e.type !== "let") { collectStringFields(e, used); collectRefVars(e, refVars); }
+      }
     }
     for (const s of used) {
       for (const v of varsIn(s)) {
-        if (!defined.has(v)) {
-          problems.push(`line ${step.line}: $${v} is used before any 'let ${v} = ...' defines it`);
-        }
+        if (!defined.has(v)) problems.push(`line ${step.line}: $${v} is used before any 'let ${v} = ...' defines it`);
       }
+    }
+    // ref-target ($var used as a scope) must be an in-scope `for each` variable
+    for (const v of refVars) {
+      if (!loopScopes.has(v)) {
+        problems.push(`line ${step.line}: $${v} is used as a scope but is not a 'for each' loop variable in scope`);
+      }
+    }
+    if (step.action.type === "forEach") {
+      const inner = new Set(loopScopes);
+      inner.add(step.action.loopVar);
+      checkSteps(step.action.body, new Set(defined), inner, problems);
     }
     for (const e of step.effects) {
-      if (e.type === "let") {
-        // redefinition is allowed (loop bodies legitimately re-capture each
-        // iteration; last value wins). use-before-def is still caught above.
-        defined.add(e.name);
-      }
+      if (e.type === "let") defined.add(e.name); // redefinition allowed (loop bodies re-capture)
     }
   }
+}
+
+function staticChecks(flow: Flow, problems: string[]): void {
+  checkSteps(flow.steps, new Set<string>(), new Set<string>(), problems);
 }
 
 // ---------------------------------------------------------------------------
@@ -596,181 +625,200 @@ function substituteVar(text: string, name: string, value: string): string {
   return text.replace(new RegExp("\\$" + name + "(?![\\w-])", "g"), value);
 }
 
-function expandLoops(source: string, problems: string[]): SrcLine[] {
-  const raw = source.split(/\r?\n/);
-  const out: SrcLine[] = [];
-  let i = 0;
-  while (i < raw.length) {
-    const line = raw[i]!;
-    const trimmed = line.trim();
-    const forMatch = /^for\s+(.+)$/.exec(trimmed);
-    if (!forMatch || indentOf(line) !== 0) {
-      out.push({ raw: line, lineNo: i + 1 });
-      i++;
-      continue;
-    }
-
-    // ---- parse the `for $a $b …` header
-    const forLine = i + 1;
-    const varTokens = forMatch[1]!.trim().split(/\s+/);
-    if (varTokens[varTokens.length - 1] === "in") varTokens.pop(); // optional readability sugar
-    const varNames: string[] = [];
-    let headerOk = true;
-    for (const vt of varTokens) {
-      const vm = /^\$([A-Za-z_][\w-]*)$/.exec(vt);
-      if (!vm) {
-        problems.push(`line ${forLine}: 'for' expects loop variables like '$name', got '${vt}'`);
-        headerOk = false;
-      } else varNames.push(vm[1]!);
-    }
-    i++;
-
-    // ---- data rows: indented lines until `do`
-    const rows: Array<{ values: string[]; lineNo: number }> = [];
-    while (i < raw.length && raw[i]!.trim() !== "do") {
-      const r = raw[i]!;
-      const t = r.trim();
-      if (t === "" || t.startsWith("#")) { i++; continue; }
-      if (indentOf(r) === 0) {
-        problems.push(`line ${forLine}: 'for' loop is missing its 'do' (found a top-level line first)`);
-        break;
-      }
-      const values = quotedValues(r);
-      if (values.length !== varNames.length) {
-        problems.push(
-          `line ${i + 1}: this 'for' row has ${values.length} value(s) but the loop declares ${varNames.length} variable(s) (${varNames.map((v) => "$" + v).join(", ")})`,
-        );
-      } else {
-        rows.push({ values, lineNo: i + 1 });
-      }
-      i++;
-    }
-    if (raw[i]?.trim() !== "do") {
-      problems.push(`line ${forLine}: 'for' loop needs a 'do' line before its body`);
-      continue;
-    }
-    i++; // consume `do`
-
-    // ---- body: indented lines until dedent to column 0
-    const body: SrcLine[] = [];
-    let minIndent = Infinity;
-    while (i < raw.length) {
-      const b = raw[i]!;
-      if (b.trim() === "") { body.push({ raw: "", lineNo: i + 1 }); i++; continue; }
-      if (indentOf(b) === 0) break;
-      if (/^\s*for\s/.test(b)) {
-        problems.push(`line ${i + 1}: nested 'for' loops are not supported`);
-      }
-      minIndent = Math.min(minIndent, indentOf(b));
-      body.push({ raw: b, lineNo: i + 1 });
-      i++;
-    }
-    const bodyLines = body.filter((l) => l.raw.trim() !== "");
-    if (!headerOk) continue;
-    if (rows.length === 0) {
-      problems.push(`line ${forLine}: 'for' loop has no data rows`);
-      continue;
-    }
-    if (bodyLines.length === 0) {
-      problems.push(`line ${forLine}: 'for' loop 'do' body is empty`);
-      continue;
-    }
-
-    // ---- unroll: dedent the body, substitute each row, emit flat lines
-    rows.forEach((row, iterIdx) => {
-      const label = `iteration ${iterIdx + 1}/${rows.length}: ${varNames.map((v, k) => `$${v}="${row.values[k]}"`).join(", ")}`;
-      for (const bl of bodyLines) {
-        let text = bl.raw.slice(Number.isFinite(minIndent) ? minIndent : 0);
-        varNames.forEach((v, k) => {
-          text = substituteVar(text, v, row.values[k]!);
-        });
-        out.push({ raw: text, lineNo: bl.lineNo, note: label });
-      }
-    });
+/** Gather the block of lines strictly deeper than `base`, starting at index p
+ * (blank/comment lines inside are kept). Returns the lines and the next index. */
+function gatherDeeper(lines: SrcLine[], p: number, base: number): { block: SrcLine[]; next: number } {
+  const block: SrcLine[] = [];
+  let j = p;
+  while (j < lines.length) {
+    const t = lines[j]!.raw.trim();
+    if (t === "" || t.startsWith("#")) { block.push(lines[j]!); j++; continue; }
+    if (indentOf(lines[j]!.raw) > base) { block.push(lines[j]!); j++; } else break;
   }
-  return out;
+  return { block, next: j };
+}
+
+/** Parse the header of a runtime loop: `for each <target> as $var`. */
+function parseForEachHeader(tokens: Token[], lineNo: number, problems: string[]): { collection: Target; loopVar: string } | null {
+  const p = new LineParser(tokens.slice(2), lineNo, problems); // drop `for` `each`
+  const collection = p.parseTarget();
+  if (!collection) return null;
+  if (p.expectWord("as") === null) return null;
+  const v = p.next();
+  if (v?.t !== "var") return p.fail(`'for each … as' expects a $variable, got ${show(v)}`), null;
+  if (!p.expectEnd("for each")) return null;
+  return { collection, loopVar: v.v };
+}
+
+/** The recursive step builder. Handles action+effect steps, the literal-table
+ * `for` (unrolled here), and the runtime `for each` (a nested forEach step). */
+function buildSteps(lines: SrcLine[], problems: string[]): Step[] {
+  const meaningful = lines.filter((l) => l.raw.trim() !== "" && !l.raw.trim().startsWith("#"));
+  if (meaningful.length === 0) return [];
+  const base = Math.min(...meaningful.map((l) => indentOf(l.raw)));
+  const steps: Step[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const t = line.raw.trim();
+    if (t === "" || t.startsWith("#")) { i++; continue; }
+    if (indentOf(line.raw) > base) {
+      problems.push(`line ${line.lineNo}: indented line has no action above it`);
+      i++;
+      continue;
+    }
+    const tokens = tokenize(t, line.lineNo, problems);
+    const head = tokens[0];
+    if (!head) { i++; continue; }
+
+    // ---- disallow top-level keywords inside a step region
+    if (head.t === "word" && (head.v === "given" || head.v === "flow" || head.v === "allow")) {
+      problems.push(
+        head.v === "given"
+          ? `line ${line.lineNo}: 'given' must come before the first action — the world is fixed per flow`
+          : `line ${line.lineNo}: '${head.v}' must come before the first action`,
+      );
+      i++;
+      continue;
+    }
+
+    // ---- for each  (runtime loop)  and  for … (literal table, unrolled)
+    if (head.t === "word" && head.v === "for") {
+      const isEach = tokens[1]?.t === "word" && tokens[1].v === "each";
+      if (isEach) {
+        const parsed = parseForEachHeader(tokens, line.lineNo, problems);
+        const { block, next } = gatherDeeper(lines, i + 1, base);
+        i = next;
+        const body = buildSteps(block, problems);
+        if (parsed) {
+          if (body.length === 0) problems.push(`line ${line.lineNo}: 'for each' body is empty`);
+          const src = `for each ${formatTarget(parsed.collection)} as $${parsed.loopVar}`;
+          const step: Step = { action: { type: "forEach", collection: parsed.collection, loopVar: parsed.loopVar, body }, effects: [], line: line.lineNo, source: src };
+          if (line.note !== undefined) step.iteration = line.note;
+          steps.push(step);
+        }
+        continue;
+      }
+      // literal table: for $a $b [in] / rows / do / body
+      const forLine = line.lineNo;
+      const varTokens = t.replace(/^for\s+/, "").trim().split(/\s+/);
+      if (varTokens[varTokens.length - 1] === "in") varTokens.pop();
+      const varNames: string[] = [];
+      let headerOk = true;
+      for (const vt of varTokens) {
+        const vm = /^\$([A-Za-z_][\w-]*)$/.exec(vt);
+        if (!vm) { problems.push(`line ${forLine}: 'for' expects loop variables like '$name', got '${vt}'`); headerOk = false; }
+        else varNames.push(vm[1]!);
+      }
+      // rows: deeper lines up to a base-indent `do`
+      const rows: Array<{ values: string[]; lineNo: number }> = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const lj = lines[j]!; const tj = lj.raw.trim();
+        if (tj === "" || tj.startsWith("#")) { j++; continue; }
+        if (indentOf(lj.raw) <= base) break; // reached `do` (or a sibling)
+        const values = quotedValues(lj.raw);
+        if (values.length !== varNames.length) {
+          problems.push(`line ${lj.lineNo}: this 'for' row has ${values.length} value(s) but the loop declares ${varNames.length} variable(s) (${varNames.map((v) => "$" + v).join(", ")})`);
+        } else rows.push({ values, lineNo: lj.lineNo });
+        j++;
+      }
+      if (lines[j]?.raw.trim() !== "do") {
+        problems.push(`line ${forLine}: 'for' loop needs a 'do' line before its body`);
+        i = j;
+        continue;
+      }
+      j++; // consume `do`
+      const { block, next } = gatherDeeper(lines, j, base);
+      i = next;
+      if (!headerOk) continue;
+      if (rows.length === 0) { problems.push(`line ${forLine}: 'for' loop has no data rows`); continue; }
+      const bodyMeaning = block.filter((l) => l.raw.trim() !== "" && !l.raw.trim().startsWith("#"));
+      if (bodyMeaning.length === 0) { problems.push(`line ${forLine}: 'for' loop 'do' body is empty`); continue; }
+      const bodyBase = Math.min(...bodyMeaning.map((l) => indentOf(l.raw)));
+      rows.forEach((row, iterIdx) => {
+        const label = `iteration ${iterIdx + 1}/${rows.length}: ${varNames.map((v, k) => `$${v}="${row.values[k]}"`).join(", ")}`;
+        const subbed: SrcLine[] = block.map((bl) => {
+          let text = bl.raw.slice(indentOf(bl.raw) >= bodyBase ? bodyBase : 0);
+          varNames.forEach((v, k) => { text = substituteVar(text, v, row.values[k]!); });
+          return { raw: text, lineNo: bl.lineNo, note: label };
+        });
+        for (const s of buildSteps(subbed, problems)) {
+          steps.push(s.iteration !== undefined ? s : { ...s, iteration: label });
+        }
+      });
+      continue;
+    }
+
+    // ---- ordinary action + its indented effects
+    if (head.t === "word" && (ACTION_WORDS as readonly string[]).includes(head.v)) {
+      const { block, next } = gatherDeeper(lines, i + 1, base);
+      i = next;
+      const p = new LineParser(tokens, line.lineNo, problems);
+      p.next();
+      const action = parseAction(p, head.v);
+      if (!action) continue;
+      const step: Step = { action, effects: [], line: line.lineNo, source: t };
+      if (line.note !== undefined) step.iteration = line.note;
+      for (const bl of block) {
+        const bt = bl.raw.trim();
+        if (bt === "" || bt.startsWith("#")) continue;
+        const btoks = tokenize(bt, bl.lineNo, problems);
+        const bhead = btoks[0];
+        const bp = new LineParser(btoks, bl.lineNo, problems);
+        if (bhead?.t === "word" && bhead.v === "expect") { bp.next(); const e = parseEffect(bp); if (e) step.effects.push(e); }
+        else if (bhead?.t === "word" && bhead.v === "let") { bp.next(); const e = parseLet(bp); if (e) step.effects.push(e); }
+        else problems.push(`line ${bl.lineNo}: indented lines must start with 'expect' or 'let', got ${show(bhead)}`);
+      }
+      steps.push(step);
+      continue;
+    }
+
+    problems.push(`line ${line.lineNo}: expected an action (${ACTION_WORDS.join(", ")}, for), got ${show(head)}`);
+    i++;
+  }
+  return steps;
 }
 
 // ---------------------------------------------------------------------------
 
 export function parseFlow(source: string, file: string): Flow {
   const problems: string[] = [];
-  const lines = expandLoops(source, problems);
+  const rawLines: SrcLine[] = source.split(/\r?\n/).map((raw, i) => ({ raw, lineNo: i + 1 }));
   let name: string | null = null;
   const givens: Given[] = [];
-  const steps: Step[] = [];
-  let sawStep = false;
 
-  for (let idx = 0; idx < lines.length; idx++) {
-    const raw = lines[idx]!.raw;
-    const lineNo = lines[idx]!.lineNo;
-    const note = lines[idx]!.note;
-    const trimmed = raw.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const indented = /^[ \t]/.test(raw);
-    const tokens = tokenize(trimmed, lineNo, problems);
-    if (tokens.length === 0) continue;
-    const p = new LineParser(tokens, lineNo, problems);
-    const head = tokens[0]!;
-
-    if (indented) {
-      if (steps.length === 0) {
-        problems.push(`line ${lineNo}: indented line has no action above it`);
-        continue;
-      }
-      if (head.t === "word" && head.v === "expect") {
-        p.next();
-        const eff = parseEffect(p);
-        if (eff) steps[steps.length - 1]!.effects.push(eff);
-      } else if (head.t === "word" && head.v === "let") {
-        p.next();
-        const eff = parseLet(p);
-        if (eff) steps[steps.length - 1]!.effects.push(eff);
-      } else {
-        problems.push(`line ${lineNo}: indented lines must start with 'expect' or 'let', got ${show(head)}`);
-      }
-      continue;
-    }
-
-    if (head.t === "word" && head.v === "flow") {
-      p.next();
+  // leading region: flow / given / allow at column 0, before the first step
+  let idx = 0;
+  for (; idx < rawLines.length; idx++) {
+    const { raw, lineNo } = rawLines[idx]!;
+    const t = raw.trim();
+    if (t === "" || t.startsWith("#")) continue;
+    if (indentOf(raw) !== 0) break;
+    const tokens = tokenize(t, lineNo, problems);
+    const head = tokens[0];
+    if (head?.t === "word" && head.v === "flow") {
+      const p = new LineParser(tokens, lineNo, problems); p.next();
       const n = p.expectString("the flow name");
-      if (n !== null && p.expectEnd("flow")) {
-        if (name !== null) problems.push(`line ${lineNo}: duplicate 'flow' declaration`);
-        name = n;
-      }
+      if (n !== null && p.expectEnd("flow")) { if (name !== null) problems.push(`line ${lineNo}: duplicate 'flow' declaration`); name = n; }
       continue;
     }
-    if (head.t === "word" && head.v === "given") {
-      if (sawStep) problems.push(`line ${lineNo}: 'given' must come before the first action — the world is fixed per flow`);
-      p.next();
-      const g = parseGiven(p);
-      if (g) givens.push(g);
+    if (head?.t === "word" && head.v === "given") {
+      const p = new LineParser(tokens, lineNo, problems); p.next();
+      const g = parseGiven(p); if (g) givens.push(g);
       continue;
     }
-    if (head.t === "word" && head.v === "allow") {
-      p.next();
+    if (head?.t === "word" && head.v === "allow") {
+      const p = new LineParser(tokens, lineNo, problems); p.next();
       const what = p.expectWord("console-errors", "dialogs");
-      if (what !== null && p.expectEnd("allow")) {
-        givens.push({ type: "allow", what: what as "console-errors" | "dialogs" });
-      }
+      if (what !== null && p.expectEnd("allow")) givens.push({ type: "allow", what: what as "console-errors" | "dialogs" });
       continue;
     }
-    if (head.t === "word" && (ACTION_WORDS as readonly string[]).includes(head.v)) {
-      p.next();
-      const action = parseAction(p, head.v);
-      sawStep = true;
-      if (action) {
-        const step: Step = { action, effects: [], line: lineNo, source: trimmed };
-        if (note !== undefined) step.iteration = note;
-        steps.push(step);
-      }
-      continue;
-    }
-    problems.push(
-      `line ${lineNo}: expected 'flow', 'given', an action (${ACTION_WORDS.join(", ")}), or an indented 'expect'/'let' — got ${show(head)}`,
-    );
+    break; // first step-region line
   }
+
+  const steps = buildSteps(rawLines.slice(idx), problems);
 
   if (name === null) problems.push(`missing 'flow "<name>"' declaration`);
   if (steps.length === 0) problems.push("flow has no steps");

@@ -274,10 +274,52 @@ do
     );
   });
 
-  it("rejects nested for loops", () => {
+  it("supports nested literal loops (cartesian unroll)", () => {
+    const flow = parseFlow(
+      `flow "t"
+for $a in
+  "x"
+  "y"
+do
+  for $b in
+    "1"
+    "2"
+  do
+    go /$a/$b
+      expect heading "$a$b"
+`,
+      "t.flow",
+    );
+    expect(flow.steps.map((s) => s.source)).toEqual(["go /x/1", "go /x/2", "go /y/1", "go /y/2"]);
+  });
+
+  it("parses a runtime `for each` into a forEach step with a body and $var scope", () => {
+    const flow = parseFlow(
+      `flow "t"
+go /cart
+  expect heading "Cart"
+for each row in table "cart-items" as $row
+  click button "Remove" in $row
+    expect gone $row
+`,
+      "t.flow",
+    );
+    expect(flow.steps).toHaveLength(2);
+    const fe = flow.steps[1]!.action;
+    expect(fe.type).toBe("forEach");
+    if (fe.type === "forEach") {
+      expect(fe.loopVar).toBe("row");
+      expect(fe.collection).toEqual({ kind: "row", name: undefined, within: { kind: "table", name: "cart-items" } });
+      expect(fe.body).toHaveLength(1);
+      expect(fe.body[0]!.action).toEqual({ type: "click", target: { kind: "button", name: "Remove", within: { kind: "ref", name: "row" } } });
+      expect(fe.body[0]!.effects[0]).toEqual({ type: "gone", target: { kind: "ref", name: "row" } });
+    }
+  });
+
+  it("rejects a $scope var that is not an in-scope for-each variable", () => {
     expect(() =>
-      parseFlow(`flow "t"\nfor $a in\n  "x"\ndo\n  for $b in\n    "y"\n  do\n    go /$b\n      expect heading "H"\n`, "t.flow"),
-    ).toThrowError(/nested 'for'/);
+      parseFlow(`flow "t"\nclick button "x" in $ghost\n  expect url /y\n`, "t.flow"),
+    ).toThrowError(/\$ghost is used as a scope but is not a 'for each' loop variable/);
   });
 
   it("parses fill with $var values and trailing-string extraction", () => {

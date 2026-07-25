@@ -19,8 +19,10 @@ export type TargetKind = (typeof ROLE_KINDS)[number] | (typeof SPECIAL_KINDS)[nu
 export const ALL_KINDS: readonly string[] = [...ROLE_KINDS, ...SPECIAL_KINDS];
 
 export interface Target {
-  kind: TargetKind;
-  /** Accessible name / text / label / testid. May contain $var. Optional for role kinds. */
+  /** "ref" = a `for each` loop variable used as a scope (resolved at runtime);
+   * "__pin" = engine-internal pinned element (a marker injected during a loop). */
+  kind: TargetKind | "ref" | "__pin";
+  /** Accessible name / text / label / testid / var name / pin key. */
   name?: string;
   /** Scope: this target is resolved within `within`. */
   within?: Target;
@@ -38,7 +40,10 @@ export type Action =
   /** make the open tab whose url matches the pattern the ACTIVE page */
   | { type: "switchTab"; path: string }
   /** close the active tab; the most recently used remaining page activates */
-  | { type: "closeTab" };
+  | { type: "closeTab" }
+  /** runtime loop: resolve `collection` (multiple matches) against the settled
+   * page, then run `body` once per element with `loopVar` bound as a scope */
+  | { type: "forEach"; collection: Target; loopVar: string; body: Step[] };
 
 export type Effect =
   /** NOTE: a `visible` effect whose target's HEAD kind is `text` is not
@@ -95,13 +100,16 @@ export interface Flow {
   steps: Step[];
 }
 
-/** Actions whose effects block MUST be non-empty. In bat, that is all of them:
- * an unobserved action is exactly where races hide. */
-export function requiresEffects(_action: Action): boolean {
-  return true;
+/** Actions whose effects block MUST be non-empty. A `for each` is a container
+ * whose body steps carry the observations, so it is exempt; everything else
+ * must observe, because an unobserved action is exactly where races hide. */
+export function requiresEffects(action: Action): boolean {
+  return action.type !== "forEach";
 }
 
 export function formatTarget(t: Target): string {
+  if (t.kind === "ref") return `$${t.name}`;
+  if (t.kind === "__pin") return `<pinned element>`;
   const base = t.name !== undefined ? `${t.kind} "${t.name}"` : t.kind;
   return t.within ? `${base} in ${formatTarget(t.within)}` : base;
 }
@@ -118,6 +126,7 @@ export function formatAction(a: Action): string {
     case "drag": return `drag ${formatTarget(a.target)} to ${formatTarget(a.to)}`;
     case "switchTab": return `switch tab ${a.path}`;
     case "closeTab": return `close tab`;
+    case "forEach": return `for each ${formatTarget(a.collection)} as $${a.loopVar}`;
   }
 }
 

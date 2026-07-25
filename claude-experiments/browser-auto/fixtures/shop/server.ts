@@ -128,6 +128,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       else db.cart.push({ productId: product.id, qty: 1 });
       return sendJson(res, 200, cartPayload());
     }
+    if (path === "/api/cart/remove" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString() || "{}") as { name?: string };
+      const product = [...db.products.values()].find((p) => p.name === body.name);
+      if (product) db.cart = db.cart.filter((l) => l.productId !== product.id);
+      return sendJson(res, 200, cartPayload());
+    }
     if (path === "/api/me" && req.method === "GET") {
       const key = cookieValue(req, "batsession");
       const user = key ? db.users.get(key) : undefined;

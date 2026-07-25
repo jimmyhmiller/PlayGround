@@ -8,7 +8,7 @@ import { matchPath, pathOf } from "./patterns.js";
 import { NetworkTracker, RequestMatcher, WsMatcher, settle } from "./settle.js";
 import { DialogRouter, DownloadWatcher, TabMatcher, waitForTab } from "./interactions.js";
 import { TransientHub } from "./transients.js";
-import { ariaSnapshotSafe, buildLocator, interpolate, resolveUnique, TargetError, type Captures } from "./targets.js";
+import { ariaSnapshotSafe, buildLocator, interpolate, LOOP_MARKER, resolveUnique, TargetError, type Captures, type LoopPins } from "./targets.js";
 import {
   newStepTrace,
   type Checkpoint,
@@ -63,6 +63,8 @@ export function composeFlowWorld(flow: Flow, registry: Map<string, Seed>): World
 interface StepContext {
   session: PageSession;
   captures: Captures;
+  /** active `for each` element pins (empty outside a loop body) */
+  pins: LoopPins;
   baseUrl: string;
   budgetMs: number;
   clockInstalled: boolean;
@@ -230,6 +232,7 @@ export async function runSteps(
     const ctx: StepContext = {
       session,
       captures,
+      pins: new Map(),
       baseUrl: opts.baseUrl,
       budgetMs: opts.stepBudgetMs,
       clockInstalled: env.clockInstalled,
@@ -237,6 +240,24 @@ export async function runSteps(
       hub: env.hub,
       engine: env.engine,
     };
+
+    // `for each` is a runtime loop: it produces MANY executed steps from one
+    // parsed step. Expand it in place, pushing each body iteration's trace.
+    if (step.action.type === "forEach") {
+      const produced = await runForEach(step, ctx, i);
+      let failed = false;
+      for (const bt of produced) {
+        bt.index = trace.steps.length;
+        trace.steps.push(bt);
+        if (bt.status === "fail") { failed = true; break; }
+      }
+      if (failed) {
+        trace.status = "fail";
+        break;
+      }
+      continue;
+    }
+
     const stepTrace = await runStep(step, i, ctx);
     const mode = opts.screenshotMode ?? "on-failure";
     if (opts.onScreenshot && mode !== "off" && (stepTrace.status === "fail" || mode === "steps")) {
@@ -268,6 +289,9 @@ export async function runSteps(
       });
     }
   }
+  // `for each` produces more executed steps than the parsed flow has, so give
+  // every step a contiguous display index (no-op for loop-free flows).
+  trace.steps.forEach((s, idx) => { s.index = idx; });
   return trace;
 }
 
@@ -354,10 +378,10 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
       } else if (eff.type === "download") {
         armed.downloads.set(eff, session.downloads.arm(interpolate(eff.name, ctx.captures)));
       } else if (eff.type === "appear") {
-        const loc = buildLocator(actPage, eff.target, ctx.captures);
+        const loc = buildLocator(actPage, eff.target, ctx.captures, false, ctx.pins);
         armed.appear.set(eff, await ctx.hub.arm("appear", loc));
       } else if (eff.type === "gone") {
-        const loc = buildLocator(actPage, eff.target, ctx.captures);
+        const loc = buildLocator(actPage, eff.target, ctx.captures, false, ctx.pins);
         const presentAtAct = await loc.first().isVisible().catch(() => false);
         armed.gone.set(eff, { presentAtAct, watcher: await ctx.hub.arm("gone", loc) });
       }
@@ -460,9 +484,87 @@ async function runStep(step: Step, index: number, ctx: StepContext): Promise<Ste
   return trace;
 }
 
+let loopCounter = 0;
+
+/**
+ * Runtime expansion of `for each`. Resolves the collection against the settled
+ * page, PINS each element with an injected marker attribute (so an iteration
+ * survives the DOM mutating underneath it — removing rows, re-rendering), then
+ * runs the body once per element with the loop var bound as a scope. Each
+ * iteration's body steps are ordinary settled/explained steps.
+ *
+ * Determinism (and thus replay) is preserved: the collection is read from a
+ * settled point, which is reproducible given the seeded world + prior steps —
+ * exactly what the fallback replay tier already reconstructs.
+ */
+async function runForEach(step: Step, ctx: StepContext, parsedIndex: number): Promise<StepTrace[]> {
+  const action = step.action;
+  if (action.type !== "forEach") return [];
+  const page = ctx.session.page;
+  const container = newStepTrace(parsedIndex, step, page.url());
+  container.status = "pass";
+
+  const collection = buildLocator(page, action.collection, ctx.captures, false, ctx.pins);
+  let n = 0;
+  try {
+    n = await collection.count();
+  } catch (e) {
+    container.status = "fail";
+    container.failure = `for each: could not resolve ${formatTarget(action.collection)}: ${e instanceof Error ? e.message : String(e)}`;
+    return [container];
+  }
+  container.source = `${step.source}  (${n} match${n === 1 ? "" : "es"})`;
+  if (n === 0) return [container]; // empty collection: body runs zero times (not a failure)
+
+  const loopId = `batloop-${parsedIndex}-${++loopCounter}`;
+  // pin every matching element with a stable marker (survives sibling mutation)
+  await collection.evaluateAll(
+    (els, args) => {
+      const [attr, id] = args as [string, string];
+      els.forEach((el, k) => el.setAttribute(attr, `${id}:${k}`));
+    },
+    [LOOP_MARKER, loopId] as [string, string],
+  );
+
+  const results: StepTrace[] = [container];
+  for (let k = 0; k < n; k++) {
+    const key = `${loopId}:${k}`;
+    let label = `iteration ${k + 1}/${n}`;
+    try {
+      const txt = (await page.locator(`[${LOOP_MARKER}="${key}"]`).innerText())
+        .trim()
+        .replace(/\s+/g, " ")
+        .slice(0, 48);
+      if (txt) label += `: $${action.loopVar}="${txt}"`;
+    } catch {
+      // element may have been removed by a prior iteration's body; label stays generic
+    }
+    const iterPins: LoopPins = new Map(ctx.pins);
+    iterPins.set(action.loopVar, key);
+    const iterCtx: StepContext = { ...ctx, captures: new Map(ctx.captures), pins: iterPins };
+
+    for (const bodyStep of action.body) {
+      if (bodyStep.action.type === "forEach") {
+        const nested = await runForEach(bodyStep, iterCtx, parsedIndex);
+        for (const nt of nested) {
+          if (nt.iteration === undefined) nt.iteration = label;
+          results.push(nt);
+        }
+        if (nested.some((t) => t.status === "fail")) return results;
+      } else {
+        const bt = await runStep(bodyStep, parsedIndex, iterCtx);
+        bt.iteration = label;
+        results.push(bt);
+        if (bt.status === "fail") return results;
+      }
+    }
+  }
+  return results;
+}
+
 async function performAction(step: Step, ctx: StepContext, remaining: () => number): Promise<void> {
   const a = step.action;
-  const { session, captures } = ctx;
+  const { session, captures, pins } = ctx;
   const page = session.page;
   switch (a.type) {
     case "go": {
@@ -473,32 +575,32 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
     case "click":
     case "dblclick":
     case "hover": {
-      const loc = await resolveUnique(page, a.target, captures, remaining());
+      const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
       if (a.type === "click") await loc.click({ timeout: remaining() });
       else if (a.type === "dblclick") await loc.dblclick({ timeout: remaining() });
       else await loc.hover({ timeout: remaining() });
       return;
     }
     case "fill": {
-      const loc = await resolveUnique(page, a.target, captures, remaining());
+      const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
       await loc.fill(interpolate(a.value, captures), { timeout: remaining() });
       return;
     }
     case "select": {
-      const loc = await resolveUnique(page, a.target, captures, remaining());
+      const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
       await loc.selectOption({ label: interpolate(a.value, captures) }, { timeout: remaining() });
       return;
     }
     case "check":
     case "uncheck": {
-      const loc = await resolveUnique(page, a.target, captures, remaining());
+      const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
       if (a.type === "check") await loc.check({ timeout: remaining() });
       else await loc.uncheck({ timeout: remaining() });
       return;
     }
     case "press": {
       if (a.target) {
-        const loc = await resolveUnique(page, a.target, captures, remaining());
+        const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
         await loc.press(a.key, { timeout: remaining() });
       } else {
         await page.keyboard.press(a.key);
@@ -506,13 +608,13 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
       return;
     }
     case "upload": {
-      const loc = await resolveUnique(page, a.target, captures, remaining());
+      const loc = await resolveUnique(page, a.target, captures, remaining(), pins);
       await loc.setInputFiles(interpolate(a.file, captures), { timeout: remaining() });
       return;
     }
     case "drag": {
-      const source = await resolveUnique(page, a.target, captures, remaining());
-      const dest = await resolveUnique(page, a.to, captures, remaining());
+      const source = await resolveUnique(page, a.target, captures, remaining(), pins);
+      const dest = await resolveUnique(page, a.to, captures, remaining(), pins);
       await source.dragTo(dest, { timeout: remaining() });
       return;
     }
@@ -536,6 +638,8 @@ async function performAction(step: Step, ctx: StepContext, remaining: () => numb
       await next.bringToFront().catch(() => {});
       return;
     }
+    case "forEach":
+      throw new Error("internal: forEach is expanded by runForEach, not performAction");
   }
 }
 
@@ -555,7 +659,7 @@ async function evaluateEffect(
   armed: ArmedWatchers,
   remaining: () => number,
 ): Promise<EffectVerdict> {
-  const { captures } = ctx;
+  const { captures, pins } = ctx;
   const page = ctx.session.page;
   const rendered = formatEffect(eff);
   const v = (pass: boolean, observed?: string): EffectVerdict =>
@@ -564,12 +668,12 @@ async function evaluateEffect(
   try {
     switch (eff.type) {
       case "visible": {
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const ok = await loc.waitFor({ state: "visible", timeout: remaining() }).then(() => true, () => false);
         return ok ? v(true) : v(false, `no visible ${formatTarget(eff.target)} on ${page.url()}`);
       }
       case "absent": {
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const ok = await loc.waitFor({ state: "hidden", timeout: remaining() }).then(() => true, () => false);
         return ok ? v(true) : v(false, `${formatTarget(eff.target)} is still visible`);
       }
@@ -587,7 +691,7 @@ async function evaluateEffect(
       }
       case "text": {
         const want = interpolate(eff.value, captures);
-        const scope = eff.target ? buildLocator(page, eff.target, captures).first() : page.locator("body");
+        const scope = eff.target ? buildLocator(page, eff.target, captures, false, pins).first() : page.locator("body");
         await scope.waitFor({ state: "visible", timeout: remaining() }).catch(() => {});
         const got = (await scope.innerText({ timeout: remaining() }).catch(() => null)) ?? "(element not found)";
         const pass = eff.exact ? got.trim() === want : got.includes(want);
@@ -597,13 +701,13 @@ async function evaluateEffect(
       }
       case "value": {
         const want = interpolate(eff.value, captures);
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const got = await loc.inputValue({ timeout: remaining() }).catch(() => null);
         return got === want ? v(true) : v(false, `value is ${got === null ? "(no input found)" : JSON.stringify(got)}`);
       }
       case "enabled":
       case "disabled": {
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const got = await loc.isEnabled({ timeout: remaining() }).catch(() => null);
         if (got === null) return v(false, `${formatTarget(eff.target)} not found`);
         const pass = eff.type === "enabled" ? got : !got;
@@ -611,7 +715,7 @@ async function evaluateEffect(
       }
       case "checked":
       case "unchecked": {
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const got = await loc.isChecked({ timeout: remaining() }).catch(() => null);
         if (got === null) return v(false, `${formatTarget(eff.target)} is not a checkable element (or not found)`);
         const pass = eff.type === "checked" ? got : !got;
@@ -619,7 +723,7 @@ async function evaluateEffect(
       }
       case "selected": {
         const want = interpolate(eff.value, captures);
-        const loc = buildLocator(page, eff.target, captures).first();
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const got = (await loc
           .evaluate((el) => (el instanceof HTMLSelectElement ? (el.selectedOptions[0]?.label ?? null) : null))
           .catch(() => null)) as string | null;
@@ -629,7 +733,7 @@ async function evaluateEffect(
       case "count": {
         const target: Target = eff.name !== undefined ? { kind: eff.kind, name: eff.name } : { kind: eff.kind };
         if (eff.within) target.within = eff.within;
-        const loc = buildLocator(page, target, captures);
+        const loc = buildLocator(page, target, captures, false, pins);
         const got = await loc.count();
         return got === eff.n ? v(true) : v(false, `found ${got}`);
       }
@@ -696,7 +800,7 @@ async function evaluateEffect(
         return v(true);
       }
       case "let": {
-        const loc = await resolveUnique(page, eff.from, captures, remaining());
+        const loc = await resolveUnique(page, eff.from, captures, remaining(), pins);
         const text = (await loc.innerText()).trim();
         captures.set(eff.name, text);
         return v(true, `captured $${eff.name} = ${JSON.stringify(text)}`);

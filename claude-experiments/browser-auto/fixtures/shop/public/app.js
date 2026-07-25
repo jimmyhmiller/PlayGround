@@ -204,6 +204,47 @@ function renderTicker() {
   app.replaceChildren(h1, p);
 }
 
+async function renderManageCart() {
+  // A dynamic list whose size is only known at runtime: rows come from the
+  // seeded cart. Each Remove deletes that row (server + DOM), so the count
+  // shrinks as you iterate — the case bat's `for each` must handle.
+  app.innerHTML = "<h1>Manage Cart</h1><p>items: <span data-testid=\"count\">?</span></p>";
+  const table = document.createElement("table");
+  table.setAttribute("aria-label", "cart-items");
+  const tbody = document.createElement("tbody");
+  table.appendChild(tbody);
+  app.appendChild(table);
+  async function refresh() {
+    const cart = await api("/api/cart");
+    document.querySelector('[data-testid="count"]').textContent = String(cart.lines.length);
+    tbody.replaceChildren(
+      ...cart.lines.map((line) => {
+        const tr = document.createElement("tr");
+        tr.setAttribute("aria-label", line.name);
+        const name = document.createElement("td");
+        name.textContent = line.name;
+        const cell = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.textContent = "Remove";
+        btn.addEventListener("click", async () => {
+          await api("/api/cart/remove", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: line.name }),
+          });
+          tr.remove();
+          const c = await api("/api/cart");
+          document.querySelector('[data-testid="count"]').textContent = String(c.lines.length);
+        });
+        cell.appendChild(btn);
+        tr.append(name, cell);
+        return tr;
+      }),
+    );
+  }
+  await refresh();
+}
+
 function renderInteractions() {
   app.innerHTML = `
     <h1>Interactions</h1>
@@ -272,6 +313,7 @@ async function render() {
   if (path === "/flaky-cart") return renderFlakyCart();
   if (path === "/chat") return renderChat();
   if (path === "/ticker") return renderTicker();
+  if (path === "/manage-cart") return renderManageCart();
   if (path === "/interactions") return renderInteractions();
   if (path === "/widget") return renderWidget();
   if (path === "/terms") return renderTerms();
