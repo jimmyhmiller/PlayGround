@@ -2092,7 +2092,7 @@ impl Bundler {
                 // A globally-imported Tailwind v4 entry carries its RAW source;
                 // compile it here against freshly-scanned class candidates,
                 // exactly as the `?url` asset path does in `emit_assets`.
-                if crate::tailwind::is_tailwind_entry(css) {
+                if crate::tailwind::needs_native_tailwind_compile(css) {
                     let css_path = Path::new(self.ids[dense].as_ref());
                     let out_root = output.parent().unwrap_or_else(|| Path::new("."));
                     let scan_root = tailwind_scan_root(css_path, css);
@@ -5072,7 +5072,7 @@ fn synthesize_asset_url(source_path: PathBuf, base: &str, inline_limit: usize) -
     // the reachable graph is built) and mark it for the emit step.
     let tailwind_source = if is_css_path(&source_path) {
         let text = String::from_utf8_lossy(&bytes);
-        crate::tailwind::is_tailwind_entry(&text).then(|| text.into_owned())
+        crate::tailwind::needs_native_tailwind_compile(&text).then(|| text.into_owned())
     } else {
         None
     };
@@ -5159,7 +5159,7 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
     // emit time (exactly like the `?url` asset path), so class candidates are
     // re-scanned on every emit and the compile stays off the per-edit
     // transform hot path.
-    if crate::tailwind::is_tailwind_entry(&text) {
+    if crate::tailwind::needs_native_tailwind_compile(&text) {
         return Ok(SpecialModule {
             hash: content_hash(text.as_bytes()),
             code: String::new(),
@@ -5172,17 +5172,9 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
             dependency_demands: Vec::new(),
         });
     }
-    // Tailwind v3's `@tailwind base/components/utilities` needs the PostCSS
-    // pipeline diffpack does not run. Shipping the raw directives would be a
-    // silently unstyled page (found live on a real app), so refuse instead.
-    if text.contains("@tailwind") {
-        return Err(format!(
-            "{} uses Tailwind v3 `@tailwind` directives, which need the PostCSS \
-             pipeline diffpack does not run; migrate the entry to Tailwind v4 \
-             (`@import \"tailwindcss\"`), which diffpack compiles natively",
-            path.display()
-        ));
-    }
+    // (Legacy Tailwind v3 `@tailwind base/components/utilities` entries are captured by
+    // the `needs_native_tailwind_compile` gate above and compiled natively through the
+    // v4 pipeline — the directives expand to the same base/components/utilities layers.)
     load_stylesheet_from_text(path, &text, Vec::new())
 }
 
@@ -5268,11 +5260,14 @@ fn app_tailwind_theme(scan_root: &Path) -> Option<String> {
 /// A `@config`-defined token overrides the default (it is appended after it).
 fn app_tailwind_theme_full(scan_root: &Path, css: &str, css_path: &Path) -> Option<String> {
     let base = app_tailwind_theme(scan_root);
-    let config = at_config_theme(css, css_path);
+    let config = at_config_theme(scan_root, css, css_path);
     match (base, config) {
         (Some(base), Some(cfg)) => Some(format!("{base}\n{cfg}")),
         (base, None) => base,
-        (None, cfg) => cfg,
+        // A v3 config with no installed `tailwindcss/theme.css`: merge the config tokens
+        // ON TOP of the vendored default theme so the config EXTENDS the default scale
+        // rather than replacing it (a bare `--color-brand` must not drop `p-4`/`flex`).
+        (None, Some(cfg)) => Some(format!("{}\n{}", crate::tailwind::vendored_theme_css(), cfg)),
     }
 }
 
@@ -5292,9 +5287,26 @@ fn parse_at_config(css: &str) -> Option<String> {
 /// proceeds on the default theme (a `@config` on a config with only content/plugins
 /// contributes no theme tokens anyway). Never silently mis-maps: the node evaluator
 /// reports unmapped theme categories on stderr, surfaced here.
-fn at_config_theme(css: &str, css_path: &Path) -> Option<String> {
-    let rel = parse_at_config(css)?;
-    let config_path = css_path.parent()?.join(rel);
+/// Discovers a legacy v3 `tailwind.config.{js,cjs,mjs,ts}` at the project scan root
+/// (v3 apps declare the config there, with no `@config` directive in the CSS). Returns
+/// the first that exists.
+fn discover_v3_config(scan_root: &Path) -> Option<PathBuf> {
+    ["tailwind.config.js", "tailwind.config.cjs", "tailwind.config.mjs", "tailwind.config.ts"]
+        .iter()
+        .map(|name| scan_root.join(name))
+        .find(|p| p.exists())
+}
+
+fn at_config_theme(scan_root: &Path, css: &str, css_path: &Path) -> Option<String> {
+    // A `@config '<path>'` directive names the config explicitly (v4-style). Otherwise a
+    // legacy v3 entry auto-discovers `tailwind.config.*` at the scan root — but a v4
+    // entry with no `@config` uses NO JS config (so a stray tailwind.config.js is not
+    // picked up for it).
+    let config_path = match parse_at_config(css) {
+        Some(rel) => css_path.parent()?.join(rel),
+        None if crate::tailwind::is_tailwind_v3_entry(css) => discover_v3_config(scan_root)?,
+        None => return None,
+    };
     if !config_path.exists() {
         eprintln!(
             "[tailwind @config] config file not found: {} (theme tokens from it will be missing)",
@@ -7060,21 +7072,41 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("url(./missing.png)"), "{error}");
         assert!(error.contains("broken.css"), "{error}");
+    }
 
-        // Tailwind v3 `@tailwind` directives need the PostCSS pipeline diffpack
-        // does not run; shipping them raw would be a silently unstyled page.
+    /// A legacy Tailwind v3 entry (`@tailwind base/components/utilities`) compiles
+    /// natively through the v4 pipeline (the directives expand to the same layers), so
+    /// a real v3 app is styled instead of hard-erroring as it used to.
+    #[test]
+    fn a_tailwind_v3_entry_compiles_natively() {
         let directory = tempdir().unwrap();
         fs::write(
             directory.path().join("v3.css"),
-            "@tailwind base;\n@tailwind utilities;\n",
+            "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
         )
         .unwrap();
-        fs::write(directory.path().join("entry.js"), "import './v3.css';\n").unwrap();
-        let error = Bundler::discover_direct(&directory.path().join("entry.js"))
-            .map(|_| ())
-            .unwrap_err();
-        assert!(error.contains("@tailwind"), "{error}");
-        assert!(error.contains("v3.css"), "{error}");
+        fs::write(
+            directory.path().join("entry.js"),
+            "import './v3.css';\nexport const html = '<div class=\"underline\">x</div>';\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("dist/bundle.js");
+        bundler
+            .emit_with_options(&reachable, &output, EmitOptions::default())
+            .unwrap();
+        let stylesheet = fs::read_to_string(directory.path().join("dist/bundle.css")).unwrap();
+        // The `@tailwind` directives are consumed (not shipped raw) and the scanned
+        // utility is generated from the vendored v4 base theme.
+        assert!(!stylesheet.contains("@tailwind"), "directives must not survive: {stylesheet}");
+        assert!(
+            stylesheet.contains("underline") && stylesheet.contains("text-decoration"),
+            "the scanned utility is generated for a v3 entry: {}",
+            &stylesheet[..stylesheet.len().min(400)]
+        );
     }
 
     /// A Tailwind v4 entry imported as a plain global stylesheet compiles

@@ -48,6 +48,14 @@ use std::collections::{BTreeMap, BTreeSet};
 /// utilities reference (colors, spacing, font sizes/weights, radii, fonts).
 const THEME_CSS: &str = include_str!("tailwind_theme.css");
 
+/// The vendored default v4 theme (the `tailwindcss` package's `theme.css`). Exposed so
+/// a legacy v3 app (which has no installed `tailwindcss/theme.css`) can start from this
+/// base and merge its `tailwind.config.js` tokens on top, instead of the config-only
+/// tokens replacing the whole default scale.
+pub fn vendored_theme_css() -> &'static str {
+    THEME_CSS
+}
+
 /// The resolved Tailwind v4.3.3 preflight (base reset). Identical for every v4
 /// app — faithful reference data, not app-specific.
 const PREFLIGHT_CSS: &str = include_str!("tailwind_preflight.css");
@@ -124,6 +132,30 @@ pub fn is_tailwind_entry(css: &str) -> bool {
         line.starts_with("@import")
             && (line.contains("'tailwindcss'") || line.contains("\"tailwindcss\""))
     })
+}
+
+/// Whether a CSS source is a legacy Tailwind **v3** entry point: it opts into the
+/// framework via the three `@tailwind base|components|utilities` directives (a
+/// `@tailwind screens|variants` also counts). The v4 compiler emits exactly the
+/// `@layer base(+preflight)/components/utilities` cascade those directives expand to,
+/// so a v3 entry compiles natively through the SAME path — the directives are consumed
+/// as no-op markers in `parse_top_level`.
+pub fn is_tailwind_v3_entry(css: &str) -> bool {
+    css.lines().any(|line| {
+        let rest = match line.trim().strip_prefix("@tailwind") {
+            Some(rest) => rest.trim(),
+            None => return false,
+        };
+        let keyword = rest.trim_end_matches(';').trim();
+        matches!(keyword, "base" | "components" | "utilities" | "screens" | "variants")
+    })
+}
+
+/// Whether a CSS source should run through the native Tailwind compiler — a v4
+/// (`@import "tailwindcss"`) OR a legacy v3 (`@tailwind …`) entry. This is the single
+/// gate every capture/emit site uses so both dialects take the identical path.
+pub fn needs_native_tailwind_compile(css: &str) -> bool {
+    is_tailwind_entry(css) || is_tailwind_v3_entry(css)
 }
 
 /// Compiles a Tailwind v4 CSS entry into a plain, self-contained stylesheet.
@@ -6776,6 +6808,21 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             i = end;
             continue;
         }
+        if css[i..].starts_with("@tailwind") {
+            // Legacy v3 `@tailwind base|components|utilities|screens|variants;`. The v4
+            // assembler emits every one of those layers unconditionally, so each
+            // directive is a consumed no-op marker here. An unknown layer keyword is a
+            // hard error (never silently ignored).
+            let end = css[i..].find(';').map(|rel| i + rel).unwrap_or(bytes.len());
+            let keyword = css[i + "@tailwind".len()..end].trim();
+            if !matches!(keyword, "base" | "components" | "utilities" | "screens" | "variants") {
+                return Err(format!(
+                    "unknown `@tailwind {keyword};` directive (expected base, components, utilities, screens, or variants)"
+                ));
+            }
+            i = if end < bytes.len() { end + 1 } else { end };
+            continue;
+        }
         if css[i..].starts_with("@theme") {
             // `@theme [inline|reference|static] { … }` — any modifiers between the
             // keyword and the `{` are accepted and ignored (the tokens are merged
@@ -7005,6 +7052,31 @@ mod tests {
         assert!(is_tailwind_entry("@import \"tailwindcss\";"));
         assert!(!is_tailwind_entry("@import './other.css';"));
         assert!(!is_tailwind_entry(".a{color:red}"));
+    }
+
+    #[test]
+    fn detects_tailwind_v3_entry_and_gate() {
+        assert!(is_tailwind_v3_entry("@tailwind base;\n@tailwind components;\n@tailwind utilities;\n"));
+        assert!(is_tailwind_v3_entry("@tailwind utilities;"));
+        assert!(!is_tailwind_v3_entry(".a{color:red}"));
+        assert!(!is_tailwind_v3_entry("@import 'tailwindcss';")); // v4, not v3
+        // The shared gate accepts both dialects.
+        assert!(needs_native_tailwind_compile("@import 'tailwindcss';"));
+        assert!(needs_native_tailwind_compile("@tailwind base;\n@tailwind utilities;"));
+        assert!(!needs_native_tailwind_compile(".a{color:red}"));
+    }
+
+    #[test]
+    fn v3_tailwind_directives_parse_as_consumed_no_ops() {
+        // A v3 entry parses (the directives are consumed markers) and compiles a scanned
+        // utility from the vendored v4 base theme.
+        let css = "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n";
+        let out = compile(css, &candidates(&["underline"])).unwrap();
+        assert!(!out.contains("@tailwind"), "directives consumed: {out}");
+        assert!(out.contains("underline") && out.contains("text-decoration"), "{out}");
+        // An unknown layer keyword is a hard error, not a silent skip.
+        let err = compile("@tailwind bogus;\n", &candidates(&[])).unwrap_err();
+        assert!(err.contains("@tailwind bogus"), "{err}");
     }
 
     #[test]
