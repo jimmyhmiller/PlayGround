@@ -457,14 +457,16 @@ enum SegParse {
     Seg(Seg),
     /// A route group `(name)` — contributes no URL segment, but its layout applies.
     Group,
-    /// A parallel `@slot` or intercepting `(.)`/`(..)`/`(...)` route — the whole
-    /// route is skipped (documented gap; never silently mis-served).
+    /// A parallel `@slot` or intercepting `(.)`/`(..)`/`(...)` marker in the PRIMARY
+    /// page path — that page is not a normal route. `@slots` are instead discovered as
+    /// parallel-route slots (composed into their layout as named props); intercepts are
+    /// soft-navigation only (they do not match on a hard render).
     Skip,
 }
 
 /// Parses one app-router directory-name component into a URL segment classification.
-/// `[x]`→Dynamic, `[...x]`→CatchAll, `[[...x]]`→OptionalCatchAll, `(group)`→omitted,
-/// `@slot` / `(.)`-intercepts → the route is skipped.
+/// `[x]`→Dynamic, `[...x]`→CatchAll, `[[...x]]`→OptionalCatchAll, `(group)`→omitted;
+/// `@slot` / `(.)`-intercepts →Skip in the primary path (see [`SegParse::Skip`]).
 fn parse_segment(comp: &str) -> SegParse {
     if comp.starts_with('@') {
         return SegParse::Skip; // parallel-route slot
@@ -485,6 +487,18 @@ fn parse_segment(comp: &str) -> SegParse {
         return SegParse::Group;
     }
     SegParse::Seg(Seg::Static(comp.to_string()))
+}
+
+/// The slot name of a parallel-route directory (`@team` -> `team`), or None.
+fn slot_name(comp: &str) -> Option<String> {
+    comp.strip_prefix('@').map(|s| s.to_string())
+}
+
+/// Whether a directory name is an intercepting-route marker (`(.)`/`(..)`/`(...)`).
+/// Intercepts are soft-navigation only, so on a hard render they do NOT match (the real
+/// route renders); they are treated as Skip inside slot discovery.
+fn is_intercept_marker(comp: &str) -> bool {
+    comp.starts_with("(.")
 }
 
 /// Reconstructs a display URL path (`/blog/[slug]`) from a parsed segment list.
@@ -546,6 +560,30 @@ struct Level {
     layout: Option<PathBuf>,
     loading: Option<PathBuf>,
     error: Option<PathBuf>,
+    /// Parallel-route `@slot` subtrees hosted by THIS directory's layout (passed to it
+    /// as named props). Empty for a normal level.
+    slots: Vec<Slot>,
+    /// The number of URL segments consumed from `app/` down to and including this
+    /// directory — so a slot matches the below-level URL parts via `parts.slice(slotBase)`.
+    part_offset: usize,
+}
+
+/// A parallel route `@slot` (e.g. `@team`): its name (the layout prop it fills), the
+/// routes inside it, and an optional `default.tsx` fallback when none match.
+#[derive(Debug, Clone)]
+struct Slot {
+    name: String,
+    routes: Vec<SlotRoute>,
+    default: Option<PathBuf>,
+}
+
+/// One matchable route inside a `@slot`: its segment pattern (RELATIVE to the slot
+/// directory) + page + the slot-internal layout chain wrapping it.
+#[derive(Debug, Clone)]
+struct SlotRoute {
+    segments: Vec<Seg>,
+    page: PathBuf,
+    levels: Vec<Level>,
 }
 
 /// One app-router route: its display URL path + parsed segment pattern, the page
@@ -842,11 +880,23 @@ fn discover_routes_dir(
     routes: &mut Vec<Route>,
 ) -> Result<(), String> {
     let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
-    // This directory's own conventions form a level for it and its descendants.
+    // The number of URL segments consumed from app/ down to and including this dir, so a
+    // parallel @slot hosted here matches the below-level URL parts (parts.slice(offset)).
+    let part_offset = dir
+        .strip_prefix(app_dir)
+        .unwrap_or(Path::new(""))
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .filter(|c| matches!(parse_segment(c), SegParse::Seg(_)))
+        .count();
+    // This directory's own conventions form a level for it and its descendants, plus any
+    // parallel @slot subtrees it hosts (passed to its layout as named props).
     level_chain.push(Level {
         layout: first_existing(dir, "layout").map(canon),
         loading: first_existing(dir, "loading").map(canon),
         error: first_existing(dir, "error").map(canon),
+        slots: discover_slots(dir)?,
+        part_offset,
     });
 
     if let Some(page) = first_existing_page(dir) {
@@ -921,7 +971,9 @@ fn discover_routes_dir(
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| !n.starts_with('.') && n != ADAPTER_DIR)
+                // Skip dotdirs, the adapter output, and `@slot` dirs (discovered as
+                // parallel-route slots on this level, not as primary routes).
+                .map(|n| !n.starts_with('.') && n != ADAPTER_DIR && !n.starts_with('@'))
                 .unwrap_or(false)
         })
         .collect();
@@ -930,6 +982,108 @@ fn discover_routes_dir(
         discover_routes_dir(app_dir, &child, root_layout, level_chain, routes)?;
     }
 
+    level_chain.pop();
+    Ok(())
+}
+
+/// Discover the parallel-route `@slot` subtrees a directory hosts (each becomes a named
+/// prop on that directory's layout). A `@slot` dir yields a [`Slot`] with its matchable
+/// routes (relative to the slot dir) and an optional `default.tsx`.
+fn discover_slots(dir: &Path) -> Result<Vec<Slot>, String> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut slot_dirs: Vec<PathBuf> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('@')))
+        .collect();
+    slot_dirs.sort();
+    let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    let mut slots = Vec::new();
+    for slot_dir in slot_dirs {
+        let name = slot_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(slot_name)
+            .unwrap_or_default();
+        let mut routes = Vec::new();
+        let mut level_chain = Vec::new();
+        discover_slot_dir(&slot_dir, &slot_dir, &mut level_chain, &mut routes)?;
+        slots.push(Slot {
+            name,
+            routes,
+            default: first_existing(&slot_dir, "default").map(canon),
+        });
+    }
+    Ok(slots)
+}
+
+/// Walk a `@slot` subtree collecting its matchable [`SlotRoute`]s (segments relative to
+/// `slot_root`). Intercepting-route markers `(.)`/`(..)`/`(...)` and nested `@slots` do
+/// NOT match on a hard render, so they are skipped here (soft-nav intercepts are a
+/// separate concern).
+fn discover_slot_dir(
+    slot_root: &Path,
+    dir: &Path,
+    level_chain: &mut Vec<Level>,
+    routes: &mut Vec<SlotRoute>,
+) -> Result<(), String> {
+    let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    level_chain.push(Level {
+        layout: first_existing(dir, "layout").map(canon),
+        loading: first_existing(dir, "loading").map(canon),
+        error: first_existing(dir, "error").map(canon),
+        slots: Vec::new(),
+        part_offset: 0,
+    });
+
+    if let Some(page) = first_existing_page(dir) {
+        let rel = dir.strip_prefix(slot_root).unwrap_or(Path::new(""));
+        let mut segments = Vec::new();
+        let mut skip = false;
+        for comp in rel.components().filter_map(|c| c.as_os_str().to_str()) {
+            match parse_segment(comp) {
+                SegParse::Seg(seg) => segments.push(seg),
+                SegParse::Group => {}
+                SegParse::Skip => {
+                    skip = true;
+                    break;
+                }
+            }
+        }
+        if !skip {
+            routes.push(SlotRoute {
+                segments,
+                page: page.canonicalize().unwrap_or(page),
+                levels: level_chain.clone(),
+            });
+        }
+    }
+
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => {
+            level_chain.pop();
+            return Ok(());
+        }
+    };
+    let mut children: Vec<PathBuf> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                !n.starts_with('.') && n != ADAPTER_DIR && !n.starts_with('@') && !is_intercept_marker(n)
+            })
+        })
+        .collect();
+    children.sort();
+    for child in children {
+        discover_slot_dir(slot_root, &child, level_chain, routes)?;
+    }
     level_chain.pop();
     Ok(())
 }
@@ -1550,6 +1704,42 @@ fn rsc_entry_module(
             None => "null".to_string(),
         }
     }
+    // Serialize a level chain to JS, including each level's parallel @slots (recursively,
+    // since a slot route carries its own level chain).
+    fn emit_levels(modules: &mut Vec<String>, levels: &[Level]) -> String {
+        let mut out = String::new();
+        for level in levels {
+            let layout_id = opt_id(modules, &level.layout);
+            let loading_id = opt_id(modules, &level.loading);
+            let error_id = opt_id(modules, &level.error);
+            let slots_js = emit_slots(modules, &level.slots);
+            out.push_str(&format!(
+                "{{ layout: {layout_id}, loading: {loading_id}, error: {error_id}, slotBase: {}, slots: [{slots_js}] }}, ",
+                level.part_offset,
+            ));
+        }
+        out
+    }
+    fn emit_slots(modules: &mut Vec<String>, slots: &[Slot]) -> String {
+        let mut out = String::new();
+        for slot in slots {
+            let default_id = opt_id(modules, &slot.default);
+            let mut routes_js = String::new();
+            for sr in &slot.routes {
+                let page_id = format!("M{}", intern(modules, &sr.page));
+                let levels_js = emit_levels(modules, &sr.levels);
+                routes_js.push_str(&format!(
+                    "{{ segments: {}, page: {page_id}, levels: [{levels_js}] }}, ",
+                    segments_js(&sr.segments),
+                ));
+            }
+            out.push_str(&format!(
+                "{{ name: {}, default: {default_id}, routes: [{routes_js}] }}, ",
+                js_str(&slot.name),
+            ));
+        }
+        out
+    }
 
     let error_boundary_id = format!("M{}", intern(&mut modules, error_boundary));
 
@@ -1568,15 +1758,7 @@ fn rsc_entry_module(
     let mut route_entries = String::new();
     for route in &disc.routes {
         let page_id = format!("M{}", intern(&mut modules, &route.page));
-        let mut levels_js = String::new();
-        for level in &route.levels {
-            let layout_id = opt_id(&mut modules, &level.layout);
-            let loading_id = opt_id(&mut modules, &level.loading);
-            let error_id = opt_id(&mut modules, &level.error);
-            levels_js.push_str(&format!(
-                "{{ layout: {layout_id}, loading: {loading_id}, error: {error_id} }}, "
-            ));
-        }
+        let levels_js = emit_levels(&mut modules, &route.levels);
         let title = route.metadata.title.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
         let description = route.metadata.description.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
         if route.kind == RouteKind::Ssg {
@@ -1768,14 +1950,52 @@ function notFoundTree() {{
   return node;
 }}
 
+// Wrap a page in its level chain (leaf→root: loading Suspense, error boundary, layout),
+// sharing `params`. Used for a matched @slot route.
+function composeLevels(page, levels, params) {{
+  const paramsPromise = Promise.resolve(params);
+  let node = createElement(page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }});
+  for (let i = levels.length - 1; i >= 0; i -= 1) {{
+    const level = levels[i];
+    if (level.loading) node = createElement(Suspense, {{ fallback: createElement(level.loading) }}, node);
+    if (level.error) {{
+      const inner = level.loading ? node : createElement(Suspense, {{ fallback: null }}, node);
+      node = createElement(ERROR_BOUNDARY, {{ fallback: level.error }}, inner);
+    }}
+    if (level.layout) node = createElement(level.layout, {{ params: paramsPromise }}, node);
+  }}
+  return node;
+}}
+
+// Match a level's parallel `@slots` against the below-level URL parts, returning a map
+// of slot name -> React node (the matched slot route, else its default.tsx, else null).
+// The layout receives these as named props alongside `children`.
+function matchSlots(level, parts, outerParams) {{
+  const props = {{}};
+  if (!level.slots || !level.slots.length) return props;
+  const rest = parts.slice(level.slotBase);
+  for (const slot of level.slots) {{
+    let node = null;
+    for (const sr of slot.routes) {{
+      const sp = matchSegments(sr.segments, rest);
+      if (sp) {{ node = composeLevels(sr.page, sr.levels, {{ ...outerParams, ...sp }}); break; }}
+    }}
+    if (!node && slot.default) node = createElement(slot.default, {{ params: Promise.resolve(outerParams) }});
+    props[slot.name] = node;
+  }}
+  return props;
+}}
+
 // Compose the matched route: the page (with its `params`/`searchParams` promises),
 // wrapped level-by-level leaf→root — each level's loading (Suspense) then error
 // (client ErrorBoundary) then layout — with the head items injected inside the root
-// layout. Returns `{{ tree, status, params }}`.
+// layout. A level hosting parallel `@slots` spreads the matched slot nodes as named
+// props on its layout. Returns `{{ tree, status, params }}`.
 function documentTree(pathname) {{
   const m = matchRoute(pathname);
   if (!m) return {{ tree: notFoundTree(), status: 404, params: {{}} }};
   const {{ route, params }} = m;
+  const parts = pathname.split("/").filter(Boolean);
   const paramsPromise = Promise.resolve(params);
   let node = createElement(route.page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }});
   let headInjected = false;
@@ -1795,7 +2015,10 @@ function documentTree(pathname) {{
       node = createElement(Fragment, null, ...headItems(route), node);
       headInjected = true;
     }}
-    if (level.layout) node = createElement(level.layout, {{ params: paramsPromise }}, node);
+    if (level.layout) {{
+      const slotProps = matchSlots(level, parts, params);
+      node = createElement(level.layout, {{ params: paramsPromise, ...slotProps }}, node);
+    }}
   }}
   if (!headInjected) node = createElement(Fragment, null, ...headItems(route), node);
   return {{ tree: node, status: 200, params }};
@@ -3406,6 +3629,50 @@ mod tests {
         // Contrast: /products/[id] has generateStaticParams and NO request read → Ssg.
         let products = disc.routes.iter().find(|r| r.url_path == "/products/[id]").unwrap();
         assert!(products.has_generate_static_params && products.kind == RouteKind::Ssg);
+    }
+
+    #[test]
+    fn parallel_routes_become_layout_slot_props() {
+        // The fixture's /dashboard hosts @team and @analytics parallel slots. Discovery
+        // must attach them to the dashboard directory's Level (not as separate routes),
+        // and the generated react-server entry must compose them as named layout props.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+
+        // @slot dirs never become their own routes.
+        assert!(
+            !disc.routes.iter().any(|r| r.url_path.contains('@')),
+            "no @slot route leaked into the primary table: {:?}",
+            disc.routes.iter().map(|r| &r.url_path).collect::<Vec<_>>()
+        );
+
+        let dashboard = disc.routes.iter().find(|r| r.url_path == "/dashboard").expect("/dashboard route");
+        // The dashboard-directory level (part_offset 1 = the "dashboard" segment) carries
+        // the two slots; the team slot has a page and no default, analytics has a default.
+        let level = dashboard
+            .levels
+            .iter()
+            .find(|l| !l.slots.is_empty())
+            .expect("a level hosts the @team/@analytics slots");
+        assert_eq!(level.part_offset, 1, "dashboard level consumed one URL segment above its slots");
+        let names: Vec<&str> = level.slots.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"team") && names.contains(&"analytics"), "slots: {names:?}");
+        let team = level.slots.iter().find(|s| s.name == "team").unwrap();
+        assert!(!team.routes.is_empty() && team.default.is_none(), "team slot has a page, no default");
+        let analytics = level.slots.iter().find(|s| s.name == "analytics").unwrap();
+        assert!(analytics.default.is_some(), "analytics slot has a default.tsx fallback");
+
+        // Codegen: the react-server entry emits the slot tables + the matcher/composer.
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &reqctx, None);
+        assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
+        assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
+        assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
+        assert!(rsc_src.contains("function composeLevels"), "the slot composer is generated");
+        assert!(rsc_src.contains("...slotProps"), "matched slots are spread as layout props");
     }
 
     #[test]
