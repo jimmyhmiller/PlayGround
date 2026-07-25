@@ -125,6 +125,12 @@ npx tsx scripts/gauntlet.ts 15
 # invariant: injected latency alone must never fail a flow
 npx tsx scripts/chaos-gauntlet.ts 10 42
 
+# self-flake-hunt: bat is a flake-hunter, so its OWN timing-sensitive paths
+# (normal flows, --fast/fallback replay, runtime loops, tabs) are run MANY
+# times and it fails on ANY single failure. A run-once suite cannot detect
+# intermittency; this can. Run under plain + latency-perturbed timing.
+npx tsx scripts/self-flake-hunt.ts 10
+
 # run a genuinely racy page (fire-and-forget refetch); on failure the report
 # ends with 'why this failed:' — rerun evidence + completion-order cross-tab
 npx tsx scripts/debug-once.ts fixtures/shop/e2e/flaky/flaky-cart.flow

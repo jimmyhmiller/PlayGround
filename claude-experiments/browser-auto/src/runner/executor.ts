@@ -132,7 +132,9 @@ export async function prepareContext(
     ensureTracked(p: Page): NetworkTracker {
       let t = trackers.get(p);
       if (!t) {
-        t = new NetworkTracker(p);
+        // a page reaching ensureTracked without an existing tracker is one the
+        // APP opened (a popup/new tab); bat cannot precede its navigation.
+        t = new NetworkTracker(p, /* appCreated */ true);
         trackers.set(p, t);
         dialogs.attach(p);
         downloads.attach(p);

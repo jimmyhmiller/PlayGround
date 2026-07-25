@@ -232,9 +232,11 @@ export async function replayStep(
     let stopAfter = flow.steps.length - 1;
     const runOpts = { ...baseOpts } as typeof baseOpts & { stopAtDisplay?: number };
     if (checkpoint) {
-      // fast tier (no loops): display index == parsed index
+      // fast tier (no loops): display index == parsed index.
+      // Use the session tracker (attached in prepareContext, BEFORE this goto)
+      // so the restored page's initial requests can't escape observation.
+      const tracker = env.session.ensureTracked(page);
       await page.goto(checkpoint.url, { waitUntil: "domcontentloaded", timeout: config.stepBudgetMs });
-      const tracker = new NetworkTracker(page);
       await settle(page, tracker, { budgetMs: config.stepBudgetMs, clockInstalled: env.clockInstalled, matchers: [] });
       startAt = target;
       stopAfter = target;

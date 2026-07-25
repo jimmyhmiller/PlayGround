@@ -147,6 +147,36 @@ click button "Add to cart" in listitem "Green Widget"
   }, 60000);
 });
 
+describe("settlement soundness guard", () => {
+  it("a NetworkTracker attached after navigation throws; before navigation is fine", async () => {
+    const { NetworkTracker } = await import("./runner/settle.js");
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    try {
+      // before navigation (about:blank) — legitimate
+      expect(() => new NetworkTracker(page)).not.toThrow();
+      // after navigating to an http page — the exact defect that caused the
+      // --fast replay flake; the guard must reject it
+      await page.goto(shop.url, { waitUntil: "domcontentloaded" });
+      expect(() => new NetworkTracker(page)).toThrowError(/already-navigated page/);
+    } finally {
+      await ctx.close();
+    }
+  }, 30000);
+
+  it("--fast replay of the cart step is deterministic across many runs (the fixed flake)", async () => {
+    // the tracker-after-goto bug reproduced at ~50% in isolation; run the
+    // exact scenario repeatedly so a regression can't hide behind a single run
+    for (let i = 0; i < 8; i++) {
+      await runFlowFile(BUY_FLOW, deps);
+      const result = await replayStep(BUY_FLOW, 4, deps, { fast: true });
+      if (result.trace.status !== "pass") {
+        throw new Error(`--fast replay flaked on iteration ${i + 1}:\n${renderReport(result.trace)}`);
+      }
+    }
+  }, 120000);
+});
+
 describe("richer observation", () => {
   function flow(src: string) {
     return parseFlow(src, "inline.flow");

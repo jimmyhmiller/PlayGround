@@ -56,7 +56,28 @@ export class NetworkTracker {
   private startCounter = 0;
   private finishCounter = 0;
 
-  constructor(page: Page) {
+  /**
+   * @param page the page to observe
+   * @param appCreated true only for pages the APP opened (popups/new tabs),
+   *   which navigate the instant they exist — bat attaches as early as it can
+   *   (the `page` event) and cannot precede their navigation. For pages bat
+   *   creates itself (the main page), the tracker MUST be attached before the
+   *   first navigation, and the guard below enforces exactly that.
+   */
+  constructor(page: Page, appCreated = false) {
+    // SOUNDNESS INVARIANT: a tracker for a bat-created page must observe it
+    // from BEFORE it navigates. Attached after an http(s) navigation, the
+    // page's initial requests may already have fired and will escape
+    // observation — settle would return early and leak an unfinished render
+    // into the next step (the intermittent "--fast replay" flake this guard
+    // exists to prevent). bat-created pages are still blank at construction.
+    const url = page.url();
+    if (!appCreated && /^https?:/i.test(url)) {
+      throw new Error(
+        `NetworkTracker attached to an already-navigated page (${url}). Trackers for bat-created pages must be built ` +
+          `before the page navigates, or in-flight requests can escape and settlement becomes unsound. Create it before the goto/click.`,
+      );
+    }
     page.on("request", (req) => {
       if (!TRACKED_TYPES.has(req.resourceType())) return;
       const rec: ObservedRequest = {
