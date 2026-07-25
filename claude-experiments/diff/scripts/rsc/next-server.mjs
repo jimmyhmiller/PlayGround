@@ -302,20 +302,21 @@ const MIME = {
 // The orchestrator matches a request path against the handler routes (queried once
 // from the worker at boot) and, on a match, dispatches the request to the react-server
 // worker's `route` op instead of page rendering.
-let __routeManifest = null;
-async function getRouteManifest() {
-  if (__routeManifest === null) {
+let __manifest = null;
+async function getManifest() {
+  if (__manifest === null) {
     try {
       const msg = await nextWorker().call({ op: "routes" });
-      __routeManifest = (msg.routes || []).map((r) => ({
-        segments: r.segments,
-        methods: new Set(r.methods),
-      }));
+      const routes = msg.routes || {};
+      __manifest = {
+        handlers: (routes.handlers || []).map((r) => ({ segments: r.segments, methods: new Set(r.methods) })),
+        hasMiddleware: !!routes.hasMiddleware,
+      };
     } catch {
-      __routeManifest = [];
+      __manifest = { handlers: [], hasMiddleware: false };
     }
   }
-  return __routeManifest;
+  return __manifest;
 }
 // Segment matcher (mirrors the react-server entry's): returns captured params or null.
 function matchHandlerSegments(segments, parts) {
@@ -344,10 +345,56 @@ function matchHandlerSegments(segments, parts) {
 }
 async function pathIsRouteHandler(pathname) {
   const parts = pathname.split("/").filter(Boolean);
-  for (const h of await getRouteManifest()) {
+  for (const h of (await getManifest()).handlers) {
     if (matchHandlerSegments(h.segments, parts)) return true;
   }
   return false;
+}
+
+// Run middleware for a request and interpret its NextResponse (via Next's
+// `x-middleware-*` protocol). Returns an action for the request handler:
+//   { kind: "response", status, headers, body }  -> send it, short-circuit
+//   { kind: "redirect", status, location, setCookies }
+//   { kind: "rewrite", pathname, setCookies, requestHeaders }
+//   { kind: "next", setCookies, requestHeaders }  -> continue to route/render
+//   null -> no middleware / not applicable
+async function runMiddleware(reqCtx) {
+  const msg = await nextWorker().call({ op: "middleware", reqCtx });
+  const mw = msg.middlewareResult;
+  if (!mw) return null;
+  const headers = mw.headers || [];
+  const setCookies = headers.filter(([k]) => k.toLowerCase() === "set-cookie").map(([, v]) => v);
+  const get = (name) => {
+    const hit = headers.find(([k]) => k.toLowerCase() === name);
+    return hit ? hit[1] : undefined;
+  };
+  // Request-header overrides (NextResponse.next({ request: { headers } })).
+  const requestHeaders = [];
+  const overrides = get("x-middleware-override-headers");
+  if (overrides) {
+    for (const name of overrides.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const v = get("x-middleware-request-" + name);
+      if (v !== undefined) requestHeaders.push([name, v]);
+    }
+  }
+  const location = get("location");
+  if (location && mw.status >= 300 && mw.status < 400) {
+    return { kind: "redirect", status: mw.status, location, setCookies };
+  }
+  const rewrite = get("x-middleware-rewrite");
+  if (rewrite) {
+    return { kind: "rewrite", pathname: new URL(rewrite, "http://localhost").pathname, setCookies, requestHeaders };
+  }
+  if (get("x-middleware-next")) {
+    return { kind: "next", setCookies, requestHeaders };
+  }
+  // A plain Response (e.g. NextResponse.json(...) / new Response(...)): short-circuit.
+  return {
+    kind: "response",
+    status: mw.status || 200,
+    headers: headers.filter(([k]) => !k.toLowerCase().startsWith("x-middleware")),
+    body: mw.body,
+  };
 }
 
 const server = createServer(async (req, res) => {
@@ -378,6 +425,39 @@ const server = createServer(async (req, res) => {
         return;
       }
     }
+    // Middleware (`middleware.ts`): runs before route handlers / page render for
+    // non-asset, non-action requests. `next()` continues (applying request-header
+    // overrides + response set-cookies), `redirect()`/`rewrite()`/a plain Response act
+    // per Next's `x-middleware-*` protocol.
+    let mwSetCookies = [];
+    let mwRequestHeaders = [];
+    if ((await getManifest()).hasMiddleware) {
+      const mw = await runMiddleware({
+        url: "http://localhost" + req.url,
+        method: req.method,
+        headers: Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
+        cookie: req.headers.cookie || "",
+      });
+      if (mw) {
+        if (mw.kind === "redirect") {
+          const h = { location: mw.location };
+          if (mw.setCookies.length) h["set-cookie"] = mw.setCookies;
+          res.writeHead(mw.status, h);
+          res.end();
+          return;
+        }
+        if (mw.kind === "response") {
+          const h = {};
+          for (const [k, v] of mw.headers) h[k] = v;
+          res.writeHead(mw.status, h);
+          res.end(mw.body ? Buffer.from(mw.body, "base64") : undefined);
+          return;
+        }
+        if (mw.kind === "rewrite") url.pathname = mw.pathname;
+        mwSetCookies = mw.setCookies || [];
+        mwRequestHeaders = mw.requestHeaders || [];
+      }
+    }
     // Route handlers (`route.ts`): a request whose path matches a handler is served by
     // it (any method) via the worker's `route` op, not by page rendering.
     if (await pathIsRouteHandler(url.pathname)) {
@@ -397,6 +477,7 @@ const server = createServer(async (req, res) => {
         body: bodyBuf.length ? bodyBuf.toString("base64") : undefined,
         bodyIsBase64: bodyBuf.length > 0,
       };
+      for (const h of mwRequestHeaders) reqCtx.headers.push(h);
       const msg = await nextWorker().call({
         op: "route",
         pathname: url.pathname,
@@ -407,6 +488,7 @@ const server = createServer(async (req, res) => {
       if (result) {
         const headers = {};
         for (const [k, v] of result.headers || []) headers[k] = v;
+        if (mwSetCookies.length) headers["set-cookie"] = mwSetCookies;
         res.writeHead(result.status || 200, headers);
         res.end(result.body ? Buffer.from(result.body, "base64") : undefined);
         return;
@@ -424,10 +506,10 @@ const server = createServer(async (req, res) => {
       // `new Headers([[k,v]...])` accepts them.
       const reqCtx = JSON.stringify({
         url: "http://localhost" + req.url,
-        headers: Object.entries(req.headers).map(([k, v]) => [
-          k,
-          Array.isArray(v) ? v.join(", ") : String(v),
-        ]),
+        headers: [
+          ...Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
+          ...mwRequestHeaders,
+        ],
         cookie: req.headers.cookie || "",
       });
       const { flight, status, params, redirect, notFound } = await runReactServer(
@@ -481,7 +563,9 @@ const server = createServer(async (req, res) => {
         params,
         { pathname: url.pathname, search: url.search },
       );
-      res.writeHead(status || 200, { "content-type": "text/html; charset=utf-8" });
+      const docHeaders = { "content-type": "text/html; charset=utf-8" };
+      if (mwSetCookies.length) docHeaders["set-cookie"] = mwSetCookies;
+      res.writeHead(status || 200, docHeaders);
       res.end(doc);
       return;
     }

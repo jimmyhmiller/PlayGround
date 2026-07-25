@@ -1113,6 +1113,10 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         .unwrap_or_else(|_| hooks_context.clone());
 
     write_if_changed(&adapter_dir.join("lazy.js"), lazy_module())?;
+    // Middleware: `middleware.{ts,js}` at the project root or under `src/`.
+    let middleware = first_existing(&root, "middleware")
+        .or_else(|| first_existing(&root.join("src"), "middleware"))
+        .map(|p| p.canonicalize().unwrap_or(p));
     write_if_changed(
         &adapter_dir.join("rsc-entry.tsx"),
         &rsc_entry_module(
@@ -1121,6 +1125,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             has_css,
             &error_boundary_canon,
             &request_context_canon,
+            middleware.as_deref(),
         ),
     )?;
     // The `next/link` shim is a `"use client"` intercepting component. In the
@@ -1163,6 +1168,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &shims_dir.join("headers.ts"),
         &next_headers_shim(&request_context_canon),
     )?;
+    write_if_changed(&shims_dir.join("server.ts"), next_server_shim())?;
 
     // --- per-environment config --------------------------------------------------
     let (entry, target, conditions): (PathBuf, Target, Vec<&str>) = match environment {
@@ -1207,6 +1213,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         alias("next/image", &shims_dir.join("image.tsx")),
         alias("next/navigation", &shims_dir.join("navigation.ts")),
         alias("next/headers", &shims_dir.join("headers.ts")),
+        alias("next/server", &shims_dir.join("server.ts")),
     ];
 
     // React's dev/prod dispatch define. Production bundles the production React
@@ -1346,6 +1353,7 @@ fn rsc_entry_module(
     has_css: bool,
     error_boundary: &Path,
     request_context: &Path,
+    middleware: Option<&Path>,
 ) -> String {
     // Intern every referenced module (page/layout/loading/error/not-found + the
     // generated error boundary) to a stable `M<i>` default-import binding.
@@ -1437,6 +1445,16 @@ fn rsc_entry_module(
         .map(|(i, s)| format!("import * as H{i} from {};\n", js_str(s)))
         .collect();
 
+    // Middleware: namespace-import it (named `middleware` or default export) so
+    // `runMiddleware` can invoke it; `null` when the app has none.
+    let (middleware_import, middleware_const) = match middleware {
+        Some(path) => (
+            format!("import * as __mw from {};\n", js_str(&path.to_string_lossy())),
+            "const MIDDLEWARE = __mw.middleware || __mw.default || null;".to_string(),
+        ),
+        None => (String::new(), "const MIDDLEWARE = null;".to_string()),
+    };
+
     let root_layout_id = opt_id(&mut modules, &disc.root_layout);
     let app_not_found_id = opt_id(&mut modules, &disc.app_not_found);
     let root_title = disc.root_metadata.title.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
@@ -1491,7 +1509,9 @@ import {{ createElement, Fragment, Suspense }} from "react";
 import {{ readFileSync, writeSync, statSync }} from "node:fs";
 import {{ fileURLToPath }} from "node:url";
 import {{ handleServerAction }} from "#diffpack-rsc-action-handler";
-{request_context_import}{imports}{ns_imports}{handler_imports}
+import {{ NextRequest }} from "next/server";
+{request_context_import}{imports}{ns_imports}{handler_imports}{middleware_import}
+{middleware_const}
 {font_const}const ROUTES = [
 {route_entries}];
 // Route handlers (`route.ts` HTTP endpoints): each entry's `methods` maps an HTTP
@@ -1757,11 +1777,34 @@ export async function handleRoute(pathname, method, reqCtx) {{
   return null;
 }}
 
-// The route-handler routes (segment patterns + methods) — queried once at boot by the
-// orchestrator so it can match locally and dispatch handler requests without a
-// per-page-request round-trip.
+// The route-handler routes (segment patterns + methods) + whether the app has
+// middleware — queried once at boot by the orchestrator so it can match locally and
+// dispatch handler/middleware without a per-page-request round-trip.
 export function routeManifest() {{
-  return ROUTE_HANDLERS.map((entry) => ({{ segments: entry.segments, methods: Object.keys(entry.methods) }}));
+  return {{
+    handlers: ROUTE_HANDLERS.map((entry) => ({{ segments: entry.segments, methods: Object.keys(entry.methods) }})),
+    hasMiddleware: MIDDLEWARE != null,
+  }};
+}}
+
+// Run the app's middleware (if any) for a request. Returns the middleware's Response
+// serialized as `{{ status, headers, body(base64) }}` — the orchestrator reads Next's
+// `x-middleware-*` protocol headers on it (next / redirect / rewrite) — or `null` when
+// there is no middleware.
+export async function runMiddleware(reqCtx) {{
+  if (MIDDLEWARE == null) return null;
+  const url = reqCtx.url || "http://localhost/";
+  const request = new NextRequest(url, {{ method: reqCtx.method || "GET", headers: new Headers(reqCtx.headers || []) }});
+  const store = {{
+    url: new URL(url, "http://localhost"),
+    headers: new Headers(reqCtx.headers || []),
+    cookieHeader: reqCtx.cookie || "",
+    params: {{}},
+  }};
+  const res = await requestAls.run(store, () => MIDDLEWARE(request, {{}}));
+  if (!(res instanceof Response)) return {{ status: 200, headers: [["x-middleware-next", "1"]], body: "" }};
+  const buf = Buffer.from(await res.arrayBuffer());
+  return {{ status: res.status, headers: [...res.headers], body: buf.toString("base64"), bodyIsBase64: true }};
 }}
 
 // The persistent DEV worker (`serve` op). Instead of the orchestrator spawning a
@@ -1795,10 +1838,11 @@ async function serveLoop() {{
       const runAction = ns.runAction || m.runAction;
       const handleRoute = ns.handleRoute || m.handleRoute;
       const routeManifest = ns.routeManifest || m.routeManifest;
+      const runMiddleware = ns.runMiddleware || m.runMiddleware;
       if (typeof renderRequest !== "function" || typeof runAction !== "function") {{
         throw new Error("rsc-entry serve: re-imported bundle does not export renderRequest/runAction");
       }}
-      cached = {{ mtime, mod: {{ renderRequest, runAction, handleRoute, routeManifest }} }};
+      cached = {{ mtime, mod: {{ renderRequest, runAction, handleRoute, routeManifest, runMiddleware }} }};
     }}
     return cached.mod;
   }}
@@ -1836,7 +1880,10 @@ async function serveLoop() {{
             : null;
           reply({{ id: req.id, routeResult: r }});
         }} else if (req.op === "routes") {{
-          reply({{ id: req.id, routes: mod.routeManifest ? mod.routeManifest() : [] }});
+          reply({{ id: req.id, routes: mod.routeManifest ? mod.routeManifest() : {{ handlers: [], hasMiddleware: false }} }});
+        }} else if (req.op === "middleware") {{
+          const r = mod.runMiddleware ? await mod.runMiddleware(req.reqCtx || {{}}) : null;
+          reply({{ id: req.id, middlewareResult: r }});
         }} else {{
           reply({{ id: req.id, error: `unknown worker op ${{JSON.stringify(req.op)}}` }});
         }}
@@ -2144,6 +2191,98 @@ boot();
 }
 
 // --- next/* shims ----------------------------------------------------------------
+
+/// `next/server` shim: `NextResponse` (extends `Response` with `next`/`redirect`/
+/// `rewrite`/`json` + a cookie jar) and `NextRequest` (adds `nextUrl` + `cookies`).
+/// Middleware returns a `NextResponse`; the orchestrator reads Next's real
+/// `x-middleware-*` protocol headers to decide continue / redirect / rewrite.
+fn next_server_shim() -> &'static str {
+    r##"// `next/server` shim (diffpack next app-router adapter).
+function cookieJar(headers, isResponse) {
+  return {
+    get(name) {
+      const raw = headers.get("cookie") || "";
+      const hit = raw.split(";").map((c) => c.trim()).find((c) => c.startsWith(name + "="));
+      return hit ? { name, value: decodeURIComponent(hit.slice(name.length + 1)) } : undefined;
+    },
+    getAll() {
+      const raw = headers.get("cookie") || "";
+      return raw.split(";").map((c) => c.trim()).filter(Boolean).map((c) => {
+        const eq = c.indexOf("=");
+        return { name: c.slice(0, eq), value: decodeURIComponent(c.slice(eq + 1)) };
+      });
+    },
+    set(name, value, opts) {
+      const parts = [`${name}=${encodeURIComponent(typeof name === "object" ? name.value : value)}`];
+      const o = typeof name === "object" ? name : opts || {};
+      if (o.path) parts.push(`Path=${o.path}`);
+      if (o.maxAge != null) parts.push(`Max-Age=${o.maxAge}`);
+      if (o.httpOnly) parts.push("HttpOnly");
+      if (o.secure) parts.push("Secure");
+      if (o.sameSite) parts.push(`SameSite=${o.sameSite}`);
+      headers.append("set-cookie", parts.join("; "));
+      return this;
+    },
+    delete(name) {
+      headers.append("set-cookie", `${name}=; Max-Age=0`);
+      return this;
+    },
+  };
+}
+
+export class NextResponse extends Response {
+  get cookies() {
+    return cookieJar(this.headers, true);
+  }
+  static next(init) {
+    const headers = new Headers(init && init.headers);
+    // Request-header overrides (NextResponse.next({ request: { headers } })) are
+    // encoded for the orchestrator to apply to the downstream render.
+    if (init && init.request && init.request.headers) {
+      const reqHeaders = new Headers(init.request.headers);
+      const names = [];
+      for (const [k, v] of reqHeaders) {
+        names.push(k);
+        headers.set("x-middleware-request-" + k, v);
+      }
+      headers.set("x-middleware-override-headers", names.join(","));
+    }
+    headers.set("x-middleware-next", "1");
+    return new NextResponse(null, { headers });
+  }
+  static redirect(url, init) {
+    const status = typeof init === "number" ? init : (init && init.status) || 307;
+    const headers = new Headers(init && typeof init === "object" ? init.headers : undefined);
+    headers.set("location", String(url));
+    return new NextResponse(null, { status, headers });
+  }
+  static rewrite(destination, init) {
+    const headers = new Headers(init && init.headers);
+    headers.set("x-middleware-rewrite", String(destination));
+    return new NextResponse(null, { headers });
+  }
+  static json(body, init) {
+    const headers = new Headers(init && init.headers);
+    if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    return new NextResponse(JSON.stringify(body), { ...(init || {}), headers });
+  }
+}
+
+export class NextRequest extends Request {
+  constructor(input, init) {
+    super(input, init);
+    const url = typeof input === "string" ? input : input.url;
+    this.nextUrl = new URL(url, "http://localhost");
+  }
+  get cookies() {
+    return cookieJar(this.headers, false);
+  }
+}
+
+export default NextResponse;
+export const userAgent = (request) => ({ ua: (request.headers.get("user-agent") || "") });
+"##
+}
 
 fn next_link_shim() -> &'static str {
     r##""use client";
