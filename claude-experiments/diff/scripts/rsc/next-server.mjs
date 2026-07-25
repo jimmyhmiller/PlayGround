@@ -732,6 +732,9 @@ const server = createServer(async (req, res) => {
           ...mwRequestHeaders,
         ],
         cookie: req.headers.cookie || "",
+        // A `?__rsc=1` fetch is a client soft navigation — the only context in which an
+        // intercepting route renders its overlay instead of the full page.
+        softNav: url.searchParams.has("__rsc"),
       };
       // Kick off the streaming render. `meta` (status/params + any TOP-LEVEL
       // redirect/notFound) settles on the first chunk; flight chunks flow into a queue
@@ -828,10 +831,13 @@ const server = createServer(async (req, res) => {
         return;
       }
       // Soft-navigation: the client Router fetches `?__rsc=1` for the RAW flight of the
-      // target route and diff-renders it in place. Stream the raw flight bytes straight
-      // through (the client's createFromFetch consumes a streaming body).
+      // target route and diff-renders it in place. When the render was an intercepting
+      // overlay, tell the client via `x-diffpack-intercept` so it portals the flight over
+      // the current page (masking the URL) instead of swapping the document.
       if (url.searchParams.has("__rsc")) {
-        res.writeHead(200, { "content-type": "text/x-component" });
+        const rscHeaders = { "content-type": "text/x-component" };
+        if (meta.intercept) rscHeaders["x-diffpack-intercept"] = "1";
+        res.writeHead(200, rscHeaders);
         for await (const b64 of flightChunks()) res.write(Buffer.from(b64, "base64"));
         res.end();
         return;

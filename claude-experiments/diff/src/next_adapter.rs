@@ -724,6 +724,22 @@ struct Discovered {
     app_not_found: Option<PathBuf>,
     /// `route.*` HTTP endpoints (`app/api/**/route.ts`), most-specific first.
     handlers: Vec<RouteHandler>,
+    /// Intercepting routes (`@slot/(.)…`): a soft-navigation to a matching target
+    /// renders this page as an overlay instead of the full target document.
+    intercepts: Vec<Intercept>,
+}
+
+/// An intercepting route (`app/@modal/(..)photo/[id]/page.tsx`): on a SOFT navigation to
+/// a URL matching `target_segments`, this page renders as an overlay (a modal) over the
+/// current page, with the URL masked to the target. A hard load of the target renders
+/// the real full-page route instead (intercepts are soft-nav only).
+#[derive(Debug, Clone)]
+struct Intercept {
+    /// The target URL pattern this intercepts (e.g. `[photo, [id]]` for `(..)photo/[id]`).
+    target_segments: Vec<Seg>,
+    /// The overlay page + its slot-internal layout chain.
+    page: PathBuf,
+    levels: Vec<Level>,
 }
 
 fn scan_metadata_file(path: &Path) -> RouteMetadata {
@@ -869,6 +885,7 @@ fn discover_routes(app_dir: &Path, root_layout: Option<&Path>) -> Result<Discove
         root_metadata,
         app_not_found: first_existing(app_dir, "not-found").map(|p| p.canonicalize().unwrap_or(p)),
         handlers: discover_route_handlers(app_dir)?,
+        intercepts: discover_intercepts(app_dir)?,
     })
 }
 
@@ -1086,6 +1103,149 @@ fn discover_slot_dir(
     }
     level_chain.pop();
     Ok(())
+}
+
+/// Where an intercept marker resolves the target relative to the marker's own URL level:
+/// `(.)` same level, `(..)` one up (`(..)(..)` n up), `(...)` from the app root.
+enum InterceptBase {
+    Up(usize),
+    Root,
+}
+
+/// Discover intercepting routes: a directory whose name is an intercept marker
+/// `(.)`/`(..)`/`(...)` followed by a target path (e.g. `@modal/(..)photo/[id]`). The
+/// target URL is the marker's URL level (adjusted by its `..` depth) plus the marker
+/// path, so an overlay defined at `app/gallery/@modal/(.)photo/[id]` intercepts
+/// `/gallery/photo/[id]`. Slot-internal layouts are captured so the overlay is wrapped
+/// exactly as its slot would render it.
+fn discover_intercepts(app_dir: &Path) -> Result<Vec<Intercept>, String> {
+    let mut out = Vec::new();
+    let mut base_segments = Vec::new();
+    collect_intercepts(app_dir, &mut base_segments, &mut out)?;
+    Ok(out)
+}
+
+/// Walk the tree tracking `base_segments` (the URL segments from app/ to the current dir;
+/// `@slots` and `(groups)` add none). On an intercept-marker dir, resolve the target base
+/// and collect the overlay subtree.
+fn collect_intercepts(dir: &Path, base_segments: &mut Vec<Seg>, out: &mut Vec<Intercept>) -> Result<(), String> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => return Ok(()),
+    };
+    let mut children: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    children.sort();
+    for path in children {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') || name == ADAPTER_DIR {
+            continue;
+        }
+        if is_intercept_marker(name) {
+            let base = match marker_base(name) {
+                InterceptBase::Root => Vec::new(),
+                InterceptBase::Up(n) => base_segments[..base_segments.len().saturating_sub(n)].to_vec(),
+            };
+            let mut level_chain = Vec::new();
+            collect_intercept_dir(&path, base, true, out, &mut level_chain)?;
+            continue;
+        }
+        // Track URL segments through normal dirs; @slots and groups add none.
+        match parse_segment(name) {
+            SegParse::Seg(seg) => {
+                base_segments.push(seg);
+                collect_intercepts(&path, base_segments, out)?;
+                base_segments.pop();
+            }
+            SegParse::Group | SegParse::Skip => {
+                collect_intercepts(&path, base_segments, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk an intercept-marker subtree collecting the overlay page + its levels. The
+/// marker-root component's marker prefix is stripped for its own target segment; deeper
+/// dirs contribute normal segments. `target_prefix` is the resolved base URL segments.
+fn collect_intercept_dir(
+    dir: &Path,
+    target_prefix: Vec<Seg>,
+    is_marker_root: bool,
+    out: &mut Vec<Intercept>,
+    level_chain: &mut Vec<Level>,
+) -> Result<(), String> {
+    let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    level_chain.push(Level {
+        layout: first_existing(dir, "layout").map(canon),
+        loading: first_existing(dir, "loading").map(canon),
+        error: first_existing(dir, "error").map(canon),
+        slots: Vec::new(),
+        part_offset: 0,
+    });
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let comp = if is_marker_root { strip_intercept_marker(name) } else { name };
+    let mut target = target_prefix.clone();
+    match parse_segment(comp) {
+        SegParse::Seg(seg) => target.push(seg),
+        SegParse::Group | SegParse::Skip => {}
+    }
+    if let Some(page) = first_existing_page(dir) {
+        out.push(Intercept {
+            target_segments: target.clone(),
+            page: page.canonicalize().unwrap_or(page),
+            levels: level_chain.clone(),
+        });
+    }
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => {
+            level_chain.pop();
+            return Ok(());
+        }
+    };
+    let mut children: Vec<PathBuf> = read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && n != ADAPTER_DIR))
+        .collect();
+    children.sort();
+    for child in children {
+        collect_intercept_dir(&child, target.clone(), false, out, level_chain)?;
+    }
+    level_chain.pop();
+    Ok(())
+}
+
+/// The base level an intercept marker resolves against: `(.)` same, `(..)` one up
+/// (`(..)(..)` n up), `(...)` the app root.
+fn marker_base(comp: &str) -> InterceptBase {
+    if comp.starts_with("(...)") {
+        return InterceptBase::Root;
+    }
+    let mut s = comp;
+    let mut up = 0;
+    while let Some(rest) = s.strip_prefix("(..)") {
+        up += 1;
+        s = rest;
+    }
+    InterceptBase::Up(up)
+}
+
+/// Strip an intercept marker prefix from a directory-name component: `(..)photo` ->
+/// `photo`, `(.)a` -> `a`, `(...)b` -> `b`.
+fn strip_intercept_marker(comp: &str) -> &str {
+    if let Some(rest) = comp.strip_prefix("(...)") {
+        return rest;
+    }
+    let mut s = comp;
+    while let Some(rest) = s.strip_prefix("(..)").or_else(|| s.strip_prefix("(.)")) {
+        s = rest;
+    }
+    s
 }
 
 /// Whether any app module imports a stylesheet (`import "./globals.css"` or a CSS
@@ -1778,6 +1938,19 @@ fn rsc_entry_module(
         ));
     }
 
+    // Intercepting routes: on a SOFT navigation to a matching target, the overlay page
+    // renders instead of the full document (the client masks the URL + keeps the current
+    // page mounted). One entry per `@slot/(.)…` intercept.
+    let mut intercept_entries = String::new();
+    for ic in &disc.intercepts {
+        let page_id = format!("M{}", intern(&mut modules, &ic.page));
+        let levels_js = emit_levels(&mut modules, &ic.levels);
+        intercept_entries.push_str(&format!(
+            "  {{ segments: {}, page: {page_id}, levels: [{levels_js}] }},\n",
+            segments_js(&ic.target_segments),
+        ));
+    }
+
     // Route handlers (`route.ts` HTTP endpoints): namespace-import each file (so every
     // exported method is reachable) and build the ROUTE_HANDLERS match table.
     let mut handler_namespaces: Vec<String> = Vec::new();
@@ -1875,6 +2048,9 @@ import {{ NextRequest }} from "next/server";
 {middleware_const}
 {font_const}const ROUTES = [
 {route_entries}];
+// Intercepting routes: a soft-nav to a matching target renders the overlay page.
+const INTERCEPTS = [
+{intercept_entries}];
 // Route handlers (`route.ts` HTTP endpoints): each entry's `methods` maps an HTTP
 // method to its exported handler function; `handleRoute` matches a request path here.
 const ROUTE_HANDLERS = [
@@ -1938,6 +2114,17 @@ function matchRoute(pathname) {{
   return null;
 }}
 
+// Match a pathname to an intercepting route (soft-nav only). Returns
+// `{{ intercept, params }}` or null.
+function matchIntercept(pathname) {{
+  const parts = pathname.split("/").filter(Boolean);
+  for (const ic of INTERCEPTS) {{
+    const params = matchSegments(ic.segments, parts);
+    if (params) return {{ intercept: ic, params }};
+  }}
+  return null;
+}}
+
 // The real-404 document: `app/not-found.tsx` (or a built-in default) wrapped in the
 // root layout + head items, so an unknown path renders a full document, never the
 // index tree.
@@ -1990,8 +2177,21 @@ function matchSlots(level, parts, outerParams) {{
 // wrapped level-by-level leaf→root — each level's loading (Suspense) then error
 // (client ErrorBoundary) then layout — with the head items injected inside the root
 // layout. A level hosting parallel `@slots` spreads the matched slot nodes as named
-// props on its layout. Returns `{{ tree, status, params }}`.
-function documentTree(pathname) {{
+// props on its layout. On a SOFT navigation (`opts.softNav`) to an intercepting route's
+// target, returns JUST the overlay tree (marked `intercept: true`) so the client renders
+// it over the still-mounted current page. Returns `{{ tree, status, params, intercept }}`.
+function documentTree(pathname, opts) {{
+  if (opts && opts.softNav) {{
+    const hit = matchIntercept(pathname);
+    if (hit) {{
+      return {{
+        tree: composeLevels(hit.intercept.page, hit.intercept.levels, hit.params),
+        status: 200,
+        params: hit.params,
+        intercept: true,
+      }};
+    }}
+  }}
   const m = matchRoute(pathname);
   if (!m) return {{ tree: notFoundTree(), status: 404, params: {{}} }};
   const {{ route, params }} = m;
@@ -2100,7 +2300,7 @@ function renderStore(pathname, reqCtx, params) {{
 // Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
 // `render` op AND the persistent `serve` worker, so both paths render identically.
 export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
-  const {{ tree, status, params }} = documentTree(pathname);
+  const {{ tree, status, params, intercept }} = documentTree(pathname, {{ softNav: !!reqCtx.softNav }});
   const store = renderStore(pathname, reqCtx, params);
   const control = {{}};
   const flight = await requestAls.run(store, async () => {{
@@ -2115,6 +2315,7 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
     params,
     redirect: control.redirect,
     notFound: control.notFound,
+    intercept,
   }};
 }}
 
@@ -2130,7 +2331,7 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
 // (after the shell has flushed) cannot unwind an already-streamed response; it is
 // reported on `sink.end` and the orchestrator logs it loudly (never silently dropped).
 export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink) {{
-  const {{ tree, status, params }} = documentTree(pathname);
+  const {{ tree, status, params, intercept }} = documentTree(pathname, {{ softNav: !!reqCtx.softNav }});
   const store = renderStore(pathname, reqCtx, params);
   const control = {{}};
   await requestAls.run(store, async () => {{
@@ -2141,7 +2342,7 @@ export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink)
     let metaSent = false;
     const sendMeta = () => {{
       metaSent = true;
-      sink.meta({{ status: control.status || status || 200, params, redirect: control.redirect, notFound: control.notFound }});
+      sink.meta({{ status: control.status || status || 200, params, redirect: control.redirect, notFound: control.notFound, intercept }});
     }};
     for (;;) {{
       const {{ done, value }} = await reader.read();
@@ -2671,7 +2872,8 @@ fn client_entry_module(adapter_dir: &Path, islands: &[PathBuf], hooks_context: &
 // useParams/usePathname/useSearchParams hydrate without a mismatch.
 import {{ createFromReadableStream, createFromFetch }} from "react-server-dom-webpack/client";
 import {{ hydrateRoot }} from "react-dom/client";
-import {{ use, useState, useEffect, useTransition, createElement }} from "react";
+import {{ createPortal }} from "react-dom";
+import {{ use, useState, useEffect, useRef, useTransition, createElement, Fragment, Suspense }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext }} from {hooks_import};
 import {{ callServer }} from "#diffpack-call-server";
 {pins}
@@ -2680,38 +2882,88 @@ import({lazy}).then((module) => {{
   (globalThis).__diffpack_next_client_lazy = module.value;
 }});
 
-// Fetch the target route's raw flight and return a thenable React can `use()`. The
-// flight is resolved through the same `__webpack_*` client seam + `callServer`
-// transport the action round-trip uses — no manifest needed.
-function fetchTree(href) {{
+// Fetch a route's raw flight over `?__rsc=1`, returning the React-`use()`-able tree AND
+// whether the server rendered it as an INTERCEPT overlay (x-diffpack-intercept header).
+// The flight resolves through the same `__webpack_*` client seam + `callServer` transport
+// the action round-trip uses — no manifest needed.
+async function fetchFlight(href) {{
   const sep = href.includes("?") ? "&" : "?";
-  return createFromFetch(fetch(href + sep + "__rsc=1"), {{ callServer }});
+  const res = await fetch(href + sep + "__rsc=1");
+  const intercept = res.headers.get("x-diffpack-intercept") === "1";
+  const tree = createFromReadableStream(res.body, {{ callServer }});
+  return {{ tree, intercept }};
 }}
 
-// The client Router: holds the current flight tree, and swaps it (inside a
-// transition, keeping the old document visible until the new flight resolves) when
-// navigation happens. React 19 reconciles the swapped `<html>/<head>/<body>` in place.
+// Portals an overlay (intercept modal) flight into <body>, so it sits ABOVE the still
+// mounted underlying page (a sibling after <html> would be invalid). Suspends on its own
+// thenable; wrapped in a Suspense with a null fallback so the page stays visible while it
+// loads.
+function ModalPortal({{ thenable }}) {{
+  return createPortal(use(thenable), document.body);
+}}
+
+// The client Router: holds the current document tree, and swaps it (inside a transition,
+// keeping the old document visible until the new flight resolves) on navigation. An
+// INTERCEPT soft-nav does NOT swap the document — it keeps the current page mounted (so
+// its state/scroll survive) and renders the overlay via a body portal, masking the URL to
+// the target. Back on a masked modal URL closes the overlay without refetching.
 function Router({{ initialTree }}) {{
   const [tree, setTree] = useState(initialTree);
+  const [modal, setModal] = useState(null); // {{ tree }} overlay, or null
   const [, startTransition] = useTransition();
+  const modalOpen = useRef(false);
+  const underlying = useRef(location.pathname + location.search);
   useEffect(() => {{
-    function navigate(to, options) {{
+    async function navigate(to, options) {{
       const opts = options || {{}};
       const push = opts.push !== false;
       const href = typeof to === "string" ? to : to.href;
       const replace = opts.replace || (typeof to === "object" && to && to.replace);
-      const next = fetchTree(href);
+      const {{ tree: next, intercept }} = await fetchFlight(href);
+      if (intercept) {{
+        underlying.current = location.pathname + location.search;
+        modalOpen.current = true;
+        startTransition(() => {{
+          setModal({{ tree: next }});
+          if (push) history.pushState({{ __diffpackModal: true }}, "", href);
+        }});
+        return;
+      }}
+      modalOpen.current = false;
       startTransition(() => {{
+        setModal(null);
         setTree(next);
         if (push) history[replace ? "replaceState" : "pushState"](null, "", href);
       }});
     }}
+    // Close an open overlay (used by a modal's own close / router.back()).
+    function closeModal() {{
+      if (!modalOpen.current) return;
+      modalOpen.current = false;
+      setModal(null);
+      history.pushState(null, "", underlying.current);
+    }}
     window.__diffpack_navigate = navigate;
-    const onpop = () => navigate(location.pathname + location.search, {{ push: false }});
+    window.__diffpack_close_modal = closeModal;
+    function onpop() {{
+      // Leaving a masked modal URL: just close the overlay (the underlying page is still
+      // mounted), no refetch.
+      if (modalOpen.current && (location.pathname + location.search) === underlying.current) {{
+        modalOpen.current = false;
+        setModal(null);
+        return;
+      }}
+      navigate(location.pathname + location.search, {{ push: false }});
+    }}
     window.addEventListener("popstate", onpop);
     return () => window.removeEventListener("popstate", onpop);
   }}, []);
-  return use(tree);
+  return createElement(
+    Fragment,
+    null,
+    use(tree),
+    modal ? createElement(Suspense, {{ fallback: null }}, createElement(ModalPortal, {{ thenable: modal.tree }})) : null,
+  );
 }}
 
 function decodeFlight(base64) {{
@@ -3676,6 +3928,42 @@ mod tests {
     }
 
     #[test]
+    fn intercepting_routes_target_and_overlay() {
+        // The fixture's app/gallery/@modal/(.)photo/[id] intercepts /gallery/photo/[id].
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+
+        // The intercept resolves its target RELATIVE to the marker's URL level: `(.)` at
+        // gallery/@modal -> /gallery/photo/[id] (not /photo/[id]).
+        let ic = disc
+            .intercepts
+            .iter()
+            .find(|i| segments_display(&i.target_segments) == "/gallery/photo/[id]")
+            .unwrap_or_else(|| panic!("gallery intercept not found: {:?}", disc.intercepts.iter().map(|i| segments_display(&i.target_segments)).collect::<Vec<_>>()));
+        assert!(ic.page.to_string_lossy().contains("@modal"), "overlay page is the @modal intercept: {:?}", ic.page);
+        // The full /gallery/photo/[id] route also exists (hard load renders the real page).
+        assert!(disc.routes.iter().any(|r| r.url_path == "/gallery/photo/[id]"), "the real photo route exists for hard loads");
+
+        // Codegen: the react-server entry emits INTERCEPTS + softNav-gated matching; the
+        // client Router portals the overlay and masks the URL.
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &reqctx, None);
+        assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
+        assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
+        assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
+
+        let islands = [app.join("Counter.tsx")];
+        let hooks = fixture.join(".diffpack-next/hooks-context.ts");
+        let client_src = client_entry_module(&fixture.join(".diffpack-next"), &islands, &hooks);
+        assert!(client_src.contains("x-diffpack-intercept"), "client reads the intercept header");
+        assert!(client_src.contains("createPortal"), "client portals the overlay over the page");
+        assert!(client_src.contains("__diffpackModal"), "client masks the URL for the overlay");
+    }
+
+    #[test]
     fn classify_route_precedence() {
         // Unit-level precedence checks independent of the fixture.
         let base = RouteConfig { dynamic_params: true, ..Default::default() };
@@ -3813,7 +4101,7 @@ mod tests {
         assert!(rs_src.contains("const ROUTES = ["), "{rs_src}");
         assert!(rs_src.contains("path: \"/\""), "{rs_src}");
         assert!(rs_src.contains("levels: ["), "{rs_src}");
-        assert!(rs_src.contains("function documentTree(pathname)"), "{rs_src}");
+        assert!(rs_src.contains("function documentTree(pathname, opts)"), "{rs_src}");
         // Dynamic-segment matching (Slice H): the `[slug]` dir becomes a Dynamic
         // segment, matched at request time by the generated `matchRoute`.
         assert!(rs_src.contains("function matchRoute(pathname)"), "{rs_src}");
