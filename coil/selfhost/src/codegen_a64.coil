@@ -3002,9 +3002,9 @@
       (loop (if (icmp-ge (load off) total) (break)
         (do (let [wrote (cga64.write (cast i32 fd)
                           (cast (ptr i8) (index (slice-data (al-slice [u8] (load bytes))) (load off)))
-                          (isub total (load off)))]
+                          (cast isize (isub total (load off))))]
               (if (icmp-le wrote 0) (cga-fail "object write failed") 0)
-              (store! off (iadd (load off) wrote)))))))
+              (store! off (iadd (load off) (cast i64 wrote))))))))
     (cga64.close (cast i32 fd))
     0))
 

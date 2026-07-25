@@ -537,7 +537,7 @@
 ; return its address. String literals are compile-time constants, so the pointer
 ; is baked into the bytecode as an immediate.
 (defn intern-bytes [(sv (slice u8))] (-> i64)
-  (let [n (slice-len sv) addr (cast i64 (interp.malloc (iadd n 1))) (mut i) 0]
+  (let [n (slice-len sv) addr (cast i64 (interp.malloc (cast isize (iadd n 1)))) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (store! (cast (ptr u8) (iadd addr (load i))) (slice-get sv (load i)))
           (store! i (iadd (load i) 1)))))
@@ -739,7 +739,7 @@
                   ; static: allocate ONCE at compile time (one persistent, zeroed
                   ; region per alloc-static site, shared across all executions —
                   ; mirrors codegen's per-site zeroed global) and bake its address.
-                  (let [addr (cast i64 (interp.malloc sz))]
+                  (let [addr (cast i64 (interp.malloc (cast isize sz)))]
                     (memzero addr sz) (femit fb 1 addr 0 0)))
             (TPtr (box-type a t)))))
       (EZeroed [t]
@@ -938,7 +938,7 @@
         ; malloc'd array of encoded Coil fnptrs, one per method (built once at
         ; compile time and baked as an immediate — mirrors codegen's data global).
         (let [nmeth (al-len [(slice u8)] (load methods))
-              vt (cast i64 (interp.malloc (imul (if (icmp-le nmeth 1) 1 nmeth) 8)))
+              vt (cast i64 (interp.malloc (cast isize (imul (if (icmp-le nmeth 1) 1 nmeth) 8))))
               (mut i) 0 l (fb-local! fb)]
           (loop (if (icmp-ge (load i) nmeth) (break)
             (do (let [mnm (al-get [(slice u8)] (load methods) (load i)) mfi (find-func cx mnm)]
@@ -1129,7 +1129,7 @@
 ; (<0 / 0 / >0); we sign-extend it. Ascending: swap while prev > cur.
 (defn interp-qsort [(cx (ptr Interp)) (base i64) (n i64) (size i64) (cmpfp i64)] (-> i64)
   (let [fi (isub cmpfp (fnptr-base))
-        tmp (cast i64 (interp.malloc (if (icmp-lt size 1) 1 size)))
+        tmp (cast i64 (interp.malloc (cast isize (if (icmp-lt size 1) 1 size))))
         argbuf (alloc-stack (array i64 2)) (mut i) 1]
     (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
         (idie "qsort: comparator is not a Coil function pointer") 0)
@@ -1162,7 +1162,7 @@
       (str-eq nm "write")   (cast i64 (interp.write (cast i32 (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
       (str-eq nm "puts")    (interp.puts (cast (ptr i8) (load (index buf 0))))
       (str-eq nm "exit")    (interp.exit (cast i32 (load (index buf 0))))
-      (str-eq nm "malloc")  (cast i64 (interp.malloc (load (index buf 0))))
+      (str-eq nm "malloc")  (cast i64 (interp.malloc (cast isize (load (index buf 0)))))
       (str-eq nm "free")    (do (interp.free (cast (ptr i8) (load (index buf 0)))) 0)
       (str-eq nm "realloc") (cast i64 (interp.realloc (cast (ptr i8) (load (index buf 0))) (cast isize (load (index buf 1)))))
       (str-eq nm "calloc")  (cast i64 (interp.calloc (cast isize (load (index buf 0))) (cast isize (load (index buf 1)))))
@@ -1170,7 +1170,7 @@
       (str-eq nm "memmove") (cast i64 (interp.memmove (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
       (str-eq nm "memset")  (cast i64 (interp.memset (cast (ptr i8) (load (index buf 0))) (load (index buf 1)) (cast isize (load (index buf 2)))))
       (str-eq nm "memcmp")  (interp.memcmp (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2))))
-      (str-eq nm "strlen")  (interp.strlen (cast (ptr i8) (load (index buf 0))))
+      (str-eq nm "strlen")  (cast i64 (interp.strlen (cast (ptr i8) (load (index buf 0)))))
       (str-eq nm "strcmp")  (cast i64 (interp.strcmp (cast (ptr i8) (load (index buf 0))) (cast (ptr i8) (load (index buf 1)))))
       (str-eq nm "read")    (cast i64 (interp.read (cast i32 (load (index buf 0))) (cast (ptr i8) (load (index buf 1))) (cast isize (load (index buf 2)))))
       (str-eq nm "abort")   (do (interp.abort) 0)
@@ -1595,7 +1595,7 @@
   (let [bf (ial-at [BFunc] (field cx bfuncs) fidx)
         nl (load (field bf nlocals))
         nlb (if (icmp-le nl 1) 1 nl)
-        locals (cast (ptr i64) (interp.malloc (imul nlb 8)))
+        locals (cast (ptr i64) (interp.malloc (cast isize (imul nlb 8))))
         framemem (cast i64 (interp.malloc 1048576))
         ops (cast (ptr i64) (interp.malloc 32768))
         spc (alloc-stack i64)
@@ -1657,8 +1657,8 @@
                  (do (if (icmp-ne c 0) (memcopy addr src b) (mem-store addr src b))
                      (store! (index locals a) addr)))
             22 (let [addr (vpop ops spc)] (do (interp.free (cast (ptr i8) addr)) (vpush ops spc 0)))
-            23 (vpush ops spc (cast i64 (interp.malloc a)))
-            24 (let [addr (cast i64 (interp.malloc a))] (do (memzero addr a) (vpush ops spc addr)))
+            23 (vpush ops spc (cast i64 (interp.malloc (cast isize a))))
+            24 (let [addr (cast i64 (interp.malloc (cast isize a)))] (do (memzero addr a) (vpush ops spc addr)))
             30 (let [addr (frame-alloc framemem memoffc 16 8)]
                  (do (mem-store addr a 8) (mem-store (iadd addr 8) b 8) (vpush ops spc addr)))
             31 (let [addr (frame-alloc framemem memoffc a b)] (do (memzero addr a) (vpush ops spc addr)))

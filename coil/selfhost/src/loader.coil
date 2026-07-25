@@ -24,7 +24,7 @@
       (let [n (read (cast i32 fd) buf 65536)]
         (if (icmp-le n 0) (break)
           (let [(mut i) 0]
-            (loop (if (icmp-ge (load i) n) (break)
+            (loop (if (icmp-ge (load i) (cast i64 n)) (break)
                 (do (al-push! (mut bytes) (cast u8 (load (index buf (load i))))) (store! i (iadd (load i) 1)))))))))
     (close fd)
     (al-slice [u8] (load bytes))))
@@ -41,7 +41,7 @@
           (let [n (read (cast i32 fd) buf 65536)]
             (if (icmp-le n 0) (break)
               (let [(mut i) 0]
-                (loop (if (icmp-ge (load i) n) (break)
+                (loop (if (icmp-ge (load i) (cast i64 n)) (break)
                     (do (al-push! (mut bytes) (cast u8 (load (index buf (load i))))) (store! i (iadd (load i) 1)))))))))
         (close fd)
         (Some (al-slice [u8] (load bytes)))))))
