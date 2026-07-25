@@ -133,7 +133,22 @@ pub fn is_tailwind_entry(css: &str) -> bool {
 /// or to a class the app's own CSS defines — or this returns a hard error naming
 /// every unresolved token.
 pub fn compile(css: &str, candidate_classes: &BTreeSet<String>) -> Result<String, String> {
-    compile_with_theme(css, candidate_classes, None)
+    compile_impl(css, candidate_classes, None, true)
+}
+
+/// Like [`compile_with_theme`] but LENIENT: an unresolved candidate — a recognized
+/// utility root the engine hasn't implemented, OR a legacy/removed class the app
+/// still references (`bg-opacity-90`) that Tailwind itself rejects — is warned about
+/// on stderr and skipped rather than being a hard error. This matches Tailwind's own
+/// scanner, which silently ignores every non-utility token it finds in the source, so
+/// a real app (whose scanned classes inevitably include such tokens) still builds.
+/// Used for real-app builds; the conformance path stays strict via [`compile`].
+pub fn compile_with_theme_lenient(
+    css: &str,
+    candidate_classes: &BTreeSet<String>,
+    app_theme_css: Option<&str>,
+) -> Result<String, String> {
+    compile_impl(css, candidate_classes, app_theme_css, false)
 }
 
 /// [`compile`] against an app-provided theme source — the app's own installed
@@ -145,6 +160,15 @@ pub fn compile_with_theme(
     css: &str,
     candidate_classes: &BTreeSet<String>,
     app_theme_css: Option<&str>,
+) -> Result<String, String> {
+    compile_impl(css, candidate_classes, app_theme_css, true)
+}
+
+fn compile_impl(
+    css: &str,
+    candidate_classes: &BTreeSet<String>,
+    app_theme_css: Option<&str>,
+    strict: bool,
 ) -> Result<String, String> {
     // The base theme (the app's installed `tailwindcss/theme.css` if found, else the
     // embedded default) EXTENDED with any inline `@theme { … }` blocks the app's own
@@ -191,13 +215,25 @@ pub fn compile_with_theme(
             Err(Fail::Invalid) => {}
             Err(Fail::Unsupported(error)) => {
                 if utility_root_recognized(class) {
-                    errors.push(error);
+                    // strict: keep the full diagnostic (a real engine gap to fix);
+                    // lenient: just the class name for a compact skip warning.
+                    errors.push(if strict { error } else { class.clone() });
                 }
             }
         }
     }
     if !errors.is_empty() {
-        return Err(errors.join("\n"));
+        if strict {
+            return Err(errors.join("\n"));
+        }
+        // Lenient: match Tailwind's scanner — skip the unresolved candidates, but say
+        // so loudly (never silently), so a real engine gap stays visible and fixable.
+        errors.sort();
+        eprintln!(
+            "[tailwind] {} scanned class(es) not generated (skipped, as Tailwind's scanner does — some may be legacy/removed utilities the app still references): {}",
+            errors.len(),
+            errors.join(", ")
+        );
     }
 
     // 3. Determine which theme tokens the generated CSS references.
@@ -6729,6 +6765,14 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             let names = css[i + 6..i + brace].trim().to_string();
             let (body, end) = read_braced(css, i + brace)?;
             items.push(TopItem::Layer { names, body });
+            i = end;
+            continue;
+        }
+        if css[i..].starts_with("@config") {
+            // `@config '<path>';` — a legacy (v3) JS config the bundler evaluates
+            // (via node/jiti) into `@theme`/`@keyframes` tokens that are merged into
+            // the theme source; here the directive itself is just consumed.
+            let end = css[i..].find(';').map(|rel| i + rel + 1).unwrap_or(bytes.len());
             i = end;
             continue;
         }

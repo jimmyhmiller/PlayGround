@@ -1964,6 +1964,15 @@ export default function Link(props) {
   }
   return createElement("a", { href: resolved, onClick: handleClick, ...rest }, children);
 }
+
+// `useLinkStatus` (Next 15.3+/16): the pending state of an in-progress client
+// navigation started by a parent `<Link>`. This adapter's soft-nav diff-renders the
+// route synchronously via `__diffpack_navigate` and does not expose a per-link pending
+// signal, so this returns the settled state — matching the common `{ pending }`
+// destructure (a loading indicator simply never shows) rather than throwing on import.
+export function useLinkStatus() {
+  return { pending: false };
+}
 "##
 }
 

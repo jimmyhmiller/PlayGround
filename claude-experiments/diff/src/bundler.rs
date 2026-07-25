@@ -2014,8 +2014,8 @@ impl Bundler {
                     // build-emit step, off the incremental transform hot path.
                     let scan_root = tailwind_scan_root(&asset.source, source_css);
                     let candidates = self.tailwind_candidates(&scan_root, parent);
-                    let app_theme = app_tailwind_theme(&scan_root);
-                    let compiled = crate::tailwind::compile_with_theme(
+                    let app_theme = app_tailwind_theme_full(&scan_root, source_css, &asset.source);
+                    let compiled = crate::tailwind::compile_with_theme_lenient(
                         source_css,
                         &candidates,
                         app_theme.as_deref(),
@@ -2097,8 +2097,8 @@ impl Bundler {
                     let out_root = output.parent().unwrap_or_else(|| Path::new("."));
                     let scan_root = tailwind_scan_root(css_path, css);
                     let candidates = self.tailwind_candidates(&scan_root, out_root);
-                    let app_theme = app_tailwind_theme(&scan_root);
-                    stylesheet.push_str(&crate::tailwind::compile_with_theme(
+                    let app_theme = app_tailwind_theme_full(&scan_root, css, css_path);
+                    stylesheet.push_str(&crate::tailwind::compile_with_theme_lenient(
                         css,
                         &candidates,
                         app_theme.as_deref(),
@@ -3088,7 +3088,14 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                 // top of the entry, before the module-graph IIFE. It is a `??=`
                 // default (never clobbers a real value) and a harmless no-op for a
                 // non-TanStack Node bundle.
-                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n".to_string()
+                // `__dirname`/`__filename` are CommonJS globals absent in an ES module,
+                // but bundled CJS modules (e.g. Next's ncc-compiled internals doing
+                // `__nccwpck_require__.ab = __dirname + "/"`) still reference them. Define
+                // them once at the top of the Node ESM entry (from `import.meta.url`); the
+                // module-graph IIFE and every module factory close over these bindings, so
+                // an inlined CJS module resolves `__dirname` to the bundle's location
+                // instead of throwing a ReferenceError at init.
+                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nimport { fileURLToPath as __diffpackFileURLToPath } from \"node:url\";\nimport { dirname as __diffpackDirname } from \"node:path\";\nconst __filename = __diffpackFileURLToPath(import.meta.url);\nconst __dirname = __diffpackDirname(__filename);\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n".to_string()
             }
             ModuleFormat::BrowserEsm if is_main && self.config.browser_process_shim => {
                 BROWSER_GLOBALS_PRELUDE.to_string()
@@ -5253,6 +5260,69 @@ fn tailwind_scan_root(css_path: &Path, source_css: &str) -> PathBuf {
 /// it the vendored copy in `src/tailwind_theme.css` applies.
 fn app_tailwind_theme(scan_root: &Path) -> Option<String> {
     fs::read_to_string(scan_root.join("node_modules/tailwindcss/theme.css")).ok()
+}
+
+/// The full app theme fed to the Tailwind compiler: the installed `tailwindcss`
+/// default `theme.css`, EXTENDED with the `@theme`/`@keyframes` tokens derived from a
+/// legacy JS config referenced by a `@config '<path>'` directive in `css` (if any).
+/// A `@config`-defined token overrides the default (it is appended after it).
+fn app_tailwind_theme_full(scan_root: &Path, css: &str, css_path: &Path) -> Option<String> {
+    let base = app_tailwind_theme(scan_root);
+    let config = at_config_theme(css, css_path);
+    match (base, config) {
+        (Some(base), Some(cfg)) => Some(format!("{base}\n{cfg}")),
+        (base, None) => base,
+        (None, cfg) => cfg,
+    }
+}
+
+/// The path string in a `@config '<path>'` / `@config "<path>"` directive, if present.
+fn parse_at_config(css: &str) -> Option<String> {
+    let after = &css[css.find("@config")? + "@config".len()..];
+    let open = after.find(['\'', '"'])?;
+    let quote = after.as_bytes()[open] as char;
+    let inner = &after[open + 1..];
+    let close = inner.find(quote)?;
+    Some(inner[..close].to_string())
+}
+
+/// Evaluate a `@config`-referenced legacy JS Tailwind config (via node + the app's
+/// own jiti) into v4 `@theme`/`@keyframes` CSS. Returns `None` when there is no
+/// `@config`, the config file is missing, or node is unavailable — the compile then
+/// proceeds on the default theme (a `@config` on a config with only content/plugins
+/// contributes no theme tokens anyway). Never silently mis-maps: the node evaluator
+/// reports unmapped theme categories on stderr, surfaced here.
+fn at_config_theme(css: &str, css_path: &Path) -> Option<String> {
+    let rel = parse_at_config(css)?;
+    let config_path = css_path.parent()?.join(rel);
+    if !config_path.exists() {
+        eprintln!(
+            "[tailwind @config] config file not found: {} (theme tokens from it will be missing)",
+            config_path.display()
+        );
+        return None;
+    }
+    // The evaluator resolves jiti + the config's imports from the CONFIG's
+    // node_modules, so it can live in a temp file; run it from the config's dir.
+    let loader = std::env::temp_dir().join("diffpack-tailwind-config-eval.mjs");
+    if fs::write(&loader, include_str!("../scripts/tailwind-config-eval.mjs")).is_err() {
+        return None;
+    }
+    let output = std::process::Command::new("node")
+        .arg(&loader)
+        .arg(&config_path)
+        .current_dir(config_path.parent().unwrap_or_else(|| Path::new(".")))
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        eprintln!("[tailwind @config] {}", stderr.trim());
+    }
+    if !output.status.success() {
+        return None;
+    }
+    let theme = String::from_utf8_lossy(&output.stdout).to_string();
+    (!theme.trim().is_empty()).then_some(theme)
 }
 
 /// Parses the `source('...')` argument of a Tailwind v4 `@import 'tailwindcss'`
