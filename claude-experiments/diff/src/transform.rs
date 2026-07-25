@@ -194,6 +194,34 @@ pub fn transform_module_with_options(
         };
     }
 
+    // MDX/Markdown (`.mdx`/`.md`): compile to JSX first (a native source-to-source
+    // transform), then run the rest of the pipeline on the emitted JSX exactly as for a
+    // `.tsx` page. A compile error becomes this module's diagnostic (empty code), never
+    // a silent pass.
+    let mdx_compiled = if crate::mdx::is_mdx_path(path) {
+        match crate::mdx::compile(path, source) {
+            Ok(compiled) => Some(compiled.jsx),
+            Err(diagnostic) => {
+                return TransformResult {
+                    code: String::new(),
+                    diagnostics: vec![diagnostic],
+                    is_esm: true,
+                    dependencies: Vec::new(),
+                    dependency_demands: Vec::new(),
+                    flat_module: None,
+                    liveness: ModuleLiveness::default(),
+                    uses_top_level_await: false,
+                    uses_import_meta: false,
+                    uses_cjs_globals: false,
+                    workers: Vec::new(),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let source = mdx_compiled.as_deref().unwrap_or(source);
+
     // The React Server (RSC) graph specializes the module boundaries BEFORE any
     // other rewrite: a `"use client"` module is replaced by its client-reference
     // re-exports (so none of the component code reaches this graph, and the
@@ -317,9 +345,13 @@ pub fn transform_module_with_options(
 
     let transform_started = frontend_profile::start();
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    // MDX compiled to JSX: parse as TSX (`.mdx`/`.md` are not recognized by from_path).
+    let source_type = if mdx_compiled.is_some() {
+        SourceType::default().with_typescript(true).with_jsx(true)
+    } else {
+        SourceType::from_path(path).unwrap_or_default()
+    }
+    .with_module(true);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let mut diagnostics = parsed
         .diagnostics

@@ -57,8 +57,14 @@ use crate::transform::Target;
 /// entries and `next/*` shims.
 pub const ADAPTER_DIR: &str = ".diffpack-next";
 
-/// Module-file extensions the adapter recognizes for app-router convention files.
+/// Module-file extensions the adapter recognizes for app-router convention files
+/// (layout/loading/error/not-found/route/next.config).
 const MODULE_EXTS: [&str; 4] = ["tsx", "jsx", "ts", "js"];
+
+/// Extensions a `page` may use — the module set PLUS MDX/Markdown, so `page.mdx` /
+/// `page.md` is a route exactly like `page.tsx`. Only `page` is MDX-eligible; the other
+/// convention files stay on [`MODULE_EXTS`].
+const PAGE_EXTS: [&str; 6] = ["tsx", "jsx", "ts", "js", "mdx", "md"];
 
 /// Detects whether `root` is a Next.js app-router project this adapter handles: an
 /// `app/` directory containing a `page.{tsx,jsx,ts,js}`, plus a `next.config.*`
@@ -76,7 +82,7 @@ fn detect_app_router(root: &Path) -> Option<PathBuf> {
     if !app.is_dir() {
         return None;
     }
-    first_existing(&app, "page")
+    first_existing_page(&app)
 }
 
 /// Whether `root` is a Next.js app-router project this adapter handles. Public
@@ -91,10 +97,19 @@ pub fn is_app_router(root: &Path) -> bool {
 
 /// The first `<dir>/<stem>.<ext>` that exists, in `MODULE_EXTS` priority order.
 fn first_existing(dir: &Path, stem: &str) -> Option<PathBuf> {
-    MODULE_EXTS
-        .iter()
+    first_existing_ext(dir, stem, &MODULE_EXTS)
+}
+
+/// The first `<dir>/<stem>.<ext>` that exists, in the given extension priority order.
+fn first_existing_ext(dir: &Path, stem: &str, exts: &[&str]) -> Option<PathBuf> {
+    exts.iter()
         .map(|ext| dir.join(format!("{stem}.{ext}")))
         .find(|path| path.is_file())
+}
+
+/// The route `page` module (MDX-eligible: `page.{tsx,jsx,ts,js,mdx,md}`).
+fn first_existing_page(dir: &Path) -> Option<PathBuf> {
+    first_existing_ext(dir, "page", &PAGE_EXTS)
 }
 
 /// Walks `app/` (skipping the adapter's own output) for `"use client"` modules,
@@ -113,6 +128,14 @@ struct RouteMetadata {
 /// (a documented gap), never silently guessed.
 fn scan_metadata(path: &Path, source: &str) -> RouteMetadata {
     use oxc_ast::ast::{Declaration, Expression, ObjectPropertyKind, PropertyKey, Statement};
+    // MDX/Markdown page: metadata comes from `title`/`description` frontmatter.
+    if crate::mdx::is_mdx_path(path) {
+        let fm = crate::mdx::frontmatter(source);
+        return RouteMetadata {
+            title: fm.get("title").cloned(),
+            description: fm.get("description").cloned(),
+        };
+    }
     if !source.contains("metadata") {
         return RouteMetadata::default();
     }
@@ -826,7 +849,7 @@ fn discover_routes_dir(
         error: first_existing(dir, "error").map(canon),
     });
 
-    if let Some(page) = first_existing(dir, "page") {
+    if let Some(page) = first_existing_page(dir) {
         // URL segments = dir relative to app/, parsed per component.
         let rel = dir.strip_prefix(app_dir).unwrap_or(Path::new(""));
         let mut segments = Vec::new();

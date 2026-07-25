@@ -6019,7 +6019,7 @@ fn resolve_options(config: &BuildConfig) -> ResolveOptions {
     };
     ResolveOptions {
         tsconfig: Some(TsconfigDiscovery::Auto),
-        extensions: [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json"]
+        extensions: [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".mdx", ".md"]
             .into_iter()
             .map(String::from)
             .collect(),

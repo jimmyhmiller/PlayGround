@@ -1,0 +1,19 @@
+---
+title: MDX Post
+description: A post authored in MDX
+---
+
+import { Counter } from "../../Counter";
+import { increment } from "../../actions";
+
+# Hello from MDX
+
+This page is authored in **MDX** and rendered as a Server Component. Prose, a fenced
+code block, and an embedded interactive client island all compile through the same
+three-graph pipeline as a `.tsx` page.
+
+<Counter initial={3} increment={increment} />
+
+```js
+const doubled = (n) => n * 2;
+```
