@@ -49,7 +49,12 @@ function tokenize(line: string, lineNo: number, problems: string[]): Token[] {
         const ch = line[i]!;
         if (ch === "\\" && i + 1 < n) {
           const next = line[i + 1]!;
-          v += next === "n" ? "\n" : next;
+          // translate the known escapes; PRESERVE unknown ones (e.g. \d, \w)
+          // so regex patterns in `matches "…"` survive intact
+          if (next === "n") v += "\n";
+          else if (next === "t") v += "\t";
+          else if (next === '"' || next === "\\") v += next;
+          else v += "\\" + next;
           i += 2;
         } else if (ch === '"') { i++; closed = true; break; }
         else { v += ch; i++; }
@@ -140,6 +145,7 @@ class LineParser {
     const t = this.next();
     if (t?.t === "path") return t.v;
     if (t?.t === "string") return t.v;
+    if (t?.t === "var") return `$${t.v}`; // a captured value used as a path
     return this.fail(`expected a path starting with '/', got ${show(t)}`);
   }
 

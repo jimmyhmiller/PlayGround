@@ -175,17 +175,24 @@ match. The runner never picks "the first one."
 | `expect no <target>` | target absent/hidden after settlement |
 | `expect text "<t>" in <target>` | element's text contains `<t>` |
 | `expect exact text "<t>" in <target>` | element's text equals `<t>` |
-| `expect value "<v>" in <target>` | input value equals |
+| `expect matches text "<re>" in <target>` | element's text matches the regex (`/…/flags` or bare source) |
+| `expect title "<t>"` / `expect exact title …` / `expect matches title …` | browser tab title |
+| `expect value "<v>" in <target>` / `expect value matches "<re>" in <target>` | input value |
+| `expect attribute "<attr>" "<v>" of <target>` / `… matches "<re>" of …` | element attribute (href, aria-*, data-*) |
 | `expect checked <target>` / `expect unchecked <target>` | checkbox/radio state |
 | `expect enabled <target>` / `expect disabled <target>` | control enablement |
 | `expect selected "<label>" in <target>` | a `<select>`'s chosen option label |
-| `expect count <kind> <n> [in <target>]` | number of matches |
+| `expect count <kind> [>=\|<=\|>\|<] <n> [in <target>]` | number of matches (exact, or a comparison) |
 | `expect url <path>` | page url path (+query) matches |
 | `expect request <METHOD> <path-pattern> [ok\|<status>] [containing "<t>"]` | this step causes a matching request that resolves with the status (`ok` = 2xx). `containing` matches the request BODY — how you pin a GraphQL operation. Armed **before** the action. |
 | `expect ws sent "<t>" [on <path-pattern>]` / `expect ws received "<t>" [on <path-pattern>]` | a websocket frame containing `<t>` (optionally on a socket path). Armed **before** the action; settlement waits for it. |
 | `expect appear <target>` | explicit transient watcher: armed before the action, so it catches elements that appear and vanish (toasts) |
 | `expect gone <target>` | target present at act time must be gone after settlement |
-| `let <name> = text in <target>` | capture observed text into `$name` (recorded in trace) |
+| `let <name> = text in <target>` | capture element text into `$name` |
+| `let <name> = value in <target>` | capture an input's value |
+| `let <name> = attribute "<attr>" of <target>` | capture an attribute (e.g. an `href` to navigate) |
+| `let <name> = count <kind> ["name"] [in <target>]` | capture a match count |
+| `let <name> = query "<param>"` | capture a current-url query parameter (create → redirect → `:id`) |
 
 `$name` interpolates into any quoted string or path.
 

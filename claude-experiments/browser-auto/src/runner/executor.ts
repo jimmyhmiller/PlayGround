@@ -877,9 +877,12 @@ async function evaluateEffect(
 function matchString(got: string, want: string, mode: "contains" | "exact" | "matches"): { ok: boolean; error?: string } {
   if (mode === "exact") return { ok: got.trim() === want };
   if (mode === "contains") return { ok: got.includes(want) };
-  // matches: `want` is a JS regex source; invalid pattern is a flow authoring error
+  // matches: `want` is a JS regex. Accept both a bare source and a /…/flags
+  // literal (`/Today is \d{4}/i`). Invalid patterns are a flow authoring error.
   try {
-    return { ok: new RegExp(want).test(got) };
+    const lit = /^\/(.+)\/([a-z]*)$/s.exec(want);
+    const re = lit ? new RegExp(lit[1]!, lit[2]) : new RegExp(want);
+    return { ok: re.test(got) };
   } catch (e) {
     return { ok: false, error: `invalid regex ${JSON.stringify(want)}: ${e instanceof Error ? e.message : String(e)}` };
   }

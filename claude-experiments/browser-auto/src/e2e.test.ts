@@ -147,6 +147,63 @@ click button "Add to cart" in listitem "Green Widget"
   }, 60000);
 });
 
+describe("richer observation", () => {
+  function flow(src: string) {
+    return parseFlow(src, "inline.flow");
+  }
+  it("title, count comparisons, and regex text matching", async () => {
+    const { trace } = await runFlow(
+      flow(`flow "observe"
+given seed "catalog-basic"
+allow console-errors
+go /
+  expect title "bat"
+  expect count listitem >= 2 in list "product-list"
+  expect count listitem 3 in list "product-list"
+go /account
+  expect matches text "/Today is \\d{4}-\\d{2}-\\d{2}/" in testid "today"
+`),
+      deps,
+    );
+    if (trace.status !== "pass") throw new Error(renderReport(trace));
+  }, 60000);
+
+  it("captures query params, attributes, and counts — and uses them later", async () => {
+    const { trace } = await runFlow(
+      flow(`flow "capture"
+given seed "catalog-basic"
+go /?token=abc123
+  expect heading "Products"
+  let tok = query "token"
+  let cartHref = attribute "href" of link "Cart"
+  let n = count listitem in list "product-list"
+click link "Cart"
+  expect url $cartHref
+`),
+      deps,
+    );
+    if (trace.status !== "pass") throw new Error(renderReport(trace));
+    const captures = trace.steps[0]!.captures;
+    expect(captures.tok).toBe("abc123");
+    expect(captures.cartHref).toBe("/cart");
+    expect(captures.n).toBe("3");
+  }, 60000);
+
+  it("a failed regex match reports the observed value, not a bare miss", async () => {
+    const { trace } = await runFlow(
+      flow(`flow "bad regex"
+given seed "catalog-basic"
+allow console-errors
+go /account
+  expect matches text "/Today is 1999/" in testid "today"
+`),
+      { ...deps, config: { ...deps.config, stepBudgetMs: 4000, rerunsOnFailure: 1 } as typeof deps.config },
+    );
+    expect(trace.status).toBe("fail");
+    expect(renderReport(trace)).toMatch(/text is "Today is 20\d\d/);
+  }, 60000);
+});
+
 describe("atomic replay", () => {
   it("fallback replay re-runs to the target step and passes", async () => {
     await runFlowFile(BUY_FLOW, deps); // ensure a run exists
