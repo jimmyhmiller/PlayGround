@@ -171,6 +171,8 @@ function spawnWorker() {
   };
   child.on("exit", (code) => fail(`react-server worker exited (${code})`));
   child.on("error", (error) => fail(`react-server worker error: ${error}`));
+  // Resolves the RAW reply message; callers extract the fields for their op (a render
+  // reply carries `flight`, a route reply `routeResult`, a routes reply `routes`).
   worker.call = (req) =>
     new Promise((resolve, reject) => {
       const id = ++seq;
@@ -179,13 +181,7 @@ function spawnWorker() {
           reject(new Error(`react-server worker: ${msg.error}`));
           return;
         }
-        resolve({
-          flight: Buffer.from(msg.flight || "", "base64"),
-          status: msg.status || 200,
-          params: msg.params || {},
-          redirect: msg.redirect,
-          notFound: msg.notFound,
-        });
+        resolve(msg);
       });
       child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
     });
@@ -210,7 +206,7 @@ function nextWorker() {
 // a 404 (the child never exits non-zero for one). Resolves `{flight,status,params}`.
 // Render + action always route through the persistent worker pool (dev AND prod), so
 // no request pays a Node cold start; other ops fall through to a one-shot spawn.
-function runReactServer(args, stdinBody) {
+async function runReactServer(args, stdinBody) {
   const op = args[0];
   if (op === "render") {
     let reqCtx = {};
@@ -221,20 +217,28 @@ function runReactServer(args, stdinBody) {
         reqCtx = {};
       }
     }
-    return nextWorker().call({
+    const msg = await nextWorker().call({
       op: "render",
       pathname: args[1],
       manifestPath: args[2],
       reqCtx,
     });
+    return {
+      flight: Buffer.from(msg.flight || "", "base64"),
+      status: msg.status || 200,
+      params: msg.params || {},
+      redirect: msg.redirect,
+      notFound: msg.notFound,
+    };
   }
   if (op === "action") {
-    return nextWorker().call({
+    const msg = await nextWorker().call({
       op: "action",
       actionId: args[1],
       manifestPath: args[2],
       body: stdinBody != null ? String(stdinBody) : "",
     });
+    return { flight: Buffer.from(msg.flight || "", "base64"), status: msg.status || 200 };
   }
   // Unknown op falls through to a one-shot spawn (defensive; not reached today).
   return new Promise((resolve, reject) => {
@@ -294,6 +298,58 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// --- Route handlers (`route.ts` HTTP endpoints) ----------------------------------
+// The orchestrator matches a request path against the handler routes (queried once
+// from the worker at boot) and, on a match, dispatches the request to the react-server
+// worker's `route` op instead of page rendering.
+let __routeManifest = null;
+async function getRouteManifest() {
+  if (__routeManifest === null) {
+    try {
+      const msg = await nextWorker().call({ op: "routes" });
+      __routeManifest = (msg.routes || []).map((r) => ({
+        segments: r.segments,
+        methods: new Set(r.methods),
+      }));
+    } catch {
+      __routeManifest = [];
+    }
+  }
+  return __routeManifest;
+}
+// Segment matcher (mirrors the react-server entry's): returns captured params or null.
+function matchHandlerSegments(segments, parts) {
+  const params = {};
+  let i = 0;
+  for (const seg of segments) {
+    if (seg.k === "static") {
+      if (parts[i] !== seg.v) return null;
+      i += 1;
+    } else if (seg.k === "dynamic") {
+      if (i >= parts.length) return null;
+      params[seg.v] = decodeURIComponent(parts[i]);
+      i += 1;
+    } else if (seg.k === "catchall") {
+      if (i >= parts.length) return null;
+      params[seg.v] = parts.slice(i).map(decodeURIComponent);
+      i = parts.length;
+    } else if (seg.k === "optcatchall") {
+      params[seg.v] = parts.slice(i).map(decodeURIComponent);
+      i = parts.length;
+    } else {
+      return null;
+    }
+  }
+  return i === parts.length ? params : null;
+}
+async function pathIsRouteHandler(pathname) {
+  const parts = pathname.split("/").filter(Boolean);
+  for (const h of await getRouteManifest()) {
+    if (matchHandlerSegments(h.segments, parts)) return true;
+  }
+  return false;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -321,6 +377,41 @@ const server = createServer(async (req, res) => {
         res.end(readFileSync(filePath));
         return;
       }
+    }
+    // Route handlers (`route.ts`): a request whose path matches a handler is served by
+    // it (any method) via the worker's `route` op, not by page rendering.
+    if (await pathIsRouteHandler(url.pathname)) {
+      const bodyChunks = [];
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        for await (const chunk of req) bodyChunks.push(Buffer.from(chunk));
+      }
+      const bodyBuf = Buffer.concat(bodyChunks);
+      const reqCtx = {
+        url: "http://localhost" + req.url,
+        method: req.method,
+        headers: Object.entries(req.headers).map(([k, v]) => [
+          k,
+          Array.isArray(v) ? v.join(", ") : String(v),
+        ]),
+        cookie: req.headers.cookie || "",
+        body: bodyBuf.length ? bodyBuf.toString("base64") : undefined,
+        bodyIsBase64: bodyBuf.length > 0,
+      };
+      const msg = await nextWorker().call({
+        op: "route",
+        pathname: url.pathname,
+        method: req.method,
+        reqCtx,
+      });
+      const result = msg.routeResult;
+      if (result) {
+        const headers = {};
+        for (const [k, v] of result.headers || []) headers[k] = v;
+        res.writeHead(result.status || 200, headers);
+        res.end(result.body ? Buffer.from(result.body, "base64") : undefined);
+        return;
+      }
+      // No handler produced a response (unexpected): fall through to 404 below.
     }
     // Any other GET is an app-router route: the react-server render matches the
     // pathname to a route (nested-layout chain composed around its page); the SSR

@@ -47,9 +47,12 @@ describe("parseFlow", () => {
       type: "let",
       name: "price",
       from: {
-        kind: "testid",
-        name: "line-total",
-        within: { kind: "row", name: "Blue Widget", within: { kind: "table", name: "cart-items" } },
+        kind: "text",
+        target: {
+          kind: "testid",
+          name: "line-total",
+          within: { kind: "row", name: "Blue Widget", within: { kind: "table", name: "cart-items" } },
+        },
       },
     });
   });
@@ -231,7 +234,7 @@ do
       type: "click",
       target: { kind: "button", name: "Add", within: { kind: "listitem", name: "Blue Widget" } },
     });
-    expect(flow.steps[1]!.effects[0]).toEqual({ type: "text", value: "$19.99", exact: false, target: { kind: "testid", name: "total" } });
+    expect(flow.steps[1]!.effects[0]).toEqual({ type: "text", value: "$19.99", mode: "contains", target: { kind: "testid", name: "total" } });
     expect(flow.steps[1]!.iteration).toContain('$item="Blue Widget"');
     expect(flow.steps[2]!.action).toMatchObject({ target: { within: { name: "Red Widget" } } });
     expect(flow.steps[2]!.iteration).toContain("iteration 2/2");

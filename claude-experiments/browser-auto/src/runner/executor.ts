@@ -715,16 +715,32 @@ async function evaluateEffect(
         const scope = eff.target ? buildLocator(page, eff.target, captures, false, pins).first() : page.locator("body");
         await scope.waitFor({ state: "visible", timeout: remaining() }).catch(() => {});
         const got = (await scope.innerText({ timeout: remaining() }).catch(() => null)) ?? "(element not found)";
-        const pass = eff.exact ? got.trim() === want : got.includes(want);
-        return pass
+        const m = matchString(got, want, eff.mode);
+        return m.ok
           ? v(true)
-          : v(false, `${eff.target ? formatTarget(eff.target) : "page"} text is ${JSON.stringify(truncate(got, 200))}`);
+          : v(false, m.error ?? `${eff.target ? formatTarget(eff.target) : "page"} text is ${JSON.stringify(truncate(got, 200))}`);
       }
       case "value": {
         const want = interpolate(eff.value, captures);
         const loc = buildLocator(page, eff.target, captures, false, pins).first();
         const got = await loc.inputValue({ timeout: remaining() }).catch(() => null);
-        return got === want ? v(true) : v(false, `value is ${got === null ? "(no input found)" : JSON.stringify(got)}`);
+        if (got === null) return v(false, "(no input found)");
+        const m = matchString(got, want, eff.mode);
+        return m.ok ? v(true) : v(false, m.error ?? `value is ${JSON.stringify(got)}`);
+      }
+      case "title": {
+        const want = interpolate(eff.value, captures);
+        const got = await page.title().catch(() => "");
+        const m = matchString(got, want, eff.mode);
+        return m.ok ? v(true) : v(false, m.error ?? `title is ${JSON.stringify(got)}`);
+      }
+      case "attribute": {
+        const want = interpolate(eff.value, captures);
+        const loc = buildLocator(page, eff.target, captures, false, pins).first();
+        const got = await loc.getAttribute(eff.attr, { timeout: remaining() }).catch(() => null);
+        if (got === null) return v(false, `${formatTarget(eff.target)} has no "${eff.attr}" attribute`);
+        const m = matchString(got, want, eff.mode);
+        return m.ok ? v(true) : v(false, m.error ?? `"${eff.attr}" is ${JSON.stringify(got)}`);
       }
       case "enabled":
       case "disabled": {
@@ -756,7 +772,13 @@ async function evaluateEffect(
         if (eff.within) target.within = eff.within;
         const loc = buildLocator(page, target, captures, false, pins);
         const got = await loc.count();
-        return got === eff.n ? v(true) : v(false, `found ${got}`);
+        const ok =
+          eff.op === ">=" ? got >= eff.n :
+          eff.op === "<=" ? got <= eff.n :
+          eff.op === ">" ? got > eff.n :
+          eff.op === "<" ? got < eff.n :
+          got === eff.n;
+        return ok ? v(true) : v(false, `found ${got} (needed ${eff.op === "=" ? "" : eff.op}${eff.n})`);
       }
       case "url": {
         const want = interpolate(eff.path, captures);
@@ -821,14 +843,45 @@ async function evaluateEffect(
         return v(true);
       }
       case "let": {
-        const loc = await resolveUnique(page, eff.from, captures, remaining(), pins);
-        const text = (await loc.innerText()).trim();
-        captures.set(eff.name, text);
-        return v(true, `captured $${eff.name} = ${JSON.stringify(text)}`);
+        const src = eff.from;
+        let captured: string;
+        if (src.kind === "query") {
+          const u = new URL(page.url());
+          const q = u.searchParams.get(interpolate(src.param, captures));
+          if (q === null) return v(false, `no query parameter "${src.param}" in ${page.url()}`);
+          captured = q;
+        } else if (src.kind === "count") {
+          const target: Target = src.name !== undefined ? { kind: src.countKind, name: src.name } : { kind: src.countKind };
+          if (src.within) target.within = src.within;
+          captured = String(await buildLocator(page, target, captures, false, pins).count());
+        } else {
+          const loc = await resolveUnique(page, src.target, captures, remaining(), pins);
+          if (src.kind === "text") captured = (await loc.innerText()).trim();
+          else if (src.kind === "value") captured = await loc.inputValue();
+          else {
+            const a = await loc.getAttribute(interpolate(src.attr, captures));
+            if (a === null) return v(false, `element has no "${src.attr}" attribute`);
+            captured = a;
+          }
+        }
+        captures.set(eff.name, captured);
+        return v(true, `captured $${eff.name} = ${JSON.stringify(captured)}`);
       }
     }
   } catch (e) {
     return v(false, e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Compare an observed string against a wanted value in one of three modes. */
+function matchString(got: string, want: string, mode: "contains" | "exact" | "matches"): { ok: boolean; error?: string } {
+  if (mode === "exact") return { ok: got.trim() === want };
+  if (mode === "contains") return { ok: got.includes(want) };
+  // matches: `want` is a JS regex source; invalid pattern is a flow authoring error
+  try {
+    return { ok: new RegExp(want).test(got) };
+  } catch (e) {
+    return { ok: false, error: `invalid regex ${JSON.stringify(want)}: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 

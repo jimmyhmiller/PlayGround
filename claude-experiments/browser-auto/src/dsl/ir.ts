@@ -54,12 +54,16 @@ export type Effect =
   /** armed BEFORE the action — catches transients (toasts) */
   | { type: "appear"; target: Target }
   | { type: "gone"; target: Target }
-  | { type: "text"; target?: Target; value: string; exact: boolean }
-  | { type: "value"; target: Target; value: string }
+  | { type: "text"; target?: Target; value: string; mode: MatchMode }
+  | { type: "value"; target: Target; value: string; mode: MatchMode }
   | { type: "checked" | "unchecked"; target: Target }
   | { type: "enabled" | "disabled"; target: Target }
   | { type: "selected"; target: Target; value: string }
-  | { type: "count"; kind: TargetKind; name?: string; n: number; within?: Target }
+  /** browser tab title (user-observable) */
+  | { type: "title"; value: string; mode: MatchMode }
+  /** an element's attribute (href, aria-*, data-*, …) */
+  | { type: "attribute"; attr: string; target: Target; value: string; mode: MatchMode }
+  | { type: "count"; kind: TargetKind; name?: string; n: number; op: CountOp; within?: Target }
   | { type: "url"; path: string }
   /** bodyContains: substring of the request body — how you pin a GraphQL
    * operation (`containing "mutation CreateInvoice"`) or a payload field */
@@ -72,7 +76,20 @@ export type Effect =
   | { type: "download"; name: string }
   /** websocket frame matcher, armed before the action */
   | { type: "ws"; dir: "sent" | "received"; text: string; pathPattern?: string }
-  | { type: "let"; name: string; from: Target };
+  | { type: "let"; name: string; from: CaptureSource };
+
+/** how a string observation is compared: substring, equality, or /regex/ */
+export type MatchMode = "contains" | "exact" | "matches";
+export type CountOp = "=" | ">=" | "<=" | ">" | "<";
+
+/** what `let name = …` captures into a $variable */
+export type CaptureSource =
+  | { kind: "text"; target: Target }
+  | { kind: "value"; target: Target }
+  | { kind: "attribute"; attr: string; target: Target }
+  | { kind: "count"; countKind: TargetKind; name?: string; within?: Target }
+  /** a query-string parameter of the current url (create → redirect → :id) */
+  | { kind: "query"; param: string };
 
 export type Given =
   | { type: "seed"; name: string }
@@ -136,14 +153,16 @@ export function formatEffect(e: Effect): string {
     case "absent": return `expect no ${formatTarget(e.target)}`;
     case "appear": return `expect appear ${formatTarget(e.target)}`;
     case "gone": return `expect gone ${formatTarget(e.target)}`;
-    case "text": return `expect ${e.exact ? "exact " : ""}text "${e.value}"${e.target ? ` in ${formatTarget(e.target)}` : ""}`;
-    case "value": return `expect value "${e.value}" in ${formatTarget(e.target)}`;
+    case "text": return `expect ${matchWord(e.mode)}text "${e.value}"${e.target ? ` in ${formatTarget(e.target)}` : ""}`;
+    case "value": return `expect value ${e.mode === "matches" ? "matches " : ""}"${e.value}" in ${formatTarget(e.target)}`;
+    case "title": return `expect ${matchWord(e.mode)}title "${e.value}"`;
+    case "attribute": return `expect attribute "${e.attr}" ${e.mode === "matches" ? "matches " : ""}"${e.value}" of ${formatTarget(e.target)}`;
     case "checked": return `expect checked ${formatTarget(e.target)}`;
     case "unchecked": return `expect unchecked ${formatTarget(e.target)}`;
     case "enabled": return `expect enabled ${formatTarget(e.target)}`;
     case "disabled": return `expect disabled ${formatTarget(e.target)}`;
     case "selected": return `expect selected "${e.value}" in ${formatTarget(e.target)}`;
-    case "count": return `expect count ${e.kind}${e.name ? ` "${e.name}"` : ""} ${e.n}${e.within ? ` in ${formatTarget(e.within)}` : ""}`;
+    case "count": return `expect count ${e.kind}${e.name ? ` "${e.name}"` : ""} ${e.op === "=" ? "" : e.op + " "}${e.n}${e.within ? ` in ${formatTarget(e.within)}` : ""}`;
     case "url": return `expect url ${e.path}`;
     case "request":
       return `expect request ${e.method} ${e.pathPattern} ${e.status}${e.bodyContains !== undefined ? ` containing "${e.bodyContains}"` : ""}`;
@@ -155,6 +174,20 @@ export function formatEffect(e: Effect): string {
       return `expect dialog "${e.message}" ${e.response}${e.text !== undefined ? ` "${e.text}"` : ""}`;
     case "download":
       return `expect download "${e.name}"`;
-    case "let": return `let ${e.name} = text in ${formatTarget(e.from)}`;
+    case "let": return `let ${e.name} = ${formatCapture(e.from)}`;
+  }
+}
+
+function matchWord(mode: MatchMode): string {
+  return mode === "exact" ? "exact " : mode === "matches" ? "matches " : "";
+}
+
+function formatCapture(c: CaptureSource): string {
+  switch (c.kind) {
+    case "text": return `text in ${formatTarget(c.target)}`;
+    case "value": return `value in ${formatTarget(c.target)}`;
+    case "attribute": return `attribute "${c.attr}" of ${formatTarget(c.target)}`;
+    case "count": return `count ${c.countKind}${c.name ? ` "${c.name}"` : ""}${c.within ? ` in ${formatTarget(c.within)}` : ""}`;
+    case "query": return `query "${c.param}"`;
   }
 }

@@ -239,7 +239,12 @@ function nearMissSuggestions(step: StepTrace): string[] {
       (v.observed.startsWith("no visible") || v.observed.includes("(element not found)") || v.observed.includes("no visible match"));
     if (!missing) continue;
     const eff = v.effect as Effect;
-    const target = "target" in eff && eff.target ? eff.target : eff.type === "let" ? eff.from : undefined;
+    const target =
+      "target" in eff && eff.target
+        ? eff.target
+        : eff.type === "let" && "target" in eff.from
+          ? eff.from.target
+          : undefined;
     if (target) wanted.push(target);
   }
 

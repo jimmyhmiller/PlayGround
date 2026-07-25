@@ -50,14 +50,22 @@ const action: fc.Arbitrary<Action> = fc.oneof(
 // (this very property discovered the collision; see the note in ir.ts)
 const visibleTarget = target.filter((t) => t.kind !== "text");
 
+const mode = fc.constantFrom("contains", "exact", "matches") as fc.Arbitrary<"contains" | "exact" | "matches">;
+const valueMode = fc.constantFrom("exact", "matches") as fc.Arbitrary<"exact" | "matches">;
+const countOp = fc.constantFrom("=", ">=", "<=", ">", "<") as fc.Arbitrary<"=" | ">=" | "<=" | ">" | "<">;
+
 const effect: fc.Arbitrary<Effect> = fc.oneof(
   visibleTarget.map((t): Effect => ({ type: "visible", target: t })),
   target.map((t): Effect => ({ type: "absent", target: t })),
-  fc.tuple(target, name, fc.boolean()).map(([t, v, exact]): Effect => ({ type: "text", target: t, value: v, exact })),
-  fc.tuple(target, name).map(([t, v]): Effect => ({ type: "value", target: t, value: v })),
+  fc.tuple(target, name, mode).map(([t, v, m]): Effect => ({ type: "text", target: t, value: v, mode: m })),
+  fc.tuple(name, mode).map(([v, m]): Effect => ({ type: "text", value: v, mode: m })),
+  fc.tuple(target, name, valueMode).map(([t, v, m]): Effect => ({ type: "value", target: t, value: v, mode: m })),
+  fc.tuple(name, mode).map(([v, m]): Effect => ({ type: "title", value: v, mode: m })),
+  fc.tuple(name, target, name, valueMode).map(([attr, t, v, m]): Effect => ({ type: "attribute", attr, target: t, value: v, mode: m })),
   target.map((t): Effect => ({ type: "checked", target: t })),
   target.map((t): Effect => ({ type: "enabled", target: t })),
   fc.tuple(target, name).map(([t, v]): Effect => ({ type: "selected", target: t, value: v })),
+  fc.tuple(kind, fc.integer({ min: 0, max: 99 }), countOp).map(([k, nn, op]): Effect => ({ type: "count", kind: k, n: nn, op })),
   path.map((p): Effect => ({ type: "url", path: p })),
   fc
     .tuple(

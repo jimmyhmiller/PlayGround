@@ -634,6 +634,8 @@ struct Discovered {
     root_layout: Option<PathBuf>,
     root_metadata: RouteMetadata,
     app_not_found: Option<PathBuf>,
+    /// `route.*` HTTP endpoints (`app/api/**/route.ts`), most-specific first.
+    handlers: Vec<RouteHandler>,
 }
 
 fn scan_metadata_file(path: &Path) -> RouteMetadata {
@@ -648,6 +650,114 @@ fn scan_metadata_file(path: &Path) -> RouteMetadata {
 /// `not-found`. Parallel (`@slot`) and intercepting (`(.)`) routes are still skipped
 /// (documented gap; never mis-served). Routes are sorted most-specific first so a
 /// literal segment beats a dynamic one at match time.
+/// The HTTP methods a route handler (`route.{ts,js}`) may export.
+const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// A Next app-router ROUTE HANDLER: a `route.{ts,tsx,js,jsx}` file whose exported
+/// HTTP-method functions serve `<dir>` as an HTTP endpoint (e.g. `app/api/users/
+/// route.ts` -> `/api/users`), instead of rendering a React page.
+#[derive(Debug, Clone)]
+struct RouteHandler {
+    /// The matched URL path (`/api/users/[id]`).
+    url_path: String,
+    segments: Vec<Seg>,
+    /// The handler module (absolute, canonical).
+    file: PathBuf,
+    /// The HTTP methods it exports, in canonical order.
+    methods: Vec<String>,
+}
+
+/// Whether `source` has a top-level export named `name` (a `function`/`const`/`let`/
+/// `var` declaration or a re-export `{ name }` / `{ x as name }`) — used to detect
+/// which HTTP methods a `route.*` file implements.
+fn exports_symbol(source: &str, name: &str) -> bool {
+    for form in [
+        format!("export async function {name}"),
+        format!("export function {name}"),
+        format!("export const {name}"),
+        format!("export let {name}"),
+        format!("export var {name}"),
+        format!("export {{ {name}"),
+        format!("as {name} }}"),
+        format!("as {name},"),
+    ] {
+        if source.contains(&form) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Discover every `route.*` HTTP endpoint under `app/`, most-specific first (same
+/// specificity order as page routes).
+fn discover_route_handlers(app_dir: &Path) -> Result<Vec<RouteHandler>, String> {
+    let mut handlers = Vec::new();
+    discover_route_handlers_dir(app_dir, app_dir, &mut handlers)?;
+    handlers.sort_by(|a, b| {
+        let count = |r: &RouteHandler, f: fn(&Seg) -> bool| r.segments.iter().filter(|s| f(s)).count();
+        let ca = count(a, |s| matches!(s, Seg::CatchAll(_) | Seg::OptionalCatchAll(_)));
+        let cb = count(b, |s| matches!(s, Seg::CatchAll(_) | Seg::OptionalCatchAll(_)));
+        let da = count(a, |s| matches!(s, Seg::Dynamic(_)));
+        let db = count(b, |s| matches!(s, Seg::Dynamic(_)));
+        ca.cmp(&cb)
+            .then(da.cmp(&db))
+            .then(b.segments.len().cmp(&a.segments.len()))
+            .then(a.url_path.cmp(&b.url_path))
+    });
+    Ok(handlers)
+}
+
+fn discover_route_handlers_dir(
+    app_dir: &Path,
+    dir: &Path,
+    out: &mut Vec<RouteHandler>,
+) -> Result<(), String> {
+    if let Some(route_file) = first_existing(dir, "route") {
+        let rel = dir.strip_prefix(app_dir).unwrap_or(Path::new(""));
+        let mut segments = Vec::new();
+        let mut skip = false;
+        for comp in rel.components().filter_map(|c| c.as_os_str().to_str()) {
+            match parse_segment(comp) {
+                SegParse::Seg(seg) => segments.push(seg),
+                SegParse::Group => {}
+                SegParse::Skip => {
+                    skip = true;
+                    break;
+                }
+            }
+        }
+        if !skip {
+            let file = route_file.canonicalize().unwrap_or(route_file.clone());
+            let source = std::fs::read_to_string(&file).unwrap_or_default();
+            let methods: Vec<String> = HTTP_METHODS
+                .iter()
+                .filter(|m| exports_symbol(&source, m))
+                .map(|m| m.to_string())
+                .collect();
+            if !methods.is_empty() {
+                out.push(RouteHandler {
+                    url_path: segments_display(&segments),
+                    segments,
+                    file,
+                    methods,
+                });
+            }
+        }
+    }
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(_) => return Ok(()),
+    };
+    for child in read.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        let name = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        discover_route_handlers_dir(app_dir, &child, out)?;
+    }
+    Ok(())
+}
+
 fn discover_routes(app_dir: &Path, root_layout: Option<&Path>) -> Result<Discovered, String> {
     let mut routes = Vec::new();
     discover_routes_dir(app_dir, app_dir, root_layout, &mut Vec::new(), &mut routes)?;
@@ -670,6 +780,7 @@ fn discover_routes(app_dir: &Path, root_layout: Option<&Path>) -> Result<Discove
         root_layout: root_layout.map(|l| l.to_path_buf()),
         root_metadata,
         app_not_found: first_existing(app_dir, "not-found").map(|p| p.canonicalize().unwrap_or(p)),
+        handlers: discover_route_handlers(app_dir)?,
     })
 }
 
@@ -1298,6 +1409,34 @@ fn rsc_entry_module(
         ));
     }
 
+    // Route handlers (`route.ts` HTTP endpoints): namespace-import each file (so every
+    // exported method is reachable) and build the ROUTE_HANDLERS match table.
+    let mut handler_namespaces: Vec<String> = Vec::new();
+    let mut handler_entries = String::new();
+    for handler in &disc.handlers {
+        let key = handler.file.to_string_lossy().into_owned();
+        let hidx = handler_namespaces.iter().position(|m| m == &key).unwrap_or_else(|| {
+            handler_namespaces.push(key);
+            handler_namespaces.len() - 1
+        });
+        let methods_js = handler
+            .methods
+            .iter()
+            .map(|m| format!("{m}: H{hidx}.{m}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        handler_entries.push_str(&format!(
+            "  {{ path: {}, segments: {}, methods: {{ {methods_js} }} }},\n",
+            js_str(&handler.url_path),
+            segments_js(&handler.segments),
+        ));
+    }
+    let handler_imports: String = handler_namespaces
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("import * as H{i} from {};\n", js_str(s)))
+        .collect();
+
     let root_layout_id = opt_id(&mut modules, &disc.root_layout);
     let app_not_found_id = opt_id(&mut modules, &disc.app_not_found);
     let root_title = disc.root_metadata.title.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
@@ -1352,9 +1491,13 @@ import {{ createElement, Fragment, Suspense }} from "react";
 import {{ readFileSync, writeSync, statSync }} from "node:fs";
 import {{ fileURLToPath }} from "node:url";
 import {{ handleServerAction }} from "#diffpack-rsc-action-handler";
-{request_context_import}{imports}{ns_imports}
+{request_context_import}{imports}{ns_imports}{handler_imports}
 {font_const}const ROUTES = [
 {route_entries}];
+// Route handlers (`route.ts` HTTP endpoints): each entry's `methods` maps an HTTP
+// method to its exported handler function; `handleRoute` matches a request path here.
+const ROUTE_HANDLERS = [
+{handler_entries}];
 // Ssg routes (a dynamic segment with generateStaticParams) → their module namespace,
 // so the `staticparams` op can enumerate concrete param sets at build time.
 const STATIC_PARAM_ROUTES = {{
@@ -1566,6 +1709,61 @@ export async function staticParams(routePath) {{
   return combos;
 }}
 
+// Dispatch a ROUTE HANDLER (`route.ts` HTTP endpoint). Matches `pathname` against the
+// ROUTE_HANDLERS table, invokes the exported method function with a real `Request` and
+// `{{ params }}` (inside the request store so cookies()/headers() work), and returns
+// the Response serialized as `{{ status, headers, body(base64) }}`. Returns `null` when
+// no handler path matches (the orchestrator then falls back to page rendering), or a
+// 405 when the path matches but the method is not implemented.
+export async function handleRoute(pathname, method, reqCtx) {{
+  const parts = pathname.split("/").filter(Boolean);
+  for (const entry of ROUTE_HANDLERS) {{
+    const params = matchSegments(entry.segments, parts);
+    if (!params) continue;
+    const fn = entry.methods[method] || (method === "HEAD" ? entry.methods.GET : undefined);
+    if (typeof fn !== "function") {{
+      return {{ status: 405, headers: [["allow", Object.keys(entry.methods).join(", ")]], body: "" }};
+    }}
+    const url = reqCtx.url || ("http://localhost" + pathname);
+    const bodyBytes =
+      method === "GET" || method === "HEAD" || reqCtx.body == null
+        ? undefined
+        : reqCtx.bodyIsBase64
+          ? Buffer.from(reqCtx.body, "base64")
+          : reqCtx.body;
+    const request = new Request(url, {{
+      method,
+      headers: new Headers(reqCtx.headers || []),
+      body: bodyBytes,
+    }});
+    const store = {{
+      url: new URL(url, "http://localhost"),
+      headers: new Headers(reqCtx.headers || []),
+      cookieHeader: reqCtx.cookie || "",
+      params,
+    }};
+    const res = await requestAls.run(store, () => fn(request, {{ params: Promise.resolve(params) }}));
+    if (!(res instanceof Response)) {{
+      return {{ status: 200, headers: [], body: "" }};
+    }}
+    const buf = Buffer.from(await res.arrayBuffer());
+    return {{
+      status: res.status,
+      headers: [...res.headers],
+      body: buf.toString("base64"),
+      bodyIsBase64: true,
+    }};
+  }}
+  return null;
+}}
+
+// The route-handler routes (segment patterns + methods) — queried once at boot by the
+// orchestrator so it can match locally and dispatch handler requests without a
+// per-page-request round-trip.
+export function routeManifest() {{
+  return ROUTE_HANDLERS.map((entry) => ({{ segments: entry.segments, methods: Object.keys(entry.methods) }}));
+}}
+
 // The persistent DEV worker (`serve` op). Instead of the orchestrator spawning a
 // fresh Node child per request (the cold-start cost dominates a server-component
 // HMR edit), it spawns ONE `serve` worker that stays warm and answers requests over
@@ -1595,10 +1793,12 @@ async function serveLoop() {{
       const ns = m.default || m;
       const renderRequest = ns.renderRequest || m.renderRequest;
       const runAction = ns.runAction || m.runAction;
+      const handleRoute = ns.handleRoute || m.handleRoute;
+      const routeManifest = ns.routeManifest || m.routeManifest;
       if (typeof renderRequest !== "function" || typeof runAction !== "function") {{
         throw new Error("rsc-entry serve: re-imported bundle does not export renderRequest/runAction");
       }}
-      cached = {{ mtime, mod: {{ renderRequest, runAction }} }};
+      cached = {{ mtime, mod: {{ renderRequest, runAction, handleRoute, routeManifest }} }};
     }}
     return cached.mod;
   }}
@@ -1630,6 +1830,13 @@ async function serveLoop() {{
         }} else if (req.op === "action") {{
           const flight = await mod.runAction(req.actionId, manifest(req.manifestPath), req.body || "");
           reply({{ id: req.id, flight: Buffer.from(flight).toString("base64"), status: 200 }});
+        }} else if (req.op === "route") {{
+          const r = mod.handleRoute
+            ? await mod.handleRoute(req.pathname || "/", req.method || "GET", req.reqCtx || {{}})
+            : null;
+          reply({{ id: req.id, routeResult: r }});
+        }} else if (req.op === "routes") {{
+          reply({{ id: req.id, routes: mod.routeManifest ? mod.routeManifest() : [] }});
         }} else {{
           reply({{ id: req.id, error: `unknown worker op ${{JSON.stringify(req.op)}}` }});
         }}

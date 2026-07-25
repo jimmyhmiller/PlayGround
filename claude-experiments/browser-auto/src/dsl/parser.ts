@@ -58,6 +58,13 @@ function tokenize(line: string, lineNo: number, problems: string[]): Token[] {
       tokens.push({ t: "string", v });
       continue;
     }
+    if (c === ">" || c === "<") {
+      const two = line.slice(i, i + 2);
+      const op = two === ">=" || two === "<=" ? two : c;
+      tokens.push({ t: "word", v: op });
+      i += op.length;
+      continue;
+    }
     if (c === "=") { tokens.push({ t: "eq" }); i++; continue; }
     if (c === "$") {
       const m = /^\$([A-Za-z_][\w-]*)/.exec(line.slice(i));
@@ -362,31 +369,51 @@ function parseEffect(p: LineParser): Effect | null {
     if (!target) return null;
     return p.expectEnd("expect selected") ? { type: "selected", target, value } : null;
   }
-  if (first?.t === "word" && (first.v === "text" || first.v === "exact")) {
-    let exact = false;
-    if (first.v === "exact") {
-      p.next();
-      if (p.expectWord("text") === null) return null;
-      exact = true;
-    } else {
+  // text / exact text / matches text / title / exact title / matches title
+  if (
+    first?.t === "word" &&
+    (first.v === "text" || first.v === "title" || ((first.v === "exact" || first.v === "matches") && p.tokens[p.pos + 1]?.t === "word" && ["text", "title"].includes((p.tokens[p.pos + 1] as { v: string }).v)))
+  ) {
+    let mode: "contains" | "exact" | "matches" = "contains";
+    if (first.v === "exact" || first.v === "matches") {
+      mode = first.v;
       p.next();
     }
-    const value = p.expectString("the expected text");
+    const kw = p.next(); // text | title
+    const value = p.expectString(`the expected ${(kw as { v: string }).v}`);
     if (value === null) return null;
-    if (p.atEnd()) return { type: "text", value, exact };
+    if ((kw as { v: string }).v === "title") {
+      return p.expectEnd("expect title") ? { type: "title", value, mode } : null;
+    }
+    if (p.atEnd()) return { type: "text", value, mode };
     if (p.expectWord("in") === null) return null;
     const target = p.parseTarget();
     if (!target) return null;
-    return p.expectEnd("expect text") ? { type: "text", target, value, exact } : null;
+    return p.expectEnd("expect text") ? { type: "text", target, value, mode } : null;
   }
   if (first?.t === "word" && first.v === "value") {
     p.next();
+    let mode: "contains" | "exact" | "matches" = "exact";
+    if (p.peek()?.t === "word" && (p.peek() as { v: string }).v === "matches") { p.next(); mode = "matches"; }
     const value = p.expectString("the expected value");
     if (value === null) return null;
     if (p.expectWord("in") === null) return null;
     const target = p.parseTarget();
     if (!target) return null;
-    return p.expectEnd("expect value") ? { type: "value", target, value } : null;
+    return p.expectEnd("expect value") ? { type: "value", target, value, mode } : null;
+  }
+  if (first?.t === "word" && first.v === "attribute") {
+    p.next();
+    const attr = p.expectString("the attribute name (e.g. \"href\")");
+    if (attr === null) return null;
+    let mode: "contains" | "exact" | "matches" = "exact";
+    if (p.peek()?.t === "word" && (p.peek() as { v: string }).v === "matches") { p.next(); mode = "matches"; }
+    const value = p.expectString("the expected attribute value");
+    if (value === null) return null;
+    if (p.expectWord("of") === null) return null;
+    const target = p.parseTarget();
+    if (!target) return null;
+    return p.expectEnd("expect attribute") ? { type: "attribute", attr, target, value, mode } : null;
   }
   if (first?.t === "word" && first.v === "count") {
     p.next();
@@ -396,8 +423,15 @@ function parseEffect(p: LineParser): Effect | null {
     }
     let name: string | undefined;
     if (p.peek()?.t === "string") name = (p.next() as { v: string }).v;
+    // optional comparison operator before the number: >= <= > < (default =)
+    let op: "=" | ">=" | "<=" | ">" | "<" = "=";
+    const opTok = p.peek();
+    if (opTok?.t === "word" && [">=", "<=", ">", "<", "="].includes(opTok.v)) {
+      op = opTok.v as typeof op;
+      p.next();
+    }
     const nTok = p.next();
-    if (nTok?.t !== "number") return p.fail(`expected a number after 'count ${kindTok.v}', got ${show(nTok)}`);
+    if (nTok?.t !== "number") return p.fail(`expected a number${op === "=" ? " or comparison (>=, <=)" : ""} after 'count ${kindTok.v}', got ${show(nTok)}`);
     let within: Target | undefined;
     if (!p.atEnd()) {
       if (p.expectWord("in") === null) return null;
@@ -405,7 +439,7 @@ function parseEffect(p: LineParser): Effect | null {
       if (!within) return null;
       if (!p.expectEnd("expect count")) return null;
     }
-    const eff: Effect = { type: "count", kind: kindTok.v as TargetKind, n: nTok.v };
+    const eff: Effect = { type: "count", kind: kindTok.v as TargetKind, n: nTok.v, op };
     if (name !== undefined) eff.name = name;
     if (within !== undefined) eff.within = within;
     return eff;
@@ -508,10 +542,44 @@ function parseLet(p: LineParser): Effect | null {
   if (nameTok?.t !== "word") return p.fail(`expected a variable name after 'let', got ${show(nameTok)}`);
   const eq = p.next();
   if (eq?.t !== "eq") return p.fail(`expected '=' after 'let ${nameTok.v}'`);
-  if (p.expectWord("text") === null) return null;
-  if (p.expectWord("in") === null) return null;
-  const from = p.parseTarget();
-  if (!from) return null;
+  const kind = p.expectWord("text", "value", "attribute", "count", "query");
+  if (kind === null) return null;
+
+  if (kind === "text" || kind === "value") {
+    if (p.expectWord("in") === null) return null;
+    const target = p.parseTarget();
+    if (!target) return null;
+    return p.expectEnd("let") ? { type: "let", name: nameTok.v, from: { kind, target } } : null;
+  }
+  if (kind === "attribute") {
+    const attr = p.expectString("the attribute name");
+    if (attr === null) return null;
+    if (p.expectWord("of") === null) return null;
+    const target = p.parseTarget();
+    if (!target) return null;
+    return p.expectEnd("let") ? { type: "let", name: nameTok.v, from: { kind, attr, target } } : null;
+  }
+  if (kind === "query") {
+    const param = p.expectString("the query parameter name");
+    if (param === null) return null;
+    return p.expectEnd("let") ? { type: "let", name: nameTok.v, from: { kind, param } } : null;
+  }
+  // count
+  const kindTok = p.next();
+  if (kindTok?.t !== "word" || !ALL_KINDS.includes(kindTok.v)) {
+    return p.fail(`expected a target kind after 'count', got ${show(kindTok)}`);
+  }
+  let name: string | undefined;
+  if (p.peek()?.t === "string") name = (p.next() as { v: string }).v;
+  let within: Target | undefined;
+  if (!p.atEnd()) {
+    if (p.expectWord("in") === null) return null;
+    within = p.parseTarget() ?? undefined;
+    if (!within) return null;
+  }
+  const from: import("./ir.js").CaptureSource = { kind: "count", countKind: kindTok.v as TargetKind };
+  if (name !== undefined) from.name = name;
+  if (within !== undefined) from.within = within;
   return p.expectEnd("let") ? { type: "let", name: nameTok.v, from } : null;
 }
 
