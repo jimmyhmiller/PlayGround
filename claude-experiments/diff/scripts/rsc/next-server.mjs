@@ -298,6 +298,71 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// --- next.config redirects / rewrites / headers ----------------------------------
+// Rules evaluated from `next.config.*` at build time (next-config-manifest.json).
+// Compiled once here; applied per request after middleware, before route/render.
+function compilePattern(source) {
+  const keys = [];
+  let re = "^";
+  for (const part of source.split("/")) {
+    if (part === "") continue;
+    re += "/";
+    const m = part.match(/^:([A-Za-z0-9_]+)([*+])?$/);
+    if (m) {
+      keys.push(m[1]);
+      re += m[2] ? "(.*)" : "([^/]+)";
+    } else {
+      re += part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  re += "/?$";
+  return { re: new RegExp(re), keys };
+}
+function matchCompiled(compiled, pathname) {
+  const m = compiled.re.exec(pathname);
+  if (!m) return null;
+  const params = {};
+  compiled.keys.forEach((k, i) => (params[k] = m[i + 1] || ""));
+  return params;
+}
+function substitutePattern(dest, params) {
+  return dest.replace(/:([A-Za-z0-9_]+)[*+]?/g, (_, k) => (params[k] != null ? params[k] : ""));
+}
+const nextConfig = (() => {
+  const p = join(outputDir, "next-config-manifest.json");
+  const cfg = existsSync(p)
+    ? JSON.parse(readFileSync(p, "utf8"))
+    : { redirects: [], rewrites: [], headers: [] };
+  for (const list of ["redirects", "rewrites", "headers"]) {
+    for (const rule of cfg[list] || []) rule.__compiled = compilePattern(rule.source || "");
+  }
+  return cfg;
+})();
+
+// Apply next.config redirects (short-circuit) + rewrites (mutate url) and COLLECT
+// matching response headers. Returns { redirect } to short-circuit, or { headers }.
+function applyNextConfig(url) {
+  for (const r of nextConfig.redirects) {
+    const params = matchCompiled(r.__compiled, url.pathname);
+    if (params) {
+      return { redirect: { status: r.permanent ? 308 : r.statusCode || 307, location: substitutePattern(r.destination, params) } };
+    }
+  }
+  for (const r of nextConfig.rewrites) {
+    const params = matchCompiled(r.__compiled, url.pathname);
+    if (params) {
+      url.pathname = substitutePattern(r.destination, params);
+      break;
+    }
+  }
+  const headers = [];
+  for (const h of nextConfig.headers) {
+    const params = matchCompiled(h.__compiled, url.pathname);
+    if (params) for (const kv of h.headers || []) headers.push([kv.key, kv.value]);
+  }
+  return { headers };
+}
+
 // --- Route handlers (`route.ts` HTTP endpoints) ----------------------------------
 // The orchestrator matches a request path against the handler routes (queried once
 // from the worker at boot) and, on a match, dispatches the request to the react-server
@@ -458,6 +523,19 @@ const server = createServer(async (req, res) => {
         mwRequestHeaders = mw.requestHeaders || [];
       }
     }
+    // next.config redirects/rewrites/headers (evaluated at build time). A matching
+    // redirect short-circuits with a 3xx; a matching rewrite mutates url.pathname (so
+    // the render/route dispatch below sees the destination); matching header rules are
+    // collected and merged onto whatever response we ultimately send.
+    const nc = applyNextConfig(url);
+    if (nc.redirect) {
+      const h = { location: nc.redirect.location };
+      if (mwSetCookies.length) h["set-cookie"] = mwSetCookies;
+      res.writeHead(nc.redirect.status, h);
+      res.end();
+      return;
+    }
+    const configHeaders = nc.headers;
     // Route handlers (`route.ts`): a request whose path matches a handler is served by
     // it (any method) via the worker's `route` op, not by page rendering.
     if (await pathIsRouteHandler(url.pathname)) {
@@ -488,6 +566,7 @@ const server = createServer(async (req, res) => {
       if (result) {
         const headers = {};
         for (const [k, v] of result.headers || []) headers[k] = v;
+        for (const [k, v] of configHeaders) headers[k] = v;
         if (mwSetCookies.length) headers["set-cookie"] = mwSetCookies;
         res.writeHead(result.status || 200, headers);
         res.end(result.body ? Buffer.from(result.body, "base64") : undefined);
@@ -543,7 +622,9 @@ const server = createServer(async (req, res) => {
           {},
           { pathname: url.pathname, search: url.search },
         );
-        res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+        const nfHeaders = { "content-type": "text/html; charset=utf-8" };
+        for (const [k, v] of configHeaders) nfHeaders[k] = v;
+        res.writeHead(404, nfHeaders);
         res.end(nfDoc);
         return;
       }
@@ -564,6 +645,7 @@ const server = createServer(async (req, res) => {
         { pathname: url.pathname, search: url.search },
       );
       const docHeaders = { "content-type": "text/html; charset=utf-8" };
+      for (const [k, v] of configHeaders) docHeaders[k] = v;
       if (mwSetCookies.length) docHeaders["set-cookie"] = mwSetCookies;
       res.writeHead(status || 200, docHeaders);
       res.end(doc);

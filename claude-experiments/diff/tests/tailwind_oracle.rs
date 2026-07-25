@@ -52,6 +52,12 @@ fn normalize_decls(body: &str) -> String {
             d.split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
+                // Drop the cosmetic space lightningcss strips after commas inside a
+                // value (`var(--a, var(--b))` -> `var(--a,var(--b))`,
+                // `color, background` -> `color,background`). A space after a comma is
+                // never significant in a CSS value, so this compares declarations, not
+                // whitespace formatting.
+                .replace(", ", ",")
                 // Strip leading zeros (`0.17` -> `.17`, `0.25rem` -> `.25rem`) so
                 // lightningcss's minified numbers compare equal.
                 .replace("0.", ".")

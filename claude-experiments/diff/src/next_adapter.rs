@@ -1225,6 +1225,13 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         node_env.to_string(),
     )];
 
+    // Evaluate `next.config` once (on the react-server pass) into the routing-rules
+    // manifest the orchestrator applies (redirects/rewrites/headers). Best-effort: a
+    // failing/absent config yields empty rules, never a build failure.
+    if environment == "react-server" {
+        write_next_config_manifest(&root);
+    }
+
     Ok(Some(AppConfig {
         environment: environment.to_string(),
         build: BuildConfig {
@@ -1250,6 +1257,46 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
 
 /// Write `contents` to `path` only if it differs (keeps mtimes stable so an
 /// unchanged adapter run does not perturb incremental builds).
+/// Evaluate `next.config.*` into `.diffpack-output/next-config-manifest.json` (the
+/// redirects/rewrites/headers rules the orchestrator applies), via node + the app's
+/// own jiti. Best-effort: no config, a config that throws, or missing node all yield
+/// an empty-rules manifest — never a build error.
+fn write_next_config_manifest(root: &Path) {
+    let output = root.join(".diffpack-output");
+    let _ = std::fs::create_dir_all(&output);
+    let manifest_path = output.join("next-config-manifest.json");
+    let empty = r#"{"redirects":[],"rewrites":[],"headers":[]}"#;
+    let config = ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"]
+        .iter()
+        .map(|f| root.join(f))
+        .find(|p| p.exists());
+    let Some(config) = config else {
+        let _ = std::fs::write(&manifest_path, empty);
+        return;
+    };
+    let loader = std::env::temp_dir().join("diffpack-next-config-eval.mjs");
+    if std::fs::write(&loader, include_str!("../scripts/rsc/next-config-eval.mjs")).is_err() {
+        let _ = std::fs::write(&manifest_path, empty);
+        return;
+    }
+    match std::process::Command::new("node")
+        .arg(&loader)
+        .arg(&config)
+        .current_dir(root)
+        .output()
+    {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+            if !out.stderr.is_empty() {
+                eprintln!("[next.config] {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            let _ = std::fs::write(&manifest_path, &out.stdout);
+        }
+        _ => {
+            let _ = std::fs::write(&manifest_path, empty);
+        }
+    }
+}
+
 fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
     if let Ok(existing) = std::fs::read_to_string(path)
         && existing == contents {
