@@ -22,7 +22,7 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import os from "node:os";
@@ -505,6 +505,96 @@ async function runMiddleware(reqCtx) {
   };
 }
 
+// --- Prerender cache (static / SSG / ISR) ---------------------------------------
+// `build-app production` prerenders static/SSG/ISR routes to `static/<stem>.html` +
+// `.rsc` and records them in `prerender-manifest.json`. We serve those straight off
+// disk — no per-request render. An ISR entry (revalidate = N seconds) is served from
+// cache too, but once the cached file is older than N seconds the next request gets
+// the STALE copy immediately AND kicks a background regeneration (stale-while-
+// revalidate), so no request ever waits on the render.
+const staticDir = join(outputDir, "static");
+const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null }
+(() => {
+  const manifestPath = join(staticDir, "prerender-manifest.json");
+  if (!existsSync(manifestPath)) return;
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch {
+    return; // a malformed manifest is non-fatal — fall back to dynamic rendering.
+  }
+  for (const e of manifest.entries || []) {
+    if (e && e.path && e.file) prerenderCache.set(e.path, { path: e.path, file: e.file, revalidate: e.revalidate ?? null });
+  }
+  if (prerenderCache.size) {
+    const isr = [...prerenderCache.values()].filter((e) => e.revalidate != null).length;
+    console.log(`next-server: ${prerenderCache.size} prerendered page(s) cached (${isr} ISR) from ${manifestPath}`);
+  }
+})();
+
+// Background ISR regeneration guard — one in-flight regen per page stem.
+const revalidating = new Set();
+function triggerRevalidate(entry) {
+  if (revalidating.has(entry.file)) return;
+  revalidating.add(entry.file);
+  (async () => {
+    try {
+      const reqCtx = JSON.stringify({ url: "http://localhost" + entry.path, headers: [], cookie: "" });
+      const r = await runReactServer(["render", entry.path, clientManifestPath], reqCtx);
+      // Never overwrite a good cache entry with an error tree.
+      if (r.redirect || r.notFound) return;
+      const flightBuf = Buffer.from(r.flight);
+      const html = await (await getRenderFlightToDocument())(
+        new Uint8Array(flightBuf),
+        serverConsumerManifest,
+        flightBuf.toString("base64"),
+        r.params || {},
+        { pathname: entry.path, search: "" },
+      );
+      // Write via a temp file + rename so a concurrent reader never sees a half-written
+      // page (rename is atomic on the same filesystem).
+      const htmlPath = join(staticDir, `${entry.file}.html`);
+      const rscPath = join(staticDir, `${entry.file}.rsc`);
+      writeFileSync(`${htmlPath}.tmp`, html);
+      renameSync(`${htmlPath}.tmp`, htmlPath);
+      writeFileSync(`${rscPath}.tmp`, flightBuf);
+      renameSync(`${rscPath}.tmp`, rscPath);
+    } catch (error) {
+      console.error(`[diffpack] ISR revalidate of ${entry.path} failed:`, error && error.message ? error.message : error);
+    } finally {
+      revalidating.delete(entry.file);
+    }
+  })();
+}
+
+// Serve a prerendered page from disk (HTML, or the raw .rsc flight for a soft-nav
+// `?__rsc=1` request). Applies config headers + middleware set-cookies. For an ISR
+// entry past its TTL, serves the stale copy now and schedules a background regen.
+// Returns true if served, false if the file is missing (fall through to a render).
+function servePrerendered(entry, isRsc, res, configHeaders, mwSetCookies) {
+  const filePath = join(staticDir, `${entry.file}.${isRsc ? "rsc" : "html"}`);
+  let stat;
+  try {
+    stat = statSync(filePath);
+  } catch {
+    return false;
+  }
+  let cacheState = "HIT";
+  if (entry.revalidate != null && Date.now() - stat.mtimeMs >= entry.revalidate * 1000) {
+    cacheState = "STALE";
+    triggerRevalidate(entry);
+  }
+  const headers = {
+    "content-type": isRsc ? "text/x-component" : "text/html; charset=utf-8",
+    "x-diffpack-cache": cacheState,
+  };
+  for (const [k, v] of configHeaders) headers[k] = v;
+  if (mwSetCookies.length) headers["set-cookie"] = mwSetCookies;
+  res.writeHead(200, headers);
+  res.end(readFileSync(filePath));
+  return true;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -616,6 +706,15 @@ const server = createServer(async (req, res) => {
         return;
       }
       // No handler produced a response (unexpected): fall through to 404 below.
+    }
+    // Prerendered cache: a static / SSG / ISR page served straight from disk with no
+    // render (ISR revalidates in the background when stale). Takes precedence over the
+    // dynamic render path below, but not over middleware / next.config / route handlers.
+    if (req.method === "GET") {
+      const entry = prerenderCache.get(url.pathname);
+      if (entry && servePrerendered(entry, url.searchParams.has("__rsc"), res, configHeaders, mwSetCookies)) {
+        return;
+      }
     }
     // Any other GET is an app-router route: the react-server render STREAMS the flight
     // (shell first, then each Suspense boundary as its async Server Component resolves)

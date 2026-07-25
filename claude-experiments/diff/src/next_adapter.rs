@@ -178,6 +178,10 @@ pub enum RouteKind {
     ForceStatic,
     /// A dynamic segment with `generateStaticParams` — one `.html` per enumerated combo.
     Ssg,
+    /// `export const revalidate = N` (N>0) on an otherwise-static route: prerendered at
+    /// build time AND regenerated on demand once the cached copy is older than N seconds
+    /// (stale-while-revalidate). Next's ISR.
+    Isr,
     /// Rendered per request (force-dynamic, request-state reads, or a dynamic segment
     /// with no `generateStaticParams`). NOT prerendered.
     Dynamic,
@@ -190,12 +194,16 @@ impl RouteKind {
             RouteKind::Static => "static",
             RouteKind::ForceStatic => "forceStatic",
             RouteKind::Ssg => "ssg",
+            RouteKind::Isr => "isr",
             RouteKind::Dynamic => "dynamic",
         }
     }
     /// Whether the prerenderer emits an on-disk `.html`/`.rsc` for this route.
     fn is_prerendered(self) -> bool {
-        matches!(self, RouteKind::Static | RouteKind::ForceStatic | RouteKind::Ssg)
+        matches!(
+            self,
+            RouteKind::Static | RouteKind::ForceStatic | RouteKind::Ssg | RouteKind::Isr
+        )
     }
 }
 
@@ -348,10 +356,21 @@ fn scan_route_config(raw_source: &str) -> RouteConfig {
     }
 }
 
+/// `export const revalidate = <n>` as a positive integer number of seconds, or None
+/// (absent, `false`, `0`, or non-numeric). `revalidate = 0` opts a route into
+/// force-dynamic (handled in `classify_route`); it is NOT an ISR TTL, so it maps to None
+/// here.
+fn parse_revalidate(cfg: &RouteConfig) -> Option<u64> {
+    match cfg.revalidate.as_deref() {
+        Some(v) => v.trim().parse::<u64>().ok().filter(|n| *n > 0),
+        None => None,
+    }
+}
+
 /// Classifies a route from whether its pattern has a dynamic segment + its config,
 /// reproducing Next's static/dynamic decision for the fixture exactly. Precedence:
 /// force-dynamic (or `revalidate:0`) > force-static/error > request-state reads >
-/// dynamic-segment (gsp ? Ssg : Dynamic) > Static.
+/// dynamic-segment (gsp ? Ssg : Dynamic) > `revalidate:N` ISR > Static.
 fn classify_route(has_dynamic_segment: bool, cfg: &RouteConfig) -> RouteKind {
     if cfg.dynamic_config.as_deref() == Some("force-dynamic")
         || cfg.revalidate.as_deref() == Some("0")
@@ -370,6 +389,9 @@ fn classify_route(has_dynamic_segment: bool, cfg: &RouteConfig) -> RouteKind {
         } else {
             RouteKind::Dynamic
         };
+    }
+    if parse_revalidate(cfg).is_some() {
+        return RouteKind::Isr;
     }
     RouteKind::Static
 }
@@ -520,9 +542,9 @@ struct Route {
     dynamic_params: bool,
     /// The reason a Dynamic route is served per-request (for the prerender manifest).
     dynamic_reason: String,
-    /// A `revalidate` value other than `0`/absent — surfaced as a build WARN (ISR is
-    /// out of scope; the route is prerendered once and will not revalidate).
-    revalidate_warn: Option<String>,
+    /// `export const revalidate = N` (N>0) in seconds — the ISR TTL. Emitted into the
+    /// prerender plan so the orchestrator revalidates the cached page after N seconds.
+    revalidate_seconds: Option<u64>,
 }
 
 /// Serializes a parsed segment list to a JSON `[{"k","v"}]` array (the plan is
@@ -581,10 +603,10 @@ pub fn write_prerender_plan(project_root: &Path, out_dir: &Path) -> Result<usize
 
     let mut entries = String::from("[\n");
     for (i, route) in disc.routes.iter().enumerate() {
-        if let Some(v) = &route.revalidate_warn {
+        if let Some(secs) = route.revalidate_seconds {
             eprintln!(
-                "WARN next SSG: route {} has `export const revalidate = {v}` — ISR is out of \
-                 scope; it is prerendered ONCE and will not revalidate.",
+                "next ISR: route {} has `revalidate = {secs}` — prerendered at build and \
+                 regenerated on demand once older than {secs}s.",
                 route.url_path,
             );
         }
@@ -608,6 +630,11 @@ pub fn write_prerender_plan(project_root: &Path, out_dir: &Path) -> Result<usize
                 _ => {
                     fields.push_str(&format!(", \"file\": {}", js_str(&route_file_stem(&route.url_path))));
                 }
+            }
+            // ISR TTL (seconds). Applies to isr routes and to any static/ssg route that
+            // also declares `revalidate` — the orchestrator revalidates on this TTL.
+            if let Some(secs) = route.revalidate_seconds {
+                fields.push_str(&format!(", \"revalidate\": {secs}"));
             }
         } else {
             fields.push_str(&format!(", \"reason\": {}", js_str(&route.dynamic_reason)));
@@ -839,10 +866,7 @@ fn discover_routes_dir(
                     ));
                 }
             }
-            let revalidate_warn = match cfg.revalidate.as_deref() {
-                Some("0") | None => None,
-                Some(v) => Some(v.to_string()),
-            };
+            let revalidate_seconds = parse_revalidate(&cfg);
             let dynamic_reason = dynamic_reason(has_dynamic_segment, &cfg);
             routes.push(Route {
                 url_path,
@@ -854,7 +878,7 @@ fn discover_routes_dir(
                 has_generate_static_params: cfg.has_generate_static_params,
                 dynamic_params: cfg.dynamic_params,
                 dynamic_reason,
-                revalidate_warn,
+                revalidate_seconds,
             });
         }
     }
@@ -3139,6 +3163,12 @@ mod tests {
         assert_eq!(kind_of("/go"), RouteKind::Dynamic, "/go is force-dynamic → Dynamic");
         assert_eq!(kind_of("/error-demo"), RouteKind::Dynamic, "/error-demo is force-dynamic → Dynamic");
         assert_eq!(kind_of("/products/[id]"), RouteKind::Ssg, "/products/[id] has generateStaticParams → Ssg");
+        assert_eq!(kind_of("/slow"), RouteKind::Dynamic, "/slow is force-dynamic → Dynamic");
+        // ISR: `export const revalidate = 2` on an otherwise-static route → Isr, and the
+        // parsed TTL is carried through for the prerender plan / orchestrator.
+        assert_eq!(kind_of("/isr"), RouteKind::Isr, "/isr has revalidate=2 → Isr");
+        let isr = disc.routes.iter().find(|r| r.url_path == "/isr").unwrap();
+        assert_eq!(isr.revalidate_seconds, Some(2), "/isr carries its revalidate TTL in seconds");
 
         // PRECEDENCE on the real fixture: /blog/[slug] exports generateStaticParams AND
         // reads cookies(). `next build` classifies it ƒ Dynamic (the cookies read opts the

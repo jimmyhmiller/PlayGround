@@ -125,10 +125,13 @@ async function main() {
       dynamic.push({ path: route.path, reason: route.reason || "dynamic" });
       continue;
     }
-    if (route.kind === "static" || route.kind === "forceStatic") {
+    if (route.kind === "static" || route.kind === "forceStatic" || route.kind === "isr") {
       await writeRoute(route.path, route.file || "index");
-      written.push(route.path);
-      console.log(`prerendered ${route.kind} ${route.path} -> ${route.file || "index"}.html + .rsc`);
+      written.push({ path: route.path, file: route.file || "index", revalidate: route.revalidate ?? null });
+      console.log(
+        `prerendered ${route.kind} ${route.path} -> ${route.file || "index"}.html + .rsc` +
+          (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),
+      );
       continue;
     }
     if (route.kind === "ssg") {
@@ -147,13 +150,18 @@ async function main() {
       for (const combo of combos) {
         const { urlPath, fileStem } = buildConcrete(route.segments, combo);
         await writeRoute(urlPath, fileStem);
-        written.push(urlPath);
-        console.log(`prerendered ssg ${route.path} [${JSON.stringify(combo)}] -> ${fileStem}.html + .rsc`);
+        written.push({ path: urlPath, file: fileStem, revalidate: route.revalidate ?? null });
+        console.log(
+          `prerendered ssg ${route.path} [${JSON.stringify(combo)}] -> ${fileStem}.html + .rsc` +
+            (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),
+        );
       }
       continue;
     }
     die(`unknown route kind ${JSON.stringify(route.kind)} for ${route.path}`);
   }
+
+  const writtenPaths = written.map((w) => w.path);
 
   // `--static-export`: a pure export cannot serve any dynamic route — fail naming them.
   if (staticExport && dynamic.length > 0) {
@@ -171,7 +179,12 @@ async function main() {
   }
 
   const manifest = {
-    static: written,
+    // Back-compat: the dumb static file server keys off the path list.
+    static: writtenPaths,
+    // The orchestrator keys off this: path -> { file stem, revalidate TTL | null }.
+    // A null revalidate is a pure static page (served from cache forever); a number is
+    // an ISR page (served from cache, regenerated on demand once older than N seconds).
+    entries: written,
     dynamic,
     generatedAt: new Date().toISOString(),
   };

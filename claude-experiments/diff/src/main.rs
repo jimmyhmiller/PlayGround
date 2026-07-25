@@ -944,6 +944,12 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
             include_str!("../scripts/rsc/next-server.mjs"),
         )
         .map_err(|error| format!("cannot write production server: {error}"))?;
+        // Prerender static / SSG / ISR routes so the orchestrator serves them from the
+        // cache (instant, no per-request render) instead of rendering every request.
+        // Dynamic routes are recorded, never dropped. A prerender failure fails the
+        // build (naming the route).
+        println!("=== prerender (static / SSG / ISR) ===");
+        next_prerender(project_root, &out, false)?;
         println!(
             "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]",
             out.display(),
@@ -1031,10 +1037,24 @@ fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> 
         }
     }
 
-    // Native route classification -> the machine-readable prerender plan.
-    let route_count = diffpack::next_adapter::write_prerender_plan(project_root, &output_root)?;
+    next_prerender(project_root, &output_root, static_export)?;
     println!(
-        "next SSG: classified {route_count} route(s) -> {}",
+        "next SSG: prerendered static routes -> {}",
+        output_root.join("static").display(),
+    );
+    Ok(())
+}
+
+/// Classify every app-router route and prerender the static / SSG / ISR ones to
+/// `<output_root>/static/*.html` + `*.rsc` (+ `prerender-manifest.json`). Shared by
+/// `build-app static` and `build-app production` — the latter serves these from a cache
+/// (with ISR revalidation) instead of rendering them per request. Assumes the client /
+/// react-server (`rsc-render/`) / ssr (`server/`) bundles are already built.
+fn next_prerender(project_root: &Path, output_root: &Path, static_export: bool) -> Result<(), String> {
+    // Native route classification -> the machine-readable prerender plan.
+    let route_count = diffpack::next_adapter::write_prerender_plan(project_root, output_root)?;
+    println!(
+        "next SSG/ISR: classified {route_count} route(s) -> {}",
         output_root.join("static/prerender-plan.json").display(),
     );
 
@@ -1049,7 +1069,7 @@ fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> 
     // Spawn the prerenderer (the app's own React runtime; the bundling stays native
     // Rust). Its stdout/stderr stream straight through; a nonzero exit fails the build.
     let mut command = std::process::Command::new("node");
-    command.arg(&prerender_path).arg(&output_root);
+    command.arg(&prerender_path).arg(output_root);
     if static_export {
         command.arg("--static-export");
     }
@@ -1062,10 +1082,6 @@ fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> 
             prerender_path.display(),
         ));
     }
-    println!(
-        "next SSG: prerendered static routes -> {}",
-        output_root.join("static").display(),
-    );
     Ok(())
 }
 
