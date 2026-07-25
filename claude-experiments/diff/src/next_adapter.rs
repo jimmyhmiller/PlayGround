@@ -1706,40 +1706,51 @@ async function drainToBuffer(stream) {{
   return Buffer.concat(chunks);
 }}
 
-// Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
-// `render` op AND the persistent `serve` worker, so both paths render identically.
-export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
-  const {{ tree, status, params }} = documentTree(pathname);
-  // The request store: url/headers/cookie carried from the HTTP request + the matched
-  // dynamic-segment params. `requestAls.run` MUST enclose BOTH the render call AND the
-  // stream drain, or a late async Server Component loses the store.
-  const store = {{
+// Interpret a react-server render error's `digest` into control flow, mutating
+// `control` in place. ONE definition, shared by the buffered `renderRequest` and the
+// streaming `renderRequestStream` so both classify redirect / notFound / real errors
+// identically. Returns the digest (marking the error known to React so the stream
+// drains) or undefined.
+function flightControlOnError(control, error) {{
+  const digest = (error && error.digest) || "";
+  if (digest.startsWith("NEXT_REDIRECT;")) {{
+    // NEXT_REDIRECT;<type>;<url>;<status>; — capture the target + status so the
+    // orchestrator can issue a real HTTP redirect (do NOT SSR the errored tree).
+    const parts = digest.split(";");
+    control.redirect = parts.slice(2, -2).join(";");
+    control.status = Number(parts[parts.length - 2]) || 307;
+  }} else if (digest === "NEXT_HTTP_ERROR_FALLBACK;404") {{
+    control.notFound = true;
+    control.status = 404;
+  }} else {{
+    // A genuine error (recovered by an app-router error boundary, or fatal) — log it;
+    // returning the digest marks it known to React so the stream drains.
+    console.error("rsc-entry render onError:", error && error.stack ? error.stack : String(error));
+  }}
+  return digest || undefined;
+}}
+
+// Build the per-request store (url/headers/cookie + matched params). `requestAls.run`
+// MUST enclose BOTH the render call AND the stream drain, or a late async Server
+// Component loses the store.
+function renderStore(pathname, reqCtx, params) {{
+  return {{
     url: new URL(reqCtx.url || ("http://localhost" + pathname), "http://localhost"),
     headers: new Headers(reqCtx.headers || []),
     cookieHeader: reqCtx.cookie || "",
     params,
   }};
+}}
+
+// Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
+// `render` op AND the persistent `serve` worker, so both paths render identically.
+export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
+  const {{ tree, status, params }} = documentTree(pathname);
+  const store = renderStore(pathname, reqCtx, params);
   const control = {{}};
   const flight = await requestAls.run(store, async () => {{
     const stream = renderToReadableStream(tree, bundlerConfig, {{
-      onError(error) {{
-        const digest = (error && error.digest) || "";
-        if (digest.startsWith("NEXT_REDIRECT;")) {{
-          // NEXT_REDIRECT;<type>;<url>;<status>; — capture the target + status so the
-          // orchestrator can issue a real HTTP redirect (do NOT SSR the errored tree).
-          const parts = digest.split(";");
-          control.redirect = parts.slice(2, -2).join(";");
-          control.status = Number(parts[parts.length - 2]) || 307;
-        }} else if (digest === "NEXT_HTTP_ERROR_FALLBACK;404") {{
-          control.notFound = true;
-          control.status = 404;
-        }} else {{
-          // A genuine error (recovered by an app-router error boundary, or fatal) —
-          // log it; returning the digest marks it known to React so the stream drains.
-          console.error("rsc-entry render onError:", error && error.stack ? error.stack : String(error));
-        }}
-        return digest || undefined;
-      }},
+      onError(error) {{ return flightControlOnError(control, error); }},
     }});
     return await drainToBuffer(stream);
   }});
@@ -1750,6 +1761,49 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
     redirect: control.redirect,
     notFound: control.notFound,
   }};
+}}
+
+// Streaming variant of `renderRequest`: forwards flight chunks to `sink` as React
+// produces them (the shell first, then each Suspense boundary as its async Server
+// Component resolves) instead of buffering the whole flight. This is what makes TTFB
+// fast for a page with a slow data dependency behind `<Suspense fallback={{loading}}>`.
+//
+// `sink.meta(m)` fires exactly ONCE, right after the first chunk is ready — by which
+// point any TOP-LEVEL redirect()/notFound() (thrown before a Suspense boundary) has
+// been captured in `control`, so the orchestrator can still issue a real HTTP redirect
+// or 404 rather than stream. A redirect/notFound thrown BEHIND a Suspense boundary
+// (after the shell has flushed) cannot unwind an already-streamed response; it is
+// reported on `sink.end` and the orchestrator logs it loudly (never silently dropped).
+export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink) {{
+  const {{ tree, status, params }} = documentTree(pathname);
+  const store = renderStore(pathname, reqCtx, params);
+  const control = {{}};
+  await requestAls.run(store, async () => {{
+    const stream = renderToReadableStream(tree, bundlerConfig, {{
+      onError(error) {{ return flightControlOnError(control, error); }},
+    }});
+    const reader = stream.getReader();
+    let metaSent = false;
+    const sendMeta = () => {{
+      metaSent = true;
+      sink.meta({{ status: control.status || status || 200, params, redirect: control.redirect, notFound: control.notFound }});
+    }};
+    for (;;) {{
+      const {{ done, value }} = await reader.read();
+      if (done) break;
+      if (!metaSent) {{
+        // First chunk ready: `control` now reflects any top-level redirect/notFound.
+        sendMeta();
+        if (control.redirect || control.notFound) {{
+          try {{ await reader.cancel(); }} catch {{}}
+          break;
+        }}
+      }}
+      sink.chunk(Buffer.from(value).toString("base64"));
+    }}
+    if (!metaSent) sendMeta();
+    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent }});
+  }});
 }}
 
 // Dispatch a server action, returning its result flight BUFFER.
@@ -1882,6 +1936,7 @@ async function serveLoop() {{
       // (`export default __diffpackEntry`, whose members are renderRequest/runAction).
       const ns = m.default || m;
       const renderRequest = ns.renderRequest || m.renderRequest;
+      const renderRequestStream = ns.renderRequestStream || m.renderRequestStream;
       const runAction = ns.runAction || m.runAction;
       const handleRoute = ns.handleRoute || m.handleRoute;
       const routeManifest = ns.routeManifest || m.routeManifest;
@@ -1889,7 +1944,7 @@ async function serveLoop() {{
       if (typeof renderRequest !== "function" || typeof runAction !== "function") {{
         throw new Error("rsc-entry serve: re-imported bundle does not export renderRequest/runAction");
       }}
-      cached = {{ mtime, mod: {{ renderRequest, runAction, handleRoute, routeManifest, runMiddleware }} }};
+      cached = {{ mtime, mod: {{ renderRequest, renderRequestStream, runAction, handleRoute, routeManifest, runMiddleware }} }};
     }}
     return cached.mod;
   }}
@@ -1918,6 +1973,19 @@ async function serveLoop() {{
         if (req.op === "render") {{
           const r = await mod.renderRequest(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}});
           reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound }});
+        }} else if (req.op === "render-stream") {{
+          // Streaming render: one `streamMeta` line, then N `streamChunk` lines, then a
+          // single `streamEnd` line — all sharing this request id. The orchestrator
+          // routes them to the request's flight stream (see `callStream`).
+          if (typeof mod.renderRequestStream !== "function") {{
+            reply({{ id: req.id, error: "rsc-entry serve: bundle does not export renderRequestStream" }});
+          }} else {{
+            await mod.renderRequestStream(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}}, {{
+              meta: (m) => reply({{ id: req.id, streamMeta: m }}),
+              chunk: (b64) => reply({{ id: req.id, streamChunk: b64 }}),
+              end: (m) => reply({{ id: req.id, streamEnd: m || {{}} }}),
+            }});
+          }}
         }} else if (req.op === "action") {{
           const flight = await mod.runAction(req.actionId, manifest(req.manifestPath), req.body || "");
           reply({{ id: req.id, flight: Buffer.from(flight).toString("base64"), status: 200 }});
@@ -2038,7 +2106,7 @@ import {{ createFromReadableStream }} from "react-server-dom-webpack/client";
 import {{ renderToPipeableStream }} from "react-dom/server";
 import {{ createElement }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext }} from {hooks_import};
-import {{ Writable }} from "node:stream";
+import {{ Writable, PassThrough }} from "node:stream";
 {pins}
 // Force a code split so the build uses the registry runtime the seam maps onto.
 import({lazy}).then((module) => {{
@@ -2123,6 +2191,108 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
     }});
   }});
 }}
+
+// STREAMING SSR-of-flight. `flightChunks` is an async iterable of base64 flight chunks
+// arriving from the react-server worker as boundaries resolve. We reconstruct the tree
+// from those chunks (createFromReadableStream over a live stream — the shell resolves
+// immediately, inner Suspense boundaries stay pending), render with
+// `renderToPipeableStream`, and pipe the HTML to `res` starting at `onShellReady` so
+// the shell + fallbacks reach the browser BEFORE the slow data resolves.
+//
+// Hydration uses Next's incremental-inline-flight approach: each flight chunk is also
+// written into the document as a `<script>self.__DF_FLIGHT.push([1,"<b64>"])</script>`
+// (a final `[0]` marks the end). The client rebuilds the flight stream from that append
+// array, so it hydrates from the SAME bytes with no second network fetch — and it works
+// regardless of whether client.js executes before or after the chunks arrive.
+//
+// All bytes go to `res` through ONE ordered async loop (React's HTML via a PassThrough,
+// flight scripts interleaved AFTER each HTML chunk), so a flight script can never
+// precede the doctype/shell.
+export async function renderFlightToStream(flightChunks, serverConsumerManifest, params, url, res, headers, status) {{
+  installSeam();
+  const pathname = (url && url.pathname) || "/";
+  const search = (url && url.search) || "";
+  // Live byte stream feeding the SSR flight reconstruction + a queue of the inline
+  // `<script>` tags carrying the same chunks for the client. One pump drives both.
+  let byteController;
+  const byteStream = new ReadableStream({{ start(c) {{ byteController = c; }} }});
+  const scriptQueue = [];
+  let pumpDone = false;
+  const pump = (async () => {{
+    for await (const b64 of flightChunks) {{
+      const binary = Buffer.from(b64, "base64");
+      byteController.enqueue(new Uint8Array(binary));
+      scriptQueue.push(
+        "<script>(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([1," + JSON.stringify(b64) + "])</script>",
+      );
+    }}
+    byteController.close();
+    scriptQueue.push("<script>(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([0])</script>");
+    pumpDone = true;
+  }})();
+  // The initial model resolves from the shell rows (does NOT await the whole stream);
+  // pending Suspense boundaries stay lazy and resolve as later chunks arrive.
+  const flightRoot = await createFromReadableStream(byteStream, {{
+    serverConsumerManifest,
+    callServer() {{
+      throw new Error("diffpack next ssr: a server action was called during SSR");
+    }},
+  }});
+  const root = createElement(
+    PathParamsContext.Provider,
+    {{ value: params || {{}} }},
+    createElement(
+      PathnameContext.Provider,
+      {{ value: pathname }},
+      createElement(SearchParamsContext.Provider, {{ value: search }}, flightRoot),
+    ),
+  );
+  await new Promise((resolve, reject) => {{
+    const html = new PassThrough();
+    let shellStarted = false;
+    const {{ pipe }} = renderToPipeableStream(root, {{
+      bootstrapModules: ["/client.js"],
+      // No inlined full flight here — it streams as __DF_FLIGHT scripts. Seed the array
+      // (so it exists before client.js runs) + the hooks-context globals.
+      bootstrapScriptContent:
+        "self.__DF_FLIGHT=self.__DF_FLIGHT||[];" +
+        "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
+        "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
+      onShellReady() {{
+        res.writeHead(status || 200, headers);
+        pipe(html);
+      }},
+      onShellError(error) {{
+        if (!shellStarted) {{
+          try {{ res.writeHead(500, {{ "content-type": "text/html; charset=utf-8" }}); }} catch {{}}
+          res.end("<!doctype html><p>Internal Server Error</p>");
+        }}
+        reject(error);
+      }},
+      onError(error) {{
+        console.error("next-ssr stream onError:", error && error.message ? error.message : error);
+      }},
+    }});
+    // Forward React's HTML to `res`, flushing any queued flight scripts AFTER each HTML
+    // chunk (guarantees the shell precedes the first flight script). React ends `html`
+    // only once every boundary is done, by which point the flight is fully drained.
+    (async () => {{
+      try {{
+        for await (const chunk of html) {{
+          shellStarted = true;
+          res.write(chunk);
+          while (scriptQueue.length) res.write(scriptQueue.shift());
+        }}
+        await pump;
+        while (scriptQueue.length) res.write(scriptQueue.shift());
+        res.end();
+        resolve();
+      }} catch (error) {{
+        reject(error);
+      }}
+    }})();
+  }});
+}}
 "#,
     )
 }
@@ -2196,20 +2366,46 @@ function decodeFlight(base64) {{
   return bytes;
 }}
 
-function boot() {{
-  const flightBase64 = window.__DIFFPACK_FLIGHT__;
-  if (!flightBase64) {{
-    throw new Error(
-      "diffpack next client: window.__DIFFPACK_FLIGHT__ is missing; the server must inline the flight payload",
-    );
-  }}
-  const bytes = decodeFlight(flightBase64);
-  const stream = new ReadableStream({{
+// Rebuild the flight as a live stream from the incremental `self.__DF_FLIGHT` append
+// array the STREAMING SSR path writes into the document (`[1,b64]` chunks, `[0]` end).
+// Replaying entries already pushed before this runs, then overriding `push`, captures
+// every chunk regardless of whether client.js executed before or after they arrived.
+function flightStreamFromDF() {{
+  const q = (self.__DF_FLIGHT = self.__DF_FLIGHT || []);
+  return new ReadableStream({{
     start(controller) {{
-      controller.enqueue(bytes);
-      controller.close();
+      let closed = false;
+      const handle = (entry) => {{
+        if (!entry) return;
+        if (entry[0] === 1) controller.enqueue(decodeFlight(entry[1]));
+        else if (entry[0] === 0 && !closed) {{ closed = true; controller.close(); }}
+      }};
+      for (const entry of q) handle(entry);
+      q.length = 0;
+      q.push = (entry) => {{ handle(entry); return 0; }};
     }},
   }});
+}}
+
+function boot() {{
+  // Streaming render inlines the flight incrementally as __DF_FLIGHT; the buffered
+  // render (notFound / error docs) inlines the whole flight as __DIFFPACK_FLIGHT__.
+  let stream;
+  if (self.__DF_FLIGHT) {{
+    stream = flightStreamFromDF();
+  }} else if (window.__DIFFPACK_FLIGHT__) {{
+    const bytes = decodeFlight(window.__DIFFPACK_FLIGHT__);
+    stream = new ReadableStream({{
+      start(controller) {{
+        controller.enqueue(bytes);
+        controller.close();
+      }},
+    }});
+  }} else {{
+    throw new Error(
+      "diffpack next client: no flight payload (neither the __DF_FLIGHT stream nor window.__DIFFPACK_FLIGHT__)",
+    );
+  }}
   const initialTree = createFromReadableStream(stream, {{ callServer }});
   // Feed the hooks contexts from the request globals the SSR bootstrap injected —
   // the SAME values the SSR entry rendered with, so hydration matches exactly.
@@ -3123,6 +3319,16 @@ mod tests {
         assert!(ssr_entry.ends_with(".diffpack-next/server.tsx"));
         let ssr_src = std::fs::read_to_string(&ssr_entry).unwrap();
         assert!(ssr_src.contains("renderFlightToDocument"));
+        // Streaming SSR: the entry also exports the streaming renderer and inlines the
+        // flight incrementally as __DF_FLIGHT scripts (so the shell can flush first).
+        assert!(ssr_src.contains("export async function renderFlightToStream"), "ssr entry exports the streaming renderer: {ssr_src}");
+        assert!(ssr_src.contains("onShellReady"), "streaming SSR flushes at onShellReady: {ssr_src}");
+        assert!(ssr_src.contains("__DF_FLIGHT"), "streaming SSR inlines the flight incrementally: {ssr_src}");
+        // The client reconstructs the flight from the incremental __DF_FLIGHT stream.
+        assert!(client_src.contains("flightStreamFromDF"), "client rebuilds flight from the __DF_FLIGHT stream: {client_src}");
+        // The worker exposes the streaming render op end-to-end.
+        assert!(rs_src.contains("export async function renderRequestStream"), "rsc-entry exports the streaming render: {rs_src}");
+        assert!(rs_src.contains("render-stream"), "the serve worker handles the render-stream op: {rs_src}");
         // The next/link shim is also pinned into the SSR graph so the soft-nav
         // link's client reference resolves during SSR-of-flight (hydration match).
         assert!(

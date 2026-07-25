@@ -11,6 +11,7 @@
 //
 // The app must build under BOTH toolchains (a stock app-router app). Fixture-safe.
 import { spawn, execFileSync, execSync } from "node:child_process";
+import { connect } from "node:net";
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -21,6 +22,9 @@ const arg = (name, def) => {
 };
 const REQUESTS = Number(arg("--requests", "60"));
 const only = arg("--server", null);
+// The route whose TTFB we measure — a page with a slow async Server Component behind a
+// Suspense boundary, where streaming SSR flushes the shell long before the data.
+const TTFB_PATH = arg("--ttfb-path", "/slow");
 const DIFFPACK = process.env.DIFFPACK ||
   "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/diff/target/release/diffpack";
 const REPO = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/diff";
@@ -134,6 +138,48 @@ async function measureLatency(port, n) {
   };
 }
 
+// Time-to-first-byte vs full-response on a streaming route, over a raw socket (fetch
+// buffers, hiding the streaming gap). TTFB = when the shell's first bytes arrive; full
+// = when the slow Suspense boundary has streamed in. A large full-minus-TTFB gap on the
+// SAME server is the streaming win: the user sees the shell without waiting for data.
+function ttfbOnce(port, path) {
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1", () => {
+      t0 = performance.now();
+      sock.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`);
+    });
+    let t0 = 0;
+    let ttfb = null;
+    let bytes = 0;
+    sock.on("data", (b) => {
+      if (ttfb === null) ttfb = performance.now() - t0;
+      bytes += b.length;
+    });
+    sock.on("end", () => resolve({ ttfb, full: performance.now() - t0, bytes }));
+    sock.on("error", reject);
+  });
+}
+
+async function measureTtfb(port, path, n) {
+  await ttfbOnce(port, path).catch(() => {}); // warmup
+  const ttfbs = [];
+  const fulls = [];
+  let bytes = 0;
+  for (let i = 0; i < n; i++) {
+    const r = await ttfbOnce(port, path);
+    ttfbs.push(r.ttfb);
+    fulls.push(r.full);
+    bytes = r.bytes;
+  }
+  ttfbs.sort((a, b) => a - b);
+  fulls.sort((a, b) => a - b);
+  return {
+    ttfb: ttfbs[Math.floor(ttfbs.length / 2)],
+    full: fulls[Math.floor(fulls.length / 2)],
+    bytes,
+  };
+}
+
 async function benchServer(label, buildCmd, startCmd, port) {
   console.log(`\n================ ${label} ================`);
   // BUILD
@@ -154,6 +200,13 @@ async function benchServer(label, buildCmd, startCmd, port) {
       peakRssKb = Math.max(peakRssKb, treeRssKb(proc.pid));
     }, 100);
     const latency = await measureLatency(port, REQUESTS);
+    // Streaming TTFB on the slow route (best-effort: only if the route exists).
+    let ttfb = null;
+    try {
+      const probe = await fetch(`http://127.0.0.1:${port}${TTFB_PATH}`, { signal: AbortSignal.timeout(5000) });
+      await probe.text();
+      if (probe.status < 400) ttfb = await measureTtfb(port, TTFB_PATH, 15);
+    } catch {}
     // a burst of concurrency to catch peak worker memory
     await Promise.all(Array.from({ length: 20 }, () => fetch(`http://127.0.0.1:${port}/`).then((r) => r.text())));
     await sleep(300);
@@ -161,8 +214,13 @@ async function benchServer(label, buildCmd, startCmd, port) {
     peakRssKb = Math.max(peakRssKb, treeRssKb(proc.pid));
     const footprintMb = treeFootprintMb(proc.pid);
     console.log(`  latency: median=${latency.median.toFixed(1)}ms p95=${latency.p95.toFixed(1)}ms min=${latency.min.toFixed(1)}ms`);
+    if (ttfb) {
+      console.log(`  streaming ${TTFB_PATH}: TTFB=${ttfb.ttfb.toFixed(1)}ms  full=${ttfb.full.toFixed(1)}ms  (shell arrives ${(ttfb.full / ttfb.ttfb).toFixed(1)}x sooner than the full response)`);
+    } else {
+      console.log(`  streaming ${TTFB_PATH}: (route not present on this server — skipped)`);
+    }
     console.log(`  server memory: ${footprintMb.toFixed(0)} MB phys_footprint (fair) | ${(peakRssKb / 1024).toFixed(0)} MB summed RSS (over-counts shared pages)`);
-    return { label, buildMs, latency, rssMb: peakRssKb / 1024, footprintMb };
+    return { label, buildMs, latency, ttfb, rssMb: peakRssKb / 1024, footprintMb };
   } finally {
     try { proc.kill("SIGTERM"); } catch {}
     await sleep(300);
@@ -199,5 +257,8 @@ if (results.length === 2) {
   console.log("\n=============== PRODUCTION: diffpack vs next ===============");
   console.log(`  build time:    diffpack ${d.buildMs}ms   vs   next ${n.buildMs}ms   (${(n.buildMs / d.buildMs).toFixed(1)}x faster)`);
   console.log(`  req latency:   diffpack ${d.latency.median.toFixed(1)}ms  vs  next ${n.latency.median.toFixed(1)}ms  (${(n.latency.median / d.latency.median).toFixed(1)}x)`);
+  if (d.ttfb && n.ttfb) {
+    console.log(`  stream TTFB:   diffpack ${d.ttfb.ttfb.toFixed(1)}ms  vs  next ${n.ttfb.ttfb.toFixed(1)}ms  (${(n.ttfb.ttfb / d.ttfb.ttfb).toFixed(1)}x — first byte on the slow route)`);
+  }
   console.log(`  memory (fair): diffpack ${d.footprintMb.toFixed(0)}MB  vs  next ${n.footprintMb.toFixed(0)}MB phys_footprint  (${(d.footprintMb / n.footprintMb).toFixed(2)}x — <1 means less)`);
 }

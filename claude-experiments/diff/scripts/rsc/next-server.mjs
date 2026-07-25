@@ -93,26 +93,37 @@ const serverConsumerManifest = {
 // Resolve `renderFlightToDocument` from the SSR bundle. In production it is imported
 // once and cached; in dev it is re-imported (fresh `?v=<mtime>`) whenever the bundle
 // changes on disk, so a client-island re-emit is picked up on the next request.
-let __ssrCache = { key: null, fn: null };
+let __ssrCache = { key: null, fns: null };
 function pickRender(mod) {
-  const fn = mod.renderFlightToDocument || (mod.default && mod.default.renderFlightToDocument);
-  if (typeof fn !== "function") fail("the SSR bundle does not export renderFlightToDocument");
-  return fn;
+  const ns = mod.default && mod.default.renderFlightToDocument ? mod.default : mod;
+  const doc = ns.renderFlightToDocument;
+  if (typeof doc !== "function") fail("the SSR bundle does not export renderFlightToDocument");
+  // Streaming export is required for the streaming GET path; buffered doc render (SSG,
+  // notFound) still uses `doc`.
+  const stream = ns.renderFlightToStream;
+  if (typeof stream !== "function") fail("the SSR bundle does not export renderFlightToStream");
+  return { doc, stream };
 }
-async function getRenderFlightToDocument() {
+async function getSsrRenderers() {
   if (!DEV) {
-    if (!__ssrCache.fn) __ssrCache.fn = pickRender(await import(pathToFileURL(ssrEntry).href));
-    return __ssrCache.fn;
+    if (!__ssrCache.fns) __ssrCache.fns = pickRender(await import(pathToFileURL(ssrEntry).href));
+    return __ssrCache.fns;
   }
   const key = statSync(ssrEntry).mtimeMs;
-  if (__ssrCache.fn && __ssrCache.key === key) return __ssrCache.fn;
-  const fn = pickRender(await import(pathToFileURL(ssrEntry).href + "?v=" + key));
-  __ssrCache = { key, fn };
-  return fn;
+  if (__ssrCache.fns && __ssrCache.key === key) return __ssrCache.fns;
+  const fns = pickRender(await import(pathToFileURL(ssrEntry).href + "?v=" + key));
+  __ssrCache = { key, fns };
+  return fns;
 }
-// Prime + validate the export up front (fail fast if the bundle is malformed), in
+async function getRenderFlightToDocument() {
+  return (await getSsrRenderers()).doc;
+}
+async function getRenderFlightToStream() {
+  return (await getSsrRenderers()).stream;
+}
+// Prime + validate the exports up front (fail fast if the bundle is malformed), in
 // both modes.
-await getRenderFlightToDocument();
+await getSsrRenderers();
 
 // --- Persistent react-server worker POOL (dev + production) -----------------------
 // Spawning a fresh Node child per `?__rsc=1` render pays the whole cold-start cost on
@@ -124,14 +135,17 @@ await getRenderFlightToDocument();
 // small pool (round-robined) so concurrent requests render in parallel, with the bundle
 // mtime stable so each worker imports it exactly once. Same process isolation, no
 // per-request spawn.
-// Pool size trades memory for render concurrency. Each worker is a separate Node
-// process (~one Node baseline + the react-server bundle), so memory scales with the
-// count. Default to a small pool that keeps steady-state RSS below a single-process
-// Next server while still rendering a couple of requests in parallel; override with
-// DIFFPACK_RSC_WORKERS for high-concurrency deployments. DEV is always 1.
+// Pool size trades memory for CPU-bound render parallelism. Each worker is a separate
+// Node process (~one Node baseline + the react-server bundle), so memory scales with
+// the count. Default to ONE: an RSC render is mostly async-I/O-bound, so a single
+// worker already overlaps concurrent requests within its event loop (a slow awaited
+// Server Component does not block others), and a lone worker's steady-state footprint
+// sits well below a single-process Next server (measured ~26% less). Bump
+// DIFFPACK_RSC_WORKERS only for CPU-bound render throughput on many-core hosts. DEV is
+// always 1.
 const POOL_SIZE = DEV
   ? 1
-  : Math.max(1, Number(process.env.DIFFPACK_RSC_WORKERS) || 2);
+  : Math.max(1, Number(process.env.DIFFPACK_RSC_WORKERS) || 1);
 let workerPool = null;
 let poolCursor = 0;
 
@@ -140,9 +154,12 @@ function spawnWorker() {
     stdio: ["pipe", "pipe", "inherit"], // worker stderr -> server log
   });
   const pending = new Map();
+  // Streaming render ops (`render-stream`) get multiple replies per id: one streamMeta,
+  // N streamChunk, one streamEnd. Their handlers live here, not in `pending`.
+  const streamPending = new Map();
   let seq = 0;
   let buffer = "";
-  const worker = { dead: false, call: null };
+  const worker = { dead: false, call: null, callStream: null };
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
@@ -157,6 +174,23 @@ function spawnWorker() {
       } catch {
         continue; // ignore any non-protocol stdout line
       }
+      // Streaming render reply (streamMeta/streamChunk/streamEnd), or an error for a
+      // stream id: route to the stream handler and do NOT touch `pending`.
+      const stream = streamPending.get(msg.id);
+      if (stream) {
+        if (msg.error) {
+          streamPending.delete(msg.id);
+          stream.onError(msg.error);
+        } else if (msg.streamMeta !== undefined) {
+          stream.onMeta(msg.streamMeta);
+        } else if (msg.streamChunk !== undefined) {
+          stream.onChunk(msg.streamChunk);
+        } else if (msg.streamEnd !== undefined) {
+          streamPending.delete(msg.id);
+          stream.onEnd(msg.streamEnd);
+        }
+        continue;
+      }
       const settle = pending.get(msg.id);
       if (settle) {
         pending.delete(msg.id);
@@ -168,6 +202,8 @@ function spawnWorker() {
     worker.dead = true;
     for (const settle of pending.values()) settle({ error: reason });
     pending.clear();
+    for (const stream of streamPending.values()) stream.onError(reason);
+    streamPending.clear();
   };
   child.on("exit", (code) => fail(`react-server worker exited (${code})`));
   child.on("error", (error) => fail(`react-server worker error: ${error}`));
@@ -185,6 +221,13 @@ function spawnWorker() {
       });
       child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
     });
+  // Streaming render: `handlers` = { onMeta, onChunk, onEnd, onError }. Returns nothing;
+  // the caller drives its response from the callbacks.
+  worker.callStream = (req, handlers) => {
+    const id = ++seq;
+    streamPending.set(id, handlers);
+    child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
+  };
   return worker;
 }
 
@@ -574,46 +617,102 @@ const server = createServer(async (req, res) => {
       }
       // No handler produced a response (unexpected): fall through to 404 below.
     }
-    // Any other GET is an app-router route: the react-server render matches the
-    // pathname to a route (nested-layout chain composed around its page); the SSR
-    // bundle turns the flight into the full document.
+    // Any other GET is an app-router route: the react-server render STREAMS the flight
+    // (shell first, then each Suspense boundary as its async Server Component resolves)
+    // and the SSR bundle streams the HTML document out as those chunks arrive — a fast
+    // TTFB even when the page has a slow data dependency behind `<Suspense>`.
     if (req.method === "GET") {
       // The per-request context the react-server render establishes (an
       // AsyncLocalStorage carrying the request url/headers/cookie, read by
-      // next/headers cookies()/headers() inside async Server Components). Passed to the
-      // render child on stdin. Array-valued headers (e.g. set-cookie) are joined so
-      // `new Headers([[k,v]...])` accepts them.
-      const reqCtx = JSON.stringify({
+      // next/headers cookies()/headers() inside async Server Components). Array-valued
+      // headers (e.g. set-cookie) are joined so `new Headers([[k,v]...])` accepts them.
+      const reqCtxObj = {
         url: "http://localhost" + req.url,
         headers: [
           ...Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
           ...mwRequestHeaders,
         ],
         cookie: req.headers.cookie || "",
+      };
+      // Kick off the streaming render. `meta` (status/params + any TOP-LEVEL
+      // redirect/notFound) settles on the first chunk; flight chunks flow into a queue
+      // exposed as an async iterator.
+      const worker = nextWorker();
+      let metaResolve;
+      let metaReject;
+      const metaP = new Promise((resolve, reject) => {
+        metaResolve = resolve;
+        metaReject = reject;
       });
-      const { flight, status, params, redirect, notFound } = await runReactServer(
-        ["render", url.pathname, clientManifestPath],
-        reqCtx,
+      const queue = [];
+      let waiters = [];
+      let ended = false;
+      let streamError = null;
+      const wake = () => {
+        const w = waiters;
+        waiters = [];
+        for (const f of w) f();
+      };
+      worker.callStream(
+        { op: "render-stream", pathname: url.pathname, manifestPath: clientManifestPath, reqCtx: reqCtxObj },
+        {
+          onMeta: (m) => metaResolve(m),
+          onChunk: (b64) => {
+            queue.push(b64);
+            wake();
+          },
+          onEnd: (m) => {
+            // redirect()/notFound() thrown BEHIND a Suspense boundary (after the shell
+            // already flushed) can't unwind the streamed response. Never silent: log it.
+            if (m && m.metaSent && (m.redirect || m.notFound)) {
+              const what = m.redirect ? `redirect(${m.redirect})` : "notFound()";
+              console.error(
+                `[diffpack] next: ${what} after the shell flushed on ${url.pathname}; the response was already streamed and cannot be changed.`,
+              );
+            }
+            ended = true;
+            wake();
+          },
+          onError: (e) => {
+            streamError = new Error(String(e));
+            metaReject(streamError);
+            wake();
+          },
+        },
       );
+      async function* flightChunks() {
+        let i = 0;
+        for (;;) {
+          if (streamError) throw streamError;
+          if (i < queue.length) {
+            yield queue[i];
+            i += 1;
+            continue;
+          }
+          if (ended) return;
+          await new Promise((resolve) => waiters.push(resolve));
+        }
+      }
+      const meta = await metaP;
       // Server-side redirect(): issue a REAL HTTP redirect (do NOT SSR the errored
       // flight tree). Over the soft-nav channel (?__rsc=1) hand the client Router a
-      // JSON redirect it can follow via history + a re-fetch.
-      if (redirect) {
+      // JSON redirect it follows via history + a re-fetch.
+      if (meta.redirect) {
         if (url.searchParams.has("__rsc")) {
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ __redirect: redirect }));
+          res.end(JSON.stringify({ __redirect: meta.redirect }));
           return;
         }
-        res.writeHead(status || 307, { location: redirect });
+        res.writeHead(meta.status || 307, { location: meta.redirect });
         res.end();
         return;
       }
-      // Server-side notFound(): render the real not-found tree (a guaranteed
-      // matchRoute miss yields app/not-found under the root layout) and serve it 404.
-      if (notFound) {
+      // Server-side notFound(): render the real not-found tree (buffered — an error
+      // path) and serve it 404.
+      if (meta.notFound) {
         const nf = await runReactServer(
           ["render", "/__diffpack_notfound__", clientManifestPath],
-          reqCtx,
+          JSON.stringify(reqCtxObj),
         );
         const nfDoc = await (await getRenderFlightToDocument())(
           new Uint8Array(nf.flight),
@@ -624,31 +723,32 @@ const server = createServer(async (req, res) => {
         );
         const nfHeaders = { "content-type": "text/html; charset=utf-8" };
         for (const [k, v] of configHeaders) nfHeaders[k] = v;
+        if (mwSetCookies.length) nfHeaders["set-cookie"] = mwSetCookies;
         res.writeHead(404, nfHeaders);
         res.end(nfDoc);
         return;
       }
-      // Soft-navigation: the client Router fetches `?__rsc=1` for the RAW flight of
-      // the target route and diff-renders it in place (no full document load). The
-      // static-asset check above ran first, so `?__rsc=1` never shadows an asset.
-      // Raw flight is status-agnostic (a 404 body tree is still valid flight).
+      // Soft-navigation: the client Router fetches `?__rsc=1` for the RAW flight of the
+      // target route and diff-renders it in place. Stream the raw flight bytes straight
+      // through (the client's createFromFetch consumes a streaming body).
       if (url.searchParams.has("__rsc")) {
         res.writeHead(200, { "content-type": "text/x-component" });
-        res.end(flight);
+        for await (const b64 of flightChunks()) res.write(Buffer.from(b64, "base64"));
+        res.end();
         return;
       }
-      const doc = await (await getRenderFlightToDocument())(
-        new Uint8Array(flight),
-        serverConsumerManifest,
-        flight.toString("base64"),
-        params,
-        { pathname: url.pathname, search: url.search },
-      );
       const docHeaders = { "content-type": "text/html; charset=utf-8" };
       for (const [k, v] of configHeaders) docHeaders[k] = v;
       if (mwSetCookies.length) docHeaders["set-cookie"] = mwSetCookies;
-      res.writeHead(status || 200, docHeaders);
-      res.end(doc);
+      await (await getRenderFlightToStream())(
+        flightChunks(),
+        serverConsumerManifest,
+        meta.params || {},
+        { pathname: url.pathname, search: url.search },
+        res,
+        docHeaders,
+        meta.status,
+      );
       return;
     }
     res.writeHead(404).end("not found");
