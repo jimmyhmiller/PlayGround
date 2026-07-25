@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  images: {
+    remotePatterns: [{ protocol: "https", hostname: "**.imgix.net" }],
+  },
   async redirects() {
     return [
       { source: "/old-about", destination: "/about", permanent: false },
