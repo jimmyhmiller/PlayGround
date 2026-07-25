@@ -236,6 +236,24 @@ fn parse_frontmatter_yaml(yaml: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// A human-readable node kind for error messages.
+fn node_kind(node: &Node) -> &'static str {
+    match node {
+        Node::Root(_) => "Root",
+        Node::Html(_) => "Html (raw HTML — write it as JSX in MDX)",
+        Node::Definition(_) => "Definition (reference-style link defs are unsupported)",
+        Node::FootnoteDefinition(_) => "FootnoteDefinition",
+        Node::FootnoteReference(_) => "FootnoteReference",
+        Node::Table(_) => "Table (GFM tables are unsupported)",
+        Node::Math(_) => "Math",
+        Node::InlineMath(_) => "InlineMath",
+        Node::Delete(_) => "Delete (strikethrough)",
+        Node::Yaml(_) => "Yaml",
+        Node::Toml(_) => "Toml",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,20 +313,3 @@ mod tests {
     }
 }
 
-/// A human-readable node kind for error messages.
-fn node_kind(node: &Node) -> &'static str {
-    match node {
-        Node::Root(_) => "Root",
-        Node::Html(_) => "Html (raw HTML — write it as JSX in MDX)",
-        Node::Definition(_) => "Definition (reference-style link defs are unsupported)",
-        Node::FootnoteDefinition(_) => "FootnoteDefinition",
-        Node::FootnoteReference(_) => "FootnoteReference",
-        Node::Table(_) => "Table (GFM tables are unsupported)",
-        Node::Math(_) => "Math",
-        Node::InlineMath(_) => "InlineMath",
-        Node::Delete(_) => "Delete (strikethrough)",
-        Node::Yaml(_) => "Yaml",
-        Node::Toml(_) => "Toml",
-        _ => "unknown",
-    }
-}
