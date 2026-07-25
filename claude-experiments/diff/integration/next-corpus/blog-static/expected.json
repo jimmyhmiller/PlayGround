@@ -1,0 +1,10 @@
+{
+  "name": "blog-static",
+  "routes": [
+    { "path": "/", "kind": "static" },
+    { "path": "/about", "kind": "static" },
+    { "path": "/blog/[slug]", "kind": "ssg", "hasGenerateStaticParams": true, "dynamicParams": true }
+  ],
+  "handlers": [],
+  "scaffold": { "loading": true, "error": false, "notFound": false }
+}

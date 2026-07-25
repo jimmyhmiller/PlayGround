@@ -1,0 +1,12 @@
+{
+  "name": "dashboard-dynamic",
+  "routes": [
+    { "path": "/", "kind": "static" },
+    { "path": "/go", "kind": "dynamic", "reasonPresent": true },
+    { "path": "/live", "kind": "dynamic", "reasonPresent": true },
+    { "path": "/search", "kind": "dynamic", "reasonPresent": true },
+    { "path": "/whoami", "kind": "dynamic", "reasonPresent": true }
+  ],
+  "handlers": [],
+  "scaffold": { "loading": false, "error": false, "notFound": false }
+}

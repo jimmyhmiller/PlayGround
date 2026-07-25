@@ -1,0 +1,7 @@
+/* Global stylesheet (makes `app_has_css` true → the compiled stylesheet is linked
+   into <head>). Hermetic: no @import of remote resources. */
+body {
+  margin: 0;
+  background: rgb(250, 250, 252);
+  font-family: system-ui, sans-serif;
+}

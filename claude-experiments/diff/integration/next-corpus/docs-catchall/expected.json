@@ -1,0 +1,13 @@
+{
+  "name": "docs-catchall",
+  "routes": [
+    { "path": "/", "kind": "static" },
+    { "path": "/boom", "kind": "static" },
+    { "path": "/[[...slug]]", "kind": "ssg", "hasGenerateStaticParams": true, "dynamicParams": true }
+  ],
+  "handlers": [
+    { "path": "/api/health", "methods": ["GET"] },
+    { "path": "/api/echo", "methods": ["GET", "POST"] }
+  ],
+  "scaffold": { "loading": false, "error": true, "notFound": true }
+}

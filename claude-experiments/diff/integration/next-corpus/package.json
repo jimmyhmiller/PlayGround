@@ -1,0 +1,12 @@
+{
+  "name": "next-corpus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared dependency root for the hermetic diffpack next app-router corpus. ONE npm install here populates a node_modules every nested app resolves via node's parent-directory walk (oxc_resolver). Versions are pinned to match integration/next-app-router exactly.",
+  "dependencies": {
+    "next": "16.2.11",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-server-dom-webpack": "^19.2.4"
+  }
+}

@@ -1,0 +1,15 @@
+# Installed once as a Tier-2 setup step (never committed, never a large file). Every
+# nested corpus app resolves react/next through node's parent-dir walk into this.
+/node_modules
+
+# diffpack build outputs (generated per app during the Tier-2 build+serve smoke)
+.diffpack-output/
+.diffpack-next/
+**/.diffpack-output/
+**/.diffpack-next/
+
+# next.js
+/.next/
+**/.next/
+
+.DS_Store

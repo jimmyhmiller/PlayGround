@@ -1,0 +1,9 @@
+{
+  "name": "shop-isr",
+  "routes": [
+    { "path": "/", "kind": "isr", "revalidate": 5 },
+    { "path": "/products/[id]", "kind": "ssg", "hasGenerateStaticParams": true, "dynamicParams": true }
+  ],
+  "handlers": [],
+  "scaffold": { "loading": false, "error": false, "notFound": false }
+}
