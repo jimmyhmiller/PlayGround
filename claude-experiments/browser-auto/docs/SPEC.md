@@ -115,6 +115,10 @@ for each row in table "cart-items" as $row
 - Every iteration's body steps are ordinary steps — settled, explained, and
   labelled `[iteration k/N: $row="…"]`. An empty collection runs the body zero
   times (not a failure); the container step reports `(N matches)`.
+- Replay addresses iterations directly: the report's display numbers are stable,
+  so `bat replay flow:7` reproduces state through the loop and focuses that one
+  iteration. (`--fast`'s per-step checkpoint tier can't span a runtime loop, so
+  replaying across one uses the reseed tier automatically.)
 - `for each` cannot iterate `let`-captured strings (use `for` for literal data);
   its collection must be a live page target.
 

@@ -160,10 +160,14 @@ export async function replayStep(
   const { config, world, seeds, browser } = deps;
   const source = await readFile(file, "utf8");
   const flow = parseFlow(source, file);
+  // `target` is a DISPLAY-index (the number shown in reports / `bat replay
+  // flow:N`), which can exceed the parsed step count when a `for each` loop
+  // expanded — and can address a single loop iteration.
   const target = stepOneBased - 1;
-  if (target < 0 || target >= flow.steps.length) {
-    throw new Error(`flow "${flow.name}" has ${flow.steps.length} steps; cannot replay step ${stepOneBased}`);
-  }
+  if (target < 0) throw new Error(`step number must be ≥ 1 (got ${stepOneBased})`);
+  // A runtime loop makes display indices diverge from parsed indices, so the
+  // checkpoint-based --fast tier (keyed by parsed index) cannot be used.
+  const hasForEach = flow.steps.some((s) => s.action.type === "forEach");
 
   const description = composeFlowWorld(flow, seeds);
   let verification: FlowTrace["worldVerification"] = null;
@@ -174,7 +178,9 @@ export async function replayStep(
 
   let tier: string;
   let checkpoint: Checkpoint | null = null;
-  if (opts.fast && target > 0) {
+  if (opts.fast && hasForEach) {
+    // fall through to the reseed tier below, with a note
+  } else if (opts.fast && target > 0) {
     checkpoint = await loadCheckpoint(config, file, target - 1);
     if (!checkpoint) {
       throw new Error(
@@ -203,7 +209,8 @@ export async function replayStep(
     tier =
       target === 0
         ? "direct (first step needs no prior state)"
-        : "fallback (reseed + re-run steps 1.." + target + " fully settled, then the target step)";
+        : (opts.fast && hasForEach ? "--fast unavailable across a for-each loop; " : "") +
+          `fallback (reseed + re-run through step ${target + 1} fully settled, focusing the target step)`;
   }
 
   const contextOpts: Parameters<Browser["newContext"]>[0] = { baseURL: config.baseUrl };
@@ -222,23 +229,37 @@ export async function replayStep(
     const env = await prepareContext(context, page, flowForPrepare, baseOpts);
 
     let startAt = 0;
+    let stopAfter = flow.steps.length - 1;
+    const runOpts = { ...baseOpts } as typeof baseOpts & { stopAtDisplay?: number };
     if (checkpoint) {
+      // fast tier (no loops): display index == parsed index
       await page.goto(checkpoint.url, { waitUntil: "domcontentloaded", timeout: config.stepBudgetMs });
       const tracker = new NetworkTracker(page);
       await settle(page, tracker, { budgetMs: config.stepBudgetMs, clockInstalled: env.clockInstalled, matchers: [] });
       startAt = target;
+      stopAfter = target;
+    } else {
+      // fallback tier: run through the target DISPLAY step (may be a loop iteration)
+      runOpts.stopAtDisplay = target;
     }
 
     const trace = await runSteps(
       flow,
       context,
       page,
-      baseOpts,
+      runOpts,
       env,
       { fingerprint: description?.fingerprint ?? null, verification },
       startAt,
-      target,
+      stopAfter,
     );
+
+    const executed = trace.steps.filter((s) => s.status !== "not-run").length;
+    if (target >= executed) {
+      throw new Error(
+        `flow "${flow.name}" produced ${executed} step(s) in this run; cannot replay step ${stepOneBased}`,
+      );
+    }
 
     const report = `replay of step ${stepOneBased} — tier: ${tier}\n\n${renderReport(trace)}`;
     await writeFile(join(runDir, "trace.json"), JSON.stringify(trace, null, 2), "utf8");

@@ -159,6 +159,26 @@ describe("atomic replay", () => {
     expect(result.trace.steps[4]!.status).toBe("not-run");
   }, 60000);
 
+  it("replays a single `for each` iteration by display index", async () => {
+    const MANAGE = join(FIXTURE, "e2e/flows/manage-cart.flow");
+    // display steps: 1-4 setup, 5 = loop container (2 matches), 6/7 = iterations, 8 = post-loop
+    const result = await replayStep(MANAGE, 7, deps, { fast: false });
+    expect(result.trace.status).toBe("pass");
+    // it re-ran THROUGH iteration 2 (reproducing state via iteration 1), then stopped
+    const executed = result.trace.steps.filter((s) => s.status !== "not-run");
+    expect(executed).toHaveLength(7);
+    const iter2 = result.trace.steps[6]!;
+    expect(iter2.iteration).toContain("iteration 2/2");
+    expect(iter2.iteration).toContain("Red Widget");
+    // the post-loop step was not run
+    expect(result.trace.steps[7]!.status).toBe("not-run");
+  }, 60000);
+
+  it("errors clearly when the replay target exceeds the run's step count", async () => {
+    const MANAGE = join(FIXTURE, "e2e/flows/manage-cart.flow");
+    await expect(replayStep(MANAGE, 99, deps, { fast: false })).rejects.toThrowError(/produced \d+ step\(s\).*cannot replay step 99/);
+  }, 60000);
+
   it("--fast replay restores the L4 world snapshot + browser checkpoint", async () => {
     await runFlowFile(BUY_FLOW, deps);
     const result = await replayStep(BUY_FLOW, 4, deps, { fast: true });

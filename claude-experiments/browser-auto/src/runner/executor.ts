@@ -33,6 +33,9 @@ export interface RunOptions {
   onCheckpoint?: (cp: Checkpoint) => Promise<void> | void;
   /** replay support: skip full trace verbosity for fast-forwarded steps */
   quietSteps?: Set<number>;
+  /** replay support: stop after executing this DISPLAY-index step (0-based),
+   * which can be a single `for each` iteration */
+  stopAtDisplay?: number;
 }
 
 export class FlowSetupError extends Error {
@@ -217,7 +220,16 @@ export async function runSteps(
     steps: [],
   };
 
-  for (let i = 0; i < flow.steps.length; i++) {
+  // `stopAtDisplay` addresses EXECUTED (display) steps, so it can target a
+  // single `for each` iteration; `executed` counts display positions.
+  const stopAtDisplay = opts.stopAtDisplay;
+  let executed = 0;
+  let done = false;
+  const markRestNotRun = (fromParsed: number) => {
+    for (let j = fromParsed; j < flow.steps.length; j++) trace.steps.push(newStepTrace(j, flow.steps[j]!, ""));
+  };
+
+  for (let i = 0; i < flow.steps.length && !done; i++) {
     const step = flow.steps[i]!;
     if (i > stopAfter) {
       trace.steps.push(newStepTrace(i, step, ""));
@@ -227,6 +239,7 @@ export async function runSteps(
       const skipped = newStepTrace(i, step, "");
       skipped.status = "pass";
       trace.steps.push(skipped);
+      executed++;
       continue;
     }
     const ctx: StepContext = {
@@ -245,16 +258,21 @@ export async function runSteps(
     // parsed step. Expand it in place, pushing each body iteration's trace.
     if (step.action.type === "forEach") {
       const produced = await runForEach(step, ctx, i);
-      let failed = false;
       for (const bt of produced) {
         bt.index = trace.steps.length;
         trace.steps.push(bt);
-        if (bt.status === "fail") { failed = true; break; }
+        executed++;
+        if (bt.status === "fail") {
+          trace.status = "fail";
+          done = true;
+          break;
+        }
+        if (stopAtDisplay !== undefined && executed - 1 >= stopAtDisplay) {
+          done = true; // replay reached its target iteration
+          break;
+        }
       }
-      if (failed) {
-        trace.status = "fail";
-        break;
-      }
+      if (done) { markRestNotRun(i + 1); break; }
       continue;
     }
 
@@ -268,11 +286,14 @@ export async function runSteps(
       }
     }
     trace.steps.push(stepTrace);
+    executed++;
     if (stepTrace.status === "fail") {
       trace.status = "fail";
-      for (let j = i + 1; j < flow.steps.length; j++) {
-        trace.steps.push(newStepTrace(j, flow.steps[j]!, ""));
-      }
+      markRestNotRun(i + 1);
+      break;
+    }
+    if (stopAtDisplay !== undefined && executed - 1 >= stopAtDisplay) {
+      markRestNotRun(i + 1); // replay reached its target step
       break;
     }
     if (opts.onCheckpoint) {
