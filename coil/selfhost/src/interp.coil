@@ -41,7 +41,7 @@
 ; the compiler (one C symbol, one signature): `exit`/`write`/`malloc` are already
 ; declared in ffi/io/alloc, so these mirror those exactly. `putchar`/`puts` are
 ; unique to the interpreter.
-(extern interp.malloc  [i64] (-> (ptr i8)))
+(extern interp.malloc  [isize] (-> (ptr i8)))   ; size_t — mirror alloc.malloc (isize, not i64)
 (extern interp.free    [(ptr i8)] (-> i64))
 (extern interp.exit    [i32] (-> i64))
 (extern interp.putchar [i64] (-> i64))

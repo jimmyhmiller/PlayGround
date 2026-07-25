@@ -67,7 +67,7 @@
           (let [n (read (cast i32 fd) buf 65536)]
             (if (icmp-le n 0) (break)
               (let [(mut i) 0]
-                (loop (if (icmp-ge (load i) n) (break)
+                (loop (if (icmp-ge (load i) (cast i64 n)) (break)
                   (do (al-push! [u8] (mut bytes) (cast u8 (load (index buf (load i)))))
                       (store! i (iadd (load i) 1)))))))))
         (close fd)
@@ -75,9 +75,9 @@
 
 ; Write a slice to stdout.
 (defn emit [(s (slice u8))] (-> i64)
-  (write 1 (cast (ptr i8) (slice-data [u8] s)) (slice-len [u8] s)) 0)
+  (write 1 (cast (ptr i8) (slice-data [u8] s)) (cast isize (slice-len [u8] s))) 0)
 (defn ewrite [(s (slice u8))] (-> i64)
-  (write 2 (cast (ptr i8) (slice-data [u8] s)) (slice-len [u8] s)) 0)
+  (write 2 (cast (ptr i8) (slice-data [u8] s)) (cast isize (slice-len [u8] s))) 0)
 
 ; Write a slice to a file (truncating). Returns 0 on success, -1 on open failure.
 (defn write-file [(a (ptr Allocator)) (path (slice u8)) (content (slice u8))] (-> i64)
