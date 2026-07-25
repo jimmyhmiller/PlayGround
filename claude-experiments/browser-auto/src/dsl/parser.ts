@@ -552,7 +552,8 @@ function staticChecks(flow: Flow, problems: string[]): void {
     }
     for (const e of step.effects) {
       if (e.type === "let") {
-        if (defined.has(e.name)) problems.push(`line ${step.line}: $${e.name} is defined twice`);
+        // redefinition is allowed (loop bodies legitimately re-capture each
+        // iteration; last value wins). use-before-def is still caught above.
         defined.add(e.name);
       }
     }
@@ -560,18 +561,150 @@ function staticChecks(flow: Flow, problems: string[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// Loop expansion — a `for` over a LITERAL table is unrolled at PARSE time into
+// flat steps. The DSL stays data-not-code: the step count is known before the
+// browser launches, every step is still a serializable indexed record, and
+// atomic single-step replay is unaffected. This is macro expansion, never
+// runtime control flow — there is deliberately no way to loop over dynamic
+// (runtime-sized) data, because that would break replay-by-index.
+//
+//   for $cat $all
+//     "Electronics" "All Electronics"
+//     "Clothing"    "All Clothing"
+//   do
+//     click link "$cat"
+//       expect text "$all"
+
+interface SrcLine {
+  raw: string;
+  /** original source line number (for errors / replay attribution) */
+  lineNo: number;
+  /** iteration note, when this line came from a loop body */
+  note?: string;
+}
+
+function indentOf(line: string): number {
+  const m = /^[ \t]*/.exec(line)!;
+  return m[0].replace(/\t/g, "  ").length;
+}
+
+function quotedValues(line: string): string[] {
+  return [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!.replace(/\\"/g, '"'));
+}
+
+function substituteVar(text: string, name: string, value: string): string {
+  return text.replace(new RegExp("\\$" + name + "(?![\\w-])", "g"), value);
+}
+
+function expandLoops(source: string, problems: string[]): SrcLine[] {
+  const raw = source.split(/\r?\n/);
+  const out: SrcLine[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const line = raw[i]!;
+    const trimmed = line.trim();
+    const forMatch = /^for\s+(.+)$/.exec(trimmed);
+    if (!forMatch || indentOf(line) !== 0) {
+      out.push({ raw: line, lineNo: i + 1 });
+      i++;
+      continue;
+    }
+
+    // ---- parse the `for $a $b …` header
+    const forLine = i + 1;
+    const varTokens = forMatch[1]!.trim().split(/\s+/);
+    if (varTokens[varTokens.length - 1] === "in") varTokens.pop(); // optional readability sugar
+    const varNames: string[] = [];
+    let headerOk = true;
+    for (const vt of varTokens) {
+      const vm = /^\$([A-Za-z_][\w-]*)$/.exec(vt);
+      if (!vm) {
+        problems.push(`line ${forLine}: 'for' expects loop variables like '$name', got '${vt}'`);
+        headerOk = false;
+      } else varNames.push(vm[1]!);
+    }
+    i++;
+
+    // ---- data rows: indented lines until `do`
+    const rows: Array<{ values: string[]; lineNo: number }> = [];
+    while (i < raw.length && raw[i]!.trim() !== "do") {
+      const r = raw[i]!;
+      const t = r.trim();
+      if (t === "" || t.startsWith("#")) { i++; continue; }
+      if (indentOf(r) === 0) {
+        problems.push(`line ${forLine}: 'for' loop is missing its 'do' (found a top-level line first)`);
+        break;
+      }
+      const values = quotedValues(r);
+      if (values.length !== varNames.length) {
+        problems.push(
+          `line ${i + 1}: this 'for' row has ${values.length} value(s) but the loop declares ${varNames.length} variable(s) (${varNames.map((v) => "$" + v).join(", ")})`,
+        );
+      } else {
+        rows.push({ values, lineNo: i + 1 });
+      }
+      i++;
+    }
+    if (raw[i]?.trim() !== "do") {
+      problems.push(`line ${forLine}: 'for' loop needs a 'do' line before its body`);
+      continue;
+    }
+    i++; // consume `do`
+
+    // ---- body: indented lines until dedent to column 0
+    const body: SrcLine[] = [];
+    let minIndent = Infinity;
+    while (i < raw.length) {
+      const b = raw[i]!;
+      if (b.trim() === "") { body.push({ raw: "", lineNo: i + 1 }); i++; continue; }
+      if (indentOf(b) === 0) break;
+      if (/^\s*for\s/.test(b)) {
+        problems.push(`line ${i + 1}: nested 'for' loops are not supported`);
+      }
+      minIndent = Math.min(minIndent, indentOf(b));
+      body.push({ raw: b, lineNo: i + 1 });
+      i++;
+    }
+    const bodyLines = body.filter((l) => l.raw.trim() !== "");
+    if (!headerOk) continue;
+    if (rows.length === 0) {
+      problems.push(`line ${forLine}: 'for' loop has no data rows`);
+      continue;
+    }
+    if (bodyLines.length === 0) {
+      problems.push(`line ${forLine}: 'for' loop 'do' body is empty`);
+      continue;
+    }
+
+    // ---- unroll: dedent the body, substitute each row, emit flat lines
+    rows.forEach((row, iterIdx) => {
+      const label = `iteration ${iterIdx + 1}/${rows.length}: ${varNames.map((v, k) => `$${v}="${row.values[k]}"`).join(", ")}`;
+      for (const bl of bodyLines) {
+        let text = bl.raw.slice(Number.isFinite(minIndent) ? minIndent : 0);
+        varNames.forEach((v, k) => {
+          text = substituteVar(text, v, row.values[k]!);
+        });
+        out.push({ raw: text, lineNo: bl.lineNo, note: label });
+      }
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 
 export function parseFlow(source: string, file: string): Flow {
   const problems: string[] = [];
-  const lines = source.split(/\r?\n/);
+  const lines = expandLoops(source, problems);
   let name: string | null = null;
   const givens: Given[] = [];
   const steps: Step[] = [];
   let sawStep = false;
 
   for (let idx = 0; idx < lines.length; idx++) {
-    const raw = lines[idx]!;
-    const lineNo = idx + 1;
+    const raw = lines[idx]!.raw;
+    const lineNo = lines[idx]!.lineNo;
+    const note = lines[idx]!.note;
     const trimmed = raw.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
     const indented = /^[ \t]/.test(raw);
@@ -627,7 +760,11 @@ export function parseFlow(source: string, file: string): Flow {
       p.next();
       const action = parseAction(p, head.v);
       sawStep = true;
-      if (action) steps.push({ action, effects: [], line: lineNo, source: trimmed });
+      if (action) {
+        const step: Step = { action, effects: [], line: lineNo, source: trimmed };
+        if (note !== undefined) step.iteration = note;
+        steps.push(step);
+      }
       continue;
     }
     problems.push(

@@ -12,10 +12,13 @@ and **fully explainable when they fail**. Built on Playwright.
    runtime waits on *events* (a named network response, a router transition,
    an element appearing), never on clocks.
 
-2. **The DSL is data, not code.** No conditionals, no loops, no closures. A
-   flow file parses to a flat JSON plan (the IR). Steps are serializable
-   records, which is what buys atomic replay, perfect traces, and
-   agent-writability.
+2. **The DSL is data, not code.** No conditionals, no closures, no runtime
+   control flow. A flow file parses to a flat JSON plan (the IR). Steps are
+   serializable records, which is what buys atomic replay, perfect traces, and
+   agent-writability. The one iteration construct — `for` over a *literal*
+   table — is unrolled at **parse time** into flat steps, so the step count is
+   known before the browser launches and every guarantee above still holds.
+   There is deliberately no way to loop over dynamic (runtime-sized) data.
 
 ## Flow grammar
 
@@ -60,6 +63,32 @@ click button "Checkout"
 | `given stub <METHOD> <path> <status> [json <literal>]` | stub a network route (declared, replayable) |
 
 Seeds merge commutatively (see WORLD.md). Patches are the only ordered given.
+
+### Loops (`for` … `do`) — parse-time unrolling
+
+A `for` iterates a body over a **literal table** of rows and is expanded into
+flat steps before anything runs. Each declared `$var` is substituted (by name)
+into the body for each row:
+
+```
+for $cat $all in            # `in` is optional readability sugar
+  "Electronics" "All Electronics"
+  "Clothing"    "All Clothing"
+  "Books"       "All Books"
+do
+  click link "$cat"
+    expect text "$all"
+```
+
+- Each row supplies exactly one value per declared variable (mismatch is a
+  parse error). Values are used verbatim — there are no transforms (lowercasing
+  etc.); put the exact string you need in the table.
+- The body is any sequence of action+effect steps; it may span multiple steps.
+- Unrolled steps carry an **iteration label** — a failure reports
+  `step 3 … [iteration 2/3: $cat="Clothing"]` and `bat replay flow:3` replays
+  exactly that iteration. This is the payoff of unrolling over a runtime loop.
+- `for` may not nest, and cannot iterate captured (`let`) or runtime data — the
+  table must be literal, because the flat IR's step count must be known up front.
 
 ### Actions
 

@@ -21,6 +21,8 @@ export interface StepTrace {
   index: number;
   line: number;
   source: string;
+  /** iteration label when this step came from unrolling a `for` loop */
+  iteration?: string;
   status: "pass" | "fail" | "not-run";
   preUrl: string;
   postUrl?: string;
@@ -77,7 +79,7 @@ export interface Checkpoint {
 }
 
 export function newStepTrace(index: number, step: Step, preUrl: string): StepTrace {
-  return {
+  const t: StepTrace = {
     index,
     line: step.line,
     source: step.source,
@@ -90,6 +92,8 @@ export function newStepTrace(index: number, step: Step, preUrl: string): StepTra
     captures: {},
     durationMs: 0,
   };
+  if (step.iteration !== undefined) t.iteration = step.iteration;
+  return t;
 }
 
 /** Render the human/agent-readable story of a failed flow. */
@@ -115,7 +119,7 @@ export function renderReport(trace: FlowTrace): string {
 
   for (const s of trace.steps) {
     const mark = s.status === "pass" ? "✓" : s.status === "fail" ? "✗" : "·";
-    out.push(`${mark} step ${s.index + 1} (line ${s.line}): ${s.source}`);
+    out.push(`${mark} step ${s.index + 1} (line ${s.line}): ${s.source}${s.iteration ? `   [${s.iteration}]` : ""}`);
     if (s.status === "not-run") continue;
     if (s.settle?.notes.length) {
       for (const n of s.settle.notes) out.push(`  note: ${n}`);

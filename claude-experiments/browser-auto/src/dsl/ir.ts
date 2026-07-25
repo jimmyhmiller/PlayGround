@@ -84,6 +84,8 @@ export interface Step {
   line: number;
   /** verbatim source of the action line (for traces/reports) */
   source: string;
+  /** set when this step came from unrolling a `for` loop — the iteration label */
+  iteration?: string;
 }
 
 export interface Flow {

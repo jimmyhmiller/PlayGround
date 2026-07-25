@@ -211,6 +211,75 @@ click button "Pay" in frame "checkout"
     expect(() => parseFlow(`flow "t"\nclick frame "x"\n  expect url /y\n`, "t.flow")).toThrowError(/"frame" is a scope/);
   });
 
+  it("unrolls a table-driven for loop into flat steps at parse time", () => {
+    const flow = parseFlow(
+      `flow "loop"
+go /shop
+  expect heading "Shop"
+for $item $price in
+  "Blue Widget" "$19.99"
+  "Red Widget"  "$24.99"
+do
+  click button "Add" in listitem "$item"
+    expect text "$price" in testid "total"
+`,
+      "loop.flow",
+    );
+    // 1 go + 2 iterations x 1 body step = 3 flat steps
+    expect(flow.steps).toHaveLength(3);
+    expect(flow.steps[1]!.action).toEqual({
+      type: "click",
+      target: { kind: "button", name: "Add", within: { kind: "listitem", name: "Blue Widget" } },
+    });
+    expect(flow.steps[1]!.effects[0]).toEqual({ type: "text", value: "$19.99", exact: false, target: { kind: "testid", name: "total" } });
+    expect(flow.steps[1]!.iteration).toContain('$item="Blue Widget"');
+    expect(flow.steps[2]!.action).toMatchObject({ target: { within: { name: "Red Widget" } } });
+    expect(flow.steps[2]!.iteration).toContain("iteration 2/2");
+  });
+
+  it("expands multi-step loop bodies per iteration", () => {
+    const flow = parseFlow(
+      `flow "multi"
+for $x in
+  "a"
+  "b"
+do
+  go /$x
+    expect heading "$x"
+  click button "next"
+    expect url /$x/done
+`,
+      "m.flow",
+    );
+    expect(flow.steps).toHaveLength(4); // 2 iterations x 2 body steps
+    expect(flow.steps.map((s) => s.source)).toEqual([
+      "go /a",
+      'click button "next"',
+      "go /b",
+      'click button "next"',
+    ]);
+    expect(flow.steps[1]!.effects[0]).toEqual({ type: "url", path: "/a/done" });
+    expect(flow.steps[3]!.effects[0]).toEqual({ type: "url", path: "/b/done" });
+  });
+
+  it("errors when a for row's value count does not match the variables", () => {
+    expect(() =>
+      parseFlow(`flow "t"\nfor $a $b in\n  "only-one"\ndo\n  go /$a\n    expect heading "H"\n`, "t.flow"),
+    ).toThrowError(/1 value\(s\) but the loop declares 2/);
+  });
+
+  it("errors on a for loop with no 'do'", () => {
+    expect(() => parseFlow(`flow "t"\nfor $a in\n  "x"\ngo /x\n  expect heading "H"\n`, "t.flow")).toThrowError(
+      /missing its 'do'|needs a 'do'/,
+    );
+  });
+
+  it("rejects nested for loops", () => {
+    expect(() =>
+      parseFlow(`flow "t"\nfor $a in\n  "x"\ndo\n  for $b in\n    "y"\n  do\n    go /$b\n      expect heading "H"\n`, "t.flow"),
+    ).toThrowError(/nested 'for'/);
+  });
+
   it("parses fill with $var values and trailing-string extraction", () => {
     const flow = parseFlow(
       `flow "t"\ngo /f\n  expect heading "F"\n  let code = text in testid "code"\nfill textbox "Code" in form "redeem" $code\n  expect value $code in textbox "Code"\n`,
