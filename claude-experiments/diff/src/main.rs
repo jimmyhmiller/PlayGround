@@ -960,6 +960,30 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
             include_str!("../scripts/rsc/next-server.mjs"),
         )
         .map_err(|error| format!("cannot write production server: {error}"))?;
+        // instrumentation.{ts,js}: the app's boot hook (register() runs once at server
+        // startup — OpenTelemetry/Sentry-style). Write the generated boot-entry wrapper
+        // (which CALLS register at module load) then bundle it NATIVELY (self-invoke our
+        // own `bundle` subcommand, ESM) to <out>/instrumentation.mjs; the orchestrator
+        // dynamic-imports it once before listen (see next-server.mjs). Build-time only,
+        // zero per-request cost.
+        if let Some(wrapper) = diffpack::next_adapter::write_instrumentation_wrapper(project_root)? {
+            println!("=== instrumentation (register() boot hook) ===");
+            let instr_out = out.join("instrumentation.mjs");
+            let status = std::process::Command::new(&exe)
+                .arg("bundle")
+                .arg(&wrapper)
+                .arg(&instr_out)
+                .arg("--format")
+                .arg("esm")
+                .status()
+                .map_err(|error| format!("cannot bundle instrumentation ({}): {error}", wrapper.display()))?;
+            if !status.success() {
+                return Err(format!(
+                    "bundling instrumentation ({}) failed ({status})",
+                    wrapper.display(),
+                ));
+            }
+        }
         // Prerender static / SSG / ISR routes so the orchestrator serves them from the
         // cache (instant, no per-request render) instead of rendering every request.
         // Dynamic routes are recorded, never dropped. A prerender failure fails the

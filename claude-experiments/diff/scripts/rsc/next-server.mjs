@@ -959,6 +959,17 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// instrumentation.ts boot hook: if the build emitted `<out>/instrumentation.mjs` (the
+// bundled boot-entry that CALLS the app's register()), import it exactly once here,
+// before we start accepting connections. Importing runs register() as the module's
+// top-level side effect, and the await blocks listen until it resolves. This is the
+// OpenTelemetry/Sentry-style startup hook; it touches request latency zero times. A
+// missing register() is a hard error thrown by the generated wrapper (never a no-op).
+const instrumentationPath = join(outputDir, "instrumentation.mjs");
+if (existsSync(instrumentationPath)) {
+  await import(pathToFileURL(instrumentationPath).href);
+}
+
 server.listen(port, () => {
   const actual = server.address().port;
   console.log(`next-server listening on http://localhost:${actual}`);
