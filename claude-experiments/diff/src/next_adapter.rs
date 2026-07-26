@@ -1763,6 +1763,16 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // preserved to `public/rsc.css` by the build (main.rs).
     let has_css = app_has_css(&app_dir);
 
+    // Evaluate `next.config.*` ONCE for this pass (redirects/rewrites/headers + images +
+    // the basePath/assetPrefix/trailingSlash/i18n routing surface). The result feeds the
+    // image-config module, the baked asset/base-path prefixes below, and (on the
+    // react-server pass) the config manifest — so node is spawned a single time instead of
+    // once per consumer (a build-time win over the previous two spawns).
+    let next_config = run_next_config_eval(&root);
+    let routing = Routing::from_eval(next_config.as_ref());
+    let base_path = routing.base_path.clone();
+    let asset_base = routing.asset_base();
+
     let adapter_dir = root.join(ADAPTER_DIR);
     let shims_dir = adapter_dir.join("shims");
     std::fs::create_dir_all(&shims_dir)
@@ -1846,6 +1856,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             &segment_boundary_canon,
             &request_context_canon,
             middleware.as_deref(),
+            &asset_base,
         ),
     )?;
     // The `next/link` shim is a `"use client"` intercepting component. In the
@@ -1856,14 +1867,14 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // file first so its canonical path exists), keyed by the SAME canonical path the
     // react-server render resolves the `next/link` alias to → manifest ids match.
     let link_shim = shims_dir.join("link.tsx");
-    write_if_changed(&link_shim, next_link_shim())?;
+    write_if_changed(&link_shim, &next_link_shim(&base_path))?;
     let link_canon = link_shim.canonicalize().unwrap_or_else(|_| link_shim.clone());
     if !islands.contains(&link_canon) {
         islands.push(link_canon);
     }
     write_if_changed(
         &adapter_dir.join("server.tsx"),
-        &ssr_entry_module(&adapter_dir, &islands, &hooks_context_canon),
+        &ssr_entry_module(&adapter_dir, &islands, &hooks_context_canon, &asset_base),
     )?;
     write_if_changed(
         &adapter_dir.join("client.tsx"),
@@ -1883,7 +1894,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // graph so the shim can allow/deny remote hosts and drive a custom/built-in loader.
     write_if_changed(
         &adapter_dir.join("image-config.ts"),
-        &image_config_module(&read_images_config(&root)),
+        &image_config_module(&images_from_eval(next_config.as_ref())),
     )?;
     write_if_changed(&shims_dir.join("image.tsx"), next_image_shim())?;
     write_if_changed(
@@ -1962,7 +1973,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // manifest the orchestrator applies (redirects/rewrites/headers). Best-effort: a
     // failing/absent config yields empty rules, never a build failure.
     if environment == "react-server" {
-        write_next_config_manifest(&root);
+        write_next_config_manifest(&root, next_config.as_ref());
     }
 
     Ok(Some(AppConfig {
@@ -2030,10 +2041,43 @@ fn default_images_json() -> serde_json::Value {
     })
 }
 
-fn read_images_config(root: &Path) -> serde_json::Value {
-    run_next_config_eval(root)
-        .and_then(|v| v.get("images").cloned())
+/// The `images` block from a single `run_next_config_eval` result, defaulted to Next's
+/// stock values when there is no config (or it lacks an `images` key).
+fn images_from_eval(eval: Option<&serde_json::Value>) -> serde_json::Value {
+    eval.and_then(|v| v.get("images").cloned())
         .unwrap_or_else(default_images_json)
+}
+
+/// The next.config routing surface diffpack BAKES into generated modules at build time:
+/// `basePath` (a URL prefix on every page link + asset) and `assetPrefix` (a CDN/path
+/// prefix on static assets only). `trailingSlash`/`i18n` are purely request-time routing
+/// decisions applied by the orchestrator from the manifest, so they are not carried here.
+/// Both fields default to "" (no prefix) when there is no config.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Routing {
+    pub base_path: String,
+    pub asset_prefix: String,
+}
+
+impl Routing {
+    fn from_eval(eval: Option<&serde_json::Value>) -> Self {
+        let field = |key: &str| {
+            eval.and_then(|v| v.get(key))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        Routing {
+            base_path: field("basePath"),
+            asset_prefix: field("assetPrefix"),
+        }
+    }
+
+    /// The prefix baked onto STATIC-asset URLs (`client.js`, `rsc.css`): assetPrefix then
+    /// basePath. A page link gets `base_path` alone.
+    fn asset_base(&self) -> String {
+        format!("{}{}", self.asset_prefix, self.base_path)
+    }
 }
 
 /// Generate `.diffpack-next/image-config.ts` — the next.config `images` the `next/image`
@@ -2073,38 +2117,25 @@ fn image_config_module(images: &serde_json::Value) -> String {
     out
 }
 
-fn write_next_config_manifest(root: &Path) {
+/// The empty-config manifest: well-formed so the orchestrator's `routing` reader always
+/// finds every field (no config, a config that throws, or missing node all land here).
+const EMPTY_CONFIG_MANIFEST: &str =
+    r#"{"redirects":[],"rewrites":[],"headers":[],"basePath":"","assetPrefix":"","trailingSlash":false,"i18n":null}"#;
+
+/// Persist the single `run_next_config_eval` result to
+/// `.diffpack-output/next-config-manifest.json` (the redirects/rewrites/headers rules +
+/// the basePath/assetPrefix/trailingSlash/i18n routing surface the orchestrator applies).
+/// No re-spawn of node: the caller already evaluated the config once for this pass.
+fn write_next_config_manifest(root: &Path, eval: Option<&serde_json::Value>) {
     let output = root.join(".diffpack-output");
     let _ = std::fs::create_dir_all(&output);
     let manifest_path = output.join("next-config-manifest.json");
-    let empty = r#"{"redirects":[],"rewrites":[],"headers":[]}"#;
-    let config = ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"]
-        .iter()
-        .map(|f| root.join(f))
-        .find(|p| p.exists());
-    let Some(config) = config else {
-        let _ = std::fs::write(&manifest_path, empty);
-        return;
-    };
-    let loader = std::env::temp_dir().join("diffpack-next-config-eval.mjs");
-    if std::fs::write(&loader, include_str!("../scripts/rsc/next-config-eval.mjs")).is_err() {
-        let _ = std::fs::write(&manifest_path, empty);
-        return;
-    }
-    match std::process::Command::new("node")
-        .arg(&loader)
-        .arg(&config)
-        .current_dir(root)
-        .output()
-    {
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-            if !out.stderr.is_empty() {
-                eprintln!("[next.config] {}", String::from_utf8_lossy(&out.stderr).trim());
-            }
-            let _ = std::fs::write(&manifest_path, &out.stdout);
+    match eval {
+        Some(value) => {
+            let _ = std::fs::write(&manifest_path, value.to_string());
         }
-        _ => {
-            let _ = std::fs::write(&manifest_path, empty);
+        None => {
+            let _ = std::fs::write(&manifest_path, EMPTY_CONFIG_MANIFEST);
         }
     }
 }
@@ -2362,6 +2393,7 @@ fn hooks_context_module() -> &'static str {
 /// route, and renders it to a flight stream (`render <pathname>` op), or dispatches a
 /// server action (`action` op). The orchestrator spawns this in its own child so its
 /// react-server React never mixes with the SSR/browser React.
+#[allow(clippy::too_many_arguments)]
 fn rsc_entry_module(
     disc: &Discovered,
     font_css: &str,
@@ -2370,6 +2402,7 @@ fn rsc_entry_module(
     segment_boundary: &Path,
     request_context: &Path,
     middleware: Option<&Path>,
+    asset_base: &str,
 ) -> String {
     // Intern every referenced module (page/layout/loading/error/not-found + the
     // generated error boundary) to a stable `M<i>` default-import binding.
@@ -2563,7 +2596,7 @@ fn rsc_entry_module(
     let css_push = if has_css {
         format!(
             "  items.push(createElement(\"link\", {{ rel: \"stylesheet\", href: {}, precedence: \"low\" }}));\n",
-            js_str(RSC_CSS_URL)
+            js_str(&format!("{asset_base}{RSC_CSS_URL}"))
         )
     } else {
         String::new()
@@ -3413,10 +3446,18 @@ fn island_pins(adapter_dir: &Path, islands: &[PathBuf]) -> String {
 /// app-router document (`<html>` and all — the RootLayout owns the document, as in
 /// real Next) to HTML with react-dom, injecting the client bootstrap module and the
 /// inlined flight via react-dom's bootstrap options so hydration matches exactly.
-fn ssr_entry_module(adapter_dir: &Path, islands: &[PathBuf], hooks_context: &Path) -> String {
+fn ssr_entry_module(
+    adapter_dir: &Path,
+    islands: &[PathBuf],
+    hooks_context: &Path,
+    asset_base: &str,
+) -> String {
     let pins = island_pins(adapter_dir, islands);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
+    // The browser fetches the client bootstrap under the app's basePath/assetPrefix (the
+    // orchestrator strips that prefix back off before the publicDir lookup).
+    let client_js = js_str(&format!("{asset_base}/client.js"));
     format!(
         r#"// Generated by diffpack's next app-router adapter — the SSR-of-flight entry
 // (Target::Server, node conditions: react + react-dom/server +
@@ -3512,7 +3553,7 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
     }});
     sink.on("error", reject);
     const {{ pipe }} = renderToPipeableStream(root, {{
-      bootstrapModules: ["/client.js"],
+      bootstrapModules: [{client_js}],
       bootstrapScriptContent:
         "window.__DIFFPACK_FLIGHT__ = " + JSON.stringify(flightBase64) + ";" +
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
@@ -3602,7 +3643,7 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     const html = new PassThrough();
     let shellStarted = false;
     const {{ pipe }} = renderToPipeableStream(root, {{
-      bootstrapModules: ["/client.js"],
+      bootstrapModules: [{client_js}],
       // No inlined full flight here — it streams as __DF_FLIGHT scripts. Seed the array
       // (so it exists before client.js runs) + the hooks-context globals.
       bootstrapScriptContent:
@@ -3966,9 +4007,17 @@ export const userAgent = (request) => ({ ua: (request.headers.get("user-agent") 
 "##
 }
 
-fn next_link_shim() -> &'static str {
-    r##""use client";
-// `next/link` shim (diffpack next app-router adapter). A `"use client"` intercepting
+fn next_link_shim(base_path: &str) -> String {
+    // `BASE_PATH` (next.config `basePath`) is baked in so the rendered `<a href>` AND the
+    // soft-nav target both carry the prefix; the orchestrator strips it back off on the
+    // `?__rsc=1` fetch. "use client" MUST stay the first statement, so the const follows it.
+    format!(
+        "\"use client\";\nconst BASE_PATH = {};\n{NEXT_LINK_SHIM_BODY}",
+        js_str(base_path),
+    )
+}
+
+const NEXT_LINK_SHIM_BODY: &str = r##"// `next/link` shim (diffpack next app-router adapter). A `"use client"` intercepting
 // component: it renders the same server-reachable `<a href>`, but on the browser a
 // plain left-click on an internal href is intercepted and handed to the client
 // Router (`window.__diffpack_navigate`), which fetches the target route's flight
@@ -3978,9 +4027,19 @@ fn next_link_shim() -> &'static str {
 // `__diffpack_navigate`) all fall through to a real navigation — no `preventDefault`.
 import { createElement, useEffect } from "react";
 
+// Prepend the app's basePath to an internal (leading-slash) href, once — an href already
+// carrying the prefix (e.g. reconstructed from router state) is left untouched. External
+// / non-string hrefs pass through so `<a>` and the click guards stay basePath-agnostic.
+function withBasePath(href) {
+  if (!BASE_PATH || typeof href !== "string" || !href.startsWith("/")) return href;
+  if (href === BASE_PATH || href.startsWith(BASE_PATH + "/")) return href;
+  return BASE_PATH + href;
+}
+
 export default function Link(props) {
   const { href, children, prefetch, replace, scroll, shallow, locale, onClick, onMouseEnter, onFocus, ...rest } = props;
-  const resolved = typeof href === "string" ? href : (href && href.pathname) || "#";
+  const rawHref = typeof href === "string" ? href : (href && href.pathname) || "#";
+  const resolved = withBasePath(rawHref);
   // Warm the client Router's prefetch cache for an internal href (the same ?__rsc=1 flight
   // a click fetches, moved earlier to hover/focus). `prefetch={false}` opts out; the
   // default prefetches on interaction; `prefetch={true}` also prefetches eagerly on mount.
@@ -4027,8 +4086,7 @@ export default function Link(props) {
 export function useLinkStatus() {
   return { pending: false };
 }
-"##
-}
+"##;
 
 /// `next/dynamic` shim (`shims/dynamic.ts`). A lean reimplementation of Next's `dynamic()`
 /// keyed on its public option shape (`{ loading, ssr }`), backed by `React.lazy`. `ssr:true`
@@ -5032,7 +5090,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None);
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
         assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
@@ -5049,7 +5107,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None);
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
         // Each route carries a metadata namespace chain resolved at render time.
         assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
         assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
@@ -5134,7 +5192,7 @@ mod tests {
         let boundary = root.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = root.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = root.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None);
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
         assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
         assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
@@ -5177,7 +5235,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None);
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
         assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
         assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
@@ -5587,6 +5645,106 @@ mod tests {
     }
 
     #[test]
+    fn routing_extraction_from_eval() {
+        // A full eval carries basePath/assetPrefix; Routing pulls exactly those, and
+        // asset_base() composes assetPrefix + basePath for static-asset URLs.
+        let eval = serde_json::json!({
+            "redirects": [], "rewrites": [], "headers": [],
+            "basePath": "/docs", "assetPrefix": "/cdn",
+            "trailingSlash": true, "i18n": null,
+        });
+        let r = Routing::from_eval(Some(&eval));
+        assert_eq!(r.base_path, "/docs");
+        assert_eq!(r.asset_prefix, "/cdn");
+        assert_eq!(r.asset_base(), "/cdn/docs", "assets sit under assetPrefix then basePath");
+
+        // basePath alone: asset_base is just the basePath.
+        let base_only = serde_json::json!({ "basePath": "/docs", "assetPrefix": "" });
+        let r2 = Routing::from_eval(Some(&base_only));
+        assert_eq!(r2.asset_base(), "/docs");
+
+        // No config at all: every prefix empty, asset_base is "" (URLs stay `/client.js`).
+        let empty = Routing::from_eval(None);
+        assert_eq!(empty.base_path, "");
+        assert_eq!(empty.asset_base(), "");
+    }
+
+    #[test]
+    fn next_link_shim_bakes_base_path_and_prefixes_internal_hrefs() {
+        // With a basePath, the shim bakes the const, defines withBasePath, and routes the
+        // rendered href + soft-nav target through it (so both carry the prefix).
+        let shim = next_link_shim("/docs");
+        assert!(shim.starts_with("\"use client\";"), "use client stays first: {shim}");
+        assert!(shim.contains(r#"const BASE_PATH = "/docs";"#), "basePath baked as a const: {shim}");
+        assert!(shim.contains("function withBasePath"), "the prefix helper is generated");
+        assert!(shim.contains("const resolved = withBasePath(rawHref);"), "href routed through withBasePath");
+        assert!(shim.contains("href.startsWith(BASE_PATH + \"/\")"), "no double-prefix guard present");
+
+        // No basePath: the const is empty, so withBasePath is an identity (href unchanged).
+        let plain = next_link_shim("");
+        assert!(plain.contains(r#"const BASE_PATH = "";"#), "empty basePath const: {plain}");
+    }
+
+    #[test]
+    fn ssr_entry_bakes_asset_base_into_bootstrap_modules() {
+        let dir = scratch("ssr-asset-base");
+        let hooks = dir.join("hooks-context.ts");
+        // With an asset base the browser bootstrap is fetched under the prefix.
+        let with_prefix = ssr_entry_module(&dir, &[], &hooks, "/cdn/docs");
+        assert!(
+            with_prefix.contains(r#"bootstrapModules: ["/cdn/docs/client.js"]"#),
+            "bootstrapModules carry the asset base (both render paths): {with_prefix}",
+        );
+        assert_eq!(
+            with_prefix.matches(r#"bootstrapModules: ["/cdn/docs/client.js"]"#).count(),
+            2,
+            "both the buffered and streaming render paths are prefixed",
+        );
+        // Empty asset base keeps the bare `/client.js`.
+        let plain = ssr_entry_module(&dir, &[], &hooks, "");
+        assert!(plain.contains(r#"bootstrapModules: ["/client.js"]"#), "no prefix -> bare client.js");
+    }
+
+    #[test]
+    fn rsc_entry_prefixes_stylesheet_href() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        // has_css=true with an asset base: the stylesheet <link> href carries the prefix.
+        let src = rsc_entry_module(&disc, "", true, &boundary, &seg_boundary, &reqctx, None, "/docs");
+        assert!(src.contains(r#"href: "/docs/rsc.css""#), "stylesheet href prefixed by basePath: {src}");
+    }
+
+    #[test]
+    fn config_manifest_round_trips_routing_surface() {
+        let dir = scratch("config-manifest");
+        let eval = serde_json::json!({
+            "redirects": [], "rewrites": [], "headers": [],
+            "basePath": "/docs", "assetPrefix": "", "trailingSlash": true,
+            "i18n": { "locales": ["en", "fr"], "defaultLocale": "en" },
+        });
+        write_next_config_manifest(&dir, Some(&eval));
+        let written = std::fs::read_to_string(dir.join(".diffpack-output/next-config-manifest.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed["basePath"], "/docs");
+        assert_eq!(parsed["trailingSlash"], true);
+        assert_eq!(parsed["i18n"]["defaultLocale"], "en");
+
+        // No eval: a well-formed empty manifest (every routing field present so the
+        // orchestrator's reader never sees an undefined).
+        write_next_config_manifest(&dir, None);
+        let empty = std::fs::read_to_string(dir.join(".diffpack-output/next-config-manifest.json")).unwrap();
+        let ep: serde_json::Value = serde_json::from_str(&empty).unwrap();
+        assert_eq!(ep["basePath"], "");
+        assert_eq!(ep["trailingSlash"], false);
+        assert!(ep["i18n"].is_null());
+    }
+
+    #[test]
     fn image_shim_supports_remote_hosts_and_loaders() {
         let shim = next_image_shim();
         assert!(shim.contains(r#"import CONFIG from "../image-config""#), "shim reads the images config: {shim}");
@@ -5751,7 +5909,7 @@ export default function Page(){ return null; }
         let seg_boundary = app.join("segment-boundary.tsx");
         let reqctx = app.join("request-context.ts");
         std::fs::write(&reqctx, request_context_module()).unwrap();
-        let rsc = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None);
+        let rsc = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc.contains("template:"), "levels carry a template id");
         assert!(rsc.contains("const GLOBAL_ERROR ="), "GLOBAL_ERROR const emitted");
         assert!(rsc.contains("key: pathname"), "template is keyed by pathname for remount");

@@ -390,6 +390,53 @@ const nextConfig = (() => {
   return cfg;
 })();
 
+// --- next.config routing surface: basePath / assetPrefix / trailingSlash / i18n --------
+// Extracted at build time into next-config-manifest.json; applied here as pure O(path)
+// string normalization BEFORE the render pipeline, so every downstream matcher stays
+// prefix/locale-agnostic. Zero new per-request node work; zero new deps.
+const routing = {
+  basePath: typeof nextConfig.basePath === "string" ? nextConfig.basePath : "",
+  assetPrefix: typeof nextConfig.assetPrefix === "string" ? nextConfig.assetPrefix : "",
+  trailingSlash: Boolean(nextConfig.trailingSlash),
+  i18n: nextConfig.i18n || null,
+};
+if (routing.i18n) {
+  // next.config `i18n` is a Pages-Router feature that app-router `next build` IGNORES.
+  // diffpack honors it as an explicit opt-in to a locale-prefix routing EXTENSION (NOT
+  // next-build behavior) — announced once, loudly, so it is never a silent divergence.
+  console.warn(
+    `next-server: next.config i18n is set (locales ${JSON.stringify(routing.i18n.locales)}, ` +
+      `default ${JSON.stringify(routing.i18n.defaultLocale)}). This is a diffpack ` +
+      `locale-routing EXTENSION; app-router \`next build\` does not consume next.config i18n.`,
+  );
+}
+
+// stripPrefix / addBasePath: a lean reimplementation of Next's removePathPrefix +
+// addPathPrefix (MIT, Copyright (c) Vercel), covering the exact-match and path-boundary
+// cases a naive slice/concat would get wrong. `stripPrefix` returns the app-relative
+// remainder, or null when `pathname` is not under `prefix` at all (`${prefix}` -> "/").
+function stripPrefix(pathname, prefix) {
+  if (!prefix) return pathname;
+  if (pathname === prefix) return "/";
+  if (pathname.startsWith(prefix + "/")) return pathname.slice(prefix.length);
+  return null;
+}
+// Re-apply basePath (+ any active non-default locale segment) to an outgoing redirect
+// Location so the browser round-trips through the same prefixed URL space. A non
+// leading-slash Location (a full URL, e.g. a middleware redirect off-site) passes through.
+function addBasePath(location, localeSeg) {
+  if (typeof location !== "string" || !location.startsWith("/")) return location;
+  const withLocale = localeSeg ? localeSeg + (location === "/" ? "" : location) : location;
+  return routing.basePath + withLocale;
+}
+// Whether a path participates in trailingSlash normalization: not the root, and its last
+// segment has no file extension (so `/client.js`, `/rsc.css`, favicons stay untouched).
+function trailingEligible(pathname) {
+  if (pathname === "/") return false;
+  const last = pathname.slice(pathname.lastIndexOf("/") + 1);
+  return !last.includes(".");
+}
+
 // Apply next.config redirects (short-circuit) + rewrites (mutate url) and COLLECT
 // matching response headers. Returns { redirect } to short-circuit, or { headers }.
 function applyNextConfig(url) {
@@ -705,6 +752,62 @@ const server = createServer(async (req, res) => {
       res.end(flight);
       return;
     }
+    // --- next.config routing normalization (basePath / assetPrefix / trailingSlash / i18n)
+    // Strip the configured prefixes up front so the whole pipeline below (static-serve,
+    // middleware, next.config, route handlers, prerender cache, render) stays prefix- and
+    // locale-agnostic; the prefix (+ locale) is re-applied to every redirect Location. The
+    // `/_action/` POST above is intentionally handled first (its transport is a fixed,
+    // unprefixed endpoint), so it never hits the basePath gate.
+    let localeSeg = ""; // e.g. "/fr" when i18n peeled a non-default locale from the path
+    let reqLocale = routing.i18n ? routing.i18n.defaultLocale : undefined;
+    {
+      // (1) relative assetPrefix (assets are baked as `${assetPrefix}${basePath}/x`; a
+      //     full-URL/CDN assetPrefix never reaches this server, so nothing to strip).
+      if (routing.assetPrefix && routing.assetPrefix.startsWith("/")) {
+        const s = stripPrefix(url.pathname, routing.assetPrefix);
+        if (s !== null) url.pathname = s;
+      }
+      // (2) basePath gate + strip: a non-prefixed page/asset path is a hard 404 (matching
+      //     Next), a matching one is stripped to app-relative for every matcher below.
+      if (routing.basePath) {
+        const stripped = stripPrefix(url.pathname, routing.basePath);
+        if (stripped === null) {
+          res.writeHead(404, { "content-type": "text/plain" }).end("not found");
+          return;
+        }
+        url.pathname = stripped;
+      }
+      // (3) i18n locale detection (diffpack EXTENSION). Peel a leading `/{locale}` segment
+      //     that is one of the configured locales; the default locale is served UNPREFIXED
+      //     (Pages-Router convention), so a bare path implies the default. `reqLocale` is
+      //     handed to the render/route ops; a NON-default locale is re-added to redirects.
+      if (routing.i18n) {
+        const seg = url.pathname.split("/")[1] || "";
+        if (routing.i18n.locales.includes(seg)) {
+          reqLocale = seg;
+          if (seg !== routing.i18n.defaultLocale) localeSeg = "/" + seg;
+          url.pathname = url.pathname.slice(seg.length + 1) || "/";
+        }
+      }
+      // (4) trailingSlash: a 308 to the canonical slash form (query preserved, assets +
+      //     root exempt), Location carrying basePath (+ locale). Internal `?__rsc=1` flight
+      //     fetches are exempt (the client Router owns the displayed URL, not the fetch).
+      if (!url.searchParams.has("__rsc") && trailingEligible(url.pathname)) {
+        const has = url.pathname.endsWith("/");
+        if (routing.trailingSlash && !has) {
+          res.writeHead(308, { location: addBasePath(url.pathname + "/", localeSeg) + url.search });
+          res.end();
+          return;
+        }
+        if (!routing.trailingSlash && has) {
+          res.writeHead(308, {
+            location: addBasePath(url.pathname.replace(/\/+$/, ""), localeSeg) + url.search,
+          });
+          res.end();
+          return;
+        }
+      }
+    }
     // Static assets from the client build's public/ (checked before route render so
     // /client.js, /rsc.css, etc. are served, not treated as app-router paths).
     if (req.method === "GET") {
@@ -731,7 +834,7 @@ const server = createServer(async (req, res) => {
       });
       if (mw) {
         if (mw.kind === "redirect") {
-          const h = { location: mw.location };
+          const h = { location: addBasePath(mw.location, localeSeg) };
           if (mw.setCookies.length) h["set-cookie"] = mw.setCookies;
           res.writeHead(mw.status, h);
           res.end();
@@ -755,7 +858,7 @@ const server = createServer(async (req, res) => {
     // collected and merged onto whatever response we ultimately send.
     const nc = applyNextConfig(url);
     if (nc.redirect) {
-      const h = { location: nc.redirect.location };
+      const h = { location: addBasePath(nc.redirect.location, localeSeg) };
       if (mwSetCookies.length) h["set-cookie"] = mwSetCookies;
       res.writeHead(nc.redirect.status, h);
       res.end();
@@ -780,6 +883,7 @@ const server = createServer(async (req, res) => {
         cookie: req.headers.cookie || "",
         body: bodyBuf.length ? bodyBuf.toString("base64") : undefined,
         bodyIsBase64: bodyBuf.length > 0,
+        locale: reqLocale,
       };
       for (const h of mwRequestHeaders) reqCtx.headers.push(h);
       const msg = await nextWorker().call({
@@ -807,7 +911,13 @@ const server = createServer(async (req, res) => {
     // render (ISR revalidates in the background when stale). Takes precedence over the
     // dynamic render path below, but not over middleware / next.config / route handlers.
     if (req.method === "GET") {
-      const entry = prerenderCache.get(url.pathname);
+      // The prerender cache is keyed by the app-relative route path (no trailing slash);
+      // a trailingSlash-canonical request (`/about/`) still hits it.
+      const cacheKey =
+        url.pathname !== "/" && url.pathname.endsWith("/")
+          ? url.pathname.replace(/\/+$/, "")
+          : url.pathname;
+      const entry = prerenderCache.get(cacheKey);
       if (entry && servePrerendered(entry, url.searchParams.has("__rsc"), res, configHeaders, mwSetCookies)) {
         return;
       }
@@ -831,6 +941,9 @@ const server = createServer(async (req, res) => {
         // A `?__rsc=1` fetch is a client soft navigation — the only context in which an
         // intercepting route renders its overlay instead of the full page.
         softNav: url.searchParams.has("__rsc"),
+        // The i18n-detected request locale (diffpack locale-routing extension), or
+        // undefined when no next.config `i18n` is configured.
+        locale: reqLocale,
       };
       // Kick off the streaming render. `meta` (status/params + any TOP-LEVEL
       // redirect/notFound) settles on the first chunk; flight chunks flow into a queue
@@ -898,10 +1011,10 @@ const server = createServer(async (req, res) => {
       if (meta.redirect) {
         if (url.searchParams.has("__rsc")) {
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ __redirect: meta.redirect }));
+          res.end(JSON.stringify({ __redirect: addBasePath(meta.redirect, localeSeg) }));
           return;
         }
-        res.writeHead(meta.status || 307, { location: meta.redirect });
+        res.writeHead(meta.status || 307, { location: addBasePath(meta.redirect, localeSeg) });
         res.end();
         return;
       }
