@@ -5337,7 +5337,8 @@ mod tests {
         let names: Vec<&str> = level.slots.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"team") && names.contains(&"analytics"), "slots: {names:?}");
         let team = level.slots.iter().find(|s| s.name == "team").unwrap();
-        assert!(!team.routes.is_empty() && team.default.is_none(), "team slot has a page, no default");
+        assert!(!team.routes.is_empty(), "team slot has a page");
+        assert!(team.default.is_some(), "team slot has a default.tsx (Next 16 requires one per slot)");
         let analytics = level.slots.iter().find(|s| s.name == "analytics").unwrap();
         assert!(analytics.default.is_some(), "analytics slot has a default.tsx fallback");
 

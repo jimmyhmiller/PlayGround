@@ -15,6 +15,8 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { spawn } from "node:child_process";
+import os from "node:os";
 import {
   loadManifests,
   getRenderFlightToDocument,
@@ -42,7 +44,40 @@ const plan = JSON.parse(readFileSync(planPath, "utf8"));
 
 const { serverConsumerManifest, clientManifestPath } = loadManifests(outputDir);
 const render = getRenderFlightToDocument(join(outputDir, "server", "server.mjs"), { dev: false });
-const runReactServer = makeRunReactServer(join(outputDir, "rsc-render", "server.mjs"));
+const rscRenderEntry = join(outputDir, "rsc-render", "server.mjs");
+const runReactServer = makeRunReactServer(rscRenderEntry);
+
+// --- Persistent react-server worker POOL for prerendering --------------------------
+// Prerendering thousands of pages by spawning a fresh node child PER PAGE pays a cold
+// start every time (the scale bottleneck). Instead keep a small pool of warm `serve`
+// workers (the same NDJSON protocol the live orchestrator uses) and render pages
+// concurrently across them: cold start is paid POOL_SIZE times total, not per page.
+const POOL_SIZE = Math.max(2, Math.min(16, (os.cpus().length || 4) - 1));
+function spawnPrerenderWorker() {
+  const child = spawn(process.execPath, [rscRenderEntry, "serve"], { stdio: ["pipe", "pipe", "inherit"] });
+  const pending = new Map();
+  let seq = 0;
+  let buffer = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let nl;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      if (!line.trim()) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      const settle = pending.get(msg.id);
+      if (settle) { pending.delete(msg.id); settle(msg); }
+    }
+  });
+  child.on("exit", (code) => { for (const s of pending.values()) s({ error: `worker exited ${code}` }); });
+  return {
+    call: (req) => new Promise((resolve) => { const id = ++seq; pending.set(id, resolve); child.stdin.write(JSON.stringify({ id, ...req }) + "\n"); }),
+    close: () => { try { child.stdin.end(); } catch {} },
+  };
+}
 
 // Substitute one generateStaticParams combo into a route's parsed segments to build a
 // concrete URL path + on-disk file stem (mirrored). Catch-all params are string[].
@@ -72,15 +107,13 @@ function bufToString(buf) {
   return Buffer.from(buf).toString("utf8");
 }
 
-async function writeRoute(urlPath, fileStem) {
+async function writeRoute(urlPath, fileStem, workerCall) {
   // Render exactly as the orchestrator does for this pathname under an EMPTY request
-  // context (a prerender has no request). Any render error PROPAGATES (no try/catch
-  // swallow) and fails the build naming the pathname.
-  let result;
-  try {
-    result = await runReactServer(["render", urlPath, clientManifestPath], "");
-  } catch (error) {
-    const msg = String(error && error.stack ? error.stack : error);
+  // context (a prerender has no request), via a warm pool worker. Any render error
+  // FAILS the build naming the pathname (no silent swallow).
+  const result = await workerCall({ op: "render", pathname: urlPath, manifestPath: clientManifestPath, reqCtx: {} });
+  if (result.error) {
+    const msg = String(result.error);
     if (msg.includes("DIFFPACK_DYNAMIC_BAILOUT")) {
       die(
         `route ${urlPath} read request state (cookies/headers) but was classified static — ` +
@@ -93,7 +126,7 @@ async function writeRoute(urlPath, fileStem) {
   if (redirect) die(`route ${urlPath} issued a server-side redirect during prerender — it is not statically prerenderable (mark it Dynamic)`);
   if (notFound) die(`route ${urlPath} rendered notFound() during prerender — it is not statically prerenderable (mark it Dynamic)`);
 
-  const flightBuf = Buffer.from(flight);
+  const flightBuf = Buffer.from(flight, "base64");
   let html;
   try {
     html = await render(
@@ -119,25 +152,22 @@ async function writeRoute(urlPath, fileStem) {
 
 async function main() {
   mkdirSync(staticDir, { recursive: true });
-  const written = []; // concrete static pathnames
+  const written = []; // concrete static pages { path, file, revalidate, tags }
   const dynamic = []; // { path, reason }
+  const jobs = []; // { urlPath, fileStem, revalidate } — one per concrete page to render
 
+  // Build the flat page list (expanding SSG via the one-shot staticparams enumeration,
+  // which is rare); the heavy per-page render then runs concurrently across the pool.
   for (const route of plan) {
     if (route.kind === "dynamic") {
       dynamic.push({ path: route.path, reason: route.reason || "dynamic" });
       continue;
     }
     if (route.kind === "static" || route.kind === "forceStatic" || route.kind === "isr") {
-      const { tags } = await writeRoute(route.path, route.file || "index");
-      written.push({ path: route.path, file: route.file || "index", revalidate: route.revalidate ?? null, tags });
-      console.log(
-        `prerendered ${route.kind} ${route.path} -> ${route.file || "index"}.html + .rsc` +
-          (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),
-      );
+      jobs.push({ urlPath: route.path, fileStem: route.file || "index", revalidate: route.revalidate ?? null });
       continue;
     }
     if (route.kind === "ssg") {
-      // Enumerate the concrete param sets in the app's own React runtime.
       const enumResult = await runReactServer(["staticparams", route.path, clientManifestPath]);
       let combos;
       try {
@@ -151,17 +181,37 @@ async function main() {
       }
       for (const combo of combos) {
         const { urlPath, fileStem } = buildConcrete(route.segments, combo);
-        const { tags } = await writeRoute(urlPath, fileStem);
-        written.push({ path: urlPath, file: fileStem, revalidate: route.revalidate ?? null, tags });
-        console.log(
-          `prerendered ssg ${route.path} [${JSON.stringify(combo)}] -> ${fileStem}.html + .rsc` +
-            (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),
-        );
+        jobs.push({ urlPath, fileStem, revalidate: route.revalidate ?? null });
       }
       continue;
     }
     die(`unknown route kind ${JSON.stringify(route.kind)} for ${route.path}`);
   }
+
+  // Prerender all pages concurrently across a warm worker pool. Each worker pulls the
+  // next page off a shared cursor, renders its flight, SSRs it in-process, and writes
+  // the .html + .rsc. Cold start is paid once per worker, not once per page.
+  const poolSize = Math.min(POOL_SIZE, Math.max(1, jobs.length));
+  const pool = Array.from({ length: poolSize }, spawnPrerenderWorker);
+  const results = new Array(jobs.length);
+  let cursor = 0;
+  let done = 0;
+  async function drain(worker) {
+    for (;;) {
+      const i = cursor++;
+      if (i >= jobs.length) break;
+      const job = jobs[i];
+      const { tags } = await writeRoute(job.urlPath, job.fileStem, worker.call);
+      results[i] = { path: job.urlPath, file: job.fileStem, revalidate: job.revalidate, tags };
+      done += 1;
+      if (done % 250 === 0 || done === jobs.length) {
+        console.log(`prerendered ${done}/${jobs.length} page(s) across ${poolSize} worker(s)`);
+      }
+    }
+  }
+  await Promise.all(pool.map((w) => drain(w)));
+  for (const w of pool) w.close();
+  for (const r of results) if (r) written.push(r);
 
   const writtenPaths = written.map((w) => w.path);
 
