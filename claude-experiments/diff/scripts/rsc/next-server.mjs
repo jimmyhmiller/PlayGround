@@ -249,7 +249,7 @@ function nextWorker() {
 // a 404 (the child never exits non-zero for one). Resolves `{flight,status,params}`.
 // Render + action always route through the persistent worker pool (dev AND prod), so
 // no request pays a Node cold start; other ops fall through to a one-shot spawn.
-async function runReactServer(args, stdinBody) {
+async function runReactServer(args, stdinBody, reqCtxOverride) {
   const op = args[0];
   if (op === "render") {
     let reqCtx = {};
@@ -275,6 +275,8 @@ async function runReactServer(args, stdinBody) {
       // next/cache: the tag set this page read, so the prerender manifest / tagToPaths map
       // can register the pathname under those tags (revalidateTag → pathname).
       tags: msg.tags || [],
+      // Set-Cookie strings a top-level cookies().set()/draftMode() write produced.
+      setCookies: msg.setCookies || [],
     };
   }
   if (op === "action") {
@@ -283,12 +285,17 @@ async function runReactServer(args, stdinBody) {
       actionId: args[1],
       manifestPath: args[2],
       body: stdinBody != null ? String(stdinBody) : "",
+      // The request context (url/headers/cookie) so the action's cookies()/headers()/
+      // draftMode() reads resolve against the real request.
+      reqCtx: reqCtxOverride || {},
     });
     return {
       flight: Buffer.from(msg.flight || "", "base64"),
       status: msg.status || 200,
       // next/cache invalidations the action requested (revalidatePath/revalidateTag).
       revalidated: msg.revalidated || { tags: [], paths: [] },
+      // Set-Cookie strings the action wrote via cookies().set()/draftMode().
+      setCookies: msg.setCookies || [],
     };
   }
   // Unknown op falls through to a one-shot spawn (defensive; not reached today).
@@ -348,6 +355,17 @@ const MIME = {
   ".avif": "image/avif",
   ".ico": "image/x-icon",
 };
+
+// Append Set-Cookie strings to a response-headers object WITHOUT clobbering any already
+// there (e.g. middleware set-cookies). node's writeHead accepts an array for set-cookie,
+// so we normalize to an array and concat. A render/action/route can add cookies via
+// next/headers cookies().set() or draftMode(); those ride here alongside middleware ones.
+function mergeSetCookie(headers, cookies) {
+  if (!cookies || !cookies.length) return;
+  const existing = headers["set-cookie"];
+  const base = existing == null ? [] : Array.isArray(existing) ? existing.slice() : [existing];
+  headers["set-cookie"] = base.concat(cookies);
+}
 
 // --- next.config redirects / rewrites / headers ----------------------------------
 // Rules evaluated from `next.config.*` at build time (next-config-manifest.json).
@@ -744,11 +762,26 @@ const server = createServer(async (req, res) => {
       }
       const body = [];
       for await (const chunk of req) body.push(Buffer.from(chunk));
-      const { flight, revalidated } = await runReactServer(["action", id, clientManifestPath], Buffer.concat(body));
+      // The action's request context so cookies()/headers()/draftMode() reads resolve.
+      const actionReqCtx = {
+        url: "http://localhost" + req.url,
+        method: req.method,
+        headers: Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
+        cookie: req.headers.cookie || "",
+      };
+      const { flight, revalidated, setCookies } = await runReactServer(
+        ["action", id, clientManifestPath],
+        Buffer.concat(body),
+        actionReqCtx,
+      );
       // next/cache: bust any prerendered pages the action invalidated (revalidatePath /
       // revalidateTag) so the next request to them re-renders in the background.
       applyRevalidation(revalidated);
-      res.writeHead(200, { "content-type": "text/x-component" });
+      const actionHeaders = { "content-type": "text/x-component" };
+      // Server-side cookie writes (cookies().set()/delete(), draftMode().enable()/disable())
+      // the action collected — delivered on the action's 200 response.
+      mergeSetCookie(actionHeaders, setCookies);
+      res.writeHead(200, actionHeaders);
       res.end(flight);
       return;
     }
@@ -901,6 +934,9 @@ const server = createServer(async (req, res) => {
         for (const [k, v] of result.headers || []) headers[k] = v;
         for (const [k, v] of configHeaders) headers[k] = v;
         if (mwSetCookies.length) headers["set-cookie"] = mwSetCookies;
+        // Cookies the handler wrote (next/headers cookies().set()/draftMode() OR the
+        // Response's own Set-Cookie headers) — appended so middleware cookies survive too.
+        mergeSetCookie(headers, result.setCookies);
         res.writeHead(result.status || 200, headers);
         res.end(result.body ? Buffer.from(result.body, "base64") : undefined);
         return;
@@ -1009,12 +1045,20 @@ const server = createServer(async (req, res) => {
       // flight tree). Over the soft-nav channel (?__rsc=1) hand the client Router a
       // JSON redirect it follows via history + a re-fetch.
       if (meta.redirect) {
+        // Cookies set BEFORE a top-level redirect() (e.g. a login flow that writes a
+        // session cookie then redirects) travel with the redirect response.
         if (url.searchParams.has("__rsc")) {
-          res.writeHead(200, { "content-type": "application/json" });
+          const rh = { "content-type": "application/json" };
+          if (mwSetCookies.length) rh["set-cookie"] = mwSetCookies;
+          mergeSetCookie(rh, meta.setCookies);
+          res.writeHead(200, rh);
           res.end(JSON.stringify({ __redirect: addBasePath(meta.redirect, localeSeg) }));
           return;
         }
-        res.writeHead(meta.status || 307, { location: addBasePath(meta.redirect, localeSeg) });
+        const rh = { location: addBasePath(meta.redirect, localeSeg) };
+        if (mwSetCookies.length) rh["set-cookie"] = mwSetCookies;
+        mergeSetCookie(rh, meta.setCookies);
+        res.writeHead(meta.status || 307, rh);
         res.end();
         return;
       }
@@ -1035,6 +1079,8 @@ const server = createServer(async (req, res) => {
         const nfHeaders = { "content-type": "text/html; charset=utf-8" };
         for (const [k, v] of configHeaders) nfHeaders[k] = v;
         if (mwSetCookies.length) nfHeaders["set-cookie"] = mwSetCookies;
+        // Cookies written before the top-level notFound() throw still apply to the 404.
+        mergeSetCookie(nfHeaders, meta.setCookies);
         res.writeHead(404, nfHeaders);
         res.end(nfDoc);
         return;
@@ -1046,6 +1092,8 @@ const server = createServer(async (req, res) => {
       if (url.searchParams.has("__rsc")) {
         const rscHeaders = { "content-type": "text/x-component" };
         if (meta.intercept) rscHeaders["x-diffpack-intercept"] = "1";
+        if (mwSetCookies.length) rscHeaders["set-cookie"] = mwSetCookies;
+        mergeSetCookie(rscHeaders, meta.setCookies);
         res.writeHead(200, rscHeaders);
         for await (const b64 of flightChunks()) res.write(Buffer.from(b64, "base64"));
         res.end();
@@ -1054,6 +1102,8 @@ const server = createServer(async (req, res) => {
       const docHeaders = { "content-type": "text/html; charset=utf-8" };
       for (const [k, v] of configHeaders) docHeaders[k] = v;
       if (mwSetCookies.length) docHeaders["set-cookie"] = mwSetCookies;
+      // Top-level cookies().set()/draftMode() writes captured before the shell flushed.
+      mergeSetCookie(docHeaders, meta.setCookies);
       await (await getRenderFlightToStream())(
         flightChunks(),
         serverConsumerManifest,

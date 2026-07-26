@@ -20,3 +20,16 @@ import { revalidateTag } from "next/cache";
 export async function revalidateProducts(): Promise<void> {
   revalidateTag("products");
 }
+
+// Server-side cookie writes from a Server Action (next/headers cookies()). Invoked over
+// `/_action/`, this sets `pref` and clears `old_pref`; diffpack collects both onto the
+// action's per-request store and the orchestrator merges them into the action's 200
+// response as Set-Cookie. `next build` accepts cookies() writes in a Server Action.
+import { cookies } from "next/headers";
+
+export async function setPrefCookie(): Promise<string> {
+  const store = await cookies();
+  store.set("pref", "dark", { path: "/", sameSite: "lax" });
+  store.delete("old_pref");
+  return "ok";
+}
