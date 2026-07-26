@@ -1104,6 +1104,26 @@ const server = createServer(async (req, res) => {
       if (mwSetCookies.length) docHeaders["set-cookie"] = mwSetCookies;
       // Top-level cookies().set()/draftMode() writes captured before the shell flushed.
       mergeSetCookie(docHeaders, meta.setCookies);
+      // DEV serves BUFFERED (whole flight inlined as __DIFFPACK_FLIGHT__): the
+      // DEVELOPMENT react-server-dom-webpack client is stricter and trips a spurious
+      // "Connection closed" on the incremental __DF_FLIGHT stream (the production client
+      // reconstructs it fine). Dev has no streaming-TTFB requirement, so the buffered
+      // document is the reliable path; PRODUCTION keeps streaming for a fast first byte.
+      if (DEV) {
+        const parts = [];
+        for await (const b64 of flightChunks()) parts.push(Buffer.from(b64, "base64"));
+        const flightBuf = Buffer.concat(parts);
+        const html = await (await getRenderFlightToDocument())(
+          new Uint8Array(flightBuf),
+          serverConsumerManifest,
+          flightBuf.toString("base64"),
+          meta.params || {},
+          { pathname: url.pathname, search: url.search },
+        );
+        res.writeHead(meta.status || 200, docHeaders);
+        res.end(html);
+        return;
+      }
       await (await getRenderFlightToStream())(
         flightChunks(),
         serverConsumerManifest,

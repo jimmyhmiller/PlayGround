@@ -159,6 +159,11 @@ async function benchServer(server) {
       wantPrefix: (nonce) => `srv${nonce}`,
       expectReload: false, // both now refresh the flight in place (no full reload)
     });
+    // Dev-server steady-state memory (after startup + the warm edit loop), summed over
+    // the whole process tree as macOS phys_footprint (the fair cross-process metric that
+    // does not double-count shared pages). diffpack dev = orchestrator + one warm
+    // react-server worker; next dev = the Turbopack dev server tree.
+    try { out.memoryMb = treeFootprintMb(proc.pid); } catch { out.memoryMb = 0; }
   } finally {
     kill(proc);
   }
@@ -284,6 +289,31 @@ function boot(server, port) {
 
 function kill(proc) { try { proc.kill("SIGTERM"); } catch {} setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 800); }
 
+// Sum macOS phys_footprint (MB) over `rootPid` and all descendants — the fair
+// cross-process memory metric (does not double-count the shared Node binary/libs).
+function treeFootprintMb(rootPid) {
+  const out = execFileSync("ps", ["-Ao", "pid=,ppid="], { encoding: "utf8" });
+  const kids = new Map();
+  for (const line of out.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!m) continue;
+    const [pid, ppid] = [Number(m[1]), Number(m[2])];
+    if (!kids.has(ppid)) kids.set(ppid, []);
+    kids.get(ppid).push(pid);
+  }
+  const all = []; const stack = [rootPid]; const seen = new Set();
+  while (stack.length) { const p = stack.pop(); if (seen.has(p)) continue; seen.add(p); all.push(p); for (const k of kids.get(p) || []) stack.push(k); }
+  let total = 0;
+  for (const pid of all) {
+    try {
+      const o = execFileSync("footprint", [String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const m = o.match(/phys_footprint:\s*([0-9.]+)\s*([MK])/i);
+      if (m) total += Number(m[1]) / (m[2].toUpperCase() === "K" ? 1024 : 1);
+    } catch {}
+  }
+  return Math.round(total);
+}
+
 async function waitReady(base, getLog, timeoutMs) {
   // "ready" = TCP accept / any HTTP response (even a compile-in-progress 200/404).
   const deadline = Date.now() + timeoutMs;
@@ -355,7 +385,7 @@ function stats(xs) {
 }
 
 function printTable(r, outPath) {
-  console.log("\n===== dev HMR summary (ms) =====");
+  console.log("\n===== dev HMR summary (edit-to-update ms; memory MB) =====");
   for (const [key, v] of Object.entries(r.servers)) {
     console.log(`\n[${key}]`);
     console.log(`  startup ready     median=${v.startup.ready?.median} p95=${v.startup.ready?.p95}`);
@@ -363,6 +393,18 @@ function printTable(r, outPath) {
     for (const [cls, h] of Object.entries(v.hmr)) {
       console.log(`  ${cls}: warm median=${h.warm?.median} p95=${h.warm?.p95} min=${h.warm?.min} max=${h.warm?.max} | cold-first=${h.warmup?.delta} | ${h.semantics}`);
     }
+    console.log(`  dev-server memory: ${v.memoryMb ?? "n/a"} MB phys_footprint`);
+  }
+  // Head-to-head when both ran.
+  const d = r.servers.diffpack, n = r.servers.next;
+  if (d && n) {
+    const ratio = (a, b) => (a && b ? (b / a).toFixed(1) + "x" : "n/a");
+    console.log("\n----- diffpack vs next (dev) -----");
+    console.log(`  startup first-byte: diffpack ${d.startup.firstByte?.median}ms vs next ${n.startup.firstByte?.median}ms (${ratio(d.startup.firstByte?.median, n.startup.firstByte?.median)} faster)`);
+    for (const cls of Object.keys(d.hmr)) {
+      if (n.hmr[cls]) console.log(`  edit ${cls}: diffpack ${d.hmr[cls].warm?.median}ms vs next ${n.hmr[cls].warm?.median}ms (${ratio(d.hmr[cls].warm?.median, n.hmr[cls].warm?.median)} faster)`);
+    }
+    if (d.memoryMb && n.memoryMb) console.log(`  dev memory: diffpack ${d.memoryMb}MB vs next ${n.memoryMb}MB (${(d.memoryMb / n.memoryMb).toFixed(2)}x = ${Math.round((1 - d.memoryMb / n.memoryMb) * 100)}% less)`);
   }
   console.log(`\nfull JSON -> ${outPath}`);
 }
