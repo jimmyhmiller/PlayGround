@@ -1994,6 +1994,11 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
                 additional_data: None,
                 root: Some(root.to_path_buf()),
             },
+            // Next static-image imports (`import img from './x.png'`) yield the
+            // `{ src, width, height, blurDataURL, variants }` object shape with
+            // build-emitted responsive variants. ONLY the Next adapter opts in;
+            // Vite/TanStack/generic builds keep bare-URL-string asset imports.
+            image_import_shape: crate::bundler::ImageImportShape::NextObject,
         },
         entry: Some(entry),
     }))
@@ -4262,6 +4267,10 @@ struct ImageEntry {
     height: u32,
     /// Variant widths to emit (empty when `unoptimized`).
     variants: Vec<u32>,
+    /// A tiny (~8px-wide) base64 `data:` URI for `placeholder="blur"`, generated
+    /// natively at scan time from the decoded raster. `None` for `unoptimized`
+    /// entries (no decodable raster to blur).
+    blur_data_url: Option<String>,
 }
 
 /// A short, stable hash of a src URL — the variant file-name prefix. Deterministic
@@ -4281,7 +4290,7 @@ fn image_variant_url(src: &str, width: u32, ext: &str) -> String {
 
 /// Variant widths for a raster of intrinsic `width`: every standard size strictly
 /// below the intrinsic width (no upscaling) plus the intrinsic width itself.
-fn variant_widths(intrinsic: u32) -> Vec<u32> {
+pub(crate) fn variant_widths(intrinsic: u32) -> Vec<u32> {
     let mut all: Vec<u32> = IMAGE_IMAGE_SIZES
         .iter()
         .chain(IMAGE_DEVICE_SIZES.iter())
@@ -4353,17 +4362,27 @@ fn scan_public_images_dir(
         );
         let optimizable = matches!(ext.as_str(), "png" | "jpg" | "jpeg");
         if optimizable {
-            match image::image_dimensions(&path) {
-                Ok((width, height)) if width > 0 => {
+            // Decode ONCE here: this yields both intrinsic dimensions AND the
+            // blurDataURL (a tiny downscale for `placeholder="blur"`). The full
+            // decode replaces the old dimensions-only read; the marginal cost is
+            // one small resize/encode per optimizable image, at build time.
+            let out_ext = if ext == "jpg" { "jpeg" } else { ext.as_str() };
+            match image::open(&path) {
+                Ok(decoded) if decoded.width() > 0 && decoded.height() > 0 => {
+                    let width = decoded.width();
+                    let height = decoded.height();
                     let variants = variant_widths(width);
+                    let blur_data_url =
+                        Some(crate::bundler::generate_blur_data_url(&decoded, out_ext)?);
                     out.push(ImageEntry {
                         src,
                         rel,
-                        ext: if ext == "jpg" { "jpeg".to_string() } else { ext },
+                        ext: out_ext.to_string(),
                         unoptimized: false,
                         width,
                         height,
                         variants,
+                        blur_data_url,
                     });
                 }
                 _ => {
@@ -4377,6 +4396,7 @@ fn scan_public_images_dir(
                         width: 0,
                         height: 0,
                         variants: Vec::new(),
+                        blur_data_url: None,
                     });
                 }
             }
@@ -4389,6 +4409,7 @@ fn scan_public_images_dir(
                 width: 0,
                 height: 0,
                 variants: Vec::new(),
+                blur_data_url: None,
             });
         }
     }
@@ -4489,8 +4510,13 @@ fn image_manifest_module(images: &[PublicImage]) -> String {
             .map(|&w| format!("{}: {}", js_str(&w.to_string()), js_str(&image_variant_url(&entry.src, w, &entry.ext))))
             .collect::<Vec<_>>()
             .join(", ");
+        let blur = entry
+            .blur_data_url
+            .as_ref()
+            .map(|data| format!(", blurDataURL: {}", js_str(data)))
+            .unwrap_or_default();
         body.push_str(&format!(
-            "  {}: {{ width: {}, height: {}, variants: {{ {variants} }} }},\n",
+            "  {}: {{ width: {}, height: {}, variants: {{ {variants} }}{blur} }},\n",
             js_str(&entry.src),
             entry.width,
             entry.height,
@@ -4510,8 +4536,12 @@ fn next_image_shim() -> &'static str {
 // renders a `<link rel="preload" as="image">` that React 19 hoists into <head>.
 // A LOCAL raster with no manifest entry throws (naming the src) — never a silent
 // degraded <img>. Runs in all three graphs (no directive; imported by Server
-// Components). OUT of scope (documented in RSC_NEXT_GAP.md §4.2): static image
-// imports (`import x from './x.png'`) and the blur placeholder.
+// Components). Static image imports (`import x from './x.png'`) arrive as the
+// build-emitted object `{ src, width, height, blurDataURL, variants }` and use
+// their embedded variants directly (no MANIFEST lookup). `placeholder="blur"`
+// paints the build-generated blurDataURL as the img's own CSS background so the
+// foreground image covers it on load — a zero-runtime approximation of Next (NO
+// client JS); a blur requested with no resolvable blurDataURL is a hard error.
 import { createElement, Fragment } from "react";
 import MANIFEST from "../image-manifest";
 import CONFIG from "../image-config";
@@ -4610,12 +4640,50 @@ export default function Image(props) {
     fill, quality, sizes, unoptimized, loading, fetchPriority, decoding,
     ...rest
   } = props;
+  const isObjectSrc = src != null && typeof src === "object";
   const rawSrc = typeof src === "string" ? src : (src && (src.src || src.default)) || "";
-  const entry = MANIFEST[rawSrc];
+  // A static image import carries its own dimensions/variants/blur; synthesize an
+  // entry from it so the OPTIMIZED path below builds a srcSet from the embedded
+  // variants directly, with NO MANIFEST lookup (the hashed /assets/ URL is not a
+  // public-image key). Falls back to the public-image MANIFEST for string srcs.
+  const entry =
+    isObjectSrc && src.width && src.variants
+      ? { width: src.width, height: src.height, variants: src.variants }
+      : MANIFEST[rawSrc];
+  // The blurDataURL resolves from (in order) the explicit prop, a static-import
+  // object, or the public-image manifest entry.
+  const resolvedBlur =
+    blurDataURL || (isObjectSrc ? src.blurDataURL : undefined) || (entry && entry.blurDataURL);
+  // `placeholder="blur"` with no resolvable blurDataURL is a hard error (naming the
+  // src), never a silent no-op. Provide `blurDataURL`, use a static import, or a
+  // public png/jpeg (diffpack auto-generates one at build).
+  if (placeholder === "blur" && !resolvedBlur) {
+    throw new Error(
+      "next/image: placeholder=\"blur\" requires a blurDataURL for src '" + rawSrc +
+      "'. Import the image statically (import img from './x.png') or pass the " +
+      "`blurDataURL` prop; public png/jpeg get one generated automatically."
+    );
+  }
+  // Next's blur placeholder style: the tiny blurDataURL painted as the img's own
+  // background, which the foreground image covers once it loads. Zero client JS.
+  const blurStyle =
+    placeholder === "blur" && resolvedBlur
+      ? {
+          backgroundSize: "cover",
+          backgroundPosition: "50% 50%",
+          backgroundRepeat: "no-repeat",
+          backgroundImage: 'url("' + resolvedBlur + '")',
+        }
+      : undefined;
+  // Merge the blur background UNDER any caller style (caller wins on conflict).
+  const finalStyle = blurStyle ? { ...blurStyle, ...rest.style } : rest.style;
   const isData = rawSrc.startsWith("data:") || rawSrc.startsWith("blob:");
   const isSvg = /\.svg(\?|$)/i.test(rawSrc);
   const isRemote = /^https?:\/\//i.test(rawSrc);
-  const forcedUnopt = Boolean(unoptimized) || CONFIG.unoptimized || isData || isSvg || (entry && entry.unoptimized);
+  // A static-import object with no decodable variants (e.g. a format the build's
+  // image crate can't optimize) renders unoptimized rather than throwing.
+  const objectUnopt = isObjectSrc && !(src.width && src.variants);
+  const forcedUnopt = Boolean(unoptimized) || CONFIG.unoptimized || isData || isSvg || objectUnopt || (entry && entry.unoptimized);
 
   // Loader precedence, matching Next: the `loader` prop > a next.config `loaderFile`
   // (bundled as CONFIG.loaderFn) > a built-in named loader (imgix/cloudinary/akamai).
@@ -4645,6 +4713,7 @@ export default function Image(props) {
       loading: imgLoading,
       fetchPriority: imgFetchPriority,
       ...rest,
+      style: finalStyle,
     });
 
   // An <img> whose src/srcSet come from a loader (with the same base attrs as baseImg),
@@ -4661,6 +4730,7 @@ export default function Image(props) {
       loading: imgLoading,
       fetchPriority: imgFetchPriority,
       ...rest,
+      style: finalStyle,
     });
     if (priority) {
       const link = createElement("link", { rel: "preload", as: "image", href: finalSrc, imageSrcSet: srcSet, imageSizes: sizes });
@@ -4726,6 +4796,7 @@ export default function Image(props) {
     loading: imgLoading,
     fetchPriority: imgFetchPriority,
     ...rest,
+    style: finalStyle,
   });
 
   if (priority) {
@@ -5796,6 +5867,7 @@ mod tests {
                 width: 1200,
                 height: 300,
                 variants: vec![640, 1200],
+                blur_data_url: Some("data:image/png;base64,AAAA".into()),
             }),
             PublicImage(ImageEntry {
                 src: "/next.svg".into(),
@@ -5805,12 +5877,14 @@ mod tests {
                 width: 0,
                 height: 0,
                 variants: Vec::new(),
+                blur_data_url: None,
             }),
         ];
         let module = image_manifest_module(&images);
         assert!(module.contains("export default {"), "{module}");
         assert!(module.contains(r#""/hero.png": { width: 1200, height: 300, variants: {"#), "optimized raster entry: {module}");
         assert!(module.contains(r#""640": "/_diffpack-image/"#), "variant keyed by width: {module}");
+        assert!(module.contains(r#"blurDataURL: "data:image/png;base64,AAAA""#), "blurDataURL serialized on optimized entry: {module}");
         assert!(module.contains(r#""/next.svg": { unoptimized: true }"#), "svg is unoptimized (no srcset): {module}");
     }
 

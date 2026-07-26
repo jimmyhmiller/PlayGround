@@ -164,6 +164,8 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // uses this config path with `hmr` false, so production is unaffected.
             hmr: false,
             scss,
+            // Vite parity: default raster imports stay bare-URL strings.
+            image_import_shape: crate::bundler::ImageImportShape::Url,
         },
         entry,
     })
@@ -217,6 +219,8 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
                 additional_data: None,
                 root: Some(root.to_path_buf()),
             },
+            // Vite parity: default raster imports stay bare-URL strings.
+            image_import_shape: crate::bundler::ImageImportShape::Url,
         },
         base: "/".to_string(),
         vite: false,

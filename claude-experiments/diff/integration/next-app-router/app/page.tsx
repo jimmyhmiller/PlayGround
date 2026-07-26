@@ -25,6 +25,7 @@ export default async function Home() {
         width={1200}
         height={300}
         sizes="(max-width: 600px) 100vw, 600px"
+        placeholder="blur"
         priority
       />
       {/* SVG next/image: raw src, no srcset (byte-faithful to Next). */}

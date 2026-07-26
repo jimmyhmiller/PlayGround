@@ -954,6 +954,19 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         let rsc_render = out.join("rsc-render");
         let _ = std::fs::remove_dir_all(&rsc_render);
         copy_dir_recursive(&server, &rsc_render)?;
+        // Publish the react-server graph's emitted assets (content-hashed images
+        // and their build-emitted responsive variants from static image imports)
+        // into the SERVED `public/assets/`. A static image import
+        // (`import img from './x.png'`) is referenced only by Server Components, so
+        // its variants are emitted in the react-server build, not the client one;
+        // merging them here (before the ssr build's prerender copies `public/` ->
+        // `static/`) makes the `<img>`'s `/assets/...` srcset URLs resolve. Names
+        // are content-hashed, so this is a copy of new files only (zero per-request
+        // cost, no image server). A no-op when the graph emitted no assets.
+        let rsc_assets = rsc_render.join("assets");
+        if rsc_assets.is_dir() {
+            copy_dir_recursive(&rsc_assets, &out.join("public/assets"))?;
+        }
         run("ssr")?;
         std::fs::write(
             out.join("next-server.mjs"),

@@ -123,6 +123,14 @@ struct AssetEmit {
     /// stored string is the raw CSS source (captured at load); `None` for an
     /// ordinary asset that is copied verbatim.
     tailwind_source: Option<String>,
+    /// Responsive downscale widths to emit alongside the copied original, for a
+    /// Next static-image import (`import img from './x.png'` under
+    /// [`ImageImportShape::NextObject`]). Each width `w` is written as
+    /// `<stem>-<w>.<ext>` next to the content-hashed original — the SAME native
+    /// resize the public-image path uses, run once at emit time (off the transform
+    /// hot path, mirroring the `tailwind_source` special-case). `None` for an
+    /// ordinary asset (no variants).
+    image_variants: Option<Vec<u32>>,
 }
 
 struct ResolutionCache {
@@ -161,6 +169,9 @@ struct ResolutionCache {
     /// SCSS compile options (Vite `additionalData` + project root), threaded
     /// to the `.scss` loaders.
     scss: Arc<crate::sass::ScssOptions>,
+    /// How default raster-image imports materialize (Vite bare-URL string vs the
+    /// Next static-import object shape). Threaded to `synthesize_asset_url`.
+    image_import_shape: ImageImportShape,
 }
 
 struct DirectoryResolutionCache {
@@ -188,6 +199,7 @@ impl ResolutionCache {
         virtual_import_base: PathBuf,
         asset_inline_limit: usize,
         scss: crate::sass::ScssOptions,
+        image_import_shape: ImageImportShape,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
@@ -200,6 +212,7 @@ impl ResolutionCache {
             virtual_import_base: Arc::from(virtual_import_base.as_path()),
             asset_inline_limit,
             scss: Arc::new(scss),
+            image_import_shape,
         }
     }
 
@@ -713,6 +726,7 @@ impl Bundler {
                     .unwrap_or_else(|| PathBuf::from(".")),
                 config.asset_inline_limit,
                 config.scss.clone(),
+                config.image_import_shape,
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -2033,6 +2047,35 @@ impl Bundler {
                     })?;
                 }
                 written.insert(destination);
+                // Next static-image import: additionally emit the responsive
+                // downscale variants next to the copied original (the SAME native
+                // resize the public-image path uses, done once at emit time — off
+                // the transform hot path, mirroring the `tailwind_source` case).
+                // Variant names are content-hashed via `public_name`, so an
+                // already-written variant needs no re-encode.
+                if let Some(widths) = &asset.image_variants {
+                    let decoded = image::open(&asset.source).map_err(|error| {
+                        format!("cannot decode image {}: {error}", asset.source.display())
+                    })?;
+                    let (intrinsic_w, intrinsic_h) = (decoded.width().max(1), decoded.height());
+                    for &width in widths {
+                        let variant_name = asset_variant_public_name(&asset.public_name, width);
+                        let variant_dest = assets_dir.join(&variant_name);
+                        if variant_dest.exists() {
+                            written.insert(variant_dest);
+                            continue;
+                        }
+                        let target_h = ((intrinsic_h as u64 * width as u64)
+                            / intrinsic_w as u64)
+                            .max(1) as u32;
+                        let variant =
+                            decoded.resize(width, target_h, image::imageops::FilterType::Triangle);
+                        variant.save(&variant_dest).map_err(|error| {
+                            format!("cannot write {}: {error}", variant_dest.display())
+                        })?;
+                        written.insert(variant_dest);
+                    }
+                }
             }
         }
         Ok(())
@@ -4600,7 +4643,12 @@ fn load_special_module(
         return Some(load_scss(path, target, &cache.scss));
     }
     if is_asset_path(path) {
-        return Some(synthesize_asset_url(path.to_path_buf(), &cache.base, cache.asset_inline_limit));
+        return Some(synthesize_asset_url(
+            path.to_path_buf(),
+            &cache.base,
+            cache.asset_inline_limit,
+            cache.image_import_shape,
+        ));
     }
     None
 }
@@ -4637,7 +4685,11 @@ fn synthesize_query_module_impl(
     asset_inline_limit: usize,
 ) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
-        Some(LoaderKind::Url) => synthesize_asset_url(PathBuf::from(&resource.path), base, asset_inline_limit),
+        // An explicit `?url` import is always the bare URL string (Vite semantics),
+        // regardless of the build's default image-import shape.
+        Some(LoaderKind::Url) => {
+            synthesize_asset_url(PathBuf::from(&resource.path), base, asset_inline_limit, ImageImportShape::Url)
+        }
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
         Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
         Some(LoaderKind::CssMedia) => synthesize_css_media(resource),
@@ -4695,6 +4747,7 @@ fn css_assets_to_emits(assets: Vec<crate::css::CssAsset>) -> Vec<AssetEmit> {
             source: asset.source,
             public_name: asset.public_name,
             tailwind_source: None,
+            image_variants: None,
         })
         .collect()
 }
@@ -5061,10 +5114,32 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// A content-hashed asset module: copies the file into `assets/` and exports its
 /// public URL as the default export. Used for both `?url` and default asset
 /// imports (images, fonts, SVG, ...).
-fn synthesize_asset_url(source_path: PathBuf, base: &str, inline_limit: usize) -> Result<SpecialModule, String> {
+///
+/// Under [`ImageImportShape::NextObject`] a decodable PNG/JPEG default import
+/// materializes as Next's static-image object (`{ src, width, height,
+/// blurDataURL, variants }`) with build-emitted responsive variants, instead of a
+/// bare URL string. Every other shape/format keeps the bare-URL behavior
+/// byte-for-byte, so Vite/TanStack/generic builds are unaffected.
+fn synthesize_asset_url(
+    source_path: PathBuf,
+    base: &str,
+    inline_limit: usize,
+    image_shape: ImageImportShape,
+) -> Result<SpecialModule, String> {
     let bytes = fs::read(&source_path)
         .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
     let public_name = asset_public_name(&source_path, content_hash(&bytes));
+    // Next static-image import: a decodable PNG/JPEG becomes the object shape with
+    // responsive variants + an auto blurDataURL. Runs BEFORE the inline-limit
+    // branch so a small raster is never inlined away (the object shape needs a
+    // real emitted file + variants). Undecodable rasters (or non-png/jpeg formats
+    // the `image` crate here can't decode) fall through to the bare-URL path.
+    if image_shape == ImageImportShape::NextObject
+        && let Some(module) =
+            synthesize_next_image_object(&source_path, &bytes, &public_name, base)?
+    {
+        return Ok(module);
+    }
     // A Tailwind v4 CSS entry imported for its URL must be compiled natively at
     // emit time, not copied verbatim: a raw copy leaves `@import 'tailwindcss'`
     // in the served file, which the browser fetches and 404s on. Capture the
@@ -5116,6 +5191,7 @@ fn synthesize_asset_url(source_path: PathBuf, base: &str, inline_limit: usize) -
             source: source_path,
             public_name,
             tailwind_source,
+            image_variants: None,
         }],
         css: None,
         css_source_files: Vec::new(),
@@ -5123,6 +5199,105 @@ fn synthesize_asset_url(source_path: PathBuf, base: &str, inline_limit: usize) -
         dependency_specifiers: Vec::new(),
         dependency_demands: Vec::new(),
     })
+}
+
+/// The public filename for one responsive variant of a content-hashed image
+/// asset: `<stem>-<width>.<ext>` derived from the original's `public_name`
+/// (e.g. `shot-1a2b3c4d.png` + 640 -> `shot-1a2b3c4d-640.png`). Deterministic so
+/// the object's `variants` map (written here) and the emitted files (written in
+/// [`ModuleGraph::emit_assets`]) agree without shared state.
+fn asset_variant_public_name(public_name: &str, width: u32) -> String {
+    match public_name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-{width}.{ext}"),
+        None => format!("{public_name}-{width}"),
+    }
+}
+
+/// Build Next's static-image object module for a default raster import, or `None`
+/// if the bytes are not a PNG/JPEG this build can decode (caller then falls back
+/// to the bare-URL string). Decodes the source once for intrinsic dimensions, a
+/// tiny blurDataURL, and the responsive-variant plan; the variants themselves are
+/// emitted at build time by [`ModuleGraph::emit_assets`] (NO image server).
+fn synthesize_next_image_object(
+    source_path: &Path,
+    bytes: &[u8],
+    public_name: &str,
+    base: &str,
+) -> Result<Option<SpecialModule>, String> {
+    let ext = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let is_png_or_jpeg = matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg"));
+    if !is_png_or_jpeg {
+        return Ok(None);
+    }
+    // Decode from the bytes already in hand (no second filesystem read).
+    let Ok(decoded) = image::load_from_memory(bytes) else {
+        // An undecodable/corrupt raster: fall back to the bare-URL string rather
+        // than throwing — the shim then renders it unoptimized, honest passthrough.
+        return Ok(None);
+    };
+    let width = decoded.width();
+    let height = decoded.height();
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+    let out_ext = if ext.as_deref() == Some("jpg") { "jpeg" } else { ext.as_deref().unwrap_or("png") };
+    let blur = generate_blur_data_url(&decoded, out_ext)?;
+    let widths = crate::next_adapter::variant_widths(width);
+    let src_url = format!("{base}assets/{public_name}");
+    let variants_js = widths
+        .iter()
+        .map(|&w| {
+            let url = format!("{base}assets/{}", asset_variant_public_name(public_name, w));
+            format!("{}: {}", quote(&w.to_string()), quote(&url))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let synthetic = format!(
+        "export default {{ src: {}, width: {width}, height: {height}, blurDataURL: {}, variants: {{ {variants_js} }} }};\n",
+        quote(&src_url),
+        quote(&blur),
+    );
+    let transformed = transform_module(Path::new("diffpack-image-import.js"), &synthetic, Target::Server);
+    Ok(Some(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: vec![AssetEmit {
+            source: source_path.to_path_buf(),
+            public_name: public_name.to_string(),
+            tailwind_source: None,
+            image_variants: Some(widths),
+        }],
+        css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    }))
+}
+
+/// Encode a tiny (~8px-wide) downscale of `img` as a base64 `data:` URI — the
+/// `blurDataURL` for `placeholder="blur"`. PNG sources keep PNG (transparency);
+/// JPEG sources keep JPEG. Generated natively via the already-vendored `image`
+/// crate (no sharp/squoosh dependency, no image server).
+pub(crate) fn generate_blur_data_url(img: &image::DynamicImage, ext: &str) -> Result<String, String> {
+    const BLUR_WIDTH: u32 = 8;
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let target_h = ((h as u64 * BLUR_WIDTH as u64) / w as u64).max(1) as u32;
+    let small = img.resize_exact(BLUR_WIDTH, target_h, image::imageops::FilterType::Triangle);
+    let (format, mime) = if ext == "jpeg" || ext == "jpg" {
+        (image::ImageFormat::Jpeg, "image/jpeg")
+    } else {
+        (image::ImageFormat::Png, "image/png")
+    };
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    small
+        .write_to(&mut buffer, format)
+        .map_err(|error| format!("cannot encode blur placeholder: {error}"))?;
+    Ok(format!("data:{mime};base64,{}", base64_encode(&buffer.into_inner())))
 }
 
 /// A `?raw` module: the file's contents inlined as the default string export.
@@ -5921,6 +6096,22 @@ fn split_chunk_route_id(id: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// How a default asset import of a raster image (`import img from './x.png'`)
+/// materializes. `Url` (the default, and what Vite/TanStack/generic builds use)
+/// makes the default export the bare public URL string, byte-identical to Vite.
+/// `NextObject` makes it Next's static-import object shape
+/// (`{ src, width, height, blurDataURL, variants }`) with build-emitted responsive
+/// variants — set ONLY by the Next app-router adapter so no other build path
+/// changes its asset-import semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageImportShape {
+    /// Bare public URL string (Vite parity). The default.
+    #[default]
+    Url,
+    /// Next's static-import object shape with responsive variants + blur.
+    NextObject,
+}
+
 /// Build-time configuration a plugin host contributes. Currently the resolver
 /// aliases (specifier -> absolute target), such as TanStack's
 /// `#tanstack-router-entry` -> `<app>/src/router.tsx`. Kept small and owned by
@@ -5979,6 +6170,11 @@ pub struct BuildConfig {
     /// (when a string) and the project root for root-relative `@use "/src/..."`
     /// targets. Default (empty) compiles `.scss` files with no injected prelude.
     pub scss: crate::sass::ScssOptions,
+    /// How default raster-image imports materialize. `Url` (default) keeps Vite
+    /// parity (bare URL string); the Next adapter opts into `NextObject` so
+    /// `import img from './x.png'` yields Next's `{ src, width, height,
+    /// blurDataURL, variants }` shape with build-emitted responsive variants.
+    pub image_import_shape: ImageImportShape,
 }
 
 impl Default for BuildConfig {
@@ -5998,6 +6194,7 @@ impl Default for BuildConfig {
             defines: Vec::new(),
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
+            image_import_shape: ImageImportShape::Url,
         }
     }
 }
@@ -8240,6 +8437,7 @@ mod tests {
             defines: Vec::new(),
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
+            image_import_shape: ImageImportShape::Url,
         };
         (directory, entry, config)
     }
@@ -8311,6 +8509,7 @@ mod tests {
             defines: Vec::new(),
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
+            image_import_shape: ImageImportShape::Url,
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -8394,6 +8593,7 @@ mod tests {
             defines: Vec::new(),
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
+            image_import_shape: ImageImportShape::Url,
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
@@ -8805,5 +9005,51 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("import.meta"), "{error}");
         assert!(error.contains("entry.js"), "{error}");
+    }
+
+    #[test]
+    fn asset_variant_public_name_appends_width_before_ext() {
+        assert_eq!(
+            asset_variant_public_name("shot-1a2b3c4d.png", 640),
+            "shot-1a2b3c4d-640.png"
+        );
+        assert_eq!(asset_variant_public_name("noext", 32), "noext-32");
+    }
+
+    #[test]
+    fn blur_data_url_is_a_tiny_decodable_data_uri() {
+        let img = image::DynamicImage::new_rgb8(200, 100);
+        let png = generate_blur_data_url(&img, "png").unwrap();
+        assert!(png.starts_with("data:image/png;base64,"), "{png}");
+        let jpeg = generate_blur_data_url(&img, "jpeg").unwrap();
+        assert!(jpeg.starts_with("data:image/jpeg;base64,"), "{jpeg}");
+        // A real payload but small (~8px-wide downscale), never a heavy full image.
+        assert!(png.len() > 40 && png.len() < 4000, "tiny but real: {}", png.len());
+    }
+
+    #[test]
+    fn next_object_image_import_differs_from_vite_url_shape() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        image::DynamicImage::new_rgb8(300, 200).save(&path).unwrap();
+
+        // NextObject: the module plans responsive variants to emit (object shape).
+        let obj = synthesize_asset_url(path.clone(), "/", 0, ImageImportShape::NextObject).unwrap();
+        assert_eq!(obj.assets.len(), 1, "one emitted original");
+        let variants = obj.assets[0]
+            .image_variants
+            .as_ref()
+            .expect("NextObject plans responsive variants");
+        assert_eq!(variants, &crate::next_adapter::variant_widths(300));
+        assert!(variants.len() >= 2, "several responsive widths: {variants:?}");
+
+        // Url (Vite/TanStack/generic): bare URL string, NO variants planned. This
+        // locks the no-regression guarantee for every non-Next build path.
+        let url = synthesize_asset_url(path.clone(), "/", 0, ImageImportShape::Url).unwrap();
+        assert_eq!(url.assets.len(), 1);
+        assert!(
+            url.assets[0].image_variants.is_none(),
+            "Url mode stays bare-URL (Vite parity): no variants"
+        );
     }
 }

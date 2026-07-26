@@ -180,6 +180,26 @@ faithful port of Next's `getImgProps`, running in all three graphs:
 - **`priority`** renders a `<link rel="preload" as="image">` (with `imageSrcSet`/
   `imageSizes`/`fetchPriority=high`) that React 19 hoists into `<head>`; `decoding`
   defaults to `async`, `loading` to `lazy` (or eager under `priority`).
+- **Static image imports** (`import img from './x.png'`) materialize as Next's
+  object shape `{ src, width, height, blurDataURL, variants }` with build-emitted
+  responsive variants — even for a raster OUTSIDE `public/`. The bundler opts into
+  this only under the Next adapter (`BuildConfig::image_import_shape =
+  NextObject`); Vite/TanStack/generic builds keep bare-URL-string asset imports
+  byte-for-byte. A Server-Component-only import's variants are emitted in the
+  react-server graph and published to the served `public/assets/` at build time
+  (`build_production` in `main.rs`), so the `<img>`'s `/assets/...` srcset resolves.
+  The shim reads the object's embedded `variants` directly (no manifest lookup).
+- **`placeholder="blur"`** paints an auto-generated tiny (~8px-wide) `blurDataURL`
+  as the img's own CSS background, which the foreground image covers on load — a
+  **zero client-JS** approximation of Next. The blurDataURL is generated natively
+  by the already-vendored `image` crate (`bundler::generate_blur_data_url`, one
+  small resize + base64 at build time — NO sharp/squoosh, no image server): for
+  public png/jpeg it rides the image-manifest; for a static import it is baked into
+  the object. A `placeholder="blur"` with no resolvable blurDataURL is a **hard
+  error** naming the src (never a silent no-op). Visible delta vs Next: a
+  transparent PNG's blur can peek through (Next clears it via a client `onLoad`);
+  documented, not silently skipped — clearing it would add a hydrated client
+  island this build-time slice deliberately avoids.
 - **No silent stub:** a local raster path with no manifest entry **throws** naming
   the src (a real build gap, never a degraded `<img>`).
 
@@ -188,11 +208,16 @@ Note: React 19 emits these attribute names camelCase in the HTML string
 case-insensitively, exactly as Next itself renders under React 19. Gated by
 `next-check.sh` gate 1i (raster `srcset` ≥2 variant candidates + `sizes` +
 `decoding` + `fetchpriority`, the largest variant a real `200 image/png`, a hoisted
-priority preload link, and the SVG rendered raw with no `srcset`). **Remaining
-(documented, not silently skipped):** static image imports (`import x from
-'./x.png'` → `{src,width,height,blurDataURL}`), the blur placeholder, and `webp`/
-`gif`/`avif` optimization (registered `unoptimized` — raw passthrough — since this
-build compiles only the `image` crate's `png`+`jpeg` decoders).
+priority preload link, and the SVG rendered raw with no `srcset`). **Deliberate
+non-goal — a runtime `/_next/image` optimizer:** a per-request resize/re-encode
+endpoint would add node CPU + a persistent encoder's memory per request and needs a
+sharp-class encoder the `image` crate here (png+jpeg only, no webp/avif *encode*)
+cannot provide — it would invert every diffpack benchmark win (build/latency/TTFB/
+memory) for no correctness gain over the honest allow-listed remote passthrough.
+Local images are fully covered at build time instead. **Remaining (documented, not
+silently skipped):** `webp`/`gif`/`avif` optimization (registered `unoptimized` —
+raw passthrough — since this build compiles only the `image` crate's `png`+`jpeg`
+decoders); a static import of such a format keeps the bare-URL string (unchanged).
 
 ### 4.3 CSS: `import "./globals.css"` + CSS Modules — CLOSED
 **Done.** The react-server graph is authoritative for CSS (Server Components render
