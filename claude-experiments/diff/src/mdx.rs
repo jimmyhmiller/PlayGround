@@ -12,7 +12,17 @@
 use markdown::mdast::{AttributeContent, AttributeValue, Node};
 use markdown::{to_mdast, Constructs, MdxSignal, ParseOptions};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The intrinsic MDX elements that a root `mdx-components.tsx` may override. When such a
+/// file exists, every emitted element below is rendered through a resolved `_components`
+/// map (`_components.h1`, ...) whose defaults are these tag names, so an unspecified tag
+/// falls back to the real intrinsic (`"h1"`) and an overridden one uses the app's
+/// component. This is exactly the set the emitter can produce.
+const INTRINSIC_TAGS: &[&str] = &[
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "blockquote", "ul", "ol", "li", "em",
+    "strong", "code", "pre", "img", "hr", "br",
+];
 
 /// Whether a path is an MDX/Markdown source (`.mdx` or `.md`).
 pub fn is_mdx_path(path: &Path) -> bool {
@@ -77,6 +87,13 @@ pub fn compile(path: &Path, source: &str) -> Result<CompiledMdx, String> {
         other => return Err(format!("MDX {}: expected a Root node, got {}", path.display(), node_kind(&other))),
     };
 
+    // If the app defines a root `mdx-components.tsx` (Next's `useMDXComponents` override
+    // convention), every intrinsic element is rendered through the resolved map instead
+    // of a plain intrinsic tag. Absence of the file keeps the emitted JSX exactly as
+    // before (`use_map` = false).
+    let components_file = find_mdx_components(path);
+    let use_map = components_file.is_some();
+
     let mut hoisted = String::new(); // MDX ESM (import/export) lifted to module scope
     let mut frontmatter = BTreeMap::new();
     let mut body = String::new(); // the JSX children of the fragment
@@ -88,7 +105,7 @@ pub fn compile(path: &Path, source: &str) -> Result<CompiledMdx, String> {
                 hoisted.push_str(&esm.value);
                 hoisted.push('\n');
             }
-            other => emit_node(other, &mut body, path)?,
+            other => emit_node(other, &mut body, path, use_map)?,
         }
     }
 
@@ -106,32 +123,62 @@ pub fn compile(path: &Path, source: &str) -> Result<CompiledMdx, String> {
         meta_export = format!("export const metadata = {{ {} }};\n", fields.join(", "));
     }
 
-    let jsx = format!(
-        "{hoisted}\n{meta_export}export default function MDXContent() {{\n  return (<>{body}</>);\n}}\n"
-    );
+    let jsx = if let Some(components_file) = components_file {
+        // Import the app's `useMDXComponents`, resolve the override map ONCE per render,
+        // and layer it over the intrinsic defaults (so an unspecified tag stays intrinsic)
+        // and any `props.components` (MDXProvider nesting). The body already emits every
+        // intrinsic as `_components.<tag>`.
+        let specifier = js_string(&relative_import_specifier(path, &components_file));
+        let defaults = INTRINSIC_TAGS
+            .iter()
+            .map(|tag| format!("{tag}: {}", js_string(tag)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{hoisted}\nimport {{ useMDXComponents as _provideComponents }} from {specifier};\n{meta_export}\
+             export default function MDXContent(props) {{\n  \
+             const _components = {{ {defaults}, ..._provideComponents(), ...((props && props.components) || {{}}) }};\n  \
+             return (<>{body}</>);\n}}\n"
+        )
+    } else {
+        format!(
+            "{hoisted}\n{meta_export}export default function MDXContent() {{\n  return (<>{body}</>);\n}}\n"
+        )
+    };
     Ok(CompiledMdx { jsx, frontmatter })
 }
 
 /// Emit one mdast node as JSX into `out`. Unhandled nodes hard-error (naming node+file).
-fn emit_node(node: &Node, out: &mut String, path: &Path) -> Result<(), String> {
+/// When `use_map` is set every intrinsic tag is emitted as `_components.<tag>` (resolved
+/// against the app's `mdx-components.tsx`); otherwise the plain intrinsic tag is emitted.
+fn emit_node(node: &Node, out: &mut String, path: &Path, use_map: bool) -> Result<(), String> {
     match node {
-        Node::Heading(h) => wrap(out, &format!("h{}", h.depth), &h.children, path)?,
-        Node::Paragraph(p) => wrap(out, "p", &p.children, path)?,
-        Node::Emphasis(e) => wrap(out, "em", &e.children, path)?,
-        Node::Strong(s) => wrap(out, "strong", &s.children, path)?,
-        Node::Blockquote(b) => wrap(out, "blockquote", &b.children, path)?,
-        Node::ListItem(li) => wrap(out, "li", &li.children, path)?,
-        Node::List(l) => wrap(out, if l.ordered { "ol" } else { "ul" }, &l.children, path)?,
+        Node::Heading(h) => wrap(out, &format!("h{}", h.depth), &h.children, path, use_map)?,
+        Node::Paragraph(p) => wrap(out, "p", &p.children, path, use_map)?,
+        Node::Emphasis(e) => wrap(out, "em", &e.children, path, use_map)?,
+        Node::Strong(s) => wrap(out, "strong", &s.children, path, use_map)?,
+        Node::Blockquote(b) => wrap(out, "blockquote", &b.children, path, use_map)?,
+        Node::ListItem(li) => wrap(out, "li", &li.children, path, use_map)?,
+        Node::List(l) => wrap(out, if l.ordered { "ol" } else { "ul" }, &l.children, path, use_map)?,
         Node::Link(l) => {
-            out.push_str(&format!("<a href={}>", js_string(&l.url)));
-            emit_children(&l.children, out, path)?;
-            out.push_str("</a>");
+            let tag = jsx_tag("a", use_map);
+            out.push_str(&format!("<{tag} href={}>", js_string(&l.url)));
+            emit_children(&l.children, out, path, use_map)?;
+            out.push_str(&format!("</{tag}>"));
         }
         Node::Image(i) => {
-            out.push_str(&format!("<img src={} alt={} />", js_string(&i.url), js_string(&i.alt)));
+            out.push_str(&format!(
+                "<{} src={} alt={} />",
+                jsx_tag("img", use_map),
+                js_string(&i.url),
+                js_string(&i.alt)
+            ));
         }
         Node::Text(t) => out.push_str(&js_expr_string(&t.value)),
-        Node::InlineCode(c) => out.push_str(&format!("<code>{}</code>", js_expr_string(&c.value))),
+        Node::InlineCode(c) => {
+            let tag = jsx_tag("code", use_map);
+            out.push_str(&format!("<{tag}>{}</{tag}>", js_expr_string(&c.value)));
+        }
         Node::Code(c) => {
             let lang = c.lang.as_deref().unwrap_or("");
             let class = if lang.is_empty() {
@@ -139,14 +186,19 @@ fn emit_node(node: &Node, out: &mut String, path: &Path) -> Result<(), String> {
             } else {
                 format!(" className={}", js_string(&format!("language-{lang}")))
             };
-            out.push_str(&format!("<pre><code{class}>{}</code></pre>", js_expr_string(&c.value)));
+            let pre = jsx_tag("pre", use_map);
+            let code = jsx_tag("code", use_map);
+            out.push_str(&format!(
+                "<{pre}><{code}{class}>{}</{code}></{pre}>",
+                js_expr_string(&c.value)
+            ));
         }
-        Node::ThematicBreak(_) => out.push_str("<hr />"),
-        Node::Break(_) => out.push_str("<br />"),
+        Node::ThematicBreak(_) => out.push_str(&format!("<{} />", jsx_tag("hr", use_map))),
+        Node::Break(_) => out.push_str(&format!("<{} />", jsx_tag("br", use_map))),
         Node::MdxFlowExpression(e) => out.push_str(&format!("{{{}}}", e.value)),
         Node::MdxTextExpression(e) => out.push_str(&format!("{{{}}}", e.value)),
-        Node::MdxJsxFlowElement(el) => emit_jsx_element(el.name.as_deref(), &el.attributes, &el.children, out, path)?,
-        Node::MdxJsxTextElement(el) => emit_jsx_element(el.name.as_deref(), &el.attributes, &el.children, out, path)?,
+        Node::MdxJsxFlowElement(el) => emit_jsx_element(el.name.as_deref(), &el.attributes, &el.children, out, path, use_map)?,
+        Node::MdxJsxTextElement(el) => emit_jsx_element(el.name.as_deref(), &el.attributes, &el.children, out, path, use_map)?,
         // MDX ESM only appears at the top level (hoisted in `compile`); a nested one is
         // malformed. Everything else is an explicitly unsupported node.
         other => {
@@ -162,19 +214,31 @@ fn emit_node(node: &Node, out: &mut String, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `<tag>children</tag>`.
-fn wrap(out: &mut String, tag: &str, children: &[Node], path: &Path) -> Result<(), String> {
+/// `<tag>children</tag>`, where `tag` is an intrinsic name mapped through `_components`
+/// when `use_map` is set.
+fn wrap(out: &mut String, tag: &str, children: &[Node], path: &Path, use_map: bool) -> Result<(), String> {
+    let tag = jsx_tag(tag, use_map);
     out.push_str(&format!("<{tag}>"));
-    emit_children(children, out, path)?;
+    emit_children(children, out, path, use_map)?;
     out.push_str(&format!("</{tag}>"));
     Ok(())
 }
 
-fn emit_children(children: &[Node], out: &mut String, path: &Path) -> Result<(), String> {
+fn emit_children(children: &[Node], out: &mut String, path: &Path, use_map: bool) -> Result<(), String> {
     for child in children {
-        emit_node(child, out, path)?;
+        emit_node(child, out, path, use_map)?;
     }
     Ok(())
+}
+
+/// The JSX tag for an intrinsic element: the resolved-map member `_components.<tag>` when
+/// an `mdx-components.tsx` override is in play, otherwise the plain intrinsic name.
+fn jsx_tag(tag: &str, use_map: bool) -> String {
+    if use_map {
+        format!("_components.{tag}")
+    } else {
+        tag.to_string()
+    }
 }
 
 /// Reconstruct an MDX JSX element `<Name attr="x" prop={expr} {...spread}>children</Name>`
@@ -185,6 +249,7 @@ fn emit_jsx_element(
     children: &[Node],
     out: &mut String,
     path: &Path,
+    use_map: bool,
 ) -> Result<(), String> {
     let tag = name.unwrap_or("");
     out.push('<');
@@ -204,7 +269,7 @@ fn emit_jsx_element(
         return Ok(());
     }
     out.push('>');
-    emit_children(children, out, path)?;
+    emit_children(children, out, path, use_map)?;
     out.push_str(&format!("</{tag}>"));
     Ok(())
 }
@@ -248,6 +313,67 @@ fn parse_frontmatter_yaml(yaml: &str) -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+/// Locate the app's `mdx-components.{tsx,ts,jsx,js}` (Next's `useMDXComponents` override
+/// file), walking up from the MDX source's directory. Next places it at the project root
+/// (next to `app/`) or in `src/`; this also matches an `app/mdx-components.*`. The walk
+/// stops at the directory holding `package.json` (the project root) so it never reaches an
+/// unrelated file higher in the filesystem. Returns `None` when no such file exists (the
+/// no-override path). Paths reaching here are canonicalized absolute paths.
+fn find_mdx_components(mdx_path: &Path) -> Option<PathBuf> {
+    const EXTS: &[&str] = &["tsx", "ts", "jsx", "js"];
+    let mut dir = mdx_path.parent();
+    while let Some(current) = dir {
+        for ext in EXTS {
+            let candidate = current.join(format!("mdx-components.{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        // The project root is the nearest ancestor with a package.json; do not walk above
+        // it (its mdx-components was already checked in this iteration).
+        if current.join("package.json").is_file() {
+            return None;
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+/// Build a relative ESM import specifier from the MDX source file to `target`, dropping the
+/// extension (the bundler resolves extensionless relative imports) and forcing a leading
+/// `./` so it is never mistaken for a bare package specifier.
+fn relative_import_specifier(from_file: &Path, target: &Path) -> String {
+    let from_dir = from_file.parent().unwrap_or_else(|| Path::new(""));
+    let from: Vec<_> = from_dir.components().collect();
+    let to: Vec<_> = target.components().collect();
+
+    let mut shared = 0;
+    while shared < from.len() && shared < to.len() && from[shared] == to[shared] {
+        shared += 1;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    for _ in shared..from.len() {
+        parts.push("..".to_string());
+    }
+    for component in &to[shared..] {
+        parts.push(component.as_os_str().to_string_lossy().into_owned());
+    }
+    // Drop the extension from the final component (the target file name).
+    if let Some(last) = parts.last_mut()
+        && let Some(stem) = Path::new(last.as_str()).file_stem().and_then(|s| s.to_str())
+    {
+        *last = stem.to_string();
+    }
+
+    let joined = parts.join("/");
+    if joined.starts_with("../") || joined == ".." {
+        joined
+    } else {
+        format!("./{joined}")
+    }
 }
 
 /// A human-readable node kind for error messages.
@@ -316,6 +442,94 @@ mod tests {
         let component_at = out.find("export default function MDXContent").unwrap();
         assert!(import_at < component_at, "import must be hoisted: {out}");
         assert!(out.contains("<Widget n={2} label=\"hi\" />"), "{out}");
+    }
+
+    /// Create a throwaway project dir (with a package.json root) containing an
+    /// `mdx-components.tsx` and a nested `page.mdx`, returning the absolute page path so
+    /// `compile` sees the same canonicalized-absolute paths the bundler passes.
+    fn scaffold_with_components(components_rel_dir: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let mut root = std::env::temp_dir();
+        root.push(format!("diffpack-mdx-{}-{}", std::process::id(), components_rel_dir.replace('/', "_")));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app/blog")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let comp_dir = root.join(components_rel_dir);
+        std::fs::create_dir_all(&comp_dir).unwrap();
+        std::fs::write(
+            comp_dir.join("mdx-components.tsx"),
+            "export function useMDXComponents() { return {}; }\n",
+        )
+        .unwrap();
+        let page = root.join("app/blog/page.mdx");
+        std::fs::write(&page, "# Hi\n").unwrap();
+        (root, page)
+    }
+
+    #[test]
+    fn no_components_file_keeps_plain_intrinsics() {
+        // A path with no mdx-components anywhere above it emits plain intrinsic tags and
+        // the zero-arg component signature, byte-identical to before this feature.
+        let out = jsx("# Title\n\nHi\n");
+        assert!(out.contains("<h1>{\"Title\"}</h1>"), "{out}");
+        assert!(out.contains("export default function MDXContent() {"), "{out}");
+        assert!(!out.contains("_components"), "{out}");
+        assert!(!out.contains("_provideComponents"), "{out}");
+    }
+
+    #[test]
+    fn root_components_file_routes_intrinsics_through_map() {
+        let (root, page) = scaffold_with_components(".");
+        let out = compile(&page, "# Hi\n\nA [link](/x) and `code`.\n").unwrap().jsx;
+        std::fs::remove_dir_all(&root).ok();
+        // Imports the app override and resolves the map once.
+        assert!(
+            out.contains("import { useMDXComponents as _provideComponents } from \"../../mdx-components\""),
+            "{out}"
+        );
+        assert!(out.contains("const _components = {"), "{out}");
+        assert!(out.contains("h1: \"h1\""), "{out}");
+        assert!(out.contains("..._provideComponents()"), "{out}");
+        assert!(out.contains("export default function MDXContent(props)"), "{out}");
+        // Every intrinsic is rendered through the map, with the intrinsic fallback baked
+        // into `_components`.
+        assert!(out.contains("<_components.h1>"), "{out}");
+        assert!(out.contains("<_components.a href="), "{out}");
+        assert!(out.contains("<_components.code>"), "{out}");
+    }
+
+    #[test]
+    fn src_app_layout_finds_src_components() {
+        // Realistic `src/app` layout: mdx-components lives at the src root, an ancestor of
+        // the page, so the walk finds it (and stops at package.json above src/).
+        let mut root = std::env::temp_dir();
+        root.push(format!("diffpack-mdx-srcapp-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("src/app/blog")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("src/mdx-components.tsx"),
+            "export function useMDXComponents() { return {}; }\n",
+        )
+        .unwrap();
+        let page = root.join("src/app/blog/page.mdx");
+        std::fs::write(&page, "# Hi\n").unwrap();
+        let out = compile(&page, "# Hi\n").unwrap().jsx;
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            out.contains("from \"../../mdx-components\""),
+            "src/ override must be found and imported relative to the page: {out}"
+        );
+        assert!(out.contains("<_components.h1>"), "{out}");
+    }
+
+    #[test]
+    fn relative_specifier_strips_extension_and_forces_dot_prefix() {
+        let from = Path::new("/proj/app/blog/hello/page.mdx");
+        let target = Path::new("/proj/mdx-components.tsx");
+        assert_eq!(relative_import_specifier(from, target), "../../../mdx-components");
+
+        let sibling = Path::new("/proj/app/blog/mdx-components.ts");
+        assert_eq!(relative_import_specifier(Path::new("/proj/app/blog/page.mdx"), sibling), "./mdx-components");
     }
 
     #[test]
