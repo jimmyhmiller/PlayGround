@@ -100,6 +100,7 @@ rsc_gate "Next dev server (Fast Refresh island + server-component reload)" scrip
 rsc_gate "Next UNMODIFIED create-next-app default (build + render + hydrate)" scripts/rsc/next-authentic-check.sh integration/next-app-router
 rsc_gate "Next SSG (prerender + dumb static serve + hydrate + soft-nav)" scripts/rsc/next-ssg-check.sh integration/next-app-router
 rsc_gate "Next corpus (multi-app SSR + classification smoke)" scripts/rsc/next-corpus-check.sh integration/next-corpus
+rsc_gate "Next real OSS apps (vercel examples: build + serve + smoke)" scripts/rsc/next-real-check.sh integration/next-real
 rsc_gate "Dev HMR bench (diffpack dev vs next --turbopack, liveness/non-regression)" scripts/rsc/next-dev-hmr-check.sh integration/next-app-router
 
 # --- Tier 3: broader wall (--full) -------------------------------------------
