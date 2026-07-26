@@ -122,6 +122,55 @@ struct RouteMetadata {
     description: Option<String>,
 }
 
+/// The extensions a metadata IMAGE file convention (`icon`/`favicon`/`apple-icon`/
+/// `opengraph-image`/`twitter-image`) may use as a STATIC file. Code generators
+/// (`.tsx`/`.jsx`/`.ts`/`.js` returning an `ImageResponse`) are a separate, heavy-dep
+/// capability that is deliberately NOT supported here (see [`scan_metadata_images`]).
+const METADATA_IMAGE_EXTS: [&str; 7] = ["ico", "png", "jpg", "jpeg", "gif", "svg", "webp"];
+
+/// A Next metadata IMAGE file convention discovered at the app root (`app/icon.png`,
+/// `app/favicon.ico`, `app/apple-icon.png`, `app/opengraph-image.jpg`,
+/// `app/twitter-image.png`). Copied to the served `public/` output at build time and
+/// head-linked (`<link rel>`/`<meta property>`) into every route — zero per-request cost.
+#[derive(Debug, Clone)]
+struct MetaImage {
+    /// The convention family, which determines the head element emitted.
+    kind: MetaImageKind,
+    /// The source file (absolute).
+    source: PathBuf,
+    /// The served URL path (`/icon.png`), which is also the copied output filename.
+    served: String,
+    /// The image MIME type inferred from the extension (for `<link type>`).
+    mime: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaImageKind {
+    /// `favicon.ico` -> `<link rel="icon" sizes="any">`.
+    Favicon,
+    /// `icon.*` -> `<link rel="icon">`.
+    Icon,
+    /// `apple-icon.*` -> `<link rel="apple-touch-icon">`.
+    AppleIcon,
+    /// `opengraph-image.*` -> `<meta property="og:image">`.
+    OpengraphImage,
+    /// `twitter-image.*` -> `<meta name="twitter:image">`.
+    TwitterImage,
+}
+
+/// The image MIME type for a metadata-image extension.
+fn metadata_image_mime(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "ico" => "image/x-icon",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        other => unreachable!("metadata_image_mime called on non-image ext {other}"),
+    }
+}
+
 /// Reads `export const metadata = { title, description }` string literals from a
 /// module (the Metadata API subset), for the adapter to render `<title>`/`<meta>`
 /// into the document head. `generateMetadata()` and non-string values are not read
@@ -747,6 +796,9 @@ struct Discovered {
     /// Intercepting routes (`@slot/(.)…`): a soft-navigation to a matching target
     /// renders this page as an overlay instead of the full target document.
     intercepts: Vec<Intercept>,
+    /// Metadata IMAGE file conventions (`app/icon.png`, `app/favicon.ico`, ...) at the
+    /// app root: copied to `public/` at build and head-linked into every route.
+    meta_images: Vec<MetaImage>,
 }
 
 /// An intercepting route (`app/@modal/(..)photo/[id]/page.tsx`): on a SOFT navigation to
@@ -906,7 +958,122 @@ fn discover_routes(app_dir: &Path, root_layout: Option<&Path>) -> Result<Discove
         app_not_found: first_existing(app_dir, "not-found").map(|p| p.canonicalize().unwrap_or(p)),
         handlers: discover_route_handlers(app_dir)?,
         intercepts: discover_intercepts(app_dir)?,
+        meta_images: scan_metadata_images(app_dir)?,
     })
+}
+
+/// A metadata FILE convention endpoint (`app/sitemap.ts` -> `/sitemap.xml`,
+/// `app/robots.ts` -> `/robots.txt`, `app/manifest.ts` -> `/manifest.webmanifest`).
+/// Each is served by the SAME route-handler machinery as a `route.ts` endpoint: a tiny
+/// generated wrapper imports the user file's default export, calls it, and serializes
+/// the result to XML / text / JSON with the right content-type. Only the app root is
+/// scanned (Next's convention location for these three files).
+struct MetaFileConvention {
+    /// The convention file stem (`sitemap`/`robots`/`manifest`).
+    stem: &'static str,
+    /// The served URL (`/sitemap.xml`).
+    url: &'static str,
+    /// The generated wrapper's basename under `shims/`.
+    wrapper: &'static str,
+}
+
+const META_FILE_CONVENTIONS: [MetaFileConvention; 3] = [
+    MetaFileConvention { stem: "sitemap", url: "/sitemap.xml", wrapper: "metadata-sitemap.ts" },
+    MetaFileConvention { stem: "robots", url: "/robots.txt", wrapper: "metadata-robots.ts" },
+    MetaFileConvention { stem: "manifest", url: "/manifest.webmanifest", wrapper: "metadata-manifest.ts" },
+];
+
+/// Synthesize route handlers for the `sitemap`/`robots`/`manifest` file conventions
+/// present at the app root. For each, write the shared serializer helper + a per-file
+/// wrapper (importing the user's default export) under `shims_dir`, and return a
+/// [`RouteHandler`] pointing at the wrapper. These flow unchanged through the existing
+/// `ROUTE_HANDLERS` table + orchestrator `route` dispatch — no new server code path.
+fn synthesize_metadata_file_handlers(
+    app_dir: &Path,
+    shims_dir: &Path,
+) -> Result<Vec<RouteHandler>, String> {
+    let mut handlers = Vec::new();
+    let mut wrote_serializer = false;
+    let serializer = shims_dir.join("metadata-serialize.ts");
+    for conv in &META_FILE_CONVENTIONS {
+        let Some(user_file) = first_existing(app_dir, conv.stem) else { continue };
+        let user_file = user_file.canonicalize().unwrap_or(user_file);
+        // `generateSitemaps` (multiple, id-partitioned sitemaps) is a distinct Next
+        // feature (`/sitemap/[id].xml`) that this adapter does not synthesize. Fail
+        // clearly rather than serve a single wrong `/sitemap.xml` (no silent stub).
+        if conv.stem == "sitemap" {
+            let src = std::fs::read_to_string(&user_file).unwrap_or_default();
+            if exports_symbol(&strip_comments(&src), "generateSitemaps") {
+                return Err(format!(
+                    "diffpack next metadata: {} exports `generateSitemaps` (multiple id-partitioned sitemaps), which this adapter does not support yet. Use a single default-export sitemap() returning the full url array instead.",
+                    user_file.display(),
+                ));
+            }
+        }
+        if !wrote_serializer {
+            write_if_changed(&serializer, metadata_serialize_shim())?;
+            wrote_serializer = true;
+        }
+        let serializer_canon = serializer.canonicalize().unwrap_or_else(|_| serializer.clone());
+        let wrapper_path = shims_dir.join(conv.wrapper);
+        let wrapper_src = metadata_file_wrapper(conv.stem, &user_file, &serializer_canon);
+        write_if_changed(&wrapper_path, &wrapper_src)?;
+        let wrapper_canon = wrapper_path.canonicalize().unwrap_or_else(|_| wrapper_path.clone());
+        // The served URL is a single static path segment (e.g. `sitemap.xml`).
+        let seg = conv.url.trim_start_matches('/').to_string();
+        handlers.push(RouteHandler {
+            url_path: conv.url.to_string(),
+            segments: vec![Seg::Static(seg)],
+            file: wrapper_canon,
+            methods: vec!["GET".to_string()],
+        });
+    }
+    Ok(handlers)
+}
+
+/// Scan the app ROOT for static metadata-image file conventions. Nested (segment-scoped)
+/// images and code-based image generators (`opengraph-image.tsx` returning an
+/// `ImageResponse`) are NOT supported here: each is reported as a hard error naming the
+/// file (per the no-silent-drop rule) rather than being dropped from the head.
+fn scan_metadata_images(app_dir: &Path) -> Result<Vec<MetaImage>, String> {
+    // (stem, kind) in head-emit priority order. `icon` also matches `icon0`, `icon1`
+    // in Next, but the base convention is a single `icon.*`; we support the base names.
+    let families: [(&str, MetaImageKind); 5] = [
+        ("favicon", MetaImageKind::Favicon),
+        ("icon", MetaImageKind::Icon),
+        ("apple-icon", MetaImageKind::AppleIcon),
+        ("opengraph-image", MetaImageKind::OpengraphImage),
+        ("twitter-image", MetaImageKind::TwitterImage),
+    ];
+    let mut images = Vec::new();
+    for (stem, kind) in families {
+        // A code-based generator at the app root (e.g. `opengraph-image.tsx`): the
+        // dynamic-image path (satori/@vercel/og) is a heavy build-time-only capability
+        // this adapter does not implement. Fail clearly, pointing at a static file.
+        if kind != MetaImageKind::Favicon
+            && let Some(generator) = first_existing(app_dir, stem)
+        {
+            return Err(format!(
+                "diffpack next metadata: {} is a code-based image generator (returns an ImageResponse), which this adapter does not support (it needs the heavy @vercel/og dependency and is kept out of the request path). Provide a static {stem}.png/.jpg/.svg instead.",
+                generator.display(),
+            ));
+        }
+        let Some(src) = first_existing_ext(app_dir, stem, &METADATA_IMAGE_EXTS) else { continue };
+        let ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let source = src.canonicalize().unwrap_or(src);
+        let served = format!("/{stem}.{ext}");
+        images.push(MetaImage {
+            kind,
+            source,
+            served,
+            mime: metadata_image_mime(&ext),
+        });
+    }
+    Ok(images)
 }
 
 fn discover_routes_dir(
@@ -1456,7 +1623,15 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // --- app-router route table (every route + its nested layout/boundary chain) --
     let _ = &page; // detection anchor; the full route set comes from discovery.
     let layout_abs = layout.as_ref().map(|l| l.canonicalize().unwrap_or_else(|_| l.clone()));
-    let discovered = discover_routes(&app_dir, layout_abs.as_deref())?;
+    let mut discovered = discover_routes(&app_dir, layout_abs.as_deref())?;
+    // Metadata FILE conventions (`app/sitemap.ts`/`robots.ts`/`manifest.ts`): synthesize
+    // a wrapper + route-handler entry for each present one, so `/sitemap.xml`,
+    // `/robots.txt`, `/manifest.webmanifest` are served through the SAME route-handler
+    // dispatch as any `route.ts` endpoint. Distinct literal URLs, so appending (no
+    // re-sort) preserves the most-specific-first invariant of the handler table.
+    discovered
+        .handlers
+        .extend(synthesize_metadata_file_handlers(&app_dir, &shims_dir)?);
 
     // The generated client Error Boundary (a `"use client"` class component) wraps
     // each route level that has an `error.tsx`. Like the `next/link` shim it must be
@@ -1774,6 +1949,129 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
 
 // --- generated module templates --------------------------------------------------
 
+/// The shared serializer for the metadata FILE conventions. Pure functions turning a
+/// Next `MetadataRoute.Sitemap` array / `MetadataRoute.Robots` object into the exact
+/// sitemap XML / robots.txt text Next emits. Written once under `shims/` and imported
+/// by the per-file wrappers. (`manifest` needs no helper — it is `JSON.stringify`.)
+fn metadata_serialize_shim() -> &'static str {
+    r##"// Generated by diffpack's next app-router adapter. Serializers for the metadata
+// FILE conventions (sitemap.xml / robots.txt). Pure, no dependencies.
+function xmlEscape(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function isoDate(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+// A Next `MetadataRoute.Sitemap` (array of { url, lastModified?, changeFrequency?,
+// priority?, alternates?: { languages }, images? }) -> sitemap XML.
+export function serializeSitemap(entries) {
+  if (!Array.isArray(entries)) {
+    throw new Error("diffpack next metadata: sitemap() must return an array of entries, got " + typeof entries);
+  }
+  const hasAlternates = entries.some((e) => e && e.alternates && e.alternates.languages);
+  const hasImages = entries.some((e) => e && e.images && e.images.length);
+  let out = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  out += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
+  if (hasAlternates) out += ' xmlns:xhtml="http://www.w3.org/1999/xhtml"';
+  if (hasImages) out += ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"';
+  out += ">\n";
+  for (const entry of entries) {
+    if (!entry || entry.url == null) {
+      throw new Error("diffpack next metadata: every sitemap entry needs a `url`");
+    }
+    out += "<url>\n";
+    out += "<loc>" + xmlEscape(entry.url) + "</loc>\n";
+    const lastmod = isoDate(entry.lastModified);
+    if (lastmod != null) out += "<lastmod>" + xmlEscape(lastmod) + "</lastmod>\n";
+    if (entry.changeFrequency != null) out += "<changefreq>" + xmlEscape(entry.changeFrequency) + "</changefreq>\n";
+    if (entry.priority != null) out += "<priority>" + xmlEscape(entry.priority) + "</priority>\n";
+    if (entry.alternates && entry.alternates.languages) {
+      for (const [lang, href] of Object.entries(entry.alternates.languages)) {
+        out += '<xhtml:link rel="alternate" hreflang="' + xmlEscape(lang) + '" href="' + xmlEscape(href) + '" />\n';
+      }
+    }
+    if (entry.images) {
+      for (const img of entry.images) {
+        out += "<image:image>\n<image:loc>" + xmlEscape(img) + "</image:loc>\n</image:image>\n";
+      }
+    }
+    out += "</url>\n";
+  }
+  out += "</urlset>\n";
+  return out;
+}
+
+// A Next `MetadataRoute.Robots` ({ rules, sitemap?, host? }) -> robots.txt text.
+export function serializeRobots(data) {
+  if (!data || typeof data !== "object") {
+    throw new Error("diffpack next metadata: robots() must return an object, got " + typeof data);
+  }
+  const lines = [];
+  const emitRule = (rule) => {
+    const agents = rule.userAgent == null ? ["*"] : Array.isArray(rule.userAgent) ? rule.userAgent : [rule.userAgent];
+    for (const agent of agents) lines.push("User-Agent: " + agent);
+    const emitPaths = (label, value) => {
+      if (value == null) return;
+      const arr = Array.isArray(value) ? value : [value];
+      for (const p of arr) lines.push(label + ": " + p);
+    };
+    emitPaths("Allow", rule.allow);
+    emitPaths("Disallow", rule.disallow);
+    if (rule.crawlDelay != null) lines.push("Crawl-delay: " + rule.crawlDelay);
+  };
+  const rules = data.rules == null ? [] : Array.isArray(data.rules) ? data.rules : [data.rules];
+  rules.forEach((rule, i) => {
+    if (i > 0) lines.push("");
+    emitRule(rule);
+  });
+  if (data.host != null) lines.push("Host: " + data.host);
+  if (data.sitemap != null) {
+    const maps = Array.isArray(data.sitemap) ? data.sitemap : [data.sitemap];
+    for (const m of maps) lines.push("Sitemap: " + m);
+  }
+  return lines.join("\n") + "\n";
+}
+"##
+}
+
+/// A per-file wrapper for a metadata FILE convention: it imports the user file's default
+/// export, calls it (awaiting — the export may be async), serializes the result, and
+/// returns a `Response` with the right content-type. Because it exports `GET`, it plugs
+/// straight into the existing route-handler dispatch (`H<i>.GET`).
+fn metadata_file_wrapper(stem: &str, user_file: &Path, serializer: &Path) -> String {
+    let user = js_str(&user_file.to_string_lossy());
+    let ser = js_str(&serializer.to_string_lossy());
+    let (import, body) = match stem {
+        "sitemap" => (
+            format!("import handler from {user};\nimport {{ serializeSitemap }} from {ser};\n"),
+            "  const body = serializeSitemap(await handler());\n  return new Response(body, { status: 200, headers: { \"content-type\": \"application/xml\" } });".to_string(),
+        ),
+        "robots" => (
+            format!("import handler from {user};\nimport {{ serializeRobots }} from {ser};\n"),
+            "  const body = serializeRobots(await handler());\n  return new Response(body, { status: 200, headers: { \"content-type\": \"text/plain\" } });".to_string(),
+        ),
+        "manifest" => (
+            format!("import handler from {user};\n"),
+            "  const body = JSON.stringify(await handler());\n  return new Response(body, { status: 200, headers: { \"content-type\": \"application/manifest+json\" } });".to_string(),
+        ),
+        other => unreachable!("metadata_file_wrapper called with unknown stem {other}"),
+    };
+    format!(
+        "// Generated by diffpack's next app-router adapter. Serves the `{stem}` metadata\n\
+         // FILE convention through the standard route-handler dispatch.\n\
+         {import}\nexport async function GET() {{\n{body}\n}}\n",
+    )
+}
+
 fn lazy_module() -> &'static str {
     "// Generated by diffpack's next app-router adapter. A trivially code-split\n\
      // module: its dynamic import forces the client/SSR builds onto the registry\n\
@@ -2067,6 +2365,32 @@ fn rsc_entry_module(
             "  items.push(createElement(\"style\", { href: \"diffpack-next-font\", precedence: \"high\", dangerouslySetInnerHTML: { __html: FONT_CSS } }));\n".to_string(),
         )
     };
+    // Static metadata IMAGE conventions (app/icon.png, app/favicon.ico, ...): head
+    // elements built once at BUILD time and pushed for every route (the files are
+    // copied to public/ by the client build). Zero per-request cost.
+    let mut meta_image_push = String::new();
+    for img in &disc.meta_images {
+        let href = js_str(&img.served);
+        let ty = js_str(img.mime);
+        let el = match img.kind {
+            MetaImageKind::Favicon => format!(
+                "  items.push(createElement(\"link\", {{ rel: \"icon\", href: {href}, type: {ty}, sizes: \"any\" }}));\n"
+            ),
+            MetaImageKind::Icon => format!(
+                "  items.push(createElement(\"link\", {{ rel: \"icon\", href: {href}, type: {ty} }}));\n"
+            ),
+            MetaImageKind::AppleIcon => format!(
+                "  items.push(createElement(\"link\", {{ rel: \"apple-touch-icon\", href: {href}, type: {ty} }}));\n"
+            ),
+            MetaImageKind::OpengraphImage => format!(
+                "  items.push(createElement(\"meta\", {{ property: \"og:image\", content: {href} }}));\n"
+            ),
+            MetaImageKind::TwitterImage => format!(
+                "  items.push(createElement(\"meta\", {{ name: \"twitter:image\", content: {href} }}));\n"
+            ),
+        };
+        meta_image_push.push_str(&el);
+    }
 
     format!(
         r##"// Generated by diffpack's next app-router adapter — the REACT-SERVER render
@@ -2107,7 +2431,7 @@ const ROOT_META = {{ title: {root_title}, description: {root_description} }};
 // hoists these into <head> from anywhere in the tree.
 function headItems(meta) {{
   const items = [];
-{css_push}{font_push}  if (meta && meta.title) items.push(createElement("title", null, meta.title));
+{css_push}{font_push}{meta_image_push}  if (meta && meta.title) items.push(createElement("title", null, meta.title));
   if (meta && meta.description) items.push(createElement("meta", {{ name: "description", content: meta.description }}));
   return items;
 }}
@@ -3517,6 +3841,34 @@ pub struct PublicImage(ImageEntry);
 /// into `<out_public>/_diffpack-image/`. Called from the client-build public-copy
 /// step (`main.rs`). Returns the number of variant files written. SVG/unoptimized
 /// entries are skipped (their raw file is already copied by `copy_static_public`).
+/// Copy the app-root metadata IMAGE file conventions (`app/icon.png`,
+/// `app/favicon.ico`, `app/apple-icon.*`, `app/opengraph-image.*`,
+/// `app/twitter-image.*`) into the served `public/` output at their served filename
+/// (`/icon.png`, ...). A build-time copy — the head `<link>`/`<meta>` referencing them
+/// is emitted by the react-server entry, so serving them is zero per-request cost
+/// (they flow through the orchestrator's existing static-asset path). Returns the count
+/// copied; a no-op for an app with no convention images. Reuses the SAME discovery
+/// ([`scan_metadata_images`]) as the head-link emitter, so the copied files and the
+/// linked URLs cannot drift.
+pub fn emit_metadata_images(root: &Path, out_public: &Path) -> Result<usize, String> {
+    let app_dir = root.join("app");
+    if !app_dir.is_dir() {
+        return Ok(0);
+    }
+    let images = scan_metadata_images(&app_dir)?;
+    let mut written = 0usize;
+    for img in &images {
+        std::fs::create_dir_all(out_public)
+            .map_err(|error| format!("cannot create {}: {error}", out_public.display()))?;
+        let dest = out_public.join(img.served.trim_start_matches('/'));
+        std::fs::copy(&img.source, &dest).map_err(|error| {
+            format!("cannot copy metadata image {} -> {}: {error}", img.source.display(), dest.display())
+        })?;
+        written += 1;
+    }
+    Ok(written)
+}
+
 pub fn emit_image_variants(
     root: &Path,
     out_public: &Path,
@@ -4118,6 +4470,95 @@ mod tests {
         }
         // module_exports_metadata detects the various export forms.
         assert!(!module_exports_metadata(&app.join("Counter.tsx")), "a plain island exports no metadata");
+    }
+
+    #[test]
+    fn metadata_file_conventions_synthesize_route_handlers() {
+        let root = scratch("meta-files");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return null}\n").unwrap();
+        std::fs::write(app.join("sitemap.ts"), "export default function sitemap(){ return [{ url: \"https://x.com\" }]; }\n").unwrap();
+        std::fs::write(app.join("robots.ts"), "export default function robots(){ return { rules: { userAgent: \"*\", allow: \"/\" } }; }\n").unwrap();
+        std::fs::write(app.join("manifest.ts"), "export default function manifest(){ return { name: \"X\" }; }\n").unwrap();
+        let shims = root.join(".diffpack-next/shims");
+        std::fs::create_dir_all(&shims).unwrap();
+
+        let handlers = synthesize_metadata_file_handlers(&app, &shims).unwrap();
+        let urls: Vec<&str> = handlers.iter().map(|h| h.url_path.as_str()).collect();
+        assert!(urls.contains(&"/sitemap.xml"), "sitemap handler synthesized: {urls:?}");
+        assert!(urls.contains(&"/robots.txt"), "robots handler synthesized: {urls:?}");
+        assert!(urls.contains(&"/manifest.webmanifest"), "manifest handler synthesized: {urls:?}");
+        for h in &handlers {
+            assert_eq!(h.methods, vec!["GET".to_string()], "convention handlers are GET-only");
+            assert!(h.file.exists(), "the wrapper file was written: {:?}", h.file);
+        }
+        // The wrappers set the right content-type + call the user export.
+        let sitemap_wrapper = std::fs::read_to_string(shims.join("metadata-sitemap.ts")).unwrap();
+        assert!(sitemap_wrapper.contains("application/xml"), "sitemap wrapper serves XML");
+        assert!(sitemap_wrapper.contains("serializeSitemap"), "sitemap wrapper serializes");
+        let robots_wrapper = std::fs::read_to_string(shims.join("metadata-robots.ts")).unwrap();
+        assert!(robots_wrapper.contains("text/plain"), "robots wrapper serves text");
+        let manifest_wrapper = std::fs::read_to_string(shims.join("metadata-manifest.ts")).unwrap();
+        assert!(manifest_wrapper.contains("application/manifest+json"), "manifest wrapper serves manifest json");
+        assert!(manifest_wrapper.contains("JSON.stringify"), "manifest wrapper JSON-serializes");
+        // The shared serializer helper is present.
+        assert!(shims.join("metadata-serialize.ts").exists(), "serializer helper written");
+    }
+
+    #[test]
+    fn generate_sitemaps_hard_errors() {
+        let root = scratch("meta-gen-sitemaps");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("sitemap.ts"), "export function generateSitemaps(){ return [{ id: 0 }]; }\nexport default function sitemap(){ return []; }\n").unwrap();
+        let shims = root.join(".diffpack-next/shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let err = synthesize_metadata_file_handlers(&app, &shims).unwrap_err();
+        assert!(err.contains("generateSitemaps"), "clear hard error names the unsupported feature: {err}");
+    }
+
+    #[test]
+    fn static_metadata_images_scanned_and_head_linked() {
+        let root = scratch("meta-images");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return null}\n").unwrap();
+        std::fs::write(app.join("icon.png"), [0u8]).unwrap();
+        std::fs::write(app.join("favicon.ico"), [0u8]).unwrap();
+        std::fs::write(app.join("apple-icon.png"), [0u8]).unwrap();
+        std::fs::write(app.join("opengraph-image.jpg"), [0u8]).unwrap();
+        std::fs::write(app.join("twitter-image.png"), [0u8]).unwrap();
+
+        let images = scan_metadata_images(&app).unwrap();
+        let served: Vec<&str> = images.iter().map(|i| i.served.as_str()).collect();
+        for want in ["/favicon.ico", "/icon.png", "/apple-icon.png", "/opengraph-image.jpg", "/twitter-image.png"] {
+            assert!(served.contains(&want), "image {want} discovered: {served:?}");
+        }
+
+        // The react-server entry emits the head links for every route.
+        let disc = discover_routes(&app, first_existing(&app, "layout").as_deref()).unwrap();
+        let boundary = root.join(".diffpack-next/error-boundary.tsx");
+        let reqctx = root.join(".diffpack-next/request-context.ts");
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &reqctx, None);
+        assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
+        assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
+        assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
+        assert!(rsc_src.contains(r#"name: "twitter:image", content: "/twitter-image.png""#), "twitter:image emitted");
+        assert!(rsc_src.contains(r#"rel: "icon", href: "/favicon.ico", type: "image/x-icon", sizes: "any""#), "favicon emitted");
+    }
+
+    #[test]
+    fn code_based_image_generator_hard_errors() {
+        let root = scratch("meta-image-gen");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("opengraph-image.tsx"), "export default function OG(){ return null; }\n").unwrap();
+        let err = scan_metadata_images(&app).unwrap_err();
+        assert!(err.contains("code-based image generator"), "clear hard error for dynamic image gen: {err}");
+        assert!(err.contains("opengraph-image.tsx"), "error names the file: {err}");
     }
 
     #[test]

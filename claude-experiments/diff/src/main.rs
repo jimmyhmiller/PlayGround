@@ -497,6 +497,19 @@ fn run() -> Result<(), String> {
                         );
                     }
                 }
+                // Metadata IMAGE file conventions (app/icon.png, app/favicon.ico, ...):
+                // copy them to the served public/ so their build-emitted head links
+                // resolve. Zero per-request cost (served by the static-asset path).
+                let meta_images = diffpack::next_adapter::emit_metadata_images(
+                    Path::new(&project_root),
+                    &summary.output_dir,
+                )?;
+                if meta_images > 0 {
+                    println!(
+                        "copied {meta_images} metadata image file(s) to {}",
+                        summary.output_dir.display(),
+                    );
+                }
                 // Persist the route -> client chunk mapping so the server build can
                 // generate the TanStack manifest from real emitted chunk URLs.
                 let client_manifest =
