@@ -11,14 +11,14 @@ export async function increment(n: number): Promise<number> {
 }
 
 // On-demand revalidation from a Server Action (next/cache). Calling
-// `revalidateTag("products")` here busts every prerendered page that read the `products`
+// `revalidateTag("products", "max")` here busts every prerendered page that read the `products`
 // tag (the /products page). diffpack collects the tag off the action's per-request store
 // and the orchestrator marks the matching cache entries stale — the next request to
 // /products serves STALE and regenerates in the background. `next build` accepts this.
 import { revalidateTag } from "next/cache";
 
 export async function revalidateProducts(): Promise<void> {
-  revalidateTag("products");
+  revalidateTag("products", "max");
 }
 
 // Server-side cookie writes from a Server Action (next/headers cookies()). Invoked over

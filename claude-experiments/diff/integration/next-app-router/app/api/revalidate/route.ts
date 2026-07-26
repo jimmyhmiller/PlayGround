@@ -11,7 +11,7 @@ export async function POST(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const tag = url.searchParams.get("tag");
   const path = url.searchParams.get("path");
-  if (tag) revalidateTag(tag);
+  if (tag) revalidateTag(tag, "max");
   if (path) revalidatePath(path);
   return new Response(
     JSON.stringify({ revalidated: true, tag: tag ?? null, path: path ?? null }),
