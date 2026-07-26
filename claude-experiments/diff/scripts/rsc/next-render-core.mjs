@@ -105,6 +105,9 @@ export function makeRunReactServer(rscRenderEntry) {
           params: parsed.params || {},
           redirect: parsed.redirect,
           notFound: parsed.notFound,
+          // next/cache: the cache tags this page read (captured so the prerender manifest
+          // can register the pathname under them for revalidateTag).
+          tags: parsed.tags || [],
           stderr: Buffer.concat(err).toString("utf8"),
         });
       });

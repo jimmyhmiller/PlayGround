@@ -89,7 +89,7 @@ async function writeRoute(urlPath, fileStem) {
     }
     die(`prerender of ${urlPath} failed:\n${msg}`);
   }
-  const { flight, params, redirect, notFound } = result;
+  const { flight, params, redirect, notFound, tags } = result;
   if (redirect) die(`route ${urlPath} issued a server-side redirect during prerender — it is not statically prerenderable (mark it Dynamic)`);
   if (notFound) die(`route ${urlPath} rendered notFound() during prerender — it is not statically prerenderable (mark it Dynamic)`);
 
@@ -112,7 +112,9 @@ async function writeRoute(urlPath, fileStem) {
   mkdirSync(dirname(htmlPath), { recursive: true });
   writeFileSync(htmlPath, html);
   writeFileSync(rscPath, flightBuf); // RAW flight — the soft-nav (?__rsc=1) source.
-  return { htmlPath, rscPath };
+  // next/cache: the cache tags this page read (unstable_cache / tagged fetch), recorded in
+  // the manifest so the orchestrator can map a tag back to this pathname for revalidateTag.
+  return { htmlPath, rscPath, tags: Array.isArray(tags) ? tags : [] };
 }
 
 async function main() {
@@ -126,8 +128,8 @@ async function main() {
       continue;
     }
     if (route.kind === "static" || route.kind === "forceStatic" || route.kind === "isr") {
-      await writeRoute(route.path, route.file || "index");
-      written.push({ path: route.path, file: route.file || "index", revalidate: route.revalidate ?? null });
+      const { tags } = await writeRoute(route.path, route.file || "index");
+      written.push({ path: route.path, file: route.file || "index", revalidate: route.revalidate ?? null, tags });
       console.log(
         `prerendered ${route.kind} ${route.path} -> ${route.file || "index"}.html + .rsc` +
           (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),
@@ -149,8 +151,8 @@ async function main() {
       }
       for (const combo of combos) {
         const { urlPath, fileStem } = buildConcrete(route.segments, combo);
-        await writeRoute(urlPath, fileStem);
-        written.push({ path: urlPath, file: fileStem, revalidate: route.revalidate ?? null });
+        const { tags } = await writeRoute(urlPath, fileStem);
+        written.push({ path: urlPath, file: fileStem, revalidate: route.revalidate ?? null, tags });
         console.log(
           `prerendered ssg ${route.path} [${JSON.stringify(combo)}] -> ${fileStem}.html + .rsc` +
             (route.revalidate ? ` (ISR: revalidate ${route.revalidate}s)` : ""),

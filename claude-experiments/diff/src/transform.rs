@@ -255,6 +255,34 @@ pub fn transform_module_with_options(
                     }
                 }
             }
+            Some(crate::rsc::RscDirective::Cache) => {
+                // `"use cache"` is a genuine transform slice diffpack has NOT built yet
+                // (it would need to wrap the module's exports in a cache boundary keyed by
+                // args + cacheTag/cacheLife). Silently treating the module as normal would
+                // drop the caching semantics and mask a correctness gap, so hard-error
+                // naming the file (repo no-silent-stub rule) instead. On-demand
+                // revalidation via `next/cache` (revalidatePath/revalidateTag/
+                // unstable_cache) IS supported — prefer those until `"use cache"` lands.
+                return TransformResult {
+                    code: String::new(),
+                    diagnostics: vec![format!(
+                        "{}: the \"use cache\" directive is not yet implemented by diffpack's \
+                         Next adapter (it would silently drop the module's caching semantics). \
+                         Use next/cache (revalidatePath / revalidateTag / unstable_cache) for \
+                         on-demand revalidation, or remove the directive.",
+                        path.display()
+                    )],
+                    is_esm: true,
+                    dependencies: Vec::new(),
+                    dependency_demands: Vec::new(),
+                    flat_module: None,
+                    liveness: ModuleLiveness::default(),
+                    uses_top_level_await: false,
+                    uses_import_meta: false,
+                    uses_cjs_globals: false,
+                    workers: Vec::new(),
+                };
+            }
             None => None,
         }
     } else {

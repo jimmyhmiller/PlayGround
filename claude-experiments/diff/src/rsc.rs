@@ -39,6 +39,12 @@ pub enum RscDirective {
     Client,
     /// `"use server"` — server actions (client sees RPC stubs).
     Server,
+    /// `"use cache"` — a cached component/function boundary (Next's Dynamic IO cache
+    /// directive). diffpack does not yet implement the `"use cache"` transform slice;
+    /// it is detected ONLY so the build can HARD-ERROR rather than silently drop the
+    /// directive (which would mask a real caching-semantics gap, per the repo
+    /// no-silent-stub rule). See [`crate::transform`] for the erroring path.
+    Cache,
 }
 
 impl RscDirective {
@@ -47,6 +53,7 @@ impl RscDirective {
         match self {
             RscDirective::Client => "use client",
             RscDirective::Server => "use server",
+            RscDirective::Cache => "use cache",
         }
     }
 }
@@ -62,7 +69,10 @@ impl RscDirective {
 ///
 /// Gated on a cheap substring pre-check so non-RSC modules never pay a parse.
 pub fn detect_directive(path: &Path, source: &str) -> Option<RscDirective> {
-    if !source.contains("use client") && !source.contains("use server") {
+    if !source.contains("use client")
+        && !source.contains("use server")
+        && !source.contains("use cache")
+    {
         return None;
     }
     let allocator = Allocator::default();
@@ -75,6 +85,7 @@ pub fn detect_directive(path: &Path, source: &str) -> Option<RscDirective> {
         match directive.directive.as_str() {
             "use client" => return Some(RscDirective::Client),
             "use server" => return Some(RscDirective::Server),
+            "use cache" => return Some(RscDirective::Cache),
             _ => {}
         }
     }

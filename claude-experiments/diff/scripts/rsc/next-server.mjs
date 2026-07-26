@@ -272,6 +272,9 @@ async function runReactServer(args, stdinBody) {
       params: msg.params || {},
       redirect: msg.redirect,
       notFound: msg.notFound,
+      // next/cache: the tag set this page read, so the prerender manifest / tagToPaths map
+      // can register the pathname under those tags (revalidateTag → pathname).
+      tags: msg.tags || [],
     };
   }
   if (op === "action") {
@@ -281,7 +284,12 @@ async function runReactServer(args, stdinBody) {
       manifestPath: args[2],
       body: stdinBody != null ? String(stdinBody) : "",
     });
-    return { flight: Buffer.from(msg.flight || "", "base64"), status: msg.status || 200 };
+    return {
+      flight: Buffer.from(msg.flight || "", "base64"),
+      status: msg.status || 200,
+      // next/cache invalidations the action requested (revalidatePath/revalidateTag).
+      revalidated: msg.revalidated || { tags: [], paths: [] },
+    };
   }
   // Unknown op falls through to a one-shot spawn (defensive; not reached today).
   return new Promise((resolve, reject) => {
@@ -513,7 +521,24 @@ async function runMiddleware(reqCtx) {
 // the STALE copy immediately AND kicks a background regeneration (stale-while-
 // revalidate), so no request ever waits on the render.
 const staticDir = join(outputDir, "static");
-const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null }
+const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null, tags:[] }
+// next/cache on-demand revalidation. `tagToPaths` maps a cache tag to the set of cached
+// pathnames that read it (captured per page at prerender time — no per-request work).
+// `forcedStale` holds pathnames an action / route handler invalidated (revalidatePath /
+// revalidateTag); the next request to such a path serves the stale copy and kicks the
+// existing background regen (stale-while-revalidate), exactly like an expired ISR entry.
+const tagToPaths = new Map(); // tag -> Set<pathname>
+const forcedStale = new Set(); // pathname
+function registerTags(pathname, tags) {
+  for (const tag of tags || []) {
+    let set = tagToPaths.get(tag);
+    if (!set) {
+      set = new Set();
+      tagToPaths.set(tag, set);
+    }
+    set.add(pathname);
+  }
+}
 (() => {
   const manifestPath = join(staticDir, "prerender-manifest.json");
   if (!existsSync(manifestPath)) return;
@@ -524,13 +549,63 @@ const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null }
     return; // a malformed manifest is non-fatal — fall back to dynamic rendering.
   }
   for (const e of manifest.entries || []) {
-    if (e && e.path && e.file) prerenderCache.set(e.path, { path: e.path, file: e.file, revalidate: e.revalidate ?? null });
+    if (e && e.path && e.file) {
+      const tags = Array.isArray(e.tags) ? e.tags : [];
+      prerenderCache.set(e.path, { path: e.path, file: e.file, revalidate: e.revalidate ?? null, tags });
+      registerTags(e.path, tags);
+    }
   }
   if (prerenderCache.size) {
     const isr = [...prerenderCache.values()].filter((e) => e.revalidate != null).length;
     console.log(`next-server: ${prerenderCache.size} prerendered page(s) cached (${isr} ISR) from ${manifestPath}`);
   }
 })();
+
+// Apply a batch of on-demand invalidations (from a Server Action or Route Handler that
+// called next/cache revalidatePath/revalidateTag). Paths are `<type>:<pathname>`: a `page`
+// invalidates that exact cached pathname; a `layout` (or a dynamic route path) invalidates
+// every cached pathname at or under that prefix. Tags invalidate every pathname registered
+// under the tag. Marking a pathname forcedStale is all that is needed — the next request
+// serves stale + triggers the existing background regen. Returns the count invalidated.
+function applyRevalidation(revalidated) {
+  if (!revalidated) return 0;
+  let count = 0;
+  const markStale = (pathname) => {
+    if (prerenderCache.has(pathname) && !forcedStale.has(pathname)) {
+      forcedStale.add(pathname);
+      count++;
+    }
+  };
+  for (const raw of revalidated.paths || []) {
+    const idx = raw.indexOf(":");
+    const type = idx === -1 ? "page" : raw.slice(0, idx);
+    const pathname = idx === -1 ? raw : raw.slice(idx + 1);
+    if (type === "layout") {
+      // A layout (or dynamic route) path invalidates its whole subtree.
+      const prefix = pathname === "/" ? "/" : pathname + "/";
+      for (const p of prerenderCache.keys()) {
+        if (p === pathname || p.startsWith(prefix)) markStale(p);
+      }
+    } else {
+      // A page path: exact match, OR (for a dynamic route path like /blog/[slug]) any
+      // concrete cached child. A literal cached pathname just matches exactly.
+      if (prerenderCache.has(pathname)) {
+        markStale(pathname);
+      } else if (pathname.includes("[")) {
+        const prefix = pathname.slice(0, pathname.indexOf("["));
+        for (const p of prerenderCache.keys()) {
+          if (p.startsWith(prefix)) markStale(p);
+        }
+      }
+    }
+  }
+  for (const tag of revalidated.tags || []) {
+    const set = tagToPaths.get(tag);
+    if (set) for (const p of set) markStale(p);
+  }
+  if (count) console.log(`next-server: on-demand revalidation marked ${count} cached page(s) stale`);
+  return count;
+}
 
 // Background ISR regeneration guard — one in-flight regen per page stem.
 const revalidating = new Set();
@@ -559,6 +634,15 @@ function triggerRevalidate(entry) {
       renameSync(`${htmlPath}.tmp`, htmlPath);
       writeFileSync(`${rscPath}.tmp`, flightBuf);
       renameSync(`${rscPath}.tmp`, rscPath);
+      // next/cache: the regenerated page's tag set can differ from last time, so refresh
+      // tagToPaths for this pathname (drop the stale registrations, add the fresh ones),
+      // then clear the forcedStale flag — the fresh file is now on disk, so the next
+      // request is a HIT again (until it expires or is invalidated anew).
+      const freshTags = Array.isArray(r.tags) ? r.tags : [];
+      for (const set of tagToPaths.values()) set.delete(entry.path);
+      entry.tags = freshTags;
+      registerTags(entry.path, freshTags);
+      forcedStale.delete(entry.path);
     } catch (error) {
       console.error(`[diffpack] ISR revalidate of ${entry.path} failed:`, error && error.message ? error.message : error);
     } finally {
@@ -580,7 +664,13 @@ function servePrerendered(entry, isRsc, res, configHeaders, mwSetCookies) {
     return false;
   }
   let cacheState = "HIT";
-  if (entry.revalidate != null && Date.now() - stat.mtimeMs >= entry.revalidate * 1000) {
+  // next/cache on-demand: an action / route handler marked this pathname forcedStale
+  // (revalidatePath / revalidateTag). Serve the stale copy now and kick a background regen
+  // — identical machinery to an expired ISR entry, so no request ever blocks.
+  if (forcedStale.has(entry.path)) {
+    cacheState = "STALE";
+    triggerRevalidate(entry);
+  } else if (entry.revalidate != null && Date.now() - stat.mtimeMs >= entry.revalidate * 1000) {
     cacheState = "STALE";
     triggerRevalidate(entry);
   }
@@ -607,7 +697,10 @@ const server = createServer(async (req, res) => {
       }
       const body = [];
       for await (const chunk of req) body.push(Buffer.from(chunk));
-      const { flight } = await runReactServer(["action", id, clientManifestPath], Buffer.concat(body));
+      const { flight, revalidated } = await runReactServer(["action", id, clientManifestPath], Buffer.concat(body));
+      // next/cache: bust any prerendered pages the action invalidated (revalidatePath /
+      // revalidateTag) so the next request to them re-renders in the background.
+      applyRevalidation(revalidated);
       res.writeHead(200, { "content-type": "text/x-component" });
       res.end(flight);
       return;
@@ -695,6 +788,9 @@ const server = createServer(async (req, res) => {
         method: req.method,
         reqCtx,
       });
+      // next/cache: a route handler can call revalidatePath/revalidateTag — bust the
+      // matching prerendered pages so the next request to them re-renders.
+      applyRevalidation(msg.revalidated);
       const result = msg.routeResult;
       if (result) {
         const headers = {};

@@ -1730,6 +1730,10 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &shims_dir.join("headers.ts"),
         &next_headers_shim(&request_context_canon),
     )?;
+    write_if_changed(
+        &shims_dir.join("cache.ts"),
+        &next_cache_shim(&request_context_canon),
+    )?;
     write_if_changed(&shims_dir.join("server.ts"), next_server_shim())?;
 
     // --- per-environment config --------------------------------------------------
@@ -1775,6 +1779,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         alias("next/image", &shims_dir.join("image.tsx")),
         alias("next/navigation", &shims_dir.join("navigation.ts")),
         alias("next/headers", &shims_dir.join("headers.ts")),
+        alias("next/cache", &shims_dir.join("cache.ts")),
         alias("next/server", &shims_dir.join("server.ts")),
     ];
 
@@ -2789,6 +2794,11 @@ function renderStore(pathname, reqCtx, params) {{
     headers: new Headers(reqCtx.headers || []),
     cookieHeader: reqCtx.cookie || "",
     params,
+    // next/cache: the cache TAGS a page reads (unstable_cache / tagged fetch), captured so
+    // the prerenderer can register the page under them (revalidateTag → pathname), and the
+    // on-demand invalidations (revalidatePath/revalidateTag) collected during a render.
+    tags: new Set(),
+    revalidated: {{ tags: new Set(), paths: new Set() }},
   }};
 }}
 
@@ -2811,6 +2821,9 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
     redirect: control.redirect,
     notFound: control.notFound,
     intercept,
+    // The cache tags this page read — the prerenderer records them so revalidateTag can
+    // later map a tag back to this concrete pathname.
+    tags: [...store.tags],
   }};
 }}
 
@@ -2853,20 +2866,40 @@ export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink)
       sink.chunk(Buffer.from(value).toString("base64"));
     }}
     if (!metaSent) sendMeta();
-    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent }});
+    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, tags: [...store.tags] }});
   }});
 }}
 
-// Dispatch a server action, returning its result flight BUFFER.
-export async function runAction(id, bundlerConfig, body) {{
+// Dispatch a server action, returning its result flight BUFFER plus any on-demand cache
+// invalidations the action requested (next/cache revalidatePath/revalidateTag). The action
+// runs INSIDE a `requestAls` store so next/headers + next/cache resolve; the store's
+// `revalidated` sets are drained into the reply so the orchestrator can bust the matching
+// prerendered cache entries. `reqCtx` carries the request url/headers/cookie (optional; a
+// standalone invocation may omit it).
+export async function runAction(id, bundlerConfig, body, reqCtx) {{
+  const ctx = reqCtx || {{}};
   const request = new Request("http://diffpack.local/_action/", {{
     method: "POST",
     headers: {{ "x-diffpack-action-id": id, "content-type": "application/json" }},
     body,
   }});
-  const response = await handleServerAction(request, bundlerConfig);
-  if (!response.body) throw new Error("rsc-entry action: handler produced no response body");
-  return await drainToBuffer(response.body);
+  const store = {{
+    url: new URL(ctx.url || "http://diffpack.local/_action/", "http://localhost"),
+    headers: new Headers(ctx.headers || []),
+    cookieHeader: ctx.cookie || "",
+    params: {{}},
+    tags: new Set(),
+    revalidated: {{ tags: new Set(), paths: new Set() }},
+  }};
+  const flight = await requestAls.run(store, async () => {{
+    const response = await handleServerAction(request, bundlerConfig);
+    if (!response.body) throw new Error("rsc-entry action: handler produced no response body");
+    return await drainToBuffer(response.body);
+  }});
+  return {{
+    flight,
+    revalidated: {{ tags: [...store.revalidated.tags], paths: [...store.revalidated.paths] }},
+  }};
 }}
 
 // Enumerate an Ssg route's concrete param sets by calling its generateStaticParams.
@@ -2913,10 +2946,15 @@ export async function handleRoute(pathname, method, reqCtx) {{
       headers: new Headers(reqCtx.headers || []),
       cookieHeader: reqCtx.cookie || "",
       params,
+      tags: new Set(),
+      revalidated: {{ tags: new Set(), paths: new Set() }},
     }};
     const res = await requestAls.run(store, () => fn(request, {{ params: Promise.resolve(params) }}));
+    // next/cache invalidations a route handler requested (revalidatePath/revalidateTag) —
+    // drained onto the result so the orchestrator can bust the matching cache entries.
+    const revalidated = {{ tags: [...store.revalidated.tags], paths: [...store.revalidated.paths] }};
     if (!(res instanceof Response)) {{
-      return {{ status: 200, headers: [], body: "" }};
+      return {{ status: 200, headers: [], body: "", revalidated }};
     }}
     const buf = Buffer.from(await res.arrayBuffer());
     return {{
@@ -2924,6 +2962,7 @@ export async function handleRoute(pathname, method, reqCtx) {{
       headers: [...res.headers],
       body: buf.toString("base64"),
       bodyIsBase64: true,
+      revalidated,
     }};
   }}
   return null;
@@ -3023,7 +3062,7 @@ async function serveLoop() {{
         manifestCache.delete(req.manifestPath);
         if (req.op === "render") {{
           const r = await mod.renderRequest(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}});
-          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound }});
+          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, tags: r.tags || [] }});
         }} else if (req.op === "render-stream") {{
           // Streaming render: one `streamMeta` line, then N `streamChunk` lines, then a
           // single `streamEnd` line — all sharing this request id. The orchestrator
@@ -3038,13 +3077,13 @@ async function serveLoop() {{
             }});
           }}
         }} else if (req.op === "action") {{
-          const flight = await mod.runAction(req.actionId, manifest(req.manifestPath), req.body || "");
-          reply({{ id: req.id, flight: Buffer.from(flight).toString("base64"), status: 200 }});
+          const a = await mod.runAction(req.actionId, manifest(req.manifestPath), req.body || "", req.reqCtx || {{}});
+          reply({{ id: req.id, flight: Buffer.from(a.flight).toString("base64"), status: 200, revalidated: a.revalidated }});
         }} else if (req.op === "route") {{
           const r = mod.handleRoute
             ? await mod.handleRoute(req.pathname || "/", req.method || "GET", req.reqCtx || {{}})
             : null;
-          reply({{ id: req.id, routeResult: r }});
+          reply({{ id: req.id, routeResult: r, revalidated: r && r.revalidated }});
         }} else if (req.op === "routes") {{
           reply({{ id: req.id, routes: mod.routeManifest ? mod.routeManifest() : {{ handlers: [], hasMiddleware: false }} }});
         }} else if (req.op === "middleware") {{
@@ -3084,7 +3123,7 @@ async function main() {{
     }}
     const r = await renderRequest(pathname, bundlerConfig, reqCtx);
     process.stdout.write(r.flight);
-    writeMeta({{ status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound }});
+    writeMeta({{ status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, tags: r.tags || [] }});
     return;
   }}
   if (op === "action") {{
@@ -3094,7 +3133,7 @@ async function main() {{
     if (!manifestPath) throw new Error("rsc-entry action: missing manifest path argument");
     const bundlerConfig = JSON.parse(readFileSync(manifestPath, "utf8"));
     const body = await readStdin();
-    const flight = await runAction(id, bundlerConfig, body);
+    const {{ flight }} = await runAction(id, bundlerConfig, body);
     process.stdout.write(flight);
     return;
   }}
@@ -4330,6 +4369,140 @@ export async function draftMode() {{
     )
 }
 
+/// The `next/cache` shim (`shims/cache.ts`): on-demand cache invalidation
+/// (`revalidatePath` / `revalidateTag`) plus `unstable_cache`. Semantics follow Next's
+/// `next/cache` (`next/dist/server/web/spec-extension/revalidate-path` /
+/// `revalidate-tag` / `unstable-cache`), reimplemented natively — Next's versions ride
+/// its heavy incremental-cache + tag manifest runtime, exactly the per-request cost this
+/// adapter avoids.
+///
+/// `revalidatePath` / `revalidateTag` COLLECT invalidations into the per-request
+/// `requestAls` store (the SAME `AsyncLocalStorage` `next/headers` reads). The worker
+/// returns `store.revalidated` on its action / route reply; the orchestrator maps tags
+/// to the concrete cached pathnames (captured per page at prerender time in
+/// `prerender-manifest.json`) and marks those entries stale, so its existing
+/// stale-while-revalidate machinery regenerates them in the background. NOTHING runs on a
+/// cache-hit request. Called with NO store, each HARD-ERRORS naming the missing context
+/// (repo no-silent-stub rule) rather than silently no-op'ing.
+///
+/// `unstable_cache` is a lean per-worker memo (expiry + tag purge) that also records its
+/// tags into `store.tags` so a tagged page is registered under those tags at prerender
+/// time. Because the default worker pool is a single warm process, `revalidateTag` purges
+/// the local memo synchronously — the same worker then regenerates the page and
+/// recomputes the cached value, with no orchestrator broadcast needed.
+fn next_cache_shim(request_context: &Path) -> String {
+    let request_import = js_str(&request_context.to_string_lossy());
+    format!(
+        r#"// `next/cache` shim (diffpack next app-router adapter). revalidatePath /
+// revalidateTag collect on-demand cache invalidations into the per-request
+// AsyncLocalStorage store the react-server render / action / route establishes; the
+// orchestrator reads them off the worker reply and marks the matching prerendered cache
+// entries stale (its existing stale-while-revalidate machinery then regenerates them in
+// the background — zero hot-path cost). unstable_cache is a lean per-worker memo
+// (expiry + tag purge) that also records its tags into store.tags so a tagged page is
+// registered under those tags at prerender time. Semantics follow Next's next/cache
+// revalidatePath / revalidateTag / unstable_cache, natively reimplemented (Next's ride a
+// heavy incremental-cache + tag manifest runtime this adapter deliberately avoids).
+import {{ requestAls }} from {request_import};
+
+// Per-worker unstable_cache memo. Module-global → shared by the render AND action module
+// instances in the same warm worker, so a revalidateTag during an action purges the value
+// a subsequent re-render would otherwise reuse. key -> {{ value, expires|null, tags:[] }}.
+const __unstableCacheMemo = new Map();
+
+function requireStore(api) {{
+  const store = requestAls.getStore();
+  if (!store) {{
+    throw new Error(
+      "diffpack next shim: " + api + " was called outside a request context (no " +
+        "AsyncLocalStorage store) — call it inside a Server Action, Route Handler, or " +
+        "during a render",
+    );
+  }}
+  if (!store.revalidated) store.revalidated = {{ tags: new Set(), paths: new Set() }};
+  if (!store.tags) store.tags = new Set();
+  return store;
+}}
+
+// revalidatePath(path, type?): invalidate a prerendered page (or, with type "layout",
+// its whole subtree). The raw path + type is recorded as `<type>:<path>`; the
+// orchestrator maps it to concrete cached pathnames (exact for a page, prefix for a
+// layout / dynamic route). Mirrors next/cache revalidatePath.
+export function revalidatePath(path, type) {{
+  if (typeof path !== "string" || !path) {{
+    throw new Error("diffpack next shim: revalidatePath(path) requires a non-empty string path");
+  }}
+  const kind = type === "layout" ? "layout" : "page";
+  requireStore("revalidatePath").revalidated.paths.add(kind + ":" + path);
+}}
+
+// revalidateTag(tag): invalidate every prerendered page that read `tag` (via
+// unstable_cache tags or a tagged fetch). Also purges THIS worker's unstable_cache memo
+// so the background re-render recomputes. Mirrors next/cache revalidateTag.
+export function revalidateTag(tag) {{
+  if (typeof tag !== "string" || !tag) {{
+    throw new Error("diffpack next shim: revalidateTag(tag) requires a non-empty string tag");
+  }}
+  requireStore("revalidateTag").revalidated.tags.add(tag);
+  for (const [key, entry] of __unstableCacheMemo) {{
+    if (entry.tags && entry.tags.indexOf(tag) !== -1) __unstableCacheMemo.delete(key);
+  }}
+}}
+
+// unstable_cache(fn, keyParts?, options?): memoize an async function per worker, keyed by
+// keyParts + arguments. `options.tags` register the entry (and the current page) under
+// those tags for revalidateTag; `options.revalidate` (seconds) is a soft TTL. Mirrors
+// next/cache unstable_cache (a lean local memo, not Next's filesystem incremental cache).
+export function unstable_cache(fn, keyParts, options) {{
+  if (typeof fn !== "function") {{
+    throw new Error("diffpack next shim: unstable_cache(fn, keyParts?, options?) requires a function");
+  }}
+  const opts = options || {{}};
+  const tags = Array.isArray(opts.tags) ? opts.tags.slice() : [];
+  const revalidate = typeof opts.revalidate === "number" ? opts.revalidate : null;
+  const base = (Array.isArray(keyParts) ? keyParts : []).join(":");
+  return async function (...args) {{
+    // Register the tags on the current render/action store so a tagged page is
+    // discoverable by the orchestrator (best-effort: outside a store this is a plain memo).
+    const store = requestAls.getStore();
+    if (store) {{
+      if (!store.tags) store.tags = new Set();
+      for (const t of tags) store.tags.add(t);
+    }}
+    const key = base + "|" + JSON.stringify(args) + "|" + tags.join(",");
+    const now = Date.now();
+    const hit = __unstableCacheMemo.get(key);
+    if (hit && (hit.expires == null || hit.expires > now)) return hit.value;
+    const value = await fn(...args);
+    __unstableCacheMemo.set(key, {{
+      value,
+      expires: revalidate != null ? now + revalidate * 1000 : null,
+      tags,
+    }});
+    return value;
+  }};
+}}
+
+// cacheTag / cacheLife belong to the "use cache" directive slice, which diffpack's Next
+// adapter has NOT implemented (the build hard-errors on a "use cache" module rather than
+// silently dropping it). Exported here so an import resolves, but calling them hard-errors
+// (repo no-silent-stub rule) — use unstable_cache({{ tags, revalidate }}) instead.
+export function cacheTag() {{
+  throw new Error(
+    "diffpack next shim: cacheTag() (the \"use cache\" directive family) is not implemented; " +
+      "use unstable_cache(fn, keyParts, {{ tags }}) for tag-based caching",
+  );
+}}
+export function cacheLife() {{
+  throw new Error(
+    "diffpack next shim: cacheLife() (the \"use cache\" directive family) is not implemented; " +
+      "use unstable_cache(fn, keyParts, {{ revalidate }}) for a TTL",
+  );
+}}
+"#,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4951,5 +5124,87 @@ mod tests {
         assert!(shim.contains("function matchRemotePattern"), "shim ports the remote-pattern matcher");
         assert!(shim.contains("is not configured under"), "shim throws a clear hostname error for a disallowed remote host");
         assert!(shim.contains("imgixLoader") && shim.contains("cloudinaryLoader") && shim.contains("akamaiLoader"), "shim has the built-in loaders");
+    }
+
+    #[test]
+    fn next_cache_shim_emits_revalidate_and_unstable_cache() {
+        // The next/cache shim exports the on-demand revalidation API + unstable_cache,
+        // imports the shared requestAls store, collects into store.revalidated/store.tags,
+        // and HARD-ERRORS (never silently no-ops) when called outside a request context.
+        let ctx = Path::new("/tmp/.diffpack-next/request-context.ts");
+        let shim = next_cache_shim(ctx);
+        // Imports the SAME per-request store next/headers reads (collection hook).
+        assert!(shim.contains("import { requestAls }"), "cache shim imports requestAls: {shim}");
+        // The three public next/cache APIs are exported.
+        assert!(shim.contains("export function revalidatePath("), "revalidatePath exported");
+        assert!(shim.contains("export function revalidateTag("), "revalidateTag exported");
+        assert!(shim.contains("export function unstable_cache("), "unstable_cache exported");
+        // Collection targets: store.revalidated.paths / .tags and store.tags.
+        assert!(shim.contains("revalidated.paths.add"), "revalidatePath writes store.revalidated.paths");
+        assert!(shim.contains("revalidated.tags.add"), "revalidateTag writes store.revalidated.tags");
+        assert!(shim.contains("store.tags.add"), "unstable_cache registers its tags on the page store");
+        // No-silent-stub: missing store hard-errors naming the context.
+        assert!(
+            shim.contains("was called outside a request context"),
+            "cache shim hard-errors with no store: {shim}"
+        );
+        // The "use cache" family (cacheTag/cacheLife) is exported but hard-errors (the
+        // directive slice is unbuilt) rather than silently succeeding.
+        assert!(shim.contains("export function cacheTag(") && shim.contains("is not implemented"),
+            "cacheTag exported and hard-errors");
+        assert!(shim.contains("export function cacheLife("), "cacheLife exported");
+        // revalidateTag purges the local unstable_cache memo (single-worker correctness).
+        assert!(shim.contains("__unstableCacheMemo.delete"), "revalidateTag purges the worker memo");
+    }
+
+    #[test]
+    fn next_cache_alias_and_shim_written_by_build() {
+        // build_next_app must write shims/cache.ts AND alias next/cache to it (an app
+        // importing next/cache resolves the faithful shim, not an unshimmed failure).
+        let root = scratch("next-cache-alias");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/page.tsx"), "export default function Page(){return null;}\n").unwrap();
+        std::fs::write(root.join("app/layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(root.join("next.config.js"), "module.exports = {};\n").unwrap();
+        // The `client` environment writes the shims + alias vec without the react-server
+        // config-eval node spawn, so the alias wiring is exercised without a child process.
+        let cfg = configure(&root, "client").unwrap().unwrap();
+        let has_alias = cfg
+            .build
+            .aliases
+            .iter()
+            .any(|(spec, file)| spec == "next/cache" && file.ends_with("cache.ts"));
+        assert!(has_alias, "next/cache aliased to the shim: {:?}", cfg.build.aliases);
+        let shim_path = root.join(".diffpack-next/shims/cache.ts");
+        assert!(shim_path.is_file(), "shims/cache.ts written at {}", shim_path.display());
+        let contents = std::fs::read_to_string(&shim_path).unwrap();
+        assert!(contents.contains("export function revalidateTag("), "written shim has revalidateTag");
+    }
+
+    #[test]
+    fn use_cache_directive_detected_and_hard_errors() {
+        // A "use cache" prologue is recognized as its own directive (never confused with
+        // use client/use server) so the build can hard-error instead of silently dropping
+        // the module's caching semantics.
+        use crate::rsc::{detect_directive, RscDirective};
+        let path = Path::new("/tmp/cached.ts");
+        assert_eq!(
+            detect_directive(path, "\"use cache\";\nexport async function data(){return 1;}\n"),
+            Some(RscDirective::Cache),
+            "\"use cache\" prologue detected as the Cache directive"
+        );
+        // The react-server transform of such a module produces a CLEAR diagnostic, not a
+        // silent pass-through.
+        let result = crate::transform::transform_module(
+            path,
+            "\"use cache\";\nexport async function data(){return 1;}\n",
+            Target::ReactServer,
+        );
+        assert!(!result.diagnostics.is_empty(), "\"use cache\" module yields a diagnostic");
+        assert!(
+            result.diagnostics[0].contains("use cache") && result.diagnostics[0].contains("not yet implemented"),
+            "diagnostic names the unimplemented directive: {:?}",
+            result.diagnostics
+        );
     }
 }
