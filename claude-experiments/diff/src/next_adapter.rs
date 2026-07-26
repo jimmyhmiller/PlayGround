@@ -171,6 +171,26 @@ fn scan_metadata(path: &Path, source: &str) -> RouteMetadata {
     meta
 }
 
+/// Whether a layout/page module exports any metadata the render-time resolver reads:
+/// `metadata`, `generateMetadata`, `viewport`, or `generateViewport`. A substring scan
+/// over comment-stripped source (MDX frontmatter counts as `metadata`).
+fn module_exports_metadata(path: &Path) -> bool {
+    if crate::mdx::is_mdx_path(path) {
+        return true; // frontmatter title/description resolve as metadata
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else { return false };
+    let source = strip_comments(&raw);
+    ["metadata", "generateMetadata", "viewport", "generateViewport"]
+        .iter()
+        .any(|name| {
+            source.contains(&format!("export const {name}"))
+                || source.contains(&format!("export let {name}"))
+                || source.contains(&format!("export var {name}"))
+                || source.contains(&format!("export function {name}"))
+                || source.contains(&format!("export async function {name}"))
+        })
+}
+
 /// The route metadata for the app, page overriding layout (as in Next).
 fn app_metadata(page: &Path, layout: Option<&Path>) -> RouteMetadata {
     let mut meta = RouteMetadata::default();
@@ -1913,12 +1933,31 @@ fn rsc_entry_module(
             namespaces.len() - 1
         })
     }
+    // A layout/page's module NAMESPACE (`NS<i>`) — its `metadata`/`generateMetadata`/
+    // `viewport`/`generateViewport` named exports are read at render time. `null` when
+    // the file exports no metadata (so the metadata chain skips it cheaply).
+    fn meta_ns(namespaces: &mut Vec<String>, path: &Option<PathBuf>) -> String {
+        match path {
+            Some(p) if module_exports_metadata(p) => format!("NS{}", intern_ns(namespaces, p)),
+            _ => "null".to_string(),
+        }
+    }
     let mut static_param_entries = String::new();
 
     let mut route_entries = String::new();
     for route in &disc.routes {
         let page_id = format!("M{}", intern(&mut modules, &route.page));
         let levels_js = emit_levels(&mut modules, &route.levels);
+        // Metadata chain (root→leaf layouts) + the page's own metadata namespace, walked
+        // at render time to resolve+merge the document <head> (title templates, openGraph,
+        // twitter, robots, icons, alternates, viewport, …).
+        let meta_chain = route
+            .levels
+            .iter()
+            .map(|lvl| meta_ns(&mut namespaces, &lvl.layout))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let page_meta = meta_ns(&mut namespaces, &Some(route.page.clone()));
         let title = route.metadata.title.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
         let description = route.metadata.description.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
         if route.kind == RouteKind::Ssg {
@@ -1929,7 +1968,7 @@ fn rsc_entry_module(
             ));
         }
         route_entries.push_str(&format!(
-            "  {{ path: {}, segments: {}, page: {page_id}, levels: [{levels_js}], title: {title}, description: {description}, kind: {}, hasGenerateStaticParams: {}, dynamicParams: {} }},\n",
+            "  {{ path: {}, segments: {}, page: {page_id}, levels: [{levels_js}], metaChain: [{meta_chain}], pageMeta: {page_meta}, title: {title}, description: {description}, kind: {}, hasGenerateStaticParams: {}, dynamicParams: {} }},\n",
             js_str(&route.url_path),
             segments_js(&route.segments),
             js_str(route.kind.as_str()),
@@ -2073,6 +2112,138 @@ function headItems(meta) {{
   return items;
 }}
 
+// --- Metadata API ------------------------------------------------------------------
+// Resolve + merge metadata from the root layout down to the page (each may export a
+// `metadata` object OR an async `generateMetadata`; likewise `viewport`/
+// `generateViewport`), applying ancestor title templates, then render the <head> tags
+// (React 19 hoists them into <head>). Runs at flight-render time so dynamic/async
+// metadata works — no per-request cost beyond the render already happening.
+async function resolveMetadata(route, params) {{
+  const chain = [...(route.metaChain || []), route.pageMeta];
+  const paramsP = Promise.resolve(params);
+  const meta = {{}};
+  let template = null; // an ancestor title.template applies to descendant string titles
+  for (const ns of chain) {{
+    if (!ns) continue;
+    let m = null;
+    if (typeof ns.generateMetadata === "function") {{
+      m = await ns.generateMetadata({{ params: paramsP, searchParams: Promise.resolve({{}}) }}, Promise.resolve(meta));
+    }} else if (ns.metadata) {{
+      m = ns.metadata;
+    }}
+    if (m) template = mergeMetadata(meta, m, template);
+    let vp = null;
+    if (typeof ns.generateViewport === "function") vp = await ns.generateViewport({{ params: paramsP }});
+    else if (ns.viewport) vp = ns.viewport;
+    if (vp) {{
+      meta.viewport = vp;
+      if (vp.themeColor) meta.themeColor = vp.themeColor;
+      if (vp.colorScheme) meta.colorScheme = vp.colorScheme;
+    }}
+  }}
+  return meta;
+}}
+
+// Merge `m` into `acc` (mutating). Returns the title.template descendants inherit.
+function mergeMetadata(acc, m, parentTemplate) {{
+  let template = parentTemplate;
+  if (m.title !== undefined) {{
+    if (typeof m.title === "string") {{
+      acc.title = parentTemplate ? parentTemplate.replace("%s", m.title) : m.title;
+    }} else if (m.title && typeof m.title === "object") {{
+      if (m.title.absolute != null) acc.title = m.title.absolute;
+      else if (m.title.default != null) acc.title = m.title.default;
+      if (m.title.template != null) template = m.title.template;
+    }}
+  }}
+  for (const k of ["description", "applicationName", "generator", "referrer", "creator", "publisher", "category", "keywords", "authors", "robots", "icons", "openGraph", "twitter", "alternates", "metadataBase", "manifest", "themeColor", "colorScheme", "formatDetection", "verification"]) {{
+    if (m[k] !== undefined) acc[k] = m[k];
+  }}
+  return template;
+}}
+
+// Build the <head> React elements from resolved metadata.
+function metadataToHead(meta) {{
+  const el = createElement;
+  const items = [];
+  const base = meta.metadataBase ? String(meta.metadataBase).replace(/\/$/, "") : "";
+  const abs = (u) => {{
+    if (u == null) return u;
+    u = String(u);
+    return /^https?:\/\//.test(u) || !base ? u : base + (u.startsWith("/") ? "" : "/") + u;
+  }};
+  let key = 0;
+  const meta_ = (attrs) => items.push(el("meta", {{ key: "m" + key++, ...attrs }}));
+  const link_ = (attrs) => items.push(el("link", {{ key: "l" + key++, ...attrs }}));
+  if (meta.title != null) items.push(el("title", {{ key: "title" }}, String(meta.title)));
+  if (meta.description != null) meta_({{ name: "description", content: String(meta.description) }});
+  if (meta.keywords) meta_({{ name: "keywords", content: Array.isArray(meta.keywords) ? meta.keywords.join(", ") : String(meta.keywords) }});
+  if (meta.applicationName) meta_({{ name: "application-name", content: meta.applicationName }});
+  if (meta.generator) meta_({{ name: "generator", content: meta.generator }});
+  if (meta.creator) meta_({{ name: "creator", content: meta.creator }});
+  if (meta.publisher) meta_({{ name: "publisher", content: meta.publisher }});
+  if (meta.authors) {{
+    const arr = Array.isArray(meta.authors) ? meta.authors : [meta.authors];
+    for (const a of arr) if (a && a.name) meta_({{ name: "author", content: a.name }});
+  }}
+  if (meta.robots) {{
+    const r = meta.robots;
+    const content = typeof r === "string" ? r : [r.index === false ? "noindex" : "index", r.follow === false ? "nofollow" : "follow", r.nocache ? "noarchive" : null].filter(Boolean).join(", ");
+    meta_({{ name: "robots", content }});
+  }}
+  if (meta.alternates && meta.alternates.canonical) link_({{ rel: "canonical", href: abs(meta.alternates.canonical) }});
+  if (meta.icons) {{
+    const ic = meta.icons;
+    const list = typeof ic === "string" ? [ic] : Array.isArray(ic) ? ic : ic.icon ? (Array.isArray(ic.icon) ? ic.icon : [ic.icon]) : [];
+    for (const i of list) {{ const url = typeof i === "string" ? i : i.url; if (url) link_({{ rel: "icon", href: abs(url) }}); }}
+  }}
+  const og = meta.openGraph;
+  if (og) {{
+    const p = (prop, c) => c != null && items.push(el("meta", {{ key: "og" + key++, property: "og:" + prop, content: String(c) }}));
+    p("title", og.title != null ? og.title : meta.title);
+    p("description", og.description != null ? og.description : meta.description);
+    p("url", abs(og.url));
+    p("site_name", og.siteName);
+    p("type", og.type || "website");
+    const imgs = og.images ? (Array.isArray(og.images) ? og.images : [og.images]) : [];
+    for (const im of imgs) p("image", abs(typeof im === "string" ? im : im.url));
+  }}
+  const tw = meta.twitter;
+  if (tw) {{
+    const p = (name, c) => c != null && meta_({{ name: "twitter:" + name, content: String(c) }});
+    p("card", tw.card || "summary_large_image");
+    p("title", tw.title != null ? tw.title : meta.title);
+    p("description", tw.description != null ? tw.description : meta.description);
+    const imgs = tw.images ? (Array.isArray(tw.images) ? tw.images : [tw.images]) : [];
+    for (const im of imgs) p("image", abs(typeof im === "string" ? im : im.url));
+  }}
+  if (meta.manifest) link_({{ rel: "manifest", href: abs(meta.manifest) }});
+  const vp = meta.viewport;
+  if (vp) {{
+    const content = typeof vp === "string" ? vp : Object.entries(vp)
+      .filter(([k]) => ["width", "height", "initialScale", "minimumScale", "maximumScale", "userScalable", "viewportFit"].includes(k))
+      .map(([k, v]) => (k === "initialScale" ? "initial-scale=" + v : k === "minimumScale" ? "minimum-scale=" + v : k === "maximumScale" ? "maximum-scale=" + v : k === "viewportFit" ? "viewport-fit=" + v : k + "=" + v))
+      .join(", ");
+    if (content) meta_({{ name: "viewport", content }});
+  }}
+  if (meta.themeColor) {{
+    const tc = Array.isArray(meta.themeColor) ? meta.themeColor : [meta.themeColor];
+    for (const t of tc) meta_({{ name: "theme-color", content: typeof t === "string" ? t : t.color }});
+  }}
+  if (meta.colorScheme) meta_({{ name: "color-scheme", content: meta.colorScheme }});
+  return items;
+}}
+
+// Async Server Component: resolves the route metadata and renders the <head> tags. A
+// build-time title/description fallback (from the ROUTE table) covers a route whose
+// modules export no metadata.
+async function MetadataHead({{ route, params }}) {{
+  const meta = await resolveMetadata(route, params);
+  if (meta.title == null && route.title != null) meta.title = route.title;
+  if (meta.description == null && route.description != null) meta.description = route.description;
+  return createElement(Fragment, null, ...metadataToHead(meta));
+}}
+
 // Match `pathname` against a route's segment pattern, capturing dynamic params.
 // Static matches one part exactly, Dynamic one part, CatchAll the (≥1) tail,
 // OptionalCatchAll the (≥0) tail. Returns the params object or null.
@@ -2212,7 +2383,7 @@ function documentTree(pathname, opts) {{
     }}
     if (i === 0) {{
       // Head items belong inside the root layout (React hoists them to <head>).
-      node = createElement(Fragment, null, ...headItems(route), node);
+      node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params }})), node);
       headInjected = true;
     }}
     if (level.layout) {{
@@ -2220,7 +2391,7 @@ function documentTree(pathname, opts) {{
       node = createElement(level.layout, {{ params: paramsPromise, ...slotProps }}, node);
     }}
   }}
-  if (!headInjected) node = createElement(Fragment, null, ...headItems(route), node);
+  if (!headInjected) node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params }})), node);
   return {{ tree: node, status: 200, params }};
 }}
 
@@ -3925,6 +4096,28 @@ mod tests {
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
         assert!(rsc_src.contains("function composeLevels"), "the slot composer is generated");
         assert!(rsc_src.contains("...slotProps"), "matched slots are spread as layout props");
+    }
+
+    #[test]
+    fn metadata_api_chain_and_resolver_codegen() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &reqctx, None);
+        // Each route carries a metadata namespace chain resolved at render time.
+        assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
+        assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
+        assert!(rsc_src.contains("async function MetadataHead"), "the async MetadataHead component is generated");
+        assert!(rsc_src.contains("function mergeMetadata"), "metadata merge (title templates) is generated");
+        // Full head coverage: openGraph, twitter, robots, canonical, viewport.
+        for marker in ["og:", "twitter:", "\"robots\"", "canonical", "\"viewport\"", "theme-color"] {
+            assert!(rsc_src.contains(marker), "metadata head covers {marker}: missing");
+        }
+        // module_exports_metadata detects the various export forms.
+        assert!(!module_exports_metadata(&app.join("Counter.tsx")), "a plain island exports no metadata");
     }
 
     #[test]

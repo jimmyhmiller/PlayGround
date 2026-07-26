@@ -92,8 +92,22 @@ pub fn compile(path: &Path, source: &str) -> Result<CompiledMdx, String> {
         }
     }
 
+    // Emit `export const metadata` from title/description frontmatter so the app-router
+    // metadata resolver (which reads named exports at render time) picks it up.
+    let mut meta_export = String::new();
+    let mut fields = Vec::new();
+    if let Some(t) = frontmatter.get("title") {
+        fields.push(format!("title: {}", js_string(t)));
+    }
+    if let Some(d) = frontmatter.get("description") {
+        fields.push(format!("description: {}", js_string(d)));
+    }
+    if !fields.is_empty() {
+        meta_export = format!("export const metadata = {{ {} }};\n", fields.join(", "));
+    }
+
     let jsx = format!(
-        "{hoisted}\nexport default function MDXContent() {{\n  return (<>{body}</>);\n}}\n"
+        "{hoisted}\n{meta_export}export default function MDXContent() {{\n  return (<>{body}</>);\n}}\n"
     );
     Ok(CompiledMdx { jsx, frontmatter })
 }
