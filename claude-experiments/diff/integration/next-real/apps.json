@@ -1,0 +1,77 @@
+{
+  "_comment": "Real, pinned, MIT-licensed Next.js app-router applications vendored as a diffpack acceptance corpus. Source is committed (small); node_modules is NOT (see .gitignore). Each app is verified hermetic: no request-time network, DB, or secrets. Built with `diffpack build-app <app> production`, served by scripts/rsc/next-server.mjs, and curl-smoked by scripts/rsc/next-real-check.sh. Both vendored apps BUILD + SERVE under diffpack (see each `frontier`); a future app that fails is a recorded frontier, never a silent drop.",
+  "upstream": {
+    "repo": "https://github.com/vercel/next.js",
+    "gitSha": "367e5215bf6fbf7a894d940df61e664b08538e22",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2025 Vercel, Inc.",
+    "note": "Vercel's own canonical examples are the reference definition of a real app-router app and are MIT-licensed / redistributable. Each vendored app carries a copy of the upstream LICENSE."
+  },
+  "pinnedDeps": {
+    "next": "16.2.11",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "apps": [
+    {
+      "name": "hello-world",
+      "subdir": "examples/hello-world",
+      "why": "Smallest possible real app-router app: a single RootLayout + a single page. The minimal proof that diffpack recognizes and builds the app/ convention at all.",
+      "features": [
+        "app-router",
+        "root-layout",
+        "static-page"
+      ],
+      "hermetic": true,
+      "smoke": [
+        {
+          "path": "/",
+          "expectStatus": 200,
+          "expectBody": "Hello, Next.js!"
+        }
+      ],
+      "buildEnv": "production",
+      "frontier": {
+        "buildsWithDiffpack": true,
+        "servesWithDiffpack": true,
+        "notes": "Builds all three RSC graphs + prerenders + serves 200 under real diffpack. ",
+        "verifiedAgainstSha": "367e5215bf6fbf7a894d940df61e664b08538e22"
+      }
+    },
+    {
+      "name": "mdx",
+      "subdir": "examples/mdx",
+      "why": "A richer but still fully hermetic app-router app: static metadata export, next/font/google (Inter), next/image (static svg), CSS Modules, and MDX-at-build (@next/mdx). Exercises several build-time app-router features at once with no request-time data.",
+      "features": [
+        "app-router",
+        "root-layout",
+        "metadata",
+        "next/font",
+        "next/image",
+        "css-modules",
+        "mdx",
+        "nested-route"
+      ],
+      "hermetic": true,
+      "smoke": [
+        {
+          "path": "/",
+          "expectStatus": 200,
+          "expectBody": "Get started by editing"
+        },
+        {
+          "path": "/blog/hello-world",
+          "expectStatus": 200,
+          "expectBody": "This is an example blog page with MDX support"
+        }
+      ],
+      "buildEnv": "production",
+      "frontier": {
+        "buildsWithDiffpack": true,
+        "servesWithDiffpack": true,
+        "notes": "Builds all three RSC graphs + prerenders + serves 200 under real diffpack. Uses @next/mdx: diffpack ignores the plugin config (best-effort eval) and handles page.mdx natively; custom `mdx-components.tsx` element overrides are NOT wired into diffpack's native MDX (a documented gap, non-blocking).",
+        "verifiedAgainstSha": "367e5215bf6fbf7a894d940df61e664b08538e22"
+      }
+    }
+  ]
+}

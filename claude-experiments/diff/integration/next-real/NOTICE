@@ -1,0 +1,34 @@
+Vendored third-party Next.js app-router applications
+=====================================================
+
+The application source under integration/next-real/<name>/ is vendored,
+pinned, and unmodified (except package.json dependency version pins) from
+third-party open-source projects. Each app carries a copy of its upstream
+LICENSE. Attribution per app follows.
+
+-----------------------------------------------------------------------
+hello-world
+  Upstream:   https://github.com/vercel/next.js  (examples/hello-world)
+  Pinned SHA: 367e5215bf6fbf7a894d940df61e664b08538e22
+  License:    MIT
+  Copyright:  Copyright (c) 2025 Vercel, Inc.
+  Local mods: package.json deps repinned to next 16.2.11 / react 19.2.4 /
+              react-dom 19.2.4 (+ matching @types) to align with the
+              diffpack acceptance target. Source (app/, config) unchanged.
+
+-----------------------------------------------------------------------
+mdx
+  Upstream:   https://github.com/vercel/next.js  (examples/mdx)
+  Pinned SHA: 367e5215bf6fbf7a894d940df61e664b08538e22
+  License:    MIT
+  Copyright:  Copyright (c) 2025 Vercel, Inc.
+  Local mods: package.json deps repinned to next 16.2.11 / @next/mdx
+              16.2.11 / react 19.2.4 / react-dom 19.2.4 (+ matching
+              @types) to align with the diffpack acceptance target.
+              Source (app/, mdx-components.tsx, config, public/) unchanged.
+-----------------------------------------------------------------------
+
+Both apps are verified hermetic: they read only local files at build time
+and perform no request-time network, database, or secret access. The only
+external references are static anchor hrefs (nextjs.org / vercel.com links)
+in rendered HTML, which are never fetched by the build or the smoke test.
