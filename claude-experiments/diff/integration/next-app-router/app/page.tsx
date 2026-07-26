@@ -18,6 +18,9 @@ export default async function Home() {
       <h1 id="heading">Server:{data}</h1>
       {/* Raster next/image: responsive srcset from build-emitted variants + a
           priority preload (Slice J / gap 4.2). */}
+      {/* A string-src blur needs an explicit blurDataURL under real Next; the blur
+          placeholder is demonstrated + tested on /image-demo via a STATIC import (the
+          form where diffpack and Next both derive the blurDataURL). */}
       <Image
         id="hero"
         src="/hero.png"
@@ -25,7 +28,6 @@ export default async function Home() {
         width={1200}
         height={300}
         sizes="(max-width: 600px) 100vw, 600px"
-        placeholder="blur"
         priority
       />
       {/* SVG next/image: raw src, no srcset (byte-faithful to Next). */}
