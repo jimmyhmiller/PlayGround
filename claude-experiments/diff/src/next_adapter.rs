@@ -2089,7 +2089,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &adapter_dir.join("image-config.ts"),
         &image_config_module(&images_from_eval(next_config.as_ref())),
     )?;
-    write_if_changed(&shims_dir.join("image.tsx"), next_image_shim())?;
+    write_if_changed(&shims_dir.join("image.tsx"), &next_image_shim(&asset_base))?;
     write_if_changed(
         &shims_dir.join("navigation.ts"),
         &next_navigation_shim(&hooks_context_canon),
@@ -4804,8 +4804,18 @@ fn image_manifest_module(images: &[PublicImage]) -> String {
     body
 }
 
-fn next_image_shim() -> &'static str {
-    r#"// `next/image` (diffpack next app-router adapter) — a faithful port of Next's
+fn next_image_shim(asset_base: &str) -> String {
+    // ASSET_BASE (assetPrefix + basePath) is baked in so every emitted next/image URL —
+    // build-time variant, static import, raw local src, and the runtime `/_next/image`
+    // optimizer endpoint — carries the configured prefix. A local raster with no build
+    // variant, or a remote src, falls back to that runtime optimizer.
+    format!(
+        "{NEXT_IMAGE_SHIM_HEADER}const ASSET_BASE = {};\n{NEXT_IMAGE_SHIM_BODY}",
+        js_str(asset_base),
+    )
+}
+
+const NEXT_IMAGE_SHIM_HEADER: &str = r#"// `next/image` (diffpack next app-router adapter) — a faithful port of Next's
 // `getImgProps`. Raster srcs with a build-emitted variant manifest entry get a real
 // responsive `srcSet`/`sizes` pointing at static files under `/_diffpack-image/`
 // (variants are emitted at BUILD time by the pure-Rust `image` crate — there is NO
@@ -4824,9 +4834,36 @@ import { createElement, Fragment } from "react";
 import MANIFEST from "../image-manifest";
 import CONFIG from "../image-config";
 
-const DEVICE_SIZES = CONFIG.deviceSizes || [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
+"#;
+
+const NEXT_IMAGE_SHIM_BODY: &str = r#"const DEVICE_SIZES = CONFIG.deviceSizes || [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
 const IMAGE_SIZES = CONFIG.imageSizes || [16, 32, 48, 64, 96, 128, 256, 384];
 const ALL_SIZES = [...IMAGE_SIZES, ...DEVICE_SIZES];
+const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";
+
+// Prepend the app's asset base (assetPrefix + basePath) to a LOCAL (leading-slash) URL,
+// once — so build-emitted variant URLs and static image srcs resolve under the configured
+// prefix. Remote/data/blob URLs and already-prefixed paths pass through untouched.
+function withAssetBase(u) {
+  if (!ASSET_BASE || typeof u !== "string" || !u.startsWith("/")) return u;
+  if (u === ASSET_BASE || u.startsWith(ASSET_BASE + "/")) return u;
+  return ASSET_BASE + u;
+}
+// The runtime optimizer URL for one candidate width (Next's default-loader shape:
+// `/_next/image?url=&w=&q=`). The `url` param stays the RAW app-relative src (the
+// orchestrator strips basePath before reading it); IMAGE_ENDPOINT carries the prefix.
+function optimizerUrl(rawSrc, w, quality) {
+  return IMAGE_ENDPOINT + "?url=" + encodeURIComponent(rawSrc) + "&w=" + w + "&q=" + (quality || 75);
+}
+// A responsive srcset pointing at the runtime optimizer (one entry per candidate width)
+// plus the largest-width finalSrc — the DYNAMIC/REMOTE fallback. A src with a build-time
+// variant entry never reaches here (build variants are preferred).
+function optimizerSrcSet(rawSrc, numericWidth, sizes, quality) {
+  const { widths, kind } = getWidths(numericWidth, sizes);
+  const parts = widths.map((w, i) => optimizerUrl(rawSrc, w, quality) + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
+  const finalSrc = optimizerUrl(rawSrc, widths[widths.length - 1], quality);
+  return { srcSet: parts.join(", "), finalSrc };
+}
 
 // Built-in third-party loaders (Next's `images.loader` presets). Each returns a URL for
 // a given { src, width, quality }.
@@ -4920,6 +4957,9 @@ export default function Image(props) {
   } = props;
   const isObjectSrc = src != null && typeof src === "object";
   const rawSrc = typeof src === "string" ? src : (src && (src.src || src.default)) || "";
+  // A LOCAL src rendered raw (svg/data/unoptimized/unknown passthrough) still needs the
+  // asset base prefix; remote/data/blob srcs are left untouched by withAssetBase.
+  const displaySrc = withAssetBase(rawSrc);
   // A static image import carries its own dimensions/variants/blur; synthesize an
   // entry from it so the OPTIMIZED path below builds a srcSet from the embedded
   // variants directly, with NO MANIFEST lookup (the hashed /assets/ URL is not a
@@ -4983,7 +5023,7 @@ export default function Image(props) {
 
   const baseImg = () =>
     createElement("img", {
-      src: rawSrc,
+      src: displaySrc,
       alt: alt || "",
       width,
       height,
@@ -5031,21 +5071,22 @@ export default function Image(props) {
   }
 
   if (!entry) {
+    // DYNAMIC/REMOTE fallback: no build-time variant, so route through the runtime
+    // `/_next/image` optimizer (Next's default loader). A remote host must still be
+    // allow-listed — a disallowed host is a clear hard error, matching Next.
     if (isRemote) {
-      // A remote src with the DEFAULT loader (no optimizer here): allow it only if the
-      // host is configured, then render the raw src with no srcset (honest — there is no
-      // /_next/image server). A disallowed host is a clear hard error, matching Next.
       if (!hasMatch(new URL(rawSrc))) throw hostnameNotConfigured(rawSrc);
-      return baseImg();
+      const { srcSet, finalSrc } = optimizerSrcSet(rawSrc, numericWidth, sizes, quality);
+      return loaderImg(finalSrc, srcSet);
     }
     if (isRasterPath(rawSrc) && rawSrc.startsWith("/")) {
-      throw new Error(
-        "next/image: no build-emitted variant manifest entry for raster src '" + rawSrc +
-        "'. Put the image under public/ (png/jpeg) so diffpack emits its responsive " +
-        "variants at build time, or pass the `unoptimized` prop."
-      );
+      // A local raster with no build-emitted variant (a runtime-computed public path):
+      // the runtime optimizer resizes it on the fly. Build-time variants stay preferred
+      // for images known at build time (public/ png/jpeg), so static pages never pay this.
+      const { srcSet, finalSrc } = optimizerSrcSet(rawSrc, numericWidth, sizes, quality);
+      return loaderImg(finalSrc, srcSet);
     }
-    // Unknown non-remote src: honest passthrough.
+    // Unknown non-remote src: honest passthrough (prefixed if local).
     return baseImg();
   }
 
@@ -5057,11 +5098,11 @@ export default function Image(props) {
   const parts = [];
   chosen.forEach((w, i) => {
     const url = entry.variants[String(w)];
-    if (url) parts.push(url + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
+    if (url) parts.push(withAssetBase(url) + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
   });
   const srcSet = parts.length ? parts.join(", ") : undefined;
   const largest = chosen[chosen.length - 1];
-  const finalSrc = entry.variants[String(largest)] || entry.variants[String(intrinsic)] || rawSrc;
+  const finalSrc = withAssetBase(entry.variants[String(largest)] || entry.variants[String(intrinsic)] || rawSrc);
 
   const img = createElement("img", {
     src: finalSrc,
@@ -5090,8 +5131,7 @@ export default function Image(props) {
   }
   return img;
 }
-"#
-}
+"#;
 
 fn next_navigation_shim(hooks_context: &Path) -> String {
     let hooks_import = js_str(&hooks_context.to_string_lossy());
@@ -6097,7 +6137,10 @@ mod tests {
         assert!(img_shim.contains(r#"import MANIFEST from "../image-manifest""#), "image shim reads the variant manifest: {img_shim}");
         assert!(img_shim.contains("function getWidths"), "image shim ports getWidths: {img_shim}");
         assert!(img_shim.contains(r#"rel: "preload""#), "image shim hoists a priority preload link: {img_shim}");
-        assert!(img_shim.contains("no build-emitted variant manifest entry"), "image shim throws (no silent stub) on a raster with no entry: {img_shim}");
+        // A raster with no build-time variant now falls back to the runtime `/_next/image`
+        // optimizer (not a silent no-op) — build-time variants stay preferred for public/.
+        assert!(img_shim.contains("function optimizerSrcSet"), "image shim has the runtime optimizer fallback: {img_shim}");
+        assert!(img_shim.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "image shim points at the runtime optimizer endpoint: {img_shim}");
         assert!(adapter.join("image-manifest.ts").is_file(), "the image variant manifest module is generated");
 
         // React dev/prod dispatch define is present (keeps React's dev build out).
@@ -6381,11 +6424,46 @@ mod tests {
 
     #[test]
     fn image_shim_supports_remote_hosts_and_loaders() {
-        let shim = next_image_shim();
+        let shim = next_image_shim("");
         assert!(shim.contains(r#"import CONFIG from "../image-config""#), "shim reads the images config: {shim}");
         assert!(shim.contains("function matchRemotePattern"), "shim ports the remote-pattern matcher");
         assert!(shim.contains("is not configured under"), "shim throws a clear hostname error for a disallowed remote host");
         assert!(shim.contains("imgixLoader") && shim.contains("cloudinaryLoader") && shim.contains("akamaiLoader"), "shim has the built-in loaders");
+    }
+
+    #[test]
+    fn image_shim_bakes_asset_base_and_routes_to_runtime_optimizer() {
+        // With an asset base the shim bakes the const and points the runtime optimizer
+        // endpoint under the prefix; build-variant + local raw URLs go through withAssetBase.
+        let shim = next_image_shim("/cdn/docs");
+        assert!(shim.contains(r#"const ASSET_BASE = "/cdn/docs";"#), "asset base baked as a const: {shim}");
+        assert!(shim.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "optimizer endpoint under the asset base: {shim}");
+        assert!(shim.contains("function withAssetBase"), "the asset-base prefix helper is generated");
+        assert!(shim.contains("function optimizerSrcSet"), "the runtime-optimizer srcset builder is generated");
+        // Build-time variants stay PREFERRED: their URLs are prefixed, not sent to the optimizer.
+        assert!(
+            shim.contains("parts.push(withAssetBase(url)"),
+            "build-variant srcset URLs are prefixed by the asset base: {shim}",
+        );
+        // The default-loader optimizer URL is Next's `/_next/image?url=&w=&q=` shape.
+        assert!(
+            shim.contains(r#"IMAGE_ENDPOINT + "?url=" + encodeURIComponent(rawSrc) + "&w=" + w + "&q=""#),
+            "optimizer URL uses Next's default-loader query shape: {shim}",
+        );
+        // A local raster with no build variant now routes to the optimizer (was a hard error).
+        assert!(
+            shim.contains("optimizerSrcSet(rawSrc, numericWidth, sizes, quality)"),
+            "dynamic/remote fallback routes through the optimizer: {shim}",
+        );
+        assert!(
+            !shim.contains("no build-emitted variant manifest entry for raster src"),
+            "the old hard-error-on-missing-variant path is gone (optimizer handles it): {shim}",
+        );
+
+        // No asset base: the const is empty, so withAssetBase is an identity.
+        let plain = next_image_shim("");
+        assert!(plain.contains(r#"const ASSET_BASE = "";"#), "empty asset base const: {plain}");
+        assert!(plain.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "optimizer endpoint still present with no prefix: {plain}");
     }
 
     #[test]

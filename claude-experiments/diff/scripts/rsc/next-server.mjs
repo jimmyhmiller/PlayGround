@@ -22,7 +22,8 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, statSync, writeFileSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import os from "node:os";
@@ -750,6 +751,209 @@ function servePrerendered(entry, isRsc, res, configHeaders, mwSetCookies) {
   return true;
 }
 
+// --- Runtime next/image optimizer (`/_next/image`) --------------------------------
+// The DYNAMIC/REMOTE fallback for next/image. Build-time responsive variants
+// (`/_diffpack-image/…`, emitted by the pure-Rust `image` crate) are still PREFERRED,
+// so a prerendered/static page only ever references those static files and never hits
+// this endpoint — the optimizer costs nothing on the static-page path. It is invoked
+// only when the shim could not resolve a build-time variant: a REMOTE src (default
+// loader) or a LOCAL raster with no manifest entry (a runtime-computed public path).
+//
+// The actual resize/re-encode is done NATIVELY by shelling to the diffpack binary
+// (`optimize-image`, the same `image` crate as the build-time variants) — no Node
+// image dependency. Optimized bytes are cached on disk (keyed by src+w+q+format) so a
+// repeated request never re-optimizes or re-spawns.
+const imagesConfig = (() => {
+  const img = (nextConfig && nextConfig.images) || {};
+  const deviceSizes = Array.isArray(img.deviceSizes) && img.deviceSizes.length
+    ? img.deviceSizes
+    : [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
+  const imageSizes = Array.isArray(img.imageSizes) && img.imageSizes.length
+    ? img.imageSizes
+    : [16, 32, 48, 64, 96, 128, 256, 384];
+  return {
+    deviceSizes,
+    imageSizes,
+    allSizes: [...imageSizes, ...deviceSizes].sort((a, b) => a - b),
+    remotePatterns: Array.isArray(img.remotePatterns) ? img.remotePatterns : [],
+    domains: Array.isArray(img.domains) ? img.domains : [],
+    qualities: Array.isArray(img.qualities) && img.qualities.length ? img.qualities : null,
+    minimumCacheTTL: typeof img.minimumCacheTTL === "number" ? img.minimumCacheTTL : 60,
+    dangerouslyAllowSVG: Boolean(img.dangerouslyAllowSVG),
+  };
+})();
+const imageCacheDir = join(outputDir, ".diffpack-image-cache");
+// Port of Next's remote-pattern matcher (protocol/hostname/port/pathname wildcards +
+// legacy `domains`). A remote src is allowed only if it matches — otherwise 400 (never
+// a silent fetch of an unconfigured host).
+function imageWildcardMatch(pattern, value) {
+  if (!pattern) return true;
+  const rx = "^" + pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, " ")
+    .replace(/\*/g, "[^.\\/]*")
+    .replace(/ /g, ".*") + "$";
+  return new RegExp(rx).test(value);
+}
+function remoteHostAllowed(u) {
+  if (imagesConfig.domains.includes(u.hostname)) return true;
+  return imagesConfig.remotePatterns.some((p) => {
+    if (p.protocol && p.protocol.replace(/:$/, "") !== u.protocol.replace(/:$/, "")) return false;
+    if (p.hostname && !imageWildcardMatch(p.hostname, u.hostname)) return false;
+    if (p.port && p.port !== u.port) return false;
+    if (p.pathname && !imageWildcardMatch(p.pathname, u.pathname)) return false;
+    return true;
+  });
+}
+const IMAGE_EXT_MIME = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  svg: "image/svg+xml",
+};
+// Run the native optimizer (diffpack `optimize-image`) over `input`, returning the
+// optimized bytes. A missing DIFFPACK_BIN, a non-zero exit, or a spawn failure is a
+// hard rejection carrying the cause — never a silent passthrough of the un-optimized
+// image (which would defeat the point and hide a misconfiguration).
+function runNativeOptimizer(input, width, quality, format) {
+  const bin = process.env.DIFFPACK_BIN;
+  if (!bin) {
+    return Promise.reject(
+      new Error(
+        "next/image optimizer: DIFFPACK_BIN is not set, so the native resize cannot run. " +
+          "Start the app via `diffpack start` / `diffpack dev` (both pass it).",
+      ),
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      bin,
+      ["optimize-image", "--width", String(width), "--quality", String(quality), "--format", format],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const out = [];
+    const err = [];
+    child.stdout.on("data", (c) => out.push(c));
+    child.stderr.on("data", (c) => err.push(c));
+    child.on("error", (e) => reject(new Error(`next/image optimizer: cannot spawn ${bin}: ${e.message}`)));
+    child.on("close", (code) => {
+      if (code === 0) resolve(Buffer.concat(out));
+      else reject(new Error(`next/image optimizer exited ${code}: ${Buffer.concat(err).toString().trim()}`));
+    });
+    child.stdin.on("error", () => {}); // EPIPE if the child died early; surfaced via `close`.
+    child.stdin.end(input);
+  });
+}
+// Serve `GET /_next/image?url=&w=&q=`. Validates params exactly like Next (bad `url`/
+// `w`/`q` -> 400), fetches the source (a local file under public/, or an allow-listed
+// remote), runs the native optimizer, caches the result on disk, and responds with a
+// long-lived cache header. SVG/GIF are passed through un-optimized (Next does the same
+// unless `dangerouslyAllowSVG`); an animated/undecodable payload surfaces the
+// optimizer's error as a 500 rather than a wrong image.
+async function serveOptimizedImage(url, res) {
+  const src = url.searchParams.get("url");
+  const wRaw = url.searchParams.get("w");
+  const qRaw = url.searchParams.get("q");
+  if (!src) return void res.writeHead(400, { "content-type": "text/plain" }).end('"url" parameter is required');
+  const w = Number(wRaw);
+  if (!wRaw || !Number.isInteger(w) || w <= 0 || !imagesConfig.allSizes.includes(w)) {
+    return void res.writeHead(400, { "content-type": "text/plain" }).end('"w" parameter (width) is not allowed');
+  }
+  const q = qRaw == null ? 75 : Number(qRaw);
+  if (!Number.isInteger(q) || q < 1 || q > 100 || (imagesConfig.qualities && !imagesConfig.qualities.includes(q))) {
+    return void res.writeHead(400, { "content-type": "text/plain" }).end('"q" parameter (quality) is not allowed');
+  }
+
+  const isRemote = /^https?:\/\//i.test(src);
+  // Resolve the source bytes + extension.
+  let bytes;
+  let ext;
+  try {
+    if (isRemote) {
+      const remoteUrl = new URL(src);
+      if (!remoteHostAllowed(remoteUrl)) {
+        return void res
+          .writeHead(400, { "content-type": "text/plain" })
+          .end(`"url" parameter is not allowed: host '${remoteUrl.hostname}' is not configured under images`);
+      }
+      const resp = await fetch(src);
+      if (!resp.ok) {
+        return void res.writeHead(resp.status === 404 ? 404 : 502, { "content-type": "text/plain" }).end("upstream image error");
+      }
+      bytes = Buffer.from(await resp.arrayBuffer());
+      const ct = (resp.headers.get("content-type") || "").split(";")[0].trim();
+      ext = Object.keys(IMAGE_EXT_MIME).find((k) => IMAGE_EXT_MIME[k] === ct) || extname(new URL(src).pathname).slice(1).toLowerCase() || "jpeg";
+    } else {
+      if (!src.startsWith("/")) {
+        return void res.writeHead(400, { "content-type": "text/plain" }).end('"url" parameter must be an absolute path or an allow-listed URL');
+      }
+      const rel = src.split("?")[0].replace(/^\/+/, "");
+      const filePath = join(publicDir, rel);
+      // Path-traversal guard: the resolved file must stay inside public/.
+      if (!filePath.startsWith(publicDir) || !existsSync(filePath)) {
+        return void res.writeHead(404, { "content-type": "text/plain" }).end("image not found");
+      }
+      bytes = readFileSync(filePath);
+      ext = extname(filePath).slice(1).toLowerCase();
+    }
+  } catch (e) {
+    return void res.writeHead(500, { "content-type": "text/plain" }).end(`next/image: ${e.message}`);
+  }
+
+  // SVG/GIF: pass through un-optimized (byte-faithful to Next, which skips them unless
+  // dangerouslyAllowSVG). SVG additionally needs the opt-in + a hardened CSP.
+  if (ext === "svg" || ext === "gif") {
+    if (ext === "svg" && !imagesConfig.dangerouslyAllowSVG) {
+      return void res.writeHead(400, { "content-type": "text/plain" }).end('"url" parameter (svg) requires images.dangerouslyAllowSVG');
+    }
+    const headers = {
+      "content-type": IMAGE_EXT_MIME[ext],
+      "cache-control": `public, max-age=${imagesConfig.minimumCacheTTL}, must-revalidate`,
+    };
+    if (ext === "svg") headers["content-security-policy"] = "script-src 'none'; frame-src 'none'; sandbox;";
+    return void res.writeHead(200, headers).end(bytes);
+  }
+
+  // Output format: PNG preserves alpha, everything else re-encodes to JPEG. (webp/avif
+  // encode is deliberately not pulled in — it would add a heavy dep; the resize/recompress
+  // is the honest optimization here.)
+  const outFormat = ext === "png" ? "png" : "jpeg";
+  const outMime = outFormat === "png" ? "image/png" : "image/jpeg";
+  const key = createHash("sha1").update(`${src}|${w}|${q}|${outFormat}`).digest("hex");
+  const cachePath = join(imageCacheDir, `${key}.${outFormat}`);
+  const cacheHeaders = () => ({
+    "content-type": outMime,
+    "cache-control": `public, max-age=${imagesConfig.minimumCacheTTL}, must-revalidate`,
+    "content-disposition": "inline",
+  });
+  if (existsSync(cachePath)) {
+    const h = cacheHeaders();
+    h["x-diffpack-image-cache"] = "HIT";
+    return void res.writeHead(200, h).end(readFileSync(cachePath));
+  }
+  let optimized;
+  try {
+    optimized = await runNativeOptimizer(bytes, w, q, outFormat);
+  } catch (e) {
+    return void res.writeHead(500, { "content-type": "text/plain" }).end(`next/image: ${e.message}`);
+  }
+  try {
+    mkdirSync(imageCacheDir, { recursive: true });
+    // Write via temp + rename so a concurrent reader never sees a half-written file.
+    const tmp = `${cachePath}.${process.pid}.tmp`;
+    writeFileSync(tmp, optimized);
+    renameSync(tmp, cachePath);
+  } catch {
+    // A cache-write failure is non-fatal: still serve the freshly optimized bytes.
+  }
+  const h = cacheHeaders();
+  h["x-diffpack-image-cache"] = "MISS";
+  res.writeHead(200, h).end(optimized);
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -840,6 +1044,14 @@ const server = createServer(async (req, res) => {
           return;
         }
       }
+    }
+    // Runtime next/image optimizer (dynamic/remote fallback). Checked here — AFTER the
+    // basePath/assetPrefix normalization (so a `${basePath}/_next/image` request has been
+    // stripped to `/_next/image`) and BEFORE static serving / rendering. Static pages
+    // reference build-time variants under /_diffpack-image/, so they never reach this.
+    if (req.method === "GET" && url.pathname === "/_next/image") {
+      await serveOptimizedImage(url, res);
+      return;
     }
     // Static assets from the client build's public/ (checked before route render so
     // /client.js, /rsc.css, etc. are served, not treated as app-router paths).

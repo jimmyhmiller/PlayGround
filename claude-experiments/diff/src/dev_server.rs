@@ -3126,11 +3126,18 @@ mod next {
     /// orphaning. The returned [`Child`] owns the write end; keeping it alive keeps the
     /// pipe open for the orchestrator's lifetime.
     fn spawn_next_node(script: &Path, output_root: &Path, port: u16) -> Result<Child, String> {
-        Command::new("node")
+        let mut command = Command::new("node");
+        command
             .arg(script)
             .arg(output_root)
             .arg(port.to_string())
-            .env("DIFFPACK_NEXT_DEV", "1")
+            .env("DIFFPACK_NEXT_DEV", "1");
+        // The runtime next/image optimizer (`/_next/image`) in the orchestrator shells
+        // back to this binary for the native resize (dynamic/remote fallback only).
+        if let Ok(exe) = std::env::current_exe() {
+            command.env("DIFFPACK_BIN", exe);
+        }
+        command
             .stdin(std::process::Stdio::piped())
             .spawn()
             .map_err(|error| {

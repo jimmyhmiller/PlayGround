@@ -814,10 +814,15 @@ fn run() -> Result<(), String> {
                     out.display()
                 ));
             }
-            let status = std::process::Command::new("node")
-                .arg(&entry)
-                .arg(out)
-                .arg(&port)
+            // The runtime next/image optimizer (`/_next/image`) in the emitted
+            // orchestrator shells back to THIS binary for the actual native resize/
+            // re-encode (the `image` crate — no Node image dep). Hand it our path.
+            let mut command = std::process::Command::new("node");
+            command.arg(&entry).arg(out).arg(&port);
+            if let Ok(exe) = std::env::current_exe() {
+                command.env("DIFFPACK_BIN", exe);
+            }
+            let status = command
                 .status()
                 .map_err(|error| format!("cannot start node server ({}): {error}", entry.display()))?;
             if status.success() {
@@ -826,8 +831,104 @@ fn run() -> Result<(), String> {
                 Err(format!("production server exited with {status}"))
             }
         }
+        // Native next/image runtime optimizer worker. The emitted next orchestrator
+        // (`scripts/rsc/next-server.mjs`) shells to this for the DYNAMIC/REMOTE
+        // fallback path only — build-time responsive variants are still preferred, so
+        // prerendered/static pages never invoke it. Reads the source image bytes on
+        // stdin, resizes (never upscales) to `--width`, re-encodes to `--format`
+        // (`png`|`jpeg`) at `--quality`, and writes the optimized bytes to stdout.
+        Some("optimize-image") => optimize_image(arguments.collect::<Vec<_>>()),
         _ => Err(usage()),
     }
+}
+
+/// The native next/image runtime optimizer: decode the source raster on stdin, resize
+/// (downscale only — never upscale past the intrinsic width) to `--width`, re-encode to
+/// `--format` (`png` preserves alpha; `jpeg` re-compresses at `--quality`), and stream the
+/// optimized bytes to stdout. This is the on-the-fly path the emitted orchestrator shells
+/// to for a DYNAMIC or REMOTE image src; static/public rasters keep using the build-time
+/// responsive variants, so this pays nothing on the prerendered/static page path.
+fn optimize_image(args: Vec<std::ffi::OsString>) -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    let mut width: Option<u32> = None;
+    let mut quality: u8 = 75;
+    let mut format = String::from("jpeg");
+    let flags: Vec<String> = args.iter().filter_map(|a| a.to_str().map(str::to_string)).collect();
+    let mut it = flags.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--width" => {
+                width = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .filter(|w| *w > 0)
+                        .ok_or_else(|| "optimize-image: --width needs a positive integer".to_string())?,
+                );
+            }
+            "--quality" => {
+                quality = it
+                    .next()
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .filter(|q| *q >= 1 && *q <= 100)
+                    .ok_or_else(|| "optimize-image: --quality needs an integer 1-100".to_string())?;
+            }
+            "--format" => {
+                format = it
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| "optimize-image: --format needs png|jpeg".to_string())?;
+            }
+            other => return Err(format!("optimize-image: unknown flag {other}")),
+        }
+    }
+    let width = width.ok_or_else(|| "optimize-image: --width is required".to_string())?;
+
+    let mut input = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .map_err(|error| format!("optimize-image: cannot read stdin: {error}"))?;
+    if input.is_empty() {
+        return Err("optimize-image: empty input on stdin".to_string());
+    }
+    let decoded = image::load_from_memory(&input)
+        .map_err(|error| format!("optimize-image: cannot decode input image: {error}"))?;
+    let (w, h) = (decoded.width().max(1), decoded.height().max(1));
+    // Downscale only: clamp the requested width to the intrinsic width so we never
+    // upscale (matching Next's optimizer, which caps at the source dimensions).
+    let target_w = width.min(w);
+    let target_h = ((h as u64 * target_w as u64) / w as u64).max(1) as u32;
+    let resized = if target_w == w {
+        decoded
+    } else {
+        decoded.resize(target_w, target_h, image::imageops::FilterType::Lanczos3)
+    };
+
+    let mut out = Vec::new();
+    match format.as_str() {
+        "png" => {
+            let mut cursor = std::io::Cursor::new(&mut out);
+            resized
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .map_err(|error| format!("optimize-image: cannot encode png: {error}"))?;
+        }
+        "jpeg" | "jpg" => {
+            let rgb = resized.to_rgb8();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+            encoder
+                .encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+                .map_err(|error| format!("optimize-image: cannot encode jpeg: {error}"))?;
+        }
+        other => {
+            return Err(format!(
+                "optimize-image: unsupported --format {other} (supported: png, jpeg)"
+            ));
+        }
+    }
+    std::io::stdout()
+        .write_all(&out)
+        .map_err(|error| format!("optimize-image: cannot write stdout: {error}"))?;
+    Ok(())
 }
 
 /// `diffpack build` — an HTML-rooted web build. Single-page by default (the
