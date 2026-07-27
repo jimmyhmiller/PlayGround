@@ -45,6 +45,17 @@ pub enum LoaderKind {
     /// query keys a distinct module per `(file, media)` pair so identical
     /// media-qualified imports dedup and distinct ones stay distinct.
     CssMedia,
+    /// `?worker` — the default export is a `Worker` constructor. The referenced
+    /// entry is bundled as its own self-contained browser chunk under `assets/`
+    /// and the constructor spawns a module worker at that emitted URL.
+    Worker,
+    /// `?inline` — the asset is always inlined as a `data:` URI (regardless of
+    /// the build's inline-size threshold), exported as the default string.
+    Inline,
+    /// `?init` — a WebAssembly module. The default export is an async
+    /// initializer `(imports) => Promise<WebAssembly.Instance>` that fetches
+    /// (or decodes, when inlined) the emitted `.wasm` and instantiates it.
+    WasmInit,
 }
 
 impl LoaderKind {
@@ -55,6 +66,9 @@ impl LoaderKind {
             LoaderKind::Raw => "raw",
             LoaderKind::TsrSplit => "tsr-split",
             LoaderKind::CssMedia => "media",
+            LoaderKind::Worker => "worker",
+            LoaderKind::Inline => "inline",
+            LoaderKind::WasmInit => "init",
         }
     }
 }
@@ -128,8 +142,24 @@ impl ResourceId {
             "raw" => Some(LoaderKind::Raw),
             "tsr-split" => Some(LoaderKind::TsrSplit),
             "media" => Some(LoaderKind::CssMedia),
+            "worker" | "sharedworker" => Some(LoaderKind::Worker),
+            "inline" => Some(LoaderKind::Inline),
+            "init" => Some(LoaderKind::WasmInit),
             _ => None,
         }
+    }
+
+    /// Whether the query carries `flag` as one of its `&`-separated tokens (a
+    /// bare flag, e.g. the `inline` in `?worker&inline`). The token must be a
+    /// standalone key, not a value: `?worker&inline` matches `inline`,
+    /// `?name=inline` does not.
+    pub fn query_has_flag(&self, flag: &str) -> bool {
+        let Some(query) = self.query.as_deref() else {
+            return false;
+        };
+        query
+            .split('&')
+            .any(|token| token.split('=').next() == Some(flag))
     }
 
     /// Builds the specific error for a query-bearing id whose loader is not yet
@@ -261,6 +291,46 @@ mod tests {
         );
         assert_eq!(ResourceId::parse("a.css").loader_kind(), None);
         assert_eq!(ResourceId::parse("a.css?weird").loader_kind(), None);
+    }
+
+    #[test]
+    fn classifies_worker_inline_and_wasm_init_loaders() {
+        assert_eq!(
+            ResourceId::parse("w.js?worker").loader_kind(),
+            Some(LoaderKind::Worker)
+        );
+        assert_eq!(
+            ResourceId::parse("w.js?sharedworker").loader_kind(),
+            Some(LoaderKind::Worker)
+        );
+        // A `?worker&inline` combo still classifies as the worker loader.
+        assert_eq!(
+            ResourceId::parse("w.js?worker&inline").loader_kind(),
+            Some(LoaderKind::Worker)
+        );
+        assert_eq!(
+            ResourceId::parse("pic.png?inline").loader_kind(),
+            Some(LoaderKind::Inline)
+        );
+        assert_eq!(
+            ResourceId::parse("m.wasm?init").loader_kind(),
+            Some(LoaderKind::WasmInit)
+        );
+    }
+
+    #[test]
+    fn query_has_flag_matches_only_standalone_bare_flags() {
+        let worker_inline = ResourceId::parse("w.js?worker&inline");
+        assert!(worker_inline.query_has_flag("worker"));
+        assert!(worker_inline.query_has_flag("inline"));
+        assert!(!worker_inline.query_has_flag("url"));
+
+        // A value, not a bare flag, must not match.
+        let named = ResourceId::parse("w.js?name=inline");
+        assert!(!named.query_has_flag("inline"));
+        assert!(named.query_has_flag("name"));
+
+        assert!(!ResourceId::parse("w.js").query_has_flag("inline"));
     }
 
     #[test]

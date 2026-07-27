@@ -2559,6 +2559,17 @@ impl Bundler {
                 .into_iter()
                 .map(|(specifier, target, demand)| (specifier, self.intern(target), demand))
                 .collect();
+            // A `?worker` module bundles its referenced entry as a self-contained
+            // worker chunk. The key matches the `__diffpack_worker__<key>__`
+            // placeholder the synthesizer emitted, so the emit-step substitution
+            // (shared with the `new Worker(new URL(...))` path) resolves it to the
+            // emitted URL.
+            let resource = ResourceId::parse(&id);
+            let workers = if resource.loader_kind() == Some(LoaderKind::Worker) {
+                vec![(worker_import_key(&resource.path), PathBuf::from(&resource.path))]
+            } else {
+                Vec::new()
+            };
             return Ok(ModuleState {
                 hash: special.hash,
                 code_hash: special.hash,
@@ -2577,7 +2588,7 @@ impl Bundler {
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
-                workers: Vec::new(),
+                workers,
             });
         }
         let read_started = frontend_profile::start();
@@ -4500,6 +4511,15 @@ fn load_uncached(
             &special,
             &mut diagnostics,
         );
+        // A `?worker` module registers its referenced entry as a worker chunk;
+        // the key matches the `__diffpack_worker__<key>__` placeholder in the
+        // synthesized constructor so the emit-step substitution resolves it.
+        let resource = ResourceId::parse(&id);
+        let workers = if resource.loader_kind() == Some(LoaderKind::Worker) {
+            vec![(worker_import_key(&resource.path), PathBuf::from(&resource.path))]
+        } else {
+            Vec::new()
+        };
         return Ok(LoadedModule {
             hash: special.hash,
             code_hash: special.hash,
@@ -4519,7 +4539,7 @@ fn load_uncached(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
-            workers: Vec::new(),
+            workers,
         });
     }
     let read_started = frontend_profile::start();
@@ -4733,8 +4753,152 @@ fn synthesize_query_module_impl(
         Some(LoaderKind::Raw) => synthesize_raw(Path::new(&resource.path)),
         Some(LoaderKind::TsrSplit) => synthesize_tsr_split(resource, target),
         Some(LoaderKind::CssMedia) => synthesize_css_media(resource),
+        Some(LoaderKind::Worker) => synthesize_worker(resource),
+        Some(LoaderKind::Inline) => synthesize_inline(Path::new(&resource.path)),
+        Some(LoaderKind::WasmInit) => synthesize_wasm_init(resource, base, asset_inline_limit),
         None => Err(resource.unimplemented_loader_error()),
     }
+}
+
+/// The deterministic worker key for a `?worker` import site, derived from the
+/// resolved entry path. Defined once and used both to mint the
+/// `__diffpack_worker__<key>__` placeholder inside the synthesized constructor
+/// module ([`synthesize_worker`]) and to register the worker entry for bundling
+/// (in [`ModuleGraph::load_module`]), so the two agree by construction.
+fn worker_import_key(entry_path: &str) -> String {
+    crate::transform::worker_key(Path::new(entry_path), "?worker")
+}
+
+/// A `?worker` module: `import W from './w.js?worker'` yields a default-exported
+/// `Worker` constructor. The referenced entry is bundled as its own
+/// self-contained browser chunk (registered as a worker entry in
+/// [`ModuleGraph::load_module`], emitted under `assets/`), and the constructor
+/// spawns a module worker at the emitted URL. The URL is a
+/// `__diffpack_worker__<key>__` placeholder that the emit step substitutes with
+/// the real public path, exactly like the `new Worker(new URL(...))` form.
+///
+/// `?worker&inline` (a blob-inlined worker) is refused with a specific error
+/// rather than silently emitting a separate file the app did not ask for.
+fn synthesize_worker(resource: &ResourceId) -> Result<SpecialModule, String> {
+    if resource.query_has_flag("inline") {
+        return Err(format!(
+            "loader `?worker&inline` (blob-inlined workers) is not yet implemented \
+             (requested for {}); use `?worker` for a separately emitted worker chunk",
+            resource.path
+        ));
+    }
+    let key = worker_import_key(&resource.path);
+    // `new WorkerWrapper()` returns the constructed Worker: a constructor that
+    // returns an object yields that object. `options` forwards a caller-supplied
+    // `name`/`credentials` while keeping the module `type`, matching Vite's
+    // `?worker` default-export shape.
+    let placeholder = format!("__diffpack_worker__{key}__");
+    let synthetic = format!(
+        "export default function WorkerWrapper(options) {{\n  \
+           return new Worker({}, {{ type: \"module\", ...options }});\n}}\n",
+        quote(&placeholder),
+    );
+    let transformed = transform_module(Path::new("diffpack-worker.js"), &synthetic, Target::Client);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    })
+}
+
+/// A `?inline` module: the asset is ALWAYS embedded as a `data:` URI (default
+/// string export), regardless of the build's inline-size threshold. SVG keeps
+/// its native `data:image/svg+xml` encoding; everything else is base64 under
+/// its content type.
+fn synthesize_inline(source_path: &Path) -> Result<SpecialModule, String> {
+    let bytes = fs::read(source_path)
+        .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
+    let data_uri = svg_data_url(source_path, &bytes).unwrap_or_else(|| {
+        format!(
+            "data:{};base64,{}",
+            asset_mime_type(source_path),
+            base64_encode(&bytes)
+        )
+    });
+    let synthetic = format!("export default {};\n", quote(&data_uri));
+    let transformed =
+        transform_module(Path::new("diffpack-inline-asset.js"), &synthetic, Target::Server);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    })
+}
+
+/// A `.wasm?init` module: `import init from './m.wasm?init'` yields an async
+/// initializer `(imports) => Promise<WebAssembly.Instance>`. The `.wasm` byte
+/// payload takes the SAME content-hashed `assets/` pipeline (and inline-limit
+/// `data:` fast path) as a `?url` asset; the emitted/inlined URL is closed over
+/// by the shared instantiation helper ([`wasm_helper.js`], ported from Vite).
+fn synthesize_wasm_init(
+    resource: &ResourceId,
+    base: &str,
+    inline_limit: usize,
+) -> Result<SpecialModule, String> {
+    let source_path = PathBuf::from(&resource.path);
+    if source_path.extension().and_then(|value| value.to_str()) != Some("wasm") {
+        return Err(format!(
+            "loader `?init` applies only to `.wasm` files (requested for {})",
+            resource.path
+        ));
+    }
+    let bytes = fs::read(&source_path)
+        .map_err(|error| format!("cannot read {}: {error}", source_path.display()))?;
+    // Small modules inline as a `data:` URI (the helper base64-decodes and
+    // instantiates directly); larger ones emit a content-hashed `assets/` file
+    // served as `application/wasm`.
+    let (url, assets) = if inline_limit > 0 && bytes.len() <= inline_limit {
+        let data_uri = format!(
+            "data:application/wasm;base64,{}",
+            base64_encode(&bytes)
+        );
+        (data_uri, Vec::new())
+    } else {
+        let public_name = asset_public_name(&source_path, content_hash(&bytes));
+        let url = format!("{base}assets/{public_name}");
+        let emit = AssetEmit {
+            source: source_path,
+            public_name,
+            tailwind_source: None,
+            image_variants: None,
+        };
+        (url, vec![emit])
+    };
+    let helper = include_str!("wasm_helper.js");
+    let synthetic = format!(
+        "{helper}\nconst __diffpackWasmUrl = {};\n\
+         export default (imports = {{}}) => __diffpackWasmInit(imports, __diffpackWasmUrl);\n",
+        quote(&url),
+    );
+    let transformed = transform_module(Path::new("diffpack-wasm-init.js"), &synthetic, Target::Server);
+    Ok(SpecialModule {
+        hash: content_hash(transformed.code.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets,
+        css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    })
 }
 
 /// A `?media=<query>` module: a CSS file imported under a media query
@@ -5163,6 +5327,7 @@ fn asset_mime_type(path: &Path) -> &'static str {
         Some("otf") => "font/otf",
         Some("woff") => "font/woff",
         Some("woff2") => "font/woff2",
+        Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
 }
@@ -6528,6 +6693,158 @@ mod tests {
                 "hello from raw\n"
             );
         }
+    }
+
+    #[test]
+    fn worker_query_import_emits_a_worker_chunk_and_references_its_public_url() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("job.js"),
+            "self.onmessage = (event) => self.postMessage(event.data * 2);\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import JobWorker from './job.js?worker';\nconst worker = new JobWorker();\nconsole.log(worker);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let bundle = fs::read_to_string(&output).unwrap();
+        // The worker URL placeholder must be fully substituted — a leftover
+        // `__diffpack_worker__…__` would 404 at runtime.
+        assert!(
+            !bundle.contains("__diffpack_worker__"),
+            "worker placeholder left in bundle:\n{bundle}"
+        );
+        // The bundle spawns a `Worker` at the emitted chunk's public URL.
+        let url = bundle
+            .lines()
+            .find_map(|line| line.find("/assets/job-").map(|start| &line[start..]))
+            .and_then(|rest| rest.split('"').next())
+            .expect("bundle should reference the worker chunk url");
+        assert!(url.ends_with(".worker.js"), "{url}");
+
+        // The self-contained worker chunk is emitted next to the bundle and
+        // carries the entry's code.
+        let worker_path = directory
+            .path()
+            .join("dist/assets")
+            .join(url.trim_start_matches("/assets/"));
+        assert!(worker_path.is_file(), "missing {}", worker_path.display());
+        let worker_code = fs::read_to_string(&worker_path).unwrap();
+        assert!(
+            worker_code.contains("postMessage"),
+            "worker chunk should bundle the entry code:\n{worker_code}"
+        );
+    }
+
+    #[test]
+    fn worker_inline_combo_reports_a_specific_unimplemented_error() {
+        let error = match synthesize_worker(&ResourceId::parse("/abs/job.js?worker&inline")) {
+            Err(error) => error,
+            Ok(_) => panic!("?worker&inline should be refused"),
+        };
+        assert!(error.contains("?worker&inline"), "{error}");
+        assert!(!error.contains("No such file or directory"), "{error}");
+    }
+
+    #[test]
+    fn inline_query_import_embeds_the_asset_as_a_data_uri() {
+        let directory = tempdir().unwrap();
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nfake-png-bytes";
+        fs::write(directory.path().join("pixel.png"), png).unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import pixel from './pixel.png?inline';\nconsole.log(pixel);\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let bundle = fs::read_to_string(&output).unwrap();
+        let expected = format!("data:image/png;base64,{}", base64_encode(png));
+        assert!(bundle.contains(&expected), "bundle should embed the data URI:\n{bundle}");
+        // An inlined asset emits no separate file.
+        let assets_dir = directory.path().join("dist/assets");
+        assert!(
+            !assets_dir.exists() || fs::read_dir(&assets_dir).unwrap().next().is_none(),
+            "?inline must not emit a separate asset file"
+        );
+    }
+
+    #[test]
+    fn wasm_init_import_emits_the_module_and_a_default_initializer() {
+        let directory = tempdir().unwrap();
+        // A minimal well-formed WebAssembly module: the `\0asm` magic + version 1.
+        let wasm: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        fs::write(directory.path().join("add.wasm"), wasm).unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import init from './add.wasm?init';\ninit().then((instance) => console.log(instance));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let bundle = fs::read_to_string(&output).unwrap();
+        // The instantiation helper is inlined.
+        assert!(bundle.contains("WebAssembly"), "helper missing:\n{bundle}");
+        assert!(bundle.contains("instantiate"), "helper missing:\n{bundle}");
+
+        // The `.wasm` payload takes the content-hashed asset pipeline (default
+        // inline limit is 0, so it is a real file, not a data URI) and the
+        // initializer closes over its URL.
+        let url = bundle
+            .lines()
+            .find_map(|line| line.find("/assets/add-").map(|start| &line[start..]))
+            .and_then(|rest| rest.split('"').next())
+            .expect("bundle should reference the hashed wasm url");
+        assert!(url.ends_with(".wasm"), "{url}");
+        let wasm_path = directory
+            .path()
+            .join("dist/assets")
+            .join(url.trim_start_matches("/assets/"));
+        assert_eq!(fs::read(&wasm_path).unwrap(), wasm);
+    }
+
+    #[test]
+    fn wasm_init_inlines_a_small_module_as_a_data_uri() {
+        let directory = tempdir().unwrap();
+        let wasm: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        fs::write(directory.path().join("tiny.wasm"), wasm).unwrap();
+        // A generous inline limit forces the payload into a `data:` URI.
+        // Guard: `?init` only applies to `.wasm`.
+        assert!(synthesize_wasm_init(&ResourceId::parse("tiny.js?init"), "/", 4096).is_err());
+        let path = directory.path().join("tiny.wasm");
+        let module = synthesize_wasm_init(
+            &ResourceId::parse(&format!("{}?init", path.display())),
+            "/",
+            4096,
+        )
+        .unwrap();
+        assert!(module.assets.is_empty(), "small wasm should inline, not emit a file");
+        assert!(
+            module.code.contains("data:application/wasm;base64,"),
+            "small wasm should be a data URI:\n{}",
+            module.code
+        );
     }
 
     #[test]
