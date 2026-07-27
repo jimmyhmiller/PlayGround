@@ -3239,7 +3239,7 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         };
         let runtime_return = if hmr {
             format!(
-                "const __exports={{register:__register,require:__require,replace:__replace,hmrApply:__hmrApply,serverInvalidate:__hmrServerInvalidate,bumpVersion:__bumpVersion}};globalThis[{}]=__exports;return __exports;",
+                "const __exports={{register:__register,require:__require,replace:__replace,hmrApply:__hmrApply,serverInvalidate:__hmrServerInvalidate,bumpVersion:__bumpVersion,prune:__hmrPrune}};globalThis[{}]=__exports;return __exports;",
                 quote(crate::hmr::RUNTIME_GLOBAL)
             )
         } else {

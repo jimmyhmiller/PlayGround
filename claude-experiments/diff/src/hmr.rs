@@ -69,20 +69,44 @@ pub const RUNTIME_METHODS: &str = r#"
 const __hmrVersions=Object.create(null);
 const __hmrData=Object.create(null);
 const __hmrEntries=Object.create(null);
-function __hmrEntry(id){return __hmrEntries[id]||(__hmrEntries[id]={selfAccept:false,selfCallbacks:[],depCallbacks:[],disposers:[]});}
+// Per-module HMR bookkeeping. `data` is NOT stored here: it lives in `__hmrData[id]`
+// and deliberately outlives dispose/re-run so a self-accepting module can carry
+// state across a hot update (the whole point of `import.meta.hot.data`).
+function __hmrEntry(id){return __hmrEntries[id]||(__hmrEntries[id]={selfAccept:false,selfCallbacks:[],depCallbacks:[],disposers:[],pruners:[],listeners:Object.create(null),declined:false});}
+// Global HMR event bus (Vite parity). `import.meta.hot.on(event,cb)` registers a
+// listener; the runtime emits the standard `vite:*` lifecycle events. Vite's emitter
+// is SHARED across every module, so an event fires every registered listener
+// regardless of which module registered it. Listeners are stored per module so they
+// are discarded automatically when that module is pruned.
+function __hmrEmit(event,payload){for(const k in __hmrEntries){const l=__hmrEntries[k].listeners[event];if(l)for(const cb of l.slice()){try{cb(payload,event);}catch(err){console.error("[diffpack hmr] "+event+" listener threw",err);}}}}
 function __makeHot(id){
   const data=__hmrData[id]||(__hmrData[id]=Object.create(null));
   return {
     data,
     accept(dep,cb){
       const entry=__hmrEntry(id);
+      // accept() / accept(cb): self-accept (re-run this module in place). accept(dep,cb)
+      // / accept([dep,...],cb): accept named dependency updates and receive their fresh
+      // module namespace(s) in `cb`.
       if(typeof dep==="function"||dep===undefined){entry.selfAccept=true;if(typeof dep==="function")entry.selfCallbacks.push(dep);}
-      else{const deps=Array.isArray(dep)?dep:[dep];for(const d of deps)entry.depCallbacks.push([d,cb]);entry.selfAccept=entry.selfAccept;}
+      else{const deps=Array.isArray(dep)?dep:[dep];for(const d of deps)entry.depCallbacks.push([d,cb]);}
     },
+    // Vite's acceptExports(names, cb): a self-accept scoped to named exports. Diffpack
+    // re-runs the whole module factory on self-accept, so the export filter is advisory
+    // (accepting the module is a superset of accepting some of its exports); we
+    // self-accept and forward the callback, which preserves the module's intent.
+    acceptExports(_exports,cb){const entry=__hmrEntry(id);entry.selfAccept=true;if(typeof cb==="function")entry.selfCallbacks.push(cb);},
     dispose(cb){__hmrEntry(id).disposers.push(cb);},
-    invalidate(){__hmrReload("module "+id+" invalidated");},
-    decline(){},
-    on(){},
+    prune(cb){__hmrEntry(id).pruners.push(cb);},
+    invalidate(message){__hmrInvalidate(id,message);},
+    // decline(): this module cannot be hot-updated; any update touching it forces a
+    // full page reload instead of a hot swap.
+    decline(){__hmrEntry(id).declined=true;},
+    on(event,cb){const e=__hmrEntry(id);(e.listeners[event]||(e.listeners[event]=[])).push(cb);},
+    off(event,cb){const e=__hmrEntries[id];if(!e)return;const l=e.listeners[event];if(!l)return;const i=l.indexOf(cb);if(i>=0)l.splice(i,1);},
+    // Client->server custom messaging needs a duplex dev channel diffpack does not
+    // expose; be explicit (a clear throw) rather than silently swallowing the message.
+    send(){throw new Error("import.meta.hot.send is not supported by diffpack's dev server");},
   };
 }
 function __importers(id){const out=[];for(const k in __maps){const m=__maps[k];for(const s in m){if(m[s]===id){out.push(+k);break;}}}return out;}
@@ -90,18 +114,42 @@ function __importers(id){const out=[];for(const k in __maps){const m=__maps[k];f
 // chunk map records `spec -> [chunkPath, targetId]`.
 function __dynamicImporters(id){const out=[];for(const k in __chunks){const m=__chunks[k];for(const s in m){const c=m[s];if(c&&c[1]===id){out.push(+k);break;}}}return out;}
 function __disposeModule(id){const e=__hmrEntries[id];if(e){for(const d of e.disposers){try{d(__hmrData[id]);}catch(err){console.error(err);}}e.selfCallbacks=[];e.disposers=[];e.depCallbacks=[];e.selfAccept=false;}}
-function __hmrReload(reason){if(typeof location!=="undefined"&&location.reload){console.log("[diffpack hmr] full reload: "+reason);location.reload();}else{console.warn("[diffpack hmr] full reload required ("+reason+")");}}
+function __hmrReload(reason){__hmrEmit("vite:beforeFullReload",{path:"*",reason:reason});if(typeof location!=="undefined"&&location.reload){console.log("[diffpack hmr] full reload: "+reason);location.reload();}else{console.warn("[diffpack hmr] full reload required ("+reason+")");}}
+// hot.invalidate(): the boundary gives up on this update. Emit the event, then force a
+// full reload so the change is still reflected (diffpack's client graph roots at the
+// entry, so an invalidated boundary that no importer re-accepts reaches the entry ->
+// reload; matching that, invalidate reloads directly rather than leaving stale code).
+function __hmrInvalidate(id,message){__hmrEmit("vite:invalidate",{path:String(id),message:message});__hmrReload("module "+id+" invalidated"+(message?": "+message:""));}
+// Fire prune callbacks for modules removed from the graph, then forget them. Exposed
+// as the runtime's `prune(ids)` and reachable from the dev client's "prune" message.
+function __hmrPrune(ids){
+  if(!ids||!ids.length)return 0;
+  __hmrEmit("vite:beforePrune",{});
+  for(const id of ids){
+    const e=__hmrEntries[id];
+    if(e){for(const p of e.pruners){try{p(__hmrData[id]);}catch(err){console.error("[diffpack hmr] prune handler threw",err);}}}
+    __disposeModule(id);
+    delete __cache[id];
+    delete __hmrEntries[id];
+    delete __hmrData[id];
+  }
+  return ids.length;
+}
 function __replace(id,factory,map){__modules[id]=factory;if(map)__maps[id]=map;return __hmrApply([id]);}
 function __bumpVersion(chunk){__hmrVersions[chunk]=(__hmrVersions[chunk]||0)+1;}
 // Apply an update for a set of changed module ids whose new factories are already
 // registered. Walks up to accepting boundaries; a leaf with no accepting importer
 // (reaching the entry) triggers a full reload. Returns true when applied hot.
 function __hmrApply(ids){
+  __hmrEmit("vite:beforeUpdate",{type:"update",updates:ids.map(id=>({type:"js-update",path:String(id),acceptedPath:String(id)}))});
   const boundaries=[];const seen=new Set();const queue=ids.slice();
   while(queue.length){
     const id=queue.shift();
     if(seen.has(id))continue;seen.add(id);
     const e=__hmrEntries[id];
+    // A module that declined hot updates forces a full reload for any update that
+    // reaches it (either directly changed or on the propagation path).
+    if(e&&e.declined){__hmrReload("module "+id+" declined hot updates");return false;}
     if(e&&e.selfAccept){boundaries.push({id,depCb:null});continue;}
     const importers=__importers(id);
     if(importers.length===0){__hmrReload("no accepting boundary for module "+id);return false;}
@@ -125,6 +173,7 @@ function __hmrApply(ids){
       if(e)for(const cb of e.selfCallbacks)cb(next,prev);
     }catch(err){console.error(err);__hmrReload("accept handler for "+b.id+" threw");return false;}
   }
+  __hmrEmit("vite:afterUpdate",{type:"update",updates:ids.map(id=>({type:"js-update",path:String(id),acceptedPath:String(id)}))});
   return true;
 }
 // Server-side invalidation (Increment A): hot-reload the changed subtree in-process
@@ -339,6 +388,13 @@ pub fn client_script(ws_path: &str) -> String {
             link.parentNode.insertBefore(next,link.nextSibling);
           }}
         }})(msg.hrefs[c]);}}
+        return;
+      }}
+      if(msg.type==="prune"){{
+        // Modules removed from the graph: fire their import.meta.hot.prune callbacks
+        // and forget them, without a reload. No-op if the runtime is not up yet.
+        var prt=globalThis[{global}];
+        if(prt&&prt.prune)prt.prune(msg.ids||[]);
         return;
       }}
       if(msg.type==="update"){{
@@ -718,6 +774,109 @@ mod tests {
         assert!(
             script.contains("msg.type===\"build-ok\"") && script.contains("__diffpackOverlay.clear()"),
             "must clear the overlay on build recovery: {script}"
+        );
+    }
+
+    #[test]
+    fn runtime_methods_expose_the_full_import_meta_hot_api() {
+        // The per-module `module.hot` (which `import.meta.hot` rewrites to) must carry
+        // the complete Vite HMR surface, not silent no-op stubs.
+        let m = RUNTIME_METHODS;
+        for member in [
+            "accept(", "acceptExports(", "dispose(", "prune(", "invalidate(", "decline(",
+            "on(event,cb)", "off(event,cb)", "send(",
+        ] {
+            assert!(m.contains(member), "runtime must define hot.{member}: {m}");
+        }
+        // `data` is the persisted object; it must be the SAME `__hmrData[id]` that
+        // survives dispose + re-run (state preservation across a hot update).
+        assert!(
+            m.contains("const data=__hmrData[id]||(__hmrData[id]=Object.create(null))"),
+            "hot.data must be the persisted per-module object: {m}"
+        );
+        // `__disposeModule` reads `__hmrData[id]` (to hand it to disposers) but must
+        // NEVER delete or reassign it, or state would not survive the re-run.
+        let dispose = m
+            .split("function __disposeModule")
+            .nth(1)
+            .and_then(|rest| rest.split("function ").next())
+            .unwrap_or("");
+        assert!(
+            !dispose.contains("delete __hmrData") && !dispose.contains("__hmrData[id]="),
+            "dispose must not clear __hmrData (data must persist across updates): {dispose}"
+        );
+    }
+
+    #[test]
+    fn decline_forces_a_full_reload_and_is_honored_by_apply() {
+        // decline() records the flag; the apply walk turns any update reaching a
+        // declined module into a full reload rather than a hot swap.
+        let m = RUNTIME_METHODS;
+        assert!(
+            m.contains("decline(){__hmrEntry(id).declined=true;}"),
+            "decline must set the declined flag: {m}"
+        );
+        assert!(
+            m.contains("if(e&&e.declined){__hmrReload"),
+            "the apply walk must full-reload when it reaches a declined module: {m}"
+        );
+    }
+
+    #[test]
+    fn prune_registers_callbacks_and_the_runtime_can_fire_them() {
+        // prune(cb) registers a pruner; __hmrPrune fires them, emits vite:beforePrune,
+        // and forgets the module (cache + entry + data), so a re-add starts clean.
+        let m = RUNTIME_METHODS;
+        assert!(m.contains("prune(cb){__hmrEntry(id).pruners.push(cb);}"), "prune must register: {m}");
+        let body = m
+            .split("function __hmrPrune")
+            .nth(1)
+            .and_then(|rest| rest.split("function ").next())
+            .unwrap_or("");
+        assert!(body.contains("vite:beforePrune"), "prune must emit vite:beforePrune: {body}");
+        for cleared in ["delete __cache[id]", "delete __hmrEntries[id]", "delete __hmrData[id]"] {
+            assert!(body.contains(cleared), "prune must forget the module ({cleared}): {body}");
+        }
+    }
+
+    #[test]
+    fn apply_emits_before_and_after_update_events() {
+        // on('vite:beforeUpdate'/'vite:afterUpdate') must observe a hot update: apply
+        // brackets its work with the two lifecycle events.
+        let m = RUNTIME_METHODS;
+        assert!(m.contains("vite:beforeUpdate"), "apply must emit vite:beforeUpdate: {m}");
+        assert!(m.contains("vite:afterUpdate"), "apply must emit vite:afterUpdate: {m}");
+        assert!(
+            m.contains("vite:beforeFullReload"),
+            "a full reload must emit vite:beforeFullReload: {m}"
+        );
+    }
+
+    #[test]
+    fn on_off_manage_a_shared_event_bus() {
+        // hot.on registers per-module; hot.off removes by identity; __hmrEmit delivers
+        // an event to EVERY module's listeners (Vite's emitter is shared).
+        let m = RUNTIME_METHODS;
+        assert!(
+            m.contains("on(event,cb){const e=__hmrEntry(id);(e.listeners[event]||(e.listeners[event]=[])).push(cb);}"),
+            "on must append to the per-module listener list: {m}"
+        );
+        assert!(
+            m.contains("off(event,cb){") && m.contains("l.splice(i,1)"),
+            "off must remove the listener by identity: {m}"
+        );
+        assert!(
+            m.contains("function __hmrEmit(event,payload){for(const k in __hmrEntries)"),
+            "emit must fan out to every module's listeners: {m}"
+        );
+    }
+
+    #[test]
+    fn client_script_handles_the_prune_message() {
+        let script = client_script("/__diffpack_hmr/ws");
+        assert!(
+            script.contains("msg.type===\"prune\"") && script.contains("prt.prune(msg.ids"),
+            "the HMR client must route a prune message to the runtime: {script}"
         );
     }
 
