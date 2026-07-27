@@ -154,6 +154,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             asset_inline_limit: 4096,
             aliases,
             conditions,
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target,
             // A TanStack/Vite app expects Vite's `import.meta.env` and
@@ -185,6 +186,20 @@ pub struct WebConfig {
     pub base: String,
     /// Whether Vite conventions are enabled for this build.
     pub vite: bool,
+    /// The HTML page entries for a MULTI-PAGE build, as ordered
+    /// `(name, absolute_html_path)` pairs from `build.rollupOptions.input`.
+    /// Empty means the single-`index.html` default; the `build` command falls
+    /// back to `<root>/index.html`.
+    pub inputs: Vec<(String, PathBuf)>,
+    /// Whether to emit the Vite build manifest (`build.manifest`), and its file
+    /// name (default `.vite/manifest.json`).
+    pub emit_manifest: bool,
+    pub manifest_name: String,
+    /// `server.proxy` rules the dev server forwards. Empty for a build.
+    pub proxy: Vec<crate::vite_config::ProxyRule>,
+    /// `optimizeDeps.exclude` — surfaced for honest reporting (Diffpack does not
+    /// pre-bundle, so exclusion is satisfied by construction).
+    pub optimize_deps_exclude: Vec<String>,
 }
 
 /// Derives the build config for an HTML-rooted web application.
@@ -211,6 +226,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions,
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::Client,
             import_meta_env: None,
@@ -235,6 +251,11 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
         },
         base: "/".to_string(),
         vite: false,
+        inputs: Vec::new(),
+        emit_manifest: false,
+        manifest_name: ".vite/manifest.json".to_string(),
+        proxy: Vec::new(),
+        optimize_deps_exclude: Vec::new(),
     };
     if !vite {
         return Ok(config);
@@ -262,10 +283,26 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     config.build.scss.additional_data = resolved
         .as_ref()
         .and_then(|resolved| resolved.scss_additional_data.clone());
-    let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
+    let mut defines = resolved
+        .as_ref()
+        .map(|resolved| resolved.define.clone())
+        .unwrap_or_default();
     set_node_env(&mut defines, "production");
     // Vite resolves with the mode condition alongside the browser ones.
     config.build.conditions.push("production".to_string());
+    // `resolve.conditions`: Vite ADDS user conditions to the environment defaults
+    // (they widen, never replace), so append any not already present.
+    if let Some(extra) = resolved.as_ref().map(|resolved| &resolved.resolve_conditions) {
+        for condition in extra {
+            if !config.build.conditions.iter().any(|existing| existing == condition) {
+                config.build.conditions.push(condition.clone());
+            }
+        }
+    }
+    // `resolve.mainFields`: override the per-target default when the config sets it.
+    if let Some(main_fields) = resolved.as_ref().map(|resolved| resolved.main_fields.clone()) {
+        config.build.main_fields = main_fields;
+    }
     config.build.defines = defines;
     // Vite normalizes `base` to end with `/`; URL joins depend on it.
     let base = if base.ends_with('/') { base } else { format!("{base}/") };
@@ -304,6 +341,40 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
     config.build.import_meta_glob = Some(crate::import_meta_glob::ImportMetaGlob {
         root: root.to_path_buf(),
     });
+    // `resolve.dedupe`: force each listed package to a single copy from the project
+    // root's `node_modules`, exactly as Vite does — a directory alias the resolver
+    // then resolves the package entry within. Appended AFTER the config aliases so it
+    // does not clobber them; a package not present at the root is skipped. Only added
+    // when the package is not already aliased, so an explicit alias wins.
+    if let Some(dedupe) = resolved.as_ref().map(|resolved| resolved.dedupe.clone()) {
+        for package in dedupe {
+            if config.build.aliases.iter().any(|(find, _)| *find == package) {
+                continue;
+            }
+            let target = root.join("node_modules").join(&package);
+            if target.is_dir() {
+                config
+                    .build
+                    .aliases
+                    .push((package, target.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    // Multi-page inputs, manifest flag, dev proxy, and optimizeDeps.exclude for the
+    // caller (`diffpack build` / `diffpack dev`).
+    if let Some(resolved) = resolved.as_ref() {
+        config.inputs = resolved
+            .inputs
+            .iter()
+            .map(|(name, path)| (name.clone(), PathBuf::from(path)))
+            .collect();
+        config.emit_manifest = resolved.manifest;
+        if let Some(name) = &resolved.manifest_name {
+            config.manifest_name = name.clone();
+        }
+        config.proxy = resolved.proxy.clone();
+        config.optimize_deps_exclude = resolved.optimize_deps_exclude.clone();
+    }
     config.base = base;
     Ok(config)
 }

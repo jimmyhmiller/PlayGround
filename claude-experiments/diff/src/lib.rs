@@ -33,6 +33,7 @@ pub mod transform;
 pub mod visualizer;
 pub mod vite_config;
 pub mod vite_define;
+pub mod vite_manifest;
 
 /// Track every allocation so the guard suite can assert on peak/retained memory
 /// deterministically. Relaxed atomics keep the overhead negligible and uniform,

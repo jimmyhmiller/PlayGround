@@ -22,6 +22,19 @@ use std::process::{Command, Stdio};
 /// stdin so no temporary file is written.
 const EVALUATOR: &str = include_str!("vite_config_evaluator.mjs");
 
+/// One `server.proxy` rule: forward requests whose path begins with `context` to
+/// `target`. `change_origin` rewrites the forwarded `Host` header to the target's
+/// host (Vite's `changeOrigin`); `ws` marks the rule as also proxying WebSocket
+/// upgrades. A `rewrite` FUNCTION cannot be expressed natively; the evaluator
+/// counts such rules and [`resolve`] surfaces a warning, never a silent drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyRule {
+    pub context: String,
+    pub target: String,
+    pub change_origin: bool,
+    pub ws: bool,
+}
+
 /// The subset of a resolved Vite config Diffpack consumes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedViteConfig {
@@ -40,6 +53,30 @@ pub struct ResolvedViteConfig {
     /// function value cannot be expressed natively; the evaluator counts it
     /// and [`resolve`] surfaces a warning, never a silent drop.
     pub scss_additional_data: Option<String>,
+    /// `build.rollupOptions.input` normalized to ordered `(name, absolute_path)`
+    /// pairs — the multi-page entry set. Empty means the single-`index.html`
+    /// default. Each path is absolute (resolved against the project root by the
+    /// evaluator).
+    pub inputs: Vec<(String, String)>,
+    /// `build.manifest`: whether to emit the build manifest, and its file name
+    /// (Vite's default is `.vite/manifest.json`).
+    pub manifest: bool,
+    pub manifest_name: Option<String>,
+    /// `resolve.conditions`: extra export-map conditions to honor, added to the
+    /// environment defaults.
+    pub resolve_conditions: Vec<String>,
+    /// `resolve.mainFields`: the `package.json` fields to try, in order. Empty
+    /// keeps the built-in per-target default.
+    pub main_fields: Vec<String>,
+    /// `resolve.dedupe`: packages that must resolve to a single copy from the
+    /// project root's `node_modules` (applied as root-directory aliases).
+    pub dedupe: Vec<String>,
+    /// `optimizeDeps.exclude`: dependencies excluded from pre-bundling. Diffpack
+    /// bundles every dependency natively, so this is satisfied by construction;
+    /// surfaced for honest reporting.
+    pub optimize_deps_exclude: Vec<String>,
+    /// `server.proxy` rules for the dev server.
+    pub proxy: Vec<ProxyRule>,
 }
 
 /// The candidate config filenames, in Vite's resolution order.
@@ -160,10 +197,153 @@ fn parse(stdout: &[u8]) -> Result<ResolvedViteConfig, String> {
         );
     }
 
+    // `build.rollupOptions.input` -> ordered `(name, absolute_path)` pairs.
+    let mut inputs = Vec::new();
+    if let Some(serde_json::Value::Array(entries)) = value.get("inputs") {
+        for entry in entries {
+            if let Some([name, path]) = entry.as_array().map(|pair| pair.as_slice())
+                && let (Some(name), Some(path)) = (name.as_str(), path.as_str())
+            {
+                inputs.push((name.to_string(), path.to_string()));
+            }
+        }
+    }
+    let manifest = value
+        .get("manifest")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let manifest_name = value
+        .get("manifestName")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let string_array = |key: &str| -> Vec<String> {
+        match value.get(key) {
+            Some(serde_json::Value::Array(entries)) => entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let resolve_conditions = string_array("resolveConditions");
+    let main_fields = string_array("mainFields");
+    let dedupe = string_array("dedupe");
+    let optimize_deps_exclude = string_array("optimizeDepsExclude");
+
+    let mut proxy = Vec::new();
+    if let Some(serde_json::Value::Array(entries)) = value.get("proxy") {
+        for entry in entries {
+            let (Some(context), Some(target)) = (
+                entry.get("context").and_then(|value| value.as_str()),
+                entry.get("target").and_then(|value| value.as_str()),
+            ) else {
+                continue;
+            };
+            proxy.push(ProxyRule {
+                context: context.to_string(),
+                target: target.to_string(),
+                change_origin: entry
+                    .get("changeOrigin")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                ws: entry
+                    .get("ws")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+            });
+        }
+    }
+    if value
+        .get("proxyRewriteSkipped")
+        .and_then(|value| value.as_u64())
+        .is_some_and(|skipped| skipped > 0)
+    {
+        eprintln!(
+            "warning: vite config has server.proxy rule(s) with a `rewrite` function, \
+             which diffpack's native dev proxy cannot apply (the path is forwarded as-is)"
+        );
+    }
+
     Ok(ResolvedViteConfig {
         base,
         define,
         alias,
         scss_additional_data,
+        inputs,
+        manifest,
+        manifest_name,
+        resolve_conditions,
+        main_fields,
+        dedupe,
+        optimize_deps_exclude,
+        proxy,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_multi_page_inputs_and_manifest() {
+        let json = br#"{
+            "inputs": [["main", "/abs/index.html"], ["about", "/abs/about.html"]],
+            "manifest": true,
+            "manifestName": ".vite/manifest.json"
+        }"#;
+        let resolved = parse(json).unwrap();
+        assert_eq!(
+            resolved.inputs,
+            vec![
+                ("main".to_string(), "/abs/index.html".to_string()),
+                ("about".to_string(), "/abs/about.html".to_string()),
+            ]
+        );
+        assert!(resolved.manifest);
+        assert_eq!(resolved.manifest_name.as_deref(), Some(".vite/manifest.json"));
+    }
+
+    #[test]
+    fn parses_resolve_and_optimize_deps_fields() {
+        let json = br#"{
+            "resolveConditions": ["custom", "browser"],
+            "mainFields": ["module", "main"],
+            "dedupe": ["react", "react-dom"],
+            "optimizeDepsExclude": ["some-esm-only-dep"]
+        }"#;
+        let resolved = parse(json).unwrap();
+        assert_eq!(resolved.resolve_conditions, vec!["custom", "browser"]);
+        assert_eq!(resolved.main_fields, vec!["module", "main"]);
+        assert_eq!(resolved.dedupe, vec!["react", "react-dom"]);
+        assert_eq!(resolved.optimize_deps_exclude, vec!["some-esm-only-dep"]);
+    }
+
+    #[test]
+    fn parses_server_proxy_string_and_object_forms() {
+        let json = br#"{
+            "proxy": [
+                {"context": "/api", "target": "http://localhost:3001", "changeOrigin": false, "ws": false},
+                {"context": "/socket", "target": "ws://localhost:4000", "changeOrigin": true, "ws": true}
+            ]
+        }"#;
+        let resolved = parse(json).unwrap();
+        assert_eq!(resolved.proxy.len(), 2);
+        assert_eq!(resolved.proxy[0].context, "/api");
+        assert_eq!(resolved.proxy[0].target, "http://localhost:3001");
+        assert!(!resolved.proxy[0].change_origin);
+        assert!(resolved.proxy[1].change_origin);
+        assert!(resolved.proxy[1].ws);
+    }
+
+    #[test]
+    fn absent_fields_default_empty() {
+        let resolved = parse(b"{}").unwrap();
+        assert!(resolved.inputs.is_empty());
+        assert!(!resolved.manifest);
+        assert!(resolved.resolve_conditions.is_empty());
+        assert!(resolved.main_fields.is_empty());
+        assert!(resolved.dedupe.is_empty());
+        assert!(resolved.optimize_deps_exclude.is_empty());
+        assert!(resolved.proxy.is_empty());
+    }
 }

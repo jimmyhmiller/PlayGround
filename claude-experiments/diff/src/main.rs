@@ -141,114 +141,29 @@ fn run() -> Result<(), String> {
                 .map_err(|error| {
                     format!("cannot open project root {}: {error}", Path::new(&project_root).display())
                 })?;
-            let html_path = root.join("index.html");
-            if !html_path.is_file() {
-                return Err(format!(
-                    "{} has no index.html; `diffpack build` bundles an HTML-rooted web app \
-                     (use `diffpack bundle <entry>` for a bare module entry)",
-                    root.display()
-                ));
-            }
-            let html = diffpack::html_entry::parse_file(&html_path)?;
-            let html_origin = html_path.display().to_string();
-            let entry_script = match html.module_scripts.as_slice() {
-                [] => {
-                    return Err(format!(
-                        "{html_origin}: no local <script type=\"module\" src> entry found"
-                    ));
-                }
-                [only] => only,
-                many => {
-                    let sources = many
-                        .iter()
-                        .map(|script| script.src.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(format!(
-                        "{html_origin}: {} module script entries ({sources}); multiple HTML \
-                         entries are not supported yet",
-                        many.len()
-                    ));
-                }
-            };
-            // A root-absolute src (`/src/main.tsx`) is project-root-relative, as
-            // in a dev server's URL space; anything else is relative to the HTML
-            // document itself.
-            let entry_path = match entry_script.src.strip_prefix('/') {
-                Some(rest) => root.join(rest),
-                None => html_path
-                    .parent()
-                    .expect("an HTML file has a parent directory")
-                    .join(&entry_script.src),
-            };
-            let entry = entry_path.canonicalize().map_err(|error| {
+            web_build(&root, out_dir, vite, minify, source_map)
+        }
+        Some("preview") => {
+            // Serve a completed production build (`diffpack build` output) over HTTP,
+            // the analogue of `vite preview`. Static files are served from the build
+            // directory; a client-routed path with no matching file falls back to the
+            // build's `index.html` (SPA fallback), exactly as `vite preview` does.
+            let dir = arguments
+                .next()
+                .ok_or_else(|| "usage: diffpack preview <build-dir> [port]".to_string())?;
+            let port = arguments
+                .next()
+                .and_then(|value| value.to_str().map(str::to_string))
+                .map(|value| value.parse::<u16>().map_err(|error| format!("invalid preview port: {error}")))
+                .transpose()?
+                .unwrap_or(4173);
+            let build_dir = Path::new(&dir).canonicalize().map_err(|error| {
                 format!(
-                    "{html_origin}: module script src \"{}\" does not resolve \
-                     ({}: {error})",
-                    entry_script.src,
-                    entry_path.display()
+                    "cannot open build directory {} — run `diffpack build <root>` first ({error})",
+                    Path::new(&dir).display()
                 )
             })?;
-
-            let config = diffpack::config::derive_web_config(&root, vite)?;
-            println!(
-                "web build{}: entry={}",
-                if config.vite { " (vite mode)" } else { "" },
-                entry.display()
-            );
-            let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-            // A generic web build fails on unresolved imports — an artifact with
-            // dangling references is not a successful build.
-            if !update.diagnostics.is_empty() {
-                let mut message = format!(
-                    "{} unresolved import(s):",
-                    update.diagnostics.len()
-                );
-                for diagnostic in &update.diagnostics {
-                    message.push_str("\n  ");
-                    message.push_str(diagnostic);
-                }
-                return Err(message);
-            }
-            let reachable = bundler.reachable_modules_direct();
-            println!("reachable {} modules", reachable.len());
-
-            let out_dir = out_dir.unwrap_or_else(|| root.join("dist"));
-            let emit_options = EmitOptions {
-                minify,
-                source_map,
-                ..EmitOptions::default()
-            };
-            let summary = bundler.emit_web(&reachable, &out_dir, "index.js", emit_options)?;
-            // The `public/` passthrough directory is a Vite convention.
-            let static_files = if config.vite {
-                diffpack::config::copy_static_public(&root, &out_dir)?
-            } else {
-                0
-            };
-            let mut injection = diffpack::html_entry::HeadInjection {
-                script_urls: vec![format!("{}index.js", config.base)],
-                stylesheet_urls: Vec::new(),
-            };
-            if summary.css_files > 0 {
-                injection.stylesheet_urls.push(format!("{}index.css", config.base));
-            }
-            let built_html = diffpack::html_entry::apply_base(
-                &html.rewrite(&html_origin, &injection)?,
-                &config.base,
-            );
-            let html_out = out_dir.join("index.html");
-            std::fs::write(&html_out, built_html)
-                .map_err(|error| format!("cannot write {}: {error}", html_out.display()))?;
-            println!(
-                "emitted {}: {} .js, {} .css, {} asset(s), {} static file(s), index.html",
-                summary.output_dir.display(),
-                summary.javascript_files,
-                summary.css_files,
-                summary.asset_files,
-                static_files,
-            );
-            Ok(())
+            diffpack::dev_server::preview(&build_dir, port)
         }
         Some("build-app") => {
             let project_root = arguments.next().ok_or_else(usage)?;
@@ -915,6 +830,234 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// `diffpack build` — an HTML-rooted web build. Single-page by default (the
+/// project's `index.html`); MULTI-PAGE when the Vite config sets
+/// `build.rollupOptions.input` to several HTML entries. Every page is bundled into a
+/// shared output dir (its entry chunk named `<input-name>.js`, its extracted
+/// stylesheet `<input-name>.css`, assets deduped by content hash), stale files are
+/// pruned once across all pages, and — when `build.manifest` is set — a Vite-shaped
+/// `manifest.json` mapping each entry to its emitted files is written.
+fn web_build(
+    root: &Path,
+    out_dir: Option<PathBuf>,
+    vite: bool,
+    minify: bool,
+    source_map: bool,
+) -> Result<(), String> {
+    let config = diffpack::config::derive_web_config(root, vite)?;
+
+    // The page set: the configured `rollupOptions.input` HTML entries, or the
+    // single-`index.html` default. A non-HTML input is a hard, specific error (a
+    // bare JS/library entry belongs to `diffpack bundle`), never a silent skip.
+    let pages: Vec<(String, PathBuf)> = if config.inputs.is_empty() {
+        let html = root.join("index.html");
+        if !html.is_file() {
+            return Err(format!(
+                "{} has no index.html; `diffpack build` bundles an HTML-rooted web app \
+                 (use `diffpack bundle <entry>` for a bare module entry, or set \
+                 build.rollupOptions.input for a multi-page build)",
+                root.display()
+            ));
+        }
+        vec![("index".to_string(), html)]
+    } else {
+        let mut pages = Vec::new();
+        for (name, path) in &config.inputs {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("html") {
+                return Err(format!(
+                    "build.rollupOptions.input `{name}` -> {} is not an .html entry; \
+                     diffpack's multi-page build takes HTML inputs (a bare JS/library \
+                     entry is `diffpack bundle <entry>`)",
+                    path.display()
+                ));
+            }
+            if !path.is_file() {
+                return Err(format!(
+                    "build.rollupOptions.input `{name}` -> {} does not exist",
+                    path.display()
+                ));
+            }
+            pages.push((name.clone(), path.clone()));
+        }
+        pages
+    };
+
+    let out_dir = out_dir.unwrap_or_else(|| root.join("dist"));
+    let emit_options = EmitOptions {
+        minify,
+        source_map,
+        ..EmitOptions::default()
+    };
+    println!(
+        "web build{}: {} page(s) -> {}",
+        if config.vite { " (vite mode)" } else { "" },
+        pages.len(),
+        out_dir.display(),
+    );
+
+    let mut written = BTreeSet::new();
+    let mut manifest_pages = Vec::new();
+    let mut total_js = 0usize;
+    let mut total_css = 0usize;
+    for (name, html_path) in &pages {
+        let html = diffpack::html_entry::parse_file(html_path)?;
+        let html_origin = html_path.display().to_string();
+        // Each HTML page carries exactly one local module-script entry (an inline or
+        // multi-entry document is a hard error naming the file).
+        let entry_script = match html.module_scripts.as_slice() {
+            [only] => only,
+            [] => {
+                return Err(format!(
+                    "{html_origin}: no local <script type=\"module\" src> entry found"
+                ));
+            }
+            many => {
+                let sources = many
+                    .iter()
+                    .map(|script| script.src.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "{html_origin}: {} module script entries ({sources}); a single HTML \
+                     page must have exactly one module-script entry",
+                    many.len()
+                ));
+            }
+        };
+        // A root-absolute src (`/src/main.tsx`) is project-root-relative; anything
+        // else is relative to the HTML document itself.
+        let entry_path = match entry_script.src.strip_prefix('/') {
+            Some(rest) => root.join(rest),
+            None => html_path
+                .parent()
+                .expect("an HTML file has a parent directory")
+                .join(&entry_script.src),
+        };
+        let entry = entry_path.canonicalize().map_err(|error| {
+            format!(
+                "{html_origin}: module script src \"{}\" does not resolve ({}: {error})",
+                entry_script.src,
+                entry_path.display()
+            )
+        })?;
+
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
+        // A web build fails on unresolved imports — an artifact with dangling
+        // references is not a successful build.
+        if !update.diagnostics.is_empty() {
+            let mut message = format!(
+                "page `{name}` ({}): {} unresolved import(s):",
+                html_origin,
+                update.diagnostics.len()
+            );
+            for diagnostic in &update.diagnostics {
+                message.push_str("\n  ");
+                message.push_str(diagnostic);
+            }
+            return Err(message);
+        }
+        let reachable = bundler.reachable_modules_direct();
+
+        let entry_file = format!("{name}.js");
+        let (summary, page_written) =
+            bundler.emit_web_written(&reachable, &out_dir, &entry_file, emit_options)?;
+        written.extend(page_written);
+        total_js += 1;
+
+        // Whether THIS page produced an extracted stylesheet (`<name>.css`).
+        let css_file = format!("{name}.css");
+        let has_css = out_dir.join(&css_file).is_file();
+        if has_css {
+            total_css += 1;
+        }
+
+        let mut injection = diffpack::html_entry::HeadInjection {
+            script_urls: vec![format!("{}{entry_file}", config.base)],
+            stylesheet_urls: Vec::new(),
+        };
+        if has_css {
+            injection
+                .stylesheet_urls
+                .push(format!("{}{css_file}", config.base));
+        }
+        let built_html = diffpack::html_entry::apply_base(
+            &html.rewrite(&html_origin, &injection)?,
+            &config.base,
+        );
+        // The output document keeps the source HTML's own file name.
+        let html_name = html_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("{html_origin}: HTML path is not UTF-8"))?;
+        let html_out = out_dir.join(html_name);
+        std::fs::write(&html_out, built_html)
+            .map_err(|error| format!("cannot write {}: {error}", html_out.display()))?;
+        written.insert(html_out.clone());
+
+        // The manifest key is the entry HTML's path relative to the project root.
+        let key = html_path
+            .strip_prefix(root)
+            .unwrap_or(html_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = entry
+            .strip_prefix(root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+        manifest_pages.push(diffpack::vite_manifest::PageRecord {
+            key,
+            file: entry_file,
+            css: if has_css { vec![css_file] } else { Vec::new() },
+            src,
+        });
+        let _ = summary;
+    }
+
+    // Prune once across every page's written set (a shared asset written by one page
+    // is never deleted by another), removing only stale files from a prior build.
+    diffpack::bundler::prune_web_output(&out_dir, &written)?;
+
+    // The `public/` passthrough directory is a Vite convention.
+    let static_files = if config.vite {
+        diffpack::config::copy_static_public(root, &out_dir)?
+    } else {
+        0
+    };
+
+    // The Vite build manifest (`build.manifest`).
+    let mut manifest_note = String::new();
+    if config.emit_manifest {
+        let manifest = diffpack::vite_manifest::render(&manifest_pages);
+        let manifest_path = out_dir.join(&config.manifest_name);
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        }
+        std::fs::write(&manifest_path, manifest)
+            .map_err(|error| format!("cannot write {}: {error}", manifest_path.display()))?;
+        manifest_note = format!(", manifest {}", config.manifest_name);
+    }
+
+    // `optimizeDeps.exclude`: Diffpack bundles every dependency natively (no
+    // pre-bundle step), so an exclusion is satisfied by construction — reported so it
+    // is never silently ignored.
+    if !config.optimize_deps_exclude.is_empty() {
+        println!(
+            "optimizeDeps.exclude: {} dep(s) ({}) — diffpack does not pre-bundle, so exclusion is inherent",
+            config.optimize_deps_exclude.len(),
+            config.optimize_deps_exclude.join(", "),
+        );
+    }
+
+    println!(
+        "emitted {}: {} page(s), {total_js} entry .js, {total_css} .css, {} static file(s){manifest_note}",
+        out_dir.display(),
+        pages.len(),
+        static_files,
+    );
+    Ok(())
+}
+
 /// Recursively copy `src` into `dest` (used to publish the react-server bundle from
 /// `server/` to `rsc-render/` before the ssr build overwrites `server/`).
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
@@ -1161,7 +1304,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
 }
 
 fn usage() -> String {
-    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--no-sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack preview <build-dir> [port] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--no-sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {

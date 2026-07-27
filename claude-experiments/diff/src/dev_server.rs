@@ -1868,6 +1868,19 @@ mod spa {
         let served_html = Arc::new(Mutex::new(served));
 
         let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
+        // `server.proxy` rules (from the Vite config), shared with each connection.
+        let proxy = Arc::new(config.proxy.clone());
+        if !proxy.is_empty() {
+            println!(
+                "[dev] server.proxy: {} rule(s) ({})",
+                proxy.len(),
+                proxy
+                    .iter()
+                    .map(|rule| format!("{} -> {}", rule.context, rule.target))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
         let hub = HmrHub::default();
         let listener = TcpListener::bind(("127.0.0.1", options.port))
             .map_err(|error| format!("cannot bind dev port {}: {error}", options.port))?;
@@ -1877,9 +1890,10 @@ mod spa {
             let served_html = Arc::clone(&served_html);
             let output_root = output_root.clone();
             let base = base.clone();
+            let proxy = Arc::clone(&proxy);
             std::thread::Builder::new()
                 .name("diffpack-dev-spa".into())
-                .spawn(move || serve_spa(listener, output_root, base, served_html, hub, refresh_runtime))
+                .spawn(move || serve_spa(listener, output_root, base, served_html, hub, refresh_runtime, proxy))
                 .map_err(|error| format!("cannot start SPA server thread: {error}"))?;
         }
         println!(
@@ -2258,6 +2272,7 @@ mod spa {
         served_html: Arc<Mutex<String>>,
         hub: HmrHub,
         refresh_runtime: Arc<String>,
+        proxy: Arc<Vec<crate::vite_config::ProxyRule>>,
     ) {
         for connection in listener.incoming() {
             let Ok(stream) = connection else { continue };
@@ -2266,6 +2281,7 @@ mod spa {
             let served_html = Arc::clone(&served_html);
             let hub = hub.clone();
             let refresh_runtime = Arc::clone(&refresh_runtime);
+            let proxy = Arc::clone(&proxy);
             let _ = std::thread::Builder::new()
                 .name("diffpack-dev-spa-conn".into())
                 .spawn(move || {
@@ -2276,6 +2292,7 @@ mod spa {
                         &served_html,
                         &hub,
                         &refresh_runtime,
+                        &proxy,
                     );
                 });
         }
@@ -2288,6 +2305,7 @@ mod spa {
         served_html: &Arc<Mutex<String>>,
         hub: &HmrHub,
         refresh_runtime: &str,
+        proxy: &[crate::vite_config::ProxyRule],
     ) -> Result<(), String> {
         let mut reader = BufReader::new(
             stream
@@ -2298,6 +2316,33 @@ mod spa {
         let (method, target) = parse_request_line(&request_line)?;
         let path = target.split('?').next().unwrap_or(&target);
         let head_only = method.eq_ignore_ascii_case("HEAD");
+
+        // `server.proxy`: a request whose path matches a rule's context is forwarded
+        // to the rule's target and the upstream response streamed straight back. This
+        // is checked BEFORE static/SPA handling so a `/api` proxy is never shadowed by
+        // the SPA fallback document.
+        if let Some(rule) = super::dev_proxy::match_rule(proxy, path) {
+            let body = read_body(&mut reader, &headers)?;
+            match super::dev_proxy::forward(rule, &method, &target, &headers, &body) {
+                Ok(response) => {
+                    stream
+                        .write_all(&response)
+                        .and_then(|()| stream.flush())
+                        .map_err(|error| format!("cannot write proxied response: {error}"))?;
+                }
+                Err(error) => {
+                    eprintln!("[dev] proxy error for {path}: {error}");
+                    write_response(
+                        &mut stream,
+                        "502 Bad Gateway",
+                        "text/plain; charset=utf-8",
+                        error.as_bytes(),
+                        head_only,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
 
         // The WebSocket HMR channel (shared framing with the TanStack path).
         if path == WS_PATH {
@@ -3251,5 +3296,322 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("__diffpackOverlay"), "2xx text/plain must not be wrapped: {text}");
         assert!(text.contains("plain body"));
+    }
+}
+
+/// `diffpack preview` — serve a completed `diffpack build` output over HTTP, the
+/// analogue of `vite preview`. Static files are served from `build_dir`; a
+/// client-routed path with no matching file falls back to `index.html` (SPA
+/// fallback), exactly as `vite preview` does. Blocks forever (a server); the caller
+/// backgrounds and kills it. This is a production-preview server, not the dev
+/// server: no HMR, no rebuild, no watch.
+pub fn preview(build_dir: &Path, port: u16) -> Result<(), String> {
+    let index = build_dir.join("index.html");
+    if !index.is_file() {
+        return Err(format!(
+            "{} has no index.html — run `diffpack build <root>` first",
+            build_dir.display()
+        ));
+    }
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|error| format!("cannot bind preview port {port}: {error}"))?;
+    println!(
+        "diffpack preview serving {} on http://127.0.0.1:{port}",
+        build_dir.display()
+    );
+    for connection in listener.incoming() {
+        let Ok(stream) = connection else { continue };
+        let build_dir = build_dir.to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("diffpack-preview-conn".into())
+            .spawn(move || {
+                let _ = handle_preview_connection(stream, &build_dir);
+            });
+    }
+    Ok(())
+}
+
+fn handle_preview_connection(mut stream: TcpStream, build_dir: &Path) -> Result<(), String> {
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|error| format!("cannot clone preview socket: {error}"))?,
+    );
+    let (request_line, _headers) = read_head(&mut reader)?;
+    let (method, target) = parse_request_line(&request_line)?;
+    let head_only = method.eq_ignore_ascii_case("HEAD");
+    let path = target.split('?').next().unwrap_or(&target);
+
+    // Map the request path to a file under the build dir, rejecting `..` traversal.
+    let relative = path.trim_start_matches('/');
+    let traversal = relative
+        .split('/')
+        .any(|segment| segment == ".." || segment == ".");
+    if !traversal && !relative.is_empty() {
+        let candidate = build_dir.join(relative);
+        if candidate.is_file() {
+            let bytes = std::fs::read(&candidate)
+                .map_err(|error| format!("cannot read {}: {error}", candidate.display()))?;
+            return write_preview_response(
+                &mut stream,
+                "200 OK",
+                preview_content_type(&candidate),
+                &bytes,
+                head_only,
+            );
+        }
+        // A concrete file (has an extension) that is missing is a real 404, not the
+        // SPA document.
+        if relative.rsplit('/').next().is_some_and(|last| last.contains('.')) {
+            return write_preview_response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found",
+                head_only,
+            );
+        }
+    }
+
+    // SPA fallback: the build's index.html.
+    let index = build_dir.join("index.html");
+    let bytes = std::fs::read(&index)
+        .map_err(|error| format!("cannot read {}: {error}", index.display()))?;
+    write_preview_response(
+        &mut stream,
+        "200 OK",
+        "text/html; charset=utf-8",
+        &bytes,
+        head_only,
+    )
+}
+
+fn write_preview_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+) -> Result<(), String> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(header.as_bytes())
+        .map_err(|error| format!("cannot write preview response head: {error}"))?;
+    if !head_only {
+        stream
+            .write_all(body)
+            .map_err(|error| format!("cannot write preview response body: {error}"))?;
+    }
+    stream
+        .flush()
+        .map_err(|error| format!("cannot flush preview response: {error}"))
+}
+
+fn preview_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("js" | "mjs" | "cjs") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("wasm") => "application/wasm",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The native dev proxy (`server.proxy`). A dev request whose path matches a rule's
+/// context is forwarded verbatim to the rule's target and the upstream response is
+/// streamed straight back — the same pass-through Vite's `http-proxy` performs for a
+/// simple `{ '/api': 'http://localhost:3001' }` rule.
+pub mod dev_proxy {
+    use super::*;
+    use crate::vite_config::ProxyRule;
+
+    /// The first rule whose context matches `path`. Vite matches a context as a path
+    /// prefix; a leading `^` (a regex anchor, the common `'^/api'` form) is treated
+    /// as an anchored prefix, which is the same set for a plain prefix pattern.
+    pub fn match_rule<'a>(rules: &'a [ProxyRule], path: &str) -> Option<&'a ProxyRule> {
+        rules.iter().find(|rule| {
+            let context = rule.context.strip_prefix('^').unwrap_or(&rule.context);
+            !context.is_empty() && path.starts_with(context)
+        })
+    }
+
+    /// Split a `http://host:port` (or `ws://...`) target into `(host, port)`. The
+    /// scheme is stripped; a missing port defaults to 80. A `wss`/`https` target
+    /// defaults to 443, though the native proxy speaks plain HTTP (a TLS upstream is
+    /// a documented limitation, surfaced by the caller, not a silent misconnect).
+    pub fn target_host_port(target: &str) -> Result<(String, u16), String> {
+        let (scheme, rest) = match target.split_once("://") {
+            Some((scheme, rest)) => (scheme, rest),
+            None => ("http", target),
+        };
+        // Drop any path/query on the target authority.
+        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+        let default_port = if scheme == "https" || scheme == "wss" {
+            443
+        } else {
+            80
+        };
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (
+                host.to_string(),
+                port.parse::<u16>()
+                    .map_err(|error| format!("bad proxy target port in {target:?}: {error}"))?,
+            ),
+            None => (authority.to_string(), default_port),
+        };
+        if host.is_empty() {
+            return Err(format!("proxy target {target:?} has no host"));
+        }
+        Ok((host, port))
+    }
+
+    /// Forward a request to the rule's target and return the raw upstream response
+    /// bytes (status line + headers + body) to write straight back to the client.
+    /// `changeOrigin` rewrites the forwarded `Host` header to the target's host, as
+    /// Vite does. The original `path_and_query` is forwarded unchanged (a `rewrite`
+    /// function is not expressible natively and was surfaced at config time).
+    pub fn forward(
+        rule: &ProxyRule,
+        method: &str,
+        path_and_query: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let (host, port) = target_host_port(&rule.target)?;
+        let mut upstream = TcpStream::connect((host.as_str(), port)).map_err(|error| {
+            format!(
+                "dev proxy cannot reach {} ({host}:{port}): {error}",
+                rule.target
+            )
+        })?;
+        let mut request = format!("{method} {path_and_query} HTTP/1.1\r\n");
+        let mut wrote_host = false;
+        for (name, value) in headers {
+            let lower = name.to_ascii_lowercase();
+            // Rewrite Host under changeOrigin; force Connection: close and identity
+            // encoding so the response framing is a single, complete read.
+            if lower == "host" {
+                wrote_host = true;
+                if rule.change_origin {
+                    request.push_str(&format!("Host: {host}:{port}\r\n"));
+                    continue;
+                }
+            }
+            if lower == "connection" || lower == "accept-encoding" {
+                continue;
+            }
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if !wrote_host {
+            request.push_str(&format!("Host: {host}:{port}\r\n"));
+        }
+        request.push_str("Connection: close\r\n");
+        request.push_str("Accept-Encoding: identity\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        upstream
+            .write_all(request.as_bytes())
+            .and_then(|()| upstream.write_all(body))
+            .and_then(|()| upstream.flush())
+            .map_err(|error| format!("dev proxy cannot send to {}: {error}", rule.target))?;
+        let mut response = Vec::new();
+        upstream
+            .read_to_end(&mut response)
+            .map_err(|error| format!("dev proxy cannot read from {}: {error}", rule.target))?;
+        Ok(response)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rule(context: &str, target: &str) -> ProxyRule {
+            ProxyRule {
+                context: context.to_string(),
+                target: target.to_string(),
+                change_origin: false,
+                ws: false,
+            }
+        }
+
+        #[test]
+        fn matches_prefix_and_regex_anchored_context() {
+            let rules = vec![rule("/api", "http://localhost:3001")];
+            assert!(match_rule(&rules, "/api/users").is_some());
+            assert!(match_rule(&rules, "/other").is_none());
+            let anchored = vec![rule("^/socket", "http://localhost:4000")];
+            assert!(match_rule(&anchored, "/socket/io").is_some());
+        }
+
+        #[test]
+        fn parses_target_host_and_port() {
+            assert_eq!(
+                target_host_port("http://localhost:3001").unwrap(),
+                ("localhost".to_string(), 3001)
+            );
+            assert_eq!(
+                target_host_port("http://example.com").unwrap(),
+                ("example.com".to_string(), 80)
+            );
+            assert_eq!(
+                target_host_port("https://api.example.com/base").unwrap(),
+                ("api.example.com".to_string(), 443)
+            );
+        }
+
+        #[test]
+        fn forwards_a_request_to_a_live_upstream_and_returns_the_response() {
+            // A throwaway in-process upstream returns a fixed response, proving the
+            // proxy connects, forwards, and passes the upstream bytes back verbatim.
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                // Read the request head (up to blank line) so we can assert the path.
+                let (line, _headers) = read_head(&mut reader).unwrap();
+                let body = b"{\"ok\":true}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+                line
+            });
+            let rule = rule("/api", &format!("http://127.0.0.1:{port}"));
+            let raw = forward(
+                &rule,
+                "GET",
+                "/api/users?limit=1",
+                &[("Host".to_string(), "127.0.0.1".to_string())],
+                b"",
+            )
+            .unwrap();
+            let text = String::from_utf8_lossy(&raw);
+            assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+            assert!(text.contains("{\"ok\":true}"), "{text}");
+            let upstream_request_line = handle.join().unwrap();
+            assert!(
+                upstream_request_line.contains("/api/users?limit=1"),
+                "upstream saw the original path+query: {upstream_request_line}"
+            );
+        }
     }
 }

@@ -1033,15 +1033,36 @@ impl Bundler {
         entry_file: &str,
         options: EmitOptions,
     ) -> Result<EmitSummary, String> {
+        let (summary, written) = self.emit_web_written(reachable, output_dir, entry_file, options)?;
+        prune_stale_files(output_dir, &written)?;
+        Ok(summary)
+    }
+
+    /// Emit one browser page into `output_dir` (entry chunk `entry_file`, its
+    /// dynamic-import chunks, extracted `<entry-stem>.css`, and content-hashed
+    /// assets) WITHOUT pruning stale files, returning the summary and the exact
+    /// set of files written. This is the multi-page primitive: a MULTI-PAGE build
+    /// emits every page into a shared `output_dir` (page chunks named per page,
+    /// assets deduped by content hash), accumulates every page's `written` set, and
+    /// prunes ONCE at the end via [`prune_web_output`] — so a shared asset written
+    /// by page A is never deleted by page B's emit, while stale files from a prior
+    /// build are still removed. A single-page build ([`Self::emit_web`]) prunes
+    /// immediately against the one page's set, unchanged.
+    pub fn emit_web_written(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_dir: &Path,
+        entry_file: &str,
+        options: EmitOptions,
+    ) -> Result<(EmitSummary, BTreeSet<PathBuf>), String> {
         let options = EmitOptions {
             format: ModuleFormat::BrowserEsm,
             ..options
         };
         let stats = self.emit_environment(reachable, output_dir, entry_file, options)?;
-        prune_stale_files(output_dir, &stats.written)?;
         let mut summary = EmitSummary::of(output_dir)?;
         summary.rendered_chunks = stats.rendered_chunks;
-        Ok(summary)
+        Ok((summary, stats.written))
     }
 
     /// Emits the server (SSR) build into `<output_root>/server/` as Node ESM
@@ -3955,6 +3976,15 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// step: unchanged chunks stay on disk (already written by this emit), while
 /// files that are no longer part of the build are removed, so no stale output
 /// ever lingers.
+/// Remove every file under `root` not in `keep`, then prune the now-empty
+/// directories (never `root` itself). The public multi-page entry point: a
+/// MULTI-PAGE build accumulates each page's written set (from
+/// [`Bundler::emit_web_written`]) into one `keep` set and prunes once, so a stale
+/// file from a prior build is deleted while no page clobbers another's output.
+pub fn prune_web_output(root: &Path, keep: &BTreeSet<PathBuf>) -> Result<(), String> {
+    prune_stale_files(root, keep)
+}
+
 fn prune_stale_files(root: &Path, keep: &BTreeSet<PathBuf>) -> Result<(), String> {
     if !root.exists() {
         return Ok(());
@@ -6407,6 +6437,11 @@ pub struct BuildConfig {
     /// server: browser conditions select packages' browser exports and exclude
     /// server-only code. Empty means the built-in default.
     pub conditions: Vec<String>,
+    /// Vite's `resolve.mainFields`: the `package.json` fields to try, in order,
+    /// when a package has no `exports` map. Empty keeps the built-in per-target
+    /// default (`["browser","module","main"]` for the client, `["module","main"]`
+    /// for the server).
+    pub main_fields: Vec<String>,
     /// Build-generated virtual modules, `(specifier, module_source)`. A specifier
     /// listed here resolves to itself (a virtual id) and loads from the given
     /// source instead of the filesystem. Used for the natively generated
@@ -6457,6 +6492,7 @@ impl Default for BuildConfig {
             asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::default(),
             import_meta_env: None,
@@ -6511,7 +6547,11 @@ fn resolve_options(config: &BuildConfig) -> ResolveOptions {
         } else {
             Vec::new()
         },
-        main_fields: if config.target == Target::Client {
+        // Vite's `resolve.mainFields` overrides the per-target default when set;
+        // otherwise keep the built-in default (browser fields for the client).
+        main_fields: if !config.main_fields.is_empty() {
+            config.main_fields.clone()
+        } else if config.target == Target::Client {
             vec!["browser".into(), "module".into(), "main".into()]
         } else {
             vec!["module".into(), "main".into()]
@@ -8853,6 +8893,7 @@ mod tests {
                 router_stub.to_string_lossy().into_owned(),
             )],
             conditions: Vec::new(),
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::Server,
             import_meta_env: None,
@@ -8926,6 +8967,7 @@ mod tests {
             asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target,
             import_meta_env: None,
@@ -9008,6 +9050,7 @@ mod tests {
             asset_inline_limit: 0,
             aliases: Vec::new(),
             conditions: Vec::new(),
+            main_fields: Vec::new(),
             virtual_modules: vec![(
                 crate::manifest::START_MANIFEST_SPECIFIER.to_string(),
                 source.to_string(),

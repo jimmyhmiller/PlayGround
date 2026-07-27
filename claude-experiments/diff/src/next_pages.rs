@@ -524,6 +524,7 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
             asset_inline_limit: 4096,
             aliases,
             conditions,
+            main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target,
             import_meta_env: None,
