@@ -70,11 +70,20 @@ INCLUSIVE (a function's total includes its callees). Skips `Code`-returning
 
 Instruments allocations and shows an **interactive** native window that updates **while the
 program runs**: current / peak / total bytes, alloc/free/resize counts, outstanding (leaked)
-blocks, a live-bytes-over-time graph, and a **per-site bar chart** — one bar per allocation
-site, **length = bytes, color = type** (stable per type via a hashed palette), sorted largest
-first. **Hover** a bar for a tooltip (full type, `file:line:col`, allocs, bytes, % of total);
-**SPACE** pauses (freezes a snapshot so you can mouse over a stable picture while the worker
-keeps allocating). raylib input: GetMouseX/Y, IsKeyPressed(KEY_SPACE=32), MeasureText.
+blocks, and two visualizations:
+- a **heap map** — the address range split into columns; each column's height = how full that
+  region is (allocated bytes / bytes it spans), colored by the type that dominates it. Tall =
+  packed with objects, dark = free/other space. Driven by a per-live-block table (addr + size +
+  site, capped at 65536 with a `dropped` counter); O(live blocks) per frame, no sort, scales to
+  millions. Replaces the old live-bytes-over-time series.
+- a **per-site bar chart** — one bar per allocation site, **length = bytes, color = type**
+  (stable per type via a hashed palette), sorted largest first.
+
+**Hover** a heap column or a bar for a tooltip (heap: address window, bytes, dominant type +
+`file:line:col`; bar: full type, `file:line:col`, allocs, bytes, % of total). **SPACE** pauses
+(freezes a snapshot so you can mouse over a stable picture while the worker keeps allocating).
+raylib input: GetMouseX/Y, IsKeyPressed(KEY_SPACE=32). `for`/`while` from control.coil keep the
+render loops correct-by-construction.
 
 ```
 LIBRARY_PATH=/opt/homebrew/lib  coil build app.coil -o app --use memgui.coil -lraylib

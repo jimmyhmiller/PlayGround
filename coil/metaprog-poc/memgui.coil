@@ -25,6 +25,7 @@
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "thread.coil" :use *)
+(import "control.coil" :use *)   ; for/while — correct-by-construction loops
 
 ; ===== raylib bindings =======================================================
 (defstruct RLColor [(r u8) (g u8) (b u8) (a u8)])
@@ -59,7 +60,13 @@
    (n-alloc i64) (n-free i64) (n-resize i64) (n-live i64)
    (cur-site i64) (n-sites i64) (sites (array MgSite 128))
    (buckets (array i64 48))
-   (tl (array i64 2048)) (tl-head i64) (tl-count i64)     ; live-bytes ring buffer
+   (tl (array i64 2048)) (tl-head i64) (tl-count i64)     ; (legacy) live-bytes ring buffer
+   ; ---- the REAL heap: one row per live allocation (addr + size + site), for the heap map ----
+   (nblk i64) (blk-dropped i64)
+   (blk-addr (array i64 65536)) (blk-size (array i64 65536)) (blk-site (array i64 65536)) (blk-live (array i64 65536))
+   ; ---- heap-map density buckets (address range split into columns) ----
+   (bk-bytes (array i64 1100)) (bk-site (array i64 1100)) (bk-max (array i64 1100))
+   (hmin i64) (hcolspan i64)
    (result i64) (worker-done i64)
    ; ---- display snapshot: frozen when paused so hover/tooltip is stable ----
    (vcur i64) (vpeak i64) (vtotal i64) (valloc i64) (vfree i64) (vresize i64) (vlive i64)
@@ -143,16 +150,34 @@
                 (store! (field s cur-site) 0)))))     ; table full -> attribute to (unknown)
         0)))
 
+; ---- live-block table: the actual heap layout (addr+size+site per live allocation) ----
+(defn mg-track-alloc [(addr i64) (size i64)] (-> i64)
+  (let [s (mg) n (load (field s nblk))]
+    (if (icmp-ge n 65536) (do (store! (field s blk-dropped) (iadd (load (field s blk-dropped)) 1)) 0)
+      (do (store! (index (field s blk-addr) n) addr) (store! (index (field s blk-size) n) size)
+          (store! (index (field s blk-site) n) (load (field s cur-site))) (store! (index (field s blk-live) n) 1)
+          (store! (field s nblk) (iadd n 1)) 0))))
+(defn mg-track-free [(addr i64)] (-> i64)   ; mark the live block at `addr` dead (linear scan)
+  (let [s (mg) n (load (field s nblk)) (mut i) 0 (mut done) 0]
+    (loop (if (if (icmp-ge (load i) n) true (icmp-ne (load done) 0)) (break)
+      (do (if (and (icmp-ne (load (index (field s blk-live) (load i))) 0) (icmp-eq (load (index (field s blk-addr) (load i))) addr))
+              (do (store! (index (field s blk-live) (load i)) 0) (store! done 1) 0) 0)
+          (store! i (iadd (load i) 1))))) 0))
+(defn mg-track-resize [(oldaddr i64) (newaddr i64) (new i64)] (-> i64)
+  (do (if (icmp-ne oldaddr 0) (mg-track-free oldaddr) 0) (mg-track-alloc newaddr new) 0))
+
 ; ===== tracking allocator ====================================================
 (defn mg-ma-alloc [(ctx (ptr i8)) (size i64) (align i64)] (-> (Option (ptr i8)))
   (let [p (malloc (cast isize size))]
-    (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (Some p)))))
+    (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (mg-track-alloc (cast i64 p) size) (Some p)))))
 (defn mg-ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old i64) (new i64) (align i64)] (-> (Option (ptr i8)))
   (let [q (realloc p (cast isize new))]
     (if (icmp-eq (cast i64 q) 0) (None)
-      (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new)) (Some q)))))
+      (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new))
+          (mg-track-resize (if (icmp-eq old 0) 0 (cast i64 p)) (cast i64 q) new)
+          (Some q)))))
 (defn mg-ma-free [(ctx (ptr i8)) (p (ptr i8)) (size i64) (align i64)] (-> i64)
-  (do (mg-acct-free size) (free p) 0))
+  (do (mg-acct-free size) (mg-track-free (cast i64 p)) (free p) 0))
 (defn mg-allocator [] (-> (ptr Allocator))
   (let [a (alloc-static Allocator)]
     (store! (field a alloc)  (fnptr-of mg-ma-alloc))
@@ -227,7 +252,7 @@
         (mg-sort-order s n)) 0))
 
 (const BARX 24)
-(const BARY 300)
+(const BARY 356)
 (const BARROW 30)
 (defn mg-nbars [] (-> i64) (idiv (isub (isub WINH BARY) 12) BARROW))
 (defn in-rect? [(mx i64) (my i64) (x i64) (y i64) (w i64) (h i64)] (-> bool)
@@ -269,21 +294,88 @@
         (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 52)) 16 (rgb 200 210 225))
         (snprintf p 256 c"%ld%% of total bytes" (if (icmp-gt tot 0) (idiv (imul (load (field sp bytes)) 100) tot) 0))
         (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 74)) 16 (rgb 150 158 175)) 0)))
+; ---- the REAL heap map: one strip, each live block placed by its address ----
+(defn mg-live-count [(s (ptr MgState))] (-> i64)
+  (let [n (load (field s nblk)) (mut i) 0 (mut c) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (if (icmp-ne (load (index (field s blk-live) (load i))) 0) (store! c (iadd (load c) 1)) 0) (store! i (iadd (load i) 1))))) (load c)))
+; Heap map as an address DENSITY strip: split [min,max) into `w` columns; each column's height
+; = how full that address region is (bytes allocated / bytes the column spans), colored by the
+; type that dominates it. Tall/bright = packed with objects; short/empty = free/other space.
+; O(live blocks) per frame, no sort — scales from hundreds to millions of blocks.
+(defn mg-draw-heap [(s (ptr MgState)) (mx i64) (my i64) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
+  (let [n (load (field s nblk)) (mut mn) -1 (mut mxa) 0 (mut hov) -1]
+    ; pass 1: address extent over live blocks
+    (for [i 0 n]
+      (if (icmp-ne (load (index (field s blk-live) i)) 0)
+          (let [a (load (index (field s blk-addr) i)) e (iadd a (load (index (field s blk-size) i)))]
+            (do (if (or (icmp-lt (load mn) 0) (icmp-lt a (load mn))) (store! mn a) 0)
+                (if (icmp-gt e (load mxa)) (store! mxa e) 0)))
+        0))
+    (for [c 0 w] (do (store! (index (field s bk-bytes) c) 0) (store! (index (field s bk-max) c) 0)))
+    (let [span (if (icmp-gt (load mxa) (load mn)) (isub (load mxa) (load mn)) 1)
+          colspan (let [q (idiv (if (icmp-gt (load mxa) (load mn)) (isub (load mxa) (load mn)) 1) w)] (if (icmp-lt q 1) 1 q))]
+      (store! (field s hmin) (load mn))
+      (store! (field s hcolspan) colspan)
+      ; pass 2: bin each live block into its address columns
+      (for [j 0 n]
+        (if (icmp-ne (load (index (field s blk-live) j)) 0)
+            (let [a (load (index (field s blk-addr) j)) sz (load (index (field s blk-size) j))
+                  sc0 (idiv (imul (isub a (load mn)) w) span)
+                  ec0 (idiv (imul (isub (iadd a (isub sz 1)) (load mn)) w) span)
+                  sc (if (icmp-lt sc0 0) 0 (if (icmp-ge sc0 w) (isub w 1) sc0))
+                  ec (if (icmp-lt ec0 0) 0 (if (icmp-ge ec0 w) (isub w 1) ec0))
+                  ncols (iadd (isub ec sc) 1) per (idiv sz ncols) site (load (index (field s blk-site) j))]
+              (for [c sc (iadd ec 1)]
+                (do (store! (index (field s bk-bytes) c) (iadd (load (index (field s bk-bytes) c)) per))
+                    (if (icmp-gt per (load (index (field s bk-max) c)))
+                        (do (store! (index (field s bk-max) c) per) (store! (index (field s bk-site) c) site))
+                      0))))
+          0))
+      (DrawRectangle (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 16 18 24))
+      (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
+      ; draw one vertical bar per column, height = occupancy, color = dominant type
+      (for [c 0 w]
+        (let [b (load (index (field s bk-bytes) c))]
+          (if (icmp-gt b 0)
+              (let [occ (let [o (idiv (imul b h) colspan)] (if (icmp-gt o h) h (if (icmp-lt o 2) 2 o)))]
+                (do (DrawRectangle (cast i32 (iadd x0 c)) (cast i32 (isub (iadd y0 h) occ)) 1 (cast i32 occ)
+                      (mg-type-color (load (field (index (field s sites) (load (index (field s bk-site) c))) typ))))
+                    (if (in-rect? mx my (iadd x0 c) y0 1 h) (store! hov c) 0)))
+            0))))
+    (load hov)))
+(defn mg-heap-tooltip [(s (ptr MgState)) (col i64) (mx i64) (my i64)] (-> i64)
+  (let [a0 (iadd (load (field s hmin)) (imul col (load (field s hcolspan)))) b (load (index (field s bk-bytes) col))
+        sp (index (field s sites) (load (index (field s bk-site) col)))
+        buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf) bx (isub mx 380) by my]
+    (do (DrawRectangle (cast i32 bx) (cast i32 by) 372 96 (rgb 12 14 20))
+        (DrawRectangleLines (cast i32 bx) (cast i32 by) 372 96 (mg-type-color (load (field sp typ))))
+        (snprintf p 256 c"addr ~0x%lx  (+%ld B window)" a0 (load (field s hcolspan)))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 8)) 16 (rgb 235 238 245))
+        (snprintf p 256 c"allocated here: %ld B" b)
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 30)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"mostly %.*s" (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ)))))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 52)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"at %.*s:%ld:%ld" (cast i32 (slice-len (load (field sp file)))) (cast (ptr i8) (slice-data (load (field sp file)))) (load (field sp line)) (load (field sp col)))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 74)) 16 (rgb 150 158 175)) 0)))
 (defn mg-render [(s (ptr MgState)) (mx i64) (my i64) (paused i64)] (-> i64)
   (let [buf (alloc-stack (array i8 220)) p (cast (ptr i8) buf) fg (rgb 235 238 245) dim (rgb 150 158 175)]
     (do (ClearBackground (rgb 24 26 34))
         (DrawText (if (icmp-ne paused 0) c"coil memory inspector  [PAUSED]"
                     (if (icmp-ne (load (field s worker-done)) 0) c"coil memory inspector  (finished)" c"coil memory inspector  (running)")) 24 16 26 fg)
-        (DrawText c"SPACE pause    hover a bar for details" 470 22 16 dim)
+        (DrawText c"SPACE pause    hover a block or bar for details" 470 22 16 dim)
         (snprintf p 220 c"current: %ld B    peak: %ld B    total: %ld B" (load (field s vcur)) (load (field s vpeak)) (load (field s vtotal)))
         (DrawText p 24 54 20 fg)
         (snprintf p 220 c"allocs: %ld   frees: %ld   resizes: %ld   outstanding: %ld" (load (field s valloc)) (load (field s vfree)) (load (field s vresize)) (load (field s vlive)))
         (DrawText p 24 80 20 dim)
-        (DrawText c"live bytes over time" 24 116 18 fg)
-        (mg-draw-timeline s 24 138 (isub WINW 48) 120)
-        (DrawText c"allocation by site  (bar length = bytes, color = type, sorted)" 24 276 18 fg)
-        (let [hov (mg-draw-bars s mx my)]
-          (if (icmp-ge hov 0) (mg-tooltip s hov mx my) 0))
+        (DrawText c"heap map  (each block placed by address; dark = free/other space)" 24 114 18 fg)
+        (snprintf p 220 c"live blocks: %ld   dropped(cap): %ld   used: %ld B" (mg-live-count s) (load (field s blk-dropped)) (load (field s cur)))
+        (DrawText p 24 322 16 dim)
+        (DrawText c"allocation by site  (bar length = bytes, color = type, sorted)" 24 332 18 fg)
+        (let [hh (mg-draw-heap s mx my 24 138 (isub WINW 48) 170)
+              bh (mg-draw-bars s mx my)]
+          (if (icmp-ge hh 0) (mg-heap-tooltip s hh mx my)
+            (if (icmp-ge bh 0) (mg-tooltip s bh mx my) 0)))
         0)))
 
 ; ===== worker result plumbing + the live loop ================================
@@ -303,8 +395,8 @@
           (do (if (IsKeyPressed 32) (store! paused (isub 1 (load paused))) 0)
               (if (icmp-eq (load paused) 0) (mg-snapshot s) 0)
               ; autoclose (headless test): force a hover over the top bar so the shot shows a tooltip
-              (let [mx (if (icmp-gt cap 0) (iadd BARX 60) (cast i64 (GetMouseX)))
-                    my (if (icmp-gt cap 0) (iadd BARY 3) (cast i64 (GetMouseY)))]
+              (let [mx (if (icmp-gt cap 0) (iadd BARX (idiv (isub WINW 48) 2)) (cast i64 (GetMouseX)))
+                    my (if (icmp-gt cap 0) 210 (cast i64 (GetMouseY)))]
                 (do (BeginDrawing) (mg-render s mx my (load paused)) (EndDrawing) 0))
               (if (and (icmp-gt cap 0) (icmp-eq (load frames) 80)) (do (TakeScreenshot c"memgui.png") 0) 0)
               (store! frames (iadd (load frames) 1)))))
