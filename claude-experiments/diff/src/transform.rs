@@ -289,32 +289,32 @@ pub fn transform_module_with_options(
                 }
             }
             Some(crate::rsc::RscDirective::Cache) => {
-                // `"use cache"` is a genuine transform slice diffpack has NOT built yet
-                // (it would need to wrap the module's exports in a cache boundary keyed by
-                // args + cacheTag/cacheLife). Silently treating the module as normal would
-                // drop the caching semantics and mask a correctness gap, so hard-error
-                // naming the file (repo no-silent-stub rule) instead. On-demand
-                // revalidation via `next/cache` (revalidatePath/revalidateTag/
-                // unstable_cache) IS supported — prefer those until `"use cache"` lands.
-                return TransformResult {
-                    code: String::new(),
-                    diagnostics: vec![format!(
-                        "{}: the \"use cache\" directive is not yet implemented by diffpack's \
-                         Next adapter (it would silently drop the module's caching semantics). \
-                         Use next/cache (revalidatePath / revalidateTag / unstable_cache) for \
-                         on-demand revalidation, or remove the directive.",
-                        path.display()
-                    )],
-                    is_esm: true,
-                    dependencies: Vec::new(),
-                    dependency_demands: Vec::new(),
-                    flat_module: None,
-                    liveness: ModuleLiveness::default(),
-                    uses_top_level_await: false,
-                    uses_import_meta: false,
-                    uses_cjs_globals: false,
-                    workers: Vec::new(),
-                };
+                // `"use cache"` wraps every export of the module in a cache boundary:
+                // each export is memoized (keyed by its arguments) and run inside a
+                // `cacheTag()`/`cacheLife()` collection scope, and the collected tags are
+                // recorded on the current request so the page is bustable by
+                // `revalidateTag` (native reimplementation on diffpack's next/cache tag
+                // registry + prerender-cache invalidation). An unwrappable construct
+                // (`export ... from` / `export *`) is a hard, specific error, never a
+                // silent pass-through that would drop the caching semantics.
+                match crate::rsc::transform_use_cache_server(path, source) {
+                    Ok(rewritten) => rewritten,
+                    Err(error) => {
+                        return TransformResult {
+                            code: String::new(),
+                            diagnostics: vec![error],
+                            is_esm: true,
+                            dependencies: Vec::new(),
+                            dependency_demands: Vec::new(),
+                            flat_module: None,
+                            liveness: ModuleLiveness::default(),
+                            uses_top_level_await: false,
+                            uses_import_meta: false,
+                            uses_cjs_globals: false,
+                            workers: Vec::new(),
+                        };
+                    }
+                }
             }
             None => None,
         }

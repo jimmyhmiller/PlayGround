@@ -144,6 +144,172 @@ pub fn transform_use_client_server(path: &Path, source: &str) -> Option<String> 
     Some(out)
 }
 
+/// The local binding a `"use cache"` module's default export is renamed to before it
+/// is wrapped in the cache boundary (so the wrapped value is re-exported as `default`
+/// without a naming collision with any module-local binding).
+const USE_CACHE_DEFAULT_LOCAL: &str = "__diffpack_uc_default";
+
+/// The name the `"use cache"` transform imports [`next_adapter`](crate::next_adapter)'s
+/// `__diffpackUseCache` cache-boundary helper under (from the aliased `next/cache`
+/// shim). The wrapper memoizes the export keyed by its arguments, runs it inside the
+/// `cacheTag`/`cacheLife` collection scope, and propagates the collected tags onto the
+/// current request store so a tagged page is bustable by `revalidateTag`.
+const USE_CACHE_HELPER_LOCAL: &str = "__diffpack_uc";
+
+/// Transforms a `"use cache"` module for the REACT SERVER (RSC) build into a set of
+/// CACHED exports. The directive marks every export of the module as a cached async
+/// function/component (Next's Dynamic-IO `"use cache"` file directive): each export's
+/// return is memoized (keyed by its arguments), the body runs inside a `cacheTag()` /
+/// `cacheLife()` collection scope, and the collected tags are recorded on the current
+/// request so the page that read the cached value is registered under them for
+/// `revalidateTag` — natively reimplemented on diffpack's existing next/cache tag
+/// registry + prerender-cache invalidation.
+///
+/// The original bodies are kept VERBATIM (unlike `"use client"`, whose code must not
+/// reach the server). The transform strips `export` off each local declaration, then
+/// re-exports a `__diffpackUseCache`-wrapped view of the same binding, so recursion and
+/// intra-module references resolve to the real (un-memoized) local exactly as before.
+///
+/// Returns `Ok(None)` for a module that is NOT a `"use cache"` boundary (caller uses
+/// the source unchanged). Hard-errors (naming the construct) on `export ... from` /
+/// `export *` re-exports, whose bindings are not local and so cannot be wrapped here.
+pub fn transform_use_cache_server(path: &Path, source: &str) -> Result<Option<String>, String> {
+    if detect_directive(path, source) != Some(RscDirective::Cache) {
+        return Ok(None);
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let program = &parsed.program;
+    let module_id = module_reference_id(path);
+
+    // (local, exported) pairs to wrap in the footer, and the in-place source edits that
+    // demote each `export` declaration to a plain local (or rename the default value to
+    // a local const) so the footer can re-export the wrapped view without a collision.
+    let mut wrapped: Vec<(String, String)> = Vec::new();
+    let mut edits: Vec<(Span, String)> = Vec::new();
+
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                // `export type { ... }` / `export interface` carry no runtime binding —
+                // types are erased in this graph, so leave them entirely untouched.
+                if export.export_kind.is_type() {
+                    continue;
+                }
+                if export.source.is_some() {
+                    return Err(format!(
+                        "'use cache' module {} re-exports with `export ... from`; a re-exported \
+                         binding is not local and cannot be wrapped in a cache boundary. Export \
+                         the cached function directly from this module.",
+                        path.display()
+                    ));
+                }
+                if let Some(declaration) = &export.declaration {
+                    // Collect the declared name(s), then strip the leading `export ` so the
+                    // binding stays module-local (the footer re-exports the wrapped view).
+                    let mut collected = false;
+                    match declaration {
+                        Declaration::VariableDeclaration(var) => {
+                            for decl in &var.declarations {
+                                if let Some(ident) = decl.id.get_binding_identifier() {
+                                    let name = ident.name.to_string();
+                                    wrapped.push((name.clone(), name));
+                                    collected = true;
+                                }
+                            }
+                        }
+                        Declaration::FunctionDeclaration(func) => {
+                            if let Some(ident) = &func.id {
+                                let name = ident.name.to_string();
+                                wrapped.push((name.clone(), name));
+                                collected = true;
+                            }
+                        }
+                        Declaration::ClassDeclaration(class) => {
+                            if let Some(ident) = &class.id {
+                                let name = ident.name.to_string();
+                                wrapped.push((name.clone(), name));
+                                collected = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if collected {
+                        // Remove exactly the `export ` keyword+whitespace before the decl.
+                        edits.push((
+                            Span::new(export.span().start, declaration.span().start),
+                            String::new(),
+                        ));
+                    }
+                }
+                // `export { a, b as c }` (no declaration): the specifiers reference existing
+                // module-local bindings — record them and drop the whole statement (the
+                // footer re-exports the wrapped views under the same exported names).
+                if export.declaration.is_none() && !export.specifiers.is_empty() {
+                    let mut any = false;
+                    for specifier in &export.specifiers {
+                        if specifier.export_kind.is_type() {
+                            continue;
+                        }
+                        wrapped.push((
+                            specifier.local.name().to_string(),
+                            specifier.exported.name().to_string(),
+                        ));
+                        any = true;
+                    }
+                    if any {
+                        edits.push((export.span(), String::new()));
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => {
+                // Rename the default value to a local const so the footer can wrap it and
+                // re-export the wrapped view as `default`. Wrapping the VALUE (not the
+                // `export default` keyword) handles an expression, a named or anonymous
+                // function/class declaration uniformly (each becomes an expression here).
+                let value_span = export.declaration.span();
+                let value = &source[value_span.start as usize..value_span.end as usize];
+                edits.push((
+                    export.span(),
+                    format!("const {USE_CACHE_DEFAULT_LOCAL} = ({value});"),
+                ));
+                wrapped.push((USE_CACHE_DEFAULT_LOCAL.to_string(), "default".to_string()));
+            }
+            Statement::ExportAllDeclaration(_) => {
+                return Err(format!(
+                    "'use cache' module {} uses `export * from`; a wildcard re-export cannot be \
+                     enumerated into cached references. Export each cached function directly.",
+                    path.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let import = format!(
+        "import {{ __diffpackUseCache as {USE_CACHE_HELPER_LOCAL} }} from \"next/cache\";\n"
+    );
+    let mut rewritten = apply_edits(source, import, edits);
+
+    // Footer: wrap each export in the cache boundary and re-export it under its original
+    // exported name. `<local>` is the real (un-wrapped) binding; the id keys the memo.
+    if !wrapped.is_empty() {
+        rewritten.push('\n');
+        for (index, (local, exported)) in wrapped.iter().enumerate() {
+            let wrapped_local = format!("__diffpack_uc_w_{index}");
+            let id = format!("{module_id}#{exported}");
+            rewritten.push_str(&format!(
+                "const {wrapped_local} = {USE_CACHE_HELPER_LOCAL}({local}, {});\n",
+                json_string(&id)
+            ));
+            // `export { x as default }` and `export { x as foo }` are both valid clauses.
+            rewritten.push_str(&format!("export {{ {wrapped_local} as {exported} }};\n"));
+        }
+    }
+    Ok(Some(rewritten))
+}
+
 /// The subpath the client-side server-action transport (`callServer`) is imported
 /// from; diffpack registers [`crate::rsc_runtime`]'s `call_server.js` under it as a
 /// virtual module for the client build.
@@ -912,6 +1078,94 @@ mod tests {
         assert_eq!(
             transform_use_server_client(Path::new("/app/src/plain.ts"), "export const a = 1;"),
             None
+        );
+    }
+
+    #[test]
+    fn use_cache_transform_wraps_named_exports_keeping_bodies() {
+        let out = transform_use_cache_server(
+            Path::new("/app/src/data.ts"),
+            "\"use cache\";\nexport async function getData(id){ return id + 1 }\nexport const load = async () => 2;",
+        )
+        .unwrap()
+        .expect("a use cache module transforms");
+        // Imports the cache boundary helper from the aliased next/cache shim.
+        assert!(
+            out.contains("import { __diffpackUseCache as __diffpack_uc } from \"next/cache\";"),
+            "{out}"
+        );
+        // The real bodies survive on the server (unlike use-client).
+        assert!(out.contains("return id + 1"), "cached body preserved: {out}");
+        assert!(out.contains("=> 2"), "{out}");
+        // The `export` keyword is stripped from each declaration (binding stays local).
+        assert!(out.contains("async function getData(id)"), "{out}");
+        assert!(!out.contains("export async function getData"), "export stripped off decl: {out}");
+        // Each export is wrapped and re-exported under its original name, keyed by id.
+        assert!(out.contains("= __diffpack_uc(getData, \"/app/src/data.ts#getData\");"), "{out}");
+        assert!(out.contains("= __diffpack_uc(load, \"/app/src/data.ts#load\");"), "{out}");
+        assert!(out.contains("as getData };"), "{out}");
+        assert!(out.contains("as load };"), "{out}");
+    }
+
+    #[test]
+    fn use_cache_transform_wraps_the_default_export() {
+        let out = transform_use_cache_server(
+            Path::new("/app/src/page.tsx"),
+            "\"use cache\";\nexport default async function Page(){ return null }",
+        )
+        .unwrap()
+        .expect("default export transforms");
+        // The default value is renamed to a local const, wrapped, and re-exported as default.
+        assert!(out.contains("const __diffpack_uc_default = (async function Page(){ return null });"), "{out}");
+        assert!(out.contains("= __diffpack_uc(__diffpack_uc_default, \"/app/src/page.tsx#default\");"), "{out}");
+        assert!(out.contains("as default };"), "{out}");
+    }
+
+    #[test]
+    fn use_cache_transform_wraps_renamed_specifiers_by_exported_name() {
+        let out = transform_use_cache_server(
+            Path::new("/app/src/data.ts"),
+            "\"use cache\";\nasync function impl(){ return 1 }\nexport { impl as run };",
+        )
+        .unwrap()
+        .expect("specifier export transforms");
+        // Wrapped value is the LOCAL binding; the id + re-export use the EXPORTED name.
+        assert!(out.contains("= __diffpack_uc(impl, \"/app/src/data.ts#run\");"), "{out}");
+        assert!(out.contains("as run };"), "{out}");
+        // The original specifier-only export statement is removed (no duplicate export).
+        assert!(!out.contains("export { impl as run };"), "original specifier export removed: {out}");
+    }
+
+    #[test]
+    fn use_cache_transform_hard_errors_on_reexport() {
+        let err = transform_use_cache_server(
+            Path::new("/app/src/data.ts"),
+            "\"use cache\";\nexport { thing } from \"./other\";",
+        )
+        .unwrap_err();
+        assert!(err.contains("export ... from") && err.contains("data.ts"), "{err}");
+
+        let star = transform_use_cache_server(
+            Path::new("/app/src/data.ts"),
+            "\"use cache\";\nexport * from \"./other\";",
+        )
+        .unwrap_err();
+        assert!(star.contains("export * from"), "{star}");
+    }
+
+    #[test]
+    fn non_use_cache_modules_are_left_unchanged() {
+        assert_eq!(
+            transform_use_cache_server(Path::new("/app/src/plain.ts"), "export const a = 1;"),
+            Ok(None)
+        );
+        // A use-client / use-server module is NOT a cache boundary.
+        assert_eq!(
+            transform_use_cache_server(
+                Path::new("/app/src/c.tsx"),
+                "\"use client\";\nexport function C(){ return null }"
+            ),
+            Ok(None)
         );
     }
 
