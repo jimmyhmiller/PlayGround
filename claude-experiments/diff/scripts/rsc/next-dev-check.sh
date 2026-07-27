@@ -21,7 +21,8 @@
 #
 # Native build (Rust); Node + Chrome are only the oracle. The fixture files are always
 # restored (a trap). Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="$repo/integration/next-app-router"
@@ -32,8 +33,6 @@ base="http://127.0.0.1:$port"
 counter="$fixture/app/Counter.tsx"
 page="$fixture/app/page.tsx"
 stamp="$(date +%s)"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"

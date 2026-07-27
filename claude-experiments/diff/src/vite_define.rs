@@ -21,7 +21,7 @@ use oxc_ast::ast::Expression;
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
-use oxc_span::{SourceType, Span};
+use oxc_span::Span;
 
 /// Replaces free references to any `defines` key in `source` with its replacement
 /// text, returning the rewritten source, or `None` when nothing is replaced.
@@ -43,7 +43,7 @@ pub fn transform(path: &Path, source: &str, defines: &[(String, String)]) -> Opt
     }
 
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let scoping = SemanticBuilder::new()
         .build(&parsed.program)

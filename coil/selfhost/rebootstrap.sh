@@ -87,6 +87,20 @@ echo "  ok — byte-identical, the LLVM backend reproduces the compiler too"
 echo "=== GATES ==="
 ./selfhost/oracle/gate-full.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-full FAIL — not a faithful compiler"; exit 1; }
 echo "  gate-full:      PASS (IR byte-exact vs reference)"
+# The PER-STAGE gates. These used to be excluded here, and every one of them rotted
+# without anyone noticing: c019c0a33 changed lib/slice.coil and re-blessed the mono /
+# ast / checked / resolved snapshots but not read / load / expand / ir / x86, so those
+# five sat red for a week while every gate this script did run stayed green. A gate
+# nothing runs is not a gate. gate-full covers the whole pipeline end to end, but only
+# these say WHICH stage moved when it does — which is the entire point of having them.
+# Cost is ~30s against a run that already does five full compiler builds.
+for g in gate gate-ast gate-load gate-resolved gate-checked gate-expand gate-mono gate-ir gate-diag gate-x86; do
+  ./selfhost/oracle/$g.sh /tmp/coil-rb2 >/dev/null \
+    || { echo "$g FAIL — that stage's output drifted from its snapshot."
+         echo "  If the change was intentional, re-bless it: COIL_REF_BIN=./coil ./selfhost/oracle/snapshot${g#gate}.sh"
+         exit 1; }
+done
+echo "  stage gates:    PASS (read/ast/load/resolve/check/expand/mono/ir/diag/x86 byte-exact)"
 ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-rb2 >/dev/null || { echo "arm64 gate-run FAIL — runtime divergence"; exit 1; }
 echo "  arm64 gate-run: PASS (programs run identically)"
 ./selfhost/oracle/gate-cli.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-cli FAIL — the CLI contract regressed"; exit 1; }

@@ -732,6 +732,24 @@
   (let [b (sanitize-box)] (store! (field b addr) 1) (store! (field b isset) 1) 0))
 (defn sanitize-address? [] (-> bool) (icmp-ne (load (field (sanitize-box) addr)) 0))
 
+; `-O0`/`-O1`/`-O2`/`-O3` — the LLVM optimization level, default 3. The cell itself
+; lives in metaengine.coil (which the metaprogram dylib cache key needs and which
+; both this module and main.coil import); only the CLI spelling is here.
+(defn opt-flag? [(arg (slice u8))] (-> bool)
+  (or (str-eq arg "-O0") (or (str-eq arg "-O1") (or (str-eq arg "-O2") (str-eq arg "-O3")))))
+(defn apply-opt-flag! [(arg (slice u8))] (-> i64)
+  (set-opt-level! (isub (cast i64 (slice-get arg 2)) 48)))
+; `--meta-opt=<0|1|2|3>` — the same knob for metaprogram objects only. Unset, they
+; follow -O. A bad level is a usage error, not a silent default.
+(defn meta-opt-flag? [(arg (slice u8))] (-> bool) (starts-with arg "--meta-opt="))
+(defn apply-meta-opt-flag! [(arg (slice u8))] (-> i64)
+  (let [v (subslice arg 11 (slice-len arg))]
+    (if (or (icmp-ne (slice-len v) 1) (or (icmp-lt (cast i64 (slice-get v 0)) 48) (icmp-gt (cast i64 (slice-get v 0)) 51)))
+        (let [w (stderr)]
+          (ps w "error: --meta-opt= expects 0, 1, 2 or 3, got '") (ps w v) (ps w "'") (wb w 10)
+          (exit 1) 0)
+      (set-meta-opt-level! (isub (cast i64 (slice-get v 0)) 48)))))
+
 ; A link flag we must NEVER pass to the metaprogram dylib link: an instrumentation
 ; flag on the dylib gets dlopen'd into the compiler and aborts it ("interceptors are
 ; not working … loaded too late"). Frameworks/libraries the program links are kept.
@@ -788,6 +806,8 @@
         (str-eq arg "--debug")  true
         (str-eq arg "--debug-checks")     true
         (str-eq arg "--sanitize=address") true
+        (opt-flag? arg)                   true
+        (meta-opt-flag? arg)              true
         (str-eq arg "--wasm-side-module") true
         (starts-with arg "--wasm-stack-size=") true
         false))
@@ -903,9 +923,11 @@
                   (if (or (str-eq arg "-g") (str-eq arg "--debug")) (do (store! backend 2) (store! wantg true) 0)
                     (if (str-eq arg "--debug-checks") (enable-debug-checks!)
                       (if (str-eq arg "--sanitize=address") (set-sanitize-address!)
+                       (if (opt-flag? arg) (apply-opt-flag! arg)
+                       (if (meta-opt-flag? arg) (apply-meta-opt-flag! arg)
                        (if (starts-with arg "--wasm-stack-size=") (apply-wasm-stack-flag! arg)
                         (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
-                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0))))))))
+                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0))))))))))
             (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
@@ -1884,6 +1906,11 @@ Reference
 
 Common flags (build / run / emit-obj)
   -o <out>              output path (required by `build`)
+  -O0 / -O1 / -O2 / -O3 LLVM optimization level (default -O3; LLVM backend only)
+  --meta-opt=<n>        -O level for METAPROGRAM objects only (default: follow -O)
+                        -O0 builds ~6x faster and runs much slower — for iterating,
+                        not for anything you intend to run. -O1 costs the built
+                        program almost nothing and still builds ~1.5x faster.
   --target <triple>     cross-compile (e.g. wasm32-unknown-unknown, x86_64-apple-macosx11.0.0)
   --backend arm64       use the native arm64 backend instead of LLVM
   -g, --debug           emit DWARF debug info (implies the arm64 backend)

@@ -49,12 +49,26 @@
       (Some [mp] (do (emit-ir-normalized a w mp triple) 1))
       (None []   0))))
 
+; The `default<On>` pipeline string for level `n`, with asan appended when
+; --sanitize=address asked for it. Spelled out rather than built because
+; LLVMRunPasses takes a C string and these are the only four.
+(defn opt-pipeline [(sanitize bool) (n i64)] (-> (ptr i8))
+  (do
+    (if sanitize
+        (if (icmp-eq n 0) c"default<O0>,asan"
+          (if (icmp-eq n 1) c"default<O1>,asan"
+            (if (icmp-eq n 2) c"default<O2>,asan" c"default<O3>,asan")))
+      (if (icmp-eq n 0) c"default<O0>"
+        (if (icmp-eq n 1) c"default<O1>"
+          (if (icmp-eq n 2) c"default<O2>" c"default<O3>"))))))
 ; mono'd Program -> native object file. Mirrors src/lib.rs::compile_to_object_dbg
 ; (the release/`src_path = None` path): build the module (codegen-module already
 ; sets target + datalayout), create a host target machine (cpu "generic", no
-; features, opt Aggressive=3, reloc PIC=2, codemodel Default=0), run the
-; `default<O3>` pipeline through the new pass manager, then EmitToFile as an object.
-(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8)) (sanitize bool)] (-> i64)
+; features, reloc PIC=2, codemodel Default=0) at CodeGenOptLevel `optlvl`, run the
+; matching `default<On>` pipeline through the new pass manager, then EmitToFile.
+; `optlvl` is passed in rather than read from the global because the PROGRAM object
+; and the METAPROGRAM object can be built at different levels (-O vs --meta-opt=).
+(defn build-object [(a (ptr Allocator)) (mp (ptr Program)) (obj-cstr (ptr i8)) (triple-override (ptr i8)) (sanitize bool) (optlvl i64)] (-> i64)
   (let [m         (codegen-module a mp triple-override)
         triple    (if (icmp-ne (cast i64 triple-override) 0) triple-override (LLVMGetDefaultTargetTriple))
         targetout (alloc-stack (ptr i8))
@@ -71,14 +85,13 @@
           (ps w (cstr->slice (load errout))) (wb w 10)
           (exit 1) 0)
       0)
-    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" (llvm-cpu-features triple) 3 2 0)
+    (let [tm  (LLVMCreateTargetMachine (load targetout) triple c"generic" (llvm-cpu-features triple) (cast i32 optlvl) 2 0)
           pbo (LLVMCreatePassBuilderOptions)
           ; --sanitize=address (mem-7): append LLVM's AddressSanitizer module pass to
           ; the O3 pipeline so the emitted object is instrumented. Only the PROGRAM
           ; object takes this path — the metaprogram dylib passes sanitize=false, so
           ; the compiler never dlopen's an ASan-instrumented object.
-          rp  (if sanitize (LLVMRunPasses m c"default<O3>,asan" tm pbo)
-                           (LLVMRunPasses m c"default<O3>" tm pbo))]
+          rp  (LLVMRunPasses m (opt-pipeline sanitize optlvl) tm pbo)]
       (if (not (icmp-eq (cast i64 rp) 0))
           (do (ps (stderr) "codegen: LLVMRunPasses failed: ")
               (ps (stderr) (cstr->slice (LLVMGetErrorMessage rp)))
@@ -107,7 +120,7 @@
   (let [w (stderr)
         (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]
     (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
-      (Some [mp] (do (build-object a mp obj-cstr triple (sanitize-address?)) 1))
+      (Some [mp] (do (build-object a mp obj-cstr triple (sanitize-address?) (opt-level)) 1))
       (None []   0))))
 
 ; `__normalize` debug subcommand: print normalized textual LLVM IR of `src`.
@@ -125,7 +138,7 @@
 (defn meta-build-obj-llvm [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
   ; NEVER sanitize the metaprogram dylib: it is dlopen'd into the compiler, and an
   ; ASan-instrumented dylib loaded that late aborts the process (mem-7).
-  (build-object a mp obj (cast (ptr i8) 0) false))
+  (build-object a mp obj (cast (ptr i8) 0) false (meta-opt-level)))
 
 ; The comptime object, handed back IN MEMORY so comptime_eval can load it straight
 ; into executable pages (jit.coil) instead of forking `cc -dynamiclib` per site.

@@ -4,7 +4,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
-use crate::bundler::{Bundler, EmitOptions};
+use crate::bundler::{Bundler, EmitOptions, partition_diagnostics};
 use crate::frontend_profile;
 use crate::visualizer::write_visualization;
 
@@ -97,12 +97,12 @@ pub fn write_live_scale_visualization(
 
     let entry = workspace.path.join(module_name(0));
     let (mut bundler, update) = Bundler::discover_direct(&entry)?;
-    if !update.diagnostics.is_empty() {
-        return Err(format!(
-            "visualization build produced {} diagnostics; first: {}",
-            update.diagnostics.len(),
-            update.diagnostics[0]
-        ));
+    // Only a FATAL diagnostic means the benchmark measured a broken build. A
+    // benign warning (an unevaluable `sideEffects` glob, an oxc warning) leaves
+    // runnable code, and failing on it would make the benchmark reject builds the
+    // real bundler accepts. One fatality predicate, shared with every other caller.
+    for warning in partition_diagnostics(&update.diagnostics, "visualization build")? {
+        eprintln!("warning: {warning}");
     }
     let mut reachability = bundler.direct_reachability();
     fs::write(
@@ -194,12 +194,8 @@ fn run_bundle_scale_inner_impl(
     let (mut bundler, initial) = Bundler::discover_direct(&entry)?;
     let discover_transform_resolve_ms = elapsed_ms(discover_started);
     let frontend_profile = frontend_profile::snapshot();
-    if !initial.diagnostics.is_empty() {
-        return Err(format!(
-            "initial build produced {} diagnostics; first: {}",
-            initial.diagnostics.len(),
-            initial.diagnostics[0]
-        ));
+    for warning in partition_diagnostics(&initial.diagnostics, "initial build")? {
+        eprintln!("warning: {warning}");
     }
 
     let reachability_started = Instant::now();
@@ -394,12 +390,8 @@ pub fn run_bundle_scale_memory(
     crate::memory::reset_peak();
 
     let (mut bundler, initial) = Bundler::discover_direct(&entry)?;
-    if !initial.diagnostics.is_empty() {
-        return Err(format!(
-            "memory build produced {} diagnostics; first: {}",
-            initial.diagnostics.len(),
-            initial.diagnostics[0]
-        ));
+    for warning in partition_diagnostics(&initial.diagnostics, "memory build")? {
+        eprintln!("warning: {warning}");
     }
     let mut reachability = bundler.direct_reachability();
     let mut reachable = reachability.reachable_modules();

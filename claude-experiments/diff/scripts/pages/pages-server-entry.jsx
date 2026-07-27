@@ -12,6 +12,12 @@
 //   * serves `pages/api/*` handlers and, for client navigations
 //     (`?__nextDataReq=1`), returns the page props as JSON instead of HTML.
 //
+// With built-in i18n configured (next.config `i18n`), a leading `/<locale>` is split
+// off the request path before matching (the default locale is served unprefixed), the
+// active locale is exposed on `router.locale` / `locales` / `defaultLocale`, passed to
+// `getStaticProps` / `getServerSideProps` / `getStaticPaths`, serialized into
+// `__NEXT_DATA__`, and rendered as `<html lang>`.
+//
 // The orchestrator (`pages-server.mjs`) imports this and wires it to Node's http
 // server; this module runs the app's own bundled React.
 
@@ -19,11 +25,13 @@ import { renderToStaticMarkup, renderToString } from "react-dom/server";
 import { RouterContext, createRouterEvents } from "./next-router.jsx";
 import { HeadManagerContext } from "./pages-head-manager.jsx";
 import { DocumentContext, matchPath } from "./pages-runtime.jsx";
+import { addLocale, detectLocale, splitLocale } from "./pages-url.js";
 import {
   App,
   Document,
   ErrorPage,
   apiRoutes,
+  i18n,
   pages,
 } from "./pages-manifest.server.js";
 
@@ -38,7 +46,9 @@ const CLIENT_ENTRY = "/client.js";
 // seconds and the NEXT request regenerates it in place (ISR): the value served stays
 // stable inside the window and changes once past it.
 //
-// Keyed by the concrete pathname (e.g. `/`, `/blog/a`). Entry shape:
+// Keyed by the concrete REQUEST pathname, locale prefix included (`/`, `/blog/a`,
+// `/fr/blog/a`), so the same route in two locales holds two independent entries.
+// Entry shape:
 //   { pageProps, expires: number|Infinity, generation: number, prebuilt: boolean }
 const isrCache = new Map();
 
@@ -60,6 +70,24 @@ export function seedPrerender(data) {
       prebuilt: true,
     });
   }
+}
+
+// Every locale the app builds for; `[null]` (one nameless locale) when i18n is off,
+// so locale-agnostic code paths iterate exactly once.
+function localeList() {
+  return i18n ? i18n.locales : [null];
+}
+
+// The getStaticPaths key for a (locale, params) pair.
+function localeKey(locale, key) {
+  return `${locale == null ? "" : locale}::${key}`;
+}
+
+// The i18n fields Next adds to every data-fetching context. `{}` when the app
+// configures no i18n, so a plain app sees exactly the context it saw before.
+function localeContext(locale) {
+  if (!i18n) return {};
+  return { locale, locales: i18n.locales, defaultLocale: i18n.defaultLocale };
 }
 
 // A canonical key for a param set, in the route's declared key order (so `/blog/a`
@@ -113,11 +141,15 @@ async function getStaticPathsTable(page, mod) {
   if (staticPathsByPattern.has(page.pattern)) return staticPathsByPattern.get(page.pattern);
   const table = { known: new Set(), fallback: false };
   if (typeof mod.getStaticPaths === "function") {
-    const result = await mod.getStaticPaths({});
+    const result = await mod.getStaticPaths(localeContext(i18n ? i18n.defaultLocale : undefined));
     table.fallback = result && "fallback" in result ? result.fallback : false;
     for (const entry of (result && result.paths) || []) {
       const params = typeof entry === "string" ? paramsFromPath(page, entry) : entry.params || {};
-      table.known.add(paramsKey(page, params));
+      const locale = typeof entry === "string" ? undefined : entry.locale;
+      // An entry without a `locale` is prerendered for every locale (Next's rule).
+      for (const each of locale !== undefined ? [locale] : localeList()) {
+        table.known.add(localeKey(each, paramsKey(page, params)));
+      }
     }
   } else if (page.keys.length) {
     throw new Error(
@@ -133,28 +165,28 @@ async function getStaticPathsTable(page, mod) {
 // `{ pageProps, state }` where state is one of "static" (served from the build-time
 // prerender), "hit" (served from a runtime-cached generation), "miss" (first runtime
 // generation), "stale" (revalidated after expiry) — or `{ notFound }` / `{ redirect }`.
-async function resolveStatic(page, mod, params, pathname) {
+async function resolveStatic(page, mod, params, cacheKey, locale) {
   const now = Date.now();
-  const cached = isrCache.get(pathname);
+  const cached = isrCache.get(cacheKey);
   if (cached && cached.expires > now) {
     return { pageProps: cached.pageProps, state: cached.prebuilt ? "static" : "hit" };
   }
   // Cache miss on a dynamic route: consult getStaticPaths for the fallback policy.
   if (!cached && page.keys.length) {
     const table = await getStaticPathsTable(page, mod);
-    if (!table.known.has(paramsKey(page, params)) && table.fallback === false) {
+    if (!table.known.has(localeKey(locale, paramsKey(page, params))) && table.fallback === false) {
       return { notFound: true };
     }
     // fallback true / "blocking": generate on demand below.
   }
-  const result = await mod.getStaticProps({ params });
+  const result = await mod.getStaticProps({ params, ...localeContext(locale) });
   if (result && result.notFound) return { notFound: true };
   if (result && result.redirect) return { redirect: result.redirect };
   const pageProps = (result && result.props) || {};
   const revalidate = result && typeof result.revalidate === "number" ? result.revalidate : null;
   const expires = revalidate != null ? now + revalidate * 1000 : Infinity;
   const generation = cached ? cached.generation + 1 : 0;
-  isrCache.set(pathname, { pageProps, expires, generation, prebuilt: false });
+  isrCache.set(cacheKey, { pageProps, expires, generation, prebuilt: false });
   return { pageProps, state: cached ? "stale" : "miss" };
 }
 
@@ -180,26 +212,36 @@ export async function prerender() {
   for (const page of pages) {
     const mod = page.mod;
     if (typeof mod.getStaticProps !== "function") continue;
-    let paramSets;
+    // Each job is one (params, locale) pair to prerender. With i18n off there is a
+    // single nameless locale, so this is the old one-entry-per-params behaviour.
+    let jobs;
     if (page.keys.length) {
       if (typeof mod.getStaticPaths !== "function") {
         throw new Error(
           `pages-router prerender: dynamic route ${page.pattern} has getStaticProps but no getStaticPaths`,
         );
       }
-      const result = await mod.getStaticPaths({});
-      paramSets = ((result && result.paths) || []).map((entry) =>
-        typeof entry === "string" ? paramsFromPath(page, entry) : entry.params || {},
+      const result = await mod.getStaticPaths(
+        localeContext(i18n ? i18n.defaultLocale : undefined),
       );
+      jobs = [];
+      for (const entry of (result && result.paths) || []) {
+        const params = typeof entry === "string" ? paramsFromPath(page, entry) : entry.params || {};
+        const locale = typeof entry === "string" ? undefined : entry.locale;
+        for (const each of locale !== undefined ? [locale] : localeList()) {
+          jobs.push({ params, locale: each });
+        }
+      }
     } else {
-      paramSets = [{}];
+      jobs = localeList().map((locale) => ({ params: {}, locale }));
     }
-    for (const params of paramSets) {
-      const result = await mod.getStaticProps({ params });
+    for (const { params, locale } of jobs) {
+      const result = await mod.getStaticProps({ params, ...localeContext(locale) });
       if (result && (result.notFound || result.redirect)) continue;
       entries.push({
-        url: urlFor(page, params),
+        url: addLocale(urlFor(page, params), locale, i18n && i18n.defaultLocale),
         pattern: page.pattern,
+        locale: locale == null ? null : locale,
         pageProps: (result && result.props) || {},
         revalidate: result && typeof result.revalidate === "number" ? result.revalidate : null,
       });
@@ -217,14 +259,17 @@ function escapeJson(json) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function serverRouter(pathname, query, params, pattern) {
+function serverRouter(pathname, query, params, pattern, locale) {
   const noop = async () => {};
   return {
     pathname: pattern,
     route: pattern,
+    // Next's `asPath` excludes the locale prefix; `pathname` here is already the
+    // locale-free request path.
     asPath: pathname,
     query: { ...query, ...params },
     basePath: "",
+    ...localeContext(locale),
     isReady: true,
     isFallback: false,
     isPreview: false,
@@ -239,10 +284,10 @@ function serverRouter(pathname, query, params, pattern) {
   };
 }
 
-function renderDocument(Component, pageProps, pathname, query, params, pattern) {
+function renderDocument(Component, pageProps, pathname, query, params, pattern, locale) {
   const head = [];
   const collector = { push: (children) => head.push(children) };
-  const router = serverRouter(pathname, query, params, pattern);
+  const router = serverRouter(pathname, query, params, pattern, locale);
   const appHtml = renderToString(
     <RouterContext.Provider value={router}>
       <HeadManagerContext.Provider value={collector}>
@@ -255,12 +300,15 @@ function renderDocument(Component, pageProps, pathname, query, params, pattern) 
     page: pattern,
     query: { ...query, ...params },
     buildId: "diffpack",
+    ...localeContext(locale),
   };
   const docCtx = {
     appHtml,
     head,
     nextDataJson: escapeJson(JSON.stringify(nextData)),
     clientEntry: CLIENT_ENTRY,
+    // `<html lang>` — the default `_document` (and `next/document`'s `Html`) render it.
+    locale: i18n ? locale : null,
   };
   const documentHtml = renderToStaticMarkup(
     <DocumentContext.Provider value={docCtx}>
@@ -369,7 +417,7 @@ function parseCookies(headers) {
   return cookies;
 }
 
-function renderError(statusCode, query, pathname) {
+function renderError(statusCode, query, pathname, locale) {
   if (query.__nextDataReq) {
     return {
       status: statusCode,
@@ -377,7 +425,7 @@ function renderError(statusCode, query, pathname) {
       body: JSON.stringify({ pageProps: { statusCode }, page: "/_error" }),
     };
   }
-  const html = renderDocument(ErrorPage, { statusCode }, pathname, query, {}, "/_error");
+  const html = renderDocument(ErrorPage, { statusCode }, pathname, query, {}, "/_error", locale);
   return {
     status: statusCode,
     headers: { "content-type": "text/html; charset=utf-8" },
@@ -388,7 +436,8 @@ function renderError(statusCode, query, pathname) {
 export async function handleRequest(method, pathname, query, headers, bodyText) {
   query = query || {};
 
-  // API routes (`pages/api/*`).
+  // API routes (`pages/api/*`). Next does NOT locale-prefix them, so they are matched
+  // against the raw request path, before any locale split.
   const apiMatch = matchPath(apiRoutes, pathname);
   if (apiMatch) {
     const handler = apiMatch.page.handler;
@@ -412,23 +461,39 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
     return { status: res.statusCode, headers: res._headers, body: res._body };
   }
 
+  // Built-in i18n: split a leading `/<locale>` off the request path. The default
+  // locale is served unprefixed; `routePath` is what the route table matches and what
+  // `router.asPath` reports (Next's asPath excludes the locale).
+  const requestPath = pathname;
+  const { locale, pathname: routePath, prefixed } = splitLocale(i18n, pathname);
+
+  // Next detects a locale from `NEXT_LOCALE` / `Accept-Language` at the bare root only,
+  // and redirects there when it differs from the default locale.
+  if (i18n && !prefixed && routePath === "/" && !query.__nextDataReq) {
+    const detected = detectLocale(i18n, headers, parseCookies(headers));
+    if (detected !== i18n.defaultLocale) {
+      return { status: 307, headers: { location: addLocale("/", detected, i18n.defaultLocale) }, body: "" };
+    }
+  }
+
   // Page routes.
-  const match = matchPath(pages, pathname);
-  if (!match) return renderError(404, query, pathname);
+  const match = matchPath(pages, routePath);
+  if (!match) return renderError(404, query, routePath, locale);
 
   const { page, params } = match;
   const mod = page.mod;
   const Component = mod.default;
-  if (typeof Component !== "function") return renderError(500, query, pathname);
+  if (typeof Component !== "function") return renderError(500, query, routePath, locale);
 
   const context = {
     params,
     query: { ...query, ...params },
     pathname: page.pattern,
-    asPath: pathname,
-    req: { method, url: pathname, headers: headers || {} },
+    asPath: routePath,
+    req: { method, url: requestPath, headers: headers || {} },
     res: makeRes(),
-    resolvedUrl: pathname,
+    resolvedUrl: routePath,
+    ...localeContext(locale),
   };
 
   // Resolve pageProps through the data-fetching lifecycle. Exactly one of
@@ -439,7 +504,7 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
   if (typeof mod.getServerSideProps === "function") {
     // Per-request server rendering.
     const result = await mod.getServerSideProps(context);
-    if (result && result.notFound) return renderError(404, query, pathname);
+    if (result && result.notFound) return renderError(404, query, routePath, locale);
     if (result && result.redirect) {
       return {
         status: result.redirect.permanent ? 308 : 307,
@@ -451,8 +516,8 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
   } else if (typeof mod.getStaticProps === "function") {
     // Static generation + ISR (served from the build-time prerender, regenerated on
     // expiry). getStaticPaths gates unknown dynamic paths.
-    const resolved = await resolveStatic(page, mod, params, pathname);
-    if (resolved.notFound) return renderError(404, query, pathname);
+    const resolved = await resolveStatic(page, mod, params, requestPath, locale);
+    if (resolved.notFound) return renderError(404, query, routePath, locale);
     if (resolved.redirect) {
       return {
         status: resolved.redirect.permanent ? 308 : 307,
@@ -464,7 +529,7 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
     isrState = resolved.state;
   } else {
     // getInitialProps (page and/or _app), run per request.
-    const router = serverRouter(pathname, query, params, page.pattern);
+    const router = serverRouter(routePath, query, params, page.pattern, locale);
     pageProps = await resolveInitialProps(Component, context, router);
   }
 
@@ -478,11 +543,19 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
     return {
       status: 200,
       headers: { ...extraHeaders, "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ pageProps, page: page.pattern }),
+      body: JSON.stringify({ pageProps, page: page.pattern, ...localeContext(locale) }),
     };
   }
 
-  const html = renderDocument(Component, pageProps, pathname, query, params, page.pattern);
+  const html = renderDocument(
+    Component,
+    pageProps,
+    routePath,
+    query,
+    params,
+    page.pattern,
+    locale,
+  );
   return {
     status: 200,
     headers: { ...extraHeaders, "content-type": "text/html; charset=utf-8" },

@@ -383,14 +383,21 @@ fn run() -> Result<(), String> {
             );
             let (bundler, update) =
                 Bundler::discover_direct_with_config(&entry, &config.build)?;
+            // A fatal diagnostic (an unresolved import, a source error) means the
+            // chunk this build would write is already broken, so it is not written
+            // at all. Only the non-fatal diagnostics survive as warnings.
+            let warnings = diffpack::bundler::partition_diagnostics(
+                &update.diagnostics,
+                &format!("{} build", config.environment),
+            )?;
             let reachable = bundler.reachable_modules_direct();
             println!(
-                "reachable {} modules; {} diagnostic(s)",
+                "reachable {} modules; {} warning(s)",
                 reachable.len(),
-                update.diagnostics.len()
+                warnings.len()
             );
-            for diagnostic in &update.diagnostics {
-                println!("  known gap: {diagnostic}");
+            for warning in &warnings {
+                println!("  warning: {warning}");
             }
 
             // Emit the environment natively. The `client` environment writes the
@@ -486,10 +493,20 @@ fn run() -> Result<(), String> {
                 // the served, non-pruned `public/rsc.css` (the SSR build would
                 // otherwise prune it from `server/`); the adapter links it into the
                 // document head. Next injects the route's stylesheets the same way.
+                //
+                // The FILE NAME is the shared constant the render entry's head-link
+                // guard reads (`RSC_EMITTED_CSS_FILE`): the entry links `/rsc.css` iff
+                // this same file sits beside it, so the link and the artifact are one
+                // fact and cannot disagree. Absent = the graph compiled no CSS = no
+                // link, which is why nothing is copied and nothing is reported.
                 if config.environment == "react-server" {
-                    let css = output_root.join("server/server.css");
+                    let css = output_root
+                        .join("server")
+                        .join(diffpack::next_adapter::RSC_EMITTED_CSS_FILE);
                     if css.is_file() {
-                        let dest = output_root.join("public/rsc.css");
+                        let dest = output_root
+                            .join("public")
+                            .join(diffpack::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
                         if let Some(parent) = dest.parent() {
                             std::fs::create_dir_all(parent).map_err(|error| {
                                 format!("cannot create {}: {error}", parent.display())
@@ -578,12 +595,10 @@ fn run() -> Result<(), String> {
             if profile {
                 eprintln!("discover: {:.1} ms", discover_started.elapsed().as_secs_f64() * 1000.0);
             }
-            if !update.diagnostics.is_empty() {
-                return Err(format!(
-                    "bundle produced {} diagnostic(s); first: {}",
-                    update.diagnostics.len(),
-                    update.diagnostics[0]
-                ));
+            for warning in
+                diffpack::bundler::partition_diagnostics(&update.diagnostics, "bundle")?
+            {
+                eprintln!("warning: {warning}");
             }
             let phase_started = Instant::now();
             let reachable = bundler.reachable_modules_direct();
@@ -610,12 +625,10 @@ fn run() -> Result<(), String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("diffpack-graph.html"));
             let (bundler, update) = Bundler::discover_direct(Path::new(&entry))?;
-            if !update.diagnostics.is_empty() {
-                return Err(format!(
-                    "visualization produced {} diagnostic(s); first: {}",
-                    update.diagnostics.len(),
-                    update.diagnostics[0]
-                ));
+            for warning in
+                diffpack::bundler::partition_diagnostics(&update.diagnostics, "visualization")?
+            {
+                eprintln!("warning: {warning}");
             }
             let reachable = bundler.reachable_modules_direct();
             let graph = bundler.visualization_graph(&reachable);
@@ -709,7 +722,7 @@ fn run() -> Result<(), String> {
                 // The REACT-SERVER-graph rewrite of a `"use client"` module: its
                 // real code never reaches the server; each export becomes a client
                 // reference the flight render serializes via the manifest.
-                Some("client-ref") => diffpack::rsc::transform_use_client_server(path, &source)
+                Some("client-ref") => diffpack::rsc::transform_use_client_server(path, &source)?
                     .ok_or_else(|| {
                         format!("{} is not a \"use client\" module", path.display())
                     })?,
@@ -814,9 +827,9 @@ fn run() -> Result<(), String> {
                     out.display()
                 ));
             }
-            // The runtime next/image optimizer (`/_next/image`) in the emitted
-            // orchestrator shells back to THIS binary for the actual native resize/
-            // re-encode (the `image` crate — no Node image dep). Hand it our path.
+            // The next/image optimizer (`/_next/image`) in the emitted orchestrator
+            // shells back to THIS binary for a native resize/re-encode the build did not
+            // precompute (the `image` crate — no Node image dep). Hand it our path.
             let mut command = std::process::Command::new("node");
             command.arg(&entry).arg(out).arg(&port);
             if let Ok(exe) = std::env::current_exe() {
@@ -832,9 +845,9 @@ fn run() -> Result<(), String> {
             }
         }
         // Native next/image runtime optimizer worker. The emitted next orchestrator
-        // (`scripts/rsc/next-server.mjs`) shells to this for the DYNAMIC/REMOTE
-        // fallback path only — build-time responsive variants are still preferred, so
-        // prerendered/static pages never invoke it. Reads the source image bytes on
+        // (`scripts/rsc/next-server.mjs`) shells to this only for a width/quality the
+        // build did not precompute — it answers everything else straight from the
+        // build-emitted variants, so prerendered/static pages never invoke it. Reads the source image bytes on
         // stdin, resizes (never upscales) to `--width`, re-encodes to `--format`
         // (`png`|`jpeg`) at `--quality`, and writes the optimized bytes to stdout.
         Some("optimize-image") => optimize_image(arguments.collect::<Vec<_>>()),
@@ -846,8 +859,8 @@ fn run() -> Result<(), String> {
 /// (downscale only — never upscale past the intrinsic width) to `--width`, re-encode to
 /// `--format` (`png` preserves alpha; `jpeg` re-compresses at `--quality`), and stream the
 /// optimized bytes to stdout. This is the on-the-fly path the emitted orchestrator shells
-/// to for a DYNAMIC or REMOTE image src; static/public rasters keep using the build-time
-/// responsive variants, so this pays nothing on the prerendered/static page path.
+/// to for a REMOTE src, or a width/quality the build did not precompute; a `/public` or
+/// static-import raster at a build-emitted width is served from disk instead.
 fn optimize_image(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     use std::io::{Read, Write};
 
@@ -983,7 +996,22 @@ fn web_build(
         pages
     };
 
-    let out_dir = out_dir.unwrap_or_else(|| root.join("dist"));
+    // Vite resolves `build.outDir` against the project root, and so does diffpack:
+    // an explicit relative `--out-dir` is root-relative, exactly like the `dist`
+    // default. `Path::join` with an absolute argument yields that path unchanged,
+    // so an absolute `--out-dir` still lands where the caller asked.
+    //
+    // Precedence, highest first: the `--out-dir` argument, then the project's
+    // `vite.config` `build.outDir` (already root-resolved by `derive_web_config`),
+    // then Vite's `dist` default. An explicit command-line argument always beats a
+    // config file.
+    let out_dir = match out_dir {
+        Some(out_dir) => root.join(out_dir),
+        None => config
+            .out_dir
+            .clone()
+            .unwrap_or_else(|| root.join("dist")),
+    };
     let emit_options = EmitOptions {
         minify,
         source_map,
@@ -1043,19 +1071,13 @@ fn web_build(
         })?;
 
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-        // A web build fails on unresolved imports — an artifact with dangling
+        // A web build fails on unresolved imports: an artifact with dangling
         // references is not a successful build.
-        if !update.diagnostics.is_empty() {
-            let mut message = format!(
-                "page `{name}` ({}): {} unresolved import(s):",
-                html_origin,
-                update.diagnostics.len()
-            );
-            for diagnostic in &update.diagnostics {
-                message.push_str("\n  ");
-                message.push_str(diagnostic);
-            }
-            return Err(message);
+        for warning in diffpack::bundler::partition_diagnostics(
+            &update.diagnostics,
+            &format!("page `{name}` ({html_origin})"),
+        )? {
+            eprintln!("warning: {warning}");
         }
         let reachable = bundler.reachable_modules_direct();
 
@@ -1214,14 +1236,18 @@ fn build_pages_app(
         entry.display(),
     );
     let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
+    let warnings = diffpack::bundler::partition_diagnostics(
+        &update.diagnostics,
+        &format!("pages {} build", config.environment),
+    )?;
     let reachable = bundler.reachable_modules_direct();
     println!(
-        "reachable {} modules; {} diagnostic(s)",
+        "reachable {} modules; {} warning(s)",
         reachable.len(),
-        update.diagnostics.len()
+        warnings.len()
     );
-    for diagnostic in &update.diagnostics {
-        println!("  known gap: {diagnostic}");
+    for warning in &warnings {
+        println!("  warning: {warning}");
     }
 
     let emit_options = EmitOptions {
@@ -1522,6 +1548,10 @@ fn next_prerender(project_root: &Path, output_root: &Path, static_export: bool) 
 
 fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
     let (mut bundler, initial) = Bundler::discover_direct(entry)?;
+    // The initial build is a hard error: there is nothing worth watching over a
+    // graph that cannot produce a loadable artifact.
+    let initial_warnings =
+        diffpack::bundler::partition_diagnostics(&initial.diagnostics, "watch")?;
     let mut session = bundler.direct_reachability();
     let mut reachable = session.reachable_modules();
     bundler.emit(&reachable, output)?;
@@ -1531,8 +1561,8 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
         reachable.len(),
         output.display()
     );
-    for diagnostic in initial.diagnostics {
-        eprintln!("diagnostic: {diagnostic}");
+    for warning in initial_warnings {
+        eprintln!("warning: {warning}");
     }
 
     let (events, receiver) = mpsc::channel();
@@ -1571,6 +1601,17 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
                 reachable.remove(&module);
             }
             reachable.extend(result.added);
+            // A bad edit must not kill the watcher, and must not overwrite the last
+            // good artifact with a broken one: report it, skip the emit, and keep
+            // watching so the next save can fix it.
+            let warnings =
+                match diffpack::bundler::partition_diagnostics(&update.diagnostics, "rebuild") {
+                    Ok(warnings) => warnings,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        continue;
+                    }
+                };
             bundler.emit(&reachable, output)?;
             let rebuild_ms = rebuild_started.elapsed().as_secs_f64() * 1_000.0;
             println!(
@@ -1581,8 +1622,8 @@ fn watch_bundle(entry: &Path, output: &Path) -> Result<(), String> {
                 reachability_ms,
                 rebuild_ms
             );
-            for diagnostic in update.diagnostics {
-                eprintln!("diagnostic: {diagnostic}");
+            for warning in warnings {
+                eprintln!("warning: {warning}");
             }
         }
     }

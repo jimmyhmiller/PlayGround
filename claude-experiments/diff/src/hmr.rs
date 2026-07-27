@@ -247,12 +247,20 @@ pub const SERVER_CONTROL: &str = r#"
 /// * A route-component split (`?tsr-split=component` / `errorComponent` / ...): the
 ///   virtual module holds exactly the extracted component, exported under its
 ///   canonical (lowercase) property name — always a boundary.
-/// * A plain `.jsx`/`.tsx` module that exports only likely components (uppercase or
-///   `default`). A ROUTE reference file is explicitly excluded: it exports the
-///   TanStack `Route` object (not a component), so making it a boundary would make
-///   every edit invalidate and full-reload. Its component is split out separately
-///   and instrumented via the split module above.
-pub fn is_refresh_boundary(path: &Path, exports: &[String], source: &str) -> bool {
+/// * A module in a JSX-capable extension that exports only likely components
+///   (uppercase or `default`). Which extensions those are is the PROJECT's rule
+///   (`jsx`): under Next a `.js` component is as much a boundary as a `.jsx` one,
+///   and treating it as plain JS would give every Next `.js` page a full page
+///   reload on each edit. A ROUTE reference file is explicitly excluded: it exports
+///   the TanStack `Route` object (not a component), so making it a boundary would
+///   make every edit invalidate and full-reload. Its component is split out
+///   separately and instrumented via the split module above.
+pub fn is_refresh_boundary(
+    path: &Path,
+    exports: &[String],
+    source: &str,
+    jsx: crate::parser::JsxExtensions,
+) -> bool {
     let path_str = path.to_string_lossy();
     if let Some(rest) = path_str.split("?tsr-split=").nth(1) {
         // Component-kind splits are refresh boundaries; a `loader` split is not.
@@ -260,15 +268,10 @@ pub fn is_refresh_boundary(path: &Path, exports: &[String], source: &str) -> boo
         return kind.to_ascii_lowercase().ends_with("component");
     }
     // Only the real source extension counts; a `?tsr-split` query would otherwise
-    // make `extension()` include the query.
-    let is_jsx = ["jsx", "tsx"].iter().any(|ext| {
-        path_str
-            .split('?')
-            .next()
-            .unwrap_or(&path_str)
-            .ends_with(&format!(".{ext}"))
-    });
-    if !is_jsx {
+    // make `extension()` include the query. The single JSX rule decides, so this
+    // never drifts from what the module was actually parsed as.
+    let real_path = Path::new(path_str.split('?').next().unwrap_or(&path_str));
+    if !crate::parser::source_type_for(real_path, jsx).is_jsx() {
         return false;
     }
     // A route file defines its route via `createFileRoute`/`createRootRoute` and
@@ -887,7 +890,38 @@ mod tests {
             Path::new("/app/src/components/Navbar.tsx"),
             &["Navbar".to_string()],
             "export const Navbar = () => null",
+            crate::parser::JsxExtensions::default(),
         );
         assert!(boundary, "a lone uppercase named component export must be a boundary");
+    }
+
+    #[test]
+    fn a_next_js_component_module_is_a_refresh_boundary() {
+        // Under Next, `.js` IS a component extension; treating it as plain JS gave
+        // every Next `.js` page a full page reload on every edit instead of a
+        // state-preserving swap.
+        let arguments = (
+            Path::new("/app/components/Gallery.js"),
+            ["Gallery".to_string()],
+            "export const Gallery = () => null",
+        );
+        assert!(
+            is_refresh_boundary(
+                arguments.0,
+                &arguments.1,
+                arguments.2,
+                crate::parser::JsxExtensions::NextJs,
+            ),
+            "a Next `.js` component module must be a Fast Refresh boundary"
+        );
+        assert!(
+            !is_refresh_boundary(
+                arguments.0,
+                &arguments.1,
+                arguments.2,
+                crate::parser::JsxExtensions::JsxAndTsxOnly,
+            ),
+            "under the Vite rule a `.js` module is plain JS, never a boundary"
+        );
     }
 }

@@ -185,6 +185,47 @@
 ; ---- backend object-builder injection (main.coil / main_a64.coil register one) ---
 (defstruct MetaBuildBox [(isset i64) (fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))])
 (defn meta-build-box [] (-> (ptr MetaBuildBox)) (alloc-static MetaBuildBox))
+
+; ---- the -O level (driver sets it from -O0/-O1/-O2/-O3, default 3) -----------------
+; One value per process, like the sanitize flag. main.coil::build-object reads it for
+; BOTH the `default<On>` pass pipeline and the target machine's CodeGenOptLevel.
+;
+; It lives HERE rather than in driver.coil because the metaprogram dylib is built
+; through that same build-object, so a metaprogram is compiled at whatever -O the
+; command line asked for — and the content-addressed dylib cache below must therefore
+; key on the level too, or a -O3 build silently reuses a dylib somebody compiled at
+; -O0 and runs its macros in unoptimized code.
+;
+; `default<O3>` over the compiler's own ~11 MB of IR is the single largest phase of a
+; build. -O0 trades the emitted program's speed for compile time: the right trade for
+; a build you are about to throw away, the wrong one for anything you intend to run.
+; LLVM-backend only — `--backend arm64` does its own codegen and never runs a pass
+; pipeline, so -O is inert there, as it is for the comptime MObj path (which is arm64
+; even in the LLVM build; see main.coil::meta-build-mobj-llvm).
+(defstruct OptLevelBox [(isset i64) (level i64)])
+(defn opt-level-box [] (-> (ptr OptLevelBox)) (alloc-static OptLevelBox))
+(defn set-opt-level! [(n i64)] (-> i64)
+  (let [b (opt-level-box)] (store! (field b level) n) (store! (field b isset) 1) 0))
+(defn opt-level [] (-> i64)
+  (let [b (opt-level-box)] (if (icmp-eq (load (field b isset)) 0) 3 (load (field b level)))))
+; `--meta-opt=<n>` — the level for METAPROGRAM objects (the dylib built below, and the
+; comptime objects comptime_eval builds through the same hook), independent of the -O
+; the program itself gets. Unset = follow -O, so this changes nothing unless asked for.
+;
+; Worth separating because the two have opposite economics. A metaprogram is small but
+; is REBUILT every time you edit it (the cache below is keyed on its own content), and
+; then it RUNS over the whole program — so its level trades its compile time against
+; its run time, on every iteration. The program object is the opposite: big, built once,
+; and its level trades build time against a runtime you may not care about at all.
+(defstruct MetaOptBox [(isset i64) (level i64)])
+(defn meta-opt-box [] (-> (ptr MetaOptBox)) (alloc-static MetaOptBox))
+(defn set-meta-opt-level! [(n i64)] (-> i64)
+  (let [b (meta-opt-box)] (store! (field b level) n) (store! (field b isset) 1) 0))
+(defn meta-opt-level [] (-> i64)
+  (let [b (meta-opt-box)] (if (icmp-eq (load (field b isset)) 0) (opt-level) (load (field b level)))))
+(defn opt-level-tag [] (-> (slice u8))
+  (let [n (meta-opt-level)]
+    (if (icmp-eq n 0) "O0|" (if (icmp-eq n 1) "O1|" (if (icmp-eq n 2) "O2|" "O3|")))))
 (defn set-meta-build-obj! [(fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))] (-> i64)
   (let [b (meta-build-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
 
@@ -364,6 +405,7 @@
   (let [c (alloc-stack FnvCell) w (alloc-stack Writer)]
     (store! (field c h) -3750763034362895579)          ; FNV-1a offset basis
     (me-fnv-str c "coil-metaprog-v1|")
+    (me-fnv-str c (opt-level-tag))     ; same program at a different -O is a different dylib
     (store! (field w write-fn) (fnptr-of me-fnv-write))
     (store! (field w ctx) (cast (ptr i8) c))
     (d-program w mp a)

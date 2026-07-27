@@ -16,15 +16,93 @@ use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{SPAN, SourceType};
 use oxc_syntax::{operator::BinaryOperator, symbol::SymbolId};
-use oxc_transformer::{ReactRefreshOptions, TransformOptions, Transformer};
+use oxc_transformer::{JsxRuntime as OxcJsxRuntime, ReactRefreshOptions, TransformOptions, Transformer};
 
 use crate::frontend_profile::{self, Phase};
-use crate::parser::{collect_dependencies, collect_dynamic_dependencies};
+use crate::parser::{JsxExtensions, collect_dependencies, collect_dynamic_dependencies};
+
+/// One oxc parse/semantic/transform diagnostic, with its severity preserved.
+/// An error means the code oxc produced does not match the source; a warning
+/// leaves runnable code, so the two cannot be collapsed into one string list —
+/// the bundler decides fatality from `fatal`.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TransformDiagnostic {
+    pub fatal: bool,
+    pub message: String,
+}
+
+impl TransformDiagnostic {
+    /// A diffpack-produced transform failure. The module's code is empty when one
+    /// of these is returned, so it is always fatal.
+    pub fn error(message: String) -> Self {
+        Self {
+            fatal: true,
+            message,
+        }
+    }
+}
+
+/// Converts an oxc diagnostic collection, preserving severity. oxc documents a
+/// missing severity as an error, and `Severity::Advice` is informational, so
+/// only `Severity::Error` is fatal.
+fn transform_diagnostics(diagnostics: oxc_diagnostics::Diagnostics) -> Vec<TransformDiagnostic> {
+    diagnostics
+        .into_vec()
+        .into_iter()
+        .map(|diagnostic| TransformDiagnostic {
+            fatal: diagnostic.severity == oxc_diagnostics::Severity::Error,
+            message: diagnostic.to_string(),
+        })
+        .collect()
+}
+
+/// Replaces oxc's bare `Unexpected JSX expression` with an actionable message when
+/// the module was parsed WITHOUT JSX. The raw diagnostic points at a column and
+/// says nothing about why the same source compiles under Next and not here, which
+/// sent a real investigation down the wrong path.
+///
+/// `esbuild.include`/`esbuild.loader` is deliberately NOT offered as a remedy:
+/// diffpack does not read it (`ResolvedViteConfig` has no `esbuild` field), and
+/// pointing at a knob that does nothing is a silent fallback wearing a help string.
+fn explain_jsx_in_non_jsx(
+    path: &Path,
+    source_type: SourceType,
+    diagnostics: &mut [TransformDiagnostic],
+) {
+    if source_type.is_jsx() {
+        return;
+    }
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return;
+    };
+    // Only the extensions this rule actually governs. A `.vue`/`.svelte` file also
+    // fails with "Unexpected JSX expression", but its remedy is a component
+    // compiler, not a rename — that is a separate defect and is left untouched.
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("module");
+    let explanation = match extension {
+        "js" | "mjs" | "cjs" => format!(
+            "JSX is not enabled for `.{extension}` files. Vite/esbuild parse `.{extension}` as \
+             plain JavaScript on purpose and diffpack matches that; \
+             `esbuild.include`/`esbuild.loader` is not honored. Rename it to `{stem}.jsx`. \
+             (A Next.js project, which does allow JSX in `.js`, is detected automatically.)"
+        ),
+        "ts" | "mts" | "cts" => format!(
+            "JSX is not enabled for `.{extension}` files: in TypeScript `<T>x` is a type \
+             assertion, so a module containing JSX must be `{stem}.tsx`."
+        ),
+        _ => return,
+    };
+    for diagnostic in diagnostics.iter_mut() {
+        if diagnostic.message.contains("Unexpected JSX expression") {
+            diagnostic.message = explanation.clone();
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TransformResult {
     pub code: String,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<TransformDiagnostic>,
     pub is_esm: bool,
     pub dependencies: Vec<String>,
     pub dependency_demands: Vec<DependencyDemand>,
@@ -45,6 +123,12 @@ pub struct TransformResult {
     /// `require`, `__filename`, `__dirname`). Such a module needs the factory
     /// wrapper that defines them and must not be scope-hoisted into ESM output.
     pub uses_cjs_globals: bool,
+    /// The module freely references `__dirname` or `__filename` specifically.
+    /// A Node target resolves those from the emitted bundle's own location, but
+    /// a BROWSER target has no such thing: the emit must define them per module
+    /// or the reference is a `ReferenceError` at module init. Strictly a subset
+    /// of [`Self::uses_cjs_globals`].
+    pub uses_dirname: bool,
     /// Module-worker entries this module creates via
     /// `new Worker(new URL('<specifier>', import.meta.url))`, as
     /// `(placeholder_key, specifier)`. The placeholder (already substituted
@@ -107,6 +191,98 @@ pub struct DependencyDemand {
     pub dynamic: bool,
 }
 
+/// Which runtime a module's JSX is lowered with.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum JsxRuntime {
+    /// `import { jsx as _jsx } from "<import source>/jsx-runtime"` — TypeScript's
+    /// `"jsx": "react-jsx"`, and the default for every project that says nothing.
+    #[default]
+    Automatic,
+    /// `React.createElement(...)` (or whatever `jsxFactory` names) — TypeScript's
+    /// `"jsx": "react"`.
+    Classic,
+}
+
+/// How a module's JSX is lowered: the resolved `jsx` / `jsxImportSource` /
+/// `jsxFactory` / `jsxFragmentFactory` contract for one file.
+///
+/// Every field is optional, and `Default` (all `None`) means the automatic runtime
+/// against `react` — oxc's own default, so a project that configures nothing is
+/// byte-identical to before this type existed. The layers that fill it in, weakest
+/// first, are: the tsconfig that owns the file, then the build's own settings
+/// (`vite.config`'s `esbuild.*` / `oxc.jsx`), then a per-file `@jsxImportSource` /
+/// `@jsx` / `@jsxFrag` / `@jsxRuntime` pragma — the last of which oxc applies
+/// itself, from the program's leading comments, after these options are installed.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct JsxConfig {
+    pub runtime: Option<JsxRuntime>,
+    /// The package the automatic runtime imports from (`preact` -> `preact/jsx-runtime`).
+    pub import_source: Option<String>,
+    /// The classic-runtime factory (`h`, `React.createElement`).
+    pub factory: Option<String>,
+    /// The classic-runtime fragment factory (`Fragment`, `React.Fragment`).
+    pub fragment_factory: Option<String>,
+}
+
+impl JsxConfig {
+    /// This config with every field `other` sets replaced by `other`'s. Field-by-
+    /// field, not whole-record, because that is exactly how Vite layers its own
+    /// options over the tsconfig's: it nulls only the tsconfig fields whose
+    /// counterpart the config sets.
+    #[must_use]
+    pub fn overridden_by(mut self, other: &Self) -> Self {
+        if other.runtime.is_some() {
+            self.runtime = other.runtime;
+        }
+        if other.import_source.is_some() {
+            self.import_source.clone_from(&other.import_source);
+        }
+        if other.factory.is_some() {
+            self.factory.clone_from(&other.factory);
+        }
+        if other.fragment_factory.is_some() {
+            self.fragment_factory.clone_from(&other.fragment_factory);
+        }
+        self
+    }
+
+    /// Installs this config on oxc's transform options.
+    ///
+    /// MUTATES the caller's defaults rather than constructing a fresh `JsxOptions`:
+    /// `JsxOptions::enable()` sets `pure: true`, and oxc only infers purity for a
+    /// config that names neither an import source nor a pragma
+    /// (`jsx_impl.rs`: `pure || (import_source.is_none() && pragma.is_none())`), so a
+    /// hand-built `JsxOptions` that sets `import_source` would silently drop every
+    /// `/*#__PURE__*/` annotation and de-tree-shake the bundle.
+    fn apply(&self, options: &mut TransformOptions) {
+        match self.runtime.unwrap_or_default() {
+            JsxRuntime::Automatic => {
+                options.jsx.runtime = OxcJsxRuntime::Automatic;
+                if let Some(import_source) = &self.import_source {
+                    options.jsx.import_source = Some(import_source.clone());
+                }
+            }
+            JsxRuntime::Classic => {
+                options.jsx.runtime = OxcJsxRuntime::Classic;
+                if let Some(factory) = &self.factory {
+                    options.jsx.pragma = Some(factory.clone());
+                    // In lockstep, and load-bearing: oxc's TypeScript pass decides
+                    // whether `import { h } from 'preact'` is a type-only import by
+                    // comparing the binding against `TypeScriptOptions::jsx_pragma`,
+                    // which defaults to `React.createElement`. Left at the default,
+                    // the factory's import is elided and the build "succeeds" into a
+                    // bundle that dies with `h is not defined`.
+                    options.typescript.jsx_pragma = factory.clone().into();
+                }
+                if let Some(fragment_factory) = &self.fragment_factory {
+                    options.jsx.pragma_frag = Some(fragment_factory.clone());
+                    options.typescript.jsx_pragma_frag = fragment_factory.clone().into();
+                }
+            }
+        }
+    }
+}
+
 /// The environment a module is being compiled for. TanStack Start ships
 /// environment-neutral runtime stubs (`createServerOnlyFn`, `createClientOnlyFn`,
 /// `createIsomorphicFn`) and relies on the build tool to specialize them per
@@ -159,7 +335,14 @@ pub enum FoldExpression {
 }
 
 pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformResult {
-    transform_module_with_options(path, source, target, false)
+    transform_module_with_options(
+        path,
+        source,
+        target,
+        false,
+        JsxExtensions::default(),
+        &JsxConfig::default(),
+    )
 }
 
 /// Transform a single TS/TSX/JS/JSX module to STANDALONE, runnable ES module source:
@@ -171,7 +354,9 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
 /// or a hard error carrying any parse/transform diagnostics (never silent).
 pub fn transform_to_standalone_esm(path: &Path, source: &str) -> Result<String, String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    // The only caller is the Next app-router `@vercel/og` prerender, so Next's JSX
+    // rule applies: an `ImageResponse` generator in a `.js` route file is JSX.
+    let source_type = crate::parser::source_type_for(path, JsxExtensions::NextJs);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let mut diagnostics: Vec<String> =
         parsed.diagnostics.into_iter().map(|d| d.to_string()).collect();
@@ -181,6 +366,10 @@ pub fn transform_to_standalone_esm(path: &Path, source: &str) -> Result<String, 
     // Default TransformOptions lowers JSX with the automatic runtime (react) and strips
     // TS, emitting `import { jsx as _jsx } from "react/jsx-runtime"` — exactly what a
     // Node run of a `@vercel/og` generator needs. No refresh, no bundler rewrite.
+    // Deliberately EXEMPT from the project's [`JsxConfig`]: `@vercel/og` renders with
+    // a real React, and the adapter writes a `react/jsx-runtime` stand-in for this
+    // prerender specifically — an app-level `jsxImportSource` would point it at a
+    // package that is not there.
     let transform_options = TransformOptions::default();
     let transformed = Transformer::new(&allocator, path, &transform_options)
         .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
@@ -202,11 +391,77 @@ pub fn transform_to_standalone_esm(path: &Path, source: &str) -> Result<String, 
 /// component modules (never by `build-app`). This is the full transform equivalent
 /// to `react-refresh/babel` — done natively in oxc, no Node — replacing the earlier
 /// footer-only registration that only worked for simple/default-export components.
+///
+/// `jsx` is the project's JSX-extension rule (see [`JsxExtensions`]): Next compiles
+/// JSX in `.js`, Vite does not, and the same source must therefore parse
+/// differently per project kind. `jsx_config` is how this module's JSX is LOWERED
+/// (see [`JsxConfig`]) — the tsconfig/vite-config contract for the file, already
+/// resolved by the caller.
 pub fn transform_module_with_options(
     path: &Path,
     source: &str,
     target: Target,
     refresh: bool,
+    jsx: JsxExtensions,
+    jsx_config: &JsxConfig,
+) -> TransformResult {
+    transform_module_in_language(
+        path,
+        source,
+        target,
+        refresh,
+        jsx,
+        jsx_config,
+        SourceLanguage::FromPath,
+    )
+}
+
+/// Which language `source` is written in, when the module's own path cannot say.
+///
+/// A path answers this for every file diffpack reads off disk, but not for source
+/// a compiler produced: `App.vue` compiled by `@vue/compiler-sfc` is TypeScript
+/// whenever the SFC's `<script>` was, and `.vue` names neither. This is the
+/// caller's explicit answer for those, and is exactly the choice
+/// `@vitejs/plugin-vue` makes when it hands its own output to Vite's transform
+/// with `lang: "ts"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceLanguage {
+    /// Derive it from the extension — every module read straight off disk.
+    #[default]
+    FromPath,
+    /// Plain JavaScript (no type annotations, no JSX).
+    JavaScript,
+    /// TypeScript without JSX. Component compilers emit `_ctx: any` style
+    /// annotations, never JSX, so enabling JSX here would only make `a < b`
+    /// ambiguous.
+    TypeScript,
+}
+
+impl SourceLanguage {
+    /// The oxc source type for a module at `path`. `FromPath` defers to the
+    /// project's JSX-extension rule; the explicit variants override it.
+    fn source_type(self, path: &Path, jsx: JsxExtensions) -> SourceType {
+        match self {
+            SourceLanguage::FromPath => crate::parser::source_type_for(path, jsx),
+            SourceLanguage::JavaScript => SourceType::default().with_module(true),
+            SourceLanguage::TypeScript => {
+                SourceType::default().with_typescript(true).with_module(true)
+            }
+        }
+    }
+}
+
+/// [`transform_module_with_options`] for source a component compiler produced:
+/// the path is the component (`App.vue`), but the language is `language`, not
+/// whatever the extension implies. See [`crate::sfc`].
+pub fn transform_module_in_language(
+    path: &Path,
+    source: &str,
+    target: Target,
+    refresh: bool,
+    jsx: JsxExtensions,
+    jsx_config: &JsxConfig,
+    language: SourceLanguage,
 ) -> TransformResult {
     if path
         .extension()
@@ -223,6 +478,7 @@ pub fn transform_module_with_options(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            uses_dirname: false,
             workers: Vec::new(),
         };
     }
@@ -237,7 +493,7 @@ pub fn transform_module_with_options(
             Err(diagnostic) => {
                 return TransformResult {
                     code: String::new(),
-                    diagnostics: vec![diagnostic],
+                    diagnostics: vec![TransformDiagnostic::error(diagnostic)],
                     is_esm: true,
                     dependencies: Vec::new(),
                     dependency_demands: Vec::new(),
@@ -246,6 +502,7 @@ pub fn transform_module_with_options(
                     uses_top_level_await: false,
                     uses_import_meta: false,
                     uses_cjs_globals: false,
+                    uses_dirname: false,
                     workers: Vec::new(),
                 };
             }
@@ -266,15 +523,12 @@ pub fn transform_module_with_options(
     let rsc_override = if target == Target::ReactServer {
         match crate::rsc::detect_directive(path, source) {
             Some(crate::rsc::RscDirective::Client) => {
-                crate::rsc::transform_use_client_server(path, source)
-            }
-            Some(crate::rsc::RscDirective::Server) => {
-                match crate::rsc::transform_use_server_server(path, source) {
+                match crate::rsc::transform_use_client_server(path, source) {
                     Ok(rewritten) => rewritten,
                     Err(error) => {
                         return TransformResult {
                             code: String::new(),
-                            diagnostics: vec![error],
+                            diagnostics: vec![TransformDiagnostic::error(error)],
                             is_esm: true,
                             dependencies: Vec::new(),
                             dependency_demands: Vec::new(),
@@ -283,6 +537,28 @@ pub fn transform_module_with_options(
                             uses_top_level_await: false,
                             uses_import_meta: false,
                             uses_cjs_globals: false,
+                            uses_dirname: false,
+                            workers: Vec::new(),
+                        };
+                    }
+                }
+            }
+            Some(crate::rsc::RscDirective::Server) => {
+                match crate::rsc::transform_use_server_server(path, source) {
+                    Ok(rewritten) => rewritten,
+                    Err(error) => {
+                        return TransformResult {
+                            code: String::new(),
+                            diagnostics: vec![TransformDiagnostic::error(error)],
+                            is_esm: true,
+                            dependencies: Vec::new(),
+                            dependency_demands: Vec::new(),
+                            flat_module: None,
+                            liveness: ModuleLiveness::default(),
+                            uses_top_level_await: false,
+                            uses_import_meta: false,
+                            uses_cjs_globals: false,
+                            uses_dirname: false,
                             workers: Vec::new(),
                         };
                     }
@@ -302,7 +578,7 @@ pub fn transform_module_with_options(
                     Err(error) => {
                         return TransformResult {
                             code: String::new(),
-                            diagnostics: vec![error],
+                            diagnostics: vec![TransformDiagnostic::error(error)],
                             is_esm: true,
                             dependencies: Vec::new(),
                             dependency_demands: Vec::new(),
@@ -311,6 +587,7 @@ pub fn transform_module_with_options(
                             uses_top_level_await: false,
                             uses_import_meta: false,
                             uses_cjs_globals: false,
+                            uses_dirname: false,
                             workers: Vec::new(),
                         };
                     }
@@ -335,7 +612,25 @@ pub fn transform_module_with_options(
     // and drop the throwing import (the companion CSS is generated by the
     // app-router adapter). Gated on a cheap string check; non-font modules pay
     // nothing. Runs first so downstream transforms see plain objects.
-    let next_font = crate::next_font::transform_next_font(path, source);
+    let next_font = match crate::next_font::transform_next_font(path, source) {
+        Ok(rewritten) => rewritten,
+        Err(error) => {
+            return TransformResult {
+                code: String::new(),
+                diagnostics: vec![TransformDiagnostic::error(error)],
+                is_esm: true,
+                dependencies: Vec::new(),
+                dependency_demands: Vec::new(),
+                flat_module: None,
+                liveness: ModuleLiveness::default(),
+                uses_top_level_await: false,
+                uses_import_meta: false,
+                uses_cjs_globals: false,
+                uses_dirname: false,
+                workers: Vec::new(),
+            };
+        }
+    };
     let source = next_font.as_deref().unwrap_or(source);
 
     // A module defining `createServerFn(...).handler(fn)` is rewritten per target:
@@ -349,7 +644,7 @@ pub fn transform_module_with_options(
         Err(error) => {
             return TransformResult {
                 code: String::new(),
-                diagnostics: vec![error],
+                diagnostics: vec![TransformDiagnostic::error(error)],
                 is_esm: true,
                 dependencies: Vec::new(),
                 dependency_demands: Vec::new(),
@@ -358,6 +653,7 @@ pub fn transform_module_with_options(
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                uses_dirname: false,
                 workers: Vec::new(),
             };
         }
@@ -384,7 +680,7 @@ pub fn transform_module_with_options(
                     Err(error) => {
                         return TransformResult {
                             code: String::new(),
-                            diagnostics: vec![error],
+                            diagnostics: vec![TransformDiagnostic::error(error)],
                             is_esm: true,
                             dependencies: Vec::new(),
                             dependency_demands: Vec::new(),
@@ -393,6 +689,7 @@ pub fn transform_module_with_options(
                             uses_top_level_await: false,
                             uses_import_meta: false,
                             uses_cjs_globals: false,
+                            uses_dirname: false,
                             workers: Vec::new(),
                         };
                     }
@@ -408,30 +705,25 @@ pub fn transform_module_with_options(
     let allocator = Allocator::default();
     // MDX compiled to JSX: parse as TSX (`.mdx`/`.md` are not recognized by from_path).
     let source_type = if mdx_compiled.is_some() {
-        SourceType::default().with_typescript(true).with_jsx(true)
+        SourceType::default().with_typescript(true).with_jsx(true).with_module(true)
     } else {
-        SourceType::from_path(path).unwrap_or_default()
-    }
-    .with_module(true);
+        language.source_type(path, jsx)
+    };
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    let mut diagnostics = parsed
-        .diagnostics
-        .into_iter()
-        .map(|diagnostic| diagnostic.to_string())
-        .collect::<Vec<_>>();
+    let mut diagnostics = transform_diagnostics(parsed.diagnostics);
+    explain_jsx_in_non_jsx(path, source_type, &mut diagnostics);
     let mut program = parsed.program;
 
     let semantic = SemanticBuilder::new()
         .with_excess_capacity(2.0)
         .with_enum_eval(true)
         .build(&program);
-    diagnostics.extend(
-        semantic
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic.to_string()),
-    );
+    diagnostics.extend(transform_diagnostics(semantic.diagnostics));
     let mut transform_options = TransformOptions::default();
+    // How this file's JSX is lowered. A file-level `@jsxImportSource`/`@jsx`/
+    // `@jsxFrag`/`@jsxRuntime` pragma still wins: oxc rescans the program's leading
+    // comments and overrides these options before building the JSX pass.
+    jsx_config.apply(&mut transform_options);
     if refresh {
         // Native React Fast Refresh: oxc injects `$RefreshSig$()`/`$RefreshReg$`
         // per component (the `react-refresh/babel` equivalent), so a hot update
@@ -441,12 +733,7 @@ pub fn transform_module_with_options(
     }
     let transformed = Transformer::new(&allocator, path, &transform_options)
         .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
-    diagnostics.extend(
-        transformed
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic.to_string()),
-    );
+    diagnostics.extend(transform_diagnostics(transformed.diagnostics));
 
     frontend_profile::finish(Phase::Transform, transform_started);
 
@@ -501,6 +788,13 @@ pub fn transform_module_with_options(
     let uses_cjs_globals = ["exports", "module", "require", "__filename", "__dirname"]
         .iter()
         .any(|name| scoping.root_unresolved_references().contains_key(*name));
+    // The two CommonJS ambients a browser target cannot supply from the host: a
+    // browser bundle has no file location to derive them from, so the emit defines
+    // them per module (see `render_runtime`). Tracked separately from
+    // `uses_cjs_globals` so the definitions are emitted ONLY where they are read.
+    let uses_dirname = ["__filename", "__dirname"]
+        .iter()
+        .any(|name| scoping.root_unresolved_references().contains_key(*name));
 
     let lower_started = frontend_profile::start();
     let (code, is_esm, dependencies, dependency_demands, flat_module) =
@@ -517,6 +811,7 @@ pub fn transform_module_with_options(
         uses_top_level_await: format_scan.top_level_await,
         uses_import_meta: format_scan.import_meta,
         uses_cjs_globals,
+        uses_dirname,
         workers,
     }
 }
@@ -1072,7 +1367,7 @@ fn lower_module_ast<'a>(
                     let namespace = format!("__diffpack_import_{import_index}");
                     import_index += 1;
                     codegen.print_str(&format!(
-                        "/*__diffpack_import:{request}__*/{namespace}=__toESM(require({request}));\n"
+                        "/*__diffpack_import:{request}__*/{namespace}=require.esm({request});\n"
                     ));
                 } else {
                     codegen.print_str(&format!(
@@ -1100,7 +1395,7 @@ fn lower_module_ast<'a>(
                     let namespace = format!("__diffpack_reexport_{import_index}");
                     import_index += 1;
                     codegen.print_str(&format!(
-                        "/*__diffpack_import:{request}__*/{namespace}=__toESM(require({request}));\n",
+                        "/*__diffpack_import:{request}__*/{namespace}=require.esm({request});\n",
                         request = quote(&request.value)
                     ));
                 }
@@ -1129,11 +1424,11 @@ fn lower_module_ast<'a>(
                 if let Some(exported) = &declaration.exported {
                     codegen.print_str(&export_getter(
                         &exported.name(),
-                        &format!("__toESM(require({request}))"),
+                        &format!("require.esm({request})"),
                     ));
                 } else {
                     codegen.print_str(&format!(
-                        "__reExport(exports,__toESM(require({request})));\n"
+                        "__reExport(exports,require.esm({request}));\n"
                     ));
                 }
             }
@@ -1920,7 +2215,7 @@ mod tests {
         assert!(!transformed.code.contains(": number"));
         assert!(!transformed.code.contains("import value"));
         assert!(!transformed.code.contains("export const"));
-        assert!(transformed.code.contains("require(\"./dep.js\")"));
+        assert!(transformed.code.contains("require.esm(\"./dep.js\")"));
         assert!(transformed.code.contains("__export(exports,\"answer\""));
         assert!(transformed.code.contains("__export(exports,\"default\""));
     }
@@ -2040,6 +2335,34 @@ mod tests {
         );
     }
 
+    /// FINDINGS #17. JSX whitespace is SIGNIFICANT between elements on the same line:
+    /// `<b>x</b> <i>y</i>` keeps the single space as its own child, so a rendered UI
+    /// does not lose the spaces its author wrote. The other two rules must hold at the
+    /// same time: a whitespace run containing a newline is dropped entirely (so
+    /// indentation never leaks into the page), and a multi-line text run joins its
+    /// lines with exactly one space while interior runs of spaces are preserved
+    /// verbatim.
+    #[test]
+    fn jsx_text_whitespace_follows_the_jsx_rules() {
+        let transformed = transform_module(
+            Path::new("component.jsx"),
+            "export const C = () => (\n  <div>\n    <b>x</b> <i>y</i>\n    <p>\n      hello   world\n      again\n    </p>\n  </div>\n);\n",
+            Target::Server,
+        );
+        assert!(transformed.diagnostics.is_empty(), "{:?}", transformed.diagnostics);
+        let code = &transformed.code;
+        // Same-line space between two elements survives as a child of its own.
+        assert!(
+            code.contains("\"b\", { children: \"x\" }),\n\t\" \",")
+                || code.contains("\" \","),
+            "the space between <b> and <i> must be preserved: {code}"
+        );
+        // Indentation-only children (they contain a newline) are dropped.
+        assert!(!code.contains("\"\\n"), "indentation must not leak into children: {code}");
+        // Lines of one text run join with a single space; interior spaces are kept.
+        assert!(code.contains("children: \"hello   world again\""), "{code}");
+    }
+
     #[test]
     fn lowers_jsx_to_javascript() {
         let transformed = transform_module(
@@ -2053,7 +2376,187 @@ mod tests {
             transformed.diagnostics
         );
         assert!(!transformed.code.contains("<div>"));
-        assert!(transformed.code.contains("require(\"react/jsx-runtime\")"));
+        assert!(transformed.code.contains("require.esm(\"react/jsx-runtime\")"));
+    }
+
+    /// A `.vue` file's extension says nothing about the language of what its
+    /// compiler emitted: `@vue/compiler-sfc` leaves a `<script lang="ts">`
+    /// component's annotations in place for the bundler to strip (which is why
+    /// plugin-vue hands its own output to Vite with `lang: "ts"`). Parsing that
+    /// by extension makes `(_ctx: any) => ...` a syntax error in generated code
+    /// the app never wrote.
+    #[test]
+    fn compiled_component_source_is_parsed_in_the_caller_declared_language() {
+        let compiled = "import { ref } from 'vue';\n\
+                        const _sfc_main = { setup() { const n = ref<number>(0); \
+                        return (_ctx: any, _cache: any) => n.value } };\n\
+                        export default _sfc_main;\n";
+        let typescript = transform_module_in_language(
+            Path::new("/app/src/App.vue"),
+            compiled,
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &JsxConfig::default(),
+            SourceLanguage::TypeScript,
+        );
+        assert!(typescript.diagnostics.is_empty(), "{:?}", typescript.diagnostics);
+        assert!(!typescript.code.contains("_ctx: any"), "{}", typescript.code);
+        assert_eq!(typescript.dependencies, vec!["vue".to_string()]);
+
+        // The same source read by extension (`.vue` is not TypeScript to oxc) is
+        // a parse error — which is exactly the misreport this parameter exists to
+        // prevent.
+        let by_path = transform_module_in_language(
+            Path::new("/app/src/App.vue"),
+            compiled,
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &JsxConfig::default(),
+            SourceLanguage::FromPath,
+        );
+        assert!(
+            !by_path.diagnostics.is_empty(),
+            "reading compiled TypeScript as JavaScript must not silently succeed"
+        );
+    }
+
+    /// `jsxImportSource` names the package the automatic runtime imports from. A
+    /// preact app has no `react` in `node_modules` at all, so lowering against
+    /// `react/jsx-runtime` is not a cosmetic difference — it is an unresolvable
+    /// import and a build that cannot emit.
+    #[test]
+    fn a_custom_import_source_replaces_react_jsx_runtime() {
+        let transformed = transform_module_with_options(
+            Path::new("/app/src/app.tsx"),
+            "export const App = () => <div>hi</div>;",
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &JsxConfig {
+                import_source: Some("preact".to_string()),
+                ..JsxConfig::default()
+            },
+        );
+        assert!(transformed.diagnostics.is_empty(), "{:?}", transformed.diagnostics);
+        assert_eq!(
+            transformed.dependencies,
+            vec!["preact/jsx-runtime".to_string()],
+            "the runtime import IS the dependency the graph must resolve: {}",
+            transformed.code
+        );
+    }
+
+    /// The classic runtime's factory import must SURVIVE TypeScript's import
+    /// elision. oxc decides whether `import { h } from 'preact'` is type-only by
+    /// comparing the binding against `TypeScriptOptions::jsx_pragma` (default
+    /// `React.createElement`); left at the default the import is dropped and the
+    /// build "succeeds" into a bundle that dies with `h is not defined`.
+    #[test]
+    fn the_classic_factory_import_is_not_elided_as_a_type_import() {
+        let transformed = transform_module_with_options(
+            Path::new("/app/src/app.tsx"),
+            "import { h, Fragment } from 'preact';\nexport const App = () => <><div>hi</div></>;",
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &JsxConfig {
+                runtime: Some(JsxRuntime::Classic),
+                factory: Some("h".to_string()),
+                fragment_factory: Some("Fragment".to_string()),
+                ..JsxConfig::default()
+            },
+        );
+        assert!(transformed.diagnostics.is_empty(), "{:?}", transformed.diagnostics);
+        assert!(
+            transformed.code.contains("\"h\"") && transformed.code.contains("\"Fragment\""),
+            "the classic factory/fragment must be called: {}",
+            transformed.code
+        );
+        assert_eq!(
+            transformed.dependencies,
+            vec!["preact".to_string()],
+            "the factory's import must survive elision (and nothing else is imported): {}",
+            transformed.code
+        );
+    }
+
+    /// A file-level `@jsxImportSource` pragma outranks the project's configuration
+    /// (oxc rescans the leading comments after our options are installed). Pinned
+    /// because it is free today and an oxc bump could take it away unnoticed.
+    ///
+    /// The pragma alone would pass with the configured source never applied at all
+    /// (oxc reads the comment itself), so the SAME configuration is asserted on a
+    /// module without a pragma: this test fails both if the pragma stops winning
+    /// and if [`JsxConfig::apply`] stops being called.
+    #[test]
+    fn a_jsx_import_source_pragma_beats_the_configured_source() {
+        let configured = JsxConfig {
+            import_source: Some("myjsx".to_string()),
+            ..JsxConfig::default()
+        };
+        let with_pragma = transform_module_with_options(
+            Path::new("/app/src/app.tsx"),
+            "/** @jsxImportSource preact */\nexport const App = () => <div>hi</div>;",
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &configured,
+        );
+        assert!(with_pragma.diagnostics.is_empty(), "{:?}", with_pragma.diagnostics);
+        assert_eq!(
+            with_pragma.dependencies,
+            vec!["preact/jsx-runtime".to_string()],
+            "the pragma must win over the configured source: {}",
+            with_pragma.code
+        );
+
+        let without_pragma = transform_module_with_options(
+            Path::new("/app/src/sibling.tsx"),
+            "export const Sibling = () => <div>hi</div>;",
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &configured,
+        );
+        assert_eq!(
+            without_pragma.dependencies,
+            vec!["myjsx/jsx-runtime".to_string()],
+            "a module with no pragma must take the CONFIGURED source: {}",
+            without_pragma.code
+        );
+    }
+
+    /// oxc infers JSX purity only for a config that names neither an import source
+    /// nor a pragma, so a hand-built `JsxOptions` (with `pure: false`) would drop
+    /// every `/*#__PURE__*/` annotation the moment an import source is set — and
+    /// silently de-tree-shake the bundle. Pins that the options are MUTATED.
+    #[test]
+    fn pure_annotations_survive_a_custom_import_source() {
+        let source = "export const App = () => <div>hi</div>;";
+        let default = transform_module(Path::new("/app/src/app.tsx"), source, Target::Client);
+        let custom = transform_module_with_options(
+            Path::new("/app/src/app.tsx"),
+            source,
+            Target::Client,
+            false,
+            JsxExtensions::default(),
+            &JsxConfig {
+                import_source: Some("preact".to_string()),
+                ..JsxConfig::default()
+            },
+        );
+        assert!(
+            default.code.contains("@__PURE__"),
+            "baseline must be annotated: {}",
+            default.code
+        );
+        assert!(
+            custom.code.contains("@__PURE__"),
+            "a custom import source must not cost the pure annotations: {}",
+            custom.code
+        );
     }
 
     #[test]
@@ -2068,12 +2571,109 @@ mod tests {
         );
         // On: oxc's native Fast Refresh transform registers the component so the
         // runtime can swap it in place — no Node/babel involved.
-        let refreshed =
-            transform_module_with_options(Path::new("Navbar.jsx"), source, Target::Client, true);
+        let refreshed = transform_module_with_options(
+            Path::new("Navbar.jsx"),
+            source,
+            Target::Client,
+            true,
+            JsxExtensions::default(),
+            &JsxConfig::default(),
+        );
         assert!(
             refreshed.code.contains("$RefreshReg$"),
             "refresh ON must register the component: {}",
             refreshed.code
+        );
+    }
+
+    /// The Next default page: JSX in a `.js` file. It must compile, and — the part
+    /// that made the defect so damaging — it must yield its DEPENDENCIES, because a
+    /// fatal parse returns a dummy program and the importer's whole subtree
+    /// (`components/Gallery.js`, ...) silently vanishes from the graph.
+    #[test]
+    fn next_compiles_jsx_in_a_js_module_and_still_sees_its_imports() {
+        let source = r#"
+            import Gallery from "../components/Gallery";
+            export default function Home() {
+                return <Gallery title="hi" />;
+            }
+        "#;
+        let transformed = transform_module_with_options(
+            Path::new("pages/index.js"),
+            source,
+            Target::Client,
+            false,
+            JsxExtensions::NextJs,
+            &JsxConfig::default(),
+        );
+
+        assert!(transformed.diagnostics.is_empty(), "{:?}", transformed.diagnostics);
+        assert!(
+            transformed.code.contains("react/jsx-runtime"),
+            "JSX must be lowered through the automatic runtime: {}",
+            transformed.code
+        );
+        assert_eq!(transformed.dependencies, ["../components/Gallery", "react/jsx-runtime"]);
+    }
+
+    /// The counterpart: under Vite/esbuild the same file is a hard error, and the
+    /// message has to say why and what to do — not oxc's bare "Unexpected JSX
+    /// expression". This is what stops the Next fix from becoming "JSX everywhere".
+    #[test]
+    fn a_vite_js_module_with_jsx_is_a_named_actionable_error() {
+        let transformed = transform_module_with_options(
+            Path::new("src/main.js"),
+            "export default function App() { return <div />; }",
+            Target::Client,
+            false,
+            JsxExtensions::JsxAndTsxOnly,
+            &JsxConfig::default(),
+        );
+
+        let fatal: Vec<&TransformDiagnostic> =
+            transformed.diagnostics.iter().filter(|d| d.fatal).collect();
+        assert_eq!(fatal.len(), 1, "{:?}", transformed.diagnostics);
+        let message = &fatal[0].message;
+        assert!(message.contains("JSX is not enabled for `.js` files"), "{message}");
+        assert!(message.contains("main.jsx"), "{message}");
+        assert!(
+            !message.contains("Unexpected JSX expression"),
+            "the raw oxc message must be replaced: {message}"
+        );
+    }
+
+    /// The rule is scoped, not a blanket "JSX everywhere": in TypeScript `<T>x` is a
+    /// type assertion, so a `.ts` module stays JSX-free even under Next.
+    #[test]
+    fn a_next_ts_module_still_reads_angle_brackets_as_a_type_assertion() {
+        let transformed = transform_module_with_options(
+            Path::new("lib/cast.ts"),
+            "const value: unknown = 1; export const text = <string>value;",
+            Target::Server,
+            false,
+            JsxExtensions::NextJs,
+            &JsxConfig::default(),
+        );
+
+        assert!(transformed.diagnostics.is_empty(), "{:?}", transformed.diagnostics);
+        assert!(
+            !transformed.code.contains("jsx-runtime"),
+            "a `.ts` type assertion must not become a JSX element: {}",
+            transformed.code
+        );
+    }
+
+    /// The auxiliary directive probe runs on a SEPARATE parse. When it did not know
+    /// `.js` could hold JSX it answered "no directive" for a JSX-bearing
+    /// `"use client"` module — a silent wrong answer once the main parse succeeds.
+    #[test]
+    fn a_use_client_directive_survives_jsx_in_a_js_module() {
+        let source = r#""use client";
+            export default function Counter() { return <button>+</button>; }
+        "#;
+        assert_eq!(
+            crate::rsc::detect_directive(Path::new("/app/components/Counter.js"), source),
+            Some(crate::rsc::RscDirective::Client)
         );
     }
 

@@ -20,14 +20,13 @@
 #   4. clicking the server button round-trips a "use server" action over /_action/
 #      and renders its result — encodeReply -> dispatch -> flight -> createFromFetch.
 # Native build (Rust); Node + Chrome are only the oracle. Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/rsc-reference}"
 diffpack="$repo/target/release/diffpack"
 output="$fixture/.diffpack-output"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"
@@ -90,8 +89,8 @@ echo "OK (gate 1): SSR HTML carries the Server Component text and the island's i
 agent-browser open "$base/" >/dev/null 2>&1
 agent-browser wait "#server-inc" >/dev/null 2>&1 || true
 
-read_count() { agent-browser get text "#counter" 2>/dev/null; }
-read_result() { agent-browser get text "#server-result" 2>/dev/null; }
+read_count() { agent-browser get text "#counter" 2>/dev/null || true; }
+read_result() { agent-browser get text "#server-result" 2>/dev/null || true; }
 
 initial="$(read_count)"
 echo "$initial" | grep -q "count: 5" || fail "browser initial count is not 5 (got: $initial)"

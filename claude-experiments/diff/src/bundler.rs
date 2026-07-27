@@ -80,6 +80,9 @@ struct ModuleState {
     /// The module freely references a CommonJS ambient (`exports`, `module`,
     /// ...), so it must render through the factory runtime in ESM output.
     uses_cjs_globals: bool,
+    /// The module freely references `__dirname`/`__filename`. A browser target
+    /// has no location to derive them from, so its factory defines them.
+    uses_dirname: bool,
     /// Module-worker entries: `(placeholder_key, resolved_entry_path)`.
     workers: Vec<(String, PathBuf)>,
 }
@@ -92,7 +95,7 @@ struct LoadedModule {
     source: SharedModuleId,
     flat_module: Option<FlatModule>,
     code: String,
-    diagnostics: Vec<String>,
+    diagnostics: Vec<Diagnostic>,
     assets: Vec<AssetEmit>,
     css: Option<String>,
     css_source_files: Vec<PathBuf>,
@@ -103,6 +106,7 @@ struct LoadedModule {
     uses_top_level_await: bool,
     uses_import_meta: bool,
     uses_cjs_globals: bool,
+    uses_dirname: bool,
     /// Module-worker entries this module creates: `(placeholder_key,
     /// resolved_entry_path)`. Emitted as self-contained bundles under
     /// `assets/`; the key ties the code placeholder to the emitted file.
@@ -174,6 +178,15 @@ struct ResolutionCache {
     image_import_shape: ImageImportShape,
     /// Less/Stylus + PostCSS wiring, threaded to the CSS loaders.
     css_preprocess: CssPreprocess,
+    /// The project's JSX-extension rule, threaded to the module transform on both
+    /// the serial ([`Bundler::load_module`]) and parallel ([`load_uncached`]) load
+    /// paths — the one parse whose diagnostics the build reports.
+    jsx_extensions: crate::parser::JsxExtensions,
+    /// The BUILD's JSX lowering settings (`vite.config`'s `esbuild.*` / `oxc.jsx`).
+    /// Layered over each file's owning tsconfig by [`jsx_config_for`] on both load
+    /// paths; empty (the default) leaves the tsconfig — and, failing that, oxc's
+    /// react-automatic default — in charge.
+    jsx: Arc<crate::transform::JsxConfig>,
 }
 
 struct DirectoryResolutionCache {
@@ -181,6 +194,10 @@ struct DirectoryResolutionCache {
     specifiers: [Mutex<HashMap<String, Result<ResolvedModule, String>>>; 64],
     aliases: Arc<Vec<(String, PathBuf)>>,
     virtual_modules: Arc<HashMap<String, String>>,
+    /// The project root, when the build has one. A root-absolute specifier
+    /// (`import icons from "/icons.svg"`) is resolved against it, and against its
+    /// `public/` directory — see [`DirectoryResolutionCache::resolve_root_absolute`].
+    root: Option<Arc<Path>>,
 }
 
 #[derive(Clone)]
@@ -203,6 +220,8 @@ impl ResolutionCache {
         scss: crate::sass::ScssOptions,
         image_import_shape: ImageImportShape,
         css_preprocess: CssPreprocess,
+        jsx_extensions: crate::parser::JsxExtensions,
+        jsx: crate::transform::JsxConfig,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
@@ -217,6 +236,8 @@ impl ResolutionCache {
             scss: Arc::new(scss),
             image_import_shape,
             css_preprocess,
+            jsx_extensions,
+            jsx: Arc::new(jsx),
         }
     }
 
@@ -288,6 +309,7 @@ impl ResolutionCache {
             specifiers: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::clone(&self.aliases),
             virtual_modules: Arc::clone(&self.virtual_modules),
+            root: self.css_preprocess.root.as_deref().map(Arc::from),
         });
         shard.insert(importer_directory.to_path_buf(), Arc::clone(&cache));
         cache
@@ -363,7 +385,20 @@ impl DirectoryResolutionCache {
                 break;
             }
         }
+        let original_specifier = path_specifier;
         let path_specifier = aliased_specifier.as_deref().unwrap_or(path_specifier);
+        // A root-absolute specifier is a project path, not a filesystem path.
+        if let Some(resolved) = self.resolve_root_absolute(path_specifier, &resource) {
+            let result = Ok(ResolvedModule {
+                id: resolved,
+                side_effect_free: false,
+            });
+            shard
+                .lock()
+                .expect("resolution specifier cache poisoned")
+                .insert(specifier.to_owned(), result.clone());
+            return result;
+        }
         // Most module graphs overwhelmingly use explicit relative files. Avoid
         // the general Node resolver on a cache miss when that exact file exists;
         // all ambiguous cases still take the standards-aware path.
@@ -382,26 +417,104 @@ impl DirectoryResolutionCache {
             resolver
                 .resolve_file(importer, path_specifier)
                 .map_err(|error| error.to_string())
-                .and_then(|resolution| {
+                .map(|resolution| {
+                    // A `.node` addon resolves like any other file; that it cannot
+                    // be BUNDLED is a loader concern, reported by
+                    // [`unhandled_source`]. Failing it here instead turned a found
+                    // file into `cannot resolve ...: install it: npm install ...`.
                     let resolved = resolution.full_path();
-                    if resolved.extension().and_then(|value| value.to_str()) == Some("node") {
-                        Err(format!("native module {specifier:?} is not supported"))
-                    } else {
-                        let side_effect_free = resolution.package_json().is_some_and(|package| {
-                            matches!(package.side_effects(), Some(SideEffects::Bool(false)))
-                        });
-                        Ok(ResolvedModule {
-                            id: module_id_with_resource(&resolved, &resource),
-                            side_effect_free,
-                        })
+                    let side_effect_free = resolution.package_json().is_some_and(|package| {
+                        matches!(package.side_effects(), Some(SideEffects::Bool(false)))
+                    });
+                    ResolvedModule {
+                        id: module_id_with_resource(&resolved, &resource),
+                        side_effect_free,
                     }
                 })
+        };
+        // An alias whose target is a package DIRECTORY cannot answer a SUBPATH by
+        // path join. Vite's `resolve.dedupe` pins `svelte` to
+        // `<root>/node_modules/svelte`, but `svelte/internal/client` is a key in
+        // that package's `exports` map, not a file at that path — the join
+        // produces a path that does not exist and the build fails on a package
+        // that is installed. Retry the specifier AS WRITTEN from the project
+        // root, which is what `dedupe` actually means (one copy, resolved from
+        // the root) and lets the package's own `exports` decide. Only ever runs
+        // where the build would otherwise have failed.
+        let result = match result {
+            Err(error) if aliased_specifier.is_some() => self
+                .resolve_from_root(resolver, original_specifier, &resource)
+                .ok_or(error),
+            other => other,
         };
         shard
             .lock()
             .expect("resolution specifier cache poisoned")
             .insert(specifier.to_owned(), result.clone());
         result
+    }
+
+    /// Resolves `specifier` as if it were imported from a file directly in the
+    /// project root, so `node_modules` lookup starts at the root and the target
+    /// package's `exports` map applies. `None` when the build has no root or the
+    /// specifier does not resolve there either.
+    fn resolve_from_root(
+        &self,
+        resolver: &Resolver,
+        specifier: &str,
+        resource: &ResourceId,
+    ) -> Option<ResolvedModule> {
+        let root = self.root.as_deref()?;
+        let resolution = resolver
+            .resolve_file(root.join("__diffpack_root_importer__.js"), specifier)
+            .ok()?;
+        let side_effect_free = resolution.package_json().is_some_and(|package| {
+            matches!(package.side_effects(), Some(SideEffects::Bool(false)))
+        });
+        Some(ResolvedModule {
+            id: module_id_with_resource(&resolution.full_path(), resource),
+            side_effect_free,
+        })
+    }
+
+    /// Vite's root-absolute specifier: `import icons from "/icons.svg"` means
+    /// `<root>/icons.svg`, NOT the filesystem path `/icons.svg`. When no such
+    /// file exists in the root but one exists under `<root>/public/`, the import
+    /// is a PUBLIC file: it is copied to the site root verbatim, so it is never
+    /// hashed or emitted and the module is just its URL
+    /// ([`LoaderKind::PublicUrl`]).
+    ///
+    /// Returns `None` for every other specifier, including a genuine absolute
+    /// filesystem path (a module id diffpack itself minted) — nothing under the
+    /// root will match `<root>/Users/...`, so those fall through to the ordinary
+    /// resolver untouched.
+    fn resolve_root_absolute(
+        &self,
+        path_specifier: &str,
+        resource: &ResourceId,
+    ) -> Option<SharedModuleId> {
+        let root = self.root.as_deref()?;
+        let relative = path_specifier.strip_prefix('/').filter(|rest| !rest.is_empty())?;
+        let in_root = root.join(relative);
+        if in_root.is_file() {
+            return Some(module_id_with_resource(&in_root, resource));
+        }
+        let in_public = root.join("public").join(relative);
+        if in_public.is_file() {
+            // A query the app wrote (`/icons.svg?raw`) asks for a specific loader
+            // and keeps it: the file is then read like any other source. Only the
+            // plain form becomes the public URL.
+            if resource.query.is_some() {
+                return Some(module_id_with_resource(&in_public, resource));
+            }
+            let public_id = ResourceId {
+                path: in_public.to_string_lossy().into_owned(),
+                query: Some(LoaderKind::PublicUrl.token().to_string()),
+                fragment: resource.fragment.clone(),
+            };
+            return Some(SharedModuleId::from(public_id.to_id()));
+        }
+        None
     }
 }
 
@@ -411,11 +524,109 @@ fn hash_value(value: impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// Why a build diagnostic was produced, and therefore whether the artifact it
+/// describes is broken or merely imperfect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticKind {
+    /// An import specifier that resolved to nothing. The specifier gets no
+    /// runtime-map entry, so the emitted chunk carries a dangling `require`
+    /// that throws the moment the module loads. The artifact is broken.
+    UnresolvedImport {
+        specifier: String,
+        importer: PathBuf,
+    },
+    /// A Node built-in reached from a BROWSER graph. Leaving it external emits a
+    /// `require` that no browser can satisfy, so the page dies at runtime while
+    /// the build exits 0. Same class as [`DiagnosticKind::UnresolvedImport`]:
+    /// the artifact is broken.
+    NodeBuiltinInBrowser {
+        specifier: String,
+        importer: PathBuf,
+    },
+    /// An oxc parse/semantic/transform diagnostic. At error severity the emitted
+    /// code does not match the source; a warning leaves runnable code.
+    Source { fatal: bool },
+    /// A `package.json` `sideEffects` glob this matcher cannot evaluate. The
+    /// module is KEPT (see [`module_droppable`]), so the bundle is correct, just
+    /// larger. `"sideEffects": ["*.{css,scss}"]` is a common idiom; failing on it
+    /// would reject apps that bundle perfectly well.
+    SideEffectsGlob,
+}
+
+/// One build diagnostic. Typed rather than a bare string so fatality is a
+/// property of the diagnostic, not a substring match at each consumer.
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub kind: DiagnosticKind,
+    pub message: String,
+}
+
+impl Diagnostic {
+    /// The single fatality predicate: a diagnostic is fatal iff the emitted
+    /// artifact would be WRONG, not merely bigger or noisier.
+    pub fn is_fatal(&self) -> bool {
+        match &self.kind {
+            DiagnosticKind::UnresolvedImport { .. } => true,
+            DiagnosticKind::NodeBuiltinInBrowser { .. } => true,
+            DiagnosticKind::Source { fatal } => *fatal,
+            DiagnosticKind::SideEffectsGlob => false,
+        }
+    }
+}
+
+/// Splits a build's diagnostics into the non-fatal warnings (`Ok`) and, when any
+/// diagnostic is fatal, one error message naming EVERY fatal diagnostic (`Err`)
+/// so a build reports all of them at once instead of only the first. `context`
+/// names what was being built, e.g. `"react-server build"`.
+pub fn partition_diagnostics(
+    diagnostics: &[Diagnostic],
+    context: &str,
+) -> Result<Vec<String>, String> {
+    let (fatal, warnings): (Vec<_>, Vec<_>) =
+        diagnostics.iter().partition(|diagnostic| diagnostic.is_fatal());
+    if fatal.is_empty() {
+        return Ok(warnings
+            .into_iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect());
+    }
+    // The consequence sentence has to match the fatalities actually present. A
+    // dangling reference is what an UNRESOLVED IMPORT would leave behind; a
+    // source error means the module never compiled at all, so claiming a dangling
+    // reference sends the reader hunting for an import that is perfectly fine.
+    let dangling = fatal.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.kind,
+            DiagnosticKind::UnresolvedImport { .. } | DiagnosticKind::NodeBuiltinInBrowser { .. }
+        )
+    });
+    let unparsed = fatal
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.kind, DiagnosticKind::Source { .. }));
+    let consequence = match (dangling, unparsed) {
+        (true, true) => {
+            "An artifact missing code diffpack could not compile, with dangling references to \
+             the rest, would crash at runtime"
+        }
+        (true, false) => "An artifact with dangling references would crash at runtime",
+        (false, _) => "The emitted code would not match the source",
+    };
+    let mut message = format!(
+        "{context}: {} fatal build diagnostic(s). {consequence}, so no output was written.",
+        fatal.len()
+    );
+    for diagnostic in fatal {
+        message.push_str("\n\n  ");
+        message.push_str(&diagnostic.message.replace('\n', "\n  "));
+    }
+    Err(message)
+}
+
 #[derive(Debug)]
 pub struct BuildUpdate {
     pub delta: GraphDelta,
     pub transformed_modules: usize,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -732,6 +943,8 @@ impl Bundler {
                 config.scss.clone(),
                 config.image_import_shape,
                 config.css_preprocess.clone(),
+                config.jsx_extensions,
+                config.jsx.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -884,7 +1097,7 @@ impl Bundler {
         id: &str,
         load_path: &Path,
         delta: &mut GraphDelta,
-        diagnostics: &mut Vec<String>,
+        diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<usize, String> {
         let Some(old) = self.modules[index].clone() else {
             return Ok(0);
@@ -1244,13 +1457,11 @@ impl Bundler {
                     let result = (|| -> Result<(), String> {
                         let (worker_bundler, update) =
                             Bundler::discover_direct_with_config(&entry, &self.config)?;
-                        if !update.diagnostics.is_empty() {
-                            return Err(format!(
-                                "worker entry {} has {} unresolved import(s); first: {}",
-                                entry.display(),
-                                update.diagnostics.len(),
-                                update.diagnostics[0]
-                            ));
+                        for warning in partition_diagnostics(
+                            &update.diagnostics,
+                            &format!("worker entry {}", entry.display()),
+                        )? {
+                            eprintln!("warning: {warning}");
                         }
                         let worker_reachable = worker_bundler.reachable_modules_direct();
                         let worker_stats = worker_bundler.emit_with_options(
@@ -2358,7 +2569,7 @@ impl Bundler {
         &mut self,
         paths: Vec<SharedModuleId>,
         delta: &mut GraphDelta,
-        diagnostics: &mut Vec<String>,
+        diagnostics: &mut Vec<Diagnostic>,
         record_delta: bool,
     ) -> Result<usize, String> {
         // Pipelined discovery: a module's dependencies are spawned the moment
@@ -2490,6 +2701,7 @@ impl Bundler {
                     uses_top_level_await: loaded.uses_top_level_await,
                     uses_import_meta: loaded.uses_import_meta,
                     uses_cjs_globals: loaded.uses_cjs_globals,
+                    uses_dirname: loaded.uses_dirname,
                     workers: loaded.workers,
                 });
             }
@@ -2511,7 +2723,7 @@ impl Bundler {
     fn load_module(
         &mut self,
         path: &Path,
-        diagnostics: &mut Vec<String>,
+        diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<ModuleState, String> {
         let id = module_id(path);
         // A build-generated virtual module (its source is not on disk) claims this
@@ -2522,6 +2734,7 @@ impl Bundler {
                 &self.resolver,
                 &self.resolution_cache,
                 &id,
+                self.target,
                 &special,
                 diagnostics,
             );
@@ -2548,6 +2761,7 @@ impl Bundler {
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                uses_dirname: false,
                 workers: Vec::new(),
             });
         }
@@ -2562,7 +2776,12 @@ impl Bundler {
             // `build-app` never sets `hmr`, so production splits are unaffected.
             if self.hmr
                 && self.target == Target::Client
-                && crate::hmr::is_refresh_boundary(Path::new(id.as_ref()), &[], "")
+                && crate::hmr::is_refresh_boundary(
+                    Path::new(id.as_ref()),
+                    &[],
+                    "",
+                    self.resolution_cache.jsx_extensions,
+                )
             {
                 special
                     .code
@@ -2572,6 +2791,7 @@ impl Bundler {
                 &self.resolver,
                 &self.resolution_cache,
                 &id,
+                self.target,
                 &special,
                 diagnostics,
             );
@@ -2609,6 +2829,7 @@ impl Bundler {
                 uses_top_level_await: false,
                 uses_import_meta: false,
                 uses_cjs_globals: false,
+                uses_dirname: false,
                 workers,
             });
         }
@@ -2625,21 +2846,38 @@ impl Bundler {
         {
             return Ok(current.clone());
         }
+        // A `.vue`/`.svelte` component is compiled to JavaScript by the app's own
+        // compiler FIRST; everything below then treats the result as the module's
+        // source, so the component's imports become graph edges and its
+        // TypeScript is stripped by the ordinary transform.
+        let (component_code, language, component) =
+            match precompile_component(path, &source, &self.resolution_cache)? {
+                Some(compiled) => (
+                    Some(compiled.code),
+                    compiled.language,
+                    compiled.side_effects,
+                ),
+                None => (
+                    None,
+                    crate::transform::SourceLanguage::FromPath,
+                    ComponentSideEffects::default(),
+                ),
+            };
+        let module_text = component_code.as_deref().unwrap_or(source.as_str());
         let source = self
             .resolution_cache
-            .apply_vite_replacements(path, &source, self.target)?;
-        let mut transformed = crate::transform::transform_module_with_options(
+            .apply_vite_replacements(path, module_text, self.target)?;
+        let jsx_config = jsx_config_for(&self.resolver, path, &self.resolution_cache.jsx)?;
+        let mut transformed = crate::transform::transform_module_in_language(
             path,
             &source,
             self.target,
             self.hmr && self.target == Target::Client,
+            self.resolution_cache.jsx_extensions,
+            &jsx_config,
+            language,
         );
-        diagnostics.extend(
-            transformed
-                .diagnostics
-                .iter()
-                .map(|diagnostic| format!("{}: {diagnostic}", path.display())),
-        );
+        diagnostics.extend(source_diagnostics(path, &transformed.diagnostics));
 
         // DEV-ONLY: install `import.meta.hot` -> `module.hot`, and append the React
         // Fast Refresh self-accept footer to client component modules. Gated on the
@@ -2649,7 +2887,12 @@ impl Bundler {
         if self.hmr {
             transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, self.target);
             if self.target == Target::Client
-                && crate::hmr::is_refresh_boundary(path, &transformed.liveness.exports, &source)
+                && crate::hmr::is_refresh_boundary(
+                    path,
+                    &transformed.liveness.exports,
+                    &source,
+                    self.resolution_cache.jsx_extensions,
+                )
             {
                 let module_key = path.to_string_lossy();
                 transformed
@@ -2658,12 +2901,19 @@ impl Bundler {
             }
         }
 
+        // A component's `<style>` `@import`s are graph edges of the component
+        // module, exactly as a stylesheet's own `@import`s are of that stylesheet.
+        // Borrowed (no copy) for every ordinary module, which is all of them but
+        // the components.
+        let (dependency_specifiers, dependency_demands) =
+            component_dependencies(&transformed, &component);
         let resolved_dependencies = resolve_dependencies(
             &self.resolver,
             &self.resolution_cache,
             path,
-            &transformed.dependencies,
-            &transformed.dependency_demands,
+            self.target,
+            &dependency_specifiers,
+            &dependency_demands,
             diagnostics,
         );
         let dependencies = resolved_dependencies
@@ -2682,16 +2932,17 @@ impl Bundler {
             source: Arc::from(source),
             flat_module: transformed.flat_module,
             code: transformed.code,
-            assets: Vec::new(),
-            css: None,
-            css_source_files: Vec::new(),
-            css_external_imports: Vec::new(),
+            assets: component.assets,
+            css: component.css,
+            css_source_files: component.css_source_files,
+            css_external_imports: component.css_external_imports,
             externals: resolved_dependencies.externals,
             droppable,
             liveness: transformed.liveness,
             uses_top_level_await: transformed.uses_top_level_await,
             uses_import_meta: transformed.uses_import_meta,
             uses_cjs_globals: transformed.uses_cjs_globals,
+        uses_dirname: transformed.uses_dirname,
             workers: resolve_worker_entries(&self.resolver, path, &transformed.workers)?,
         })
     }
@@ -3104,8 +3355,26 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                     &export_demands[dense_index],
                     &pruned_imports,
                 );
+                // `__dirname`/`__filename` in a BROWSER bundle. A Node bundle gets
+                // them from the emitted file's own location (see the ESM prelude);
+                // a browser has no such location, so — exactly as webpack does for
+                // `target: "web"`, whose `node.__dirname`/`node.__filename` "mock"
+                // defaults are the literals `"/"` and `"/index.js"` — the factory
+                // binds them per module. Bundled CommonJS packages read them at
+                // module init (Next's ncc-compiled `url`/`querystring` polyfills do
+                // `__nccwpck_require__.ab = __dirname + "/"`), and without a binding
+                // that is a `ReferenceError` that kills the whole entry. Emitted
+                // only for modules that actually reference one, and on the factory's
+                // OWN line so the module body's line numbers (and its source map)
+                // are unchanged.
+                let browser_cjs_locations =
+                    if format == ModuleFormat::BrowserEsm && module.uses_dirname {
+                        "const __filename=\"/index.js\",__dirname=\"/\";"
+                    } else {
+                        ""
+                    };
                 let module_fragment = format!(
-                    "{runtime_id}:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){{\n{}\n}},\n",
+                    "{runtime_id}:function(module,exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal){{{browser_cjs_locations}\n{}\n}},\n",
                     code
                 );
                 let mut map_fragment = format!("{runtime_id}:{{");
@@ -3245,15 +3514,12 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         let (require_dynamic, require_native) = match format {
             ModuleFormat::Esm => (
                 require_dynamic_esm,
-                "const requireNative=__diffpackCreateRequire(import.meta.url);",
+                "const requireNative=__diffpackCreateRequire(import.meta.url);".to_string(),
             ),
-            ModuleFormat::BrowserEsm => (
-                require_dynamic_esm,
-                r#"const requireNative=specifier=>{const fail=()=>{throw new Error("node builtin "+specifier+" is not available in the browser");};const stub=new Proxy(function(){fail();},{get:(_,p)=>(p==="then"||p===Symbol.toPrimitive||p===Symbol.iterator||p===Symbol.asyncIterator)?undefined:stub,construct:()=>stub,apply:()=>fail()});return stub;};"#,
-            ),
+            ModuleFormat::BrowserEsm => (require_dynamic_esm, browser_require_native()),
             ModuleFormat::Cjs => (
                 r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null){if(typeof requireNative!=="function")throw new Error("Dynamic chunks require a CommonJS host");requireNative(chunk[0]);}return __require(chunk[1]);};"#,
-                r#"const requireNative=typeof require==="function"?require:null;"#,
+                r#"const requireNative=typeof require==="function"?require:null;"#.to_string(),
             ),
         };
         // DEV-ONLY HMR wiring (never emitted for production `build-app`). A
@@ -3288,27 +3554,86 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         } else {
             ""
         };
+        // `__toESM` decides whether a required module is ALREADY an ES namespace or a
+        // CommonJS `module.exports` that needs interop. That decision is made on
+        // `__esmNamespaces`, a brand only `__esmNamespace` (i.e. only diffpack's own
+        // ESM emit) can add to, plus a null-prototype `Symbol.toStringTag === "Module"`
+        // test for a namespace the HOST produced. It is deliberately NOT made on
+        // `__esModule`: that is a convention marker any CommonJS file may stamp on its
+        // own `exports` — tslib's UMD build and every TypeScript package published with
+        // `importHelpers` do — and treating it as proof of ESM handed such a module
+        // straight through, so `import x from "tslib"` threw "does not provide an export
+        // named default". Node's ESM-imports-CJS rule ignores `__esModule` entirely:
+        // `default` is `module.exports`, which is what the interop below builds.
+        //
+        // Three properties the interop must hold, each of which was a defect:
+        //
+        //  * IDEMPOTENT AND STABLE. `__toESM` is not called once per module but once
+        //    per import site, and `export * as ns from "cjs"` re-runs it on every
+        //    read of `ns`. `__cjsNamespaces` keys the wrapper by the `module.exports`
+        //    it wraps, so one CommonJS module has exactly one namespace object (as in
+        //    Node), and `__isESM` recognises a wrapper (via `__cjsInterops`) so
+        //    re-wrapping a wrapper is a no-op instead of nesting `default.default`.
+        //    Keying by `module.exports` cannot cover `module.exports = 42` — a
+        //    WeakMap takes no primitive key — so a static import goes through
+        //    `require.esm`, which keys by the MODULE ID (`__idNamespaces`) and is the
+        //    only identity that exists for every value shape. Both halves matter and
+        //    neither alone is enough: id-keying alone would give two modules that
+        //    each `module.exports = 42` one shared namespace under a value-keyed
+        //    cache, and exports-keying alone gives ONE module a fresh namespace per
+        //    read (`ns.legacy === ns.legacy` was `false` against Node's `true`).
+        //  * STRICT ABOUT NAMED EXPORTS. `import { missing } from "./legacy.cjs"` is a
+        //    hard error in Node; it must not evaluate to `undefined` here. The wrapper
+        //    is therefore NOT exempt from `__import`'s check — the check consults the
+        //    live `module.exports` and throws when the name is on neither.
+        //  * LIVE, NOT A SNAPSHOT. The wrapper's enumerable keys are copied from
+        //    `module.exports` at wrap time, which in an ESM<->CJS cycle is a
+        //    PARTIALLY populated object. `__syncCJS` re-copies on every later
+        //    `__toESM` of the same exports, and `__import` reads through to the live
+        //    `module.exports`, so a key the module assigns after the wrap is visible
+        //    rather than permanently missing.
         let tail = if is_main {
             format!(
                 r#"const __runtime=globalThis[{runtime_key}]??=(()=>{{
 const __modules=Object.create(null),__maps=Object.create(null),__chunks=Object.create(null),__cache=Object.create(null);
-const __exportStates=new WeakMap();
-function __esmNamespace(){{const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{{value:"Module"}});return namespace;}}
+const __exportStates=new WeakMap(),__esmNamespaces=new WeakSet(),__cjsNamespaces=new WeakMap(),__cjsInterops=new WeakMap(),__cjsOrigins=new WeakMap(),__idNamespaces=Object.create(null);
+function __esmNamespace(){{const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{{value:"Module"}});__esmNamespaces.add(namespace);return namespace;}}
 function __seal(namespace){{const movable=Reflect.ownKeys(namespace).filter(key=>typeof key==="string"&&Object.getOwnPropertyDescriptor(namespace,key).configurable);const sorted=[...movable].sort();if(movable.some((key,index)=>key!==sorted[index])){{const descriptors={{}};for(const key of movable){{descriptors[key]=Object.getOwnPropertyDescriptor(namespace,key);delete namespace[key];}}for(const key of sorted)Object.defineProperty(namespace,key,descriptors[key]);}}for(const key of Reflect.ownKeys(namespace)){{const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{{configurable:false}});}}Object.preventExtensions(namespace);}}
 function __exportState(target){{let state=__exportStates.get(target);if(!state){{state={{explicit:new Set(),stars:new Map(),ambiguous:new Set()}};__exportStates.set(target,state);}}return state;}}
 function __export(target,name,getter){{const state=__exportState(target);const descriptor=Object.getOwnPropertyDescriptor(target,name);if(descriptor?.configurable)delete target[name];if(!Object.prototype.hasOwnProperty.call(target,name))Object.defineProperty(target,name,{{enumerable:true,configurable:true,get:getter}});state.explicit.add(name);state.stars.delete(name);state.ambiguous.delete(name);}}
 function __reExport(target,source){{const state=__exportState(target);for(const key of Object.keys(source)){{if(key==="default"||key==="__esModule"||state.explicit.has(key)||state.ambiguous.has(key))continue;const previous=state.stars.get(key);if(previous&&previous!==source){{delete target[key];state.stars.delete(key);state.ambiguous.add(key);continue;}}if(!previous){{Object.defineProperty(target,key,{{enumerable:true,configurable:true,get:()=>source[key]}});state.stars.set(key,source);}}}}}}
+function __holdsProperties(value){{return value!==null&&value!==undefined&&(typeof value==="object"||typeof value==="function");}}
+function __origin(exports,specifier){{if(__holdsProperties(exports)&&!__cjsOrigins.has(exports))__cjsOrigins.set(exports,specifier);return exports;}}
+function __isESM(value){{if(!value||(typeof value!=="object"&&typeof value!=="function"))return false;if(__esmNamespaces.has(value)||__cjsInterops.has(value))return true;return Object.getPrototypeOf(value)===null&&value[Symbol.toStringTag]==="Module";}}
+function __syncCJS(namespace,value){{if(__holdsProperties(value))for(const key of Object.keys(value))if(key!=="default"&&!Object.prototype.hasOwnProperty.call(namespace,key))__export(namespace,key,()=>value[key]);return namespace;}}
 function __toESM(value){{
-  if(value&&value.__esModule)return value;
+  if(__isESM(value))return value;
+  const cached=__cjsNamespaces.get(value);
+  if(cached)return __syncCJS(cached,value);
   const namespace=Object.create(null);
   Object.defineProperty(namespace,"__esModule",{{value:true}});
-  Object.defineProperty(namespace,"__diffpackCJS",{{value:true}});
   __export(namespace,"default",()=>value);
-  if(value&&(typeof value==="object"||typeof value==="function"))for(const key of Object.keys(value))if(key!=="default")__export(namespace,key,()=>value[key]);
+  __syncCJS(namespace,value);
+  __cjsInterops.set(namespace,{{exports:value}});
+  if(__holdsProperties(value))__cjsNamespaces.set(value,namespace);
   return namespace;
 }}
-function __import(namespace,name){{if(Object.prototype.hasOwnProperty.call(namespace,name)||namespace.__diffpackCJS)return namespace[name];throw new SyntaxError("Module does not provide an export named "+name);}}
-function __dynamic(require,specifier){{return Promise.resolve().then(()=>require.dynamic(specifier)).then(__toESM);}}
+function __namespaceOf(id,value){{
+  if(__holdsProperties(value))return __toESM(value);
+  const cached=__idNamespaces[id];
+  if(cached)return cached;
+  const namespace=__toESM(value);
+  __idNamespaces[id]=namespace;
+  return namespace;
+}}
+function __import(namespace,name){{
+  if(Object.prototype.hasOwnProperty.call(namespace,name))return namespace[name];
+  const interop=__cjsInterops.get(namespace);
+  if(interop&&__holdsProperties(interop.exports)&&Object.prototype.hasOwnProperty.call(interop.exports,name)){{const exports=interop.exports;__export(namespace,name,()=>exports[name]);return exports[name];}}
+  const origin=__cjsOrigins.get(namespace)??(interop?__cjsOrigins.get(interop.exports):undefined);
+  throw new SyntaxError("The requested module "+(origin===undefined?"(unknown)":JSON.stringify(origin))+" does not provide an export named "+JSON.stringify(name));
+}}
+function __dynamic(require,specifier){{return Promise.resolve().then(()=>require.dynamic(specifier)).then(exports=>__toESM(__origin(exports,specifier)));}}
 function __register(modules,maps,chunks){{Object.assign(__modules,modules);Object.assign(__maps,maps);Object.assign(__chunks,chunks);}}
 function __require(id){{
   if(__cache[id])return __cache[id].exports;
@@ -3317,7 +3642,8 @@ function __require(id){{
   const module={{exports:{{}}}};
   __cache[id]=module;
   {hot_install}
-  const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined){{if(requireNative)return requireNative(specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}}return __require(target);}};
+  const require=specifier=>{{const target=__maps[id][specifier];if(target===undefined){{if(requireNative)return __origin(requireNative(specifier),specifier);throw new Error("Cannot resolve "+specifier+" from "+id);}}return __origin(__require(target),specifier);}};
+  require.esm=specifier=>{{const target=__maps[id][specifier],value=require(specifier);return target===undefined?__toESM(value):__namespaceOf(target,value);}};
   {require_dynamic}
   factory(module,module.exports,require,__toESM,__export,__reExport,__import,__dynamic,__esmNamespace,__seal);
   return module.exports;
@@ -4477,6 +4803,68 @@ impl DirectReachability {
     }
 }
 
+/// True for a module diffpack itself generated into the project (`.diffpack-next/`,
+/// `.diffpack-next-pages/`). Those files live INSIDE the app root, so the app's own
+/// tsconfig `include` claims them, but they are diffpack's source written against
+/// React — handing them the app's `jsxImportSource` would lower diffpack's own
+/// runtime against a package it never imports.
+fn is_generated_adapter_module(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(crate::next_adapter::ADAPTER_DIR | crate::next_pages::ADAPTER_DIR)
+        )
+    })
+}
+
+/// How `path`'s JSX must be lowered: the `jsx` / `jsxImportSource` / `jsxFactory` /
+/// `jsxFragmentFactory` of the tsconfig/jsconfig that CONFIGURES the file, with the
+/// build's own settings (`overrides`, from `vite.config` and its plugins) winning
+/// field by field — Vite's exact precedence.
+///
+/// Applicability, not type-checking: see [`crate::jsx_project_config`] for why the
+/// resolver's own `find_tsconfig` is the wrong question here (it excludes `.jsx`
+/// from a config without `allowJs`, splitting one app across two JSX runtimes, and
+/// never reads `jsconfig.json` at all). Files under `node_modules` get no config,
+/// which is what keeps a dependency's `.tsx` off the app's import source.
+fn jsx_config_for(
+    resolver: &Resolver,
+    path: &Path,
+    overrides: &crate::transform::JsxConfig,
+) -> Result<crate::transform::JsxConfig, String> {
+    if is_generated_adapter_module(path) {
+        return Ok(crate::transform::JsxConfig::default().overridden_by(overrides));
+    }
+    let tsconfig = crate::jsx_project_config::owning_config(resolver, path)?;
+    let mut resolved = crate::transform::JsxConfig::default();
+    if let Some(tsconfig) = tsconfig {
+        let compiler_options = &tsconfig.compiler_options;
+        resolved.runtime = match compiler_options.jsx.as_deref() {
+            None => None,
+            Some("react-jsx" | "react-jsxdev") => Some(crate::transform::JsxRuntime::Automatic),
+            Some("react") => Some(crate::transform::JsxRuntime::Classic),
+            // `preserve`/`react-native` tell TYPESCRIPT to emit JSX unchanged and
+            // leave the lowering to a downstream tool — which is this bundler. A
+            // browser cannot run JSX, so there is nothing to preserve; the automatic
+            // runtime is what every such toolchain (Next's SWC loader on
+            // create-next-app's `"jsx": "preserve"`, Vite's oxc pass) actually emits.
+            Some("preserve" | "react-native") => Some(crate::transform::JsxRuntime::Automatic),
+            Some(other) => {
+                return Err(format!(
+                    "{}: unsupported \"jsx\" value {other:?} (expected one of \"react-jsx\", \
+                     \"react-jsxdev\", \"react\", \"preserve\", \"react-native\"), which owns {}",
+                    tsconfig.path.display(),
+                    path.display(),
+                ));
+            }
+        };
+        resolved.import_source.clone_from(&compiler_options.jsx_import_source);
+        resolved.factory.clone_from(&compiler_options.jsx_factory);
+        resolved.fragment_factory.clone_from(&compiler_options.jsx_fragment_factory);
+    }
+    Ok(resolved.overridden_by(overrides))
+}
+
 fn load_uncached(
     resolver: &Resolver,
     resolution_cache: &ResolutionCache,
@@ -4494,6 +4882,7 @@ fn load_uncached(
             resolver,
             resolution_cache,
             &id,
+            target,
             &special,
             &mut diagnostics,
         );
@@ -4516,6 +4905,7 @@ fn load_uncached(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            uses_dirname: false,
             workers: Vec::new(),
         });
     }
@@ -4527,7 +4917,12 @@ fn load_uncached(
         // Fast Refresh footer (see [`crate::hmr`]). Never runs for `build-app`.
         if hmr
             && target == Target::Client
-            && crate::hmr::is_refresh_boundary(Path::new(id.as_ref()), &[], "")
+            && crate::hmr::is_refresh_boundary(
+                Path::new(id.as_ref()),
+                &[],
+                "",
+                resolution_cache.jsx_extensions,
+            )
         {
             special
                 .code
@@ -4538,6 +4933,7 @@ fn load_uncached(
             resolver,
             resolution_cache,
             &id,
+            target,
             &special,
             &mut diagnostics,
         );
@@ -4569,6 +4965,7 @@ fn load_uncached(
             uses_top_level_await: false,
             uses_import_meta: false,
             uses_cjs_globals: false,
+            uses_dirname: false,
             workers,
         });
     }
@@ -4577,18 +4974,44 @@ fn load_uncached(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     frontend_profile::finish(Phase::Read, read_started);
     let hash = content_hash(source.as_bytes());
-    let source = resolution_cache.apply_vite_replacements(path, &source, target)?;
-    let mut transformed = crate::transform::transform_module_with_options(
+    // A `.vue`/`.svelte` component is compiled to JavaScript by the app's own
+    // compiler before anything below reads it as a module (see
+    // [`precompile_component`]).
+    let (component_code, language, component) =
+        match precompile_component(path, &source, resolution_cache)? {
+            Some(compiled) => (
+                Some(compiled.code),
+                compiled.language,
+                compiled.side_effects,
+            ),
+            None => (
+                None,
+                crate::transform::SourceLanguage::FromPath,
+                ComponentSideEffects::default(),
+            ),
+        };
+    let module_text = component_code.as_deref().unwrap_or(source.as_str());
+    let source = resolution_cache.apply_vite_replacements(path, module_text, target)?;
+    let jsx_config = jsx_config_for(resolver, path, &resolution_cache.jsx)?;
+    let mut transformed = crate::transform::transform_module_in_language(
         path,
         &source,
         target,
         hmr && target == Target::Client,
+        resolution_cache.jsx_extensions,
+        &jsx_config,
+        language,
     );
     // DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation (client only).
     if hmr {
         transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, target);
         if target == Target::Client
-            && crate::hmr::is_refresh_boundary(path, &transformed.liveness.exports, &source)
+            && crate::hmr::is_refresh_boundary(
+                path,
+                &transformed.liveness.exports,
+                &source,
+                resolution_cache.jsx_extensions,
+            )
         {
             transformed
                 .code
@@ -4596,17 +5019,16 @@ fn load_uncached(
         }
     }
     let code_hash = content_hash(transformed.code.as_bytes());
-    let mut diagnostics = transformed
-        .diagnostics
-        .iter()
-        .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
-        .collect::<Vec<_>>();
+    let mut diagnostics = source_diagnostics(path, &transformed.diagnostics);
+    let (dependency_specifiers, dependency_demands) =
+        component_dependencies(&transformed, &component);
     let dependencies = resolve_dependencies(
         resolver,
         resolution_cache,
         path,
-        &transformed.dependencies,
-        &transformed.dependency_demands,
+        target,
+        &dependency_specifiers,
+        &dependency_demands,
         &mut diagnostics,
     );
     let droppable = module_droppable(path, &mut diagnostics);
@@ -4619,29 +5041,50 @@ fn load_uncached(
         flat_module: transformed.flat_module,
         code: transformed.code,
         diagnostics,
-        assets: Vec::new(),
-        css: None,
-        css_source_files: Vec::new(),
-        css_external_imports: Vec::new(),
+        assets: component.assets,
+        css: component.css,
+        css_source_files: component.css_source_files,
+        css_external_imports: component.css_external_imports,
         externals: dependencies.externals,
         droppable,
         liveness: transformed.liveness,
         uses_top_level_await: transformed.uses_top_level_await,
         uses_import_meta: transformed.uses_import_meta,
         uses_cjs_globals: transformed.uses_cjs_globals,
+        uses_dirname: transformed.uses_dirname,
         workers: resolve_worker_entries(resolver, path, &transformed.workers)?,
     })
+}
+
+/// Attributes a module's oxc diagnostics to its path, keeping each one's
+/// severity so an error fails the build and a warning only prints.
+fn source_diagnostics(
+    path: &Path,
+    diagnostics: &[crate::transform::TransformDiagnostic],
+) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| Diagnostic {
+            kind: DiagnosticKind::Source {
+                fatal: diagnostic.fatal,
+            },
+            message: format!("{}: {}", path.display(), diagnostic.message),
+        })
+        .collect()
 }
 
 /// Whether the module at `path` may be dropped when unused, per its nearest
 /// `package.json`'s `sideEffects` field. An unsupported `sideEffects` glob is a
 /// hard, specific error, surfaced as a build diagnostic; the module is then kept
 /// (treated as non-droppable), never silently mis-classified.
-fn module_droppable(path: &Path, diagnostics: &mut Vec<String>) -> bool {
+fn module_droppable(path: &Path, diagnostics: &mut Vec<Diagnostic>) -> bool {
     match crate::side_effects::is_droppable(path) {
         Ok(droppable) => droppable,
         Err(error) => {
-            diagnostics.push(format!("{}: {error}", path.display()));
+            diagnostics.push(Diagnostic {
+                kind: DiagnosticKind::SideEffectsGlob,
+                message: format!("{}: {error}", path.display()),
+            });
             false
         }
     }
@@ -4686,7 +5129,13 @@ fn load_special_module(
 ) -> Option<Result<SpecialModule, String>> {
     let resource = ResourceId::parse(id);
     if resource.query.is_some() {
-        return Some(synthesize_query_module_impl(&resource, target, &cache.base, cache.asset_inline_limit));
+        return Some(synthesize_query_module_impl(
+            &resource,
+            target,
+            &cache.base,
+            cache.asset_inline_limit,
+            cache.css_preprocess.root_path(),
+        ));
     }
     let postcss = cache.css_preprocess.postcss.as_deref();
     if crate::css::is_css_module_path(path) {
@@ -4714,7 +5163,115 @@ fn load_special_module(
             cache.image_import_shape,
         ));
     }
+    // Nothing above claimed it. Falling through to `None` would mean "read it as
+    // JavaScript", which for an `.astro`/`.graphql` file produces a parse error
+    // in the app's own source instead of naming diffpack's gap. (`.vue` and
+    // `.svelte` ARE claimed — by the JS load path, which compiles them first;
+    // see [`precompile_component`].)
+    if let Some(unhandled) = unhandled_source(path) {
+        return Some(Err(unhandled_source_message(path, &unhandled)));
+    }
     None
+}
+
+/// A `.vue`/`.svelte` component after its own framework compiler has run: the
+/// JavaScript to parse in place of the file's text, plus everything its
+/// `<style>` blocks contributed once they went through the ordinary CSS
+/// pipeline (rebased `url(...)`s, PostCSS, `@import` edges).
+struct PrecompiledComponent {
+    /// The compiled JavaScript, still carrying the component's own imports.
+    code: String,
+    /// How [`Self::code`] must be parsed — a Vue SFC with `<script lang="ts">`
+    /// compiles to TypeScript.
+    language: crate::transform::SourceLanguage,
+    /// Everything the component contributes BESIDES its JavaScript.
+    side_effects: ComponentSideEffects,
+}
+
+/// What a component's `<style>` blocks contribute to its module, once they have
+/// been through the ordinary CSS pipeline. A module that is not a component
+/// contributes nothing, which is exactly [`Default`].
+#[derive(Default)]
+struct ComponentSideEffects {
+    css: Option<String>,
+    css_source_files: Vec<PathBuf>,
+    css_external_imports: Vec<String>,
+    assets: Vec<AssetEmit>,
+    /// `@import` targets the component's styles pull in. They are appended to
+    /// the module's JavaScript dependencies so the imported stylesheet is a real
+    /// graph edge — the same treatment a `.css` module's `@import` gets.
+    dependency_specifiers: Vec<String>,
+    dependency_demands: Vec<DependencyDemand>,
+}
+
+/// The dependency specifiers and demands a module contributes: its JavaScript
+/// imports, plus a component's style `@import`s. Borrows the transform's own
+/// vectors for every module that is not a component — the common case must not
+/// pay a copy for a feature it does not use.
+fn component_dependencies<'a>(
+    transformed: &'a crate::transform::TransformResult,
+    component: &ComponentSideEffects,
+) -> (Cow<'a, [String]>, Cow<'a, [DependencyDemand]>) {
+    if component.dependency_specifiers.is_empty() {
+        return (
+            Cow::Borrowed(&transformed.dependencies),
+            Cow::Borrowed(&transformed.dependency_demands),
+        );
+    }
+    let mut specifiers = transformed.dependencies.clone();
+    specifiers.extend(component.dependency_specifiers.iter().cloned());
+    let mut demands = transformed.dependency_demands.clone();
+    demands.extend(component.dependency_demands.iter().cloned());
+    (Cow::Owned(specifiers), Cow::Owned(demands))
+}
+
+/// Compiles `path` when it is a single-file component, returning `None` for
+/// every ordinary JavaScript/TypeScript module (the overwhelming majority — the
+/// check is one extension comparison). The component's compiler is the app's
+/// own; see [`crate::sfc`]. A failure to compile is a hard error naming the
+/// file, never a fall-through to "parse it as JavaScript".
+fn precompile_component(
+    path: &Path,
+    source: &str,
+    cache: &ResolutionCache,
+) -> Result<Option<PrecompiledComponent>, String> {
+    let Some(framework) = crate::sfc::framework_for(path) else {
+        return Ok(None);
+    };
+    let compiled = crate::sfc::compile(framework, path, source, cache.css_preprocess.root_path())?;
+    let language = match compiled.language {
+        crate::sfc::OutputLanguage::TypeScript => crate::transform::SourceLanguage::TypeScript,
+        crate::sfc::OutputLanguage::JavaScript => crate::transform::SourceLanguage::JavaScript,
+    };
+    // The component's styles take the SAME path a hand-written stylesheet takes,
+    // so an SFC `url(../a.png)` is rebased and hashed exactly like one in a
+    // `.css` file. The JS stub that loader synthesizes is discarded: this
+    // module's JavaScript is the component's own.
+    let styles = match &compiled.css {
+        Some(css) => Some(load_stylesheet_from_text(
+            path,
+            css,
+            Vec::new(),
+            cache.css_preprocess.postcss.as_deref(),
+        )?),
+        None => None,
+    };
+    let side_effects = match styles {
+        Some(styles) => ComponentSideEffects {
+            css: styles.css,
+            css_source_files: styles.css_source_files,
+            css_external_imports: styles.css_external_imports,
+            assets: styles.assets,
+            dependency_specifiers: styles.dependency_specifiers,
+            dependency_demands: styles.dependency_demands,
+        },
+        None => ComponentSideEffects::default(),
+    };
+    Ok(Some(PrecompiledComponent {
+        code: compiled.code,
+        language,
+        side_effects,
+    }))
 }
 
 /// A Sass source (`.scss`): compiled natively to plain CSS first, then handed
@@ -4773,6 +5330,7 @@ fn synthesize_query_module_impl(
     target: Target,
     base: &str,
     asset_inline_limit: usize,
+    root: Option<&Path>,
 ) -> Result<SpecialModule, String> {
     match resource.loader_kind() {
         // An explicit `?url` import is always the bare URL string (Vite semantics),
@@ -4786,8 +5344,61 @@ fn synthesize_query_module_impl(
         Some(LoaderKind::Worker) => synthesize_worker(resource),
         Some(LoaderKind::Inline) => synthesize_inline(Path::new(&resource.path)),
         Some(LoaderKind::WasmInit) => synthesize_wasm_init(resource, base, asset_inline_limit),
+        Some(LoaderKind::PublicUrl) => synthesize_public_url(resource, base, root),
         None => Err(resource.unimplemented_loader_error()),
     }
+}
+
+/// A file under the project's `public/` directory, reached by a root-absolute
+/// import (`import icons from "/icons.svg"`). The public directory is copied to
+/// the site root VERBATIM, so the file is not read, hashed, or emitted here: the
+/// module is exactly its public URL, `<base><path under public/>` — which is
+/// what Vite's own root-absolute import yields.
+///
+/// The URL is derived from the resolved path, so a resolved id that is not under
+/// `<root>/public` is a contradiction between the resolver and this loader and
+/// fails loudly rather than minting a URL that resolves to nothing.
+fn synthesize_public_url(
+    resource: &ResourceId,
+    base: &str,
+    root: Option<&Path>,
+) -> Result<SpecialModule, String> {
+    let path = Path::new(&resource.path);
+    let root = root.ok_or_else(|| {
+        format!(
+            "{}: a `?public-url` module needs the project root to derive its URL, and this \
+             build has none",
+            path.display()
+        )
+    })?;
+    let public_dir = root.join("public");
+    let relative = path.strip_prefix(&public_dir).map_err(|_| {
+        format!(
+            "{}: a `?public-url` module must live under {}",
+            path.display(),
+            public_dir.display()
+        )
+    })?;
+    // Public URLs are `/`-separated regardless of the host filesystem.
+    let url_path = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    let url = format!("{base}{url_path}");
+    let synthetic = format!("export default {};\n", quote(&url));
+    let transformed = transform_module(Path::new("diffpack-public-url.js"), &synthetic, Target::Server);
+    Ok(SpecialModule {
+        hash: content_hash(url.as_bytes()),
+        code: transformed.code,
+        flat_module: transformed.flat_module,
+        assets: Vec::new(),
+        css: None,
+        css_source_files: Vec::new(),
+        css_external_imports: Vec::new(),
+        dependency_specifiers: Vec::new(),
+        dependency_demands: Vec::new(),
+    })
 }
 
 /// The deterministic worker key for a `?worker` import site, derived from the
@@ -5397,18 +6008,6 @@ fn synthesize_asset_url(
 ) -> Result<SpecialModule, String> {
     let bytes = fs::read(&source_path)
         .map_err(|error| format!("cannot read asset {}: {error}", source_path.display()))?;
-    let public_name = asset_public_name(&source_path, content_hash(&bytes));
-    // Next static-image import: a decodable PNG/JPEG becomes the object shape with
-    // responsive variants + an auto blurDataURL. Runs BEFORE the inline-limit
-    // branch so a small raster is never inlined away (the object shape needs a
-    // real emitted file + variants). Undecodable rasters (or non-png/jpeg formats
-    // the `image` crate here can't decode) fall through to the bare-URL path.
-    if image_shape == ImageImportShape::NextObject
-        && let Some(module) =
-            synthesize_next_image_object(&source_path, &bytes, &public_name, base)?
-    {
-        return Ok(module);
-    }
     // A Tailwind v4 CSS entry imported for its URL must be compiled natively at
     // emit time, not copied verbatim: a raw copy leaves `@import 'tailwindcss'`
     // in the served file, which the browser fetches and 404s on. Capture the
@@ -5420,6 +6019,33 @@ fn synthesize_asset_url(
     } else {
         None
     };
+    // The bytes a Tailwind entry SERVES are the compiled stylesheet, not these
+    // source bytes, so the app's resolved theme (which varies with the installed
+    // `tailwindcss`) must be in the content hash: otherwise upgrading Tailwind
+    // changes the stylesheet's content while leaving its immutable-cached URL
+    // identical. The scanned class candidates are the compile's other input and
+    // are still NOT hashed — they are unknown until the graph is built, so a
+    // pure class-set change reuses the URL (pre-existing, tracked separately).
+    let public_name = if tailwind_source.is_some() {
+        let mut hashed = bytes.clone();
+        if let Some(theme) = app_tailwind_theme(&source_path) {
+            hashed.extend_from_slice(theme.as_bytes());
+        }
+        asset_public_name(&source_path, content_hash(&hashed))
+    } else {
+        asset_public_name(&source_path, content_hash(&bytes))
+    };
+    // Next static-image import: a decodable PNG/JPEG becomes the object shape with
+    // responsive variants + an auto blurDataURL. Runs BEFORE the inline-limit
+    // branch so a small raster is never inlined away (the object shape needs a
+    // real emitted file + variants). Undecodable rasters (or non-png/jpeg formats
+    // the `image` crate here can't decode) fall through to the bare-URL path.
+    if image_shape == ImageImportShape::NextObject
+        && let Some(module) =
+            synthesize_next_image_object(&source_path, &bytes, &public_name, base)?
+    {
+        return Ok(module);
+    }
     // A plain ES module exporting the asset URL, run through the real transformer
     // so it yields flat-linker code and export metadata like any hand-written
     // module.
@@ -5696,12 +6322,72 @@ fn tailwind_scan_root(css_path: &Path, source_css: &str) -> PathBuf {
         })
 }
 
+/// The installed `tailwindcss` package directory Node resolution reaches from a
+/// stylesheet: the nearest ancestor of the STYLESHEET holding a
+/// `node_modules/tailwindcss/theme.css`.
+///
+/// Anchored on the stylesheet, not on the candidate scan root. Module resolution
+/// is defined against the importing file; a `source(...)` scan root is a
+/// source-tree concept with no relation to it, and joining `node_modules` onto
+/// it only found the install when the two happened to coincide — TanStack
+/// Start's `src/styles/app.css` with `source('../')` scans `src/`, which holds
+/// no `node_modules`, so every such app silently compiled against the vendored
+/// theme and shipped a stale `--font-sans`. Walking up from the file is also
+/// what makes pnpm's nested layout and a monorepo root install resolve.
+fn installed_tailwind_dir(css_path: &Path) -> Option<PathBuf> {
+    css_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .ancestors()
+        .map(|dir| dir.join("node_modules/tailwindcss"))
+        .find(|package| package.join("theme.css").is_file())
+}
+
 /// The app's own installed Tailwind default theme, when present. Compiling
 /// against it matches the exact Tailwind version the reference build used
 /// (default tokens like `--font-sans` changed between v4 releases); without
 /// it the vendored copy in `src/tailwind_theme.css` applies.
-fn app_tailwind_theme(scan_root: &Path) -> Option<String> {
-    fs::read_to_string(scan_root.join("node_modules/tailwindcss/theme.css")).ok()
+fn app_tailwind_theme(css_path: &Path) -> Option<String> {
+    let package = installed_tailwind_dir(css_path)?;
+    let theme = fs::read_to_string(package.join("theme.css")).ok()?;
+    warn_on_tailwind_version_drift(&package);
+    Some(theme)
+}
+
+/// The `version` field of an installed package's `package.json`.
+fn installed_package_version(package: &Path) -> Option<String> {
+    let manifest = fs::read_to_string(package.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    value.get("version")?.as_str().map(str::to_string)
+}
+
+/// Warns, once per differing version, when the app's installed `tailwindcss` is
+/// not the release the vendored data came from. The installed `theme.css` is
+/// still used (its tokens are what the app's own build would emit), but the
+/// preflight and the version banner remain the vendored ones — a mixture that
+/// exists in no released Tailwind, so it is stated rather than left to be
+/// discovered as a pixel diff.
+fn warn_on_tailwind_version_drift(package: &Path) {
+    static WARNED: Mutex<Option<BTreeSet<String>>> = Mutex::new(None);
+    let Some(installed) = installed_package_version(package) else {
+        return;
+    };
+    if installed == crate::tailwind::VERSION {
+        return;
+    }
+    let mut warned = WARNED.lock().unwrap();
+    if !warned.get_or_insert_with(BTreeSet::new).insert(installed.clone()) {
+        return;
+    }
+    eprintln!(
+        "warning: {} is tailwindcss v{installed}, but diffpack's vendored Tailwind data is \
+         v{}. Its theme tokens are used as installed; the preflight and version banner \
+         remain v{}. Re-vendor src/tailwind_theme.css / src/tailwind_preflight*.css if the \
+         output diverges.",
+        package.display(),
+        crate::tailwind::VERSION,
+        crate::tailwind::VERSION,
+    );
 }
 
 /// The full app theme fed to the Tailwind compiler: the installed `tailwindcss`
@@ -5709,7 +6395,7 @@ fn app_tailwind_theme(scan_root: &Path) -> Option<String> {
 /// legacy JS config referenced by a `@config '<path>'` directive in `css` (if any).
 /// A `@config`-defined token overrides the default (it is appended after it).
 fn app_tailwind_theme_full(scan_root: &Path, css: &str, css_path: &Path) -> Option<String> {
-    let base = app_tailwind_theme(scan_root);
+    let base = app_tailwind_theme(css_path);
     let config = at_config_theme(scan_root, css, css_path);
     match (base, config) {
         (Some(base), Some(cfg)) => Some(format!("{base}\n{cfg}")),
@@ -5897,6 +6583,140 @@ fn is_asset_path(path: &Path) -> bool {
     )
 }
 
+/// A resolved file that no loader claims and that is not JavaScript either.
+/// Split three ways because the honest remedy differs: diffpack either knows
+/// exactly what the file is and which compiler it would need, knows it is not
+/// source at all, or knows only that nothing here parses it.
+enum UnhandledSource {
+    /// A recognized source format whose compiler is a JS library a bundler runs
+    /// as a plugin. `kind` reads as "`.astro` is {kind}, not JavaScript".
+    NeedsCompiler {
+        kind: &'static str,
+        compiler: &'static str,
+    },
+    /// A prebuilt native addon (`.node`): machine code, not source.
+    NativeAddon,
+    /// An extension no loader claims. All diffpack knows is that it is not JS.
+    NoLoader,
+}
+
+/// Source formats diffpack recognizes and deliberately cannot compile: each one
+/// needs a compiler that bundlers host as a JS plugin, and diffpack hosts no JS
+/// plugins (README: "Not yet: JS plugin hosting"). Naming the compiler is the
+/// whole point of the table — the alternative is parsing someone else's language
+/// as JavaScript and blaming the app for a syntax error it does not have.
+const COMPILED_SOURCE_KINDS: &[(&str, &str, &str)] = &[
+    (
+        "astro",
+        "an Astro component",
+        "the Astro compiler (@astrojs/compiler)",
+    ),
+    (
+        "marko",
+        "a Marko template",
+        "the Marko compiler (@marko/compiler)",
+    ),
+    (
+        "riot",
+        "a Riot component",
+        "the Riot compiler (@riotjs/compiler)",
+    ),
+    ("imba", "an Imba module", "the Imba compiler"),
+    (
+        "civet",
+        "a Civet module",
+        "the Civet compiler (@danielx/civet)",
+    ),
+    ("coffee", "a CoffeeScript module", "the CoffeeScript compiler"),
+    ("res", "a ReScript module", "the ReScript compiler"),
+    ("resi", "a ReScript interface", "the ReScript compiler"),
+    ("re", "a Reason module", "the Reason compiler"),
+    ("rei", "a Reason interface", "the Reason compiler"),
+    ("elm", "an Elm module", "the Elm compiler"),
+];
+
+/// Whether a resolved file falls outside every loader AND outside the JavaScript
+/// family. [`load_special_module`] returning `None` means "read this as
+/// JavaScript", so without this check "unknown extension" and "JavaScript" are
+/// the same branch: oxc parses an Astro component's markup as a JS expression
+/// and reports `Unexpected JSX expression`, blaming the app for diffpack's own
+/// gap. The JS family is therefore an explicit allow-list, not an implicit
+/// default.
+fn unhandled_source(path: &Path) -> Option<UnhandledSource> {
+    // No extension at all IS JavaScript: package `main` entries and `bin` scripts
+    // under `node_modules` are routinely extensionless.
+    let extension = path.extension().and_then(|value| value.to_str())?;
+    // `.mts`/`.cts` are absent from the resolver's extension list, so they only
+    // ever arrive via an explicit specifier — but they are still TypeScript.
+    if matches!(
+        extension,
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "json" | "md" | "mdx"
+    ) {
+        return None;
+    }
+    // A `.vue`/`.svelte` single-file component IS handled: the JS load path
+    // compiles it with the app's own compiler before parsing (see
+    // [`precompile_component`] and [`crate::sfc`]). It must not be reported as a
+    // gap here, and it must not be read as JavaScript either — the compile step
+    // between the read and the parse is what makes both true.
+    if crate::sfc::is_component_path(path) {
+        return None;
+    }
+    if extension == "node" {
+        return Some(UnhandledSource::NativeAddon);
+    }
+    match COMPILED_SOURCE_KINDS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == extension)
+    {
+        Some((_, kind, compiler)) => Some(UnhandledSource::NeedsCompiler { kind, compiler }),
+        None => Some(UnhandledSource::NoLoader),
+    }
+}
+
+/// Renders an unhandled source: the file, what its extension actually is, what
+/// compiling it would require, and the way forward. Deliberately says the file
+/// was FOUND — the failure this replaces was routinely read as a missing import,
+/// which sent readers hunting for a resolution problem that does not exist.
+fn unhandled_source_message(path: &Path, unhandled: &UnhandledSource) -> String {
+    let file = path.display();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let found = "the file was found on disk: this is neither a missing import nor a JavaScript \
+                 syntax error";
+    match unhandled {
+        UnhandledSource::NeedsCompiler { kind, compiler } => format!(
+            "{file}: `.{extension}` is {kind}, not JavaScript\n  \
+             compiling it requires {compiler}; diffpack hosts no JS plugins and has no built-in \
+             `.{extension}` compiler\n  {found}\n  \
+             build this project with its own toolchain instead"
+        ),
+        UnhandledSource::NativeAddon => format!(
+            "{file}: `.{extension}` is a prebuilt native addon, not JavaScript\n  \
+             a native addon is machine code loaded by Node's `process.dlopen`, and diffpack \
+             cannot put native code in a JavaScript bundle\n  {found}\n  \
+             build this project with its own toolchain instead"
+        ),
+        UnhandledSource::NoLoader => {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            format!(
+                "{file}: no loader handles the `.{extension}` extension\n  \
+                 diffpack loads .js/.jsx/.mjs/.cjs/.ts/.tsx/.mts/.cts, .json, .md/.mdx, \
+                 .css/.scss/.sass/.less/.styl/.stylus, and static assets; nothing else is parsed \
+                 as JavaScript\n  \
+                 the file was found on disk: this is not a missing import\n  \
+                 to import its contents or its URL, use an explicit loader query: \
+                 `./{name}?raw` or `./{name}?url`"
+            )
+        }
+    }
+}
+
 /// The content-hashed public filename for an asset, e.g. `app-1a2b3c4d5e6f7080.css`.
 pub(crate) fn asset_public_name(path: &Path, hash: u64) -> String {
     let stem = path
@@ -5909,59 +6729,128 @@ pub(crate) fn asset_public_name(path: &Path, hash: u64) -> String {
     }
 }
 
-/// Whether a specifier is external (not bundled): a Node built-in, addressed
-/// either with the unambiguous `node:` prefix or as a bare builtin name. External
-/// imports are left in the output for the runtime to resolve.
-fn is_external_specifier(specifier: &str) -> bool {
+/// The Node built-in module names, without the `node:` prefix. ONE list: the
+/// build-time classifier ([`is_node_builtin`]) and the browser runtime's
+/// `requireNative` stub (see [`browser_require_native`]) are both derived from
+/// it, so the two can never disagree about what "a Node built-in" means.
+pub(crate) const NODE_BUILTINS: &[&str] = &[
+    "assert",
+    "async_hooks",
+    "buffer",
+    "child_process",
+    "cluster",
+    "console",
+    "constants",
+    "crypto",
+    "dgram",
+    "diagnostics_channel",
+    "dns",
+    "domain",
+    "events",
+    "fs",
+    "http",
+    "http2",
+    "https",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "path",
+    "perf_hooks",
+    "process",
+    "punycode",
+    "querystring",
+    "readline",
+    "repl",
+    "stream",
+    "string_decoder",
+    "sys",
+    "timers",
+    "tls",
+    "trace_events",
+    "tty",
+    "url",
+    "util",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+    "zlib",
+];
+
+/// Whether a specifier names a Node built-in, addressed either with the
+/// unambiguous `node:` prefix or as a bare builtin name.
+pub(crate) fn is_node_builtin(specifier: &str) -> bool {
     if let Some(builtin) = specifier.strip_prefix("node:") {
         // `node:test`, `node:fs/promises`, etc. The prefix alone is authoritative.
         return !builtin.is_empty();
     }
     let root = specifier.split('/').next().unwrap_or(specifier);
-    matches!(
-        root,
-        "assert"
-            | "async_hooks"
-            | "buffer"
-            | "child_process"
-            | "cluster"
-            | "console"
-            | "constants"
-            | "crypto"
-            | "dgram"
-            | "diagnostics_channel"
-            | "dns"
-            | "domain"
-            | "events"
-            | "fs"
-            | "http"
-            | "http2"
-            | "https"
-            | "inspector"
-            | "module"
-            | "net"
-            | "os"
-            | "path"
-            | "perf_hooks"
-            | "process"
-            | "punycode"
-            | "querystring"
-            | "readline"
-            | "repl"
-            | "stream"
-            | "string_decoder"
-            | "sys"
-            | "timers"
-            | "tls"
-            | "trace_events"
-            | "tty"
-            | "url"
-            | "util"
-            | "v8"
-            | "vm"
-            | "wasi"
-            | "worker_threads"
-            | "zlib"
+    NODE_BUILTINS.contains(&root)
+}
+
+/// Whether a specifier is external (not bundled): a Node built-in. External
+/// imports are left in the output for the runtime to resolve.
+///
+/// This is a property of the SPECIFIER only, so it cannot decide whether leaving
+/// the import external is *acceptable*: on a browser target there is no runtime
+/// that can resolve it. That decision lives in [`resolve_dependencies`], which
+/// knows the [`Target`].
+pub(crate) fn is_external_specifier(specifier: &str) -> bool {
+    is_node_builtin(specifier)
+}
+
+/// The build error for a Node built-in reached from a BROWSER graph. A browser
+/// has no `fs`/`net`/`async_hooks`; leaving the import external would emit a
+/// chunk whose `require` hits the throw-on-use stub and kills the page at
+/// runtime, with a zero exit code at build time. Naming the importer is the
+/// whole point: the fix is almost always to stop pulling a server module into
+/// the client graph.
+fn node_builtin_in_browser_message(path: &Path, specifier: &str) -> String {
+    let mut message = format!(
+        "Node built-in {specifier:?} cannot be bundled for the browser: browsers have no such module"
+    );
+    message.push_str(&format!("\n  imported by {}", path.display()));
+    message.push_str(
+        "\n  a browser build has no Node runtime to resolve it, so this import cannot work at \
+         runtime\n  diffpack does NOT implement webpack/Next-style browser polyfills for Node \
+         built-ins; that is an unimplemented feature, not a resolution failure\n  either keep this \
+         module out of the client graph (import it only from server code), or replace it with a \
+         browser-safe equivalent",
+    );
+    message
+}
+
+/// The browser-ESM `requireNative` binding.
+///
+/// A browser has no `node:module`/`createRequire`, so a `require(...)` that the
+/// bundle has no map entry for lands here. There are two genuinely different
+/// cases and they must not be conflated:
+///
+/// - A **Node built-in**. Statically-known built-ins are now a *build* error
+///   (see [`node_builtin_in_browser_message`]), so reaching one here means the
+///   specifier was only known at runtime. It is bound to a load-safe
+///   throw-on-USE stub: property reads and construction succeed (so a module
+///   that merely reads a shape off it at init still LOADS), but any actual CALL
+///   throws a clear, specifically-named error. It never fabricates a value.
+/// - **Anything else** — a package the bundle does not contain, typically an
+///   optional dependency required through a specifier the bundler could not see
+///   (`require("@emotion/is-prop-" + "valid")`). Node and every other bundler
+///   throw *immediately* for that, which is exactly what the near-universal
+///   `try { require(optional) } catch {}` idiom is written against. Returning a
+///   lazy stub here defeats the `catch`, smuggles the stub into the app as a
+///   real value, and blows up much later somewhere unrelated. So: throw now.
+///
+/// Calling the second case "node builtin ..." — as this stub used to — is simply
+/// a false statement about the user's dependency.
+fn browser_require_native() -> String {
+    let builtins = NODE_BUILTINS
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"const __nodeBuiltins=new Set([{builtins}]);const requireNative=specifier=>{{const builtin=specifier.startsWith("node:")?specifier.length>5:__nodeBuiltins.has(specifier.split("/")[0]);if(!builtin)throw new Error("Cannot require "+JSON.stringify(specifier)+" in the browser: it is not a Node built-in and was not included in the bundle (its specifier is only known at runtime)");const fail=()=>{{throw new Error("node builtin "+specifier+" is not available in the browser");}};const absent=p=>p==="then"||p===Symbol.toPrimitive||p===Symbol.iterator||p===Symbol.asyncIterator;const stub=new Proxy(function(){{fail();}},{{get:(_,p)=>absent(p)?undefined:stub,getOwnPropertyDescriptor:(target,p)=>Reflect.getOwnPropertyDescriptor(target,p)??(typeof p==="string"&&!absent(p)?{{value:stub,writable:true,enumerable:false,configurable:true}}:undefined),has:(target,p)=>absent(p)?Reflect.has(target,p):true,construct:()=>stub,apply:()=>fail()}});return stub;}};"#
     )
 }
 
@@ -5994,9 +6883,10 @@ fn resolve_dependencies(
     resolver: &Resolver,
     resolution_cache: &ResolutionCache,
     path: &Path,
+    target: Target,
     dependency_specifiers: &[String],
     dependency_demands: &[DependencyDemand],
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> ResolvedDependencies {
     let resolve_started = frontend_profile::start();
     let mut dependencies = Vec::with_capacity(dependency_specifiers.len());
@@ -6012,8 +6902,44 @@ fn resolve_dependencies(
         }
         // An external (a Node built-in like `node:stream`) is not a graph module:
         // it is neither resolved nor bundled, and its `require(...)` is left in
-        // place for the runtime to resolve. It is not a diagnostic.
+        // place for the runtime to resolve. On a SERVER target that is correct and
+        // not a diagnostic — Node resolves it. On a BROWSER target there is no
+        // runtime that can: the emitted `require` hits the throw-on-use stub and
+        // the page dies, while the build exits 0. That is the same
+        // silent-broken-artifact class as an unresolved import, so it is fatal.
         if is_external_specifier(specifier) {
+            // An alias may deliberately map a built-in onto a browser polyfill —
+            // Next does exactly this for `url`, `querystring`, `buffer`, ... using the
+            // copies it vendors, so such an import is valid in a Next client page. The
+            // resolver carries the project's alias table, so a built-in specifier that
+            // RESOLVES to a real file was mapped on purpose: bundle that file instead of
+            // rejecting it. A built-in with no mapping still falls through below.
+            if target == Target::Client
+                && let Ok(resolved) = directory_cache.resolve(resolver, path, specifier)
+            {
+                let demand = dependency_demands
+                    .iter()
+                    .find(|demand| demand.specifier == *specifier)
+                    .cloned()
+                    .unwrap_or_else(|| DependencyDemand {
+                        specifier: specifier.clone(),
+                        all: true,
+                        names: Vec::new(),
+                        dynamic: false,
+                    });
+                dependencies.push((specifier.clone(), resolved.id, demand));
+                continue;
+            }
+            if target == Target::Client {
+                diagnostics.push(Diagnostic {
+                    kind: DiagnosticKind::NodeBuiltinInBrowser {
+                        specifier: specifier.clone(),
+                        importer: path.to_path_buf(),
+                    },
+                    message: node_builtin_in_browser_message(path, specifier),
+                });
+                continue;
+            }
             if !externals.iter().any(|existing| existing == specifier) {
                 externals.push(specifier.clone());
             }
@@ -6041,10 +6967,13 @@ fn resolve_dependencies(
                     dependencies.push((specifier.clone(), resolved.id, demand));
                 }
             }
-            Err(error) => diagnostics.push(format!(
-                "{}: cannot resolve {specifier:?}: {error}",
-                path.display()
-            )),
+            Err(error) => diagnostics.push(Diagnostic {
+                kind: DiagnosticKind::UnresolvedImport {
+                    specifier: specifier.clone(),
+                    importer: path.to_path_buf(),
+                },
+                message: unresolved_import_message(path, specifier, &error.to_string()),
+            }),
         }
     }
     frontend_profile::finish(Phase::Resolve, resolve_started);
@@ -6061,6 +6990,75 @@ struct ResolvedDependencies {
     externals: Vec<String>,
 }
 
+/// The package a bare specifier belongs to (`foo/sub` -> `foo`,
+/// `@scope/foo/sub` -> `@scope/foo`), or `None` for a relative/absolute path or
+/// a `#`-prefixed subpath import, which no `npm install` can fix.
+fn bare_package_name(specifier: &str) -> Option<String> {
+    if specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with('#') {
+        return None;
+    }
+    let mut segments = specifier.split('/');
+    let first = segments.next().filter(|segment| !segment.is_empty())?;
+    match first.strip_prefix('@') {
+        Some(scope) if !scope.is_empty() => {
+            let second = segments.next().filter(|segment| !segment.is_empty())?;
+            Some(format!("{first}/{second}"))
+        }
+        _ => Some(first.to_string()),
+    }
+}
+
+/// Renders an unresolved import: the specifier, the file that imported it, and
+/// the action that fixes it. Adapter-generated importers are called out, because
+/// pointing a user at a path they never wrote (or, for a virtual module, one
+/// that does not exist on disk at all) is the confusing part of this failure.
+fn unresolved_import_message(path: &Path, specifier: &str, error: &str) -> String {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    let generated = file_name == Some("__diffpack_virtual_module__.js")
+        || path.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some(crate::next_adapter::ADAPTER_DIR) | Some(crate::next_pages::ADAPTER_DIR)
+            )
+        });
+    let mut message = format!("cannot resolve {specifier:?}: {error}");
+    if file_name == Some("__diffpack_virtual_module__.js") {
+        message.push_str("\n  imported by a diffpack build-generated virtual module");
+    } else {
+        message.push_str(&format!("\n  imported by {}", path.display()));
+        if generated {
+            message.push_str("\n              (generated by diffpack, not by your app)");
+        }
+    }
+    // The remedy depends on the specifier's shape: a missing package is an install,
+    // a missing file is a typo, and a `#` subpath is a `package.json` `imports` map.
+    match bare_package_name(specifier) {
+        // The RSC runtime is DIFFPACK's requirement, not the app's: no real Next app
+        // depends on `react-server-dom-webpack` (Next vendors its own copy, which
+        // diffpack normally resolves — see `rsc_runtime_resolve`). Reaching here means
+        // neither the app nor the installed `next` has one, so say whose requirement
+        // this is instead of billing the user for a dependency they never declared.
+        Some(package) if package == crate::rsc_runtime_resolve::PACKAGE => {
+            message.push_str(
+                "\n  this is diffpack's requirement, not your app's: diffpack's app-router \
+                 entries need an RSC (flight) runtime.\n  It normally uses the copy `next` \
+                 vendors at next/dist/compiled/react-server-dom-webpack; the installed `next` \
+                 has none (or `next` is not installed).\n  install it:  npm install \
+                 react-server-dom-webpack",
+            );
+        }
+        Some(package) => message.push_str(&format!("\n  install it:  npm install {package}")),
+        None if specifier.starts_with('#') => message.push_str(
+            "\n  a `#` specifier resolves through the nearest package.json `imports` \
+             field; check that it maps this specifier",
+        ),
+        None => message.push_str(
+            "\n  no file matched that path; check the spelling and the file extension",
+        ),
+    }
+    message
+}
+
 /// Resolves a synthesized module's carried import specifiers into real graph
 /// edges. A leaf synthetic module (asset URL, `?raw`, stylesheet) carries none
 /// and resolves to nothing. A route-split (`?tsr-split`) module carries the
@@ -6074,8 +7072,9 @@ fn resolve_special_dependencies(
     resolver: &Resolver,
     resolution_cache: &ResolutionCache,
     id: &str,
+    target: Target,
     special: &SpecialModule,
-    diagnostics: &mut Vec<String>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> ResolvedDependencies {
     if special.dependency_specifiers.is_empty() {
         return ResolvedDependencies {
@@ -6099,6 +7098,7 @@ fn resolve_special_dependencies(
         resolver,
         resolution_cache,
         &source_file,
+        target,
         &special.dependency_specifiers,
         &special.dependency_demands,
         diagnostics,
@@ -6480,6 +7480,16 @@ pub struct BuildConfig {
     /// Less/Stylus compilation + PostCSS. Default is off (no PostCSS; Less/Stylus
     /// resolve their tool from each file's directory). See [`CssPreprocess`].
     pub css_preprocess: CssPreprocess,
+    /// Which extensions may contain JSX. `JsxAndTsxOnly` (default) is the
+    /// Vite/esbuild rule; the Next adapters opt into `NextJs`, where `.js`/`.mjs`/
+    /// `.cjs` are JSX-capable too. See [`crate::parser::JsxExtensions`].
+    pub jsx_extensions: crate::parser::JsxExtensions,
+    /// How JSX is LOWERED, as the BUILD configures it: `vite.config`'s
+    /// `esbuild.{jsx,jsxImportSource,jsxFactory,jsxFragment}` / `oxc.jsx`. Layered
+    /// over the tsconfig that owns each file (which is honored in every mode,
+    /// because a tsconfig is the file's own compilation contract). Default (all
+    /// `None`) is the automatic runtime against `react`.
+    pub jsx: crate::transform::JsxConfig,
 }
 
 impl Default for BuildConfig {
@@ -6502,6 +7512,8 @@ impl Default for BuildConfig {
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
             css_preprocess: CssPreprocess::default(),
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx: crate::transform::JsxConfig::default(),
         }
     }
 }
@@ -6601,9 +7613,53 @@ mod tests {
 
     use super::*;
 
+    /// `node`, with an inherited terminal-colour override stripped.
+    ///
+    /// Many tests here execute an emitted chunk and compare its stdout
+    /// byte-for-byte. `console.log(6)` prints `6` down a pipe but
+    /// `\x1b[33m6\x1b[39m` when node believes it is writing to a terminal, and
+    /// an inherited `FORCE_COLOR` (set by plenty of terminal wrappers and CI
+    /// runners) makes it believe exactly that. Every such assertion then fails
+    /// for a reason that has nothing to do with the bundler. Removing the
+    /// variable — rather than setting `NO_COLOR`, which node ignores in its
+    /// presence and warns about on stderr — makes the output environment-
+    /// independent.
+    fn node_command() -> Command {
+        let mut command = Command::new("node");
+        command.env_remove("FORCE_COLOR");
+        command
+    }
+
+    #[test]
+    fn node_is_spawned_without_inherited_terminal_colour() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        // The hazard is real: with FORCE_COLOR set, node writes ANSI escapes even
+        // down a pipe, and every stdout comparison in this module would fail.
+        let coloured = Command::new("node")
+            .env("FORCE_COLOR", "3")
+            .args(["-e", "console.log(6)"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&coloured.stdout).contains('\u{1b}'),
+            "expected node to colour its output under FORCE_COLOR"
+        );
+        // node_command() unsets it, whatever the parent environment holds.
+        assert!(
+            node_command()
+                .get_envs()
+                .any(|(key, value)| key == std::ffi::OsStr::new("FORCE_COLOR") && value.is_none()),
+            "node_command must remove FORCE_COLOR from the child environment"
+        );
+        let plain = node_command().args(["-e", "console.log(6)"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&plain.stdout), "6\n");
+    }
+
     #[test]
     fn bundles_typescript_dynamic_import_and_a_package_into_executable_javascript() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
 
@@ -6645,7 +7701,7 @@ mod tests {
         assert_eq!(reachable.len(), 4);
         bundler.emit(&reachable, &output).unwrap();
 
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             executed.status.success(),
             "{}",
@@ -6654,6 +7710,144 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&executed.stdout),
             "package-ok:5\nlazy-loaded\n"
+        );
+    }
+
+    /// Bundles `entry.js` out of an already-populated directory and runs the
+    /// result under Node, returning its stdout. The interop tests below are all
+    /// "what does the emitted program actually print", which is the only level
+    /// at which a runtime helper can be pinned.
+    fn bundle_and_run(directory: &Path) -> String {
+        let entry = directory.join("entry.js");
+        let output = directory.join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        String::from_utf8_lossy(&executed.stdout).into_owned()
+    }
+
+    /// `import { missing } from "./legacy.cjs"` is a hard error in Node, and
+    /// must not evaluate to `undefined` here either — not even when the module
+    /// stamps the `__esModule` convention marker on itself, which is exactly
+    /// the case the interop's own CommonJS marker used to wave through.
+    #[test]
+    fn a_named_import_a_commonjs_module_does_not_provide_is_a_hard_error() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("marked.cjs"),
+            "exports.__esModule = true;\nexports.present = \"present-val\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                import { present, missingName } from "./marked.cjs";
+                import marked from "./marked.cjs";
+                console.log("present:" + present);
+                console.log("default-is-module-exports:" + (marked.present === "present-val"));
+                try {
+                  console.log("missing:" + missingName);
+                } catch (error) {
+                  console.log("threw:" + (error instanceof SyntaxError));
+                  console.log("message:" + error.message);
+                }
+            "#,
+        )
+        .unwrap();
+
+        let stdout = bundle_and_run(directory.path());
+        let lines = stdout.lines().collect::<Vec<_>>();
+        assert_eq!(
+            &lines[..3],
+            [
+                "present:present-val",
+                "default-is-module-exports:true",
+                "threw:true",
+            ],
+            "{stdout}"
+        );
+        // The error names both the module and the export, the way Node's does.
+        let message = lines[3];
+        assert!(message.contains("./marked.cjs"), "{message}");
+        assert!(message.contains("missingName"), "{message}");
+    }
+
+    /// The interop namespace copies `module.exports`' keys at wrap time, which
+    /// in an ESM<->CJS cycle is a PARTIALLY populated object. A key the module
+    /// assigns after that point must still be readable through a named import
+    /// rather than being frozen out (or, worse, reported as not provided).
+    #[test]
+    fn a_commonjs_export_assigned_after_the_interop_wrap_is_still_visible() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("legacy.cjs"),
+            "exports.early = \"early\";\nrequire(\"./esm.js\");\nexports.late = \"late\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("esm.js"),
+            "import { early, late } from \"./legacy.cjs\";\nexport function read() { return early + \"/\" + late; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import \"./legacy.cjs\";\nimport { read } from \"./esm.js\";\nconsole.log(\"read:\" + read());\n",
+        )
+        .unwrap();
+
+        assert_eq!(bundle_and_run(directory.path()), "read:early/late\n");
+    }
+
+    /// One CommonJS module has exactly one interop namespace: re-running the
+    /// interop over the same `module.exports` (`export * as ns from` re-runs it
+    /// on every read) must return the same object, and running it over a
+    /// namespace it already produced must be a no-op instead of nesting a
+    /// second `default` around it.
+    #[test]
+    fn the_commonjs_interop_namespace_is_stable_and_idempotent() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("legacy.cjs"),
+            "exports.value = \"legacy-value\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("hub.js"),
+            "export * as legacy from \"./legacy.cjs\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                import * as hub from "./hub.js";
+                import * as direct from "./legacy.cjs";
+                console.log("stable:" + (hub.legacy === hub.legacy));
+                console.log("shared:" + (hub.legacy === direct));
+                console.log("value:" + hub.legacy.value);
+                console.log("not-nested:" + (hub.legacy.default.default === undefined));
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle_and_run(directory.path()),
+            "stable:true\nshared:true\nvalue:legacy-value\nnot-nested:true\n"
         );
     }
 
@@ -6695,8 +7889,8 @@ mod tests {
         // A second, identical asset would hash to the same name (determinism).
         assert_eq!(asset_name, asset_public_name(Path::new("styles.css"), content_hash(css.as_bytes())));
 
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -6721,8 +7915,8 @@ mod tests {
         assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
         let reachable = bundler.reachable_modules_direct();
         bundler.emit(&reachable, &output).unwrap();
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -6964,6 +8158,329 @@ mod tests {
         assert!(!error.contains("No such file or directory"), "{error}");
     }
 
+    /// Every wording a reader would chase down the WRONG path: a JSX syntax error
+    /// in their own file, or a resolution failure. An unhandled source is neither.
+    fn assert_not_misreported(error: &str) {
+        for misleading in [
+            "Unexpected JSX expression",
+            "cannot resolve",
+            "unresolved",
+            "npm install",
+            "No such file or directory",
+        ] {
+            assert!(!error.contains(misleading), "{misleading}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_vue_component_whose_compiler_is_missing_names_the_package_not_a_jsx_error() {
+        // A `.vue` file is not JavaScript. Parsing it as JavaScript reports
+        // `Unexpected JSX expression` on the app's `<template>`, blaming the app
+        // for diffpack's own gap. It is compiled by the APP's OWN
+        // `@vue/compiler-sfc`; this fixture project has no `node_modules` at all,
+        // so the compile must fail loudly, naming the file and the package —
+        // never fall back to reading the component as JavaScript.
+        // (Requires `node` on PATH, as every diffpack build already does.)
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("App.vue"),
+            "<script setup lang=\"ts\">\nconst greeting = 'hi';\n</script>\n\n\
+             <template>\n  <h1>{{ greeting }}</h1>\n</template>\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import App from './App.vue';\nconsole.log(App);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("a `.vue` component has no compiler here; it must fail the build"),
+            Err(error) => error,
+        };
+        assert!(error.contains("App.vue"), "{error}");
+        assert!(error.contains("Vue single-file component"), "{error}");
+        assert!(error.contains("@vue/compiler-sfc"), "{error}");
+        assert_not_misreported(&error);
+    }
+
+    #[test]
+    fn a_svelte_component_whose_compiler_is_missing_names_the_package() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("App.svelte"),
+            "<script lang=\"ts\">\n  let count = 0;\n</script>\n\n<h1>{count}</h1>\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import App from './App.svelte';\nconsole.log(App);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("a `.svelte` component has no compiler here; it must fail the build"),
+            Err(error) => error,
+        };
+        assert!(error.contains("App.svelte"), "{error}");
+        assert!(error.contains("Svelte component"), "{error}");
+        assert!(error.contains("svelte/compiler"), "{error}");
+        assert_not_misreported(&error);
+    }
+
+    /// A build configured like a Vite project: a real project root (so
+    /// root-absolute and `public/` imports resolve) and the client target.
+    fn vite_like_config(root: &Path, aliases: Vec<(String, String)>) -> BuildConfig {
+        BuildConfig {
+            base: "/".to_string(),
+            browser_process_shim: false,
+            asset_inline_limit: 0,
+            aliases,
+            conditions: vec!["module".into(), "browser".into()],
+            main_fields: Vec::new(),
+            virtual_modules: Vec::new(),
+            target: Target::Client,
+            import_meta_env: None,
+            import_meta_glob: None,
+            defines: Vec::new(),
+            hmr: false,
+            scss: crate::sass::ScssOptions::default(),
+            image_import_shape: ImageImportShape::Url,
+            css_preprocess: CssPreprocess {
+                root: Some(root.to_path_buf()),
+                postcss: None,
+            },
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx: crate::transform::JsxConfig::default(),
+        }
+    }
+
+    #[test]
+    fn a_root_absolute_import_of_a_public_file_is_its_url_not_an_emitted_asset() {
+        // Vite: `import icons from "/icons.svg"` is `<root>/icons.svg`, not the
+        // filesystem path `/icons.svg`. With no such file in the root but one in
+        // `public/`, the import is the file's PUBLIC URL — `public/` is copied to
+        // the site root verbatim, so hashing and re-emitting it would mint a
+        // second copy at a URL the app's own build never produces.
+        // (Vue's SFC compiler emits exactly this import for a `<use href="/icons.svg#x">`.)
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("public")).unwrap();
+        fs::write(root.join("public/icons.svg"), "<svg/>").unwrap();
+        fs::write(
+            root.join("entry.js"),
+            "import icons from '/icons.svg';\nconsole.log(icons);\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.js");
+        let config = vite_like_config(root, Vec::new());
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = root.join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(code.contains("\"/icons.svg\"") || code.contains("'/icons.svg'"), "{code}");
+        // No hashed copy: the public file is served from the site root as-is.
+        assert!(!root.join("dist/assets").exists(), "a public file must not be re-emitted");
+    }
+
+    #[test]
+    fn a_root_absolute_import_prefers_a_file_in_the_project_root() {
+        // `/lib/util.js` with `<root>/lib/util.js` present is that module, not a
+        // public URL — Vite resolves root-relative first.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(root.join("lib/util.js"), "export const value = 'ROOT_RELATIVE_OK';\n").unwrap();
+        fs::write(
+            root.join("entry.js"),
+            "import { value } from '/lib/util.js';\nconsole.log(value);\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.js");
+        let config = vite_like_config(root, Vec::new());
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = root.join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(code.contains("ROOT_RELATIVE_OK"), "{code}");
+    }
+
+    #[test]
+    fn a_dedupe_alias_still_resolves_a_subpath_through_the_package_exports_map() {
+        // Vite's `resolve.dedupe` pins a package to `<root>/node_modules/<pkg>`,
+        // which diffpack carries as a directory alias. A SUBPATH cannot be
+        // answered by joining onto that directory: `svelte/internal/client` is a
+        // key in the package's `exports` map, not a file at that path, so the
+        // join produced a path that does not exist and the build failed on a
+        // package that is installed.
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let package = root.join("node_modules/widget");
+        fs::create_dir_all(package.join("src/internal")).unwrap();
+        fs::write(
+            package.join("package.json"),
+            "{\"name\":\"widget\",\"exports\":{\".\":\"./src/index.js\",\
+             \"./internal/client\":\"./src/internal/client-impl.js\"}}",
+        )
+        .unwrap();
+        fs::write(package.join("src/index.js"), "export const main = 1;\n").unwrap();
+        fs::write(
+            package.join("src/internal/client-impl.js"),
+            "export const internalValue = 'EXPORTS_SUBPATH_OK';\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.js"),
+            "import { internalValue } from 'widget/internal/client';\nconsole.log(internalValue);\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.js");
+        let aliases = vec![(
+            "widget".to_string(),
+            package.to_string_lossy().into_owned(),
+        )];
+        let config = vite_like_config(root, aliases);
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = root.join("dist/bundle.js");
+        bundler.emit(&reachable, &output).unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(code.contains("EXPORTS_SUBPATH_OK"), "{code}");
+    }
+
+    #[test]
+    fn an_extension_no_loader_handles_is_named_not_parsed_as_javascript() {
+        // diffpack does not know what a `.graphql` file is, and must say exactly
+        // that rather than invent a compiler for it or parse it as JavaScript.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("schema.graphql"),
+            "type Query { hello: String }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import schema from './schema.graphql';\nconsole.log(schema);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("no loader handles `.graphql`; it must fail the build"),
+            Err(error) => error,
+        };
+        assert!(error.contains("no loader handles the `.graphql` extension"), "{error}");
+        assert!(error.contains("./schema.graphql?raw"), "{error}");
+        assert!(!error.contains("compiler"), "{error}");
+        assert_not_misreported(&error);
+    }
+
+    #[test]
+    fn a_native_addon_is_reported_where_it_is_loaded_not_where_it_is_resolved() {
+        // A `.node` addon resolves perfectly well. Failing it inside the resolver
+        // printed `cannot resolve ...` plus `install it: npm install ...` for a
+        // file sitting right there on disk.
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("node_modules/native-addon");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            "{\"name\":\"native-addon\",\"main\":\"index.node\"}",
+        )
+        .unwrap();
+        fs::write(package.join("index.node"), [0x7f, b'E', b'L', b'F']).unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import addon from 'native-addon';\nconsole.log(addon);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let error = match Bundler::discover_direct(&entry) {
+            Ok(_) => panic!("native code cannot go in a JavaScript bundle; it must fail the build"),
+            Err(error) => error,
+        };
+        assert!(error.contains("index.node"), "{error}");
+        assert!(error.contains("prebuilt native addon"), "{error}");
+        assert_not_misreported(&error);
+    }
+
+    #[test]
+    fn a_vue_file_still_loads_through_the_raw_loader() {
+        // The query check runs BEFORE the extension table, so `?raw`/`?url` remain
+        // the escape hatch for any extension diffpack cannot compile itself.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("App.vue"),
+            "<template><h1>hi</h1></template>\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import source from './App.vue?raw';\nconsole.log(source);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(code.contains("<template><h1>hi</h1></template>"), "{code}");
+    }
+
+    #[test]
+    fn mts_cts_and_extensionless_modules_still_build_as_javascript() {
+        // The extension table is an ALLOW-list for JavaScript, so it must not
+        // reject the JS-family extensions the resolver never adds implicitly
+        // (`.mts`/`.cts`) or the extensionless files `node_modules` is full of.
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("a.mts"), "export const a = 1;\n").unwrap();
+        fs::write(directory.path().join("b.cts"), "export const b = 2;\n").unwrap();
+        fs::create_dir_all(directory.path().join("bin")).unwrap();
+        fs::write(directory.path().join("bin/cli"), "export const c = 3;\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { a } from './a.mts';\nimport { b } from './b.cts';\n\
+             import { c } from './bin/cli';\nconsole.log(a + b + c);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let output = directory.path().join("dist/bundle.js");
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+    }
+
+    #[test]
+    fn a_source_error_is_not_reported_as_a_dangling_reference() {
+        // "Dangling references" describes what an UNRESOLVED IMPORT leaves behind.
+        // Saying it for a module that never compiled points the reader at an
+        // import that is perfectly fine.
+        let source_only = [Diagnostic {
+            kind: DiagnosticKind::Source { fatal: true },
+            message: "App.vue: `.vue` is a Vue single-file component".into(),
+        }];
+        let error = partition_diagnostics(&source_only, "page `index`").unwrap_err();
+        assert!(!error.contains("dangling"), "{error}");
+        assert!(error.contains("would not match the source"), "{error}");
+
+        let unresolved_only = [Diagnostic {
+            kind: DiagnosticKind::UnresolvedImport {
+                specifier: "left-pad".into(),
+                importer: PathBuf::from("entry.js"),
+            },
+            message: "cannot resolve \"left-pad\"".into(),
+        }];
+        let error = partition_diagnostics(&unresolved_only, "page `index`").unwrap_err();
+        assert!(error.contains("dangling references"), "{error}");
+    }
+
     #[test]
     fn node_builtins_are_recognized_as_externals() {
         assert!(is_external_specifier("node:stream"));
@@ -6995,12 +8512,14 @@ mod tests {
         assert_eq!(reachable.len(), 1, "only the entry is a graph module: {reachable:?}");
         bundler.emit(&reachable, &output).unwrap();
 
-        // The external require survives for the runtime to resolve.
+        // The external require survives for the runtime to resolve. A static
+        // import goes through `require.esm`, which calls that same `require` and
+        // falls back to `__toESM` for a specifier the graph does not own.
         let bundle = fs::read_to_string(&output).unwrap();
-        assert!(bundle.contains("require(\"node:path\")"), "{bundle}");
+        assert!(bundle.contains("require.esm(\"node:path\")"), "{bundle}");
 
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -7008,6 +8527,322 @@ mod tests {
             );
             assert_eq!(String::from_utf8_lossy(&executed.stdout), "c.txt:nl\n");
         }
+    }
+
+    /// The browser build's node-builtin stub exists so that dead server code
+    /// which leaked into the client graph still LOADS, and throws a
+    /// specifically-named error only when it actually calls into the built-in.
+    /// A named import is a read like any other: it must hand back the stub, not
+    /// trip `__import`'s "does not provide an export" check — the stub is a
+    /// Proxy whose shape is unknowable, so absence there proves nothing.
+    #[test]
+    fn a_named_import_of_a_node_builtin_in_a_browser_build_stubs_instead_of_throwing() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                import { readFileSync } from "node:fs";
+                console.log("loaded:" + (typeof readFileSync));
+                try {
+                  readFileSync("/etc/hosts");
+                } catch (error) {
+                  console.log("called:" + error.message);
+                }
+            "#,
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.mjs");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let executed = node_command().arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "loaded:function\ncalled:node builtin node:fs is not available in the browser\n"
+        );
+    }
+
+    /// A CommonJS module has exactly ONE ES namespace, whatever `module.exports`
+    /// happens to be.
+    ///
+    /// `export * as ns from "cjs"` compiles to a getter, so the interop re-runs on
+    /// every read of `ns`. `__cjsNamespaces` keys the wrapper by the `module.exports`
+    /// object, which covers nothing when `module.exports = 42`: a WeakMap takes no
+    /// primitive key, so every read minted a fresh namespace and `ns.legacy ===
+    /// ns.legacy` was `false` where Node (and rolldown) say `true`.
+    ///
+    /// The identity that exists for every value shape is the MODULE, which is why a
+    /// static import goes through `require.esm` (keyed by module id) rather than
+    /// `__toESM(require(...))`. Caching by primitive VALUE instead would be a second
+    /// wrong answer, and the second half of this test is what forbids it: two
+    /// modules that each `module.exports = 42` are two namespaces.
+    #[test]
+    fn one_commonjs_module_has_one_namespace_even_when_its_exports_are_a_primitive() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("num.cjs"), "module.exports = 42;\n").unwrap();
+        fs::write(root.join("other.cjs"), "module.exports = 42;\n").unwrap();
+        fs::write(root.join("a.js"), "export * as legacy from \"./num.cjs\";\n").unwrap();
+        fs::write(root.join("b.js"), "export * as legacy from \"./num.cjs\";\n").unwrap();
+        fs::write(root.join("c.js"), "export * as legacy from \"./other.cjs\";\n").unwrap();
+        fs::write(
+            root.join("entry.js"),
+            "import * as a from \"./a.js\";\n\
+             import * as b from \"./b.js\";\n\
+             import * as c from \"./c.js\";\n\
+             console.log(\"stable:\" + (a.legacy === a.legacy));\n\
+             console.log(\"shared:\" + (a.legacy === b.legacy));\n\
+             console.log(\"distinct:\" + (a.legacy === c.legacy));\n\
+             console.log(\"default:\" + a.legacy.default);\n",
+        )
+        .unwrap();
+
+        let entry = root.join("entry.js");
+        let output = root.join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+
+        let executed = node_command().arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        // Node's own answer for this program, unbundled.
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "stable:true\nshared:true\ndistinct:false\ndefault:42\n"
+        );
+    }
+
+    /// A Node built-in reached from a BROWSER graph is a FATAL build diagnostic,
+    /// not a silent external. Leaving it external emits a `require` no browser can
+    /// satisfy: the build exits 0 and the page dies. The same specifier on a
+    /// SERVER graph stays external and is not a diagnostic at all — Node resolves
+    /// it. The classifier alone cannot tell these apart, which is why
+    /// `resolve_dependencies` takes the `Target`.
+    #[test]
+    fn a_node_builtin_is_fatal_in_a_browser_build_and_external_in_a_server_build() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        fs::write(
+            &entry,
+            "import { format } from \"url\";\nconsole.log(format({}));\n",
+        )
+        .unwrap();
+        let config = |target| BuildConfig {
+            target,
+            ..BuildConfig::default()
+        };
+
+        let (_bundler, client) =
+            Bundler::discover_direct_with_config(&entry, &config(Target::Client)).unwrap();
+        let fatal: Vec<_> = client
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_fatal())
+            .collect();
+        assert_eq!(fatal.len(), 1, "{:?}", client.diagnostics);
+        assert!(
+            matches!(
+                &fatal[0].kind,
+                DiagnosticKind::NodeBuiltinInBrowser { specifier, .. } if specifier == "url"
+            ),
+            "{:?}",
+            fatal[0].kind
+        );
+        // The message names the built-in AND the file that imported it: the fix is
+        // to stop pulling that file into the client graph.
+        assert!(fatal[0].message.contains("\"url\""), "{}", fatal[0].message);
+        assert!(
+            fatal[0].message.contains("entry.js"),
+            "{}",
+            fatal[0].message
+        );
+        // And it must stop the build, not warn.
+        assert!(partition_diagnostics(&client.diagnostics, "client build").is_err());
+
+        let (_bundler, server) =
+            Bundler::discover_direct_with_config(&entry, &config(Target::Server)).unwrap();
+        assert!(
+            server
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.is_fatal()),
+            "{:?}",
+            server.diagnostics
+        );
+    }
+
+    /// The browser `requireNative` fallback must not claim that an npm package is
+    /// a "node builtin", and must not hand back a lazy stub for one. Every
+    /// optional dependency in the ecosystem is loaded as
+    /// `try { require(pkg) } catch {}`; returning a Proxy defeats the `catch`,
+    /// smuggles the stub in as a real value, and throws later somewhere unrelated
+    /// (this is exactly how `next-pages-framer-motion` died on
+    /// `@emotion/is-prop-valid`). Node throws immediately for an absent module, so
+    /// so do we — while a genuine Node built-in keeps the load-safe stub.
+    #[test]
+    fn a_non_builtin_runtime_require_throws_immediately_in_a_browser_build() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        // The specifier is assembled at runtime, exactly as framer-motion does it,
+        // so the bundler never sees it as a static dependency and it reaches the
+        // `requireNative` fallback.
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                const pkg = "@emotion/is-prop-" + "valid";
+                let loaded = "fallback";
+                try {
+                  loaded = require(pkg).default;
+                } catch (error) {
+                  console.log("caught:" + error.message);
+                }
+                console.log("value:" + loaded);
+            "#,
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.mjs");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let executed = node_command().arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&executed.stdout);
+        // It threw (so the app's own `catch` ran and its fallback survived) ...
+        assert!(stdout.contains("caught:"), "{stdout}");
+        assert!(stdout.contains("value:fallback"), "{stdout}");
+        // ... and it did NOT call an npm package a node builtin.
+        assert!(
+            !stdout.contains("node builtin"),
+            "an npm package must not be reported as a Node built-in: {stdout}"
+        );
+        assert!(
+            stdout.contains("@emotion/is-prop-valid"),
+            "the error must name the specifier: {stdout}"
+        );
+    }
+
+    /// `__dirname`/`__filename` in a BROWSER bundle. Node's ESM entry defines them
+    /// from `import.meta.url`, but a browser chunk has no location to derive them
+    /// from, so a bundled CommonJS package that reads one at module-init time died
+    /// with `ReferenceError: __dirname is not defined` — and, because that runs
+    /// during the entry's initialization, it took the WHOLE client bundle with it
+    /// (this is exactly how `next-pages-shallow-routing` failed to hydrate: Next
+    /// vendors an ncc-compiled `url` polyfill that does
+    /// `__nccwpck_require__.ab = __dirname + "/"`). Webpack's `target: "web"`
+    /// defines the same two names per module (its `node.__dirname` "mock" default),
+    /// so this is what a browser build is supposed to do.
+    #[test]
+    fn a_browser_bundle_defines_dirname_for_a_bundled_commonjs_module() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        // The exact shape ncc-compiled packages emit at module scope.
+        fs::write(
+            directory.path().join("vendored.js"),
+            r#"
+                const base = __dirname + "/";
+                module.exports = { base, file: __filename };
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                const vendored = require("./vendored.js");
+                console.log("base:" + vendored.base);
+                console.log("file:" + vendored.file);
+            "#,
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.mjs");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(
+            code.contains("const __filename=\"/index.js\",__dirname=\"/\";"),
+            "the browser factory must bind the two CommonJS location ambients: {code}"
+        );
+        // Only the module that reads them gets the binding — the entry does not.
+        assert_eq!(
+            code.matches("const __filename=\"/index.js\",__dirname=\"/\";").count(),
+            1,
+            "the binding must be emitted per referencing module, not for every module"
+        );
+
+        // A `.mjs` file has no ambient `__dirname`, so running it proves the
+        // binding is what makes the module load at all.
+        let executed = node_command().arg(&output).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&executed.stdout);
+        assert!(stdout.contains("base://"), "{stdout}");
+        assert!(stdout.contains("file:/index.js"), "{stdout}");
     }
 
     #[test]
@@ -7075,8 +8910,8 @@ mod tests {
         let js = fs::read_to_string(&output).unwrap();
         assert!(!js.contains("color: red"), "{js}");
 
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -7137,8 +8972,8 @@ mod tests {
         assert!(!css.contains(".btn:"), "unscoped local leaked: {css}");
         assert!(!css.contains(".icon"), "unscoped local leaked: {css}");
 
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -7197,8 +9032,8 @@ mod tests {
         // composes never reaches the emitted CSS.
         assert!(!css.contains("composes"), "{css}");
 
-        if Command::new("node").arg("--version").output().is_ok() {
-            let executed = Command::new("node").arg(&output).output().unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
             assert!(
                 executed.status.success(),
                 "{}",
@@ -7217,7 +9052,7 @@ mod tests {
 
     #[test]
     fn cross_file_composes_adds_a_dependency_edge_and_tracks_edits_incrementally() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -7246,7 +9081,7 @@ mod tests {
         );
         bundler.emit(&reachable, &output).unwrap();
         let first = String::from_utf8(
-            Command::new("node").arg(&output).output().unwrap().stdout,
+            node_command().arg(&output).output().unwrap().stdout,
         )
         .unwrap();
         let first_names = first.trim().split(' ').map(str::to_owned).collect::<Vec<_>>();
@@ -7266,7 +9101,7 @@ mod tests {
         );
         bundler.emit(&bundler.reachable_modules_direct(), &output).unwrap();
         let second = String::from_utf8(
-            Command::new("node").arg(&output).output().unwrap().stdout,
+            node_command().arg(&output).output().unwrap().stdout,
         )
         .unwrap();
         let second_names = second.trim().split(' ').map(str::to_owned).collect::<Vec<_>>();
@@ -7315,7 +9150,7 @@ mod tests {
 
     #[test]
     fn scss_module_scopes_compiled_css_and_exports_the_mapping() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -7343,7 +9178,7 @@ mod tests {
             .emit(&bundler.reachable_modules_direct(), &output)
             .unwrap();
         let printed = String::from_utf8(
-            Command::new("node").arg(&output).output().unwrap().stdout,
+            node_command().arg(&output).output().unwrap().stdout,
         )
         .unwrap();
         let scoped = printed.trim();
@@ -7424,7 +9259,7 @@ mod tests {
 
     #[test]
     fn a_missing_cross_file_composes_target_throws_at_runtime_instead_of_undefined() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -7447,7 +9282,7 @@ mod tests {
         bundler
             .emit(&bundler.reachable_modules_direct(), &output)
             .unwrap();
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             !executed.status.success(),
             "a missing composes target must not silently yield undefined"
@@ -7803,7 +9638,7 @@ mod tests {
 
     #[test]
     fn rebuilds_only_the_changed_module_and_updates_live_reachability() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -7850,7 +9685,7 @@ mod tests {
 
     #[test]
     fn resolves_typescript_path_aliases_from_the_nearest_tsconfig() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -7878,9 +9713,280 @@ mod tests {
         assert_eq!(run_node(&output), "42\n");
     }
 
+    /// Writes a `node_modules` JSX-runtime package whose `jsx` factory records
+    /// which runtime produced an element, so a bundle can be asked, per module,
+    /// what import source its JSX was lowered against.
+    fn write_jsx_runtime_package(root: &Path, name: &str) {
+        let package = root.join("node_modules").join(name);
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"1.0.0","exports":{{"./jsx-runtime":"./jsx-runtime.js"}}}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            package.join("jsx-runtime.js"),
+            format!(
+                "export const Fragment = 'Fragment';\n\
+                 export function jsx(tag, props) {{ return '{name}:' + tag; }}\n\
+                 export const jsxs = jsx;\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// `compilerOptions.jsxImportSource` decides which package the automatic
+    /// runtime is imported from, and it is read from the tsconfig that OWNS each
+    /// file — through create-vite's solution-style root config (`{"files":[],
+    /// "references":[...]}`, no `compilerOptions` at all), which a nearest-file
+    /// read finds nothing in. Two files that the app's tsconfig does NOT own stay
+    /// on react: a dependency's `.tsx` under `node_modules`, and diffpack's own
+    /// generated `.diffpack-next/` sources, which live inside the project root and
+    /// would otherwise be claimed by the app's `include`.
+    #[test]
+    fn jsx_import_source_comes_from_the_tsconfig_that_owns_each_file() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".diffpack-next")).unwrap();
+        write_jsx_runtime_package(root, "myjsx");
+        write_jsx_runtime_package(root, "react");
+        // Solution-style: the root config carries no `compilerOptions` at all.
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"files":[],"references":[{"path":"./tsconfig.app.json"}]}"#,
+        )
+        .unwrap();
+        // `**/*.tsx` is create-next-app's own `include`, and it reaches straight
+        // into `.diffpack-next/` — which is why the guard there is not theoretical.
+        fs::write(
+            root.join("tsconfig.app.json"),
+            r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"myjsx"},
+                "include":["**/*.ts","**/*.tsx"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("node_modules").join("vendor.tsx"),
+            "export const vendor = <span />;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".diffpack-next").join("generated.tsx"),
+            "export const generated = <main />;\n",
+        )
+        .unwrap();
+        let entry = root.join("src").join("entry.tsx");
+        fs::write(
+            &entry,
+            "import { vendor } from '../node_modules/vendor.tsx';\n\
+             import { generated } from '../.diffpack-next/generated.tsx';\n\
+             console.log(<div />, vendor, generated);\n",
+        )
+        .unwrap();
+
+        let output = root.join("bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        assert_eq!(run_node(&output), "myjsx:div react:span react:main\n");
+    }
+
+    /// Per FILE, not per build: two sibling subtrees of ONE bundle, each with its
+    /// own nearest config naming a different import source, must each be lowered
+    /// against its own. A build-wide answer (first config found, or the entry's)
+    /// silently hands one subtree the other's runtime, and nothing in the output
+    /// says so — the JSX still compiles, it just calls into the wrong package.
+    #[test]
+    fn two_subtrees_with_different_nearest_configs_each_get_their_own_import_source() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_jsx_runtime_package(root, "myjsx");
+        write_jsx_runtime_package(root, "react");
+        fs::create_dir_all(root.join("packages/preactish")).unwrap();
+        fs::create_dir_all(root.join("packages/reactish")).unwrap();
+        // A JS project states its options in `jsconfig.json`, a TS one in
+        // `tsconfig.json`; both shapes appear in one tree here on purpose.
+        fs::write(
+            root.join("packages/preactish/jsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"myjsx"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/reactish/tsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"react"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/preactish/widget.jsx"),
+            "export const widget = <span />;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/reactish/panel.tsx"),
+            "export const panel = <section />;\n",
+        )
+        .unwrap();
+        // The entry itself is under NEITHER config: it keeps oxc's react default.
+        let entry = root.join("entry.jsx");
+        fs::write(
+            &entry,
+            "import { widget } from './packages/preactish/widget.jsx';\n\
+             import { panel } from './packages/reactish/panel.tsx';\n\
+             console.log(<div />, widget, panel);\n",
+        )
+        .unwrap();
+
+        let output = root.join("bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        assert_eq!(run_node(&output), "react:div myjsx:span react:section\n");
+    }
+
+    /// A `.jsx` file under a tsconfig that TypeScript would NOT compile (no
+    /// `allowJs`, so `include: ["src"]` does not claim it) still gets the project's
+    /// import source. The bundler lowers the file whatever `tsc` would have done
+    /// with it, and `preact/jsx-runtime` is the only runtime such a project has.
+    #[test]
+    fn a_jsx_file_gets_the_import_source_of_a_tsconfig_that_would_not_compile_it() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        write_jsx_runtime_package(root, "myjsx");
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"myjsx"},"include":["src"]}"#,
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.jsx");
+        fs::write(&entry, "console.log(<div />);\n").unwrap();
+
+        let output = root.join("bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        assert_eq!(run_node(&output), "myjsx:div\n");
+    }
+
+    /// A JavaScript project states its compiler options in `jsconfig.json`. It is
+    /// the only place such a project can put `jsxImportSource` at all, so a build
+    /// that never reads it silently lowers the whole app against React.
+    #[test]
+    fn a_jsconfig_import_source_reaches_a_javascript_project() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        write_jsx_runtime_package(root, "myjsx");
+        fs::write(
+            root.join("jsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"myjsx"}}"#,
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.jsx");
+        fs::write(&entry, "console.log(<div />);\n").unwrap();
+
+        let output = root.join("bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        assert_eq!(run_node(&output), "myjsx:div\n");
+    }
+
+    /// ONE app, ONE JSX runtime. `create-next-app`'s tsconfig `include`s only
+    /// `**/*.ts` and `**/*.tsx`, and Next compiles JSX in `.js` (and `.mdx`) too:
+    /// under a type-checking ownership rule the `.tsx` modules take the configured
+    /// import source while the `.js` ones silently take React — two runtimes in one
+    /// bundle, and (for a preact app) one of them not installed.
+    #[test]
+    fn every_extension_in_one_project_lowers_against_the_same_import_source() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("app")).unwrap();
+        write_jsx_runtime_package(root, "myjsx");
+        write_jsx_runtime_package(root, "react");
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"preserve","jsxImportSource":"myjsx","allowJs":true},
+                "include":["next-env.d.ts","**/*.ts","**/*.tsx"],
+                "exclude":["node_modules"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("app").join("legacy.js"),
+            "export const Legacy = () => <span />;\n",
+        )
+        .unwrap();
+        let entry = root.join("app").join("page.tsx");
+        fs::write(
+            &entry,
+            "import { Legacy } from './legacy.js';\nconsole.log(<div />, Legacy());\n",
+        )
+        .unwrap();
+
+        let output = root.join("bundle.js");
+        // Next's rule: `.js` may contain JSX (`crate::parser::JsxExtensions::NextJs`).
+        let config = BuildConfig {
+            jsx_extensions: crate::parser::JsxExtensions::NextJs,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        assert_eq!(run_node(&output), "myjsx:div myjsx:span\n");
+    }
+
+    /// A `jsx` value diffpack cannot honor names the tsconfig and the value, and
+    /// stops the build — a silently mislowered module would be a bundle whose
+    /// runtime import points at the wrong package.
+    #[test]
+    fn an_unsupported_tsconfig_jsx_value_is_a_named_hard_error() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"jsx":"react-native-web"},"include":["src"]}"#,
+        )
+        .unwrap();
+        let entry = root.join("src").join("entry.tsx");
+        fs::write(&entry, "export const view = <div />;\n").unwrap();
+
+        let Err(error) = Bundler::discover_direct(&entry) else {
+            panic!("an unsupported tsconfig `jsx` value must stop the build");
+        };
+        assert!(
+            error.contains("tsconfig.json")
+                && error.contains("react-native-web")
+                && error.contains("entry.tsx"),
+            "the error must name the tsconfig, the value and the file: {error}"
+        );
+    }
+
     #[test]
     fn a_minified_chunk_runs_identically_to_its_readable_form_and_is_smaller() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8237,7 +10343,7 @@ mod tests {
     /// and no `node:module` import a browser could not resolve.
     #[test]
     fn emit_public_entry_loads_as_a_browser_es_module_under_node() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8300,7 +10406,7 @@ mod tests {
             "import(process.argv[2]).then(() => new Promise((done) => setTimeout(done, 0))).then(() => { if (globalThis.__diffpack_client_ran !== true) { console.error('entry top-level did not run'); process.exit(3); } if (globalThis.__diffpack_lazy !== 'lazy-value') { console.error('SPLIT_CHUNK_VALUE:' + String(globalThis.__diffpack_lazy)); process.exit(5); } console.log('LOADED'); }).catch((e) => { console.error('LOAD_ERROR:' + e.message); process.exit(4); });\n",
         )
         .unwrap();
-        let output = Command::new("node")
+        let output = node_command()
             .arg(&harness)
             .arg(&client)
             .output()
@@ -8318,7 +10424,7 @@ mod tests {
     }
 
     fn run_node(path: &Path) -> String {
-        let output = Command::new("node").arg(path).output().unwrap();
+        let output = node_command().arg(path).output().unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -8330,7 +10436,7 @@ mod tests {
     /// Syntax-checks a file as JavaScript under the Node ESM goal. `node --check`
     /// is a build oracle only, never in the build path.
     fn node_check(path: &Path) {
-        let output = Command::new("node")
+        let output = node_command()
             .arg("--check")
             .arg(path)
             .output()
@@ -8411,7 +10517,7 @@ mod tests {
     /// representable and must actually run.
     #[test]
     fn top_level_await_is_a_hard_error_in_cjs_and_runs_in_flat_esm() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8460,7 +10566,7 @@ mod tests {
     /// emitted chunk (the standard bundler semantic).
     #[test]
     fn import_meta_is_a_hard_error_in_cjs_and_survives_in_esm() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8505,7 +10611,7 @@ mod tests {
     /// made output 2.2x larger than esbuild's.
     #[test]
     fn shaking_drops_helpers_of_dead_exports_transitively() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8548,7 +10654,7 @@ mod tests {
     /// limit disabled (generic bundling) — it stays a hashed public file.
     #[test]
     fn small_assets_inline_as_data_uris_only_in_vite_mode() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8595,7 +10701,7 @@ mod tests {
     /// live on wall-go's minimax AI workers).
     #[test]
     fn module_workers_are_bundled_and_their_urls_substituted() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8647,7 +10753,7 @@ mod tests {
     /// conformance suite's `order-side-effect-imports` finding).
     #[test]
     fn side_effect_imports_execute_in_import_order_not_id_order() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8712,7 +10818,7 @@ mod tests {
     /// static value and the dynamically-loaded chunk's value reach stdout.
     #[test]
     fn emit_server_mjs_executes_the_entry_and_dynamic_chunk_under_node() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8792,7 +10898,7 @@ mod tests {
     #[test]
     fn emitted_index_mjs_boots_and_serves_ssr_and_static_under_node() {
         use std::process::Stdio;
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -8836,7 +10942,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let mut child = Command::new("node")
+        let mut child = node_command()
             .arg(server_dir.join("index.mjs"))
             .env("PORT", port.to_string())
             .env("HOST", "127.0.0.1")
@@ -8903,6 +11009,8 @@ mod tests {
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
             css_preprocess: CssPreprocess::default(),
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx: crate::transform::JsxConfig::default(),
         };
         (directory, entry, config)
     }
@@ -8977,6 +11085,8 @@ mod tests {
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
             css_preprocess: CssPreprocess::default(),
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx: crate::transform::JsxConfig::default(),
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -9063,6 +11173,8 @@ mod tests {
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
             css_preprocess: CssPreprocess::default(),
+            jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
+            jsx: crate::transform::JsxConfig::default(),
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
@@ -9294,7 +11406,7 @@ mod tests {
 
     #[test]
     fn import_meta_glob_lazy_matches_load_from_their_own_chunks_in_sorted_key_order() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -9324,7 +11436,7 @@ mod tests {
         let chunks = emitted_chunk_names(&directory.path().join("dist"));
         assert_eq!(chunks.len(), 2, "one chunk per lazy match: {chunks:?}");
 
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             executed.status.success(),
             "{}",
@@ -9339,7 +11451,7 @@ mod tests {
 
     #[test]
     fn import_meta_glob_eager_with_default_import_binds_values_statically() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -9366,7 +11478,7 @@ mod tests {
         let chunks = emitted_chunk_names(&directory.path().join("dist"));
         assert!(chunks.is_empty(), "eager glob must not split chunks: {chunks:?}");
 
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             executed.status.success(),
             "{}",
@@ -9377,7 +11489,7 @@ mod tests {
 
     #[test]
     fn import_meta_glob_raw_query_routes_matches_through_the_raw_loader() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -9399,7 +11511,7 @@ mod tests {
         let reachable = bundler.reachable_modules_direct();
         bundler.emit(&reachable, &output).unwrap();
 
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             executed.status.success(),
             "{}",
@@ -9413,7 +11525,7 @@ mod tests {
 
     #[test]
     fn import_meta_glob_pattern_array_unions_and_negative_pattern_excludes() {
-        if Command::new("node").arg("--version").output().is_err() {
+        if node_command().arg("--version").output().is_err() {
             return;
         }
         let directory = tempdir().unwrap();
@@ -9437,7 +11549,7 @@ mod tests {
         let reachable = bundler.reachable_modules_direct();
         bundler.emit(&reachable, &output).unwrap();
 
-        let executed = Command::new("node").arg(&output).output().unwrap();
+        let executed = node_command().arg(&output).output().unwrap();
         assert!(
             executed.status.success(),
             "{}",
@@ -9520,5 +11632,282 @@ mod tests {
             url.assets[0].image_variants.is_none(),
             "Url mode stays bare-URL (Vite parity): no variants"
         );
+    }
+
+    // --- diagnostic fatality ------------------------------------------------
+    //
+    // The predicate that decides whether a build fails. It is structural (the
+    // diagnostic's kind), not a substring match, so a new diagnostic kind has to
+    // state its own fatality rather than inherit someone else's.
+
+    #[test]
+    fn an_unresolved_import_is_a_fatal_diagnostic() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { helper } from './does-not-exist.js';\nexport const value = helper;\n",
+        )
+        .unwrap();
+
+        let (_, update) = Bundler::discover_direct(&directory.path().join("entry.js")).unwrap();
+        assert_eq!(update.diagnostics.len(), 1, "{:?}", update.diagnostics);
+        let diagnostic = &update.diagnostics[0];
+        assert!(matches!(
+            &diagnostic.kind,
+            DiagnosticKind::UnresolvedImport { specifier, .. }
+                if specifier == "./does-not-exist.js"
+        ));
+        assert!(diagnostic.is_fatal());
+        // The message must be actionable: it names the specifier, the importing
+        // file, and (for a relative path) that no file matched.
+        assert!(diagnostic.message.contains("./does-not-exist.js"));
+        assert!(diagnostic.message.contains("entry.js"));
+        assert!(diagnostic.message.contains("no file matched"));
+
+        let error = partition_diagnostics(&update.diagnostics, "test build").unwrap_err();
+        assert!(error.contains("test build"), "{error}");
+        assert!(error.contains("./does-not-exist.js"), "{error}");
+    }
+
+    #[test]
+    fn an_unresolved_bare_package_suggests_installing_it() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import x from '@scope/missing-pkg/sub';\nexport const value = x;\n",
+        )
+        .unwrap();
+
+        let (_, update) = Bundler::discover_direct(&directory.path().join("entry.js")).unwrap();
+        assert_eq!(update.diagnostics.len(), 1, "{:?}", update.diagnostics);
+        assert!(
+            update.diagnostics[0]
+                .message
+                .contains("npm install @scope/missing-pkg"),
+            "{}",
+            update.diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn a_node_builtin_is_an_external_not_a_diagnostic() {
+        // Locks in that making unresolved imports fatal can never start failing
+        // builds over Node built-ins: they short-circuit before resolution and are
+        // never diagnostics at all.
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { readFileSync } from 'node:fs';\nimport { join } from 'path';\n\
+             export const read = (p) => readFileSync(join(p, 'x'));\n",
+        )
+        .unwrap();
+
+        let config = BuildConfig {
+            target: Target::Server,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&directory.path().join("entry.js"), &config)
+                .unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        assert!(partition_diagnostics(&update.diagnostics, "test build").is_ok());
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 1);
+    }
+
+    #[test]
+    fn an_unsupported_side_effects_glob_is_a_warning_and_the_build_succeeds() {
+        // `"sideEffects": ["*.{css,scss}"]` is a common package.json idiom this
+        // matcher cannot evaluate. The module is KEPT, so the bundle is correct —
+        // only larger. Failing the build on it would reject apps that bundle fine.
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("node_modules/braced-pkg");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"braced-pkg","type":"module","exports":"./index.js","sideEffects":["*.{css,scss}"]}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "export const value = 'ok';").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { value } from 'braced-pkg';\nconsole.log(value);\n",
+        )
+        .unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&directory.path().join("entry.js")).unwrap();
+        let side_effects = update
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == DiagnosticKind::SideEffectsGlob)
+            .collect::<Vec<_>>();
+        assert_eq!(side_effects.len(), 1, "{:?}", update.diagnostics);
+        assert!(!side_effects[0].is_fatal());
+
+        let warnings = partition_diagnostics(&update.diagnostics, "test build")
+            .expect("an unsupported sideEffects glob must not fail the build");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("sideEffects"), "{}", warnings[0]);
+        // And the build really does complete.
+        let output = directory.path().join("dist/bundle.js");
+        bundler
+            .emit(&bundler.reachable_modules_direct(), &output)
+            .unwrap();
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn partition_diagnostics_reports_every_fatal_and_keeps_warnings_separate() {
+        let diagnostics = vec![
+            Diagnostic {
+                kind: DiagnosticKind::UnresolvedImport {
+                    specifier: "./a".into(),
+                    importer: PathBuf::from("/app/one.js"),
+                },
+                message: "cannot resolve \"./a\"".into(),
+            },
+            Diagnostic {
+                kind: DiagnosticKind::SideEffectsGlob,
+                message: "unsupported `sideEffects` glob".into(),
+            },
+            Diagnostic {
+                kind: DiagnosticKind::Source { fatal: false },
+                message: "a benign oxc warning".into(),
+            },
+            Diagnostic {
+                kind: DiagnosticKind::Source { fatal: true },
+                message: "a real parse error".into(),
+            },
+        ];
+
+        let error = partition_diagnostics(&diagnostics, "client build").unwrap_err();
+        assert!(error.contains("2 fatal build diagnostic(s)"), "{error}");
+        assert!(error.contains("cannot resolve \"./a\""), "{error}");
+        assert!(error.contains("a real parse error"), "{error}");
+        assert!(!error.contains("a benign oxc warning"), "{error}");
+
+        let warnings = partition_diagnostics(&diagnostics[1..3], "client build").unwrap();
+        assert_eq!(
+            warnings,
+            vec![
+                "unsupported `sideEffects` glob".to_string(),
+                "a benign oxc warning".to_string()
+            ]
+        );
+    }
+
+    /// FINDINGS #19. A legacy v3 app's design tokens are `theme.extend` ON TOP OF the
+    /// v3 DEFAULT theme — a different palette, radius scale and type scale from v4's.
+    /// The evaluator used to emit only the config's OWN keys, which diffpack then
+    /// merged into the vendored v4 defaults, so every unmentioned token came out v4:
+    /// `slate-400` as `oklch(...)` rather than `#94a3b8`, `rounded-full` as
+    /// `calc(infinity * 1px)` rather than `9999px`. It now resolves the config through
+    /// the app's own `tailwindcss/resolveConfig`.
+    ///
+    /// Runs against the pinned `next-blog-starter` e2e app (a real tailwindcss@3
+    /// install); soft-skips when the corpus has not been fetched.
+    #[test]
+    fn v3_config_evaluator_resolves_the_full_v3_default_theme() {
+        let app = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("integration/e2e/apps/next-blog-starter");
+        let config = app.join("tailwind.config.ts");
+        if !config.is_file() || !app.join("node_modules/tailwindcss").is_dir() {
+            return;
+        }
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let loader = std::env::temp_dir().join("diffpack-tailwind-config-eval-test.mjs");
+        fs::write(&loader, include_str!("../scripts/tailwind-config-eval.mjs")).unwrap();
+        let output = node_command()
+            .arg(&loader)
+            .arg(&config)
+            .current_dir(&app)
+            .output()
+            .unwrap();
+        let theme = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        // v3 DEFAULT tokens the config never mentions, in v3's own sRGB form.
+        assert!(theme.contains("--color-slate-400: #94a3b8;"), "{theme}");
+        assert!(theme.contains("--radius-full: 9999px;"), "{theme}");
+        // The v3 preflight's border reset colour.
+        assert!(theme.contains("--default-border-color: #e5e7eb;"), "{theme}");
+        // A `[size, { lineHeight }]` pair splits into the value + modifier tokens
+        // instead of stringifying the modifier object into the font-size.
+        assert!(theme.contains("--text-4xl: 2.25rem;"), "{theme}");
+        assert!(theme.contains("--text-4xl--line-height: 2.5rem;"), "{theme}");
+        assert!(!theme.contains("[object Object]"), "{theme}");
+        // The app's OWN tokens still win over the resolved defaults.
+        assert!(theme.contains("--color-cyan: #79FFE1;"), "{theme}");
+        assert!(theme.contains("--shadow-md: 0 8px 30px rgba(0, 0, 0, 0.12);"), "{theme}");
+        // v3 `columns.12` is a column COUNT, not a v4 `--container-12` width: emitting
+        // it made `w-12` resolve against the container scale (100px, not 3rem).
+        assert!(!theme.contains("--container-12:"), "{theme}");
+        assert!(theme.contains("--spacing-12: 3rem;"), "{theme}");
+
+        // `darkMode: "class"` carries across as the `dark` variant it defines. Without
+        // it every `dark:` utility compiled into `@media (prefers-color-scheme: dark)`,
+        // so the app painted its dark palette on a browser that merely preferred dark.
+        assert!(theme.contains("@custom-variant dark (&:is(.dark *));"), "{theme}");
+
+        // The resolved v3 fontSize scale REPLACES the vendored v4 one. Merging left
+        // v4's `--text-5xl--line-height: 1` in place, but this config sets
+        // `fontSize: { '5xl': '2.5rem' }` — a bare string, i.e. no line-height at all.
+        assert!(theme.contains("--text-*: initial;"), "{theme}");
+        assert!(theme.contains("--text-5xl: 2.5rem;"), "{theme}");
+        assert!(!theme.contains("--text-5xl--line-height"), "{theme}");
+        // The reset comes first, so every size token after it survives.
+        assert!(
+            theme.find("--text-*: initial;").unwrap() < theme.find("--text-4xl: 2.25rem;").unwrap(),
+            "{theme}"
+        );
+    }
+
+    /// `darkMode` strategies the evaluator maps, and the hard error for one it does
+    /// not: an untranslated strategy would silently fall back to the media query.
+    #[test]
+    fn v3_config_evaluator_maps_every_dark_mode_strategy() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let loader = std::env::temp_dir().join("diffpack-tailwind-darkmode-eval-test.mjs");
+        fs::write(&loader, include_str!("../scripts/tailwind-config-eval.mjs")).unwrap();
+        let dir = std::env::temp_dir().join("diffpack-tailwind-darkmode-configs");
+        fs::create_dir_all(&dir).unwrap();
+        let run = |name: &str, dark_mode: &str| {
+            let config = dir.join(format!("{name}.cjs"));
+            fs::write(&config, format!("module.exports = {{ {dark_mode} theme: {{}} }};\n")).unwrap();
+            let out = node_command().arg(&loader).arg(&config).output().unwrap();
+            (
+                String::from_utf8_lossy(&out.stdout).to_string(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+                out.status.success(),
+            )
+        };
+
+        let (media, _, ok) = run("media", "darkMode: 'media',");
+        assert!(ok);
+        assert!(!media.contains("@custom-variant"), "{media}");
+        let (absent, _, ok) = run("absent", "");
+        assert!(ok);
+        assert!(!absent.contains("@custom-variant"), "{absent}");
+
+        // v3's `class` strategy emits `<selector> &`; `selector` emits the
+        // `:where(sel, sel *)` form that also matches the element itself.
+        let (class, _, ok) = run("class", "darkMode: 'class',");
+        assert!(ok);
+        assert!(class.contains("@custom-variant dark (&:is(.dark *));"), "{class}");
+        let (named, _, ok) = run("named", "darkMode: ['class', '[data-mode=\"dark\"]'],");
+        assert!(ok);
+        assert!(named.contains("@custom-variant dark (&:is([data-mode=\"dark\"] *));"), "{named}");
+        let (selector, _, ok) = run("selector", "darkMode: 'selector',");
+        assert!(ok);
+        assert!(selector.contains("@custom-variant dark (&:where(.dark, .dark *));"), "{selector}");
+
+        // An unmapped strategy is a hard, named failure — never a silent fallback.
+        let (_, stderr, ok) = run("variant", "darkMode: ['variant', '&:not(.light *)'],");
+        assert!(!ok, "an unmapped darkMode strategy must fail the evaluation");
+        assert!(stderr.contains("darkMode"), "{stderr}");
     }
 }

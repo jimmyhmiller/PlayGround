@@ -39,6 +39,25 @@ async function loadConfig() {
 }
 const loaded = await loadConfig();
 const config = (loaded && loaded.default) || loaded || {};
+
+// A v3 app's design tokens are NOT just what its config writes down: `theme.extend`
+// extends the v3 DEFAULT theme, whose palette, radii, shadows and type scale differ
+// from v4's (v3 `slate-400` is `#94a3b8`, v4's is `oklch(0.704 0.04 256.788)`;
+// v3 `rounded-full` is `9999px`, v4's is `calc(infinity * 1px)`). Emitting only the
+// config's own keys on top of the vendored v4 defaults therefore shipped v4 colours
+// for a v3 app. Resolving through the app's OWN installed `tailwindcss/resolveConfig`
+// yields the exact theme its `tailwindcss` build used, defaults included.
+let resolvedTheme = null;
+try {
+  const resolveConfig = appRequire('tailwindcss/resolveConfig');
+  const resolve = resolveConfig.default || resolveConfig;
+  resolvedTheme = resolve({ ...config, content: [] }).theme;
+} catch (error) {
+  process.stderr.write(
+    `could not resolve the config through the app's own tailwindcss/resolveConfig (${error.message}); ` +
+      `only the config's OWN theme keys are applied, on top of diffpack's vendored Tailwind defaults\n`,
+  );
+}
 const theme = config.theme || {};
 
 // v3 plugins (@tailwindcss/forms, typography's `prose`, custom plugin utilities /
@@ -73,20 +92,48 @@ const NS = {
   columns: 'container',
 };
 
+// v3 categories whose values are `[value, { …modifiers }]` pairs rather than plain
+// scalars or font stacks. The modifiers become v4's `--<var>--<modifier>` tokens
+// (`fontSize: ['2.25rem', { lineHeight: '2.5rem' }]` -> `--text-4xl: 2.25rem;
+// --text-4xl--line-height: 2.5rem`), which is how a v3 `text-4xl` carries its
+// line-height. Dropping the modifier object (the old `val.join(', ')`) produced
+// `font-size: 2.25rem, [object Object]`.
+const PAIRED = new Set(['fontSize', 'fontFamily']);
+
 // Merge base `theme.<cat>` (overrides) and `theme.extend.<cat>` (additions) — the
 // extend wins on key collisions, matching Tailwind's resolution for our purposes.
-const cats = {};
+// Used when `resolveConfig` was unavailable, and (always) to decide which unmapped
+// categories are worth reporting: with a resolved config every v3 default category
+// is present, and naming all ~60 of them would bury the ones the app actually set.
+const ownCats = {};
 for (const [cat, val] of Object.entries(theme)) {
   if (cat === 'extend') continue;
-  cats[cat] = { ...(cats[cat] || {}), ...(isPlainObject(val) ? val : { DEFAULT: val }) };
+  ownCats[cat] = { ...(ownCats[cat] || {}), ...(isPlainObject(val) ? val : { DEFAULT: val }) };
 }
 for (const [cat, val] of Object.entries(theme.extend || {})) {
-  cats[cat] = { ...(cats[cat] || {}), ...(isPlainObject(val) ? val : { DEFAULT: val }) };
+  ownCats[cat] = { ...(ownCats[cat] || {}), ...(isPlainObject(val) ? val : { DEFAULT: val }) };
 }
+const cats = resolvedTheme
+  ? Object.fromEntries(
+      Object.entries(resolvedTheme).map(([cat, val]) => [
+        cat,
+        isPlainObject(val) ? val : { DEFAULT: val },
+      ]),
+    )
+  : ownCats;
 
 const themeLines = [];
 let keyframesCss = '';
 const unmapped = [];
+
+// A resolved v3 `fontSize` scale is COMPLETE, so it must REPLACE diffpack's
+// vendored v4 `--text-*` scale rather than merge into it. Merging left v4's
+// per-size line-height tokens in place, and a v3 config that overrides a size with
+// a bare string (`fontSize: { '5xl': '2.5rem' }`) deliberately gives it NO
+// line-height — v3 emits `.text-5xl{font-size:2.5rem}` while the merged theme
+// still carried v4's `--text-5xl--line-height: 1`. `--text-*: initial;` is
+// Tailwind's own "clear this namespace" spelling.
+if (isPlainObject(resolvedTheme?.fontSize)) themeLines.push('  --text-*: initial;');
 
 for (const [cat, obj] of Object.entries(cats)) {
   if (cat === 'keyframes') {
@@ -103,17 +150,57 @@ for (const [cat, obj] of Object.entries(cats)) {
     continue;
   }
   const ns = NS[cat];
-  if (!ns) { unmapped.push(cat); continue; }
+  if (!ns) {
+    if (Object.prototype.hasOwnProperty.call(ownCats, cat)) unmapped.push(cat);
+    continue;
+  }
+  // v3 `columns` and v4 `--container-*` collide on numeric keys and mean different
+  // things: v3 `columns.12` is the column COUNT `12`, v4 `--container-12` is a width
+  // in the container scale that `w-12`/`max-w-12` read. Emitting the numeric column
+  // counts made `w-12` resolve to `var(--container-12)` (garbage) instead of the
+  // spacing scale, sizing a 48px avatar at 100px. Only the named sizes (`3xs`…`7xl`,
+  // which ARE widths in both) map across.
+  const numericColumnKey = cat === 'columns' ? (path) => /^\d+$/.test(path[path.length - 1]) : null;
   flatten(obj, [], (path, value) => {
+    if (numericColumnKey?.(path)) return;
     // `DEFAULT` collapses to the bare namespace (`--radius: …`); nested keys join
     // with `-` (`colors.brand.500` -> `--color-brand-500`).
     const suffix = path.filter((p) => p !== 'DEFAULT').join('-');
     const varName = suffix ? `--${ns}-${suffix}` : `--${ns}`;
     themeLines.push(`  ${varName}: ${value};`);
-  });
+  }, cat);
 }
 
+// The v3 preflight resets every border to `theme('borderColor.DEFAULT')` — gray-200,
+// not v4's `currentColor`. The compiler substitutes this token into the v3 base layer.
+if (resolvedTheme?.borderColor?.DEFAULT && typeof resolvedTheme.borderColor.DEFAULT === 'string') {
+  themeLines.push(`  --default-border-color: ${resolvedTheme.borderColor.DEFAULT};`);
+}
+
+// `darkMode` decides what `dark:` MEANS, and dropping it silently compiled every
+// `dark:` utility into `@media (prefers-color-scheme: dark)` — so a class-toggled
+// app rendered its dark palette purely because the browser preferred dark. It
+// carries across as a `@custom-variant dark (…)`, which is exactly v4's spelling
+// of the same option; the compiler already honours that over the media default.
+//   'media' (or absent) -> the media query, i.e. nothing to emit
+//   'class'    / ['class', sel]    -> v3 emits `<sel> &`      => `&:is(<sel> *)`
+//   'selector' / ['selector', sel] -> v3 emits `:where()` form => `&:where(<sel>, <sel> *)`
+// `['variant', …]` is an arbitrary user-written variant; it is NOT translated.
+const darkVariant = (() => {
+  const dm = config.darkMode;
+  if (dm == null || dm === 'media') return null;
+  const [strategy, selector] = Array.isArray(dm) ? [dm[0], dm[1]] : [dm, undefined];
+  const sel = selector || '.dark';
+  if (strategy === 'class') return `&:is(${sel} *)`;
+  if (strategy === 'selector') return `&:where(${sel}, ${sel} *)`;
+  throw new Error(
+    `tailwind config darkMode: unsupported strategy ${JSON.stringify(dm)} ` +
+      `(diffpack's native compiler maps 'media', 'class' and 'selector')`,
+  );
+})();
+
 let out = '';
+if (darkVariant) out += `@custom-variant dark (${darkVariant});\n`;
 if (themeLines.length) out += `@theme {\n${themeLines.join('\n')}\n}\n`;
 out += keyframesCss;
 process.stdout.write(out);
@@ -129,11 +216,17 @@ function kebab(s) {
 }
 // Walk a theme category object to its leaves. An array leaf (font stacks) joins
 // with `, `; a function value (rare, references other tokens) is skipped.
-function flatten(obj, path, emit) {
+function flatten(obj, path, emit, cat) {
   for (const [key, val] of Object.entries(obj)) {
     const next = [...path, key];
-    if (Array.isArray(val)) emit(next, val.join(', '));
-    else if (isPlainObject(val)) flatten(val, next, emit);
+    if (Array.isArray(val)) {
+      const paired = PAIRED.has(cat) && isPlainObject(val[val.length - 1]);
+      const modifiers = paired ? val[val.length - 1] : null;
+      emit(next, (paired ? val.slice(0, -1) : val).join(', '));
+      for (const [name, value] of Object.entries(modifiers || {})) {
+        emit([...next, `-${kebab(name)}`], value);
+      }
+    } else if (isPlainObject(val)) flatten(val, next, emit, cat);
     else if (typeof val !== 'function') emit(next, String(val));
   }
 }

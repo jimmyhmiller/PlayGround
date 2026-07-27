@@ -135,7 +135,17 @@ fn compiled_app_css_matches_the_reference_declarations_per_class() {
     let reference_css_path = fixture.join(".output/public/assets/app-CgRaPnL3.css");
     if !app_css_path.exists() || !reference_css_path.exists() {
         // The reference Vite build must be present (`npm ci && npm run build`).
-        eprintln!("skipping: reference build artifacts not present");
+        // Loud, and a hard failure under `DIFFPACK_REQUIRE_UPSTREAM=1` (what CI and
+        // check.sh set) — the same convention as tests/tailwind_upstream_drift.rs, so an
+        // absent reference can never read as a green oracle.
+        let message = "SKIP tailwind_oracle::compiled_app_css_matches_the_reference_declarations_per_class \
+             — reference build artifacts not present; run 'npm ci && npm run build' in \
+             integration/tanstack-start-reference";
+        assert!(
+            std::env::var_os("DIFFPACK_REQUIRE_UPSTREAM").is_none_or(|value| value != "1"),
+            "{message}"
+        );
+        eprintln!("{message}");
         return;
     }
 

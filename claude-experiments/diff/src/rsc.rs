@@ -26,9 +26,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Declaration, Statement};
+use oxc_ast::ast::{Declaration, Expression, ImportDeclarationSpecifier, Statement};
+use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, Span, SourceType};
+use oxc_span::{GetSpan, Span};
 
 use crate::server_fn::apply_edits;
 
@@ -76,7 +77,7 @@ pub fn detect_directive(path: &Path, source: &str) -> Option<RscDirective> {
         return None;
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     for directive in &parsed.program.directives {
         // `directive.directive` is the COOKED value (escapes resolved), so a
@@ -119,13 +120,54 @@ pub fn module_reference_id(path: &Path) -> String {
 ///
 /// The proxy is imported from `react-server-dom-webpack/server`; the app supplies
 /// it (it is a peer of using RSC at all), exactly as the reference plugin assumes.
-pub fn transform_use_client_server(path: &Path, source: &str) -> Option<String> {
+///
+/// The module's STYLESHEET imports are carried over as side-effect imports. A client
+/// component's CSS belongs to the document, not to its client code (Next collects it
+/// into the route's stylesheet so the first paint is already styled), and the
+/// react-server graph is where the served stylesheet is compiled from — dropping
+/// them with the body would silently delete the app's CSS from `server.css`, and with
+/// it from the `/rsc.css` the document head links.
+/// A `"use client"` module whose export surface cannot be enumerated is a HARD ERROR
+/// (`Err`), never a proxy with no exports: such a module type-checks and bundles, then
+/// throws `does not provide an export named "default"` on the first request that renders
+/// it — a failure that names neither the file nor the reason.
+pub fn transform_use_client_server(path: &Path, source: &str) -> Result<Option<String>, String> {
     if detect_directive(path, source) != Some(RscDirective::Client) {
-        return None;
+        return Ok(None);
     }
     let exports = module_exports(path, source);
+    if exports.is_empty() {
+        return Err(format!(
+            "{}: a \"use client\" module with no exports diffpack can enumerate.\n  \
+             The react-server build replaces this module with client references, one per \
+             export, so a module with none is a client boundary nothing can import.\n  \
+             Add an `export` (or, if this is CommonJS, assign to `exports.<name>` / \
+             `module.exports = {{ … }}` so the export surface is statically visible).",
+            path.display()
+        ));
+    }
+    let unrepresentable: Vec<&String> = exports
+        .iter()
+        .filter(|export| *export != "default" && !is_reexportable_identifier(export))
+        .collect();
+    if !unrepresentable.is_empty() {
+        return Err(format!(
+            "{}: \"use client\" module exports a name that is not a valid ESM binding: {}.\n  \
+             The react-server build re-exports each export as a client reference, which \
+             requires an identifier name.",
+            path.display(),
+            unrepresentable
+                .iter()
+                .map(|name| format!("{name:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     let id = module_reference_id(path);
     let mut out = String::new();
+    for specifier in stylesheet_imports(path, source) {
+        out.push_str(&format!("import {};\n", json_string(&specifier)));
+    }
     out.push_str("import { createClientModuleProxy } from \"react-server-dom-webpack/server\";\n");
     out.push_str(&format!(
         "const __diffpack_client = createClientModuleProxy({});\n",
@@ -141,7 +183,7 @@ pub fn transform_use_client_server(path: &Path, source: &str) -> Option<String> 
             ));
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The local binding a `"use cache"` module's default export is renamed to before it
@@ -178,7 +220,7 @@ pub fn transform_use_cache_server(path: &Path, source: &str) -> Result<Option<St
         return Ok(None);
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
     let module_id = module_reference_id(path);
@@ -441,7 +483,7 @@ pub fn transform_use_server_server(path: &Path, source: &str) -> Result<Option<S
         return Ok(None);
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let program = &parsed.program;
     let (named, default_value) = server_exports(path, program)?;
@@ -535,6 +577,82 @@ pub struct ActionEntry {
     pub id: String,
 }
 
+/// Walks the project at `root` and calls `visit` once per readable module file with
+/// its CANONICAL path and its source text, skipping installed dependencies, build
+/// output, and VCS metadata.
+///
+/// This is the ONE project walk every directive/convention scan shares: the
+/// `"use server"` action scan below, and the Next adapter's `"use client"` island /
+/// `next/font` / stylesheet-import scan. They must see the same file set — a
+/// `"use client"` module one scan finds and the other misses is exactly the
+/// "Could not find the module ... in the React Client Manifest" class of bug, since
+/// the react-server graph resolves real imports while island discovery is a
+/// filesystem walk.
+///
+/// Skipped at ANY depth: `node_modules`, `.git`, and the generated/derived trees
+/// (`dist`, `.output`, `.next`, `.diffpack-output`, `.diffpack-next`) — a
+/// `"use client"` file inside one of those is a copy of a source file, and pinning
+/// the copy registers a second module id for the same component.
+/// Skipped only at the PROJECT ROOT ([`PROJECT_ROOT_ONLY_SKIPPED_DIRS`]): the
+/// exported/reported trees whose names are ordinary words a source directory may
+/// legitimately use further down (`src/build/`, `app/out/`).
+pub fn walk_project_modules<F>(root: &Path, visit: &mut F) -> Result<(), String>
+where
+    F: FnMut(&Path, &str) -> Result<(), String>,
+{
+    walk_project_modules_inner(root, true, visit)
+}
+
+/// Build/report output trees skipped ONLY when they sit directly in the project
+/// root. `next build && next export` writes `out/`, other toolchains write `build/`,
+/// `vercel build` writes `.vercel/`, coverage and Storybook write `coverage/` and
+/// `storybook-static/`. Each holds a COPY of the app's modules, so a stale one would
+/// otherwise contribute duplicate `"use client"` islands (a second manifest id for a
+/// component that already has one). They are not skipped deeper down because
+/// `src/build/` or `lib/out/` is plausibly real source.
+const PROJECT_ROOT_ONLY_SKIPPED_DIRS: [&str; 5] =
+    ["out", "build", ".vercel", "coverage", "storybook-static"];
+
+fn walk_project_modules_inner<F>(root: &Path, at_project_root: bool, visit: &mut F) -> Result<(), String>
+where
+    F: FnMut(&Path, &str) -> Result<(), String>,
+{
+    let read = match std::fs::read_dir(root) {
+        Ok(read) => read,
+        Err(_) => return Ok(()),
+    };
+    for entry in read {
+        let entry = entry.map_err(|error| format!("cannot read {}: {error}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_str();
+            if matches!(
+                name,
+                Some("node_modules" | ".diffpack-output" | ".diffpack-next" | ".git" | "dist" | ".output" | ".next")
+            ) {
+                continue;
+            }
+            if at_project_root
+                && name.is_some_and(|name| PROJECT_ROOT_ONLY_SKIPPED_DIRS.contains(&name))
+            {
+                continue;
+            }
+            walk_project_modules_inner(&path, false, visit)?;
+        } else if is_scannable_module(&path) {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            visit(&canonical, &source)?;
+        }
+    }
+    Ok(())
+}
+
 /// Walks `root` (skipping `node_modules`, build output, and VCS dirs) for
 /// `"use server"` modules, returning every exported action sorted by id. Only files
 /// whose text contains `"use server"` AND whose directive prologue is `"use server"`
@@ -542,57 +660,29 @@ pub struct ActionEntry {
 /// generated action resolver map each id to a real module import.
 pub fn scan_project_server_actions(root: &Path) -> Result<Vec<ActionEntry>, String> {
     let mut entries = Vec::new();
-    scan_actions_directory(root, &mut entries)?;
+    walk_project_modules(root, &mut |path, source| {
+        if !source.contains("use server") {
+            return Ok(());
+        }
+        if detect_directive(path, source) != Some(RscDirective::Server) {
+            return Ok(());
+        }
+        for name in module_exports(path, source) {
+            let id = action_reference_id(path, &name);
+            entries.push(ActionEntry {
+                path: path.to_path_buf(),
+                name,
+                id,
+            });
+        }
+        Ok(())
+    })?;
     entries.sort_by(|left, right| left.id.cmp(&right.id));
     entries.dedup();
     Ok(entries)
 }
 
-fn scan_actions_directory(dir: &Path, entries: &mut Vec<ActionEntry>) -> Result<(), String> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(_) => return Ok(()),
-    };
-    for entry in read {
-        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
-            let name = entry.file_name();
-            if matches!(
-                name.to_str(),
-                Some("node_modules" | ".diffpack-output" | ".diffpack-next" | ".git" | "dist" | ".output" | ".next")
-            ) {
-                continue;
-            }
-            scan_actions_directory(&path, entries)?;
-        } else if is_action_module_file(&path) {
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !source.contains("use server") {
-                continue;
-            }
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            if detect_directive(&canonical, &source) != Some(RscDirective::Server) {
-                continue;
-            }
-            for name in module_exports(&canonical, &source) {
-                let id = action_reference_id(&canonical, &name);
-                entries.push(ActionEntry {
-                    path: canonical.clone(),
-                    name,
-                    id,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn is_action_module_file(path: &Path) -> bool {
+fn is_scannable_module(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
@@ -653,7 +743,7 @@ pub fn action_handler_module_source() -> &'static str {
 /// original module's exports one-for-one.
 fn module_exports(path: &Path, source: &str) -> Vec<String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let mut names = Vec::new();
     let mut push = |name: String| {
@@ -697,7 +787,326 @@ fn module_exports(path: &Path, source: &str) -> Vec<String> {
             push(specifier.exported.name().to_string());
         }
     }
+    // `push` borrows `names` mutably; the borrow ends with the last call above.
+    if names.is_empty() {
+        // No ESM export syntax at all: the module is (or was compiled to) CommonJS.
+        // Published `"use client"` components in node_modules are overwhelmingly CJS
+        // — `next/dist/client/script.js` is swc-compiled CJS — and a client proxy with
+        // ZERO exports is a module that throws "does not provide an export named
+        // default" the first time anything imports it. Recover the export surface
+        // from the CJS assignment forms instead.
+        let mut collector = CjsExportCollector { names: Vec::new() };
+        collector.visit_program(&parsed.program);
+        names = collector.names;
+    }
     names
+}
+
+/// Whether `name` can be written as a bare `export const <name>` / `export { <name> }`
+/// binding. A CJS module may export any string key (`exports["a-b"] = …`); such a name
+/// has no ESM re-export form here, so it is reported by [`cjs_export_names`]'s caller
+/// rather than silently emitted as invalid syntax.
+fn is_reexportable_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    if !chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+        return false;
+    }
+    // Reserved words cannot be a `const` binding name.
+    !matches!(
+        name,
+        "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+    )
+}
+
+/// Recovers the export names of a CommonJS module from its assignment forms. Covers
+/// every shape a compiler (swc, tsc, babel) emits for `export … ` in CJS output:
+///
+/// * `exports.NAME = …` / `module.exports.NAME = …`
+/// * `module.exports = { NAME: … }` (and swc's `0 && (module.exports = { … })` hint)
+/// * `Object.defineProperty(exports, "NAME", …)`
+/// * `_export(exports, { NAME: … })` — swc's helper — and `Object.assign(exports, {…})`
+///
+/// `__esModule` is a marker, never a real export, and is excluded.
+struct CjsExportCollector {
+    names: Vec<String>,
+}
+
+impl CjsExportCollector {
+    fn push(&mut self, name: &str) {
+        if name == "__esModule" || name.is_empty() {
+            return;
+        }
+        if !self.names.iter().any(|kept| kept == name) {
+            self.names.push(name.to_string());
+        }
+    }
+
+    /// The keys of an object literal, for the `module.exports = {…}` / `_export(exports, {…})`
+    /// forms. Spread elements carry no statically-known names and are skipped.
+    fn push_object_keys(&mut self, object: &oxc_ast::ast::ObjectExpression<'_>) {
+        for property in &object.properties {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) = property else {
+                continue;
+            };
+            if let Some(name) = prop.key.static_name() {
+                self.push(&name);
+            }
+        }
+    }
+}
+
+/// Whether `expression` is the CJS exports object: the `exports` identifier or the
+/// `module.exports` member expression.
+fn is_cjs_exports_object(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Identifier(ident) => ident.name == "exports",
+        Expression::StaticMemberExpression(member) => {
+            member.property.name == "exports"
+                && matches!(&member.object, Expression::Identifier(ident) if ident.name == "module")
+        }
+        _ => false,
+    }
+}
+
+impl<'a> Visit<'a> for CjsExportCollector {
+    fn visit_assignment_expression(&mut self, assign: &oxc_ast::ast::AssignmentExpression<'a>) {
+        match &assign.left {
+            // `exports.NAME = …` / `module.exports.NAME = …`, and the whole-object
+            // replacement `module.exports = { NAME: … }`.
+            oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+                if is_cjs_exports_object(&member.object) {
+                    self.push(member.property.name.as_str());
+                } else if member.property.name == "exports"
+                    && matches!(&member.object, Expression::Identifier(ident) if ident.name == "module")
+                    && let Expression::ObjectExpression(object) = &assign.right
+                {
+                    self.push_object_keys(object);
+                }
+            }
+            // `exports["NAME"] = …` (a literal key; a computed one is not statically known)
+            oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+                if is_cjs_exports_object(&member.object)
+                    && let Expression::StringLiteral(literal) = &member.expression
+                {
+                    self.push(literal.value.as_str());
+                }
+            }
+            // `exports = { NAME: … }`
+            oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(ident)
+                if ident.name == "exports" =>
+            {
+                if let Expression::ObjectExpression(object) = &assign.right {
+                    self.push_object_keys(object);
+                }
+            }
+            _ => {}
+        }
+        walk::walk_assignment_expression(self, assign);
+    }
+
+    fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        let args: Vec<&Expression<'a>> = call
+            .arguments
+            .iter()
+            .map(|argument| argument.as_expression())
+            .take_while(|argument| argument.is_some())
+            .flatten()
+            .collect();
+        if args.len() >= 2 && is_cjs_exports_object(args[0]) {
+            match args[1] {
+                // `Object.defineProperty(exports, "NAME", …)`
+                Expression::StringLiteral(literal) => self.push(literal.value.as_str()),
+                // `_export(exports, { NAME: … })` / `Object.assign(exports, { NAME: … })`
+                Expression::ObjectExpression(object) => self.push_object_keys(object),
+                _ => {}
+            }
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+/// One module specifier a source file names, with the fact that decides whether the
+/// build must resolve it: a `import type {...} from "./x"` (or `export type ... from`)
+/// is ERASED before the bundler ever sees it, so it may legitimately name a `.d.ts`
+/// that no resolver can find.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    /// The specifier exactly as written (`"./x.css"`, `"@/lib/store"`, `"zustand"`).
+    pub specifier: String,
+    /// Type-only (`import type` / `export type`): erased, never resolved.
+    pub type_only: bool,
+}
+
+/// EVERY module specifier `source` names, in source order and deduped: static
+/// `import`/`export … from`, dynamic `import(...)`, and `require(...)` with a string
+/// literal argument — anywhere in the module, not only at the top level.
+///
+/// This is the ONE specifier extraction the RSC-side scans share, so the stylesheet
+/// carry-over ([`stylesheet_imports`]) and the project import graph
+/// ([`crate::project_graph`]) cannot disagree about what a module depends on.
+/// Non-literal forms (`import(variable)`, `require(name)`) are not specifiers a
+/// bundler can follow and are not reported.
+pub fn module_import_specifiers(path: &Path, source: &str) -> Vec<ModuleImport> {
+    let allocator = Allocator::default();
+    let source_type = crate::parser::scan_source_type(path);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut collector = ImportCollector {
+        imports: Vec::new(),
+    };
+    collector.visit_program(&parsed.program);
+    collector.imports
+}
+
+struct ImportCollector {
+    imports: Vec<ModuleImport>,
+}
+
+impl ImportCollector {
+    fn push(&mut self, specifier: &str, type_only: bool) {
+        if let Some(existing) = self
+            .imports
+            .iter_mut()
+            .find(|kept| kept.specifier == specifier)
+        {
+            // A specifier named both ways is a real (value) dependency.
+            existing.type_only &= type_only;
+            return;
+        }
+        self.imports.push(ModuleImport {
+            specifier: specifier.to_string(),
+            type_only,
+        });
+    }
+}
+
+impl<'a> Visit<'a> for ImportCollector {
+    fn visit_import_declaration(&mut self, import: &oxc_ast::ast::ImportDeclaration<'a>) {
+        let type_only = import.import_kind.is_type()
+            || import.specifiers.as_ref().is_some_and(|specifiers| {
+                !specifiers.is_empty()
+                    && specifiers.iter().all(|specifier| match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                            named.import_kind.is_type()
+                        }
+                        _ => false,
+                    })
+            });
+        self.push(import.source.value.as_str(), type_only);
+        walk::walk_import_declaration(self, import);
+    }
+
+    fn visit_export_named_declaration(
+        &mut self,
+        export: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+    ) {
+        if let Some(source) = &export.source {
+            self.push(source.value.as_str(), export.export_kind.is_type());
+        }
+        walk::walk_export_named_declaration(self, export);
+    }
+
+    fn visit_export_all_declaration(&mut self, export: &oxc_ast::ast::ExportAllDeclaration<'a>) {
+        self.push(export.source.value.as_str(), export.export_kind.is_type());
+        walk::walk_export_all_declaration(self, export);
+    }
+
+    fn visit_import_expression(&mut self, import: &oxc_ast::ast::ImportExpression<'a>) {
+        if let Expression::StringLiteral(literal) = &import.source {
+            self.push(literal.value.as_str(), false);
+        }
+        walk::walk_import_expression(self, import);
+    }
+
+    fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        if let Expression::Identifier(callee) = &call.callee
+            && callee.name == "require"
+            && call.arguments.len() == 1
+            && let Some(Expression::StringLiteral(literal)) =
+                call.arguments[0].as_expression()
+        {
+            self.push(literal.value.as_str(), false);
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+/// The stylesheet extensions diffpack's loader compiles into the emitted CSS
+/// (`bundler::load_special_module`): plain CSS, Sass, Less and Stylus, in both their
+/// global and `*.module.*` forms.
+const STYLESHEET_EXTENSIONS: [&str; 6] = ["css", "scss", "sass", "less", "styl", "stylus"];
+
+/// Whether a specifier names a stylesheet the build compiles. The loader query and
+/// fragment (`./a.css?url`, `./a.css#x`) are not part of the extension.
+pub fn is_stylesheet_specifier(specifier: &str) -> bool {
+    let path = crate::resource_id::ResourceId::parse(specifier).path;
+    matches!(
+        Path::new(&path).extension().and_then(|value| value.to_str()),
+        Some(extension) if STYLESHEET_EXTENSIONS.contains(&extension)
+    )
+}
+
+/// The stylesheet specifiers `source` depends on, in source order and deduped. Read
+/// by [`transform_use_client_server`], which discards the module body but must keep
+/// its stylesheets in the react-server graph — that graph is what `server.css` (and
+/// so the served `/rsc.css`) is compiled from, so a stylesheet dropped here is a
+/// silently unstyled page.
+///
+/// Every form [`module_import_specifiers`] reports counts, including
+/// `require("./x.css")` and `import("./x.css")`: the module body they sat in is being
+/// deleted, so the only way the stylesheet survives at all is as a side-effect import
+/// of the proxy. A dynamic import therefore becomes eager here — the styles apply
+/// from first paint rather than on demand, which is the same direction Next takes
+/// when it hoists a client component's CSS into the route's stylesheet.
+fn stylesheet_imports(path: &Path, source: &str) -> Vec<String> {
+    module_import_specifiers(path, source)
+        .into_iter()
+        .filter(|import| !import.type_only && is_stylesheet_specifier(&import.specifier))
+        .map(|import| import.specifier)
+        .collect()
 }
 
 /// JSON-encode a string as a JS string literal for embedding in generated code.
@@ -916,6 +1325,7 @@ mod tests {
 
     fn client_server(source: &str) -> Option<String> {
         transform_use_client_server(Path::new("/app/src/Counter.tsx"), source)
+            .expect("not a hard error")
     }
 
     #[test]
@@ -949,6 +1359,184 @@ mod tests {
         // Non-existent path falls back to the given path verbatim (canonicalize fails).
         let id = module_reference_id(Path::new("/app/src/Widget.tsx"));
         assert_eq!(id, "/app/src/Widget.tsx");
+    }
+
+    #[test]
+    fn the_server_transform_keys_a_client_reference_by_module_reference_id() {
+        // The id is single-sourced; this pins that the react-server `$$id` prefix and
+        // the client-references-manifest key stay the SAME string, for every layout a
+        // real project uses (under `src/`, under `app/`, inside a dependency). A
+        // disagreement here is the "Could not find the module ... in the React Client
+        // Manifest" failure, and no filesystem-scan fix can paper over it.
+        for path in [
+            "/app/src/components/counter.tsx",
+            "/app/app/components/counter.tsx",
+            "/app/node_modules/jotai/esm/react.mjs",
+        ] {
+            let path = Path::new(path);
+            let source = "\"use client\";\nexport default function C() { return null; }\n";
+            let out = transform_use_client_server(path, source).unwrap().unwrap();
+            let id = module_reference_id(path);
+            assert!(
+                out.contains(&format!("createClientModuleProxy({})", json_string(&id))),
+                "{}: proxy id is not module_reference_id: {out}",
+                path.display()
+            );
+            // The manifest keys by the same call, so the two agree by construction.
+            let manifest = ClientReferencesManifest {
+                entries: BTreeMap::from([(
+                    module_reference_id(path),
+                    ClientReferenceEntry { id: 1, chunks: Vec::new(), name: "*".to_string() },
+                )]),
+            };
+            assert_eq!(manifest.to_json()[&id]["id"], serde_json::json!(1));
+        }
+    }
+
+    #[test]
+    fn the_client_reference_proxy_keeps_the_module_stylesheet_imports() {
+        // The proxy discards the module body, but a client component's CSS belongs to
+        // the document: the react-server graph is what `server.css` (served as
+        // `/rsc.css`) is compiled from, so dropping these imports serves an unstyled
+        // page while the head still links the stylesheet.
+        let source = "\"use client\";\nimport \"./clock.css\";\nimport styles from \"./x.module.scss\";\nimport { useState } from \"react\";\nexport default function Clock() { return null; }\n";
+        let out = transform_use_client_server(Path::new("/app/src/components/clock.tsx"), source)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("import \"./clock.css\";"), "{out}");
+        assert!(out.contains("import \"./x.module.scss\";"), "{out}");
+        // Non-stylesheet imports (and the body) still must NOT reach the server.
+        assert!(!out.contains("react\""), "{out}");
+        assert!(!out.contains("useState"), "{out}");
+    }
+
+    #[test]
+    fn the_proxy_keeps_every_stylesheet_form_and_every_stylesheet_language() {
+        // The extraction used to be a static `import` declaration with a `.css`/`.scss`/
+        // `.sass` extension and nothing else, so a `require`d, dynamically imported,
+        // Less or Stylus stylesheet was silently deleted with the module body — an
+        // unstyled page with no diagnostic.
+        let source = "\"use client\";\n\
+                      import \"./a.less\";\n\
+                      import theme from \"./b.module.styl\";\n\
+                      const c = require(\"./c.scss\");\n\
+                      function open() { return import(\"./d.css\"); }\n\
+                      export default function W() { return [theme, c, open]; }\n";
+        let out = transform_use_client_server(Path::new("/app/src/w.tsx"), source).unwrap().unwrap();
+        for stylesheet in ["./a.less", "./b.module.styl", "./c.scss", "./d.css"] {
+            assert!(
+                out.contains(&format!("import {};", json_string(stylesheet))),
+                "{stylesheet} lost from the react-server graph: {out}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_type_only_stylesheet_import_is_not_a_stylesheet() {
+        // `import type` is erased; carrying it over would emit an import of a module
+        // the build never had.
+        let source =
+            "\"use client\";\nimport type Styles from \"./x.module.css\";\nexport default function W(): Styles { return null as never; }\n";
+        let out = transform_use_client_server(Path::new("/app/src/w.tsx"), source).unwrap().unwrap();
+        assert!(!out.contains("x.module.css"), "{out}");
+    }
+
+    #[test]
+    fn a_commonjs_use_client_module_keeps_its_export_surface() {
+        // FINDINGS #23. `next/dist/client/script.js` is swc-compiled CommonJS carrying
+        // `"use client"`. The export scan only understood ESM syntax, so the proxy was
+        // emitted with ZERO exports — a module that bundles fine and then throws
+        // `The requested module "./dist/client/script" does not provide an export named
+        // "default"` on the first render. Every CJS export form must be recovered.
+        let source = "'use client';\n\
+                      \"use strict\";\n\
+                      Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+                      0 && (module.exports = { default: null, handleClientScriptLoad: null });\n\
+                      function _export(target, all) { for (var name in all) Object.defineProperty(target, name, { get: all[name] }); }\n\
+                      _export(exports, {\n\
+                          default: function() { return _default; },\n\
+                          handleClientScriptLoad: function() { return handleClientScriptLoad; },\n\
+                          initScriptLoader: function() { return initScriptLoader; }\n\
+                      });\n\
+                      exports.extraNamed = 1;\n\
+                      function _default() { return null; }\n";
+        let out = transform_use_client_server(Path::new("/app/node_modules/next/dist/client/script.js"), source)
+            .expect("a CJS use-client module is not a hard error")
+            .expect("it IS a use client module");
+        assert!(out.contains("export default __diffpack_client.default;"), "{out}");
+        for named in ["handleClientScriptLoad", "initScriptLoader", "extraNamed"] {
+            assert!(
+                out.contains(&format!("export const {named} = __diffpack_client[")),
+                "{named} is missing from the client-reference surface: {out}",
+            );
+        }
+        // `__esModule` is a marker, never a real export.
+        assert!(!out.contains("__esModule ="), "{out}");
+    }
+
+    #[test]
+    fn a_use_client_module_with_no_enumerable_exports_is_a_hard_error() {
+        // A proxy with no exports is a client boundary nothing can import: it must fail
+        // the BUILD, naming the file, not a request months later with a message that
+        // names neither the module nor the reason.
+        let error = transform_use_client_server(
+            Path::new("/app/node_modules/weird/index.js"),
+            "\"use client\";\nconst x = 1;\nconsole.log(x);\n",
+        )
+        .expect_err("a use-client module with no exports must be a hard error");
+        assert!(error.contains("/app/node_modules/weird/index.js"), "names the file: {error}");
+        assert!(error.contains("use client"), "names the directive: {error}");
+    }
+
+    #[test]
+    fn a_use_client_export_name_that_is_not_an_identifier_is_a_hard_error() {
+        // `exports["data-x"]` has no `export const <name>` form; emitting one would be a
+        // syntax error in the generated module, so it is rejected by name.
+        let error = transform_use_client_server(
+            Path::new("/app/node_modules/weird/index.js"),
+            "\"use client\";\nexports[\"data-x\"] = 1;\n",
+        )
+        .expect_err("a non-identifier export name must be a hard error");
+        assert!(error.contains("data-x"), "names the export: {error}");
+    }
+
+    #[test]
+    fn esm_exports_still_win_over_the_commonjs_scan() {
+        // The CJS recovery is a FALLBACK; a module with real ESM exports that also pokes
+        // at a local `exports` object must not pick up the poking.
+        let out = transform_use_client_server(
+            Path::new("/app/src/w.tsx"),
+            "\"use client\";\nexport default function W() { return null; }\nconst exports = {};\nexports.notAnExport = 1;\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(out.contains("export default __diffpack_client.default;"), "{out}");
+        assert!(!out.contains("notAnExport"), "{out}");
+    }
+
+    #[test]
+    fn module_imports_cover_every_specifier_form() {
+        let source = "import a from \"./a\";\n\
+                      import type { T } from \"./t\";\n\
+                      export { b } from \"./b\";\n\
+                      export * from \"./c\";\n\
+                      export type { U } from \"./u\";\n\
+                      const d = require(\"./d\");\n\
+                      const e = () => import(\"./e\");\n\
+                      export default [a, d, e];\n";
+        let imports = module_import_specifiers(Path::new("/app/src/x.ts"), source);
+        let value: Vec<&str> = imports
+            .iter()
+            .filter(|import| !import.type_only)
+            .map(|import| import.specifier.as_str())
+            .collect();
+        assert_eq!(value, ["./a", "./b", "./c", "./d", "./e"]);
+        let type_only: Vec<&str> = imports
+            .iter()
+            .filter(|import| import.type_only)
+            .map(|import| import.specifier.as_str())
+            .collect();
+        assert_eq!(type_only, ["./t", "./u"]);
     }
 
     #[test]

@@ -32,14 +32,13 @@
 #       onto the document — with ZERO console errors/warnings (clean hydration).
 #   A7  Real browser: the styles APPLY — the CSS-Module <main> computes max-width
 #       800px (from ._main_*) and the page container computes display:flex.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="$repo/integration/next-app-router"
 authentic="$fixture/authentic-create-next-app"
 diffpack="$repo/target/release/diffpack"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [ -d "$authentic/app" ] || fail "pristine default missing at $authentic/app"
 
@@ -66,6 +65,14 @@ trap cleanup EXIT
 cp -R "$authentic/app" "$build/app"
 cp "$authentic/next.config.ts" "$build/next.config.ts"
 # Record the authentic source checksum BEFORE the build; assert it is untouched after.
+# Assert the checksum inputs exist FIRST: a missing input makes `find` exit 1, and swallowing
+# that would checksum a smaller set on both sides — comparing equal and silently retiring the
+# tamper check rather than failing it.
+[ -d "$authentic/app" ] || fail "authentic source missing $authentic/app — nothing to checksum"
+[ -f "$authentic/next.config.ts" ] || fail "authentic source missing $authentic/next.config.ts — nothing to checksum"
+# `|| true` would be WRONG here: a truncated checksum on BOTH sides compares equal, silently
+# retiring the tamper check. The inputs are asserted to exist above instead.
+# lint-gates: allow — preconditions asserted; an empty result would compare equal, not fail
 authentic_sum_before="$(cd "$authentic" && find app next.config.ts -type f -exec shasum {} \; | sort | shasum | cut -d' ' -f1)"
 # node_modules: the fixture's pinned installs (resolution only; nothing written).
 ln -s "$fixture/node_modules" "$build/node_modules"
@@ -86,6 +93,9 @@ echo "== native build: ssr-of-flight graph =="
 "$diffpack" build-app "$build" ssr --no-minify
 
 # --- The authentic source must be byte-identical after the whole build -------------
+# `|| true` would be WRONG here: a truncated checksum on BOTH sides compares equal, silently
+# retiring the tamper check. The inputs are asserted to exist above instead.
+# lint-gates: allow — preconditions asserted; an empty result would compare equal, not fail
 authentic_sum_after="$(cd "$authentic" && find app next.config.ts -type f -exec shasum {} \; | sort | shasum | cut -d' ' -f1)"
 [ "$authentic_sum_before" = "$authentic_sum_after" ] || fail "the authentic create-next-app source was modified by the build (checksum drift) — it MUST stay untouched"
 echo "OK: authentic create-next-app app/ stayed byte-identical through the build"
@@ -104,6 +114,16 @@ base="http://localhost:$port"
 echo "app server on $base"
 
 html="$(curl -s "$base/")"
+
+# --- Gate A0: raw document integrity (streaming SSR must not split an HTML token) ---
+# react-dom writes on 2048-byte view boundaries that routinely land INSIDE a tag, so
+# anything interleaved between two of its writes (the inline __DF_FLIGHT scripts)
+# corrupts the document. A browser's parser recovers from that, so it has to be checked
+# on the raw bytes — ahead of A1..A7, which only ever see the symptom.
+curl -s "$base/" -o "$build/document.html"
+node "$repo/scripts/rsc/html-integrity.mjs" "$build/document.html" \
+  || fail "A0: the served document has a <script> inside an open tag (streaming SSR injected a flight script mid-token)"
+echo "OK (A0): the streamed document has no <script> spliced inside an HTML tag"
 
 # --- Gate A1: SSR of the full app-router document ----------------------------------
 echo "$html" | grep -q "<!DOCTYPE html>" || { echo "$html"; fail "A1: no full document (RootLayout must own <html>)"; }
@@ -125,7 +145,7 @@ echo "OK (A3): the stock Metadata (title + description) rendered"
 
 # --- Gate A4: globals.css + CSS Module via /rsc.css; scoping agrees -----------------
 echo "$html" | grep -qE '<link[^>]*href="/rsc.css"' || { echo "$html"; fail "A4: /rsc.css was not linked into <head>"; }
-module_class="$(echo "$html" | grep -oE '_page_[a-z0-9]+' | head -1)"
+module_class="$(echo "$html" | grep -oE -m1 '_page_[a-z0-9]+' || true)"
 [ -n "$module_class" ] || { echo "$html"; fail "A4: the page CSS-Module scoped class was not applied"; }
 css="$(curl -s "$base/rsc.css")"
 echo "$css" | grep -q "$module_class" || { echo "$css"; fail "A4: served /rsc.css has no rule for the applied class $module_class (scoping disagrees)"; }
@@ -134,7 +154,7 @@ echo "$css" | grep -qi "prefers-color-scheme" || { echo "$css" | head; fail "A4:
 echo "OK (A4): globals.css + the page CSS Module served via /rsc.css; applied class $module_class matches a real rule"
 
 # --- Gate A5: next/image — both SVGs raw (unoptimized), priority preload hoisted ----
-logo="$(echo "$html" | grep -oiE '<img[^>]*src="/next.svg"[^>]*>' | head -1)"
+logo="$(echo "$html" | grep -oiE -m1 '<img[^>]*src="/next.svg"[^>]*>' || true)"
 [ -n "$logo" ] || { echo "$html"; fail "A5: the /next.svg <img> was not rendered"; }
 if echo "$logo" | grep -qiE 'srcset='; then echo "$logo"; fail "A5: the SVG logo must NOT have a srcset (unoptimized, byte-faithful to Next under React 19)"; fi
 echo "$logo" | grep -qiE 'decoding="async"' || { echo "$logo"; fail "A5: the SVG logo lost decoding=async"; }

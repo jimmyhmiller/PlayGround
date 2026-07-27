@@ -22,7 +22,7 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -49,6 +49,82 @@ if (DEV) {
 function fail(message) {
   console.error(`next-server: ${message}`);
   process.exit(1);
+}
+
+// A production server must survive a failing REQUEST. Node's default handlers turn an
+// uncaught exception (or an unhandled rejection, since Node 15) into `process.exit(1)`,
+// so ONE bad render — or one socket the peer reset mid-stream — takes the whole server
+// down and every other in-flight request with it. Log loudly and keep serving; the
+// failing request is already accounted for by `failRequest` below.
+for (const [event, label] of [
+  ["uncaughtException", "uncaught exception"],
+  ["unhandledRejection", "unhandled rejection"],
+]) {
+  process.on(event, (error) => {
+    console.error(
+      `next-server: ${label} (request dropped, server stays up):`,
+      error && error.stack ? error.stack : String(error),
+    );
+  });
+}
+
+// Reports a request-handling failure on `res` WITHOUT ever throwing.
+//
+// Once the streaming shell has gone out, the status line is spent: `res.writeHead(500)`
+// on such a response throws `ERR_HTTP_HEADERS_SENT`, which (from an async handler) is an
+// unhandled rejection — the crash this exists to prevent. After headers are sent the only
+// truthful signal left is to END the response, so the client sees a truncated document
+// rather than a hung socket.
+function failRequest(res, error) {
+  console.error(error && error.stack ? error.stack : String(error));
+  try {
+    if (res.headersSent || res.writableEnded) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    res.end(String(error && error.stack ? error.stack : error));
+  } catch (secondary) {
+    // Reporting the failure failed (a destroyed socket, a response another writer
+    // already finished). Drop the connection; never let this path throw.
+    console.error(
+      "next-server: could not report a request error:",
+      secondary && secondary.message ? secondary.message : String(secondary),
+    );
+    try {
+      res.destroy();
+    } catch {}
+  }
+}
+
+// The `'nonce-…'` value a strict Content-Security-Policy puts on `script-src` (falling
+// back to `default-src`, exactly as Next's `getScriptNonceFromHeader` does). The header
+// is read off the EFFECTIVE request headers — i.e. after middleware's
+// `NextResponse.next({ request: { headers } })` overrides — because that is where the
+// canonical strict-CSP recipe sets it. Every script the render emits must carry this
+// value or the browser blocks it and the page never hydrates.
+function scriptNonceFromHeaders(headerPairs) {
+  let csp;
+  for (const [name, value] of headerPairs) {
+    const lower = String(name).toLowerCase();
+    if (lower === "content-security-policy" || lower === "content-security-policy-report-only") {
+      csp = String(value);
+      if (lower === "content-security-policy") break;
+    }
+  }
+  if (!csp) return undefined;
+  // `script-src` first, `default-src` only as a fallback — a policy that declares both
+  // (the canonical strict-CSP recipe does) carries the nonce on `script-src`.
+  const directives = csp.split(";").map((part) => part.trim());
+  const directive =
+    directives.find((part) => part.startsWith("script-src")) ||
+    directives.find((part) => part.startsWith("default-src"));
+  if (!directive) return undefined;
+  const token = directive
+    .split(/\s+/)
+    .slice(1)
+    .find((part) => part.startsWith("'nonce-") && part.endsWith("'") && part.length > 8);
+  return token ? token.slice("'nonce-".length, -1) : undefined;
 }
 
 const outputDir = process.argv[2];
@@ -804,14 +880,13 @@ function servePrerendered(entry, isRsc, res, configHeaders, mwSetCookies) {
 }
 
 // --- Runtime next/image optimizer (`/_next/image`) --------------------------------
-// The DYNAMIC/REMOTE fallback for next/image. Build-time responsive variants
-// (`/_diffpack-image/…`, emitted by the pure-Rust `image` crate) are still PREFERRED,
-// so a prerendered/static page only ever references those static files and never hits
-// this endpoint — the optimizer costs nothing on the static-page path. It is invoked
-// only when the shim could not resolve a build-time variant: a REMOTE src (default
-// loader) or a LOCAL raster with no manifest entry (a runtime-computed public path).
+// Next's default loader points EVERY optimizable image here, so the emitted HTML is
+// byte-faithful to Next. Cost is kept off the static-page path a different way: a
+// request whose (src, width) the BUILD already precomputed is answered straight from
+// the emitted variant file (see `buildVariantFile`) with no decode and no spawn.
 //
-// The actual resize/re-encode is done NATIVELY by shelling to the diffpack binary
+// For everything else — a REMOTE src, or a width/quality the build did not precompute —
+// the actual resize/re-encode is done NATIVELY by shelling to the diffpack binary
 // (`optimize-image`, the same `image` crate as the build-time variants) — no Node
 // image dependency. Optimized bytes are cached on disk (keyed by src+w+q+format) so a
 // repeated request never re-optimizes or re-spawns.
@@ -866,6 +941,86 @@ const IMAGE_EXT_MIME = {
   avif: "image/avif",
   svg: "image/svg+xml",
 };
+
+// --- Build-emitted variants: the pre-optimized answer to a `/_next/image` request ----
+// The emitted HTML uses Next's optimizer URL shape for every optimizable image (there
+// is no "prefer a build-time file" branch in Next, so the shim has none either). The
+// PIXELS are still computed at build time: `diffpack build-app` writes a responsive
+// ladder for every `/public` raster (`_diffpack-image/`, indexed by the manifest below)
+// and for every static image import (`/assets/<name>-<hash>-<w>.<ext>`, named by
+// convention next to the original). This lookup answers a request straight from those
+// files, so a prerendered page costs ZERO runtime re-encodes; only a width/quality the
+// build did not precompute reaches the native optimizer.
+//
+// Build variants are encoded at the default quality (75), so a request asking for a
+// different `q` deliberately misses and gets a real re-encode.
+const IMAGE_BUILD_QUALITY = 75;
+const variantManifest = (() => {
+  const path = join(publicDir, "_diffpack-image", "variants.json");
+  if (!existsSync(path)) return {};
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    // A corrupt manifest is a build defect, not something to paper over: say so loudly
+    // and fall back to real optimization (correct output, just slower).
+    console.error(`next/image: cannot read the build variant manifest ${path}: ${error.message}`);
+    return {};
+  }
+})();
+// The static-import variant ladders, read off disk ONCE. Static-import assets are
+// emitted by the client build (not the next adapter), so they are not in the manifest
+// above; their ladder is recovered from the emitted file names, `<stem>-<w><ext>` next
+// to `<stem><ext>`. A single readdir at boot beats a per-request stat sweep.
+const assetVariantLadders = (() => {
+  const index = new Map();
+  const dir = join(publicDir, "assets");
+  if (!existsSync(dir)) return index;
+  for (const name of readdirSync(dir)) {
+    const m = /^(.*)-(\d+)(\.(?:png|jpe?g))$/i.exec(name);
+    if (!m) continue;
+    const key = m[1] + m[3];
+    const widths = index.get(key) || [];
+    widths.push(Number(m[2]));
+    index.set(key, widths);
+  }
+  for (const widths of index.values()) widths.sort((a, b) => a - b);
+  return index;
+})();
+// Resolve `src` at width `w` to a build-emitted variant file, or null when the build
+// did not precompute it. Never invents a file: every branch checks existsSync.
+function buildVariantFile(src, w, q) {
+  if (q !== IMAGE_BUILD_QUALITY) return null;
+  const entry = variantManifest[src];
+  if (entry) {
+    // A width at or above the intrinsic width resolves to the intrinsic-width variant:
+    // the optimizer never upscales, so those are the exact bytes it would produce.
+    const url = entry.widths[String(w)] || (w >= entry.width ? entry.widths[String(entry.width)] : null);
+    if (url) {
+      const file = join(publicDir, url.replace(/^\/+/, ""));
+      if (file.startsWith(publicDir) && existsSync(file)) return file;
+    }
+    return null;
+  }
+  // Static image imports live under the build's own hashed asset dir, where the variant
+  // name is `<original stem>-<w><ext>`. Scoped to `/assets/` precisely because the app
+  // cannot put files there — a `/public` file literally named `hero-640.png` must never
+  // be mistaken for a variant of `hero.png`.
+  const m = /^\/assets\/([^/]+)(\.(?:png|jpe?g))$/i.exec(src);
+  if (!m) return null;
+  const ladder = assetVariantLadders.get(m[1] + m[2]);
+  if (!ladder) return null;
+  // The ladder's top entry IS the image's intrinsic width (the build emits every
+  // standard size below the intrinsic, then the intrinsic itself), so a request at or
+  // above it resolves there: the optimizer never upscales, making that variant the
+  // exact bytes it would have produced.
+  const top = ladder[ladder.length - 1];
+  const pick = ladder.includes(w) ? w : w >= top ? top : null;
+  if (pick === null) return null;
+  const file = join(publicDir, "assets", `${m[1]}-${pick}${m[2]}`);
+  if (file.startsWith(publicDir) && existsSync(file)) return file;
+  return null;
+}
+
 // Run the native optimizer (diffpack `optimize-image`) over `input`, returning the
 // optimized bytes. A missing DIFFPACK_BIN, a non-zero exit, or a spawn failure is a
 // hard rejection carrying the cause — never a silent passthrough of the un-optimized
@@ -920,6 +1075,22 @@ async function serveOptimizedImage(url, res) {
   }
 
   const isRemote = /^https?:\/\//i.test(src);
+  // Build-emitted variant fast path: the exact bytes the optimizer would produce, already
+  // on disk. No file read of the original, no spawn, no cache write.
+  if (!isRemote && src.startsWith("/")) {
+    const variant = buildVariantFile(src.split("?")[0], w, q);
+    if (variant) {
+      const vext = extname(variant).slice(1).toLowerCase();
+      return void res
+        .writeHead(200, {
+          "content-type": IMAGE_EXT_MIME[vext] || "application/octet-stream",
+          "cache-control": `public, max-age=${imagesConfig.minimumCacheTTL}, must-revalidate`,
+          "content-disposition": "inline",
+          "x-diffpack-image-cache": "BUILD",
+        })
+        .end(readFileSync(variant));
+    }
+  }
   // Resolve the source bytes + extension.
   let bytes;
   let ext;
@@ -1007,6 +1178,15 @@ async function serveOptimizedImage(url, res) {
 }
 
 const server = createServer(async (req, res) => {
+  // A peer that resets the connection mid-stream emits `error` on the request and the
+  // response. An `error` event with no listener THROWS, which — with a streaming SSR
+  // response in flight — would take the server down for a client-side disconnect.
+  req.on("error", (error) => {
+    console.error("next-server: request socket error:", error && error.message ? error.message : error);
+  });
+  res.on("error", (error) => {
+    console.error("next-server: response socket error:", error && error.message ? error.message : error);
+  });
   try {
     const url = new URL(req.url, "http://localhost");
     // Server actions.
@@ -1267,6 +1447,8 @@ const server = createServer(async (req, res) => {
         // undefined when no next.config `i18n` is configured.
         locale: reqLocale,
       };
+      // Strict-CSP nonce for every script the document emits (see scriptNonceFromHeaders).
+      const scriptNonce = scriptNonceFromHeaders(reqCtxObj.headers);
       // Kick off the streaming render. `meta` (status/params + any TOP-LEVEL
       // redirect/notFound) settles on the first chunk; flight chunks flow into a queue
       // exposed as an async iterator.
@@ -1361,6 +1543,7 @@ const server = createServer(async (req, res) => {
           nf.flight.toString("base64"),
           {},
           { pathname: url.pathname, search: url.search },
+          scriptNonce,
         );
         const nfHeaders = { "content-type": "text/html; charset=utf-8" };
         for (const [k, v] of configHeaders) nfHeaders[k] = v;
@@ -1405,6 +1588,7 @@ const server = createServer(async (req, res) => {
           flightBuf.toString("base64"),
           meta.params || {},
           { pathname: url.pathname, search: url.search },
+          scriptNonce,
         );
         res.writeHead(meta.status || 200, docHeaders);
         res.end(html);
@@ -1418,13 +1602,13 @@ const server = createServer(async (req, res) => {
         res,
         docHeaders,
         meta.status,
+        scriptNonce,
       );
       return;
     }
     res.writeHead(404).end("not found");
   } catch (error) {
-    console.error(error && error.stack ? error.stack : String(error));
-    res.writeHead(500, { "content-type": "text/plain" }).end(String(error && error.stack));
+    failRequest(res, error);
   }
 });
 

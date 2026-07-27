@@ -65,6 +65,14 @@
    ; ---- the REAL heap: one row per live allocation (addr + size + site), for the heap map ----
    (nblk i64) (blk-dropped i64)
    (blk-addr (array i64 65536)) (blk-size (array i64 65536)) (blk-site (array i64 65536)) (blk-live (array i64 65536))
+   ; addr -> block index, so free/resize do not scan the block table. Open addressing,
+   ; 4x the block cap: at most 65536 slots are ever written (one per block, and a
+   ; delete only turns an entry into a tombstone, it never adds a slot), so occupancy
+   ; never exceeds 25% and probe chains stay short without any rehash. Fixed size like
+   ; every other field here, so the render thread can read the state while the worker
+   ; writes it. Slot 0 = empty, -1 = tombstone; the stored key is addr, the value is
+   ; blkidx+1 (0 would be ambiguous with an empty slot).
+   (hx-key (array i64 262144)) (hx-val (array i64 262144))
    ; ---- heap-map density buckets (address range split into columns) ----
    (bk-bytes (array i64 1100)) (bk-site (array i64 1100)) (bk-max (array i64 1100))
    (hmin i64) (hcolspan i64)
@@ -152,18 +160,45 @@
         0)))
 
 ; ---- live-block table: the actual heap layout (addr+size+site per live allocation) ----
+; ---- addr -> block index (open addressing, linear probing) ----
+; Address bits 0-3 are always 0 for malloc'd pointers, so mix before masking or every
+; key lands in the same few buckets.
+(defn mg-hx-slot [(addr i64)] (-> i64)
+  (let [h (ixor addr (ishr addr 20))] (iand (ixor h (ishr h 9)) 262143)))
+(defn mg-hx-put! [(s (ptr MgState)) (addr i64) (blkidx i64)] (-> i64)
+  (let [(mut i) (mg-hx-slot addr) (mut n) 0]
+    (loop (if (icmp-ge (load n) 262144) (break)     ; cannot happen at <=25% load; a guard, not a path
+      (let [k (load (index (field s hx-key) (load i)))]
+        (if (if (icmp-eq k 0) true (if (icmp-eq k -1) true (icmp-eq k addr)))
+            (do (store! (index (field s hx-key) (load i)) addr)
+                (store! (index (field s hx-val) (load i)) (iadd blkidx 1)) (break))
+          (do (store! i (iand (iadd (load i) 1) 262143)) (store! n (iadd (load n) 1)) 0)))))
+    0))
+; the block index for `addr`, or -1. Clears the entry when found: an address is only
+; ever looked up to retire it, and malloc reuses addresses.
+(defn mg-hx-take! [(s (ptr MgState)) (addr i64)] (-> i64)
+  (let [(mut i) (mg-hx-slot addr) (mut n) 0 (mut r) -1]
+    (loop (if (icmp-ge (load n) 262144) (break)
+      (let [k (load (index (field s hx-key) (load i)))]
+        (if (icmp-eq k 0) (break)                    ; empty slot -> the key was never here
+          (if (icmp-eq k addr)
+              (do (store! r (isub (load (index (field s hx-val) (load i))) 1))
+                  (store! (index (field s hx-key) (load i)) -1) (break))
+            (do (store! i (iand (iadd (load i) 1) 262143)) (store! n (iadd (load n) 1)) 0))))))
+    (load r)))
 (defn mg-track-alloc [(addr i64) (size i64)] (-> i64)
   (let [s (mg) n (load (field s nblk))]
     (if (icmp-ge n 65536) (do (store! (field s blk-dropped) (iadd (load (field s blk-dropped)) 1)) 0)
       (do (store! (index (field s blk-addr) n) addr) (store! (index (field s blk-size) n) size)
           (store! (index (field s blk-site) n) (load (field s cur-site))) (store! (index (field s blk-live) n) 1)
+          (mg-hx-put! s addr n)
           (store! (field s nblk) (iadd n 1)) 0))))
-(defn mg-track-free [(addr i64)] (-> i64)   ; mark the live block at `addr` dead (linear scan)
-  (let [s (mg) n (load (field s nblk)) (mut i) 0 (mut done) 0]
-    (loop (if (if (icmp-ge (load i) n) true (icmp-ne (load done) 0)) (break)
-      (do (if (and (icmp-ne (load (index (field s blk-live) (load i))) 0) (icmp-eq (load (index (field s blk-addr) (load i))) addr))
-              (do (store! (index (field s blk-live) (load i)) 0) (store! done 1) 0) 0)
-          (store! i (iadd (load i) 1))))) 0))
+; Mark the live block at `addr` dead. This used to scan the whole block table, which
+; made every free and every realloc O(nblk) — on a real workload (the compiler building
+; itself) that one scan was the bulk of the program's runtime under instrumentation.
+(defn mg-track-free [(addr i64)] (-> i64)
+  (let [s (mg) i (mg-hx-take! s addr)]
+    (if (icmp-lt i 0) 0 (do (store! (index (field s blk-live) i) 0) 0))))
 (defn mg-track-resize [(oldaddr i64) (newaddr i64) (new i64)] (-> i64)
   (do (if (icmp-ne oldaddr 0) (mg-track-free oldaddr) 0) (mg-track-alloc newaddr new) 0))
 
@@ -424,18 +459,27 @@
     (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
 (defn mg-headis? [(h Code) (nm (slice u8))] (-> bool)
   (and (code-sym? h) (str-eq (mg-simple (code-str h)) nm)))
+; A head's simple name, or "" when it isn't a symbol. Every `code-*` call is a
+; round-trip out of the metaprogram and back into the compiler, so this is
+; deliberately computed ONCE per head and then compared against all the target
+; names below — matching name-by-name instead would re-fetch the same string once
+; per candidate, and mg-target-kind runs on every node of the whole program.
+(defn mg-simple-name [(h Code)] (-> (slice u8))
+  (if (code-sym? h) (mg-simple (code-str h)) ""))
 ; a call head we tag with a source site; its type-arg is at index 1
-(defn mg-tag? [(h Code)] (-> bool)
-  (if (mg-headis? h "al-new") true (if (mg-headis? h "al-push!") true (if (mg-headis? h "hm-new") true
-    (if (mg-headis? h "hm-new-scalar") true (if (mg-headis? h "hm-put!") true (if (mg-headis? h "create") true
-      (if (mg-headis? h "alloc-slice") true false))))))))
+(defn mg-tag-name? [(nm (slice u8))] (-> bool)
+  (if (str-eq nm "al-new") true (if (str-eq nm "al-push!") true (if (str-eq nm "hm-new") true
+    (if (str-eq nm "hm-new-scalar") true (if (str-eq nm "hm-put!") true (if (str-eq nm "create") true
+      (if (str-eq nm "alloc-slice") true false))))))))
 (defn mg-target-kind [(h Code)] (-> i64)     ; 1 = malloc-allocator swap, 2 = tag, 0 = none
-  (if (mg-headis? h "malloc-allocator") 1 (if (mg-tag? h) 2 0)))
+  (let [nm (mg-simple-name h)]
+    (if (str-eq nm "malloc-allocator") 1 (if (mg-tag-name? nm) 2 0))))
 (defn mg-has-target? [(f Code)] (-> bool)
   (if (not (code-list? f)) false
     (let [n (code-count f)]
       (if (icmp-eq n 0) false
-        (if (and (code-sym? (code-nth f 0)) (icmp-ne (mg-target-kind (code-nth f 0)) 0)) true
+        ; mg-target-kind is 0 for a non-symbol head, so no separate code-sym? probe
+        (if (icmp-ne (mg-target-kind (code-nth f 0)) 0) true
           (mg-has-target-kids? f 0 n))))))
 (defn mg-has-target-kids? [(f Code) (i i64) (n i64)] (-> bool)
   (if (icmp-ge i n) false (if (mg-has-target? (code-nth f i)) true (mg-has-target-kids? f (iadd i 1) n))))
@@ -451,7 +495,7 @@
   (if (not (code-list? f)) f
     (let [n (code-count f)]
       (if (icmp-eq n 0) f
-        (let [head (code-nth f 0) kind (if (code-sym? (code-nth f 0)) (mg-target-kind (code-nth f 0)) 0)]
+        (let [head (code-nth f 0) kind (mg-target-kind head)]
           (if (and (code-eq head `do) (mg-tagged? f))
               ; keep the tag; rewrite only the wrapped call's ARGS (don't re-tag it)
               (let [call (code-nth f 2)]

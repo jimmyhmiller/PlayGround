@@ -32,7 +32,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, Span};
 
 /// How many substitution passes to run before giving up. Each pass resolves one
 /// nesting level (a hit does not descend into its own replacement), so a handful
@@ -64,9 +64,7 @@ pub fn transform(path: &Path, source: &str) -> Option<String> {
 /// delete, outermost-first.
 fn pass(path: &Path, source: &str) -> Option<String> {
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path)
-        .unwrap_or_default()
-        .with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     // A file that does not parse is not ours to rewrite; the real parse
     // downstream reports the error with proper diagnostics.

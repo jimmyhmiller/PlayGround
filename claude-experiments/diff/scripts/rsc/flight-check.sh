@@ -13,7 +13,8 @@
 # Native build + native transforms + native manifests; node is only the oracle.
 # This is the fast node-only subset of scripts/rsc/rsc-check.sh (the full browser
 # gate). Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/rsc-reference}"

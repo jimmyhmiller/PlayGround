@@ -3,7 +3,8 @@
 # client reference resolves through the emitted client-references manifest + the
 # `__webpack_*` seam to the real exported component. Native build; node is only the
 # oracle. Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/rsc-seam}"

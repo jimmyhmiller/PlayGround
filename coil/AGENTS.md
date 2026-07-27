@@ -11,9 +11,16 @@ before writing Coil.
 - `coil build file.coil -o out` / `coil run file.coil` — single file.
 - `coil guide` — print the language guide.
 - The compiler is **self-hosted** (written in Coil, in `selfhost/src/`). Rebuild +
-  verify it with `selfhost/rebootstrap.sh` (fixpoint + gates). If you change a file
-  in the gate corpus (e.g. `selfhost/src/main.coil`), regenerate the reference
-  snapshot first: `COIL_REF_BIN=./coil ./selfhost/oracle/snapshot-full.sh`.
+  verify it with `selfhost/rebootstrap.sh` (fixpoint + gates).
+- ⚠ The gate corpora include **every `lib/*.coil`** and the `examples/`, `apps/` and
+  `freestanding/` files listed in each `selfhost/oracle/*/corpus.txt`. Changing one
+  of those changes what the gates see, so re-bless the affected snapshots in the same
+  commit: `COIL_REF_BIN=./coil ./selfhost/oracle/snapshot-<stage>.sh` (`snapshot.sh`
+  for the reader; `snapshot-full.sh`, `-ast`, `-load`, `-resolved`, `-checked`,
+  `-expand`, `-mono`, `-ir`, `-diag`, `-x86`). rebootstrap runs all of them, so a
+  forgotten one fails there rather than rotting silently — which is exactly what
+  happened to read/load/expand/ir/x86 when `lib/slice.coil` changed and only some
+  snapshots were re-blessed.
 
 ## Where things live
 

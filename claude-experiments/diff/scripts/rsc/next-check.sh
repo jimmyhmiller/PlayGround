@@ -29,14 +29,13 @@
 #   4. clicking the server button round-trips the "use server" action over
 #      /_action/ (increment(6) -> 7).
 # Native build (Rust); Node + Chrome are only the oracle. Exit 0 = gate PASS.
-set -euo pipefail
+# Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
+source "$(dirname "$0")/_gate-prelude.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/next-app-router}"
 diffpack="$repo/target/release/diffpack"
 output="$fixture/.diffpack-output"
-
-fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== building diffpack (release) =="
 cargo build --release --manifest-path "$repo/Cargo.toml"
@@ -86,6 +85,18 @@ done
 base="http://localhost:$port"
 echo "app server on $base"
 
+# --- Gate 0: raw document integrity (streaming SSR must not split an HTML token) ---
+# react-dom writes on 2048-byte view boundaries that routinely land INSIDE a tag, so
+# anything interleaved between two of its writes (the inline __DF_FLIGHT scripts)
+# corrupts the document. A browser's parser recovers from that, so check the raw bytes
+# first — the later gates only ever see the symptom.
+rawdoc="$(mktemp)"
+curl -s "$base/" -o "$rawdoc"
+node "$repo/scripts/rsc/html-integrity.mjs" "$rawdoc" \
+  || fail "gate 0: the served document has a <script> inside an open tag (streaming SSR injected a flight script mid-token)"
+rm -f "$rawdoc"
+echo "OK (gate 0): the streamed document has no <script> spliced inside an HTML tag"
+
 # --- Gate 1 (pre-hydration SSR document via curl) --------------------------------
 html="$(curl -s "$base/")"
 echo "$html" | grep -q "<!DOCTYPE html>" || { echo "$html"; fail "SSR did not produce a full document (no doctype; the RootLayout must own <html>)"; }
@@ -111,7 +122,7 @@ echo "OK (gate 1b): next/font macro rewritten + font CSS hoisted, Metadata API <
 # preserves that stylesheet to public/rsc.css, and links it (React-hoisted). The
 # module class on the element MUST match a class in the served stylesheet.
 echo "$html" | grep -qE '<link[^>]*href="/rsc.css"' || { echo "$html"; fail "CSS: the app stylesheet <link href=/rsc.css> was not injected/hoisted into <head>"; }
-module_class="$(echo "$html" | grep -oE 'class="_page_[a-z0-9]+"' | head -1 | grep -oE '_page_[a-z0-9]+')"
+module_class="$(echo "$html" | grep -oE -m1 'class="_page_[a-z0-9]+"' | grep -oE -m1 '_page_[a-z0-9]+' || true)"
 [ -n "$module_class" ] || { echo "$html"; fail "CSS Modules: the scoped class from styles.page was not applied to <main>"; }
 css="$(curl -s "$base/rsc.css")"
 echo "$css" | grep -q "._${module_class#_}" || echo "$css" | grep -q ".$module_class" || { echo "$css"; fail "CSS Modules: served /rsc.css has no rule for the applied class .$module_class (scoping disagrees)"; }
@@ -186,16 +197,16 @@ echo "OK (gate 1h): loading.tsx composed a Suspense around the blog page (struct
 # srcset. React 19 emits these attribute names camelCase (srcSet/fetchPriority) and the
 # browser normalizes them case-insensitively — exactly as Next itself renders under
 # React 19 — so the attribute-name greps here are case-insensitive.
-hero_img="$(echo "$html" | grep -oiE '<img[^>]*id="hero"[^>]*>' | head -1)"
+hero_img="$(echo "$html" | grep -oiE -m1 '<img[^>]*id="hero"[^>]*>' || true)"
 [ -n "$hero_img" ] || { echo "$html"; fail "next/image: the raster hero <img id=hero> was not rendered"; }
-cand="$(echo "$hero_img" | grep -oiE '/_diffpack-image/[^ ]+\.png [0-9]+w' | wc -l | tr -d ' ')"
+cand="$(echo "$hero_img" | grep -oiE '/_diffpack-image/[^ ]+\.png [0-9]+w' | wc -l | tr -d ' ' || true)"
 [ "${cand:-0}" -ge 2 ] || { echo "$hero_img"; fail "next/image: hero srcset has <2 build-emitted variant candidates (got: ${cand:-0})"; }
 echo "$hero_img" | grep -qiE 'srcset="[^"]*/_diffpack-image/' || { echo "$hero_img"; fail "next/image: hero <img> has no srcset pointing at /_diffpack-image/ variants"; }
 echo "$hero_img" | grep -qF 'sizes="(max-width: 600px) 100vw, 600px"' || { echo "$hero_img"; fail "next/image: hero <img> lost the sizes passthrough"; }
 echo "$hero_img" | grep -qiE 'decoding="async"' || { echo "$hero_img"; fail "next/image: hero <img> missing decoding=async"; }
 echo "$hero_img" | grep -qiE 'fetchpriority="high"' || { echo "$hero_img"; fail "next/image: priority image missing fetchpriority=high"; }
 # The largest variant URL is a REAL emitted static file (200 image/png).
-largest="$(echo "$hero_img" | grep -oiE 'src="/_diffpack-image/[^"]+\.png"' | head -1 | sed -E 's/^src="//i; s/"$//')"
+largest="$(echo "$hero_img" | grep -oiE -m1 'src="/_diffpack-image/[^"]+\.png"' | sed -E 's/^src="//i; s/"$//' || true)"
 [ -n "$largest" ] || { echo "$hero_img"; fail "next/image: hero <img> src is not a /_diffpack-image variant"; }
 vhdr="$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$base$largest")"
 echo "$vhdr" | grep -qE '^200 image/png' || fail "next/image: the largest variant $largest is not a real 200 image/png (got: $vhdr)"
@@ -203,7 +214,7 @@ echo "$vhdr" | grep -qE '^200 image/png' || fail "next/image: the largest varian
 echo "$html" | grep -qiE '<link[^>]*rel="preload"[^>]*as="image"' || { echo "$html"; fail "next/image: no priority preload <link rel=preload as=image> was hoisted"; }
 echo "$html" | grep -oiE '<link[^>]*rel="preload"[^>]*as="image"[^>]*>' | grep -qiE 'imagesrcset="[^"]*/_diffpack-image/|href="/_diffpack-image/' || { echo "$html"; fail "next/image: the preload link does not reference the hero variants (imagesrcset/href)"; }
 # The SVG image is unoptimized: raw src, NO srcset.
-logo_img="$(echo "$html" | grep -oiE '<img[^>]*id="logo"[^>]*>' | head -1)"
+logo_img="$(echo "$html" | grep -oiE -m1 '<img[^>]*id="logo"[^>]*>' || true)"
 [ -n "$logo_img" ] || { echo "$html"; fail "next/image: the SVG logo <img id=logo> was not rendered"; }
 echo "$logo_img" | grep -qF 'src="/next.svg"' || { echo "$logo_img"; fail "next/image: SVG logo lost its raw src=/next.svg"; }
 if echo "$logo_img" | grep -qiE 'srcset='; then echo "$logo_img"; fail "next/image: SVG logo must NOT have a srcset (unoptimized, byte-faithful to Next)"; fi
@@ -263,8 +274,8 @@ echo "OK (gate 8 SSR): useParams() resolved the matched segment on the server (s
 agent-browser open "$base/" >/dev/null 2>&1
 agent-browser wait "#server-inc" >/dev/null 2>&1 || true
 
-read_count() { agent-browser get text "#counter" 2>/dev/null; }
-read_result() { agent-browser get text "#server-result" 2>/dev/null; }
+read_count() { agent-browser get text "#counter" 2>/dev/null || true; }
+read_result() { agent-browser get text "#server-result" 2>/dev/null || true; }
 
 initial="$(read_count)"
 echo "$initial" | grep -q "count: 5" || fail "browser initial count is not 5 (got: $initial)"

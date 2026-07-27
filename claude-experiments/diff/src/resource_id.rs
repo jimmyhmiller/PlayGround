@@ -56,6 +56,12 @@ pub enum LoaderKind {
     /// initializer `(imports) => Promise<WebAssembly.Instance>` that fetches
     /// (or decodes, when inlined) the emitted `.wasm` and instantiates it.
     WasmInit,
+    /// `?public-url` — a file under the project's `public/` directory, reached by
+    /// a root-absolute import (`import icons from "/icons.svg"`). A public file
+    /// is copied to the site root VERBATIM, so it is never hashed, emitted, or
+    /// parsed: the module's only content is the file's public URL. Minted by the
+    /// resolver, never written by an app.
+    PublicUrl,
 }
 
 impl LoaderKind {
@@ -69,6 +75,7 @@ impl LoaderKind {
             LoaderKind::Worker => "worker",
             LoaderKind::Inline => "inline",
             LoaderKind::WasmInit => "init",
+            LoaderKind::PublicUrl => "public-url",
         }
     }
 }
@@ -145,6 +152,7 @@ impl ResourceId {
             "worker" | "sharedworker" => Some(LoaderKind::Worker),
             "inline" => Some(LoaderKind::Inline),
             "init" => Some(LoaderKind::WasmInit),
+            "public-url" => Some(LoaderKind::PublicUrl),
             _ => None,
         }
     }

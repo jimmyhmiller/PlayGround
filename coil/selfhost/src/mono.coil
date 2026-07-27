@@ -832,52 +832,66 @@
 ; sort lives ONLY in the mono dump path; the shared dumper is untouched.
 (defn sdef-name [(s StructDef)] (-> (slice u8)) (let [p (alloc-stack StructDef)] (store! p s) (load (field p name))))
 (defn sumdef-name [(s SumDef)] (-> (slice u8)) (let [p (alloc-stack SumDef)] (store! p s) (load (field p name))))
+; All three sorts run on EVERY build (run-pipeline calls sort-mono-program before
+; codegen), over every mono'd definition in the program. They used to be selection
+; sorts: O(n²) comparisons, and each comparison pulled two whole Func/StructDef/
+; SumDef structs out of the list BY VALUE just to read one name field. On the
+; compiler's own source that came to ~15% of the build.
+;
+; Instead: extract the names ONCE, sort a permutation of indices with a bottom-up
+; merge, then materialize. Same order out — mangled names are a total order and
+; both sorts are stable — with O(n log n) comparisons and no struct copies.
+(defn sort-index-by-name [(a (ptr Allocator)) (keys (ArrayList (slice u8)))] (-> (ArrayList i64))
+  (let [n (al-len [(slice u8)] keys)
+        (mut cur) (al-new [i64] a) (mut nxt) (al-new [i64] a)
+        (mut w) 1 (mut lo) 0 (mut mid) 0 (mut hi) 0 (mut i) 0 (mut j) 0 (mut k) 0]
+    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut cur) (load k)) (store! k (iadd (load k) 1)))))
+    (loop (if (icmp-ge (load w) n) (break)
+      (do (store! nxt (al-new [i64] a))
+          (store! lo 0)
+          (loop (if (icmp-ge (load lo) n) (break)
+            (do (store! mid (if (icmp-lt (iadd (load lo) (load w)) n) (iadd (load lo) (load w)) n))
+                (store! hi  (if (icmp-lt (iadd (load mid) (load w)) n) (iadd (load mid) (load w)) n))
+                (store! i (load lo))
+                (store! j (load mid))
+                (loop (if (and (icmp-ge (load i) (load mid)) (icmp-ge (load j) (load hi))) (break)
+                  ; take from the left run unless it is exhausted or the right key
+                  ; is strictly smaller — ties keep the left element, so this is stable
+                  (if (if (icmp-ge (load i) (load mid)) false
+                        (if (icmp-ge (load j) (load hi)) true
+                          (not (str-lt (al-get [(slice u8)] keys (al-get [i64] (load cur) (load j)))
+                                       (al-get [(slice u8)] keys (al-get [i64] (load cur) (load i)))))))
+                      (do (al-push! (mut nxt) (al-get [i64] (load cur) (load i))) (store! i (iadd (load i) 1)))
+                    (do (al-push! (mut nxt) (al-get [i64] (load cur) (load j))) (store! j (iadd (load j) 1))))))
+                (store! lo (load hi)))))
+          (store! cur (load nxt))
+          (store! w (imul (load w) 2)))))
+    (load cur)))
 (defn sort-funcs [(a (ptr Allocator)) (src (ptr (ArrayList Func)))] (-> (ptr (ArrayList Func)))
-  (let [n (al-len [Func] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [Func] a) (mut k) 0]
-    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
-    (let [(mut c) 0]
+  (let [n (al-len [Func] (load src)) (mut keys) (al-new [(slice u8)] a) (mut out) (al-new [Func] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (al-elem [Func] src (load i)) name))) (store! i (iadd (load i) 1)))))
+    (let [ord (sort-index-by-name a (load keys)) (mut c) 0]
       (loop (if (icmp-ge (load c) n) (break)
-        (do (let [(mut best) -1 (mut bi) 0]
-              (loop (if (icmp-ge (load bi) n) (break)
-                (do (if (not (al-get [bool] (load used) (load bi)))
-                        (if (or (icmp-lt (load best) 0)
-                                (str-lt (func-name (al-get [Func] (load src) (load bi))) (func-name (al-get [Func] (load src) (load best)))))
-                            (store! best (load bi)) 0) 0)
-                    (store! bi (iadd (load bi) 1)))))
-              (al-set! [bool] (mut used) (load best) true)
-              (al-push! (mut out) (al-get [Func] (load src) (load best))))
+        (do (al-push! (mut out) (al-get [Func] (load src) (al-get [i64] ord (load c))))
             (store! c (iadd (load c) 1))))))
     (box-al [Func] a (load out))))
 (defn sort-structs [(a (ptr Allocator)) (src (ptr (ArrayList StructDef)))] (-> (ptr (ArrayList StructDef)))
-  (let [n (al-len [StructDef] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [StructDef] a) (mut k) 0]
-    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
-    (let [(mut c) 0]
+  (let [n (al-len [StructDef] (load src)) (mut keys) (al-new [(slice u8)] a) (mut out) (al-new [StructDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (al-elem [StructDef] src (load i)) name))) (store! i (iadd (load i) 1)))))
+    (let [ord (sort-index-by-name a (load keys)) (mut c) 0]
       (loop (if (icmp-ge (load c) n) (break)
-        (do (let [(mut best) -1 (mut bi) 0]
-              (loop (if (icmp-ge (load bi) n) (break)
-                (do (if (not (al-get [bool] (load used) (load bi)))
-                        (if (or (icmp-lt (load best) 0)
-                                (str-lt (sdef-name (al-get [StructDef] (load src) (load bi))) (sdef-name (al-get [StructDef] (load src) (load best)))))
-                            (store! best (load bi)) 0) 0)
-                    (store! bi (iadd (load bi) 1)))))
-              (al-set! [bool] (mut used) (load best) true)
-              (al-push! (mut out) (al-get [StructDef] (load src) (load best))))
+        (do (al-push! (mut out) (al-get [StructDef] (load src) (al-get [i64] ord (load c))))
             (store! c (iadd (load c) 1))))))
     (box-al [StructDef] a (load out))))
 (defn sort-sums [(a (ptr Allocator)) (src (ptr (ArrayList SumDef)))] (-> (ptr (ArrayList SumDef)))
-  (let [n (al-len [SumDef] (load src)) (mut used) (al-new [bool] a) (mut out) (al-new [SumDef] a) (mut k) 0]
-    (loop (if (icmp-ge (load k) n) (break) (do (al-push! (mut used) false) (store! k (iadd (load k) 1)))))
-    (let [(mut c) 0]
+  (let [n (al-len [SumDef] (load src)) (mut keys) (al-new [(slice u8)] a) (mut out) (al-new [SumDef] a) (mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (al-push! (mut keys) (load (field (al-elem [SumDef] src (load i)) name))) (store! i (iadd (load i) 1)))))
+    (let [ord (sort-index-by-name a (load keys)) (mut c) 0]
       (loop (if (icmp-ge (load c) n) (break)
-        (do (let [(mut best) -1 (mut bi) 0]
-              (loop (if (icmp-ge (load bi) n) (break)
-                (do (if (not (al-get [bool] (load used) (load bi)))
-                        (if (or (icmp-lt (load best) 0)
-                                (str-lt (sumdef-name (al-get [SumDef] (load src) (load bi))) (sumdef-name (al-get [SumDef] (load src) (load best)))))
-                            (store! best (load bi)) 0) 0)
-                    (store! bi (iadd (load bi) 1)))))
-              (al-set! [bool] (mut used) (load best) true)
-              (al-push! (mut out) (al-get [SumDef] (load src) (load best))))
+        (do (al-push! (mut out) (al-get [SumDef] (load src) (al-get [i64] ord (load c))))
             (store! c (iadd (load c) 1))))))
     (box-al [SumDef] a (load out))))
 (defn sort-mono-program [(a (ptr Allocator)) (p (ptr Program))] (-> i64)

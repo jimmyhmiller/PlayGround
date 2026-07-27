@@ -14,7 +14,8 @@
 //! layer) that the proven spine then builds unchanged.
 //!
 //! This is the index route (`app/page.tsx`) composed under the root layout
-//! (`app/layout.tsx`), all `"use client"` islands discovered under `app/`, with
+//! (`app/layout.tsx`), all `"use client"` islands discovered across the PROJECT
+//! (they routinely live outside the app dir — `src/components` beside `src/app`), with
 //! `next/font` (build-time macro rewrite + hoisted CSS), the static Metadata API
 //! (`<title>`/`<meta>`), global + CSS-Module stylesheets (linked from the
 //! react-server graph's compiled CSS), and client-side soft navigation (`next/link`
@@ -58,8 +59,13 @@ use crate::transform::Target;
 pub const ADAPTER_DIR: &str = ".diffpack-next";
 
 /// Module-file extensions the adapter recognizes for app-router convention files
-/// (layout/loading/error/not-found/route/next.config).
+/// (layout/loading/error/not-found/route).
 const MODULE_EXTS: [&str; 4] = ["tsx", "jsx", "ts", "js"];
+
+/// Extensions a `next.config` may use — Next's own set, and the ONE definition of it in
+/// diffpack (detection and the config eval both go through [`next_config_path`]). Note
+/// `tsx`/`jsx` are deliberately absent: Next never loads a JSX config file.
+const NEXT_CONFIG_EXTS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
 
 /// Extensions a `page` may use — the module set PLUS MDX/Markdown, so `page.mdx` /
 /// `page.md` is a route exactly like `page.tsx`. Only `page` is MDX-eligible; the other
@@ -100,23 +106,132 @@ fn validate_page_extensions(eval: Option<&serde_json::Value>) -> Result<(), Stri
     ))
 }
 
-/// Detects whether `root` is a Next.js app-router project this adapter handles: an
-/// `app/` directory containing a `page.{tsx,jsx,ts,js}`, plus a `next.config.*`
-/// (so we never mistake a non-Next `app/` folder for one). Returns the resolved
-/// `app/page` path when so.
-fn detect_app_router(root: &Path) -> Option<PathBuf> {
-    let has_next_config = MODULE_EXTS
+/// Report the app's `@next/mdx` (`createMDX`) configuration to the build log.
+///
+/// `createMDX({ options: { remarkPlugins: [remarkGfm] } })` used to be read by nobody: the
+/// app got plain CommonMark with no warning and no error, and the page simply rendered
+/// differently from what the author wrote. The options are now read by the config eval and
+/// stated here, every build, so their fate is visible: honoured natively, or handed to the
+/// app's own MDX pipeline (`src/mdx_runner.mjs`) — which hard-errors, naming the plugins and
+/// the file, if that pipeline is not installed.
+///
+/// Silent only when the app does not use `@next/mdx` at all.
+pub(crate) fn report_mdx_config(eval: Option<&serde_json::Value>) {
+    let config = crate::mdx::MdxConfig::from_eval(eval);
+    if !config.configured {
+        return;
+    }
+    let summary = config.summary();
+    if config.unhonored_options().is_empty() {
+        eprintln!("[next.config] @next/mdx: {summary} — compiled by diffpack's native MDX compiler");
+    } else {
+        eprintln!(
+            "[next.config] @next/mdx: {summary} — .mdx/.md files are compiled with the app's \
+             own @mdx-js/mdx pipeline so these run"
+        );
+    }
+}
+
+/// Browser aliases for the Node built-ins Next.js POLYFILLS for client bundles.
+///
+/// Next ships these under `next/dist/compiled/` and its client webpack config maps the
+/// built-in specifier onto them, so `import { format } from "url"` in a page is valid
+/// Next code and `next build` accepts it. Without this table diffpack's (correct)
+/// "node built-in cannot be bundled for the browser" error rejects an app that Next
+/// builds — which is what happened to `examples/with-shallow-routing`.
+///
+/// Only built-ins Next actually vendors are mapped, and only when the file is really
+/// present in this app's `node_modules`: a missing one stays a hard error rather than
+/// resolving to nothing. Built-ins Next does NOT polyfill (`fs`, `net`, `child_process`,
+/// …) are deliberately absent and keep failing loudly.
+pub fn next_browser_polyfill_aliases(root: &Path) -> Vec<(String, String)> {
+    // specifier -> Next's vendored package directory, mirroring next/dist/build/webpack-config.
+    const POLYFILLS: &[(&str, &str)] = &[
+        ("assert", "assert"),
+        ("buffer", "buffer"),
+        ("crypto", "crypto-browserify"),
+        ("events", "events"),
+        ("path", "path-browserify"),
+        ("process", "process"),
+        ("punycode", "punycode"),
+        ("querystring", "querystring-es3"),
+        ("stream", "stream-browserify"),
+        ("string_decoder", "string_decoder"),
+        ("timers", "timers-browserify"),
+        ("url", "native-url"),
+        ("util", "util"),
+        ("vm", "vm-browserify"),
+        ("zlib", "browserify-zlib"),
+    ];
+    let compiled = root.join("node_modules").join("next").join("dist").join("compiled");
+    let mut aliases = Vec::new();
+    for (specifier, vendored) in POLYFILLS {
+        let dir = compiled.join(vendored);
+        if !dir.is_dir() {
+            continue;
+        }
+        aliases.push(((*specifier).to_string(), dir.to_string_lossy().into_owned()));
+        // `node:`-prefixed form resolves to the same polyfill.
+        aliases.push((format!("node:{specifier}"), dir.to_string_lossy().into_owned()));
+    }
+    aliases
+}
+
+/// The app's `next.config.<ext>` (see [`NEXT_CONFIG_EXTS`]), or None. A `next.config` is
+/// OPTIONAL in Next.js, so its absence is not evidence that a project is not a Next app.
+pub fn next_config_path(root: &Path) -> Option<PathBuf> {
+    NEXT_CONFIG_EXTS
         .iter()
-        .chain(["mjs"].iter())
-        .any(|ext| root.join(format!("next.config.{ext}")).is_file());
-    if !has_next_config {
+        .map(|ext| root.join(format!("next.config.{ext}")))
+        .find(|path| path.is_file())
+}
+
+/// Whether `root` is a Next.js project at all — router-independent, and the guard that
+/// keeps a non-Next `app/` (a TanStack `routesDirectory`, say) from being hijacked by the
+/// Next adapters. Two signals, OR'd: a `next` dependency in `package.json`, or a
+/// `next.config.*`. Both are needed — real apps commonly have no config (it is optional),
+/// and diffpack's own hermetic fixtures have no `package.json`.
+pub fn is_next_project(root: &Path) -> bool {
+    let manifest = root.join("package.json");
+    if let Ok(text) = std::fs::read_to_string(&manifest) {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(json) => {
+                let declares_next = ["dependencies", "devDependencies"]
+                    .iter()
+                    .any(|field| json.get(field).and_then(|deps| deps.get("next")).is_some());
+                if declares_next {
+                    return true;
+                }
+            }
+            // Never silently answer "not a Next app" because of a broken manifest: say so
+            // loudly, then fall through to the config signal.
+            Err(error) => eprintln!(
+                "next detection: cannot parse {} ({error}); falling back to next.config detection",
+                manifest.display(),
+            ),
+        }
+    }
+    next_config_path(root).is_some()
+}
+
+/// The app-router directory for `root`, checking `app/` then `src/app/` (Next's own
+/// precedence: the root location wins). None when neither exists.
+pub fn app_dir(root: &Path) -> Option<PathBuf> {
+    [root.join("app"), root.join("src").join("app")]
+        .into_iter()
+        .find(|candidate| candidate.is_dir())
+}
+
+/// Detects whether `root` is a Next.js app-router project this adapter handles: a Next
+/// project (see [`is_next_project`]) whose `app/` — or `src/app/` — contains at least one
+/// `page`/`route` module ANYWHERE beneath it (Next has no requirement that the app root
+/// itself be a route: `app/[lang]/page.tsx` alone is a valid app). Returns the resolved
+/// page/route path when so.
+fn detect_app_router(root: &Path) -> Option<PathBuf> {
+    if !is_next_project(root) {
         return None;
     }
-    let app = root.join("app");
-    if !app.is_dir() {
-        return None;
-    }
-    first_existing_page(&app)
+    first_page_under(&app_dir(root)?)
 }
 
 /// Whether `root` is a Next.js app-router project this adapter handles. Public
@@ -192,6 +307,31 @@ fn first_existing_ext(dir: &Path, stem: &str, exts: &[&str]) -> Option<PathBuf> 
 /// The route `page` module (MDX-eligible: `page.{tsx,jsx,ts,js,mdx,md}`).
 fn first_existing_page(dir: &Path) -> Option<PathBuf> {
     first_existing_ext(dir, "page", &PAGE_EXTS)
+}
+
+/// The first `page`/`route` module anywhere under `dir` (breadth of the whole subtree,
+/// deterministic: children are sorted). This is DETECTION only, so it must never fail —
+/// only decline; that is why it walks the tree itself instead of reusing
+/// [`discover_routes`], which parses sources and can return `Err`. Skips dotdirs, the
+/// adapter's own output, and `node_modules`.
+fn first_page_under(dir: &Path) -> Option<PathBuf> {
+    if let Some(page) = first_existing_page(dir).or_else(|| first_existing(dir, "route")) {
+        return Some(page);
+    }
+    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| !name.starts_with('.') && name != ADAPTER_DIR && name != "node_modules")
+                .unwrap_or(false)
+        })
+        .collect();
+    children.sort();
+    children.iter().find_map(|child| first_page_under(child))
 }
 
 /// Walks `app/` (skipping the adapter's own output) for `"use client"` modules,
@@ -276,7 +416,7 @@ fn scan_metadata(path: &Path, source: &str) -> RouteMetadata {
         return RouteMetadata::default();
     }
     let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     let mut meta = RouteMetadata::default();
     for statement in &parsed.program.body {
@@ -965,12 +1105,15 @@ pub fn write_prerender_plan(project_root: &Path, out_dir: &Path) -> Result<usize
         .map_err(|error| format!("cannot open project root {}: {error}", project_root.display()))?;
     if detect_app_router(&root).is_none() {
         return Err(format!(
-            "{} is not a Next.js app-router project (no app/ + next config); \
+            "{} is not a Next.js app-router project (no `next` dependency / next.config, or \
+             no app/ or src/app containing a page); \
              `build-app <root> static` only prerenders app-router apps",
             root.display(),
         ));
     }
-    let app_dir = root.join("app");
+    let app_dir = app_dir(&root).ok_or_else(|| {
+        format!("{}: app-router detected but no app/ or src/app directory", root.display())
+    })?;
     let layout = first_existing(&app_dir, "layout");
     let layout_abs = layout.as_ref().map(|l| l.canonicalize().unwrap_or_else(|_| l.clone()));
     let disc = discover_routes(&app_dir, layout_abs.as_deref())?;
@@ -1812,123 +1955,175 @@ fn strip_intercept_marker(comp: &str) -> &str {
     s
 }
 
-/// Whether any app module imports a stylesheet (`import "./globals.css"` or a CSS
-/// Module `import styles from "./x.module.css"`). When so, the react-server build's
-/// compiled+scoped CSS (`server.css`, preserved to `public/rsc.css`) is linked from
-/// the document head. The react-server graph is authoritative for CSS-Module class
-/// scoping, since Server Components render there — its `styles.x` values match the
-/// classes in its emitted CSS.
-fn app_has_css(app_dir: &Path) -> bool {
-    fn walk(dir: &Path) -> bool {
-        let Ok(read) = std::fs::read_dir(dir) else { return false };
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if walk(&path) {
-                    return true;
-                }
-            } else if is_module_file(&path)
-                && let Ok(source) = std::fs::read_to_string(&path) {
-                    // A `.css`/`.scss`/`.sass` import specifier anywhere in the module.
-                    if source.contains(".css\"") || source.contains(".css'")
-                        || source.contains(".scss\"") || source.contains(".scss'")
-                        || source.contains(".sass\"") || source.contains(".sass'")
-                    {
-                        return true;
-                    }
-                }
-        }
-        false
-    }
-    walk(app_dir)
-}
-
 /// The served path the react-server build's compiled CSS (`server/server.css`) is
 /// preserved to (see `main.rs`), and the href the adapter links from `<head>`.
 pub const RSC_CSS_URL: &str = "/rsc.css";
 
-/// Collects every `next/font` usage across the app's module files (deduped), so the
-/// adapter can generate one CSS block covering all fonts. Mirrors island scanning.
-fn collect_app_fonts(app_dir: &Path) -> Result<Vec<crate::next_font::FontUsage>, String> {
-    let mut usages = Vec::new();
-    collect_fonts_dir(app_dir, &mut usages)?;
-    Ok(usages)
+/// The file name the react-server build gives its compiled stylesheet, next to the
+/// render entry. Its EXISTENCE is the single fact both halves of the stylesheet
+/// concept read: `main.rs` preserves exactly this file to the served
+/// `public/rsc.css`, and the render entry links [`RSC_CSS_URL`] only when it is
+/// there. Two derivations of the same fact cannot disagree; a source scan and an
+/// emitted artifact can, and did — a `<link>` to a 404.
+pub const RSC_EMITTED_CSS_FILE: &str = "server.css";
+
+/// The module-level facts one project walk yields for the adapter.
+struct ProjectScan {
+    /// Every `"use client"` module, canonical + sorted + deduped: the islands pinned
+    /// into the client and SSR graphs so their client references resolve.
+    islands: Vec<PathBuf>,
+    /// Every `next/font` usage (deduped), so the adapter generates one CSS block
+    /// covering all fonts.
+    fonts: Vec<crate::next_font::FontUsage>,
+    /// The source text of every module the walk read, keyed by canonical path, handed
+    /// to [`crate::project_graph`] so the reachability walk re-reads nothing.
+    sources: std::collections::HashMap<PathBuf, String>,
 }
 
-fn collect_fonts_dir(dir: &Path, usages: &mut Vec<crate::next_font::FontUsage>) -> Result<(), String> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(_) => return Ok(()),
+/// Scans the WHOLE project — not just `app/` — for the module facts above, over the
+/// same [`crate::rsc::walk_project_modules`] the `"use server"` action scan uses, so
+/// the two halves of the RSC directive concept cannot diverge on root or skip-list.
+///
+/// Rooted at the project because a `"use client"` component, a `next/font` call, or a
+/// stylesheet import is routinely a SIBLING of the app directory rather than a child
+/// of it (`src/components/`, `src/lib/` next to `src/app/`; `components/` next to
+/// `app/`). An app-rooted walk misses those, the island never enters the client graph,
+/// it therefore gets no client-references-manifest entry, and the react-server render
+/// dies with `Could not find the module "…" in the React Client Manifest`.
+///
+/// Honest cost of discovery-by-filesystem-walk rather than by graph reachability:
+/// every `"use client"` file in the tree becomes a pin, including ones no route
+/// imports (Next pins only what is reachable), and a `"use client"` module inside
+/// `node_modules` is never seen at all — the walk must skip dependencies to stay
+/// tractable. The over-approximation is what makes the manifest complete, so it
+/// stays; what it must NOT do is make dead code fatal, which
+/// [`drop_unreachable_unbuildable_islands`] is responsible for.
+fn scan_project(root: &Path) -> Result<ProjectScan, String> {
+    let mut scan = ProjectScan {
+        islands: Vec::new(),
+        fonts: Vec::new(),
+        sources: std::collections::HashMap::new(),
     };
-    for entry in read {
-        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
-            collect_fonts_dir(&path, usages)?;
-        } else if is_module_file(&path)
-            && let Ok(source) = std::fs::read_to_string(&path)
-                && source.contains("next/font") {
-                    for usage in crate::next_font::scan_next_font(&path, &source) {
-                        if !usages.contains(&usage) {
-                            usages.push(usage);
-                        }
-                    }
+    crate::rsc::walk_project_modules(root, &mut |path, source| {
+        if source.contains("use client")
+            && detect_directive(path, source) == Some(RscDirective::Client)
+        {
+            scan.islands.push(path.to_path_buf());
+        }
+        if source.contains("next/font") {
+            for usage in crate::next_font::scan_next_font(path, source)? {
+                if !scan.fonts.contains(&usage) {
+                    scan.fonts.push(usage);
                 }
-    }
-    Ok(())
+            }
+        }
+        scan.sources.insert(path.to_path_buf(), source.to_string());
+        Ok(())
+    })?;
+    scan.islands.sort();
+    scan.islands.dedup();
+    Ok(scan)
 }
 
-fn scan_client_islands(app_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut islands = Vec::new();
-    scan_islands_dir(app_dir, &mut islands)?;
-    islands.sort();
-    islands.dedup();
-    Ok(islands)
-}
-
-fn scan_islands_dir(dir: &Path, islands: &mut Vec<PathBuf>) -> Result<(), String> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(_) => return Ok(()),
-    };
-    for entry in read {
-        let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
-            if matches!(
-                entry.file_name().to_str(),
-                Some("node_modules" | ".diffpack-output" | ".diffpack-next" | ".git" | ".next")
-            ) {
-                continue;
+/// Every module the app's ROUTES are built from: each route's page and its whole
+/// nested layout/loading/error/template chain (parallel `@slot` subtrees included),
+/// the root layout, `not-found`, `global-error`, every `route.*` handler, and each
+/// intercepting route's page + chain. These are the entry points the react-server
+/// graph is rooted at, and therefore the definition of "a route can reach it".
+fn route_module_roots(disc: &Discovered) -> Vec<PathBuf> {
+    fn push_levels(levels: &[Level], out: &mut Vec<PathBuf>) {
+        for level in levels {
+            for path in [&level.layout, &level.loading, &level.error, &level.template]
+                .into_iter()
+                .flatten()
+            {
+                out.push(path.clone());
             }
-            scan_islands_dir(&path, islands)?;
-        } else if is_module_file(&path) {
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !source.contains("use client") {
-                continue;
-            }
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            if detect_directive(&canonical, &source) == Some(RscDirective::Client) {
-                islands.push(canonical);
+            for slot in &level.slots {
+                if let Some(default) = &slot.default {
+                    out.push(default.clone());
+                }
+                for route in &slot.routes {
+                    out.push(route.page.clone());
+                    push_levels(&route.levels, out);
+                }
             }
         }
     }
-    Ok(())
+    let mut roots = Vec::new();
+    for path in [&disc.root_layout, &disc.app_not_found, &disc.global_error]
+        .into_iter()
+        .flatten()
+    {
+        roots.push(path.clone());
+    }
+    for route in &disc.routes {
+        roots.push(route.page.clone());
+        push_levels(&route.levels, &mut roots);
+    }
+    for handler in &disc.handlers {
+        roots.push(handler.file.clone());
+    }
+    for intercept in &disc.intercepts {
+        roots.push(intercept.page.clone());
+        push_levels(&intercept.levels, &mut roots);
+    }
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
-fn is_module_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
-    )
+/// Removes from `islands` every `"use client"` module that (a) no route can reach and
+/// (b) cannot be built, returning the exclusions for the caller to report.
+///
+/// THE RULE. Island discovery is a filesystem walk, so it finds files that are not
+/// part of the application at all — a leftover component, an `examples/` sketch, a
+/// `__tests__` helper. Pinning them is harmless while they compile, and that
+/// over-approximation is what keeps the React Client Manifest complete. But a pin is a
+/// hard build dependency, so before this an unreachable file with an unresolvable
+/// import failed the WHOLE build: dead code was fatal.
+///
+/// The rule chosen is the narrowest one that fixes exactly that: **an island is
+/// dropped only when it is both unbuildable and unreachable.**
+///
+/// * Unbuildable AND reachable from a route — left pinned. The bundler reports it as
+///   the fatal, specifier-naming diagnostic it already does. A real broken import in
+///   live code must never be downgraded.
+/// * Buildable but unreachable — still pinned, exactly as before. Nothing changes for
+///   dead code that compiles.
+/// * Unbuildable and unreachable — dropped, and reported by the caller naming the
+///   island, the module that carries the bad specifier, and the specifier. Never
+///   silent: the app is told precisely what was excluded and why.
+///
+/// The classification is deliberately asymmetric in the safe direction. Failing to
+/// resolve something the bundler could resolve only makes an *unreachable* island
+/// eligible for a drop, which is what the rule wants anyway; a reachable island is
+/// never dropped whatever the probe thinks.
+fn drop_unreachable_unbuildable_islands(
+    islands: &mut Vec<PathBuf>,
+    scan: &ProjectScan,
+    disc: &Discovered,
+    aliases: &[(String, String)],
+) -> Vec<(PathBuf, crate::project_graph::UnresolvedImport)> {
+    let route_roots = route_module_roots(disc);
+    let mut seeds = route_roots.clone();
+    seeds.extend(islands.iter().cloned());
+    let graph = crate::project_graph::ProjectImportGraph::build(&seeds, &scan.sources, aliases);
+    let mut unbuildable: Vec<(PathBuf, crate::project_graph::UnresolvedImport)> = Vec::new();
+    for island in islands.iter() {
+        if let Some(reason) = graph.first_unresolved_from(island) {
+            unbuildable.push((island.clone(), reason));
+        }
+    }
+    if unbuildable.is_empty() {
+        return Vec::new();
+    }
+    let reachable = graph.reachable_from(&route_roots);
+    unbuildable.retain(|(island, _)| !reachable.contains(island));
+    let dropped: std::collections::HashSet<PathBuf> =
+        unbuildable.iter().map(|(island, _)| island.clone()).collect();
+    islands.retain(|island| !dropped.contains(island));
+    unbuildable
 }
 
 /// A JS string literal for an absolute path (JSON-quoted; escapes backslashes and
@@ -1979,18 +2174,22 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     let Some(page) = detect_app_router(&root) else {
         return Ok(None);
     };
-    let app_dir = root.join("app");
+    let app_dir = app_dir(&root).ok_or_else(|| {
+        format!("{}: app-router detected but no app/ or src/app directory", root.display())
+    })?;
     let layout = first_existing(&app_dir, "layout");
-    let mut islands = scan_client_islands(&app_dir)?;
-    // `next/font` usages across the app: the transform (next_font.rs) rewrites the
-    // calls to static objects and drops the import; here we generate the companion
-    // CSS (Google @import + the CSS-variable classes) that the render entry injects
-    // as a React-hoisted <style> into the document head.
-    let font_css = crate::next_font::generate_css(&collect_app_fonts(&app_dir)?);
-    // Whether to link the app's compiled stylesheet (globals.css + CSS Modules)
-    // into the head. The CSS itself is the react-server build's `server.css`,
-    // preserved to `public/rsc.css` by the build (main.rs).
-    let has_css = app_has_css(&app_dir);
+    // ONE walk of the project (NOT of `app/` — client components and fonts routinely
+    // live in siblings like `src/components`) yields the `"use client"` islands and the
+    // `next/font` usages. The font transform (next_font.rs) rewrites the calls to
+    // static objects and drops the import; here we generate the companion CSS (Google
+    // @import + the CSS-variable classes) the render entry injects as a React-hoisted
+    // <style> into the document head. The app's own stylesheet is NOT a fact of this
+    // walk: the head <link> is derived from the react-server build's emitted
+    // `server.css` at render time (see `rsc_entry_module`), which is the same artifact
+    // `main.rs` preserves to `public/rsc.css`.
+    let scan = scan_project(&root)?;
+    let mut islands = scan.islands.clone();
+    let font_css = crate::next_font::generate_css(&root, &scan.fonts)?;
 
     // Evaluate `next.config.*` ONCE for this pass (redirects/rewrites/headers + images +
     // the basePath/assetPrefix/trailingSlash/i18n routing surface). The result feeds the
@@ -2002,6 +2201,9 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // extension diffpack cannot discover is a clear hard error, never a silently-missing
     // route. Supported extensions (incl. md/mdx) flow through the built-in discovery set.
     validate_page_extensions(next_config.as_ref())?;
+    // State what `createMDX`'s options were and how they are honoured — they must never be
+    // dropped in silence (see `report_mdx_config`).
+    report_mdx_config(next_config.as_ref());
     let routing = Routing::from_eval(next_config.as_ref());
     let base_path = routing.base_path.clone();
     let asset_base = routing.asset_base();
@@ -2010,6 +2212,28 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     let shims_dir = adapter_dir.join("shims");
     std::fs::create_dir_all(&shims_dir)
         .map_err(|error| format!("cannot create {}: {error}", shims_dir.display()))?;
+
+    // `next/*` shims resolved as aliases (specifier -> shim file). Only the subset
+    // this adapter faithfully implements; `next/font`, `next/headers` server APIs,
+    // etc. are documented gaps and are intentionally NOT silently aliased to a
+    // no-op (an app importing an unshimmed `next/*` fails at resolve, naming it).
+    // Built here rather than at the config below because the island reachability probe
+    // must resolve specifiers exactly as the build will.
+    // (`react-server-dom-webpack/*` joins this list once the environment's resolve
+    // conditions are known — see the RSC-runtime alias below. It is NOT needed for the
+    // reachability probe: app code never imports the flight runtime, only diffpack's
+    // generated entries do.)
+    let alias = |spec: &str, file: &Path| (spec.to_string(), file.to_string_lossy().into_owned());
+    let mut aliases = vec![
+        alias("next/link", &shims_dir.join("link.tsx")),
+        alias("next/image", &shims_dir.join("image.tsx")),
+        alias("next/navigation", &shims_dir.join("navigation.ts")),
+        alias("next/headers", &shims_dir.join("headers.ts")),
+        alias("next/cache", &shims_dir.join("cache.ts")),
+        alias("next/server", &shims_dir.join("server.ts")),
+        alias("next/dynamic", &shims_dir.join("dynamic.ts")),
+        alias("next/script", &shims_dir.join("script.tsx")),
+    ];
 
     // --- app-router route table (every route + its nested layout/boundary chain) --
     let _ = &page; // detection anchor; the full route set comes from discovery.
@@ -2024,9 +2248,26 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         .handlers
         .extend(synthesize_metadata_file_handlers(&app_dir, &shims_dir)?);
 
+    // Island discovery over-approximates on purpose (see `scan_project`), and a pin is
+    // a hard build dependency — so a `"use client"` file that is BOTH unbuildable and
+    // unreachable from every route would otherwise fail the whole build for dead code.
+    // Drop exactly those, and say so: the app is told which file was excluded, which
+    // module carries the bad specifier, and what the specifier was. A reachable island
+    // is never dropped — its broken import stays the bundler's fatal diagnostic.
+    for (island, reason) in
+        drop_unreachable_unbuildable_islands(&mut islands, &scan, &discovered, &aliases)
+    {
+        eprintln!(
+            "next app-router: excluded the unreachable \"use client\" module {} — no route imports it, and it cannot be built: {} imports {:?}, which does not resolve. Import it from a route to make this a build error instead.",
+            island.display(),
+            reason.file.display(),
+            reason.specifier,
+        );
+    }
+
     // The generated client Error Boundary (a `"use client"` class component) wraps
     // each route level that has an `error.tsx`. Like the `next/link` shim it must be
-    // BUNDLED + REGISTERED in the client + ssr graphs (scan_islands_dir skips
+    // BUNDLED + REGISTERED in the client + ssr graphs (`scan_project` skips
     // `.diffpack-next/`) so its client reference resolves; in the react-server graph
     // it stays a client reference. Keyed by the SAME canonical path the react-server
     // render imports it from → manifest ids match. Write it first so its path exists.
@@ -2091,7 +2332,6 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &rsc_entry_module(
             &discovered,
             &font_css,
-            has_css,
             &error_boundary_canon,
             &segment_boundary_canon,
             &request_context_canon,
@@ -2103,7 +2343,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // react-server graph it stays a client reference (resolved to real code through
     // the seam); in the client + ssr graphs it must be BUNDLED and REGISTERED like
     // any island so its client reference resolves and it hydrates. Because
-    // `scan_islands_dir` skips `.diffpack-next/`, pin it explicitly here (write the
+    // `scan_project` skips `.diffpack-next/`, pin it explicitly here (write the
     // file first so its canonical path exists), keyed by the SAME canonical path the
     // react-server render resolves the `next/link` alias to → manifest ids match.
     let link_shim = shims_dir.join("link.tsx");
@@ -2111,6 +2351,19 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     let link_canon = link_shim.canonicalize().unwrap_or_else(|_| link_shim.clone());
     if !islands.contains(&link_canon) {
         islands.push(link_canon);
+    }
+    // `next/script` is the same shape: a `"use client"` component the react-server graph
+    // sees only as a client reference. Next's own `next/script` is CommonJS inside
+    // `node_modules`, which `scan_project` cannot see (it skips dependencies), so without
+    // this alias + pin the flight carries a client reference no client manifest has an
+    // entry for. Pinned by canonical path so all three graphs agree on the id.
+    let script_shim = shims_dir.join("script.tsx");
+    write_if_changed(&script_shim, next_script_shim())?;
+    let script_canon = script_shim
+        .canonicalize()
+        .unwrap_or_else(|_| script_shim.clone());
+    if !islands.contains(&script_canon) {
+        islands.push(script_canon);
     }
     write_if_changed(
         &adapter_dir.join("server.tsx"),
@@ -2185,20 +2438,17 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         })
         .collect();
 
-    // `next/*` shims resolved as aliases (specifier -> shim file). Only the subset
-    // this adapter faithfully implements; `next/font`, `next/headers` server APIs,
-    // etc. are documented gaps and are intentionally NOT silently aliased to a
-    // no-op (an app importing an unshimmed `next/*` fails at resolve, naming it).
-    let alias = |spec: &str, file: &Path| (spec.to_string(), file.to_string_lossy().into_owned());
-    let aliases = vec![
-        alias("next/link", &shims_dir.join("link.tsx")),
-        alias("next/image", &shims_dir.join("image.tsx")),
-        alias("next/navigation", &shims_dir.join("navigation.ts")),
-        alias("next/headers", &shims_dir.join("headers.ts")),
-        alias("next/cache", &shims_dir.join("cache.ts")),
-        alias("next/server", &shims_dir.join("server.ts")),
-        alias("next/dynamic", &shims_dir.join("dynamic.ts")),
-    ];
+    // The RSC runtime diffpack's own entries import. A real Next app does not depend on
+    // `react-server-dom-webpack` — Next vendors it — so it is resolved from the copy
+    // `next` ships, through that copy's `exports` under THESE conditions (the flight
+    // writer exists only under `react-server`; the client half differs browser vs node).
+    // An app that installs its own copy gets no alias and keeps it. See
+    // `rsc_runtime_resolve` for what happens when neither exists.
+    aliases.extend(crate::rsc_runtime_resolve::aliases(
+        &root,
+        &conditions,
+        target == Target::Client,
+    ));
 
     // React's dev/prod dispatch define. Production bundles the production React
     // (small, no dev warnings); DEV bundles the development React whose renderer
@@ -2244,6 +2494,13 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
                 root: Some(root.to_path_buf()),
                 postcss: crate::postcss::discover(&root).map(std::sync::Arc::new),
             },
+            // Next compiles JSX in `.js`/`.mjs`/`.cjs` (its SWC loader enables jsx
+            // for everything that is not a plain `.ts`).
+            jsx_extensions: crate::parser::JsxExtensions::NextJs,
+            // Next does not expose Vite's `esbuild.jsx*` knobs; a Next app that
+            // wants a different JSX runtime says so in its tsconfig, which
+            // `jsx_config_for` reads per file.
+            jsx: crate::transform::JsxConfig::default(),
         },
         entry: Some(entry),
     }))
@@ -2259,11 +2516,8 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
 /// (redirects/rewrites/headers/images). None when there is no config, node is missing,
 /// or it fails — every caller then falls back to its own defaults (best-effort, never a
 /// build error). stderr from the eval is surfaced.
-fn run_next_config_eval(root: &Path) -> Option<serde_json::Value> {
-    let config = ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"]
-        .iter()
-        .map(|f| root.join(f))
-        .find(|p| p.exists())?;
+pub(crate) fn run_next_config_eval(root: &Path) -> Option<serde_json::Value> {
+    let config = next_config_path(root)?;
     let loader = std::env::temp_dir().join("diffpack-next-config-eval.mjs");
     std::fs::write(&loader, include_str!("../scripts/rsc/next-config-eval.mjs")).ok()?;
     let out = std::process::Command::new("node")
@@ -2767,7 +3021,6 @@ fn hooks_context_module() -> &'static str {
 fn rsc_entry_module(
     disc: &Discovered,
     font_css: &str,
-    has_css: bool,
     error_boundary: &Path,
     segment_boundary: &Path,
     request_context: &Path,
@@ -2964,14 +3217,20 @@ fn rsc_entry_module(
     );
 
     // Head items (React 19 hoists <link>/<style>/<title>/<meta> into <head>).
-    let css_push = if has_css {
-        format!(
-            "  items.push(createElement(\"link\", {{ rel: \"stylesheet\", href: {}, precedence: \"low\" }}));\n",
-            js_str(&format!("{asset_base}{RSC_CSS_URL}"))
-        )
-    } else {
-        String::new()
-    };
+    //
+    // The app stylesheet <link> is derived from what the build EMITTED, not from a
+    // scan of the sources. `server.css` is written next to this entry exactly when the
+    // react-server module graph compiled any CSS, and `main.rs` preserves exactly that
+    // file to the served `public/rsc.css` — so one existence check decides both, and a
+    // <link> whose href 404s is not expressible. A source scan cannot do this: it sees
+    // CSS that the graph never compiles (a `"use client"` file no route imports; a
+    // string that merely ends in `.css`) and links a stylesheet that was never emitted.
+    let css_const = format!(
+        "// Linked only when the react-server build emitted a stylesheet beside this entry.\n\
+         const RSC_CSS_HREF = existsSync(new URL(\"./{RSC_EMITTED_CSS_FILE}\", import.meta.url)) ? {} : null;\n",
+        js_str(&format!("{asset_base}{RSC_CSS_URL}")),
+    );
+    let css_push = "  if (RSC_CSS_HREF) items.push(createElement(\"link\", { rel: \"stylesheet\", href: RSC_CSS_HREF, precedence: \"low\" }));\n".to_string();
     let (font_const, font_push) = if font_css.trim().is_empty() {
         (String::new(), String::new())
     } else {
@@ -3018,13 +3277,13 @@ fn rsc_entry_module(
 // to the orchestrator over fd 3), or dispatches a server action (`action` op).
 import {{ renderToReadableStream }} from "react-server-dom-webpack/server";
 import {{ createElement, Fragment, Suspense }} from "react";
-import {{ readFileSync, writeSync, statSync }} from "node:fs";
+import {{ readFileSync, writeSync, statSync, existsSync }} from "node:fs";
 import {{ fileURLToPath }} from "node:url";
 import {{ handleServerAction }} from "#diffpack-rsc-action-handler";
 import {{ NextRequest }} from "next/server";
 {request_context_import}{imports}{ns_imports}{handler_imports}{middleware_import}
 {middleware_const}
-{font_const}const ROUTES = [
+{css_const}{font_const}const ROUTES = [
 {route_entries}];
 // Intercepting routes: a soft-nav to a matching target renders the overlay page.
 const INTERCEPTS = [
@@ -3893,6 +4152,10 @@ fn ssr_entry_module(
     // The browser fetches the client bootstrap under the app's basePath/assetPrefix (the
     // orchestrator strips that prefix back off before the publicDir lookup).
     let client_js = js_str(&format!("{asset_base}/client.js"));
+    // The streaming destination is real source (src/next_runtime/flight_sink.js) spliced
+    // in verbatim so the node regression test can import the SAME code this entry runs.
+    // It carries this module's `node:stream` import.
+    let flight_sink = include_str!("next_runtime/flight_sink.js");
     format!(
         r#"// Generated by diffpack's next app-router adapter — the SSR-of-flight entry
 // (Target::Server, node conditions: react + react-dom/server +
@@ -3906,7 +4169,7 @@ import {{ createFromReadableStream }} from "react-server-dom-webpack/client";
 import {{ renderToPipeableStream, renderToStaticMarkup }} from "react-dom/server";
 import {{ createElement }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext, ServerInsertedHTMLContext }} from {hooks_import};
-import {{ Writable, PassThrough }} from "node:stream";
+{flight_sink}
 {pins}
 // Force a code split so the build uses the registry runtime the seam maps onto.
 import({lazy}).then((module) => {{
@@ -3925,13 +4188,20 @@ function installSeam() {{
   g.__webpack_require__ = (id) => runtime.require(id);
   g.__webpack_require__.u = (c) => c;
   g.__webpack_chunk_load__ = () => Promise.resolve();
+  // Next PATCHES the NODE builds of its vendored react-server-dom-webpack to read
+  // `globalThis.__next_require__` instead of `__webpack_require__` (its browser build
+  // still reads `__webpack_require__`). diffpack resolves the flight runtime from that
+  // vendored copy when the app has none, so the SSR-of-flight graph must answer to both
+  // names — same registry, one alias. Installed unconditionally: an app that installs
+  // the npm package reads `__webpack_require__` and never touches this.
+  g.__next_require__ = g.__webpack_require__;
 }}
 
 // Reconstruct the flight and render the whole document to an HTML string. The
 // client bootstrap module (`/client.js`) and the inlined flight are injected via
 // react-dom's bootstrap options, so the served DOM (scripts included) is exactly
 // what hydration on the browser expects — no mismatch.
-export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url) {{
+export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce) {{
   installSeam();
   const bytes = new Uint8Array(flightBytes);
   const stream = new ReadableStream({{
@@ -3988,6 +4258,10 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
     }});
     sink.on("error", reject);
     const {{ pipe }} = renderToPipeableStream(root, {{
+      // Content-Security-Policy: the request's `script-src 'nonce-…'` value, so every
+      // script react-dom emits (the bootstrap module + the inline bootstrap content)
+      // carries it. Without it a strict-CSP app blocks its own hydration.
+      nonce: nonce || undefined,
       bootstrapModules: [{client_js}],
       bootstrapScriptContent:
         "window.__DIFFPACK_FLIGHT__ = " + JSON.stringify(flightBase64) + ";" +
@@ -4022,10 +4296,11 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
 // array, so it hydrates from the SAME bytes with no second network fetch — and it works
 // regardless of whether client.js executes before or after the chunks arrive.
 //
-// All bytes go to `res` through ONE ordered async loop (React's HTML via a PassThrough,
-// flight scripts interleaved AFTER each HTML chunk), so a flight script can never
-// precede the doctype/shell.
-export async function renderFlightToStream(flightChunks, serverConsumerManifest, params, url, res, headers, status) {{
+// All bytes go to `res` through ONE ordered destination (`createFlightSink`), which
+// forwards React's chunks untouched and injects the queued flight scripts ONLY at a
+// react-dom flush-cycle boundary — react-dom's own `write()` boundaries fall every 2048
+// bytes and routinely land inside an HTML token (see flight_sink.js).
+export async function renderFlightToStream(flightChunks, serverConsumerManifest, params, url, res, headers, status, nonce) {{
   installSeam();
   const pathname = (url && url.pathname) || "/";
   const search = (url && url.search) || "";
@@ -4034,17 +4309,27 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
   let byteController;
   const byteStream = new ReadableStream({{ start(c) {{ byteController = c; }} }});
   const scriptQueue = [];
+  // Content-Security-Policy: a strict-CSP app (middleware sets `script-src 'nonce-…'`)
+  // blocks every inline script that does not carry the nonce — including the flight
+  // chunks below, without which the client never hydrates. Same value react-dom stamps
+  // on the bootstrap scripts via the `nonce` render option.
+  const nonceAttr = nonce ? " nonce=" + JSON.stringify(String(nonce)) : "";
   let pumpDone = false;
+  // Assigned once the destination exists; the pump nudges it so chunks that arrive while
+  // React has nothing to flush still reach the client at the next macrotask boundary.
+  let sink = null;
   const pump = (async () => {{
     for await (const b64 of flightChunks) {{
       const binary = Buffer.from(b64, "base64");
       byteController.enqueue(new Uint8Array(binary));
       scriptQueue.push(
-        "<script>(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([1," + JSON.stringify(b64) + "])</script>",
+        "<script" + nonceAttr + ">(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([1," + JSON.stringify(b64) + "])</script>",
       );
+      if (sink) sink.scheduleDrain();
     }}
     byteController.close();
-    scriptQueue.push("<script>(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([0])</script>");
+    scriptQueue.push("<script" + nonceAttr + ">(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([0])</script>");
+    if (sink) sink.scheduleDrain();
     pumpDone = true;
   }})();
   // The initial model resolves from the shell rows (does NOT await the whole stream);
@@ -4055,10 +4340,10 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
       throw new Error("diffpack next ssr: a server action was called during SSR");
     }},
   }});
-  // useServerInsertedHTML: per-request callbacks flushed into the byte stream AFTER each
-  // HTML chunk (streaming registries push as boundaries resolve). Shell styles land with
-  // the first chunk; late registrations flush after the shell (styled-components tolerates
-  // this). Zero cost unless a registry actually registers one.
+  // useServerInsertedHTML: per-request callbacks flushed into the byte stream at each
+  // flush-cycle boundary (streaming registries push as boundaries resolve). Shell styles
+  // land with the first boundary; late registrations flush after the shell
+  // (styled-components tolerates this). Zero cost unless a registry registers one.
   const inserted = [];
   let insertedFlushed = 0;
   const root = createElement(
@@ -4075,9 +4360,28 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     ),
   );
   await new Promise((resolve, reject) => {{
-    const html = new PassThrough();
     let shellStarted = false;
+    sink = createFlightSink({{
+      res,
+      scriptQueue,
+      renderInserted() {{
+        const out = [];
+        while (insertedFlushed < inserted.length) {{
+          out.push(renderToStaticMarkup(inserted[insertedFlushed++]()));
+        }}
+        return out;
+      }},
+      onFirstWrite() {{
+        shellStarted = true;
+      }},
+      // React ends the destination once every boundary is done; the pump's terminal
+      // `push([0])` may still be in flight, so wait for it before closing `res`.
+      beforeEnd: () => pump,
+    }});
+    sink.on("finish", resolve);
+    sink.on("error", reject);
     const {{ pipe }} = renderToPipeableStream(root, {{
+      nonce: nonce || undefined,
       bootstrapModules: [{client_js}],
       // No inlined full flight here — it streams as __DF_FLIGHT scripts. Seed the array
       // (so it exists before client.js runs) + the hooks-context globals.
@@ -4087,12 +4391,18 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onShellReady() {{
         res.writeHead(status || 200, headers);
-        pipe(html);
+        pipe(sink);
       }},
       onShellError(error) {{
-        if (!shellStarted) {{
-          try {{ res.writeHead(500, {{ "content-type": "text/html; charset=utf-8" }}); }} catch {{}}
-          res.end("<!doctype html><p>Internal Server Error</p>");
+        // Only a response whose status line has NOT gone out can still be a 500;
+        // `res.headersSent` is the authority (onShellReady may already have written
+        // the head even if the sink has not seen a byte yet). Writing a header on a
+        // sent response throws ERR_HTTP_HEADERS_SENT and kills the server process.
+        if (!shellStarted && !res.headersSent) {{
+          try {{
+            res.writeHead(500, {{ "content-type": "text/html; charset=utf-8" }});
+            res.end("<!doctype html><p>Internal Server Error</p>");
+          }} catch {{}}
         }}
         reject(error);
       }},
@@ -4100,30 +4410,6 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
         console.error("next-ssr stream onError:", error && error.message ? error.message : error);
       }},
     }});
-    // Forward React's HTML to `res`, flushing any queued flight scripts AFTER each HTML
-    // chunk (guarantees the shell precedes the first flight script). React ends `html`
-    // only once every boundary is done, by which point the flight is fully drained.
-    (async () => {{
-      try {{
-        for await (const chunk of html) {{
-          shellStarted = true;
-          res.write(chunk);
-          while (insertedFlushed < inserted.length) {{
-            res.write(renderToStaticMarkup(inserted[insertedFlushed++]()));
-          }}
-          while (scriptQueue.length) res.write(scriptQueue.shift());
-        }}
-        await pump;
-        while (insertedFlushed < inserted.length) {{
-          res.write(renderToStaticMarkup(inserted[insertedFlushed++]()));
-        }}
-        while (scriptQueue.length) res.write(scriptQueue.shift());
-        res.end();
-        resolve();
-      }} catch (error) {{
-        reject(error);
-      }}
-    }})();
   }});
 }}
 "#,
@@ -4523,6 +4809,19 @@ export function useLinkStatus() {
 }
 "##;
 
+/// `next/script` shim (`shims/script.tsx`). A `"use client"` reimplementation of Next's
+/// `<Script>`: `afterInteractive`/`lazyOnload` contribute only a `ReactDOM.preload` to the
+/// server-rendered document and inject the real `<script>` after mount; `beforeInteractive`
+/// additionally renders the `<script>` in place so it runs before hydration. Partytown
+/// (`strategy="worker"`) is NOT implemented and throws, naming the prop.
+///
+/// The shim exists because Next's own `next/script` is a CommonJS barrel inside
+/// `node_modules` wired to Next-internal singletons; aliasing to a project-local island is
+/// what makes the client reference resolvable in all three graphs.
+fn next_script_shim() -> &'static str {
+    include_str!("next_runtime/next_script_shim.tsx")
+}
+
 /// `next/dynamic` shim (`shims/dynamic.ts`). A lean reimplementation of Next's `dynamic()`
 /// keyed on its public option shape (`{ loading, ssr }`), backed by `React.lazy`. `ssr:true`
 /// (the default) wraps the lazy chunk in a `Suspense` with the `loading` fallback — valid in
@@ -4576,11 +4875,12 @@ export default function dynamic(loader, options) {
 
 // --- next/image build-time variant emit + manifest (Slice J / gap 4.2) -----------
 //
-// Next's `<Image>` produces a responsive `srcset` of pre-optimized variants. There
-// is no image-optimization server in this adapter: the optimization happens at BUILD
-// time (pure-Rust `image` crate) and the output is plain static files under
-// `public/_diffpack-image/`. The runtime shim (`next_image_shim`, a `getImgProps`
-// port) reads the generated manifest to build the `srcset` pointing at those files.
+// Next's `<Image>` produces a responsive `srcset` of `/_next/image?url=&w=&q=` URLs.
+// The shim (`next_image_shim`, a `getImgProps` port) emits that exact shape, but the
+// optimization itself happens at BUILD time (pure-Rust `image` crate): every width in
+// the ladder is written to `public/_diffpack-image/` and indexed in `variants.json`,
+// which the orchestrator's `/_next/image` handler serves from directly. Runtime
+// re-encoding is only for widths/qualities the build did not precompute.
 //
 // `deviceSizes`/`imageSizes` mirror Next's defaults (`next/dist/shared/lib/image-config`).
 
@@ -4774,10 +5074,11 @@ pub struct PublicImage(ImageEntry);
 /// ([`scan_metadata_images`]) as the head-link emitter, so the copied files and the
 /// linked URLs cannot drift.
 pub fn emit_metadata_images(root: &Path, out_public: &Path) -> Result<usize, String> {
-    let app_dir = root.join("app");
-    if !app_dir.is_dir() {
+    // A no-op (not an error) for a project with no app dir at all: main.rs calls this on
+    // EVERY build, including non-Next ones.
+    let Some(app_dir) = app_dir(root) else {
         return Ok(0);
-    }
+    };
     let images = scan_metadata_images(&app_dir)?;
     let mut written = 0usize;
     for img in &images {
@@ -4856,6 +5157,7 @@ pub fn emit_image_variants(
     let public_dir = root.join("public");
     let variant_dir = out_public.join("_diffpack-image");
     let mut written = 0usize;
+    let mut served: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     for PublicImage(entry) in images {
         if entry.unoptimized {
             continue;
@@ -4880,9 +5182,41 @@ pub fn emit_image_variants(
                 .map_err(|error| format!("cannot write {}: {error}", dest.display()))?;
             written += 1;
         }
+        let widths: serde_json::Map<String, serde_json::Value> = entry
+            .variants
+            .iter()
+            .map(|&w| {
+                (
+                    w.to_string(),
+                    serde_json::Value::String(image_variant_url(&entry.src, w, &entry.ext)),
+                )
+            })
+            .collect();
+        served.insert(
+            entry.src.clone(),
+            serde_json::json!({ "width": entry.width, "widths": widths }),
+        );
     }
+    // The orchestrator's `/_next/image` handler reads this to answer a request from a
+    // build-emitted variant instead of re-optimizing at runtime. Written even when
+    // empty so a missing file always means "this build emitted no variants" rather
+    // than "the manifest step silently didn't run".
+    std::fs::create_dir_all(&variant_dir)
+        .map_err(|error| format!("cannot create {}: {error}", variant_dir.display()))?;
+    let manifest_path = variant_dir.join(IMAGE_VARIANT_MANIFEST);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&serde_json::Value::Object(served))
+            .map_err(|error| format!("cannot serialize the image variant manifest: {error}"))?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", manifest_path.display()))?;
     Ok(written)
 }
+
+/// File name of the build-emitted variant manifest the orchestrator's `/_next/image`
+/// handler reads (under `<out>/public/_diffpack-image/`). Kept in one place so the
+/// emitter here and the reader in `scripts/rsc/next-server.mjs` cannot drift silently.
+pub(crate) const IMAGE_VARIANT_MANIFEST: &str = "variants.json";
 
 /// Generate the `.diffpack-next/image-manifest.ts` module the `next/image` shim
 /// imports: a default-exported map from served src URL to its variant plan. Always
@@ -4891,9 +5225,10 @@ pub fn emit_image_variants(
 fn image_manifest_module(images: &[PublicImage]) -> String {
     let mut body = String::from(
         "// GENERATED by diffpack next-adapter (Slice J / gap 4.2). Maps each public\n\
-         // image src to its build-emitted responsive variants. The `next/image` shim\n\
-         // reads this to build a real `srcset` pointing at static files under\n\
-         // `/_diffpack-image/` — no image-optimization server.\nexport default {\n",
+         // image src to its intrinsic size, blurDataURL and build-emitted responsive\n\
+         // variants. The `next/image` shim reads the intrinsic/blur/unoptimized data\n\
+         // from here; the variant FILES are served by the orchestrator behind Next's\n\
+         // `/_next/image` URL (see `_diffpack-image/variants.json`).\nexport default {\n",
     );
     for PublicImage(entry) in images {
         if entry.unoptimized {
@@ -4934,17 +5269,19 @@ fn next_image_shim(asset_base: &str) -> String {
 }
 
 const NEXT_IMAGE_SHIM_HEADER: &str = r#"// `next/image` (diffpack next app-router adapter) — a faithful port of Next's
-// `getImgProps`. Raster srcs with a build-emitted variant manifest entry get a real
-// responsive `srcSet`/`sizes` pointing at static files under `/_diffpack-image/`
-// (variants are emitted at BUILD time by the pure-Rust `image` crate — there is NO
-// image-optimization server). SVG / `data:` / `blob:` / `unoptimized` srcs render
-// the raw src with NO `srcSet` (byte-faithful to Next's SVG handling). `priority`
-// renders a `<link rel="preload" as="image">` that React 19 hoists into <head>.
-// A LOCAL raster with no manifest entry throws (naming the src) — never a silent
-// degraded <img>. Runs in all three graphs (no directive; imported by Server
+// `getImgProps`. With Next's DEFAULT loader every optimizable src — a `/public`
+// string, a static import, or an allow-listed remote — renders the optimizer URL
+// shape `/_next/image?url=&w=&q=`, exactly as Next does; there is no "prefer a
+// build-time file" branch, because Next has none. The pixels are still computed at
+// BUILD time: the orchestrator answers those `/_next/image` requests from the
+// build-emitted responsive variants (pure-Rust `image` crate) whenever one exists,
+// and only shells out to the native optimizer for a width/quality the build did not
+// precompute. SVG / `data:` / `blob:` / `unoptimized` srcs render the raw src with
+// NO `srcSet` (byte-faithful to Next's SVG handling). `priority`/`preload`
+// render a `<link rel="preload" as="image">` that React 19 hoists into <head>.
+// Runs in all three graphs (no directive; imported by Server
 // Components). Static image imports (`import x from './x.png'`) arrive as the
-// build-emitted object `{ src, width, height, blurDataURL, variants }` and use
-// their embedded variants directly (no MANIFEST lookup). `placeholder="blur"`
+// build-emitted object `{ src, width, height, blurDataURL, variants }`. `placeholder="blur"`
 // paints the build-generated blurDataURL as the img's own CSS background so the
 // foreground image covers it on load — a zero-runtime approximation of Next (NO
 // client JS); a blur requested with no resolvable blurDataURL is a hard error.
@@ -4958,6 +5295,8 @@ const NEXT_IMAGE_SHIM_BODY: &str = r#"const DEVICE_SIZES = CONFIG.deviceSizes ||
 const IMAGE_SIZES = CONFIG.imageSizes || [16, 32, 48, 64, 96, 128, 256, 384];
 const ALL_SIZES = [...IMAGE_SIZES, ...DEVICE_SIZES];
 const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";
+// object-fit values that are not valid background-size values (Next's list).
+const INVALID_BACKGROUND_SIZE_VALUES = ["-moz-initial", "fill", "none", "scale-down", undefined];
 
 // Prepend the app's asset base (assetPrefix + basePath) to a LOCAL (leading-slash) URL,
 // once — so build-emitted variant URLs and static image srcs resolve under the configured
@@ -4973,14 +5312,14 @@ function withAssetBase(u) {
 function optimizerUrl(rawSrc, w, quality) {
   return IMAGE_ENDPOINT + "?url=" + encodeURIComponent(rawSrc) + "&w=" + w + "&q=" + (quality || 75);
 }
-// A responsive srcset pointing at the runtime optimizer (one entry per candidate width)
-// plus the largest-width finalSrc — the DYNAMIC/REMOTE fallback. A src with a build-time
-// variant entry never reaches here (build variants are preferred).
+// A responsive srcset pointing at the optimizer endpoint (one entry per candidate width)
+// plus the largest-width finalSrc. This is the DEFAULT-loader path for EVERY optimizable
+// src — local, static-import or remote — exactly as in Next.
 function optimizerSrcSet(rawSrc, numericWidth, sizes, quality) {
   const { widths, kind } = getWidths(numericWidth, sizes);
   const parts = widths.map((w, i) => optimizerUrl(rawSrc, w, quality) + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
   const finalSrc = optimizerUrl(rawSrc, widths[widths.length - 1], quality);
-  return { srcSet: parts.join(", "), finalSrc };
+  return { srcSet: parts.join(", "), finalSrc, kind };
 }
 
 // Built-in third-party loaders (Next's `images.loader` presets). Each returns a URL for
@@ -5063,16 +5402,30 @@ function getWidths(width, sizes) {
   return { widths: seen, kind: "x" };
 }
 
-function isRasterPath(s) {
-  return /\.(png|jpe?g|webp|gif|avif)(\?|$)/i.test(s);
-}
-
 export default function Image(props) {
+  // Every prop Next's `getImgProps` consumes is destructured here so it can NEVER
+  // leak through `...rest` onto the DOM <img> as a bogus attribute.
   const {
     src, alt, width, height, priority, loader, placeholder, blurDataURL,
-    fill, quality, sizes, unoptimized, loading, fetchPriority, decoding,
+    fill: fillProp, quality, sizes: sizesProp, unoptimized, loading, fetchPriority, decoding,
+    style: styleProp, layout, objectFit, objectPosition, overrideSrc, preload,
     ...rest
   } = props;
+  // Port of Next's legacy `layout` mapping: `layout="fill"` implies `fill`, and
+  // intrinsic/responsive contribute style plus a default `sizes`.
+  let fill = Boolean(fillProp);
+  let sizes = sizesProp;
+  let style = styleProp;
+  if (layout) {
+    if (layout === "fill") fill = true;
+    const layoutToStyle = {
+      intrinsic: { maxWidth: "100%", height: "auto" },
+      responsive: { width: "100%", height: "auto" },
+    };
+    const layoutToSizes = { responsive: "100vw", fill: "100vw" };
+    if (layoutToStyle[layout]) style = { ...style, ...layoutToStyle[layout] };
+    if (layoutToSizes[layout] && !sizes) sizes = layoutToSizes[layout];
+  }
   const isObjectSrc = src != null && typeof src === "object";
   const rawSrc = typeof src === "string" ? src : (src && (src.src || src.default)) || "";
   // A LOCAL src rendered raw (svg/data/unoptimized/unknown passthrough) still needs the
@@ -5100,76 +5453,143 @@ export default function Image(props) {
       "`blurDataURL` prop; public png/jpeg get one generated automatically."
     );
   }
-  // Next's blur placeholder style: the tiny blurDataURL painted as the img's own
-  // background, which the foreground image covers once it loads. Zero client JS.
-  const blurStyle =
-    placeholder === "blur" && resolvedBlur
+  // Next's `getImgProps` img style, assembled in Next's exact order:
+  //   Object.assign(fill ? {...positioning} : {}, showAltText ? {} : { color: "transparent" }, style)
+  // `color: transparent` hides the alt text while the image loads; Next only drops it
+  // once the <img> has ERRORED (`showAltText`), which a server-rendered <img> never
+  // has — so it is unconditional here. Without it every next/image element differs
+  // from Next on `color` (and on `border-*-color`, which inherits `currentColor`).
+  const imgStyle = Object.assign(
+    fill
       ? {
-          backgroundSize: "cover",
-          backgroundPosition: "50% 50%",
-          backgroundRepeat: "no-repeat",
-          backgroundImage: 'url("' + resolvedBlur + '")',
+          position: "absolute",
+          height: "100%",
+          width: "100%",
+          left: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
+          objectFit,
+          objectPosition,
         }
-      : undefined;
-  // Merge the blur background UNDER any caller style (caller wins on conflict).
-  const finalStyle = blurStyle ? { ...blurStyle, ...rest.style } : rest.style;
+      : {},
+    { color: "transparent" },
+    style,
+  );
+  // Next's placeholder background: the blurDataURL (placeholder="blur") or a caller
+  // -supplied `data:` URI (placeholder="data:image/...", the shimmer pattern) painted
+  // as the img's own background, which the foreground image covers on load. Zero
+  // client JS. `backgroundSize`/`backgroundPosition` derive from the resolved
+  // objectFit/objectPosition exactly as Next does.
+  const backgroundImage =
+    placeholder === "blur" && resolvedBlur
+      ? 'url("' + resolvedBlur + '")'
+      : placeholder && placeholder !== "empty" && placeholder !== "blur"
+        ? 'url("' + placeholder + '")'
+        : null;
+  const backgroundSize = !INVALID_BACKGROUND_SIZE_VALUES.includes(imgStyle.objectFit)
+    ? imgStyle.objectFit
+    : imgStyle.objectFit === "fill"
+      ? "100% 100%"
+      : "cover";
+  const placeholderStyle = backgroundImage
+    ? {
+        backgroundSize,
+        backgroundPosition: imgStyle.objectPosition || "50% 50%",
+        backgroundRepeat: "no-repeat",
+        backgroundImage,
+      }
+    : {};
+  // Next spreads the placeholder background OVER imgStyle (the placeholder wins).
+  const finalStyle = { ...imgStyle, ...placeholderStyle };
+  // Next tags every <img> it renders with data-nimg ("fill" or "1").
+  const dataNimg = fill ? "fill" : "1";
   const isData = rawSrc.startsWith("data:") || rawSrc.startsWith("blob:");
-  const isSvg = /\.svg(\?|$)/i.test(rawSrc);
+  const isSvg = /\.svg$/i.test(rawSrc.split("?")[0]);
   const isRemote = /^https?:\/\//i.test(rawSrc);
   // A static-import object with no decodable variants (e.g. a format the build's
   // image crate can't optimize) renders unoptimized rather than throwing.
   const objectUnopt = isObjectSrc && !(src.width && src.variants);
-  const forcedUnopt = Boolean(unoptimized) || CONFIG.unoptimized || isData || isSvg || objectUnopt || (entry && entry.unoptimized);
 
   // Loader precedence, matching Next: the `loader` prop > a next.config `loaderFile`
   // (bundled as CONFIG.loaderFn) > a built-in named loader (imgix/cloudinary/akamai).
+  // No explicit loader = Next's DEFAULT loader (the `/_next/image` optimizer).
   const explicitLoader =
     typeof loader === "function" ? loader : CONFIG.loaderFn || builtinLoader(CONFIG.loader);
+  const isDefaultLoader = !explicitLoader;
+  // Next's SVG special case is DEFAULT-LOADER ONLY (`get-img-props`: `isDefaultLoader &&
+  // !config.dangerouslyAllowSVG && src.endsWith('.svg')`) — a configured loader still
+  // gets to rewrite an SVG src.
+  const svgUnopt = isSvg && isDefaultLoader && !CONFIG.dangerouslyAllowSVG;
+  const forcedUnopt = Boolean(unoptimized) || CONFIG.unoptimized || isData || svgUnopt || objectUnopt || (entry && entry.unoptimized);
 
   // Build a loader-driven srcset (one loader call per candidate width).
   const loaderSrcSet = (fn) => {
     const { widths, kind } = getWidths(numericWidth, sizes);
     const parts = widths.map((w, i) => fn({ src: rawSrc, width: w, quality }) + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
     const finalSrc = fn({ src: rawSrc, width: widths[widths.length - 1], quality });
-    return { srcSet: parts.join(", "), finalSrc };
+    return { srcSet: parts.join(", "), finalSrc, kind };
   };
 
   const numericWidth = typeof width === "number" ? width : Number(width);
-  const imgLoading = priority ? undefined : (loading || "lazy");
+  // Next's `isLazy` verbatim: `!priority && !preload && (loading === 'lazy' || loading
+  // === undefined)`, forced false for data:/blob:. `loadingFinal = isLazy ? 'lazy' :
+  // loading` — so `priority` does NOT erase an explicit `loading="eager"`.
+  const isLazy = !priority && !preload && (loading === "lazy" || typeof loading === "undefined") && !isData;
+  const imgLoading = isLazy ? "lazy" : loading;
   const imgDecoding = decoding || "async";
-  const imgFetchPriority = priority ? "high" : fetchPriority;
+  // Next PASSES `fetchPriority` THROUGH — `priority` only drives lazy-loading and the
+  // preload link, it never synthesizes fetchPriority="high" (`get-img-props`: the
+  // returned props carry the caller's `fetchPriority` unchanged).
+  const imgFetchPriority = fetchPriority;
+  // Next's generateImgAttrs: a `w`-descriptor srcSet with no caller `sizes` gets
+  // `sizes="100vw"`; an `x`-descriptor one (a fixed numeric width) gets none.
+  const effectiveSizes = (kind) => (!sizes && kind === "w" ? "100vw" : sizes);
 
   const baseImg = () =>
     createElement("img", {
-      src: displaySrc,
+      src: overrideSrc || displaySrc,
       alt: alt || "",
       width,
       height,
       decoding: imgDecoding,
       loading: imgLoading,
       fetchPriority: imgFetchPriority,
+      "data-nimg": dataNimg,
       ...rest,
       style: finalStyle,
     });
 
   // An <img> whose src/srcSet come from a loader (with the same base attrs as baseImg),
   // plus the `priority` preload link when requested.
-  const loaderImg = (finalSrc, srcSet) => {
+  const loaderImg = (finalSrc, srcSet, kind) => {
+    const imgSizes = effectiveSizes(kind);
     const img = createElement("img", {
-      src: finalSrc,
+      src: overrideSrc || finalSrc,
       srcSet,
-      sizes,
+      sizes: imgSizes,
       alt: alt || "",
       width,
       height,
       decoding: imgDecoding,
       loading: imgLoading,
       fetchPriority: imgFetchPriority,
+      "data-nimg": dataNimg,
       ...rest,
       style: finalStyle,
     });
-    if (priority) {
-      const link = createElement("link", { rel: "preload", as: "image", href: finalSrc, imageSrcSet: srcSet, imageSizes: sizes });
+    if (priority || preload) {
+      // Next's `ImagePreload` omits `href` whenever an `imageSrcSet` is present (an
+      // href-only browser would preload the WRONG candidate) and carries the caller's
+      // `fetchPriority`, not a synthesized "high".
+      const link = createElement("link", {
+        rel: "preload",
+        as: "image",
+        href: srcSet ? undefined : finalSrc,
+        imageSrcSet: srcSet,
+        imageSizes: imgSizes,
+        fetchPriority: imgFetchPriority,
+      });
       return createElement(Fragment, null, link, img);
     }
     return img;
@@ -5184,70 +5604,25 @@ export default function Image(props) {
       // A built-in named loader still respects the remote allow-list.
       throw hostnameNotConfigured(rawSrc);
     }
-    const { srcSet, finalSrc } = loaderSrcSet(explicitLoader);
-    return loaderImg(finalSrc, srcSet);
+    const { srcSet, finalSrc, kind } = loaderSrcSet(explicitLoader);
+    return loaderImg(finalSrc, srcSet, kind);
   }
 
-  if (!entry) {
-    // DYNAMIC/REMOTE fallback: no build-time variant, so route through the runtime
-    // `/_next/image` optimizer (Next's default loader). A remote host must still be
-    // allow-listed — a disallowed host is a clear hard error, matching Next.
-    if (isRemote) {
-      if (!hasMatch(new URL(rawSrc))) throw hostnameNotConfigured(rawSrc);
-      const { srcSet, finalSrc } = optimizerSrcSet(rawSrc, numericWidth, sizes, quality);
-      return loaderImg(finalSrc, srcSet);
-    }
-    if (isRasterPath(rawSrc) && rawSrc.startsWith("/")) {
-      // A local raster with no build-emitted variant (a runtime-computed public path):
-      // the runtime optimizer resizes it on the fly. Build-time variants stay preferred
-      // for images known at build time (public/ png/jpeg), so static pages never pay this.
-      const { srcSet, finalSrc } = optimizerSrcSet(rawSrc, numericWidth, sizes, quality);
-      return loaderImg(finalSrc, srcSet);
-    }
-    // Unknown non-remote src: honest passthrough (prefixed if local).
-    return baseImg();
-  }
-
-  // OPTIMIZED: build a responsive srcSet from the emitted variants.
-  const { widths, kind } = getWidths(numericWidth, sizes);
-  const intrinsic = entry.width;
-  const chosen = widths.filter((w) => w <= intrinsic);
-  if (chosen.length === 0) chosen.push(intrinsic);
-  const parts = [];
-  chosen.forEach((w, i) => {
-    const url = entry.variants[String(w)];
-    if (url) parts.push(withAssetBase(url) + " " + (kind === "w" ? w + "w" : (i + 1) + "x"));
-  });
-  const srcSet = parts.length ? parts.join(", ") : undefined;
-  const largest = chosen[chosen.length - 1];
-  const finalSrc = withAssetBase(entry.variants[String(largest)] || entry.variants[String(intrinsic)] || rawSrc);
-
-  const img = createElement("img", {
-    src: finalSrc,
-    srcSet,
-    sizes,
-    alt: alt || "",
-    width,
-    height,
-    decoding: imgDecoding,
-    loading: imgLoading,
-    fetchPriority: imgFetchPriority,
-    ...rest,
-    style: finalStyle,
-  });
-
-  if (priority) {
-    const link = createElement("link", {
-      rel: "preload",
-      as: "image",
-      href: finalSrc,
-      imageSrcSet: srcSet,
-      imageSizes: sizes,
-      fetchPriority: "high",
-    });
-    return createElement(Fragment, null, link, img);
-  }
-  return img;
+  // DEFAULT LOADER — Next's `/_next/image` optimizer. Next routes EVERY optimizable
+  // image through it: a `/public` string src, a static import, and an allow-listed
+  // remote alike (`get-img-props` -> `generateImgAttrs` -> `defaultLoader`, which is
+  // unconditionally `${config.path}?url=&w=&q=`). There is no "prefer a build-time
+  // file" branch in Next, so there is none here: the build-emitted responsive variants
+  // are what the orchestrator SERVES those requests FROM (see `next-server.mjs`
+  // `buildVariantFile`), so the pixels are still computed at build time and the URL
+  // shape stays byte-faithful to Next.
+  //
+  // A remote host must be allow-listed — a disallowed host is a clear hard error, as in
+  // Next. A local src the optimizer cannot resolve 404s there, naming the file; it is
+  // never silently downgraded to a raw <img> here.
+  if (isRemote && !hasMatch(new URL(rawSrc))) throw hostnameNotConfigured(rawSrc);
+  const { srcSet, finalSrc, kind } = optimizerSrcSet(rawSrc, numericWidth, sizes, quality);
+  return loaderImg(finalSrc, srcSet, kind);
 }
 "#;
 
@@ -5868,6 +6243,99 @@ mod tests {
     }
 
     #[test]
+    fn static_sibling_of_a_dynamic_segment_is_prerendered() {
+        // A dynamic segment does NOT make its whole URL namespace dynamic. app/blog holds
+        // BOTH [slug]/page.tsx (Dynamic: it reads cookies) and post/page.mdx (a plain static
+        // page: no dynamic segment, no request read, no `export const dynamic`). Next
+        // classifies the pair ƒ Dynamic + ○ Static, so /blog/post must be prerendered while
+        // /blog/[slug] is skipped.
+        //
+        // This pins the pair that the SSG gate's old `ls static/blog/*.html` assertion
+        // conflated: that glob read "no HTML under blog/", which was only ever equivalent to
+        // "the dynamic route wrote nothing" while [slug] was the sole route in the namespace.
+        // Adding the MDX sibling made a CORRECT prerender trip it.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let route = |path: &str| {
+            disc.routes.iter().find(|r| r.url_path == path).unwrap_or_else(|| {
+                panic!(
+                    "route {path} not discovered: {:?}",
+                    disc.routes.iter().map(|r| &r.url_path).collect::<Vec<_>>()
+                )
+            })
+        };
+        let post = route("/blog/post");
+        assert_eq!(
+            post.kind,
+            RouteKind::Static,
+            "/blog/post is a static MDX sibling of a dynamic segment → Static (it must be prerendered)",
+        );
+        assert!(post.kind.is_prerendered(), "/blog/post must be prerendered, not skipped");
+        assert_eq!(
+            route("/blog/[slug]").kind,
+            RouteKind::Dynamic,
+            "/blog/[slug] reads cookies() → Dynamic (it must NOT be prerendered)",
+        );
+        assert!(
+            !route("/blog/[slug]").kind.is_prerendered(),
+            "/blog/[slug] must be skipped at prerender",
+        );
+    }
+
+    #[test]
+    fn prerender_plan_never_emits_a_file_for_a_dynamic_route() {
+        // Structural invariants of the emitted prerender-plan.json — the artifact the SSG
+        // gate and the prerenderer both read. These hold for ANY fixture shape, so they do
+        // not go stale as routes are added (which is exactly how the old path-glob assertion
+        // broke): a dynamic route carries a reason and NO output file, and no prerendered
+        // route's file path keeps a literal [bracket] segment.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let out = scratch("prerender-plan");
+        write_prerender_plan(&fixture, &out).unwrap();
+
+        let text = std::fs::read_to_string(out.join("static/prerender-plan.json")).unwrap();
+        let plan: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+        assert!(!plan.is_empty(), "plan is empty");
+
+        let mut saw_static_blog_sibling = false;
+        let mut saw_dynamic_blog = false;
+        for entry in &plan {
+            let path = entry["path"].as_str().unwrap();
+            let kind = entry["kind"].as_str().unwrap();
+            if kind == "dynamic" {
+                let reason = entry["reason"].as_str().unwrap_or("");
+                assert!(!reason.is_empty(), "{path}: dynamic entry carries no reason (never drop a route silently)");
+                assert!(
+                    entry.get("file").is_none(),
+                    "{path}: dynamic entry names an output file {:?} — a dynamic route must produce nothing",
+                    entry.get("file"),
+                );
+            }
+            if let Some(file) = entry["file"].as_str() {
+                assert!(
+                    !file.contains('[') && !file.contains(']'),
+                    "{path}: prerendered file {file:?} keeps a literal bracket segment",
+                );
+            }
+            // The exact pair the stale glob conflated, as it lands in the plan.
+            if path == "/blog/post" {
+                assert_eq!(kind, "static", "/blog/post must be planned static");
+                assert_eq!(entry["file"].as_str(), Some("blog/post"), "/blog/post output file");
+                saw_static_blog_sibling = true;
+            }
+            if path == "/blog/[slug]" {
+                assert_eq!(kind, "dynamic", "/blog/[slug] must be planned dynamic");
+                saw_dynamic_blog = true;
+            }
+        }
+        assert!(saw_static_blog_sibling, "/blog/post missing from the plan");
+        assert!(saw_dynamic_blog, "/blog/[slug] missing from the plan");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
     fn parallel_routes_become_layout_slot_props() {
         // The fixture's /dashboard hosts @team and @analytics parallel slots. Discovery
         // must attach them to the dashboard directory's Level (not as separate routes),
@@ -5905,7 +6373,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
         assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
@@ -5922,7 +6390,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
         // Each route carries a metadata namespace chain resolved at render time.
         assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
         assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
@@ -6045,7 +6513,7 @@ mod tests {
         let boundary = root.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = root.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = root.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
         assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
         assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
@@ -6175,7 +6643,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
         assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
         assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
@@ -6288,6 +6756,407 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Writes a `package.json` declaring `next` under `field`.
+    fn write_next_package_json(root: &Path, field: &str) {
+        std::fs::write(
+            root.join("package.json"),
+            format!("{{\"name\":\"app\",\"{field}\":{{\"next\":\"16.2.11\"}}}}\n"),
+        )
+        .unwrap();
+    }
+
+    /// Writes `<dir>/layout.tsx` + `<dir>/page.tsx`.
+    fn write_app_route(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("layout.tsx"),
+            "export default function L({ children }) { return <html><body>{children}</body></html>; }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("page.tsx"), "export default function P() { return <p>hi</p>; }\n").unwrap();
+    }
+
+    #[test]
+    fn app_router_detected_without_next_config() {
+        // `next.config.*` is OPTIONAL in Next.js: a `next` dependency is enough.
+        let root = scratch("no-config-app-router");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app"));
+        assert!(is_app_router(&root));
+        assert!(configure(&root, "client").unwrap().is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn app_router_detected_from_dev_dependency() {
+        let root = scratch("dev-dep-app-router");
+        write_next_package_json(&root, "devDependencies");
+        write_app_route(&root.join("app"));
+        assert!(is_app_router(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Plants a project whose `"use client"` components are SIBLINGS of the app dir
+    /// (`<base>/components`, `<base>/lib` beside `<base>/app`) — the shape of every
+    /// real `with-<state-library>` example — plus one server module that imports a
+    /// stylesheet from outside the app dir. `base` is `root` or `root/src`.
+    fn write_islands_beside_app(root: &Path, base: &Path) {
+        write_next_package_json(root, "dependencies");
+        write_app_route(&base.join("app"));
+        std::fs::create_dir_all(base.join("components")).unwrap();
+        std::fs::create_dir_all(base.join("lib")).unwrap();
+        std::fs::write(
+            base.join("components").join("counter.tsx"),
+            "\"use client\";\nimport \"./counter.css\";\nexport default function Counter() { return null; }\n",
+        )
+        .unwrap();
+        std::fs::write(base.join("components").join("counter.css"), ".counter { color: red; }\n")
+            .unwrap();
+        std::fs::write(
+            base.join("lib").join("StoreProvider.tsx"),
+            "\"use client\";\nexport default function StoreProvider() { return null; }\n",
+        )
+        .unwrap();
+        std::fs::write(base.join("lib").join("store.ts"), "export const store = 1;\n").unwrap();
+    }
+
+    fn canon(path: PathBuf) -> PathBuf {
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn client_islands_include_components_outside_the_app_dir() {
+        // Island discovery is the ONLY thing that puts a `"use client"` module into the
+        // client + SSR graphs, so a module it misses gets no client-references-manifest
+        // entry and the react-server render dies with `Could not find the module "..."
+        // in the React Client Manifest`. Client components living BESIDE the app dir
+        // (not under it) are the common case, in both project layouts — asserted on the
+        // generated entries, which is what the graphs actually build.
+        for (name, sub) in [("islands-src-sibling", "src"), ("islands-root-sibling", "")] {
+            let root = scratch(name);
+            let base = if sub.is_empty() { root.clone() } else { root.join(sub) };
+            write_islands_beside_app(&root, &base);
+            assert!(configure(&root, "client").unwrap().is_some());
+
+            let adapter_dir = root.canonicalize().unwrap().join(ADAPTER_DIR);
+            let client = std::fs::read_to_string(adapter_dir.join("client.tsx")).unwrap();
+            for island in ["components/counter.tsx", "lib/StoreProvider.tsx"] {
+                let path = canon(base.join(island));
+                assert!(
+                    client.contains(&path.to_string_lossy().to_string()),
+                    "{name}: {island} is not pinned into the client graph"
+                );
+            }
+            assert!(
+                !client.contains("lib/store.ts"),
+                "{name}: a module without the directive is not an island"
+            );
+            // The SSR graph must pin the SAME set: it is where the flight's client
+            // references are resolved during SSR-of-flight, so an island present in the
+            // client graph and absent here has no ssrModuleMapping entry.
+            let ssr = std::fs::read_to_string(adapter_dir.join("server.tsx")).unwrap();
+            for island in ["components/counter.tsx", "lib/StoreProvider.tsx"] {
+                let path = canon(base.join(island));
+                assert!(
+                    ssr.contains(&path.to_string_lossy().to_string()),
+                    "{name}: {island} is not pinned into the SSR graph"
+                );
+            }
+
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    #[test]
+    fn client_islands_skip_dependencies_and_build_output() {
+        // Being rooted at the project (not the app dir) means the skip-list is what
+        // keeps the walk tractable and keeps installed/generated/stale-build
+        // `"use client"` files out of the pins.
+        let root = scratch("islands-skips");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app"));
+        let island = "\"use client\";\nexport default function X() { return null; }\n";
+        for skipped in [
+            "node_modules/zustand",
+            ".diffpack-output/public",
+            ".diffpack-next/shims",
+            "dist",
+            ".output",
+            ".next/static",
+            ".git",
+            // Exported/reported trees at the project root. Each holds a COPY of the
+            // app's own modules, so a stale one would contribute a duplicate island —
+            // a second client-reference id for a component that already has one.
+            "out",
+            "build",
+            ".vercel/output",
+            "coverage/lcov-report",
+            "storybook-static",
+        ] {
+            let dir = root.join(skipped);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("skipped-island.tsx"), island).unwrap();
+        }
+        // …but `out`/`build` are ordinary words: a source directory that happens to use
+        // one further down the tree is REAL source and must still be scanned.
+        let nested = root.join("src").join("build").join("widgets");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("nested-island.tsx"), island).unwrap();
+
+        let scan = scan_project(&root.canonicalize().unwrap()).unwrap();
+        assert_eq!(
+            scan.islands.len(),
+            1,
+            "only the nested src/build island may be found, got {:?}",
+            scan.islands
+        );
+        assert!(
+            scan.islands[0].ends_with("src/build/widgets/nested-island.tsx"),
+            "a source directory named `build` below the root is not build output: {:?}",
+            scan.islands
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A minimal app-router project whose only route is `app/page.tsx` with `page_body`,
+    /// plus whatever `extra` files (relative path, contents) the case needs.
+    fn write_app_with(root: &Path, page_body: &str, extra: &[(&str, &str)]) {
+        write_next_package_json(root, "dependencies");
+        write_app_route(&root.join("app"));
+        std::fs::write(root.join("app").join("page.tsx"), page_body).unwrap();
+        for (relative, contents) in extra {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+    }
+
+    /// Whether the generated react-server entry would link the app stylesheet no matter
+    /// what the build emits — the phantom-`<link>`-to-a-404 shape.
+    fn links_the_stylesheet_unconditionally(adapter_dir: &Path) -> bool {
+        let entry = std::fs::read_to_string(adapter_dir.join("rsc-entry.tsx")).unwrap();
+        entry.lines().any(|line| {
+            line.contains(RSC_CSS_URL)
+                && !line.contains("existsSync(new URL(\"./server.css\", import.meta.url))")
+        })
+    }
+
+    #[test]
+    fn an_app_with_no_stylesheet_does_not_link_one() {
+        // REGRESSION (FINDINGS 3a, reproduction 1). The verifier's app: NO stylesheet
+        // anywhere, and the only occurrence of the string is a plain script constant.
+        // The old substring scan for `.css"` flipped `has_css`, the entry baked in
+        // `<link rel="stylesheet" href="/rsc.css">`, and `GET /rsc.css` was a 404
+        // because the react-server build never emitted `server.css` to copy.
+        let root = scratch("no-stylesheet-app");
+        write_app_with(
+            &root,
+            "import { THEME } from \"../lib/theme\";\nexport default function P() { return <p>{THEME}</p>; }\n",
+            &[("lib/theme.ts", "export const THEME = \"theme.css\";\n")],
+        );
+        assert!(configure(&root, "react-server").unwrap().is_some());
+        let adapter_dir = root.canonicalize().unwrap().join(ADAPTER_DIR);
+        assert!(
+            !links_the_stylesheet_unconditionally(&adapter_dir),
+            "an app with no stylesheet must not link one; the head <link> has to follow the emitted artifact",
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unreachable_islands_stylesheet_does_not_link_one() {
+        // REGRESSION (FINDINGS 3a, reproduction 2). A `"use client"` component that
+        // imports a REAL stylesheet but that no route imports: it is pinned as an
+        // island (so the old scan flipped `has_css`) yet it never enters the
+        // react-server graph, so its CSS is never compiled into `server.css` — the same
+        // `<link>` to the same 404 by a second route.
+        let root = scratch("unreachable-island-css");
+        write_app_with(
+            &root,
+            "export default function P() { return <p>hi</p>; }\n",
+            &[
+                (
+                    "components/orphan.tsx",
+                    "\"use client\";\nimport \"./unused.css\";\nexport default function O() { return null; }\n",
+                ),
+                ("components/unused.css", ".orphan { color: rebeccapurple; }\n"),
+            ],
+        );
+        assert!(configure(&root, "react-server").unwrap().is_some());
+        let adapter_dir = root.canonicalize().unwrap().join(ADAPTER_DIR);
+        assert!(
+            !links_the_stylesheet_unconditionally(&adapter_dir),
+            "a stylesheet only an unreachable island imports is never compiled, so it must never be linked",
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dead_code_cannot_fail_the_build_but_live_code_still_does() {
+        // REGRESSION (FINDINGS 3a, second consequence). Widening island discovery to the
+        // whole project made every `"use client"` file a hard build dependency, so an
+        // unreachable one with an unresolvable import failed the WHOLE build. The rule:
+        // an island is dropped only when it is BOTH unbuildable AND unreachable —
+        // reachable code keeps its fatal diagnostic.
+        let orphan = "\"use client\";\nimport { helper } from \"./does-not-exist\";\nexport default function O() { return helper; }\n";
+
+        let dead = scratch("dead-island-unresolvable");
+        write_app_with(
+            &dead,
+            "export default function P() { return <p>hi</p>; }\n",
+            &[("components/orphan.tsx", orphan)],
+        );
+        assert!(configure(&dead, "client").unwrap().is_some());
+        let dead_client =
+            std::fs::read_to_string(dead.canonicalize().unwrap().join(ADAPTER_DIR).join("client.tsx"))
+                .unwrap();
+        assert!(
+            !dead_client.contains("components/orphan.tsx"),
+            "an unbuildable module no route can reach must not become a build dependency: {dead_client}",
+        );
+        std::fs::remove_dir_all(&dead).ok();
+
+        // The SAME module, imported by the page: still pinned, so the bundler still
+        // reports `cannot resolve "./does-not-exist"` and fails the build.
+        let live = scratch("live-island-unresolvable");
+        write_app_with(
+            &live,
+            "import O from \"../components/orphan\";\nexport default function P() { return <O />; }\n",
+            &[("components/orphan.tsx", orphan)],
+        );
+        assert!(configure(&live, "client").unwrap().is_some());
+        let live_client =
+            std::fs::read_to_string(live.canonicalize().unwrap().join(ADAPTER_DIR).join("client.tsx"))
+                .unwrap();
+        assert!(
+            live_client.contains("components/orphan.tsx"),
+            "a broken import in code a route reaches stays a hard build error: {live_client}",
+        );
+        std::fs::remove_dir_all(&live).ok();
+    }
+
+    #[test]
+    fn dead_code_that_compiles_is_still_pinned() {
+        // The over-approximation is what keeps the client manifest complete, so the drop
+        // rule must be as narrow as it claims: an unreachable island that BUILDS is
+        // still pinned, exactly as before.
+        let root = scratch("dead-island-buildable");
+        write_app_with(
+            &root,
+            "export default function P() { return <p>hi</p>; }\n",
+            &[(
+                "components/orphan.tsx",
+                "\"use client\";\nexport default function O() { return null; }\n",
+            )],
+        );
+        assert!(configure(&root, "client").unwrap().is_some());
+        let client =
+            std::fs::read_to_string(root.canonicalize().unwrap().join(ADAPTER_DIR).join("client.tsx"))
+                .unwrap();
+        assert!(
+            client.contains("components/orphan.tsx"),
+            "only UNBUILDABLE dead islands are dropped: {client}",
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_island_scan_and_the_action_scan_share_one_walk() {
+        // Two scanners over the same directive concept diverging on root or skip-list
+        // IS the defect; this pins them to one walk. Both files sit at the same depth,
+        // outside the app dir, where the app-rooted island scan used to see neither.
+        let root = scratch("islands-actions-one-walk");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app"));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib").join("island.tsx"),
+            "\"use client\";\nexport default function X() { return null; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lib").join("actions.ts"),
+            "\"use server\";\nexport async function save() {}\n",
+        )
+        .unwrap();
+
+        let canonical = root.canonicalize().unwrap();
+        let islands = scan_project(&canonical).unwrap().islands;
+        let actions = crate::rsc::scan_project_server_actions(&canonical).unwrap();
+        assert_eq!(islands, vec![canon(root.join("lib").join("island.tsx"))]);
+        assert_eq!(
+            actions.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+            vec![canon(root.join("lib").join("actions.ts"))]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn app_router_detected_under_src_app() {
+        let root = scratch("src-app-router");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("src").join("app"));
+        assert!(is_app_router(&root));
+        assert_eq!(app_dir(&root), Some(root.join("src").join("app")));
+        assert!(configure(&root, "client").unwrap().is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn root_app_wins_over_src_app() {
+        // Next's own precedence when a project has both.
+        let root = scratch("both-app-dirs");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app"));
+        write_app_route(&root.join("src").join("app"));
+        assert_eq!(app_dir(&root), Some(root.join("app")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn app_router_detected_with_no_index_page() {
+        // Next requires a route SOMEWHERE under app/, not an `app/page.*` specifically.
+        let root = scratch("no-index-app-router");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app").join("[lang]"));
+        assert!(is_app_router(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn next_dep_without_app_dir_is_not_app_router() {
+        // A pages-router project: app-router detection must decline so the caller's
+        // `!is_app_router && is_pages_router` ordering hands it to the pages adapter.
+        let root = scratch("pages-only");
+        write_next_package_json(&root, "dependencies");
+        std::fs::create_dir_all(root.join("pages")).unwrap();
+        std::fs::write(root.join("pages/index.tsx"), "export default () => <p>hi</p>;\n").unwrap();
+        assert!(!is_app_router(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_next_app_directory_is_not_app_router() {
+        // A TanStack project whose `routesDirectory` is `app/` must NOT be hijacked.
+        let root = scratch("non-next-app-dir");
+        std::fs::write(root.join("package.json"), "{\"name\":\"app\",\"dependencies\":{\"vite\":\"7\"}}\n")
+            .unwrap();
+        write_app_route(&root.join("app"));
+        assert!(!is_app_router(&root));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn first_page_under_skips_generated_and_vendor_dirs() {
+        let root = scratch("first-page-under");
+        let app = root.join("app");
+        write_app_route(&app.join("node_modules").join("x"));
+        write_app_route(&app.join(ADAPTER_DIR));
+        write_app_route(&app.join("blog"));
+        assert_eq!(first_page_under(&app), Some(app.join("blog").join("page.tsx")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn app_router_project_scaffolds_and_configures_each_environment() {
         let root = scratch("app-router");
@@ -6385,6 +7254,34 @@ mod tests {
         assert!(ssr_src.contains("export async function renderFlightToStream"), "ssr entry exports the streaming renderer: {ssr_src}");
         assert!(ssr_src.contains("onShellReady"), "streaming SSR flushes at onShellReady: {ssr_src}");
         assert!(ssr_src.contains("__DF_FLIGHT"), "streaming SSR inlines the flight incrementally: {ssr_src}");
+        // The flight scripts may ONLY enter the byte stream at a react-dom flush-cycle
+        // boundary: react-dom's own write() boundaries fall every 2048 bytes and land
+        // inside HTML tokens, so injecting after an arbitrary chunk splits a tag.
+        assert!(
+            !ssr_src.contains("for await (const chunk of html)"),
+            "renderFlightToStream must not re-read a PassThrough (flight scripts land mid-token): {ssr_src}"
+        );
+        assert!(
+            ssr_src.contains("export function createFlightSink"),
+            "the SSR entry carries src/next_runtime/flight_sink.js: {ssr_src}"
+        );
+        assert!(
+            ssr_src.contains("sink.flush = () =>"),
+            "flight scripts must be injected from react-dom's flushBuffered() hook: {ssr_src}"
+        );
+        assert!(
+            ssr_src.contains("writev(chunks, cb)"),
+            "the SSR destination must forward a corked writev burst without injecting between chunks: {ssr_src}"
+        );
+        assert!(
+            ssr_src.contains("assertFlushHookFired"),
+            "a react-dom without flushBuffered must be a hard error, not a silent fallback: {ssr_src}"
+        );
+        assert_eq!(
+            ssr_src.matches("from \"node:stream\"").count(),
+            1,
+            "exactly one node:stream import (the spliced flight sink owns it): {ssr_src}"
+        );
         // The client reconstructs the flight from the incremental __DF_FLIGHT stream.
         assert!(client_src.contains("flightStreamFromDF"), "client rebuilds flight from the __DF_FLIGHT stream: {client_src}");
         // The worker exposes the streaming render op end-to-end.
@@ -6448,9 +7345,9 @@ mod tests {
         assert!(img_shim.contains(r#"import MANIFEST from "../image-manifest""#), "image shim reads the variant manifest: {img_shim}");
         assert!(img_shim.contains("function getWidths"), "image shim ports getWidths: {img_shim}");
         assert!(img_shim.contains(r#"rel: "preload""#), "image shim hoists a priority preload link: {img_shim}");
-        // A raster with no build-time variant now falls back to the runtime `/_next/image`
-        // optimizer (not a silent no-op) — build-time variants stay preferred for public/.
-        assert!(img_shim.contains("function optimizerSrcSet"), "image shim has the runtime optimizer fallback: {img_shim}");
+        // Every optimizable raster renders Next's `/_next/image` optimizer URL; the
+        // build-emitted variants are what the orchestrator serves those requests FROM.
+        assert!(img_shim.contains("function optimizerSrcSet"), "image shim builds the optimizer srcset: {img_shim}");
         assert!(img_shim.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "image shim points at the runtime optimizer endpoint: {img_shim}");
         assert!(adapter.join("image-manifest.ts").is_file(), "the image variant manifest module is generated");
 
@@ -6574,6 +7471,137 @@ mod tests {
             image_variant_url("/other.png", 640, "png"),
             "distinct srcs hash to distinct variant files"
         );
+    }
+
+    /// Regression: the emitted variant FILES and the `variants.json` the orchestrator
+    /// reads must describe the same set. The rendered HTML now uses Next's
+    /// `/_next/image` URL for every image, so this manifest is the ONLY thing that
+    /// keeps a prerendered page off the runtime re-encode path — a drifted or missing
+    /// entry silently costs a spawn per image instead of failing loudly.
+    #[test]
+    fn emitted_image_variants_are_indexed_by_the_manifest_the_server_reads() {
+        let root = scratch("image-variant-manifest");
+        let public = root.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        // A real 900x300 raster, so `variant_widths` plans several standard widths.
+        image::RgbImage::from_fn(900, 300, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 7]))
+            .save(public.join("hero.png"))
+            .unwrap();
+        let out_public = root.join("out").join("public");
+        let images = scan_public_images(&root).unwrap();
+        let written = emit_image_variants(&root, &out_public, &images).unwrap();
+        assert!(written >= 2, "several widths emitted: {written}");
+
+        let manifest_path = out_public.join("_diffpack-image").join(IMAGE_VARIANT_MANIFEST);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let entry = &manifest["/hero.png"];
+        assert_eq!(entry["width"], 900, "intrinsic width recorded: {manifest}");
+        let widths = entry["widths"].as_object().unwrap();
+        assert_eq!(widths.len(), written, "every emitted variant is indexed: {manifest}");
+        assert!(widths.contains_key("900"), "the intrinsic width is indexed: {manifest}");
+        for (w, url) in widths {
+            let url = url.as_str().unwrap();
+            assert!(url.starts_with("/_diffpack-image/"), "served URL: {url}");
+            assert!(url.ends_with(&format!("-{w}.png")), "width in the file name: {url}");
+            assert!(
+                out_public.join(url.trim_start_matches('/')).is_file(),
+                "manifest entry {url} points at a file that was actually emitted",
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression: `/_next/image?url=…&w=…` must be answered from a build-emitted
+    /// variant whenever one exists — that is what keeps Next's URL shape from costing a
+    /// runtime re-encode on every prerendered page. Runs the orchestrator's real
+    /// `buildVariantFile` (sliced out of `next-server.mjs`, not a reimplementation)
+    /// against a stub filesystem.
+    #[test]
+    fn next_server_answers_image_requests_from_build_emitted_variants() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        let start = SERVER
+            .find("const IMAGE_BUILD_QUALITY = 75;")
+            .expect("next-server.mjs still defines the build-variant fast path");
+        let end = SERVER[start..]
+            .find("// Run the native optimizer")
+            .expect("the build-variant block still ends before the native optimizer")
+            + start;
+        let region = &SERVER[start..end];
+        assert!(region.contains("function buildVariantFile"), "sliced the right block: {region}");
+
+        let prelude = format!(
+            r##"const publicDir = "/out/public";
+const FILES = new Set([
+  "/out/public/_diffpack-image/abc-640.jpeg",
+  "/out/public/_diffpack-image/abc-1600.jpeg",
+  "/out/public/assets/vercel-a1cdda59-1080.png",
+  "/out/public/assets/vercel-a1cdda59-1600.png",
+  "/out/public/hero-640-640.png",
+  "/out/public/_diffpack-image/{manifest}",
+]);
+// What `readdirSync(publicDir + "/assets")` sees: the original plus its ladder, exactly
+// as the client build emits them (the ladder tops out at the 1600px intrinsic width).
+const ASSETS_DIR = ["vercel-a1cdda59.png", "vercel-a1cdda59-1080.png", "vercel-a1cdda59-1600.png"];
+const MANIFEST = {{ "/cat.jpg": {{ width: 1600, widths: {{ "640": "/_diffpack-image/abc-640.jpeg", "1600": "/_diffpack-image/abc-1600.jpeg" }} }} }};
+function join(...parts) {{ return parts.join("/").replace(/\/+/g, "/"); }}
+function existsSync(p) {{ return FILES.has(p) || p === "/out/public/assets"; }}
+function readFileSync() {{ return JSON.stringify(MANIFEST); }}
+function readdirSync() {{ return ASSETS_DIR; }}
+"##,
+            manifest = IMAGE_VARIANT_MANIFEST,
+        );
+        let driver = r#"
+const CASES = [
+  ["/cat.jpg", 640, 75],
+  ["/cat.jpg", 3840, 75],
+  ["/cat.jpg", 640, 50],
+  ["/assets/vercel-a1cdda59.png", 1080, 75],
+  ["/assets/vercel-a1cdda59.png", 2048, 75],
+  ["/assets/vercel-a1cdda59.png", 640, 75],
+  ["/hero-640.png", 640, 75],
+];
+console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))));
+"#;
+        let file = scratch("image-build-variant-lookup").join("lookup.mjs");
+        std::fs::write(&file, format!("{prelude}{region}{driver}")).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "build-variant lookup failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: Vec<Option<String>> = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            got[0].as_deref(),
+            Some("/out/public/_diffpack-image/abc-640.jpeg"),
+            "an exact indexed width is served from disk: {got:?}",
+        );
+        assert_eq!(
+            got[1].as_deref(),
+            Some("/out/public/_diffpack-image/abc-1600.jpeg"),
+            "a width at/above intrinsic resolves to the intrinsic variant (the optimizer never upscales): {got:?}",
+        );
+        assert_eq!(got[2], None, "a non-default quality gets a real re-encode: {got:?}");
+        assert_eq!(
+            got[3].as_deref(),
+            Some("/out/public/assets/vercel-a1cdda59-1080.png"),
+            "a static-import variant is found by its build naming convention: {got:?}",
+        );
+        assert_eq!(
+            got[4].as_deref(),
+            Some("/out/public/assets/vercel-a1cdda59-1600.png"),
+            "a width above a static import's intrinsic resolves to the top of its ladder, so a prerendered page never re-encodes: {got:?}",
+        );
+        assert_eq!(got[5], None, "a width the ladder does not contain falls through: {got:?}");
+        assert_eq!(
+            got[6], None,
+            "a /public file literally named `hero-640.png` is NEVER mistaken for a variant of `hero.png`: {got:?}",
+        );
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
     #[test]
@@ -6703,9 +7731,58 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        // has_css=true with an asset base: the stylesheet <link> href carries the prefix.
-        let src = rsc_entry_module(&disc, "", true, &boundary, &seg_boundary, &reqctx, None, "/docs");
-        assert!(src.contains(r#"href: "/docs/rsc.css""#), "stylesheet href prefixed by basePath: {src}");
+        // With an asset base the stylesheet href carries the prefix — and it is still
+        // only linked when the react-server build emitted a stylesheet beside the entry.
+        let src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "/docs");
+        assert!(
+            src.contains(
+                r#"const RSC_CSS_HREF = existsSync(new URL("./server.css", import.meta.url)) ? "/docs/rsc.css" : null;"#
+            ),
+            "stylesheet href prefixed by basePath, guarded by the emitted server.css: {src}",
+        );
+        // The <link> is pushed from that const, never unconditionally.
+        assert!(
+            src.contains(
+                r#"  if (RSC_CSS_HREF) items.push(createElement("link", { rel: "stylesheet", href: RSC_CSS_HREF, precedence: "low" }));"#
+            ),
+            "the head <link> is conditional on the emitted stylesheet: {src}",
+        );
+        // Empty asset base keeps the bare `/rsc.css`.
+        let plain = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        assert!(plain.contains(r#"? "/rsc.css" : null;"#), "no prefix -> bare /rsc.css: {plain}");
+    }
+
+    #[test]
+    fn the_stylesheet_link_is_never_emitted_unconditionally() {
+        // REGRESSION (FINDINGS 3a). The <link rel=stylesheet href=/rsc.css> used to be
+        // baked in from a SUBSTRING scan for `.css"` over every project source, which
+        // has no relationship to what the react-server build compiles: an app with no
+        // stylesheet at all whose only `.css` is inside a string literal
+        // (`export const THEME = "theme.css";`) served a document linking /rsc.css while
+        // GET /rsc.css returned 404. The href may only appear inside the guard that
+        // tests for the emitted artifact.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        let src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        for line in src.lines() {
+            if !line.contains(RSC_CSS_URL) {
+                continue;
+            }
+            assert!(
+                line.contains("existsSync(new URL(\"./server.css\", import.meta.url))"),
+                "the stylesheet URL appears outside the emitted-artifact guard: {line}",
+            );
+        }
+        assert_eq!(
+            src.matches(RSC_CSS_URL).count(),
+            1,
+            "exactly one place decides the stylesheet link: {src}",
+        );
     }
 
     #[test]
@@ -6751,20 +7828,20 @@ mod tests {
         assert!(shim.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "optimizer endpoint under the asset base: {shim}");
         assert!(shim.contains("function withAssetBase"), "the asset-base prefix helper is generated");
         assert!(shim.contains("function optimizerSrcSet"), "the runtime-optimizer srcset builder is generated");
-        // Build-time variants stay PREFERRED: their URLs are prefixed, not sent to the optimizer.
-        assert!(
-            shim.contains("parts.push(withAssetBase(url)"),
-            "build-variant srcset URLs are prefixed by the asset base: {shim}",
-        );
         // The default-loader optimizer URL is Next's `/_next/image?url=&w=&q=` shape.
         assert!(
             shim.contains(r#"IMAGE_ENDPOINT + "?url=" + encodeURIComponent(rawSrc) + "&w=" + w + "&q=""#),
             "optimizer URL uses Next's default-loader query shape: {shim}",
         );
-        // A local raster with no build variant now routes to the optimizer (was a hard error).
+        // EVERY default-loader src routes through the optimizer (Next has no
+        // "prefer a build-time file" branch, so neither does the shim).
         assert!(
             shim.contains("optimizerSrcSet(rawSrc, numericWidth, sizes, quality)"),
-            "dynamic/remote fallback routes through the optimizer: {shim}",
+            "the default loader routes through the optimizer: {shim}",
+        );
+        assert!(
+            !shim.contains("entry.variants[String("),
+            "no build-variant URL is ever rendered into the srcSet: {shim}",
         );
         assert!(
             !shim.contains("no build-emitted variant manifest entry for raster src"),
@@ -6775,6 +7852,276 @@ mod tests {
         let plain = next_image_shim("");
         assert!(plain.contains(r#"const ASSET_BASE = "";"#), "empty asset base const: {plain}");
         assert!(plain.contains(r#"const IMAGE_ENDPOINT = ASSET_BASE + "/_next/image";"#), "optimizer endpoint still present with no prefix: {plain}");
+    }
+
+    /// Run the generated `next/image` shim under node against a stub react
+    /// `createElement` / manifest / config and return the props of every element it
+    /// renders for `props`. The shim's three imports are the only substitutions —
+    /// the component logic under test is the emitted source, byte for byte.
+    fn render_image_shim(props: &str) -> serde_json::Value {
+        let mut src = next_image_shim("");
+        for (import, stub) in [
+            (
+                "import { createElement, Fragment } from \"react\";",
+                "const Fragment = \"#fragment\";\nfunction createElement(type, props) { RENDERED.push({ type, props }); return { type, props }; }",
+            ),
+            (
+                "import MANIFEST from \"../image-manifest\";",
+                "const MANIFEST = STUB_MANIFEST;",
+            ),
+            (
+                "import CONFIG from \"../image-config\";",
+                "const CONFIG = STUB_CONFIG;",
+            ),
+        ] {
+            assert!(src.contains(import), "shim still has `{import}`:\n{src}");
+            src = src.replace(import, stub);
+        }
+        let prelude = r##"const RENDERED = [];
+const STUB_CONFIG = { remotePatterns: [{ protocol: "https", hostname: "img.example.com" }] };
+const STUB_MANIFEST = {
+  "/hero.png": {
+    width: 1000,
+    height: 1000,
+    variants: { "640": "/v-640.png", "750": "/v-750.png", "828": "/v-828.png", "1000": "/v-1000.png" },
+    blurDataURL: "data:image/gif;base64,BLUR",
+  },
+};
+"##;
+        let driver = format!("\nImage({props});\nconsole.log(JSON.stringify(RENDERED));\n");
+        // One scratch dir per props set — these tests run in parallel and `scratch`
+        // wipes the directory it hands back, so a shared name races.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(props, &mut hasher);
+        let file = scratch(&format!(
+            "image-shim-render-{:016x}",
+            std::hash::Hasher::finish(&hasher)
+        ))
+        .join("shim.mjs");
+        std::fs::write(&file, format!("{prelude}{src}{driver}")).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "shim render failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    /// Regression: `next/image` renders `style={{ color: "transparent" }}` (Next hides
+    /// the alt text until the <img> errors — which a server-rendered <img> never does).
+    /// Without it EVERY next/image element differed from Next on the computed `color`
+    /// and, because border colors inherit `currentColor`, on `border-*-color` too.
+    #[test]
+    fn image_shim_matches_next_img_style_assembly() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        // 1. A plain fixed-size image: color transparent, data-nimg="1", no `sizes`
+        //    (the srcSet uses `x` descriptors, so Next emits no sizes attribute).
+        let rendered = render_image_shim(r#"{ src: "/hero.png", alt: "Hero", width: 700, height: 700 }"#);
+        let img = &rendered[0];
+        assert_eq!(img["type"], "img");
+        assert_eq!(img["props"]["style"]["color"], "transparent");
+        assert_eq!(img["props"]["data-nimg"], "1");
+        assert!(img["props"]["sizes"].is_null(), "no sizes for an x-descriptor srcSet: {img}");
+
+        // 2. The CALLER's style wins over `color: transparent` — Next assigns the
+        //    caller's style LAST.
+        let rendered =
+            render_image_shim(r#"{ src: "/hero.png", alt: "Hero", width: 700, height: 700, style: { color: "red" } }"#);
+        assert_eq!(rendered[0]["props"]["style"]["color"], "red");
+
+        // 3. `fill`: Next's absolute-positioning block, then color transparent, plus
+        //    `data-nimg="fill"` and the default `sizes="100vw"` (w-descriptor srcSet).
+        let rendered =
+            render_image_shim(r#"{ src: "/hero.png", alt: "Hero", fill: true, objectFit: "cover" }"#);
+        let style = &rendered[0]["props"]["style"];
+        assert_eq!(style["position"], "absolute");
+        assert_eq!(style["width"], "100%");
+        assert_eq!(style["height"], "100%");
+        assert_eq!(style["objectFit"], "cover");
+        assert_eq!(style["color"], "transparent");
+        assert_eq!(rendered[0]["props"]["data-nimg"], "fill");
+        assert_eq!(rendered[0]["props"]["sizes"], "100vw");
+
+        // 4. The blur placeholder is spread OVER imgStyle (Next's order), and its
+        //    background-size/position derive from the resolved objectFit/objectPosition.
+        let rendered = render_image_shim(
+            r#"{ src: "/hero.png", alt: "Hero", fill: true, objectFit: "contain", placeholder: "blur" }"#,
+        );
+        let style = &rendered[0]["props"]["style"];
+        assert_eq!(style["color"], "transparent", "color survives the placeholder spread: {style}");
+        assert_eq!(style["backgroundSize"], "contain");
+        assert_eq!(style["backgroundPosition"], "50% 50%");
+        assert_eq!(style["backgroundImage"], "url(\"data:image/gif;base64,BLUR\")");
+
+        // 5. `unoptimized` still gets the style + data-nimg (Next tags every <img>).
+        let rendered = render_image_shim(
+            r#"{ src: "/hero.png", alt: "Hero", width: 700, height: 700, unoptimized: true }"#,
+        );
+        assert_eq!(rendered[0]["props"]["style"]["color"], "transparent");
+        assert_eq!(rendered[0]["props"]["data-nimg"], "1");
+    }
+
+    /// Regression (e2e cluster "next/image serves build-time variants where Next serves
+    /// its runtime optimizer URL"): with Next's DEFAULT loader every optimizable src
+    /// renders the `/_next/image?url=&w=&q=` shape — a `/public` string src, a static
+    /// image import, and an allow-listed remote alike. diffpack used to render its own
+    /// build-emitted variant files (`/_diffpack-image/…`, `/assets/…-1080.png`), which
+    /// is a URL shape Next never produces. The variants still exist; the orchestrator
+    /// serves `/_next/image` FROM them.
+    #[test]
+    fn image_shim_renders_next_optimizer_urls_for_every_default_loader_src() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        // 1. A `/public` string src WITH a build-variant manifest entry: still the
+        //    optimizer URL, never `/v-1000.png`.
+        let rendered = render_image_shim(r#"{ src: "/hero.png", alt: "Hero", width: 700, height: 700 }"#);
+        let props = &rendered[0]["props"];
+        let src = props["src"].as_str().unwrap();
+        assert_eq!(
+            src, "/_next/image?url=%2Fhero.png&w=1920&q=75",
+            "public string src renders Next's optimizer URL: {props}",
+        );
+        assert_eq!(
+            props["srcSet"], "/_next/image?url=%2Fhero.png&w=750&q=75 1x, /_next/image?url=%2Fhero.png&w=1920&q=75 2x",
+            "…and an x-descriptor optimizer srcSet: {props}",
+        );
+        assert!(
+            !rendered.to_string().contains("/v-"),
+            "no build-variant file URL is rendered: {rendered}",
+        );
+
+        // 2. A STATIC IMPORT object (`import x from './x.png'`) — the shape the build
+        //    emits, variants and all. Next optimizes it through the same endpoint.
+        let rendered = render_image_shim(
+            r#"{ src: { src: "/assets/vercel-a1cdda59.png", width: 1600, height: 1600, variants: { "640": "/assets/vercel-a1cdda59-640.png" } }, alt: "V", width: 1000, height: 1000 }"#,
+        );
+        let props = &rendered[0]["props"];
+        assert_eq!(
+            props["src"], "/_next/image?url=%2Fassets%2Fvercel-a1cdda59.png&w=2048&q=75",
+            "static import renders the optimizer URL, not its own variant file: {props}",
+        );
+        assert!(
+            !props["srcSet"].as_str().unwrap().contains("-640.png"),
+            "the static import's build variants stay out of the srcSet: {props}",
+        );
+
+        // 3. An allow-listed remote src is unchanged (it always used the optimizer).
+        let rendered = render_image_shim(
+            r#"{ src: "https://img.example.com/a.png", alt: "R", width: 200, height: 200 }"#,
+        );
+        assert!(
+            rendered[0]["props"]["src"]
+                .as_str()
+                .unwrap()
+                .starts_with("/_next/image?url=https%3A%2F%2Fimg.example.com"),
+            "remote src still routes through the optimizer: {rendered}",
+        );
+
+        // 4. `unoptimized` and SVG keep the RAW src with no srcSet (Next's two
+        //    default-loader escape hatches), so this is not "everything is a query URL".
+        for props_js in [
+            r#"{ src: "/hero.png", alt: "H", width: 700, height: 700, unoptimized: true }"#,
+            r#"{ src: "/logo.svg", alt: "L", width: 700, height: 700 }"#,
+        ] {
+            let rendered = render_image_shim(props_js);
+            let props = &rendered[0]["props"];
+            assert!(
+                !props["src"].as_str().unwrap().contains("/_next/image"),
+                "unoptimized/svg keeps the raw src: {props_js} -> {props}",
+            );
+            assert!(props["srcSet"].is_null(), "…and gets no srcSet: {props_js} -> {props}");
+        }
+    }
+
+    /// Regression: `priority` must NOT synthesize `fetchPriority="high"`. Next's
+    /// `getImgProps` passes the caller's `fetchPriority` through untouched — `priority`
+    /// only turns off lazy loading and adds the preload link. diffpack rendered
+    /// `fetchpriority="high"` on every priority image, an attribute Next never emits.
+    #[test]
+    fn image_shim_passes_fetch_priority_through_instead_of_synthesizing_high() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        // `priority` alone: no fetchPriority anywhere, and loading is dropped (not lazy).
+        let rendered =
+            render_image_shim(r#"{ src: "/hero.png", alt: "H", width: 700, height: 700, priority: true }"#);
+        let of_type = |kind: &str| -> serde_json::Value {
+            rendered
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["type"] == kind)
+                .unwrap_or_else(|| panic!("no <{kind}> rendered: {rendered}"))
+                .clone()
+        };
+        let link = of_type("link");
+        let img = of_type("img");
+        assert!(
+            link["props"]["fetchPriority"].is_null(),
+            "the preload link carries no synthesized fetchPriority: {link}",
+        );
+        assert!(
+            link["props"]["href"].is_null(),
+            "Next omits the preload href when an imageSrcSet is present: {link}",
+        );
+        assert!(
+            img["props"]["fetchPriority"].is_null(),
+            "`priority` alone renders NO fetchPriority: {img}",
+        );
+        assert!(img["props"]["loading"].is_null(), "`priority` drops loading=lazy: {img}");
+
+        // An explicit fetchPriority is passed through verbatim, with and without priority.
+        for (props_js, expected) in [
+            (r#"{ src: "/hero.png", alt: "H", width: 700, height: 700, fetchPriority: "low" }"#, "low"),
+            (
+                r#"{ src: "/hero.png", alt: "H", width: 700, height: 700, priority: true, fetchPriority: "auto" }"#,
+                "auto",
+            ),
+        ] {
+            let rendered = render_image_shim(props_js);
+            let img = rendered.as_array().unwrap().iter().find(|e| e["type"] == "img").unwrap();
+            assert_eq!(img["props"]["fetchPriority"], expected, "fetchPriority passed through: {img}");
+        }
+
+        // Next's `loadingFinal = isLazy ? "lazy" : loading`: `priority` does not erase an
+        // explicit `loading`, and a plain image is lazy.
+        let rendered = render_image_shim(
+            r#"{ src: "/hero.png", alt: "H", width: 700, height: 700, priority: true, loading: "eager" }"#,
+        );
+        let eager = rendered.as_array().unwrap().iter().find(|e| e["type"] == "img").unwrap();
+        assert_eq!(eager["props"]["loading"], "eager");
+        let rendered = render_image_shim(r#"{ src: "/hero.png", alt: "H", width: 700, height: 700 }"#);
+        assert_eq!(rendered[0]["props"]["loading"], "lazy");
+    }
+
+    /// Regression: props `getImgProps` consumes must never leak through `...rest` onto
+    /// the DOM <img> as bogus attributes (`objectfit="cover"`, `layout="fill"`, …).
+    #[test]
+    fn image_shim_does_not_leak_next_only_props_to_the_dom() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let rendered = render_image_shim(
+            r#"{ src: "/hero.png", alt: "Hero", layout: "fill", objectFit: "cover", objectPosition: "top", overrideSrc: "/override.png" }"#,
+        );
+        let props = &rendered[0]["props"];
+        for leaked in ["layout", "objectFit", "objectPosition", "overrideSrc", "fill", "priority", "preload"] {
+            assert!(
+                props.get(leaked).is_none(),
+                "`{leaked}` leaked onto the DOM <img>: {props}",
+            );
+        }
+        // `layout="fill"` implies fill (positioning + data-nimg + default sizes) and
+        // `overrideSrc` replaces the rendered src, exactly as Next does.
+        assert_eq!(props["data-nimg"], "fill");
+        assert_eq!(props["style"]["position"], "absolute");
+        assert_eq!(props["style"]["objectPosition"], "top");
+        assert_eq!(props["sizes"], "100vw");
+        assert_eq!(props["src"], "/override.png");
     }
 
     #[test]
@@ -6865,7 +8212,7 @@ mod tests {
         );
         // (The module has been lowered to CJS by the full pipeline, so match that form.)
         assert!(
-            result.code.contains("__diffpackUseCache") && result.code.contains("require(\"next/cache\")"),
+            result.code.contains("__diffpackUseCache") && result.code.contains("require.esm(\"next/cache\")"),
             "transform imports the cache boundary helper from next/cache: {}",
             result.code
         );
@@ -6989,7 +8336,7 @@ export default function Page(){ return null; }
         let seg_boundary = app.join("segment-boundary.tsx");
         let reqctx = app.join("request-context.ts");
         std::fs::write(&reqctx, request_context_module()).unwrap();
-        let rsc = rsc_entry_module(&disc, "", false, &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc.contains("template:"), "levels carry a template id");
         assert!(rsc.contains("const GLOBAL_ERROR ="), "GLOBAL_ERROR const emitted");
         assert!(rsc.contains("key: pathname"), "template is keyed by pathname for remount");
@@ -7011,5 +8358,134 @@ export default function Page(){ return null; }
         // No instrumentation file → None.
         let root3 = scratch("instrumentation-none");
         assert!(instrumentation_entry(&root3).is_none(), "no instrumentation → None");
+    }
+
+    /// The emitted production orchestrator, as a string (the same bytes `build-app`
+    /// writes to `<out>/next-server.mjs`).
+    const NEXT_SERVER_MJS: &str = include_str!("../scripts/rsc/next-server.mjs");
+
+    #[test]
+    fn the_production_server_survives_a_failing_render() {
+        // FINDINGS #22. The request handler's catch called `res.writeHead(500)` on a
+        // response whose shell had already gone out; that throws ERR_HTTP_HEADERS_SENT
+        // from an async handler, which Node turns into `process.exit(1)` — ONE bad
+        // render killed the whole server. The catch must delegate to a reporter that
+        // checks `res.headersSent`, and the process must not die on an unhandled
+        // rejection either.
+        let catch_block = NEXT_SERVER_MJS
+            .rsplit_once("} catch (error) {")
+            .expect("the request handler has a catch")
+            .1;
+        let catch_body = catch_block.split_once("\n  }").expect("catch block ends").0;
+        assert!(
+            catch_body.contains("failRequest(res, error)"),
+            "the request handler's catch must go through failRequest: {catch_body}",
+        );
+        assert!(
+            !catch_body.contains("res.writeHead("),
+            "the catch must not write a status line unconditionally: {catch_body}",
+        );
+        assert!(
+            NEXT_SERVER_MJS.contains("function failRequest(res, error)")
+                && NEXT_SERVER_MJS.contains("res.headersSent || res.writableEnded"),
+            "failRequest must guard on headersSent before writing a 500",
+        );
+        for event in ["uncaughtException", "unhandledRejection"] {
+            assert!(
+                NEXT_SERVER_MJS.contains(&format!("\"{event}\"")),
+                "the server must install a process-level {event} handler",
+            );
+        }
+        assert!(
+            NEXT_SERVER_MJS.contains("process.on(event, (error)"),
+            "the process-level handlers must log rather than exit",
+        );
+        // A socket error on either half of an in-flight streaming response must not
+        // throw (an `error` event with no listener is fatal).
+        assert!(
+            NEXT_SERVER_MJS.contains("req.on(\"error\"") && NEXT_SERVER_MJS.contains("res.on(\"error\""),
+            "the request/response sockets must have error listeners",
+        );
+    }
+
+    #[test]
+    fn the_streaming_renderer_reports_a_post_shell_error_without_writing_headers() {
+        // The SSR entry's `onShellError` used to gate on its own `shellStarted` flag,
+        // which can be false AFTER `onShellReady` wrote the head — writing a 500 there
+        // throws the same ERR_HTTP_HEADERS_SENT. `res.headersSent` is the authority.
+        let ssr = ssr_entry_module(
+            Path::new("/app/.diffpack-next"),
+            &[],
+            Path::new("/app/.diffpack-next/hooks-context.ts"),
+            "",
+        );
+        assert!(
+            ssr.contains("if (!shellStarted && !res.headersSent) {"),
+            "onShellError must check res.headersSent: {ssr}",
+        );
+    }
+
+    #[test]
+    fn a_strict_csp_nonce_reaches_every_script_the_document_emits() {
+        // `next-strict-csp`: middleware sets `script-src 'nonce-…'`, so an inline script
+        // without the nonce is BLOCKED and the page never hydrates. react-dom nonces its
+        // bootstrap scripts from the `nonce` render option; the injected `__DF_FLIGHT`
+        // chunks are diffpack's own tags and must carry it too.
+        let ssr = ssr_entry_module(
+            Path::new("/app/.diffpack-next"),
+            &[],
+            Path::new("/app/.diffpack-next/hooks-context.ts"),
+            "",
+        );
+        assert_eq!(
+            ssr.matches("nonce: nonce || undefined").count(),
+            2,
+            "both the buffered and the streaming render must pass the nonce to react-dom: {ssr}",
+        );
+        assert!(
+            ssr.contains("const nonceAttr = nonce ?"),
+            "the streaming renderer must build a nonce attribute: {ssr}",
+        );
+        assert!(
+            !ssr.contains("\"<script>(self.__DF_FLIGHT"),
+            "no flight script may be emitted without the nonce attribute: {ssr}",
+        );
+        // `script-src` wins over `default-src` (the canonical recipe declares both).
+        assert!(
+            NEXT_SERVER_MJS.contains("function scriptNonceFromHeaders(headerPairs)")
+                && NEXT_SERVER_MJS.contains("directives.find((part) => part.startsWith(\"script-src\"))"),
+            "the orchestrator must read the nonce off script-src first",
+        );
+    }
+
+    #[test]
+    fn next_script_is_shimmed_as_a_pinned_client_island() {
+        // FINDINGS #23. Next's own `next/script` is a CommonJS barrel inside
+        // node_modules that `scan_project` cannot see, so its client reference had no
+        // manifest entry. It is aliased to a project-local `"use client"` shim instead,
+        // exactly like `next/link`.
+        let shim = next_script_shim();
+        assert!(shim.starts_with("\"use client\";"), "the directive stays first: {shim}");
+        assert!(shim.contains("export default Script;"), "the shim has a default export");
+        assert!(
+            shim.contains("ReactDOM.preload(src, preloadOptions(props))"),
+            "afterInteractive contributes a preload to the document: {shim}",
+        );
+        assert!(
+            shim.contains("strategy === \"worker\"") && shim.contains("is not implemented"),
+            "Partytown must be a LOUD error, not a silent downgrade: {shim}",
+        );
+        // The client + ssr entries must both pin it, or the flight's client reference
+        // resolves to nothing at render time.
+        let islands = [PathBuf::from("/app/.diffpack-next/shims/script.tsx")];
+        let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks);
+        let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks, "");
+        for (label, source) in [("client", &client), ("ssr", &ssr)] {
+            assert!(
+                source.contains("shims/script.tsx") || source.contains("shims\\script.tsx"),
+                "{label} entry must pin the next/script shim: {source}",
+            );
+        }
     }
 }

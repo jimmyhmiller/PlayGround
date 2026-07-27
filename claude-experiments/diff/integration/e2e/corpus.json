@@ -1,0 +1,428 @@
+{
+  "_comment": "Real, pinned, third-party applications used as diffpack's end-to-end truth test. Every third-party app is materialized from a pinned upstream git SHA and is NEVER modified. A few entries are instead FIRST-PARTY (\"firstParty\": a path under integration/e2e/): applications written by diffpack and checked into this repository, used only where no pinned upstream example exercises the behaviour at all. They are marked as such in their DIFFPACK_E2E_PROVENANCE.json and are not third-party evidence. Every app, of either origin, is built twice \u2014 once by its own native toolchain (the reference) and once by diffpack \u2014 then both are served and driven in the same real browser, and eleven observation channels are compared. See README.md.",
+  "sources": {
+    "next-examples": {
+      "repo": "https://github.com/vercel/next.js",
+      "sha": "af9a3928168cb37b9cee9b2102a55fe90e3363fd",
+      "license": "MIT",
+      "copyright": "Copyright (c) 2025 Vercel, Inc.",
+      "note": "Vercel's own examples are the canonical definition of a real Next.js app."
+    },
+    "tanstack-router": {
+      "repo": "https://github.com/TanStack/router",
+      "sha": "179d9b9b5eec50dc7833b4e2ef91b735d34bbc07",
+      "sparse": [
+        "examples/react"
+      ],
+      "license": "MIT",
+      "copyright": "Copyright (c) 2021-present Tanner Linsley",
+      "note": "TanStack's own examples are the reference definition of a TanStack Start / Router app."
+    },
+    "create-vite": {
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "3ac77d9dd742968961af38a5a91ed6b061ceda7d",
+      "sparse": [
+        "packages/create-vite"
+      ],
+      "license": "MIT",
+      "copyright": "Copyright (c) 2019-present VoidZero Inc. and Vite contributors",
+      "note": "The create-vite templates are the everyday shape of a Vite app: exactly what `npm create vite` scaffolds."
+    }
+  },
+  "pins": {
+    "next": "16.2.11",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "vite": "8.1.5"
+  },
+  "apps": [
+    {
+      "id": "next-hello-world",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/hello-world",
+      "why": "Smallest real app-router app: root layout + one static page.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-basic-css",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/basic-css",
+      "why": "Global CSS + CSS Modules through the app router.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-active-class-name",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/active-class-name",
+      "why": "usePathname-driven active link styling: client navigation must recompute classes.",
+      "routes": [
+        "/",
+        "/about"
+      ]
+    },
+    {
+      "id": "next-blog-starter",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/blog-starter",
+      "why": "The flagship content app: src/app layout, Tailwind, markdown at build time (gray-matter + remark), dynamic [slug] routes, next/image.",
+      "routes": [
+        "/",
+        "/posts/dynamic-routing",
+        "/posts/hello-world"
+      ]
+    },
+    {
+      "id": "next-image-component",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/image-component",
+      "why": "next/image across every layout mode \u2014 the image optimizer surface.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-mdx",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/mdx",
+      "why": "@next/mdx at build time, next/font/google, next/image, CSS Modules, metadata.",
+      "routes": [
+        "/",
+        "/blog/hello-world"
+      ]
+    },
+    {
+      "id": "next-mdx-features",
+      "kind": "next-app",
+      "firstParty": "fixtures/next-mdx-features",
+      "why": "MDX as it is actually written: a NON-EMPTY mdx-components override map, GFM (table with per-column alignment, strikethrough, task list, autolink literal, footnote), a component imported into MDX and used as JSX, a client component inside an MDX route, `export const` read both by the route and by an importing module, and an .mdx used as a plain component. Configures remark-gfm and nothing else — the branch diffpack answers with its native Rust MDX compiler.",
+      "firstPartyReason": "Vercel's two MDX examples (next-mdx, next-pages-mdx) are the only pinned MDX apps that exist, and between them they use no GFM, no plugin, no frontmatter and an EMPTY override map (`const components: MDXComponents = {}`), so diffpack's whole MDX surface was passing the corpus untested. No third-party example covers it; this fixture does, and is still compared against `next build`.",
+      "routes": [
+        "/",
+        "/docs"
+      ]
+    },
+    {
+      "id": "next-radix-ui",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/radix-ui",
+      "why": "A real third-party client component library (Radix dropdown) + Tailwind + PostCSS.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-redux",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-redux",
+      "why": "Redux Toolkit store in an app-router client boundary \u2014 the RTK NODE_ENV guard family.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-zustand",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-zustand",
+      "why": "src/app layout + a per-request store provider.",
+      "routes": [
+        "/"
+      ],
+      "volatile": [
+        "\\d{2}:\\d{2}:\\d{2}"
+      ],
+      "volatileNote": "The page renders the SERVER's clock (a per-request timestamp). The determinism shim freezes Date in the browser, which cannot reach a server render, so the two deployments legitimately print times a second apart."
+    },
+    {
+      "id": "next-with-xstate",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-xstate",
+      "why": "A state machine driving interactive client state.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-jotai",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-jotai",
+      "why": "Atom state across a client boundary.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-context-api",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-context-api",
+      "why": "React context provider straddling the server/client boundary.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-sass",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-sass",
+      "why": "Real Sass compilation (.scss modules) in an app-router build.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-styled-components",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-styled-components",
+      "why": "CSS-in-JS with an SSR style registry \u2014 a genuine plugin-shaped requirement.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-dynamic-import",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-dynamic-import",
+      "why": "next/dynamic code splitting, including ssr:false islands.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-web-worker",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-web-worker",
+      "why": "new Worker(new URL(...)) inside a Next client component.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-with-absolute-imports",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-absolute-imports",
+      "why": "tsconfig paths / baseUrl resolution.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-i18n-routing",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/i18n-routing",
+      "why": "Middleware-driven locale negotiation + [lang] dynamic segments.",
+      "routes": [
+        "/en-US",
+        "/nl-NL"
+      ]
+    },
+    {
+      "id": "next-github-pages",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/github-pages",
+      "why": "output: 'export' static export \u2014 the whole app must be emitted as plain files.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-strict-csp",
+      "kind": "next-app",
+      "source": "next-examples",
+      "subdir": "examples/with-strict-csp",
+      "why": "The only app-router example here that is genuinely DYNAMIC: `headers()` in the page opts out of prerendering, so this is what exercises the streaming SSR path (inline flight scripts) rather than a static file. It also has middleware and `.js` files containing JSX.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-pages-typescript",
+      "kind": "next-pages",
+      "source": "next-examples",
+      "subdir": "examples/with-typescript",
+      "why": "Classic pages router: getStaticProps/getStaticPaths, _app, API route.",
+      "routes": [
+        "/",
+        "/users",
+        "/about"
+      ]
+    },
+    {
+      "id": "next-pages-mdx",
+      "kind": "next-pages",
+      "source": "next-examples",
+      "subdir": "examples/mdx-pages",
+      "why": "MDX pages through the pages router.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-pages-mdx-plugins",
+      "kind": "next-pages",
+      "firstParty": "fixtures/next-pages-mdx-plugins",
+      "why": "The OTHER MDX compiler: a next.config configuring remark/rehype plugins diffpack's native emitter cannot run (remark-frontmatter, remark-mdx-frontmatter, rehype-slug, rehype-autolink-headings), so every .mdx file is compiled by the app's own @mdx-js/mdx via src/mdx_runner.mjs. Covers YAML frontmatter being stripped AND exposed to the page, plus imports/JSX and `export const` in a pages-router MDX page.",
+      "firstPartyReason": "Nothing pinned configures an MDX plugin, so the app-pipeline branch added for FINDINGS #34 had zero end-to-end coverage — and frontmatter cannot be compared at all without it, because `next build` renders `---` as a thematic break unless remark-frontmatter is configured.",
+      "routes": [
+        "/",
+        "/about"
+      ]
+    },
+    {
+      "id": "next-pages-shallow-routing",
+      "kind": "next-pages",
+      "source": "next-examples",
+      "subdir": "examples/with-shallow-routing",
+      "why": "next/router shallow navigation and query state.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-pages-i18n-routing",
+      "kind": "next-pages",
+      "source": "next-examples",
+      "subdir": "examples/i18n-routing-pages",
+      "why": "Built-in pages-router i18n config (locale subpaths).",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "next-pages-framer-motion",
+      "kind": "next-pages",
+      "source": "next-examples",
+      "subdir": "examples/with-framer-motion",
+      "why": "A heavy animation library plus custom _app page transitions.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "tanstack-start-basic",
+      "kind": "tanstack",
+      "source": "tanstack-router",
+      "subdir": "examples/react/start-basic",
+      "why": "TanStack's own flagship Start example: file-based routes, SSR, server functions, pathless layouts.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "tanstack-start-counter",
+      "kind": "tanstack",
+      "source": "tanstack-router",
+      "subdir": "examples/react/start-counter",
+      "why": "The minimal Start app: one route, one server function mutating a file \u2014 fully hermetic.",
+      "routes": [
+        "/"
+      ],
+      "resetFiles": [
+        "count.txt"
+      ],
+      "resetNote": "The server function persists the counter to count.txt in the project root. Without resetting it, the second side served starts from where the first left off and the interaction channel reports a difference that is the app's own state, not a bundler difference."
+    },
+    {
+      "id": "tanstack-start-tailwind-v4",
+      "kind": "tanstack",
+      "source": "tanstack-router",
+      "subdir": "examples/react/start-tailwind-v4",
+      "why": "Start plus Tailwind v4 through the Vite plugin \u2014 diffpack reimplements both natively.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "tanstack-router-quickstart",
+      "kind": "vite",
+      "source": "tanstack-router",
+      "subdir": "examples/react/quickstart-file-based",
+      "why": "A plain Vite SPA (no SSR) whose routing comes from the TanStack Router Vite plugin.",
+      "routes": [
+        "/",
+        "/about"
+      ]
+    },
+    {
+      "id": "vite-react-ts",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-react-ts",
+      "why": "What `npm create vite` gives a React user \u2014 the single most common Vite app there is.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "vite-vanilla-ts",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-vanilla-ts",
+      "why": "No framework at all: TypeScript, a CSS import, an asset import. The floor of Vite support.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "vite-preact-ts",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-preact-ts",
+      "why": "JSX through a non-React runtime (@preact/preset-vite) \u2014 tests plugin-shaped JSX config.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "vite-preact",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-preact",
+      "why": "The JS twin of template-preact-ts: a non-React JSX runtime configured ONLY by a Vite plugin (no tsconfig, no jsconfig) \u2014 the case a tsconfig-only JSX rule cannot see.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "vite-vue-ts",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-vue-ts",
+      "why": "A single-file-component compiler plugin. Expected to be outside diffpack's current boundary \u2014 recorded, never silently dropped.",
+      "routes": [
+        "/"
+      ]
+    },
+    {
+      "id": "vite-svelte-ts",
+      "kind": "vite",
+      "source": "create-vite",
+      "subdir": "packages/create-vite/template-svelte-ts",
+      "why": "A second, independent compiler-plugin framework. Same purpose as the Vue entry: map the boundary honestly.",
+      "routes": [
+        "/"
+      ]
+    }
+  ]
+}

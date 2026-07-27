@@ -3,40 +3,50 @@
 // navigation re-runs the target page's data fetching and swaps the view without a
 // full document load. Modified clicks, non-self targets, and the no-router case
 // (defensive) fall back to native navigation.
+//
+// The rendered `href` follows Next's own resolution, which is NOT "stringify the
+// prop":
+//   * an OBJECT `href` ({ pathname, query, hash }) is formatted, and dynamic route
+//     segments in `pathname` are INTERPOLATED from `query` — the keys consumed that
+//     way are removed from the query string and the leftovers are appended
+//     (`{ pathname: "/users/[id]", query: { id: 7, tab: "a" } }` -> `/users/7?tab=a`);
+//   * an explicit `as` prop is the *displayed* URL and wins over `href` (the classic
+//     `<Link href="/users/[id]" as="/users/7">` form);
+//   * with built-in i18n configured, the URL is locale-prefixed exactly as Next's
+//     `addLocale` does (no prefix for the default locale; `locale={false}` opts out).
 
 import { useContext } from "react";
 import { RouterContext } from "./next-router.jsx";
-
-function hrefToString(href) {
-  if (typeof href === "string") return href;
-  if (href && typeof href === "object") {
-    const path = href.pathname || "";
-    const query = href.query
-      ? "?" + new URLSearchParams(href.query).toString()
-      : "";
-    const hash = href.hash || "";
-    return path + query + hash;
-  }
-  return "#";
-}
+import { addLocale, resolveHref } from "./pages-url.js";
 
 export default function Link(props) {
   const {
     href,
-    as: _as,
+    as: asProp,
     children,
     replace,
-    scroll: _scroll,
-    shallow: _shallow,
+    scroll,
+    shallow,
     prefetch: _prefetch,
     passHref: _passHref,
     legacyBehavior: _legacyBehavior,
-    locale: _locale,
+    locale,
     onClick,
     ...rest
   } = props;
   const router = useContext(RouterContext);
-  const url = hrefToString(href);
+  const resolvedHref = resolveHref(href);
+  // `as` is the displayed URL when present; otherwise the resolved href is.
+  const displayed =
+    asProp !== undefined && asProp !== null ? resolveHref(asProp) : resolvedHref;
+  // Locale prefixing only applies when the app configured built-in i18n (the router
+  // then carries `locales`). `locale={false}` opts a link out.
+  const i18nEnabled = Boolean(router && router.locales && router.locales.length);
+  const targetLocale =
+    locale === false ? null : locale !== undefined ? locale : router && router.locale;
+  const url = i18nEnabled
+    ? addLocale(displayed, targetLocale, router && router.defaultLocale)
+    : displayed;
 
   const handleClick = (event) => {
     if (onClick) onClick(event);
@@ -53,8 +63,12 @@ export default function Link(props) {
     if (rest.target && rest.target !== "_self") return;
     if (!router) return; // no context: let the browser navigate natively
     event.preventDefault();
-    if (replace) router.replace(url);
-    else router.push(url);
+    // `shallow` and `scroll` are Link's pass-through navigation options, not
+    // decoration: `scroll={false}` keeps the reader where they are and
+    // `shallow` skips the target's data fetching.
+    const options = { shallow, scroll };
+    if (replace) router.replace(url, undefined, options);
+    else router.push(url, undefined, options);
   };
 
   return (

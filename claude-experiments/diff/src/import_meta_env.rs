@@ -20,7 +20,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
-use oxc_span::{SourceType, Span};
+use oxc_span::Span;
 
 use crate::transform::Target;
 
@@ -91,7 +91,7 @@ pub fn transform(path: &Path, source: &str, options: &ImportMetaEnv, target: Tar
         return None;
     }
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let source_type = crate::parser::scan_source_type(path);
     let parsed = Parser::new(&allocator, source, source_type).parse();
     let mut collector = EnvCollector {
         options,

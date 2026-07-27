@@ -32,8 +32,14 @@ use crate::transform::Target;
 /// entries, `next/*` shims, and route-table manifests.
 pub const ADAPTER_DIR: &str = ".diffpack-next-pages";
 
-/// Extensions a page / api module may use.
-const PAGE_EXTS: [&str; 4] = ["tsx", "jsx", "ts", "js"];
+/// Extensions a module-file convention (`_app`/`_document`/`_error`) may use.
+const MODULE_EXTS: [&str; 4] = ["tsx", "jsx", "ts", "js"];
+
+/// Extensions a page / api module may use — the module set PLUS MDX/Markdown, so
+/// `pages/index.mdx` is a route exactly like `pages/index.tsx` (what `@next/mdx` +
+/// `pageExtensions` configures). Mirrors the app-router split in
+/// [`crate::next_adapter`]: only pages are MDX-eligible, never `_document`.
+const PAGE_EXTS: [&str; 6] = ["tsx", "jsx", "ts", "js", "mdx", "md"];
 
 /// One kind of a route path segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,22 +81,15 @@ fn pages_dir(root: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_dir())
 }
 
-/// Whether `root` has a `next.config.*`.
-fn has_next_config(root: &Path) -> bool {
-    ["tsx", "jsx", "ts", "js", "mjs", "cjs"]
-        .iter()
-        .any(|ext| root.join(format!("next.config.{ext}")).is_file())
-}
-
-/// Whether `root` is a Next.js pages-router project this adapter handles: a
-/// `next.config.*` plus a `pages/` (or `src/pages/`) directory containing at least
-/// one page module. A project that ALSO has an `app/` page is an app-router project
-/// (or hybrid); this adapter is only chosen when app-router detection declines, so
-/// the caller must check [`crate::next_adapter::is_app_router`] first. Canonicalizes
-/// defensively (a bad path is simply "not a pages app", never a panic).
+/// Whether `root` is a Next.js pages-router project this adapter handles: a Next project
+/// (see [`crate::next_adapter::is_next_project`]) plus a `pages/` (or `src/pages/`)
+/// directory containing at least one page module. A project that ALSO has an `app/` page
+/// is an app-router project (or hybrid); this adapter is only chosen when app-router
+/// detection declines, so the caller must check [`crate::next_adapter::is_app_router`]
+/// first. Canonicalizes defensively (a bad path is simply "not a pages app", never a panic).
 pub fn is_pages_router(root: &Path) -> bool {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !has_next_config(&canonical) {
+    if !crate::next_adapter::is_next_project(&canonical) {
         return false;
     }
     let Some(dir) = pages_dir(&canonical) else {
@@ -103,9 +102,10 @@ pub fn is_pages_router(root: &Path) -> bool {
     }
 }
 
-/// The first `<dir>/<stem>.<ext>` that exists, in `PAGE_EXTS` priority order.
+/// The first `<dir>/<stem>.<ext>` that exists, in `MODULE_EXTS` priority order. Used for
+/// the `_app`/`_document`/`_error` conventions, which are never MDX.
 fn first_existing(dir: &Path, stem: &str) -> Option<PathBuf> {
-    PAGE_EXTS
+    MODULE_EXTS
         .iter()
         .map(|ext| dir.join(format!("{stem}.{ext}")))
         .find(|path| path.is_file())
@@ -303,10 +303,103 @@ fn keys_source(keys: &[(String, bool)]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+/// The `i18n` block of `next.config`, as the pages adapter implements it: the
+/// locale list, the default locale (served WITHOUT a path prefix), and whether
+/// `Accept-Language` detection redirects the bare root. Sub-features diffpack does
+/// not implement are rejected by [`i18n_from_eval`] rather than dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct I18n {
+    locales: Vec<String>,
+    default_locale: String,
+    locale_detection: bool,
+}
+
+impl I18n {
+    /// The `{ locales, defaultLocale, localeDetection }` object literal both generated
+    /// manifests export as `i18n` (the single source the two entries read).
+    fn to_js(&self) -> String {
+        let locales: Vec<String> = self.locales.iter().map(|l| js_str(l)).collect();
+        format!(
+            "{{ locales: [{}], defaultLocale: {}, localeDetection: {} }}",
+            locales.join(", "),
+            js_str(&self.default_locale),
+            self.locale_detection,
+        )
+    }
+}
+
+/// Read + validate the `i18n` block of a single `next.config` evaluation.
+///
+/// `Ok(None)` means the app configured no i18n. Anything present but beyond what the
+/// adapter implements (`domains`, i.e. domain-based locale routing) is a HARD ERROR
+/// naming the config key: shipping a build with a configured feature silently missing
+/// is not an option this adapter takes.
+fn i18n_from_eval(eval: Option<&serde_json::Value>) -> Result<Option<I18n>, String> {
+    let Some(block) = eval.and_then(|value| value.get("i18n")) else {
+        return Ok(None);
+    };
+    if block.is_null() {
+        return Ok(None);
+    }
+    let locales: Vec<String> = block
+        .get("locales")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if locales.is_empty() {
+        return Err(
+            "next.config: `i18n` is present but `i18n.locales` is empty or not an array of \
+             strings — diffpack's pages-router i18n needs the locale list"
+                .to_string(),
+        );
+    }
+    let default_locale = block
+        .get("defaultLocale")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&locales[0])
+        .to_string();
+    if !locales.contains(&default_locale) {
+        return Err(format!(
+            "next.config: `i18n.defaultLocale` is {default_locale:?} but it is not in \
+             `i18n.locales` ({locales:?})"
+        ));
+    }
+    let domains = block.get("domains").and_then(|v| v.as_array());
+    if domains.is_some_and(|items| !items.is_empty()) {
+        return Err(
+            "next.config: `i18n.domains` (domain-based locale routing) is NOT implemented by \
+             diffpack's pages-router adapter. Remove it, or serve the app with `next start`. \
+             `i18n.locales` / `i18n.defaultLocale` (sub-path locale routing) ARE supported."
+                .to_string(),
+        );
+    }
+    Ok(Some(I18n {
+        locales,
+        default_locale,
+        locale_detection: block
+            .get("localeDetection")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+    }))
+}
+
+/// The `export const i18n = ...;` line both manifests carry (`null` when unconfigured).
+fn i18n_export(i18n: Option<&I18n>) -> String {
+    match i18n {
+        Some(config) => format!("export const i18n = {};\n", config.to_js()),
+        None => "export const i18n = null;\n".to_string(),
+    }
+}
+
 /// Generate the CLIENT route-table manifest module: it statically imports each
 /// page's default component (so the bundler discovers them), the App, and the error
 /// page, and exports the ordered `pages` table used by `matchPath` on the client.
-fn client_manifest_module(discovery: &Discovery, adapter_dir: &Path) -> String {
+fn client_manifest_module(discovery: &Discovery, adapter_dir: &Path, i18n: Option<&I18n>) -> String {
     let app = resolved_app(discovery, adapter_dir);
     let error = resolved_error(discovery, adapter_dir);
     let mut out = String::new();
@@ -323,6 +416,7 @@ fn client_manifest_module(discovery: &Discovery, adapter_dir: &Path) -> String {
         ));
     }
     out.push_str("export { App, ErrorPage };\n");
+    out.push_str(&i18n_export(i18n));
     out.push_str("export const pages = [\n");
     for (index, route) in discovery.pages.iter().enumerate() {
         let (regex, keys) = compile_regex(&route.segments);
@@ -341,7 +435,7 @@ fn client_manifest_module(discovery: &Discovery, adapter_dir: &Path) -> String {
 /// namespace (default component + `getServerSideProps`/`getStaticProps`), the App,
 /// the Document, the error page, and each api handler, and exports the ordered
 /// `pages` and `apiRoutes` tables the server render entry dispatches through.
-fn server_manifest_module(discovery: &Discovery, adapter_dir: &Path) -> String {
+fn server_manifest_module(discovery: &Discovery, adapter_dir: &Path, i18n: Option<&I18n>) -> String {
     let app = resolved_app(discovery, adapter_dir);
     let document = resolved_document(discovery, adapter_dir);
     let error = resolved_error(discovery, adapter_dir);
@@ -369,6 +463,7 @@ fn server_manifest_module(discovery: &Discovery, adapter_dir: &Path) -> String {
         ));
     }
     out.push_str("export { App, Document, ErrorPage };\n");
+    out.push_str(&i18n_export(i18n));
     out.push_str("export const pages = [\n");
     for (index, route) in discovery.pages.iter().enumerate() {
         let (regex, keys) = compile_regex(&route.segments);
@@ -432,11 +527,13 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
 
 /// The fixed runtime + shim files scaffolded verbatim into the adapter dir.
 const RUNTIME_FILES: &[(&str, &str)] = &[
+    ("pages-url.js", include_str!("../scripts/pages/pages-url.js")),
     ("pages-runtime.jsx", include_str!("../scripts/pages/pages-runtime.jsx")),
     ("next-router.jsx", include_str!("../scripts/pages/next-router.jsx")),
     ("pages-head-manager.jsx", include_str!("../scripts/pages/pages-head-manager.jsx")),
     ("next-head.jsx", include_str!("../scripts/pages/next-head.jsx")),
     ("next-link.jsx", include_str!("../scripts/pages/next-link.jsx")),
+    ("route-announcer.jsx", include_str!("../scripts/pages/route-announcer.jsx")),
     ("next-document.jsx", include_str!("../scripts/pages/next-document.jsx")),
     ("default-app.jsx", include_str!("../scripts/pages/default-app.jsx")),
     ("default-document.jsx", include_str!("../scripts/pages/default-document.jsx")),
@@ -461,7 +558,7 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
     let root = root
         .canonicalize()
         .map_err(|error| format!("cannot open project root {}: {error}", root.display()))?;
-    if !has_next_config(&root) {
+    if !crate::next_adapter::is_next_project(&root) {
         return Ok(None);
     }
     let Some(dir) = pages_dir(&root) else {
@@ -480,15 +577,24 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
     for (name, contents) in RUNTIME_FILES {
         write_if_changed(&adapter_dir.join(name), contents)?;
     }
+    // Built-in i18n (`next.config`'s `i18n`) — locale-prefixed routes, `router.locale`
+    // / `locales` / `defaultLocale`, and `<html lang>`. Unsupported sub-features are a
+    // build error from `i18n_from_eval`, never a silently missing feature.
+    let next_config = crate::next_adapter::run_next_config_eval(&root);
+    // `@next/mdx`'s options govern `.mdx` pages on this router too — state them (never drop
+    // them in silence). See `next_adapter::report_mdx_config`.
+    crate::next_adapter::report_mdx_config(next_config.as_ref());
+    let i18n = i18n_from_eval(next_config.as_ref())?;
+
     // Generate the route-table manifests (both, so a later server build after a
     // client build never reads a stale table).
     write_if_changed(
         &adapter_dir.join("pages-manifest.client.js"),
-        &client_manifest_module(&discovery, &adapter_dir),
+        &client_manifest_module(&discovery, &adapter_dir, i18n.as_ref()),
     )?;
     write_if_changed(
         &adapter_dir.join("pages-manifest.server.js"),
-        &server_manifest_module(&discovery, &adapter_dir),
+        &server_manifest_module(&discovery, &adapter_dir, i18n.as_ref()),
     )?;
 
     let is_client = environment == "client";
@@ -506,12 +612,20 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
     };
 
     let alias = |spec: &str, file: &str| (spec.to_string(), adapter_dir.join(file).to_string_lossy().into_owned());
-    let aliases = vec![
+    let mut aliases = vec![
         alias("next/link", "next-link.jsx"),
         alias("next/head", "next-head.jsx"),
         alias("next/router", "next-router.jsx"),
         alias("next/document", "next-document.jsx"),
     ];
+    // A CLIENT bundle may import the Node built-ins Next polyfills (`url`,
+    // `querystring`, ...): Next's own webpack config maps them onto the copies it
+    // vendors, so such an import is valid Next code. Without this the browser-target
+    // "node built-in cannot be bundled" error rejects an app `next build` accepts.
+    // Server bundles keep the real built-ins.
+    if is_client {
+        aliases.extend(crate::next_adapter::next_browser_polyfill_aliases(&root));
+    }
 
     let node_env = if dev { "\"development\"" } else { "\"production\"" };
     let defines = vec![("process.env.NODE_ENV".to_string(), node_env.to_string())];
@@ -540,6 +654,12 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
                 root: Some(root.clone()),
                 postcss: crate::postcss::discover(&root).map(std::sync::Arc::new),
             },
+            // Next compiles JSX in `.js`/`.mjs`/`.cjs` (its SWC loader enables jsx
+            // for everything that is not a plain `.ts`), and pages-router apps rely
+            // on it constantly — `pages/index.js` is the default Next page.
+            jsx_extensions: crate::parser::JsxExtensions::NextJs,
+            // As for the app router: the tsconfig is the only JSX-lowering input.
+            jsx: crate::transform::JsxConfig::default(),
         },
         entry: Some(entry),
     }))
@@ -644,13 +764,13 @@ mod tests {
             ..Discovery::default()
         };
         let adapter = PathBuf::from("/x/.diffpack-next-pages");
-        let client = client_manifest_module(&discovery, &adapter);
+        let client = client_manifest_module(&discovery, &adapter, None);
         assert!(client.contains("export const pages = ["));
         assert!(client.contains("regex: /^\\/$/"));
         assert!(client.contains("regex: /^\\/post\\/([^/]+)$/"));
         assert!(client.contains("component: Component1"));
         assert!(client.contains("default-app.jsx"));
-        let server = server_manifest_module(&discovery, &adapter);
+        let server = server_manifest_module(&discovery, &adapter, None);
         assert!(server.contains("import * as Page0"));
         assert!(server.contains("mod: Page0"));
         assert!(server.contains("export const apiRoutes = ["));
@@ -661,6 +781,152 @@ mod tests {
     fn regex_lite_match(source: &str, input: &str) -> bool {
         // Only handles the exact `^\/$` case used by the root test.
         source == "^\\/$" && input == "/"
+    }
+
+    // --- FINDINGS 15: `next/link` object href / `as` interpolation ----------------
+
+    #[test]
+    fn link_shim_resolves_object_hrefs_and_honors_as() {
+        // The shim must NOT stringify an object href verbatim: `/users/[id]` rendered
+        // literally is the defect (every dynamic link dead). The pure resolver lives in
+        // pages-url.js; the shim must delegate to it and prefer `as` for the rendered URL.
+        let url = include_str!("../scripts/pages/pages-url.js");
+        assert!(url.contains("export function resolveHref"));
+        assert!(
+            url.contains("interpolate(raw, href.query)"),
+            "an object href's pathname must be interpolated from its query, not emitted literally",
+        );
+        assert!(
+            url.contains("if (consumed.has(key)) continue;"),
+            "query keys consumed by dynamic segments must be dropped from the search string",
+        );
+        assert!(
+            url.contains("is missing a value for the dynamic"),
+            "a dynamic segment with no query value must be a LOUD error, never a literal `[id]`",
+        );
+        let link = include_str!("../scripts/pages/next-link.jsx");
+        assert!(
+            link.contains(r#"import { addLocale, resolveHref } from "./pages-url.js";"#),
+            "next/link must use the one shared URL resolver",
+        );
+        assert!(
+            link.contains("asProp !== undefined && asProp !== null ? resolveHref(asProp) : resolvedHref"),
+            "`as` is the displayed URL and must win over the route pattern in `href`",
+        );
+        assert!(link.contains("href={url}"));
+        // The old verbatim stringifier must be gone.
+        assert!(!link.contains("hrefToString"));
+    }
+
+    // --- FINDINGS 16: pages-router built-in i18n ----------------------------------
+
+    fn eval_with_i18n(i18n: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "i18n": i18n })
+    }
+
+    #[test]
+    fn i18n_absent_or_null_is_no_i18n() {
+        assert_eq!(i18n_from_eval(None).unwrap(), None);
+        assert_eq!(i18n_from_eval(Some(&serde_json::json!({}))).unwrap(), None);
+        assert_eq!(
+            i18n_from_eval(Some(&eval_with_i18n(serde_json::Value::Null))).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn i18n_locales_and_default_are_read() {
+        let eval = eval_with_i18n(serde_json::json!({
+            "locales": ["en", "fr", "nl"],
+            "defaultLocale": "en",
+            "localeDetection": true,
+        }));
+        let config = i18n_from_eval(Some(&eval)).unwrap().expect("i18n configured");
+        assert_eq!(config.locales, vec!["en", "fr", "nl"]);
+        assert_eq!(config.default_locale, "en");
+        assert!(config.locale_detection);
+        // The first locale is the default when the config omits `defaultLocale`.
+        let eval = eval_with_i18n(serde_json::json!({ "locales": ["de", "en"] }));
+        let config = i18n_from_eval(Some(&eval)).unwrap().unwrap();
+        assert_eq!(config.default_locale, "de");
+    }
+
+    #[test]
+    fn unsupported_i18n_features_are_hard_errors_not_silent_gaps() {
+        // Domain-based locale routing is NOT implemented; it must name the config key
+        // and fail the build rather than serve an app with the feature missing.
+        let eval = eval_with_i18n(serde_json::json!({
+            "locales": ["en", "fr"],
+            "defaultLocale": "en",
+            "domains": [{ "domain": "example.fr", "defaultLocale": "fr" }],
+        }));
+        let error = i18n_from_eval(Some(&eval)).unwrap_err();
+        assert!(error.contains("i18n.domains"), "error must name the key: {error}");
+        assert!(error.contains("NOT implemented"), "error must be explicit: {error}");
+
+        // A malformed block is an error too, never a silent "no i18n".
+        let eval = eval_with_i18n(serde_json::json!({ "locales": [] }));
+        assert!(i18n_from_eval(Some(&eval)).unwrap_err().contains("i18n.locales"));
+        let eval = eval_with_i18n(serde_json::json!({
+            "locales": ["en"],
+            "defaultLocale": "fr",
+        }));
+        assert!(
+            i18n_from_eval(Some(&eval)).unwrap_err().contains("defaultLocale"),
+        );
+    }
+
+    #[test]
+    fn manifests_carry_the_i18n_table() {
+        let discovery = Discovery {
+            pages: vec![Route {
+                pattern: "/".into(),
+                segments: vec![],
+                module: PathBuf::from("/x/pages/index.tsx"),
+            }],
+            ..Discovery::default()
+        };
+        let adapter = PathBuf::from("/x/.diffpack-next-pages");
+        // No i18n -> an explicit null, so both entries always find the binding.
+        assert!(client_manifest_module(&discovery, &adapter, None).contains("export const i18n = null;"));
+        assert!(server_manifest_module(&discovery, &adapter, None).contains("export const i18n = null;"));
+
+        let config = I18n {
+            locales: vec!["en".into(), "fr".into(), "nl".into()],
+            default_locale: "en".into(),
+            locale_detection: true,
+        };
+        let expected =
+            r#"export const i18n = { locales: ["en", "fr", "nl"], defaultLocale: "en", localeDetection: true };"#;
+        assert!(client_manifest_module(&discovery, &adapter, Some(&config)).contains(expected));
+        assert!(server_manifest_module(&discovery, &adapter, Some(&config)).contains(expected));
+    }
+
+    #[test]
+    fn entries_implement_locale_routing_end_to_end() {
+        let url = include_str!("../scripts/pages/pages-url.js");
+        assert!(url.contains("export function splitLocale"));
+        assert!(url.contains("export function addLocale"));
+        assert!(url.contains("export function detectLocale"));
+
+        let server = include_str!("../scripts/pages/pages-server-entry.jsx");
+        // The request path is split before route matching, and the locale reaches every
+        // data-fetching hook, the router, __NEXT_DATA__ and <html lang>.
+        assert!(server.contains("splitLocale(i18n, pathname)"));
+        assert!(server.contains("matchPath(pages, routePath)"));
+        assert!(server.contains("mod.getStaticProps({ params, ...localeContext(locale) })"));
+        assert!(server.contains("...localeContext(locale),"));
+        assert!(server.contains("locale: i18n ? locale : null,"), "<html lang> needs the locale");
+        // SSG prerender covers every locale, under locale-prefixed URLs.
+        assert!(server.contains("addLocale(urlFor(page, params), locale, i18n && i18n.defaultLocale)"));
+
+        let document = include_str!("../scripts/pages/next-document.jsx");
+        assert!(document.contains("ctx && ctx.locale"), "<Html> must fill lang from the locale");
+
+        let client = include_str!("../scripts/pages/pages-client-entry.jsx");
+        assert!(client.contains("splitLocale(i18n, requestPath)"));
+        assert!(client.contains("locales: i18n ? i18n.locales : undefined,"));
+        assert!(client.contains("defaultLocale: i18n ? i18n.defaultLocale : undefined,"));
     }
 
     #[test]
@@ -730,14 +996,14 @@ mod tests {
             ..Discovery::default()
         };
         let adapter = PathBuf::from("/x/.diffpack-next-pages");
-        let server = server_manifest_module(&discovery, &adapter);
+        let server = server_manifest_module(&discovery, &adapter, None);
         assert!(server.contains("import * as Api0"));
         assert!(server.contains("import * as Api1"));
         assert!(server.contains("handler: Api0.default"));
         assert!(server.contains("handler: Api1.default"));
         assert!(server.contains("regex: /^\\/api\\/user\\/([^/]+)$/"));
         // The client manifest never imports api handlers (server-only code).
-        let client = client_manifest_module(&discovery, &adapter);
+        let client = client_manifest_module(&discovery, &adapter, None);
         assert!(!client.contains("api/hello"));
         assert!(!client.contains("apiRoutes"));
     }
@@ -761,6 +1027,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A scratch project root with a `package.json` declaring `next` (no next.config —
+    /// that is the point) and one page at `<root>/<pages_rel>`.
+    fn scratch_pages_project(name: &str, pages_rel: &str, page_file: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("diffpack-next-pages-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(pages_rel)).unwrap();
+        std::fs::write(root.join("package.json"), "{\"name\":\"app\",\"dependencies\":{\"next\":\"16.2.11\"}}\n")
+            .unwrap();
+        std::fs::write(root.join(pages_rel).join(page_file), "export default function P(){return null}\n")
+            .unwrap();
+        root
+    }
+
+    #[test]
+    fn pages_router_detected_without_next_config() {
+        // `next.config.*` is OPTIONAL in Next.js: a `next` dependency is enough.
+        let root = scratch_pages_project("no-config", "pages", "index.tsx");
+        assert!(is_pages_router(&root));
+        assert!(configure(&root, "client", false).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pages_router_detected_under_src_pages() {
+        let root = scratch_pages_project("src-pages", "src/pages", "index.tsx");
+        assert!(is_pages_router(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_next_pages_directory_is_not_pages_router() {
+        // A non-Next project that happens to have a `pages/` folder must not be hijacked.
+        let root = scratch_pages_project("non-next", "pages", "index.tsx");
+        std::fs::write(root.join("package.json"), "{\"name\":\"app\",\"dependencies\":{\"vite\":\"7\"}}\n")
+            .unwrap();
+        assert!(!is_pages_router(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hybrid_project_matches_both_routers() {
+        // A hybrid app satisfies BOTH predicates; app-router wins because every dispatch
+        // site orders them `!is_app_router() && is_pages_router()` (main.rs / dev_server.rs).
+        let root = scratch_pages_project("hybrid", "pages", "index.tsx");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/page.tsx"), "export default function P(){return null}\n").unwrap();
+        assert!(crate::next_adapter::is_app_router(&root));
+        assert!(is_pages_router(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mdx_page_is_discovered() {
+        // `@next/mdx` + `pageExtensions: [.., "mdx"]` makes `pages/index.mdx` a route.
+        let root = scratch_pages_project("mdx", "pages", "index.mdx");
+        let discovery = discover(&root.join("pages")).unwrap();
+        let patterns: Vec<&str> = discovery.pages.iter().map(|r| r.pattern.as_str()).collect();
+        assert_eq!(patterns, vec!["/"]);
+        assert!(is_pages_router(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn orchestrator_seeds_prerender_manifest() {
         assert!(ORCHESTRATOR.contains("prerender.json"));
@@ -772,5 +1100,102 @@ mod tests {
         assert!(PRERENDER_DRIVER.contains("prerender"));
         assert!(PRERENDER_DRIVER.contains("prerender.json"));
         assert!(PRERENDER_DRIVER.contains("server.mjs"));
+    }
+
+    // --- FINDINGS 29: shallow routing does not update asPath ----------------------
+
+    #[test]
+    fn client_entry_implements_shallow_routing() {
+        // `router.push(href, href, { shallow: true })` must change the URL, `asPath`
+        // and `query` and NOT re-run data fetching. The defect was a `push(url)` that
+        // dropped both extra arguments: the page re-fetched (its
+        // `getServerSideProps` counter advanced) and `asPath` never showed the new
+        // query, so `/?counter=1` never appeared.
+        let client = include_str!("../scripts/pages/pages-client-entry.jsx");
+        assert!(
+            client.contains("push: (url, as, options) => load(url, as, options, \"push\")"),
+            "router.push must accept Next's (url, as, options) signature",
+        );
+        assert!(
+            client.contains("replace: (url, as, options) => load(url, as, options, \"replace\")"),
+            "router.replace must accept Next's (url, as, options) signature",
+        );
+        // Shallow is only valid within one page — Next's own rule.
+        assert!(
+            client
+                .contains("const shallow = Boolean(options.shallow) && resolved.pattern === current.pattern;"),
+            "shallow routing must be restricted to a URL change inside the same page",
+        );
+        // ... and a request that leaves the page is never silently downgraded.
+        assert!(
+            client.contains("console.warn("),
+            "a shallow request that resolves to another page must say so, not fetch quietly",
+        );
+        // The whole point: no data fetch, props carried over.
+        assert!(
+            client.contains("pageProps = current.pageProps;"),
+            "a shallow navigation must keep the current props instead of fetching",
+        );
+        // asPath is state-driven (so the shallow re-render observes it) and carries
+        // the query string.
+        assert!(client.contains("asPath: resolved.pathname + (search ? `?${search}` : \"\"),"));
+        assert!(
+            client.contains("return stateRef.current.asPath;"),
+            "asPath must come from router state, not be recomputed from live location",
+        );
+        assert!(
+            !client.contains("return stateRef.current.pathname + location.search;"),
+            "the old location-derived asPath must be gone",
+        );
+        // Scroll follows Next: a valid shallow route does not jump to the top.
+        assert!(
+            client.contains("const scroll = options.scroll === undefined ? !shallow : options.scroll;"),
+        );
+    }
+
+    #[test]
+    fn link_forwards_shallow_and_scroll_options() {
+        // `<Link scroll={false}>` / `<Link shallow>` are navigation options, and
+        // dropping them (they were destructured into `_scroll`/`_shallow` and
+        // discarded) silently changed what the app does.
+        let link = include_str!("../scripts/pages/next-link.jsx");
+        assert!(link.contains("const options = { shallow, scroll };"));
+        assert!(link.contains("router.replace(url, undefined, options)"));
+        assert!(link.contains("router.push(url, undefined, options)"));
+        assert!(!link.contains("scroll: _scroll"));
+        assert!(!link.contains("shallow: _shallow"));
+    }
+
+    // --- FINDINGS 29b: the pages-router route announcer -----------------------------
+
+    #[test]
+    fn client_entry_renders_the_route_announcer() {
+        // Every Next pages-router app appends `<next-route-announcer>` to <body> and
+        // announces each client-side route change to assistive technology. diffpack
+        // shipped no announcer at all, which is a real difference for a screen-reader
+        // user (and the whole `navigation` channel diff on
+        // `next-pages-shallow-routing` / `next-pages-framer-motion`).
+        assert!(
+            RUNTIME_FILES.iter().any(|(name, _)| *name == "route-announcer.jsx"),
+            "the announcer must be scaffolded into the adapter dir",
+        );
+        let announcer = include_str!("../scripts/pages/route-announcer.jsx");
+        assert!(announcer.contains("document.createElement(\"next-route-announcer\")"));
+        assert!(announcer.contains("id=\"__next-route-announcer__\""));
+        assert!(announcer.contains("aria-live=\"assertive\""));
+        assert!(announcer.contains("role=\"alert\""));
+        // Next's announcement priority: title, then the first h1, then the path.
+        assert!(announcer.contains("if (document.title)"));
+        assert!(announcer.contains("document.querySelector(\"h1\")"));
+        assert!(announcer.contains("setAnnouncement(content || asPath)"));
+        // The first load announces nothing (the browser already did).
+        assert!(announcer.contains("const announcedPath = useRef(asPath);"));
+        assert!(announcer.contains("if (announcedPath.current === asPath) return;"));
+        // It must not exist before hydration: the portal node is created in an effect.
+        assert!(announcer.contains("return host ? createPortal(<RouteAnnouncer />, host) : null;"));
+
+        let client = include_str!("../scripts/pages/pages-client-entry.jsx");
+        assert!(client.contains("import RouteAnnouncerPortal from \"./route-announcer.jsx\";"));
+        assert!(client.contains("<RouteAnnouncerPortal />"));
     }
 }

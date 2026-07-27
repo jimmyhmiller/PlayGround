@@ -101,6 +101,8 @@ diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--source
 Bundles an HTML-rooted web app: `index.html` is the entry, its
 `<script type="module" src>` starts the graph, and the built document is
 rewritten Vite-style (script + extracted stylesheet injected into `<head>`).
+`--out-dir` defaults to `dist` and, like Vite's `build.outDir`, a relative path
+resolves against `<project-root>` (an absolute path is used as given).
 `--vite` opts in to Vite conventions as a bundle — `vite.config` `define`/`base`
 evaluation, the `.env`/`VITE_*` file stack, `import.meta.env`, and the `public/`
 passthrough. Without the flag none of those apply; Vite behavior is never
@@ -137,6 +139,14 @@ acceptance + headless-browser gates (see its `acceptance.mjs` /
 - TanStack Start builds natively end to end (13/13 gates, SSR + server
   functions + route splitting + manifests); `diffpack dev` is a long-lived dev
   server with client HMR, React Fast Refresh, and in-process server hot reload.
+- Vue and Svelte single-file components build: a `.vue`/`.svelte` module is
+  compiled by the APP's OWN installed compiler (`@vue/compiler-sfc`,
+  `svelte/compiler`) and the result then flows through the normal graph, so its
+  imports are real edges, its TypeScript is stripped by the same transform every
+  `.ts` module takes, and its `<style>` blocks take the same CSS pipeline a
+  hand-written stylesheet does. Same shape as Less/Stylus/PostCSS: the app's
+  pinned tool runs, nothing is reimplemented, and a missing compiler is a hard
+  error naming the package.
 - Not yet: JS plugin hosting (deliberate — popular plugins are reimplemented
   natively), multiple HTML entries, content-hashed JS chunk names, shared
   vendor chunking, CSS modules in `?url` verbatim copies, a non-root `base`

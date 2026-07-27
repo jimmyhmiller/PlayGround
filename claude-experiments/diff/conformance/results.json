@@ -1,6 +1,6 @@
 {
-  "generated": "2026-07-21T14:10:03.531Z",
-  "node": "v22.21.0",
+  "generated": "2026-07-27T18:20:57.676Z",
+  "node": "v26.5.0",
   "bundlers": {
     "diffpack": "target/release/diffpack (local build)",
     "rolldown": "1.2.0",
@@ -8,21 +8,21 @@
   },
   "counts": {
     "diffpack": {
-      "PASS": 40,
+      "PASS": 47,
       "WRONG-OUTPUT": 5,
       "BUILD-ERROR": 2,
       "RUNTIME-ERROR": 1
     },
     "rolldown": {
-      "PASS": 41,
-      "WRONG-OUTPUT": 5,
-      "BUILD-ERROR": 1,
+      "PASS": 45,
+      "WRONG-OUTPUT": 7,
+      "BUILD-ERROR": 2,
       "RUNTIME-ERROR": 1
     },
     "esbuild": {
-      "PASS": 39,
-      "WRONG-OUTPUT": 7,
-      "BUILD-ERROR": 1,
+      "PASS": 43,
+      "WRONG-OUTPUT": 9,
+      "BUILD-ERROR": 2,
       "RUNTIME-ERROR": 1
     }
   },
@@ -47,6 +47,31 @@
           "class": "PASS",
           "exit": 0,
           "stdout": "start\nused:eval\nvalue:used-val\n"
+        }
+      }
+    },
+    "cjs-cycle-late-key-named-import": {
+      "expected": {
+        "stdout": "early:early late:undefined\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"early:early late:undefined\\n\" got \"early:early late:late\\n\"",
+          "exit": 0,
+          "stdout": "early:early late:late\n"
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"early:early late:undefined\\n\" got \"early:early late:late\\n\"",
+          "exit": 0,
+          "stdout": "early:early late:late\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "early:early late:undefined\n"
         }
       }
     },
@@ -126,10 +151,9 @@
       },
       "bundlers": {
         "diffpack": {
-          "class": "WRONG-OUTPUT",
-          "detail": "expected \"type:object\\ndefault-prop:real-default\\nnamed:named-val\\n\" got \"type:string\\ndefault-prop:undefined\\nnamed:named-val\\n\"",
+          "class": "PASS",
           "exit": 0,
-          "stdout": "type:string\ndefault-prop:undefined\nnamed:named-val\n"
+          "stdout": "type:object\ndefault-prop:real-default\nnamed:named-val\n"
         },
         "rolldown": {
           "class": "PASS",
@@ -140,6 +164,29 @@
           "class": "PASS",
           "exit": 0,
           "stdout": "type:object\ndefault-prop:real-default\nnamed:named-val\n"
+        }
+      }
+    },
+    "cjs-esmodule-marker-no-default": {
+      "expected": {
+        "stdout": "type:object\nnamed-via-default:named-val\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:object\nnamed-via-default:named-val\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:object\nnamed-via-default:named-val\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "type:object\nnamed-via-default:named-val\n"
         }
       }
     },
@@ -166,6 +213,31 @@
         }
       }
     },
+    "cjs-missing-named-throws": {
+      "expected": {
+        "stdout": "",
+        "exit": 1
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected a runtime failure but the bundle exited 0",
+          "exit": 0,
+          "stdout": "reached:undefined\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected a runtime failure but the bundle exited 0",
+          "exit": 0,
+          "stdout": "reached:undefined\n"
+        }
+      }
+    },
     "cjs-named-import-static": {
       "expected": {
         "stdout": "foo-val:bar-val\n",
@@ -186,6 +258,76 @@
           "class": "PASS",
           "exit": 0,
           "stdout": "foo-val:bar-val\n"
+        }
+      }
+    },
+    "cjs-namespace-identity": {
+      "expected": {
+        "stdout": "stable:true\nvalue:legacy-value\ndefault-is-exports:true\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\nvalue:legacy-value\ndefault-is-exports:true\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\nvalue:legacy-value\ndefault-is-exports:true\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\nvalue:legacy-value\ndefault-is-exports:true\n"
+        }
+      }
+    },
+    "cjs-namespace-identity-across-importers": {
+      "expected": {
+        "stdout": "same-module:true\ndifferent-module:false\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "same-module:true\ndifferent-module:false\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "same-module:true\ndifferent-module:false\n"
+        },
+        "esbuild": {
+          "class": "WRONG-OUTPUT",
+          "detail": "expected \"same-module:true\\ndifferent-module:false\\n\" got \"same-module:false\\ndifferent-module:false\\n\"",
+          "exit": 0,
+          "stdout": "same-module:false\ndifferent-module:false\n"
+        }
+      }
+    },
+    "cjs-namespace-identity-primitive": {
+      "expected": {
+        "stdout": "stable:true\ndefault:42\n",
+        "exit": 0
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\ndefault:42\n"
+        },
+        "rolldown": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\ndefault:42\n"
+        },
+        "esbuild": {
+          "class": "PASS",
+          "exit": 0,
+          "stdout": "stable:true\ndefault:42\n"
         }
       }
     },
@@ -266,9 +408,9 @@
       "bundlers": {
         "diffpack": {
           "class": "WRONG-OUTPUT",
-          "detail": "expected \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:string\\n\" got \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:false\\nfilename:undefined\\n\"",
+          "detail": "expected \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:true\\nfilename:string\\n\" got \"exports:object\\nmodule:object\\nrequire:function\\nthis-is-exports:false\\nfilename:string\\n\"",
           "exit": 0,
-          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:false\nfilename:undefined\n"
+          "stdout": "exports:object\nmodule:object\nrequire:function\nthis-is-exports:false\nfilename:string\n"
         },
         "rolldown": {
           "class": "WRONG-OUTPUT",
@@ -318,19 +460,19 @@
       "bundlers": {
         "diffpack": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/diffpack/mod.js' imported from /tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/diffpack/diffpack.mjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/diffpack/mod.js' imported from /private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/diffpack/diffpack.mjs",
           "exit": 1,
           "stdout": ""
         },
         "rolldown": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/rolldown/mod.js' imported from /tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/rolldown/rolldown.mjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/rolldown/mod.js' imported from /private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/rolldown/rolldown.mjs",
           "exit": 1,
           "stdout": ""
         },
         "esbuild": {
           "class": "RUNTIME-ERROR",
-          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/esbuild/mod.js' imported from /tmp/diffpack-conformance-yZ9TwZ/dynamic-import-concat-literal/esbuild/esbuild.mjs",
+          "detail": "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/esbuild/mod.js' imported from /private/var/folders/b3/821wsm8x1vgg7xqhxhqgtftc0000gn/T/diffpack-conformance-KmgydW/dynamic-import-concat-literal/esbuild/esbuild.mjs",
           "exit": 1,
           "stdout": ""
         }
@@ -367,7 +509,7 @@
       "bundlers": {
         "diffpack": {
           "class": "BUILD-ERROR",
-          "message": "error: top-level await in /home/jimmyhmiller/Documents/Code/Playground/claude-experiments/diff/conformance/fixtures/dynamic-static-same-namespace/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
+          "message": "error: top-level await in /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/diff/conformance/fixtures/dynamic-static-same-namespace/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
         },
         "rolldown": {
           "class": "PASS",
@@ -543,6 +685,27 @@
           "class": "PASS",
           "exit": 0,
           "stdout": "type:string\nfile:true\n"
+        }
+      }
+    },
+    "esm-missing-default-throws": {
+      "expected": {
+        "stdout": "",
+        "exit": 1
+      },
+      "bundlers": {
+        "diffpack": {
+          "class": "PASS",
+          "exit": 1,
+          "stdout": ""
+        },
+        "rolldown": {
+          "class": "BUILD-ERROR",
+          "message": "Build failed with 1 error:\n\n[MISSING_EXPORT] \"default\" is not exported by \"fixtures/esm-missing-default-throws/nodefault.js\".\n   ╭─[ fixtures/esm-missing-default-throws/entry.js:1:8 ]\n   │\n 1 │ import missing from \"./nodefault.js\";\n   │        ───┬───  \n   │           ╰───── Missing export\n───╯\n"
+        },
+        "esbuild": {
+          "class": "BUILD-ERROR",
+          "message": "No matching export in \"fixtures/esm-missing-default-throws/nodefault.js\" for import \"default\""
         }
       }
     },
@@ -1133,7 +1296,7 @@
       "bundlers": {
         "diffpack": {
           "class": "BUILD-ERROR",
-          "message": "error: top-level await in /home/jimmyhmiller/Documents/Code/Playground/claude-experiments/diff/conformance/fixtures/tla-dynamic-import-order/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
+          "message": "error: top-level await in /Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/diff/conformance/fixtures/tla-dynamic-import-order/entry.js requires the single-chunk scope-hoisted ESM output, but this build splits into 1 extra chunk(s) — code-split or dev output wraps every module in a synchronous factory that cannot await"
         },
         "rolldown": {
           "class": "PASS",

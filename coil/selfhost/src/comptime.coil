@@ -6,6 +6,7 @@
 (import "slice.coil" :use *)
 (import "str.coil" :use *)
 (import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)   ; the module_fns set index (module-fns-has)
 (import "io.coil" :use *)
 (import "control.coil" :use *)
 (import "try.coil" :use *)
@@ -1155,6 +1156,13 @@
                     (if (not (is-ccode v1)) (Err [CtVal Diag] (derr "comptime: code-eq expects two Code values"))
                         (Ok [CtVal Diag] (CBool (sexp-eq code (ccode-of v1))))))))))))))))))))))
 (defn code-op [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
+  ; The structural ops a metaprogram actually spends its life on — code-list? (0),
+  ; code-sym? (1), code-int? (2), code-count (3), code-nth (4), code-sym (5),
+  ; code-int (6), code-rest (7), code-keyword? (11) — are handled by cop-codearg,
+  ; which is this chain's FALLTHROUGH. Without this guard they pay every icmp below
+  ; before reaching it. None of them is matched by any test in the chain, so routing
+  ; them straight there is exactly the same dispatch, minus the search.
+  (if (or (icmp-le op 7) (icmp-eq op 11)) (cop-codearg op args cx)
   (let [a (load (field cx a))]
     (if (icmp-eq op 8) (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
     (if (icmp-eq op 30) (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
@@ -1222,12 +1230,41 @@
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
     (if (icmp-eq op 37) (cop-binding-of args cx)
-        (cop-codearg op args cx))))))))))))))))))))))))
+        (cop-codearg op args cx)))))))))))))))))))))))))
+; module-fns-has is asked once per QUASIQUOTE HEAD a metaprogram builds
+; (metahost.mh-qualify-head! -> resolve-in-module), against every defn name in the
+; whole program. As a linear str-eq scan that is O(program) per template list, which
+; on the compiler's own source is the single hottest thing in the metaprogram path.
+; Index it into a set instead.
+;
+; The index is valid only for the exact `module_fns` list it was built from, and two
+; things together make that airtight. It records the list POINTER and rebuilds if the
+; caller's cx names a different one, which covers two lists being alive at once (the
+; macro tower and the transform driver each build their own). And it is INVALIDATED
+; inside all-defn-names, the one and only place a module_fns list is ever born, which
+; covers the case a pointer check alone could not: the allocator handing a fresh list
+; the address of a dead one. A stale hit here would silently resolve a name to the
+; wrong module, so neither guard is optional.
+(defstruct ModFnsIdx [(src (ptr (ArrayList (slice u8)))) (built i64) (m (HashMap (slice u8) i64))])
+(defn mod-fns-idx [] (-> (ptr ModFnsIdx)) (alloc-static ModFnsIdx))
+(defn module-fns-index-reset! [] (-> i64)
+  (let [ix (mod-fns-idx)] (store! (field ix built) 0) (store! (field ix src) (cast (ptr (ArrayList (slice u8))) 0)) 0))
+(defn module-fns-index-build! [(ix (ptr ModFnsIdx)) (lst (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [a (malloc-allocator) n (al-len [(slice u8)] (load lst)) (mut i) 0]
+    (store! (field ix m) (hm-new [(slice u8) i64] a (str-keyops)))
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (hm-put! [(slice u8) i64] (mut (field ix m)) (al-get [(slice u8)] (load lst) (load i)) (load i))
+          (store! i (iadd (load i) 1)))))
+    (store! (field ix src) lst) (store! (field ix built) 1) 0))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
-  (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
-    (loop (if (or (load r) (icmp-ge (load i) n)) (break)
-      (do (if (str-eq (al-get [(slice u8)] (load lst) (load i)) q) (do (store! r true) 0) 0) (store! i (iadd (load i) 1)))))
-    (load r)))
+  (let [lst (load (field cx module_fns)) ix (mod-fns-idx)]
+    (if (icmp-eq (cast i64 lst) 0) false
+      (do (if (or (icmp-eq (load (field ix built)) 0)
+                  (icmp-ne (cast i64 (load (field ix src))) (cast i64 lst)))
+              (module-fns-index-build! ix lst) 0)
+          (match (hm-get [(slice u8) i64] (load (field ix m)) q)
+            (Some [_] true)
+            (None [] false))))))
 (defn resolve-in-module [(cx (ptr CtCtx)) (name (slice u8)) (m (slice u8))] (-> (Option (slice u8)))
   (let [a (load (field cx a)) own (sconcat3 a m "." name)]
     (if (module-fns-has cx own) (Some own)

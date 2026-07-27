@@ -103,8 +103,41 @@
     (cast (ptr i8) b)))
 
 ; ---- code-op argument builder (a boxed ArrayList CtVal) ------------------------
+; A metaprogram's argument lists are strictly LIFO. metalower nests the builder
+; chain — (mp-op-h OP (mp-arg-i (mp-arg-c (mp-arg-new) X) 0)) — so if evaluating X
+; runs a nested op, that op's list is created AND consumed entirely before the outer
+; list is filled any further. And exactly one metaprogram runs at a time
+; (meta-engine-invoke is a pthread_create immediately followed by pthread_join), so
+; one process-wide stack of reusable lists is enough; no per-thread state needed.
+;
+; Reusing them matters because no code op takes more than three arguments (nothing in
+; comptime.coil reads past `cv-get args 2`), so the growable list never actually grew
+; — it just cost a malloc for the ArrayList box and another for its first buffer, on
+; EVERY code op. After the first few ops each depth's list has capacity and the whole
+; arg-passing path is allocation-free. `al-clear!` keeps that capacity.
+;
+; Depths beyond the pool fall back to a fresh list, so nesting deeper than POOL just
+; loses the optimization rather than misbehaving.
+(defstruct ArgPool [(depth i64) (slots (array (ptr (ArrayList CtVal)) 64))])
+(defn arg-pool [] (-> (ptr ArgPool)) (alloc-static ArgPool))
 (defn mh-arg-new [] (-> (ptr i8))
-  (let [a (malloc-allocator)] (cast (ptr i8) (box-al [CtVal] a (al-new [CtVal] a)))))
+  (let [p (arg-pool) d (load (field p depth))]
+    (if (icmp-ge d 64)
+        (do (store! (field p depth) (iadd d 1))
+            (cast (ptr i8) (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator)))))
+      (let [sp (index (field p slots) d)]
+        (if (icmp-eq (cast i64 (load sp)) 0)
+            (store! sp (box-al [CtVal] (malloc-allocator) (al-new [CtVal] (malloc-allocator))))
+          (al-clear! [CtVal] (mut (load sp))))
+        (store! (field p depth) (iadd d 1))
+        (cast (ptr i8) (load sp))))))
+; Pop the innermost list. Called once the op has run: code-op's result never points
+; into the argument list (it returns Sexp handles and slices into Sexp-owned memory),
+; so the list is dead the moment code-op returns. A failing op halts the metaprogram
+; thread inside code-op and never gets here, which is fine — that thread is over.
+(defn mh-arg-pop! [] (-> i64)
+  (let [p (arg-pool) d (load (field p depth))]
+    (if (icmp-gt d 0) (store! (field p depth) (isub d 1)) 0) 0))
 (defn mh-arg-push [(b (ptr i8)) (v CtVal)] (-> (ptr i8))
   (do (al-push! [CtVal] (cast (ptr (ArrayList CtVal)) b) v) b))
 (defn mh-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (mh-arg-push b (CCode (mh-handle-sexp c))))
@@ -117,7 +150,7 @@
 (defn mh-run [(op i64) (b (ptr i8))] (-> CtVal)
   (match (code-op op (cast (ptr (ArrayList CtVal)) b) (mh-cx))
     (Err [d] (do (mh-halt d) (CInt 0)))
-    (Ok [v] v)))
+    (Ok [v] (do (mh-arg-pop!) v))))
 (defn mh-op-i [(op i64) (b (ptr i8))] (-> i64)
   (match-else (mh-run op b)
     (CInt [n] n)

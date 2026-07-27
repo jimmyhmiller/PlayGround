@@ -110,8 +110,11 @@ impl EnvBuild {
             self.reachable.remove(&module);
         }
         self.reachable.extend(result.added);
-        for diagnostic in &update.diagnostics {
-            eprintln!("[dev] diagnostic: {diagnostic}");
+        // An edit that introduces an unresolved import would hot-patch a chunk that
+        // throws on load. Fail the rebuild instead; the caller catches this and
+        // shows the browser overlay, keeping the last good bundle served.
+        for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "rebuild")? {
+            eprintln!("[dev] warning: {warning}");
         }
         Ok(Rebuilt {
             transformed,
@@ -889,8 +892,8 @@ fn build_client(
         .clone()
         .ok_or_else(|| "no client entry found for the app".to_string())?;
     let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-    for diagnostic in &update.diagnostics {
-        println!("[dev] client known gap: {diagnostic}");
+    for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "dev client build")? {
+        println!("[dev] warning: {warning}");
     }
     let session = bundler.direct_reachability();
     let reachable = session.reachable_modules();
@@ -942,8 +945,8 @@ fn build_server(
         .clone()
         .ok_or_else(|| "no ssr entry found for the app".to_string())?;
     let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-    for diagnostic in &update.diagnostics {
-        println!("[dev] server known gap: {diagnostic}");
+    for warning in crate::bundler::partition_diagnostics(&update.diagnostics, "dev server build")? {
+        println!("[dev] warning: {warning}");
     }
     let session = bundler.direct_reachability();
     let reachable = session.reachable_modules();
@@ -1939,11 +1942,12 @@ mod spa {
         emit_options: EmitOptions,
     ) -> Result<EnvBuild, String> {
         let (bundler, update) = Bundler::discover_direct_with_config(entry, &config.build)?;
-        // A dangling import in a dev build is a real error, but surface it as a
-        // diagnostic (like the TanStack path) rather than aborting the whole server
-        // — the browser overlay work is deferred, so print and continue.
-        for diagnostic in &update.diagnostics {
-            println!("[dev] client known gap: {diagnostic}");
+        // The initial build is a hard error: a dev server with nothing loadable to
+        // serve should say so, not start and hand the browser a broken chunk.
+        for warning in
+            crate::bundler::partition_diagnostics(&update.diagnostics, "dev client build")?
+        {
+            println!("[dev] warning: {warning}");
         }
         let session = bundler.direct_reachability();
         let reachable = session.reachable_modules();
@@ -2652,15 +2656,19 @@ mod next {
             options.port
         );
 
-        // Watch app/ recursively (all convention files live there) + the project root
-        // non-recursively (next.config.*), without recursing into node_modules.
-        let app_dir = project_root.join("app");
+        // Watch the app dir recursively (all convention files live there) + the project
+        // root non-recursively (next.config.*), without recursing into node_modules.
+        // `run_next` is only reached after `is_app_router` said yes, so a missing app dir
+        // is an invariant break, not a case to fall back from.
+        let app_dir = crate::next_adapter::app_dir(project_root).ok_or_else(|| {
+            format!("next dev: {} has no app/ or src/app directory", project_root.display())
+        })?;
+        println!("[dev] watching {}", app_dir.display());
         let watch_roots = vec![
             (app_dir, RecursiveMode::Recursive),
             (project_root.to_path_buf(), RecursiveMode::NonRecursive),
         ];
         let receiver = start_watcher_paths(&watch_roots)?;
-        println!("[dev] watching {}/app", project_root.display());
 
         let result = next_watch_loop(
             &receiver,
@@ -2752,8 +2760,10 @@ mod next {
             .clone()
             .ok_or_else(|| format!("no {label} entry found for the next app"))?;
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
-        for diagnostic in &update.diagnostics {
-            println!("[dev] next {label} known gap: {diagnostic}");
+        for warning in
+            crate::bundler::partition_diagnostics(&update.diagnostics, &format!("dev {label} build"))?
+        {
+            println!("[dev] warning: {warning}");
         }
         let session = bundler.direct_reachability();
         let reachable = session.reachable_modules();
@@ -2824,10 +2834,16 @@ mod next {
         let reachable = reachable_ids(env);
         let summary = env.bundler.emit_server(&reachable, rsc_root, env.options)?;
         // The react-server graph is authoritative for CSS; preserve it to the served,
-        // non-pruned public/rsc.css (the adapter links it into <head>).
-        let css = rsc_root.join("server/server.css");
+        // non-pruned public/rsc.css. The render entry links it iff this same
+        // `RSC_EMITTED_CSS_FILE` sits beside it (it is copied to `rsc-render/` with the
+        // bundle below), so the <link> and the artifact are one fact.
+        let css = rsc_root
+            .join("server")
+            .join(crate::next_adapter::RSC_EMITTED_CSS_FILE);
         if css.is_file() {
-            let dest = output_root.join("public/rsc.css");
+            let dest = output_root
+                .join("public")
+                .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
@@ -3132,8 +3148,8 @@ mod next {
             .arg(output_root)
             .arg(port.to_string())
             .env("DIFFPACK_NEXT_DEV", "1");
-        // The runtime next/image optimizer (`/_next/image`) in the orchestrator shells
-        // back to this binary for the native resize (dynamic/remote fallback only).
+        // The next/image optimizer (`/_next/image`) in the orchestrator shells back to
+        // this binary for a native resize the build did not precompute.
         if let Ok(exe) = std::env::current_exe() {
             command.env("DIFFPACK_BIN", exe);
         }

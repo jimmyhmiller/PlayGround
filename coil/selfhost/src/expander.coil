@@ -421,6 +421,10 @@
       (do (let [tf (al-elem [TaggedForm] out-forms (load i)) fp (field tf form)]
             (match (defn-name-of fp) (Some [nm] (al-push! (mut (field sb items)) (qualify-name a nm (load (field tf module))))) (None [] 0)))
           (store! i (iadd (load i) 1)))))
+    ; This is the ONLY place a module_fns list is born, so it is the one place that
+    ; can guarantee comptime's set index never outlives the list it indexed — even if
+    ; the allocator hands this fresh list the address of a dead one.
+    (module-fns-index-reset!)
     sb))
 ; ── the DEFINITION-TIME EXPANSION TOWER ──────────────────────────────────────
 ; A metaprogram body may CALL MACROS (`when`, `try!`, `fmt`, …). The rule is
