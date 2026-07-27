@@ -66,25 +66,37 @@ recognized by its `__prof_t0__` binding). The function name is baked into the in
 INCLUSIVE (a function's total includes its callees). Skips `Code`-returning
 (comptime) functions and its own runtime module.
 
-## `memgui.coil` — a memory inspector (transform + native raylib GUI)
+## `memgui.coil` — a LIVE memory inspector (transform + native raylib GUI)
 
-Instruments allocations and pops a native window when `main` returns, showing how memory was
-used: current / peak / total bytes, alloc/free/resize counts, outstanding (leaked) blocks, a
-live-bytes-over-time graph, and an allocation-size histogram.
+Instruments allocations and shows a native window that updates **while the program runs**:
+current / peak / total bytes, alloc/free/resize counts, outstanding (leaked) blocks, a
+live-bytes-over-time graph, an allocation-size histogram, and a **per-site table** —
+`type @ file:line:col   count   bytes` for every allocation site.
 
 ```
 LIBRARY_PATH=/opt/homebrew/lib  coil build app.coil -o app --use memgui.coil -lraylib
-./app     # runs, then the inspector window opens; close it to exit
+./app     # window updates live as it allocates; close it to exit
 ```
 
-Interception is by **allocator swap**, not call-site surgery: the transform rewrites every
-`(malloc-allocator)` in USER code to `(mg-allocator)`, whose alloc/resize/free vtable records
-byte accounting then delegates to malloc/realloc/free. Because collections take the allocator
-they are handed, everything built on it (ArrayList, HashMap, `create`, `box`, …) is tracked —
-with **no edits to the bundled stdlib**, and the tracker's own bookkeeping uses the real
-untracked allocator so it never recurses. `memgui_demo.coil` frees an ArrayList and leaks a
-HashMap; the GUI reports `outstanding blocks: 1`. Set `MEMGUI_AUTOCLOSE=1` to auto-close after
-90 frames and write `memgui.png` (used for headless testing).
+**Live model.** macOS requires the GL window on the main thread, so the transform moves the
+user's original `main` body into a worker function run on a spawned thread (`thread.coil`) and
+rewrites `main` into a launcher that owns the raylib render loop — the graph/stats update as
+the worker allocates. The launcher joins the worker on close and returns its result. All
+tracker state is FIXED-SIZE (site table, timeline ring, histogram — no realloc), so the render
+thread reads it while the worker writes without use-after-free.
+
+**Two interceptions, USER code only:**
+1. *Allocator swap* — `(malloc-allocator)` -> `(mg-allocator)`, whose alloc/resize/free vtable
+   records exact byte accounting then delegates to malloc/realloc/free. Collections built on it
+   (ArrayList/HashMap/create/box) are all tracked with **no edits to the bundled stdlib**.
+2. *Site tagging* — each allocation-introducing call (al-new, al-push!, hm-new[-scalar], hm-put!,
+   create, alloc-slice) is wrapped `(mg-set-site TYPE FILE LINE COL) call`, so the vtable
+   attributes bytes to the exact source site + type. Needs `code-col` (added to the compiler
+   alongside `code-line`/`code-file`) and `code-str` for the type. Head matching is by SIMPLE
+   name (after the last `.`) so it survives name qualification across transform fixpoint rounds.
+
+`memgui_demo.coil` frees an ArrayList and leaks a HashMap; the GUI reports `outstanding: 1`.
+`MEMGUI_AUTOCLOSE=1` auto-closes after 90 frames and writes `memgui.png` (headless testing).
 
 Limitation: tracks allocations made through `malloc-allocator` (the common case). Arenas or
 direct libc `malloc` calls are not swapped. raylib must be installed (`brew install raylib`).

@@ -317,6 +317,21 @@
         (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) 0
           (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid))
             (ct-line-at (load (field sp text)) (sx-lo node))))))))
+; `(code-col NODE)` — the 1-based source COLUMN of a node's span (chars since the last
+; newline before `lo`). Mirrors code-line; together they give `file:line:col` for a node.
+(defn ct-col-at [(src (slice u8)) (off0 i64)] (-> i64)
+  (let [n (slice-len [u8] src) off (if (icmp-gt off0 n) n off0) (mut col) 1 (mut k) 0]
+    (loop (if (icmp-ge (load k) off) (break)
+      (do (if (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (store! col 1) (store! col (iadd (load col) 1)))
+          (store! k (iadd (load k) 1)))))
+    (load col)))
+(defn code-col-of [(node Sexp)] (-> i64)
+  (let [b (src-box) lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0) 0
+      (let [sid (sx-source node)]
+        (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) 0
+          (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid))
+            (ct-col-at (load (field sp text)) (sx-lo node))))))))
 ; `(code-src NODE)` — the raw SOURCE TEXT of a node's span (lo..hi), so a macro can
 ; show the user exactly what they wrote (Rust's `assert!` prints the expression).
 ; Empty when the node has no known source or a dummy span.
@@ -1186,6 +1201,10 @@
         (match (cv-get args 0)
           (Some [nodev] (if (is-ccode nodev) (Ok [CtVal Diag] (CStr (code-src-of (ccode-of nodev)))) (Err [CtVal Diag] (derr "code-src: expects a Code node"))))
           (None [] (Err [CtVal Diag] (derr "code-src: expects (code-src NODE)"))))
+    (if (icmp-eq op 42)
+        (match (cv-get args 0)
+          (Some [nodev] (if (is-ccode nodev) (Ok [CtVal Diag] (CInt (code-col-of (ccode-of nodev)))) (Err [CtVal Diag] (derr "code-col: expects a Code node"))))
+          (None [] (Err [CtVal Diag] (derr "code-col: expects (code-col NODE)"))))
     (if (icmp-eq op 34)
         (match (cv-get args 0)
           (Some [nodev] (if (is-ccode nodev)
@@ -1203,7 +1222,7 @@
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
     (if (icmp-eq op 37) (cop-binding-of args cx)
-        (cop-codearg op args cx)))))))))))))))))))))))
+        (cop-codearg op args cx))))))))))))))))))))))))
 (defn module-fns-has [(cx (ptr CtCtx)) (q (slice u8))] (-> bool)
   (let [lst (load (field cx module_fns)) n (al-len [(slice u8)] (load lst)) (mut i) 0 (mut r) false]
     (loop (if (or (load r) (icmp-ge (load i) n)) (break)
