@@ -66,6 +66,40 @@ const MODULE_EXTS: [&str; 4] = ["tsx", "jsx", "ts", "js"];
 /// convention files stay on [`MODULE_EXTS`].
 const PAGE_EXTS: [&str; 6] = ["tsx", "jsx", "ts", "js", "mdx", "md"];
 
+/// Every source extension the adapter's page/route discovery can compile (the superset of
+/// [`PAGE_EXTS`] plus the CommonJS/ESM variants oxc parses). A next.config `pageExtensions`
+/// is HONORED against this set: diffpack discovers pages using this fixed superset, which
+/// equals Next's default (`tsx/ts/jsx/js`) plus what `@next/mdx` adds (`md/mdx`) — the
+/// standard configuration, and exactly the mdx fixture's. A configured extension OUTSIDE
+/// this set (e.g. a custom `.vue` page) means diffpack could never discover that page, so
+/// it is a CLEAR hard error rather than a silently-missing route.
+const SUPPORTED_PAGE_EXTS: [&str; 8] = ["tsx", "jsx", "ts", "js", "mjs", "cjs", "mdx", "md"];
+
+/// Validate a next.config `pageExtensions` (from the config eval) against the extensions
+/// diffpack's discovery supports. Present + all-supported: Ok (diffpack's superset covers
+/// every page the config intends). Any unsupported extension: a hard error naming it. No
+/// `pageExtensions` set (null/absent): Ok — the adapter uses its built-in [`PAGE_EXTS`].
+fn validate_page_extensions(eval: Option<&serde_json::Value>) -> Result<(), String> {
+    let Some(list) = eval.and_then(|v| v.get("pageExtensions")).and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+    let unsupported: Vec<String> = list
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|ext| !SUPPORTED_PAGE_EXTS.contains(ext))
+        .map(|ext| ext.to_string())
+        .collect();
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "next.config `pageExtensions` includes {:?}, which diffpack's app-router page \
+         discovery cannot compile (supported: {:?}). Remove the unsupported extension(s) or \
+         author those pages in a supported extension.",
+        unsupported, SUPPORTED_PAGE_EXTS,
+    ))
+}
+
 /// Detects whether `root` is a Next.js app-router project this adapter handles: an
 /// `app/` directory containing a `page.{tsx,jsx,ts,js}`, plus a `next.config.*`
 /// (so we never mistake a non-Next `app/` folder for one). Returns the resolved
@@ -1230,23 +1264,32 @@ fn synthesize_metadata_file_handlers(
     for conv in &META_FILE_CONVENTIONS {
         let Some(user_file) = first_existing(app_dir, conv.stem) else { continue };
         let user_file = user_file.canonicalize().unwrap_or(user_file);
-        // `generateSitemaps` (multiple, id-partitioned sitemaps) is a distinct Next
-        // feature (`/sitemap/[id].xml`) that this adapter does not synthesize. Fail
-        // clearly rather than serve a single wrong `/sitemap.xml` (no silent stub).
-        if conv.stem == "sitemap" {
-            let src = std::fs::read_to_string(&user_file).unwrap_or_default();
-            if exports_symbol(&strip_comments(&src), "generateSitemaps") {
-                return Err(format!(
-                    "diffpack next metadata: {} exports `generateSitemaps` (multiple id-partitioned sitemaps), which this adapter does not support yet. Use a single default-export sitemap() returning the full url array instead.",
-                    user_file.display(),
-                ));
-            }
-        }
         if !wrote_serializer {
             write_if_changed(&serializer, metadata_serialize_shim())?;
             wrote_serializer = true;
         }
         let serializer_canon = serializer.canonicalize().unwrap_or_else(|_| serializer.clone());
+        // `generateSitemaps` (id-partitioned sitemaps): Next serves each partition at
+        // `/sitemap/[id].xml` (e.g. `/sitemap/0.xml`), calling the default `sitemap({ id })`
+        // once per id enumerated by `generateSitemaps()`. Synthesize a DYNAMIC route handler
+        // (`/sitemap/[id]`) whose wrapper validates the requested id against the enumeration,
+        // then serializes `sitemap({ id })` — plugging into the same dispatch as a `route.ts`.
+        if conv.stem == "sitemap" {
+            let src = std::fs::read_to_string(&user_file).unwrap_or_default();
+            if exports_symbol(&strip_comments(&src), "generateSitemaps") {
+                let wrapper_path = shims_dir.join("metadata-sitemap-id.ts");
+                write_if_changed(&wrapper_path, &sitemap_id_wrapper(&user_file, &serializer_canon))?;
+                let wrapper_canon = wrapper_path.canonicalize().unwrap_or_else(|_| wrapper_path.clone());
+                handlers.push(RouteHandler {
+                    url_path: "/sitemap/[id].xml".to_string(),
+                    segments: vec![Seg::Static("sitemap".to_string()), Seg::Dynamic("id".to_string())],
+                    file: wrapper_canon,
+                    methods: vec!["GET".to_string()],
+                    edge: false,
+                });
+                continue;
+            }
+        }
         let wrapper_path = shims_dir.join(conv.wrapper);
         let wrapper_src = metadata_file_wrapper(conv.stem, &user_file, &serializer_canon);
         write_if_changed(&wrapper_path, &wrapper_src)?;
@@ -1955,6 +1998,10 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // react-server pass) the config manifest — so node is spawned a single time instead of
     // once per consumer (a build-time win over the previous two spawns).
     let next_config = run_next_config_eval(&root);
+    // Honor next.config `pageExtensions` (e.g. what `@next/mdx` merges): a configured
+    // extension diffpack cannot discover is a clear hard error, never a silently-missing
+    // route. Supported extensions (incl. md/mdx) flow through the built-in discovery set.
+    validate_page_extensions(next_config.as_ref())?;
     let routing = Routing::from_eval(next_config.as_ref());
     let base_path = routing.base_path.clone();
     let asset_base = routing.asset_base();
@@ -2474,6 +2521,32 @@ fn metadata_file_wrapper(stem: &str, user_file: &Path, serializer: &Path) -> Str
         "// Generated by diffpack's next app-router adapter. Serves the `{stem}` metadata\n\
          // FILE convention through the standard route-handler dispatch.\n\
          {import}\nexport async function GET() {{\n{body}\n}}\n",
+    )
+}
+
+/// The wrapper for an id-partitioned sitemap (`generateSitemaps`). Served at
+/// `/sitemap/[id].xml`: the `id` segment arrives as `"<id>.xml"` (Next's URL shape), so the
+/// wrapper strips the `.xml` suffix, validates the id against `generateSitemaps()`'s
+/// enumeration (a 404 for an unknown id, matching Next), coerces it back to the enumerated
+/// value's type, then serializes `sitemap({ id })`. Exports `GET`, so it plugs straight into
+/// the route-handler dispatch (which passes `{ params }`).
+fn sitemap_id_wrapper(user_file: &Path, serializer: &Path) -> String {
+    let user = js_str(&user_file.to_string_lossy());
+    let ser = js_str(&serializer.to_string_lossy());
+    format!(
+        "// Generated by diffpack's next app-router adapter. Serves an id-partitioned\n\
+         // `sitemap` (generateSitemaps) through the standard route-handler dispatch.\n\
+         import handler, {{ generateSitemaps }} from {user};\n\
+         import {{ serializeSitemap }} from {ser};\n\
+         export async function GET(request, {{ params }}) {{\n  \
+           const p = await params;\n  \
+           const idStr = String(p.id).replace(/\\.xml$/, \"\");\n  \
+           const maps = (await generateSitemaps()) || [];\n  \
+           const match = maps.find((m) => String(m && m.id) === idStr);\n  \
+           if (!match) return new Response(\"Not Found\", {{ status: 404 }});\n  \
+           const body = serializeSitemap(await handler({{ id: match.id }}));\n  \
+           return new Response(body, {{ status: 200, headers: {{ \"content-type\": \"application/xml\" }} }});\n\
+         }}\n",
     )
 }
 
@@ -5899,15 +5972,53 @@ mod tests {
     }
 
     #[test]
-    fn generate_sitemaps_hard_errors() {
+    fn generate_sitemaps_synthesizes_id_partitioned_route() {
         let root = scratch("meta-gen-sitemaps");
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(app.join("sitemap.ts"), "export function generateSitemaps(){ return [{ id: 0 }]; }\nexport default function sitemap(){ return []; }\n").unwrap();
+        std::fs::write(
+            app.join("sitemap.ts"),
+            "export function generateSitemaps(){ return [{ id: 0 }, { id: 1 }]; }\n\
+             export default function sitemap({ id }){ return [{ url: `https://x.com/${id}` }]; }\n",
+        )
+        .unwrap();
         let shims = root.join(".diffpack-next/shims");
         std::fs::create_dir_all(&shims).unwrap();
-        let err = synthesize_metadata_file_handlers(&app, &shims).unwrap_err();
-        assert!(err.contains("generateSitemaps"), "clear hard error names the unsupported feature: {err}");
+        let handlers = synthesize_metadata_file_handlers(&app, &shims).unwrap();
+        // A single DYNAMIC handler at `/sitemap/[id].xml`, not the plain `/sitemap.xml`.
+        let sm: Vec<&RouteHandler> = handlers.iter().filter(|h| h.url_path.starts_with("/sitemap")).collect();
+        assert_eq!(sm.len(), 1, "one id-partitioned sitemap handler: {:?}", handlers.iter().map(|h| &h.url_path).collect::<Vec<_>>());
+        let h = sm[0];
+        assert_eq!(h.url_path, "/sitemap/[id].xml");
+        assert_eq!(
+            h.segments,
+            vec![Seg::Static("sitemap".to_string()), Seg::Dynamic("id".to_string())],
+            "dynamic id segment under /sitemap",
+        );
+        assert_eq!(h.methods, vec!["GET".to_string()]);
+        let wrapper = std::fs::read_to_string(shims.join("metadata-sitemap-id.ts")).unwrap();
+        assert!(wrapper.contains("generateSitemaps"), "wrapper enumerates ids: {wrapper}");
+        assert!(wrapper.contains("await params"), "wrapper reads the id param: {wrapper}");
+        assert!(wrapper.contains(".xml$"), "wrapper strips the .xml suffix: {wrapper}");
+        assert!(wrapper.contains("status: 404"), "unknown id 404s: {wrapper}");
+        assert!(wrapper.contains("handler({ id: match.id })"), "calls sitemap({{id}}): {wrapper}");
+    }
+
+    #[test]
+    fn page_extensions_honored_or_hard_errored() {
+        // Absent pageExtensions: Ok (adapter uses its built-in superset).
+        assert!(validate_page_extensions(None).is_ok());
+        assert!(validate_page_extensions(Some(&serde_json::json!({}))).is_ok());
+        // The @next/mdx-merged default (tsx/ts/jsx/js + md/mdx) is fully supported.
+        let ok = serde_json::json!({ "pageExtensions": ["tsx", "ts", "jsx", "js", "md", "mdx"] });
+        assert!(validate_page_extensions(Some(&ok)).is_ok());
+        // A restricting subset is still supported (superset covers it).
+        let subset = serde_json::json!({ "pageExtensions": ["ts", "tsx"] });
+        assert!(validate_page_extensions(Some(&subset)).is_ok());
+        // An extension diffpack cannot compile is a clear hard error naming it.
+        let bad = serde_json::json!({ "pageExtensions": ["tsx", "vue"] });
+        let err = validate_page_extensions(Some(&bad)).unwrap_err();
+        assert!(err.contains("pageExtensions") && err.contains("vue"), "names the bad ext: {err}");
     }
 
     #[test]
@@ -6075,6 +6186,38 @@ mod tests {
         assert!(client_src.contains("x-diffpack-intercept"), "client reads the intercept header");
         assert!(client_src.contains("createPortal"), "client portals the overlay over the page");
         assert!(client_src.contains("__diffpackModal"), "client masks the URL for the overlay");
+    }
+
+    #[test]
+    fn nested_intercepting_routes_resolve_target() {
+        // A NESTED intercept: a `(.)` marker inside a nested slot, plus a `(...)` root-based
+        // marker inside another nested slot. Both must resolve their target relative to the
+        // marker's URL level (not the filesystem depth), with the deeper `[id]` recursed in.
+        let root = scratch("nested-intercepts");
+        let app = root.join("app");
+        // The real deep routes (hard loads).
+        std::fs::create_dir_all(app.join("photos/[id]")).unwrap();
+        std::fs::write(app.join("photos/[id]/page.tsx"), "export default function P(){return null}\n").unwrap();
+        std::fs::create_dir_all(app.join("feed/photo/[id]")).unwrap();
+        std::fs::write(app.join("feed/photo/[id]/page.tsx"), "export default function P(){return null}\n").unwrap();
+        // (.) same level as the marker's URL level (feed) -> intercepts /feed/photo/[id].
+        std::fs::create_dir_all(app.join("feed/@modal/(.)photo/[id]")).unwrap();
+        std::fs::write(app.join("feed/@modal/(.)photo/[id]/page.tsx"), "export default function M(){return null}\n").unwrap();
+        // (...) root-based marker nested under feed/@grid -> intercepts /photos/[id].
+        std::fs::create_dir_all(app.join("feed/@grid/(...)photos/[id]")).unwrap();
+        std::fs::write(app.join("feed/@grid/(...)photos/[id]/page.tsx"), "export default function G(){return null}\n").unwrap();
+
+        let intercepts = discover_intercepts(&app).unwrap();
+        let targets: Vec<String> = intercepts.iter().map(|i| segments_display(&i.target_segments)).collect();
+        // `(.)` at feed/@modal (same level as feed) -> /feed/photo/[id].
+        assert!(targets.contains(&"/feed/photo/[id]".to_string()), "same-level intercept: {targets:?}");
+        // `(...)` -> resolved from the app root regardless of nesting depth.
+        assert!(targets.contains(&"/photos/[id]".to_string()), "root-based intercept: {targets:?}");
+        // Each overlay page is the one inside the marker subtree, with its `[id]` recursed.
+        for ic in &intercepts {
+            assert!(matches!(ic.target_segments.last(), Some(Seg::Dynamic(d)) if d == "id"), "deep [id] recursed: {:?}", ic.target_segments);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

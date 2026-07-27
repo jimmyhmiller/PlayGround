@@ -456,6 +456,58 @@ function trailingEligible(pathname) {
   return !last.includes(".");
 }
 
+// --- i18n Accept-Language locale detection (diffpack locale-routing EXTENSION) --------
+// Read one cookie value from a Cookie header (returns null when absent).
+function readCookie(header, name) {
+  if (typeof header !== "string" || !header) return null;
+  for (const pair of header.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    if (pair.slice(0, eq).trim() === name) return decodeURIComponent(pair.slice(eq + 1).trim());
+  }
+  return null;
+}
+// Parse an Accept-Language header into lowercased BCP-47 tags, highest quality first.
+function parseAcceptLanguage(header) {
+  if (typeof header !== "string" || !header) return [];
+  return header
+    .split(",")
+    .map((part) => {
+      const [tag, ...params] = part.trim().split(";");
+      let q = 1;
+      for (const p of params) {
+        const m = /^q=([0-9.]+)$/.exec(p.trim());
+        if (m) q = parseFloat(m[1]);
+      }
+      return { tag: tag.trim().toLowerCase(), q: Number.isFinite(q) ? q : 0 };
+    })
+    .filter((e) => e.tag && e.tag !== "*" && e.q > 0)
+    .sort((a, b) => b.q - a.q)
+    .map((e) => e.tag);
+}
+// The best configured locale for a request, mirroring Next's pages-router detection order:
+// an explicit `NEXT_LOCALE` cookie (when it names a configured locale) wins; otherwise the
+// highest-quality Accept-Language tag matching a configured locale (exact, then primary
+// subtag). Falls back to the default locale when nothing matches.
+function detectPreferredLocale(i18n, cookieHeader, acceptLanguage) {
+  const locales = i18n.locales;
+  const lower = locales.map((l) => l.toLowerCase());
+  const cookieLocale = readCookie(cookieHeader, "NEXT_LOCALE");
+  if (cookieLocale) {
+    const idx = lower.indexOf(cookieLocale.toLowerCase());
+    if (idx !== -1) return locales[idx];
+  }
+  for (const tag of parseAcceptLanguage(acceptLanguage)) {
+    let idx = lower.indexOf(tag);
+    if (idx === -1) {
+      const primary = tag.split("-")[0];
+      idx = lower.findIndex((l) => l === primary || l.split("-")[0] === primary);
+    }
+    if (idx !== -1) return locales[idx];
+  }
+  return i18n.defaultLocale;
+}
+
 // Apply next.config redirects (short-circuit) + rewrites (mutate url) and COLLECT
 // matching response headers. Returns { redirect } to short-circuit, or { headers }.
 function applyNextConfig(url) {
@@ -1024,6 +1076,28 @@ const server = createServer(async (req, res) => {
           reqLocale = seg;
           if (seg !== routing.i18n.defaultLocale) localeSeg = "/" + seg;
           url.pathname = url.pathname.slice(seg.length + 1) || "/";
+        } else if (
+          routing.i18n.localeDetection &&
+          url.pathname === "/" &&
+          !url.searchParams.has("__rsc")
+        ) {
+          // Root visit with no locale prefix: detect the visitor's preferred locale
+          // (NEXT_LOCALE cookie, then Accept-Language). A NON-default detected locale gets a
+          // 307 to `/{locale}` (Next's pages-router behavior — detection redirects only from
+          // `/`); the default stays unprefixed. The Location carries basePath so the browser
+          // round-trips the same URL space.
+          const preferred = detectPreferredLocale(
+            routing.i18n,
+            req.headers.cookie || "",
+            req.headers["accept-language"],
+          );
+          if (preferred !== routing.i18n.defaultLocale) {
+            res.writeHead(307, {
+              location: routing.basePath + "/" + preferred + url.search,
+            });
+            res.end();
+            return;
+          }
         }
       }
       // (4) trailingSlash: a 308 to the canonical slash form (query preserved, assets +

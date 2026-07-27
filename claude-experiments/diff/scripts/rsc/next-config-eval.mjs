@@ -8,8 +8,36 @@
 // falls back to a plain dynamic import. Only these three async functions are called —
 // the rest of the config (webpack, experimental, …) is never touched.
 import { pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import Module, { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+
+// Build-only Next plugins that wrap next.config but whose runtime behavior diffpack
+// implements NATIVELY (so the real package is unnecessary and often not installed).
+// `@next/mdx` compiles `.mdx`/`.md` through a webpack loader; diffpack compiles MDX
+// natively (src/mdx.rs), so its only config-visible effect we must preserve is the
+// `pageExtensions` merge (adding `md`/`mdx`). We shim it here as a faithful identity-plus-
+// pageExtensions wrapper so `require("@next/mdx")` never crashes the config eval — a crash
+// would otherwise discard the ENTIRE config (redirects/rewrites/headers/i18n/basePath).
+// A real installed `@next/mdx` is intentionally shadowed: diffpack owns the MDX pipeline.
+const NATIVE_CONFIG_PLUGINS = {
+  "@next/mdx": (_pluginOptions) => (nextConfig = {}) => {
+    const exts =
+      Array.isArray(nextConfig.pageExtensions) && nextConfig.pageExtensions.length
+        ? nextConfig.pageExtensions
+        : ["tsx", "ts", "jsx", "js"];
+    const merged = exts.includes("mdx") ? exts : [...exts, "md", "mdx"];
+    return { ...nextConfig, pageExtensions: merged };
+  },
+};
+// Intercept `require`/`createRequire` (both funnel through Module._load) for the shimmed
+// specifiers, so both a CJS `require("@next/mdx")` and jiti's delegated require are caught.
+const origLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (Object.prototype.hasOwnProperty.call(NATIVE_CONFIG_PLUGINS, request)) {
+    return NATIVE_CONFIG_PLUGINS[request];
+  }
+  return origLoad.apply(this, arguments);
+};
 
 const configPath = process.argv[2];
 if (!configPath) {
@@ -98,7 +126,24 @@ function extractRouting(config) {
     assetPrefix: normalizeAssetPrefix(config && config.assetPrefix),
     trailingSlash: Boolean(config && config.trailingSlash),
     i18n,
+    pageExtensions: extractPageExtensions(config),
   };
+}
+
+// The `pageExtensions` the config declares (Next's default is tsx/ts/jsx/js; `@next/mdx`
+// merges md/mdx — see the shim above). Returned as-is (lowercased, dot-stripped) so the
+// adapter can honor / validate them; `null` when the config does not set the field (the
+// adapter then uses its built-in superset default).
+function extractPageExtensions(config) {
+  const raw = config && config.pageExtensions;
+  if (!Array.isArray(raw) || !raw.length) return null;
+  const out = [];
+  for (const e of raw) {
+    if (typeof e !== "string") continue;
+    const ext = e.trim().replace(/^\./, "").toLowerCase();
+    if (ext) out.push(ext);
+  }
+  return out.length ? out : null;
 }
 
 const EMPTY = {
