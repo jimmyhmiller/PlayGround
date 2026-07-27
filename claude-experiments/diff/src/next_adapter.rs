@@ -184,12 +184,17 @@ const METADATA_IMAGE_EXTS: [&str; 7] = ["ico", "png", "jpg", "jpeg", "gif", "svg
 struct MetaImage {
     /// The convention family, which determines the head element emitted.
     kind: MetaImageKind,
-    /// The source file (absolute).
+    /// The source file (absolute): a static image to copy, or — when `generator` is
+    /// true — a code-based `opengraph-image.tsx` (etc.) whose default export returns a
+    /// `@vercel/og` `ImageResponse`, prerendered to a PNG at build time.
     source: PathBuf,
-    /// The served URL path (`/icon.png`), which is also the copied output filename.
+    /// The served URL path (`/icon.png`), which is also the copied/emitted output filename.
     served: String,
     /// The image MIME type inferred from the extension (for `<link type>`).
     mime: &'static str,
+    /// True when `source` is a code-based ImageResponse generator (prerendered to
+    /// `served` at build time via `@vercel/og`), rather than a static file to copy.
+    generator: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,8 +365,9 @@ struct RouteConfig {
     /// Reads request-scoped state at the top level (cookies/headers/draftMode or the
     /// `searchParams` prop) — forces per-request rendering.
     reads_request_state: bool,
-    /// `export const runtime = "nodejs" | "edge"`. `edge` hard-errors at discovery
-    /// (diffpack has no edge runtime); `nodejs` (the default) is inert.
+    /// `export const runtime = "nodejs" | "edge"`. `edge` opts the route into diffpack's
+    /// lean WinterCG (edge-like) context (see [`RouteRuntime`] + [`validate_edge_module`]);
+    /// `nodejs` (the default) is inert.
     runtime: Option<String>,
     /// `export const fetchCache = <mode>` — the fetch Data Cache mode. Parsed and
     /// WARNed (diffpack has no fetch Data Cache; fetches are always live).
@@ -524,33 +530,101 @@ fn scan_route_config(raw_source: &str) -> RouteConfig {
     }
 }
 
-/// Enforce the route-segment-config exports diffpack recognizes beyond the
-/// static/dynamic set. `runtime = "edge"` is a HARD ERROR naming the route (diffpack
-/// has no edge runtime; there is no correct way to serve it, so failing loudly beats
-/// silently running it on Node with different semantics). The remaining exports
-/// (`fetchCache`, `preferredRegion`, `maxDuration`, `experimental_ppr`) are advisory
-/// for a native single-node server: each is reported with a build WARN explaining
-/// precisely why diffpack cannot honor it, so the behavior is explicit rather than a
-/// silent default. Returns `Err` only for the unsupported edge runtime.
-fn validate_segment_config(url_path: &str, cfg: &RouteConfig) -> Result<(), String> {
-    if let Some(runtime) = cfg.runtime.as_deref() {
-        match runtime {
-            "edge" | "experimental-edge" => {
-                return Err(format!(
-                    "route {url_path}: runtime = \"{runtime}\" is not supported (diffpack has no \
-                     edge runtime). Remove the export to use the Node.js runtime, which diffpack \
-                     serves natively.",
-                ));
-            }
-            "nodejs" => {} // the default; inert.
-            other => {
-                return Err(format!(
-                    "route {url_path}: runtime = \"{other}\" is not a recognized Next runtime \
-                     (expected \"nodejs\" or \"edge\").",
-                ));
-            }
+/// Which runtime a route / route-handler / middleware declares. Next's default is
+/// `nodejs`; `edge` (or the legacy alias `experimental-edge`) opts into a lean
+/// WinterCG runtime. diffpack serves both from one native Node process — the edge
+/// distinction is (1) the WinterCG global surface (already present on Node) advertised
+/// via `globalThis.EdgeRuntime`, and (2) the ban on Node built-ins enforced at build
+/// time by [`validate_edge_module`], so an edge route never silently reaches a Node-only
+/// API it would fail on in a real edge deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteRuntime {
+    Node,
+    Edge,
+}
+
+impl RouteRuntime {
+    /// Classify a `runtime` config value. Unknown values are a hard error (never a
+    /// silent Node default) so a typo does not quietly change where code runs.
+    fn from_config(url_path: &str, value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("nodejs") => Ok(RouteRuntime::Node),
+            Some("edge") | Some("experimental-edge") => Ok(RouteRuntime::Edge),
+            Some(other) => Err(format!(
+                "route {url_path}: runtime = \"{other}\" is not a recognized Next runtime \
+                 (expected \"nodejs\" or \"edge\").",
+            )),
         }
     }
+
+    fn is_edge(self) -> bool {
+        matches!(self, RouteRuntime::Edge)
+    }
+}
+
+/// Node built-in modules a WinterCG (edge) runtime does NOT provide. Importing any of
+/// these from an `edge` route/handler/middleware is rejected at BUILD time — mirroring
+/// what a real edge deployment would reject — instead of silently running on Node with
+/// different semantics. The set covers the filesystem, process/child-process, raw
+/// networking, and other Node-host-only modules; the WinterCG-shaped ones an edge
+/// runtime polyfills (buffer/events/util/stream/crypto/path/async_hooks/...) are
+/// deliberately allowed.
+const EDGE_FORBIDDEN_NODE_BUILTINS: [&str; 20] = [
+    "fs", "fs/promises", "child_process", "worker_threads", "cluster", "net", "tls",
+    "dgram", "dns", "dns/promises", "http", "https", "http2", "os", "vm", "v8",
+    "inspector", "readline", "repl", "module",
+];
+
+/// Scan an `edge`-runtime module's source for imports of Node built-ins the WinterCG
+/// runtime cannot provide, hard-erroring (naming the module + the offending specifier)
+/// if any is found. This is the lean, native enforcement of the edge "no Node fs" (and
+/// no process/net/...) contract: the check is SHALLOW (this module's own import/require
+/// specifiers only, over comment-stripped source), documented as such — it catches the
+/// direct, common mistake without a full graph walk. Returns `Ok(())` for a clean edge
+/// module.
+fn validate_edge_module(label: &str, source: &str) -> Result<(), String> {
+    let stripped = strip_comments(source);
+    for name in EDGE_FORBIDDEN_NODE_BUILTINS {
+        // `node:<name>` is unambiguously the builtin wherever it appears as a specifier.
+        // A bare `<name>` is only treated as the builtin in specifier position
+        // (`from "..."`, `require("...")`, `import("...")`, side-effect `import "..."`).
+        let quoted: [String; 2] = [format!("\"{name}\""), format!("'{name}'")];
+        let node_quoted: [String; 2] = [format!("\"node:{name}\""), format!("'node:{name}'")];
+        let hits_node = node_quoted.iter().any(|q| stripped.contains(q.as_str()));
+        let hits_bare = quoted.iter().any(|q| {
+            // Require a specifier keyword just before the quoted string.
+            for kw in ["from ", "require(", "import(", "import "] {
+                let needle = format!("{kw}{q}");
+                if stripped.contains(&needle) {
+                    return true;
+                }
+            }
+            false
+        });
+        if hits_node || hits_bare {
+            return Err(format!(
+                "{label}: imports the Node built-in \"{name}\", which the edge (WinterCG) runtime \
+                 does not provide. Remove `export const runtime = \"edge\"` to run it on the Node.js \
+                 runtime, or rewrite it against Web APIs (fetch/Request/Response/URL/crypto).",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the route-segment-config exports diffpack recognizes beyond the
+/// static/dynamic set. `runtime = "edge"` selects diffpack's lean WinterCG context (no
+/// longer a hard error): the caller runs [`validate_edge_module`] on the source to
+/// enforce the no-Node-built-ins contract, and the served route advertises the edge
+/// globals via `globalThis.EdgeRuntime`. An UNRECOGNIZED runtime is still a hard error
+/// (never a silent Node default). The remaining exports (`fetchCache`,
+/// `preferredRegion`, `maxDuration`, `experimental_ppr`) are advisory for a native
+/// single-node server: each is reported with a build WARN explaining precisely why
+/// diffpack cannot honor it, so the behavior is explicit rather than a silent default.
+fn validate_segment_config(url_path: &str, cfg: &RouteConfig) -> Result<(), String> {
+    // Classify the runtime (errors on an unrecognized value; `edge` is accepted here and
+    // its module body is checked by the caller via `validate_edge_module`).
+    RouteRuntime::from_config(url_path, cfg.runtime.as_deref())?;
     if let Some(mode) = cfg.fetch_cache.as_deref() {
         eprintln!(
             "next segment config: route {url_path} exports `fetchCache = \"{mode}\"`, which \
@@ -981,6 +1055,9 @@ struct RouteHandler {
     file: PathBuf,
     /// The HTTP methods it exports, in canonical order.
     methods: Vec<String>,
+    /// `export const runtime = "edge"` — served in diffpack's lean WinterCG context
+    /// (`globalThis.EdgeRuntime` advertised; Node built-ins rejected at build).
+    edge: bool,
 }
 
 /// Whether `source` has a top-level export named `name` (a `function`/`const`/`let`/
@@ -1051,11 +1128,25 @@ fn discover_route_handlers_dir(
                 .map(|m| m.to_string())
                 .collect();
             if !methods.is_empty() {
+                let url_path = segments_display(&segments);
+                // Route-handler runtime: `export const runtime = "edge"` opts into the
+                // lean WinterCG context. Enforce the no-Node-built-ins contract on the
+                // handler source (a real edge deployment would reject those imports).
+                let runtime = RouteRuntime::from_config(&url_path, extract_export_const(&strip_comments(&source), "runtime").as_deref())?;
+                if runtime.is_edge() {
+                    validate_edge_module(&format!("edge route handler {url_path} ({})", file.display()), &source)?;
+                    eprintln!(
+                        "next edge runtime: route handler {url_path} exports `runtime = \"edge\"`; \
+                         served in diffpack's WinterCG context (globalThis.EdgeRuntime set; Node \
+                         built-ins rejected at build).",
+                    );
+                }
                 out.push(RouteHandler {
-                    url_path: segments_display(&segments),
+                    url_path,
                     segments,
                     file,
                     methods,
+                    edge: runtime.is_edge(),
                 });
             }
         }
@@ -1167,15 +1258,61 @@ fn synthesize_metadata_file_handlers(
             segments: vec![Seg::Static(seg)],
             file: wrapper_canon,
             methods: vec!["GET".to_string()],
+            edge: false,
         });
     }
     Ok(handlers)
 }
 
-/// Scan the app ROOT for static metadata-image file conventions. Nested (segment-scoped)
-/// images and code-based image generators (`opengraph-image.tsx` returning an
-/// `ImageResponse`) are NOT supported here: each is reported as a hard error naming the
-/// file (per the no-silent-drop rule) rather than being dropped from the head.
+/// Walk up from `start` to the nearest ancestor directory that contains a `node_modules`
+/// folder, returning that directory (the effective project root for module resolution).
+fn nearest_node_modules_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if d.join("node_modules").is_dir() {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// The module specifier a code-based image generator imports its `ImageResponse` from:
+/// `next/og` (Next re-exports `@vercel/og`) or `@vercel/og` directly. Returns the first
+/// recognized specifier found in the (comment-stripped) source, or None.
+fn og_import_specifier(source: &str) -> Option<&'static str> {
+    let stripped = strip_comments(source);
+    for spec in ["next/og", "@vercel/og"] {
+        for q in [format!("\"{spec}\""), format!("'{spec}'")] {
+            if stripped.contains(&q) {
+                return Some(match spec {
+                    "next/og" => "next/og",
+                    _ => "@vercel/og",
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Whether the `ImageResponse` provider a generator imports resolves in this project.
+/// `@vercel/og` resolves when the package is installed; `next/og` resolves when `next`
+/// is installed (Next bundles `@vercel/og` and exposes it as `next/og`). A filesystem
+/// check (no Node spawn) — lean and run only when a generator is actually present.
+fn og_provider_resolves(project_root: &Path, spec: &str) -> bool {
+    let nm = project_root.join("node_modules");
+    match spec {
+        "@vercel/og" => nm.join("@vercel/og").join("package.json").is_file(),
+        "next/og" => nm.join("next").join("package.json").is_file(),
+        _ => false,
+    }
+}
+
+/// Scan the app ROOT for metadata-image file conventions: STATIC image files (copied to
+/// the served output) and code-based `ImageResponse` GENERATORS (`opengraph-image.tsx`
+/// etc., prerendered to a PNG at build time via `@vercel/og`). A generator whose
+/// `@vercel/og`/`next/og` provider does not resolve is a clear hard error (naming the
+/// file + how to install/opt out). Nested (segment-scoped) images are not scanned here.
 fn scan_metadata_images(app_dir: &Path) -> Result<Vec<MetaImage>, String> {
     // (stem, kind) in head-emit priority order. `icon` also matches `icon0`, `icon1`
     // in Next, but the base convention is a single `icon.*`; we support the base names.
@@ -1188,16 +1325,52 @@ fn scan_metadata_images(app_dir: &Path) -> Result<Vec<MetaImage>, String> {
     ];
     let mut images = Vec::new();
     for (stem, kind) in families {
-        // A code-based generator at the app root (e.g. `opengraph-image.tsx`): the
-        // dynamic-image path (satori/@vercel/og) is a heavy build-time-only capability
-        // this adapter does not implement. Fail clearly, pointing at a static file.
+        // A code-based generator (e.g. `opengraph-image.tsx`) returning a `@vercel/og`
+        // ImageResponse. `favicon` has no code-generator convention in Next.
         if kind != MetaImageKind::Favicon
             && let Some(generator) = first_existing(app_dir, stem)
         {
-            return Err(format!(
-                "diffpack next metadata: {} is a code-based image generator (returns an ImageResponse), which this adapter does not support (it needs the heavy @vercel/og dependency and is kept out of the request path). Provide a static {stem}.png/.jpg/.svg instead.",
-                generator.display(),
-            ));
+            let generator = generator.canonicalize().unwrap_or(generator);
+            let source = std::fs::read_to_string(&generator).unwrap_or_default();
+            let stripped = strip_comments(&source);
+            // `generateImageMetadata` (multiple id-partitioned images) needs the request
+            // context + a size manifest this build-time prerender does not model. Fail
+            // clearly rather than emit one wrong image (no silent stub).
+            if exports_symbol(&stripped, "generateImageMetadata") {
+                return Err(format!(
+                    "diffpack next metadata: {} exports `generateImageMetadata` (multiple \
+                     id-partitioned images), which this adapter does not prerender yet. Use a \
+                     single default-export {stem}() returning one ImageResponse instead.",
+                    generator.display(),
+                ));
+            }
+            let Some(spec) = og_import_specifier(&source) else {
+                return Err(format!(
+                    "diffpack next metadata: {} is a code-based image generator but imports its \
+                     ImageResponse from neither `next/og` nor `@vercel/og`. diffpack prerenders \
+                     the ImageResponse at build time via @vercel/og; import it from one of those, \
+                     or provide a static {stem}.png/.jpg/.svg instead.",
+                    generator.display(),
+                ));
+            };
+            let root = nearest_node_modules_root(app_dir).unwrap_or_else(|| app_dir.to_path_buf());
+            if !og_provider_resolves(&root, spec) {
+                return Err(format!(
+                    "diffpack next metadata: {} is a code-based image generator that imports \
+                     `{spec}`, but {spec} does not resolve in this project. Install it (\
+                     `@vercel/og`, or `next` for `next/og`) so diffpack can prerender the \
+                     ImageResponse at build time, or provide a static {stem}.png/.jpg/.svg instead.",
+                    generator.display(),
+                ));
+            }
+            images.push(MetaImage {
+                kind,
+                source: generator,
+                served: format!("/{stem}.png"),
+                mime: "image/png",
+                generator: true,
+            });
+            continue;
         }
         let Some(src) = first_existing_ext(app_dir, stem, &METADATA_IMAGE_EXTS) else { continue };
         let ext = src
@@ -1212,6 +1385,7 @@ fn scan_metadata_images(app_dir: &Path) -> Result<Vec<MetaImage>, String> {
             source,
             served,
             mime: metadata_image_mime(&ext),
+            generator: false,
         });
     }
     Ok(images)
@@ -1270,10 +1444,22 @@ fn discover_routes_dir(
             });
             let kind = classify_route(has_dynamic_segment, &cfg);
             let url_path = segments_display(&segments);
-            // Route-segment-config exports beyond the static/dynamic set: `runtime =
-            // "edge"` hard-errors here (no edge runtime); the advisory ones WARN. Done
-            // before the route is recorded so an unsupported route never reaches codegen.
+            // Route-segment-config exports beyond the static/dynamic set: an
+            // unrecognized `runtime` hard-errors; the advisory ones WARN. Done before the
+            // route is recorded so an unsupported route never reaches codegen.
             validate_segment_config(&url_path, &cfg)?;
+            // `runtime = "edge"`: accept it (diffpack renders the page through its Node
+            // RSC pipeline — output-identical to edge), but enforce the WinterCG
+            // no-Node-built-ins contract on the page source so an edge page that would
+            // fail in a real edge deployment fails loudly here instead.
+            if RouteRuntime::from_config(&url_path, cfg.runtime.as_deref())?.is_edge() {
+                validate_edge_module(&format!("edge route {url_path} ({})", page_abs.display()), &page_source)?;
+                eprintln!(
+                    "next edge runtime: route {url_path} exports `runtime = \"edge\"`; diffpack \
+                     renders it through its native RSC pipeline under the WinterCG global surface \
+                     (fetch/Request/Response/URL/crypto), Node built-ins rejected at build.",
+                );
+            }
             // Nested-gsp is out of scope: a route with >1 dynamic segment that also
             // exports generateStaticParams needs a BFS param merge we do not implement.
             // Hard-error naming the route rather than emit a wrong enumeration.
@@ -1842,10 +2028,17 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     }
 
     write_if_changed(&adapter_dir.join("lazy.js"), lazy_module())?;
-    // Middleware: `middleware.{ts,js}` at the project root or under `src/`.
+    // Middleware: `middleware.{ts,js}` at the project root or under `src/`. Next
+    // middleware ALWAYS runs on the edge (WinterCG) runtime, so enforce the
+    // no-Node-built-ins contract on its source (a real deployment rejects those
+    // imports) — the served middleware runs in diffpack's edge context.
     let middleware = first_existing(&root, "middleware")
         .or_else(|| first_existing(&root.join("src"), "middleware"))
         .map(|p| p.canonicalize().unwrap_or(p));
+    if let Some(mw) = middleware.as_deref() {
+        let mw_source = std::fs::read_to_string(mw).unwrap_or_default();
+        validate_edge_module(&format!("middleware ({}) [edge runtime]", mw.display()), &mw_source)?;
+    }
     write_if_changed(
         &adapter_dir.join("rsc-entry.tsx"),
         &rsc_entry_module(
@@ -2604,9 +2797,10 @@ fn rsc_entry_module(
             .collect::<Vec<_>>()
             .join(", ");
         handler_entries.push_str(&format!(
-            "  {{ path: {}, segments: {}, methods: {{ {methods_js} }} }},\n",
+            "  {{ path: {}, segments: {}, methods: {{ {methods_js} }}, edge: {} }},\n",
             js_str(&handler.url_path),
             segments_js(&handler.segments),
+            handler.edge,
         ));
     }
     let handler_imports: String = handler_namespaces
@@ -3261,6 +3455,25 @@ export async function staticParams(routePath) {{
   return combos;
 }}
 
+// Enter diffpack's lean WinterCG (edge) context for an `runtime = "edge"` route/handler
+// or for middleware (always edge in Next). Node already provides the full WinterCG global
+// surface (fetch/Request/Response/URL/crypto/TextEncoder/…), so there is nothing to
+// polyfill — we (1) advertise the edge marker `globalThis.EdgeRuntime` that edge code and
+// libraries probe, and (2) assert the required globals are present, failing loudly if a
+// host somehow lacks one. Node built-in imports are already rejected at BUILD time
+// (`validate_edge_module`), so a served edge route never reaches a Node-only API. The
+// marker is set idempotently and process-wide (one-process server) — documented.
+function ensureEdgeContext() {{
+  if (typeof globalThis.EdgeRuntime === "undefined") {{
+    globalThis.EdgeRuntime = "diffpack-edge";
+  }}
+  for (const g of ["fetch", "Request", "Response", "URL", "crypto", "TextEncoder", "TextDecoder"]) {{
+    if (typeof globalThis[g] === "undefined") {{
+      throw new Error(`diffpack edge runtime: required WinterCG global \`${{g}}\` is missing from this host`);
+    }}
+  }}
+}}
+
 // Dispatch a ROUTE HANDLER (`route.ts` HTTP endpoint). Matches `pathname` against the
 // ROUTE_HANDLERS table, invokes the exported method function with a real `Request` and
 // `{{ params }}` (inside the request store so cookies()/headers() work), and returns
@@ -3276,6 +3489,8 @@ export async function handleRoute(pathname, method, reqCtx) {{
     if (typeof fn !== "function") {{
       return {{ status: 405, headers: [["allow", Object.keys(entry.methods).join(", ")]], body: "" }};
     }}
+    // Edge (WinterCG) handler: advertise the edge globals before invoking it.
+    if (entry.edge) ensureEdgeContext();
     const url = reqCtx.url || ("http://localhost" + pathname);
     const bodyBytes =
       method === "GET" || method === "HEAD" || reqCtx.body == null
@@ -3351,6 +3566,8 @@ export function routeManifest() {{
 // there is no middleware.
 export async function runMiddleware(reqCtx) {{
   if (MIDDLEWARE == null) return null;
+  // Next middleware always runs on the edge runtime.
+  ensureEdgeContext();
   const url = reqCtx.url || "http://localhost/";
   const request = new NextRequest(url, {{ method: reqCtx.method || "GET", headers: new Headers(reqCtx.headers || []) }});
   const store = {{
@@ -4449,12 +4666,68 @@ pub fn emit_metadata_images(root: &Path, out_public: &Path) -> Result<usize, Str
         std::fs::create_dir_all(out_public)
             .map_err(|error| format!("cannot create {}: {error}", out_public.display()))?;
         let dest = out_public.join(img.served.trim_start_matches('/'));
-        std::fs::copy(&img.source, &dest).map_err(|error| {
-            format!("cannot copy metadata image {} -> {}: {error}", img.source.display(), dest.display())
-        })?;
+        if img.generator {
+            prerender_og_image(root, &img.source, &dest)?;
+        } else {
+            std::fs::copy(&img.source, &dest).map_err(|error| {
+                format!("cannot copy metadata image {} -> {}: {error}", img.source.display(), dest.display())
+            })?;
+        }
         written += 1;
     }
     Ok(written)
+}
+
+/// Prerender a code-based `@vercel/og` ImageResponse GENERATOR (`opengraph-image.tsx`
+/// etc.) to a PNG at build time. Transforms the generator to standalone ESM (TS stripped,
+/// JSX lowered to `react/jsx-runtime`, imports untouched), writes it + the runner inside
+/// the app tree (so Node resolves `@vercel/og`/`next/og`/`react` from the app's
+/// node_modules), then runs the runner under Node to invoke the generator and capture the
+/// rendered image bytes. Any transform/runtime failure is a hard error surfacing the
+/// cause (never a silent or empty image). The satori/resvg rendering is @vercel/og's own
+/// concern — diffpack drives it through the app's installed copy, adding no heavy dep.
+fn prerender_og_image(root: &Path, generator: &Path, dest: &Path) -> Result<(), String> {
+    let source = std::fs::read_to_string(generator)
+        .map_err(|error| format!("cannot read og image generator {}: {error}", generator.display()))?;
+    let esm = crate::transform::transform_to_standalone_esm(generator, &source)?;
+    // A private staging dir inside the app tree (node_modules resolves upward from here).
+    let stage = root.join(ADAPTER_DIR).join("og");
+    std::fs::create_dir_all(&stage)
+        .map_err(|error| format!("cannot create {}: {error}", stage.display()))?;
+    let stem = generator
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("opengraph-image");
+    let gen_mjs = stage.join(format!("{stem}.mjs"));
+    std::fs::write(&gen_mjs, esm)
+        .map_err(|error| format!("cannot write {}: {error}", gen_mjs.display()))?;
+    let runner = stage.join("og-prerender.mjs");
+    std::fs::write(&runner, include_str!("../scripts/rsc/og-prerender.mjs"))
+        .map_err(|error| format!("cannot write {}: {error}", runner.display()))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let output = std::process::Command::new("node")
+        .arg(&runner)
+        .arg(&gen_mjs)
+        .arg(dest)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot run the @vercel/og prerender for {} (is `node` on PATH?): {error}",
+                generator.display(),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "diffpack next metadata: prerendering the @vercel/og ImageResponse for {} failed:\n{}",
+            generator.display(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn emit_image_variants(
@@ -5462,14 +5735,101 @@ mod tests {
     }
 
     #[test]
-    fn code_based_image_generator_hard_errors() {
+    fn code_based_image_generator_requires_vercel_og() {
+        // A generator importing `@vercel/og` whose provider does not resolve → clear
+        // hard error naming the file + the missing dependency (no silent drop).
         let root = scratch("meta-image-gen");
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(app.join("opengraph-image.tsx"), "export default function OG(){ return null; }\n").unwrap();
+        std::fs::write(
+            app.join("opengraph-image.tsx"),
+            "import { ImageResponse } from \"@vercel/og\";\nexport default function OG(){ return new ImageResponse(null); }\n",
+        ).unwrap();
         let err = scan_metadata_images(&app).unwrap_err();
-        assert!(err.contains("code-based image generator"), "clear hard error for dynamic image gen: {err}");
+        assert!(err.contains("@vercel/og") && err.contains("does not resolve"), "names the missing dep: {err}");
         assert!(err.contains("opengraph-image.tsx"), "error names the file: {err}");
+
+        // A generator that imports neither next/og nor @vercel/og → clear hard error.
+        let app2 = scratch("meta-image-gen-noimport").join("app");
+        std::fs::create_dir_all(&app2).unwrap();
+        std::fs::write(app2.join("opengraph-image.tsx"), "export default function OG(){ return null; }\n").unwrap();
+        let err2 = scan_metadata_images(&app2).unwrap_err();
+        assert!(err2.contains("next/og") && err2.contains("@vercel/og"), "explains the required import: {err2}");
+
+        // With @vercel/og present (a resolvable stub package), the generator is accepted
+        // and recorded as a build-time-prerendered PNG head link.
+        let ok_app = app.clone();
+        let nm = root.join("node_modules").join("@vercel").join("og");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(nm.join("package.json"), "{\"name\":\"@vercel/og\"}\n").unwrap();
+        let images = scan_metadata_images(&ok_app).unwrap();
+        let og = images.iter().find(|i| i.kind == MetaImageKind::OpengraphImage).expect("og image recorded");
+        assert!(og.generator, "recorded as a generator");
+        assert_eq!(og.served, "/opengraph-image.png", "served as a prerendered PNG");
+        assert_eq!(og.mime, "image/png");
+    }
+
+    #[test]
+    fn og_image_generator_prerenders_to_png() {
+        // Exercises the full build-time @vercel/og prerender ORCHESTRATION: transform the
+        // TSX generator to standalone ESM (TS stripped, JSX lowered to react/jsx-runtime,
+        // the @vercel/og import preserved), run it under Node against a resolvable
+        // ImageResponse provider, and capture the rendered bytes to a PNG. Uses stand-in
+        // `@vercel/og` + `react/jsx-runtime` packages (same API shape as the real ones —
+        // ImageResponse extends Response) so the pipeline is proven without the heavy dep;
+        // satori's rasterization is @vercel/og's own concern, not diffpack's.
+        if std::process::Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("SKIP og_image_generator_prerenders_to_png: node not found");
+            return;
+        }
+        let root = scratch("og-prerender");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        // Stand-in @vercel/og: ImageResponse extends the Web Response, emitting a minimal
+        // valid PNG (signature + IHDR) regardless of the element (the real one rasterizes).
+        let og = root.join("node_modules").join("@vercel").join("og");
+        std::fs::create_dir_all(&og).unwrap();
+        std::fs::write(og.join("package.json"), "{\"name\":\"@vercel/og\",\"type\":\"module\",\"exports\":{\".\":\"./index.js\"}}\n").unwrap();
+        std::fs::write(
+            og.join("index.js"),
+            "export class ImageResponse extends Response {\n\
+             \x20 constructor(element, opts) {\n\
+             \x20   const png = Buffer.from('89504e470d0a1a0a0000000d494844520000000100000001', 'hex');\n\
+             \x20   super(png, { status: 200, headers: { 'content-type': 'image/png' } });\n\
+             \x20 }\n\
+             }\n",
+        ).unwrap();
+        // Stand-in react/jsx-runtime (the automatic JSX runtime the transform targets).
+        let react = root.join("node_modules").join("react");
+        std::fs::create_dir_all(&react).unwrap();
+        std::fs::write(react.join("package.json"), "{\"name\":\"react\",\"type\":\"module\",\"exports\":{\"./jsx-runtime\":\"./jsx-runtime.js\"}}\n").unwrap();
+        std::fs::write(
+            react.join("jsx-runtime.js"),
+            "export function jsx(t,p){return {t,p};}\nexport function jsxs(t,p){return {t,p};}\nexport const Fragment=Symbol('F');\n",
+        ).unwrap();
+        // The generator: JSX + a preserved @vercel/og import + a default export function.
+        let generator = app.join("opengraph-image.tsx");
+        std::fs::write(
+            &generator,
+            "import { ImageResponse } from \"@vercel/og\";\n\
+             export const size = { width: 1200, height: 630 };\n\
+             export default function OG(): ImageResponse {\n\
+             \x20 const label: string = \"Hello edge\";\n\
+             \x20 return new ImageResponse(<div style={{ fontSize: 48 }}>{label}</div>);\n\
+             }\n",
+        ).unwrap();
+
+        // scan records it as a generator (the provider resolves).
+        let images = scan_metadata_images(&app).unwrap();
+        let entry = images.iter().find(|i| i.generator).expect("generator recorded");
+        assert_eq!(entry.served, "/opengraph-image.png");
+
+        // Prerender it.
+        let dest = root.join("out").join("opengraph-image.png");
+        prerender_og_image(&root, &generator, &dest).expect("og prerender succeeds");
+        let bytes = std::fs::read(&dest).expect("png written");
+        assert!(bytes.len() >= 8, "non-empty image emitted");
+        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a], "valid PNG signature");
     }
 
     #[test]
@@ -6134,25 +6494,62 @@ export default function Page(){ return null; }
     }
 
     #[test]
-    fn edge_runtime_is_a_hard_error() {
+    fn edge_runtime_is_accepted_and_classified() {
+        // `runtime = "edge"` is a recognized runtime (no longer a hard error).
         let src = "export const runtime = \"edge\";\nexport default function Page(){return null;}\n";
         let cfg = scan_route_config(src);
-        let err = validate_segment_config("/edgy", &cfg).unwrap_err();
-        assert!(
-            err.contains("/edgy") && err.contains("edge") && err.contains("not supported"),
-            "edge error must name the route + reason: {err}",
-        );
-        // Discovery surfaces it: a route exporting `runtime = "edge"` fails the build.
-        let app = scratch("edge-runtime");
+        assert_eq!(cfg.runtime.as_deref(), Some("edge"));
+        assert!(validate_segment_config("/edgy", &cfg).is_ok(), "edge runtime validates");
+        assert_eq!(RouteRuntime::from_config("/edgy", cfg.runtime.as_deref()).unwrap(), RouteRuntime::Edge);
+        assert_eq!(RouteRuntime::from_config("/x", Some("experimental-edge")).unwrap(), RouteRuntime::Edge);
+        assert_eq!(RouteRuntime::from_config("/x", Some("nodejs")).unwrap(), RouteRuntime::Node);
+        assert_eq!(RouteRuntime::from_config("/x", None).unwrap(), RouteRuntime::Node);
+        // An unrecognized runtime is still a hard error (never a silent Node default).
+        let bad = RouteRuntime::from_config("/z", Some("deno")).unwrap_err();
+        assert!(bad.contains("/z") && bad.contains("deno"), "unknown runtime names route + value: {bad}");
+        // A clean edge page discovers + classifies normally.
+        let app = scratch("edge-runtime-ok");
         std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
         let edge_dir = app.join("edgy");
         std::fs::create_dir_all(&edge_dir).unwrap();
         std::fs::write(edge_dir.join("page.tsx"), src).unwrap();
         let layout = first_existing(&app, "layout");
-        match discover_routes(&app, layout.as_deref()) {
-            Err(e) => assert!(e.contains("edge"), "discovery error must name the edge runtime: {e}"),
-            Ok(_) => panic!("edge-runtime route must fail discovery"),
+        let disc = discover_routes(&app, layout.as_deref()).expect("clean edge page discovers");
+        assert!(disc.routes.iter().any(|r| r.url_path == "/edgy"), "the edge route is recorded");
+    }
+
+    #[test]
+    fn edge_module_importing_node_builtin_hard_errors() {
+        // The "no Node fs" contract: an edge module importing a Node built-in fails loudly.
+        for (src, name) in [
+            ("import fs from \"node:fs\";\nexport function GET(){}\n", "fs"),
+            ("import { readFile } from \"fs/promises\";\nexport function GET(){}\n", "fs/promises"),
+            ("const cp = require(\"child_process\");\nexport function GET(){}\n", "child_process"),
+            ("import net from \"net\";\nexport const runtime=\"edge\";\n", "net"),
+        ] {
+            let err = validate_edge_module("edge route /x", src).unwrap_err();
+            assert!(err.contains(name) && err.contains("edge"), "must name the builtin + edge: {err}");
         }
+        // WinterCG-safe imports (and Node built-ins the edge runtime polyfills) pass.
+        for ok in [
+            "import { NextResponse } from \"next/server\";\nexport function GET(){ return new Response(\"ok\"); }\n",
+            "import { Buffer } from \"node:buffer\";\nexport function GET(){}\n",
+            "import crypto from \"node:crypto\";\nexport function GET(){}\n",
+            // A `fs` substring that is NOT an import specifier must not false-trigger.
+            "const label = \"fs is fine as data\";\nexport function GET(){ return new Response(label); }\n",
+        ] {
+            assert!(validate_edge_module("edge route /ok", ok).is_ok(), "clean edge module passes: {ok}");
+        }
+        // Discovery of an edge ROUTE HANDLER that imports fs fails the build, naming it.
+        let app = scratch("edge-handler-fs");
+        let api = app.join("api").join("edge");
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(
+            api.join("route.ts"),
+            "export const runtime = \"edge\";\nimport fs from \"node:fs\";\nexport function GET(){ return new Response(String(fs)); }\n",
+        ).unwrap();
+        let err = discover_route_handlers(&app).unwrap_err();
+        assert!(err.contains("fs") && err.contains("edge"), "edge handler fs import fails discovery: {err}");
     }
 
     #[test]

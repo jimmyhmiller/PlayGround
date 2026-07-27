@@ -162,6 +162,39 @@ pub fn transform_module(path: &Path, source: &str, target: Target) -> TransformR
     transform_module_with_options(path, source, target, false)
 }
 
+/// Transform a single TS/TSX/JS/JSX module to STANDALONE, runnable ES module source:
+/// strip TypeScript, lower JSX via the automatic runtime (`react/jsx-runtime`), and
+/// leave every `import`/`export` specifier UNTOUCHED (no diffpack bundler rewriting).
+/// The result runs directly under Node from the module's own directory, resolving its
+/// imports (`react/jsx-runtime`, `@vercel/og`/`next/og`, ...) through Node's resolver.
+/// Used by the build-time `@vercel/og` ImageResponse prerender. Returns the emitted code
+/// or a hard error carrying any parse/transform diagnostics (never silent).
+pub fn transform_to_standalone_esm(path: &Path, source: &str) -> Result<String, String> {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_default().with_module(true);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut diagnostics: Vec<String> =
+        parsed.diagnostics.into_iter().map(|d| d.to_string()).collect();
+    let mut program = parsed.program;
+    let semantic = SemanticBuilder::new().build(&program);
+    diagnostics.extend(semantic.diagnostics.into_iter().map(|d| d.to_string()));
+    // Default TransformOptions lowers JSX with the automatic runtime (react) and strips
+    // TS, emitting `import { jsx as _jsx } from "react/jsx-runtime"` — exactly what a
+    // Node run of a `@vercel/og` generator needs. No refresh, no bundler rewrite.
+    let transform_options = TransformOptions::default();
+    let transformed = Transformer::new(&allocator, path, &transform_options)
+        .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
+    diagnostics.extend(transformed.diagnostics.into_iter().map(|d| d.to_string()));
+    if !diagnostics.is_empty() {
+        return Err(format!(
+            "cannot transform {} for the @vercel/og prerender: {}",
+            path.display(),
+            diagnostics.join("; "),
+        ));
+    }
+    Ok(Codegen::new().build(&program).code)
+}
+
 /// Like [`transform_module`], but with `refresh` enabling oxc's native React Fast
 /// Refresh transform: it injects the per-component `$RefreshReg$` registrations and
 /// `$RefreshSig$` hook signatures the React Refresh runtime needs to swap a
