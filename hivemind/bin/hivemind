@@ -81,6 +81,17 @@ const DEFAULT_CONFIG = {
     temperature: 0,
     maxTokens: 8192,
     jsonMode: false,   // reasoning models (e.g. deepseek-v4-pro) reject response_format json_object
+    // What --flash / --pro resolve to. Overridable per project, because model
+    // ids are provider-scoped: talking to deepseek directly they are bare
+    // ("deepseek-v4-flash"), but through an aggregator they carry a provider
+    // prefix ("deepseek/deepseek-v4-flash"). Any OpenAI-compatible
+    // /chat/completions endpoint works — e.g. Vercel AI Gateway:
+    //   "baseUrl": "https://ai-gateway.vercel.sh/v1",
+    //   "keyEnv":  "AI_GATEWAY_API_KEY",
+    //   "model":   "anthropic/claude-haiku-4.5",
+    //   "aliases": { "flash": "deepseek/deepseek-v4-flash",
+    //                "pro":   "deepseek/deepseek-v4-pro" }
+    aliases: { flash: "deepseek-v4-flash", pro: "deepseek-v4-pro" },
   },
   stubs: {
     files: [],                                  // explicit list (relative to root)
@@ -322,10 +333,17 @@ function scan(root, cfg, tasks, opts) {
 }
 
 // ----------------------------------------------------------------------------- prompt
-function buildContextBlock(root, cfg) {
-  if (!cfg.context || !cfg.context.length) return "";
+// `extra` are per-task context files (manifest `context: [...]`), appended to the
+// project-wide ones. An agent has no filesystem: it sees this block and the file
+// it is editing, nothing else. So a spec that says "port the implementation in
+// <path>" is only meaningful if <path> is listed here — otherwise the model is
+// guessing at an API it cannot look up, which is indistinguishable from it being
+// bad at the task.
+function buildContextBlock(root, cfg, extra) {
+  const rels = [...(cfg.context || []), ...(extra || [])];
+  if (!rels.length) return "";
   const parts = [];
-  for (const rel of cfg.context) {
+  for (const rel of rels) {
     const p = path.join(root, rel);
     if (!exists(p)) continue;
     parts.push(`## Context: ${rel}\n\`\`\`\n${readFile(p)}\n\`\`\`\n`);
@@ -334,11 +352,16 @@ function buildContextBlock(root, cfg) {
 }
 
 function buildMessages(root, cfg, item, contextBlock, feedback) {
+  // Per-task context is resolved here so it lands in the same block as the
+  // project-wide files, in the same format.
+  const extra = (item.task && item.task.context) || [];
+  if (extra.length) contextBlock = buildContextBlock(root, { context: [] }, [...(cfg.context || []), ...extra]);
   const fileSrc = readFile(path.join(root, item.file));
   const t = item.task || {};
   const hasTest = cfg.output.testKey != null;
-  const isRefactor = cfg.task === "refactor";
-  const isEdit = cfg.task === "edit";
+  const mode = modeFor(cfg, item);
+  const isRefactor = mode === "refactor";
+  const isEdit = mode === "edit";
   // The unit's current text (the span that will be replaced). Whole file unless anchored.
   const span = locateSpan(root, cfg, item);
   const region = (!span.missing && !span.gone) ? span.lines.slice(span.start, span.end + 1).join("\n") : fileSrc;
@@ -392,29 +415,95 @@ function buildMessages(root, cfg, item, contextBlock, feedback) {
 }
 
 // ----------------------------------------------------------------------------- llm
-async function callLLM(cfg, key, messages) {
+async function callLLM(cfg, key, messages, mode) {
   const base = process.env[cfg.provider.baseUrlEnv] || cfg.provider.baseUrl;
   const model = process.env[cfg.provider.modelEnv] || cfg.provider.model;
   const body = { model, messages, temperature: cfg.provider.temperature, max_tokens: cfg.provider.maxTokens };
   if (cfg.provider.jsonMode) body.response_format = { type: "json_object" };
+  // ALWAYS stream. Not for progress — for survival. On a non-streaming call the
+  // response headers do not arrive until generation is finished, so undici's
+  // 300s headersTimeout becomes a hard ceiling on total generation time, and a
+  // slow reasoning model silently dies as "fetch failed". Streaming delivers a
+  // first chunk immediately and keeps arriving, so neither timeout ever trips.
+  body.stream = true;
   const res = await fetch(base.replace(/\/$/, "") + "/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error("API " + res.status + ": " + (await res.text()).slice(0, 300));
-  const j = await res.json();
-  let content = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-  if (typeof content !== "string") throw new Error("no content in model response");
+
+  // Minimal SSE reader: accumulate `choices[0].delta.content`, and keep the last
+  // finish_reason / usage we are told about. Re-shaped into the non-streaming
+  // response object the rest of this function already expects.
+  let content = "", finishReason = null, usage = null, buf = "";
+  const decoder = new TextDecoder();
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();                       // keep the trailing partial line
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const payload = t.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      let ev;
+      try { ev = JSON.parse(payload); } catch { continue; }   // ignore keep-alives
+      const choice = ev.choices && ev.choices[0];
+      if (choice) {
+        if (choice.delta && typeof choice.delta.content === "string") content += choice.delta.content;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+      }
+      if (ev.usage) usage = ev.usage;
+    }
+  }
+  const j = { choices: [{ finish_reason: finishReason, message: { content } }], usage };
+  if (typeof content !== "string" || content === "") throw new Error("no content in model response");
+  // A truncated reply is indistinguishable from a badly-behaved one once you are
+  // only looking at unparseable text — a reasoning model that runs out of budget
+  // mid-thought simply never reaches the JSON. Say so plainly instead, because
+  // the fix (raise provider.maxTokens) is nothing like the fix for bad format.
+  const finish = j.choices[0].finish_reason;
+  if (finish === "length") {
+    const used = (j.usage && j.usage.completion_tokens) || "?";
+    throw new Error(`model hit the output limit (finish_reason=length, ${used} completion tokens) `
+      + `before finishing its reply — raise provider.maxTokens (currently ${cfg.provider.maxTokens})`);
+  }
   let obj;
-  try { obj = JSON.parse(content); }
-  catch {
-    const m = content.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("model did not return JSON");
-    obj = JSON.parse(m[0]);
+  // Recovery ladder, cheapest and most faithful first: as-is, then with a
+  // wrapping ```fence``` removed (models fence JSON constantly), then the
+  // first-brace-to-last-brace span. The last one is a guess — it can straddle
+  // prose or a truncated reply — so it goes last, and on failure we surface a
+  // snippet of what actually came back. Without that the raw response is lost
+  // and a parse failure is undiagnosable after the fact.
+  const candidates = [content, stripFence(content.trim())];
+  // Reasoning models often narrate first and emit the object last. A single
+  // first-brace-to-last-brace span then straddles any `{` in the prose and
+  // parses as garbage, so try every `{` as a start, nearest the end first —
+  // the real object is almost always the last one.
+  const last = content.lastIndexOf("}");
+  if (last > 0) {
+    const starts = [];
+    for (let i = 0; i < last; i++) if (content[i] === "{") starts.push(i);
+    for (const i of starts.reverse()) candidates.push(content.slice(i, last + 1));
+  }
+  let lastErr;
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      // A brace span can parse cleanly and still be the wrong object (a JSON
+      // snippet quoted in the prose). Require the payload key.
+      if (parsed && typeof parsed === "object" && cfg.output.implKey in parsed) { obj = parsed; break; }
+    } catch (e) { lastErr = e; }
+  }
+  if (obj === undefined) {
+    // Snippet first: the stuck-summary truncates, and the raw reply is the part
+    // worth reading.
+    throw new Error(`model did not return parseable JSON. Raw reply began: `
+      + `${JSON.stringify(content.slice(0, 300))} (parser said: ${lastErr && lastErr.message})`);
   }
   const implKey = cfg.output.implKey, testKey = cfg.output.testKey;
-  if (cfg.task === "edit") {
+  if (mode === "edit") {
     const edits = obj[implKey];
     if (!Array.isArray(edits)) throw new Error(`model did not return "${implKey}" as an array of {old,new} edits`);
     for (const e of edits) {
@@ -439,12 +528,30 @@ function withLock(file, fn) {
   return prev.then(() => Promise.resolve().then(fn)).finally(release);
 }
 
+// A manifest task may carry its own `mode` ("implement" | "refactor" | "edit"),
+// overriding the project-wide `task`. Needed when units differ in kind: appending
+// cases to a large existing file wants `edit` (exact find/replace, output scales
+// with the change), while filling in a stub file wants `refactor` (whole-file
+// replacement) — demanding verbatim `old` strings for a file being rewritten
+// wholesale is all cost and no benefit.
+function modeFor(cfg, item) {
+  return (item && item.task && item.task.mode) || cfg.task;
+}
+
+// A manifest task may carry its own `gate` string, for a project whose units are
+// not all checked the same way (e.g. a per-transform test binary alongside a
+// whole-suite one). Falls back to the project-wide gate.
+function gateFor(cfg, item) {
+  return (item.task && item.task.gate) || cfg.gate.command;
+}
+
 function applyGate(root, cfg, item, impl, test) {
   return withLock(item.file, () => {
+    const mode = modeFor(cfg, item);
     // ---- edit mode: apply a list of {old,new} find/replace pairs to the whole file.
     // Each "old" must match exactly once; only those spans change, so an arbitrarily
     // large file's untouched bytes are preserved by construction.
-    if (cfg.task === "edit") {
+    if (mode === "edit") {
       const abs = path.join(root, item.file);
       let src;
       try { src = readFile(abs); } catch { return { ok: false, output: `cannot read ${item.file}` }; }
@@ -463,7 +570,7 @@ function applyGate(root, cfg, item, impl, test) {
       // what decides whether the file is actually acceptable.
       const changed = out !== snapshot;
       if (changed) writeFile(abs, out);
-      const gateCmd = fill(cfg.gate.command, { marker: item.marker, file: item.file });
+      const gateCmd = fill(gateFor(cfg, item), { marker: item.marker, file: item.file });
       let r;
       try { cp.execSync(gateCmd, { cwd: root, stdio: "pipe" }); r = { ok: true }; }
       catch (e) { r = { ok: false, output: (e.stdout || "") + (e.stderr || "") + (e.message || "") }; }
@@ -484,7 +591,7 @@ function applyGate(root, cfg, item, impl, test) {
       testAbs = path.join(root, fill(cfg.output.testPath, { marker: item.marker }));
       writeFile(testAbs, test);
     }
-    const gateCmd = fill(cfg.gate.command, { marker: item.marker, file: item.file });
+    const gateCmd = fill(gateFor(cfg, item), { marker: item.marker, file: item.file });
     let r;
     try { cp.execSync(gateCmd, { cwd: root, stdio: "pipe" }); r = { ok: true }; }
     catch (e) { r = { ok: false, output: (e.stdout || "") + (e.stderr || "") + (e.message || "") }; }
@@ -502,13 +609,31 @@ async function doItem(root, cfg, key, contextBlock, item) {
   let feedback = null;
   for (let a = 0; a < cfg.attempts; a++) {
     let resp;
-    try { resp = await callLLM(cfg, key, buildMessages(root, cfg, item, contextBlock, feedback)); }
-    catch (e) { feedback = "LLM error: " + e.message; continue; }
+    try { resp = await callLLM(cfg, key, buildMessages(root, cfg, item, contextBlock, feedback), modeFor(cfg, item)); }
+    catch (e) { feedback = "LLM error: " + e.message; recordFailure(root, item, a, feedback, null); continue; }
     const r = await applyGate(root, cfg, item, resp.impl, resp.test);
     if (r.ok) return { marker: item.marker, ok: true };
     feedback = r.output;
+    // Keep the rejected code next to the gate output. A revert leaves no trace
+    // otherwise, and the console summary only shows the first line — which for
+    // a compiler gate is "Compiling <crate>", i.e. nothing. Without this, a unit
+    // that fails on the work itself is indistinguishable from one that failed on
+    // the harness, which is the only distinction worth having.
+    recordFailure(root, item, a, feedback, resp.impl);
   }
   return { marker: item.marker, ok: false, feedback };
+}
+
+/// Persist a failed attempt to `.hivemind/failures/` for post-mortem.
+function recordFailure(root, item, attempt, output, impl) {
+  try {
+    const dir = path.join(root, ".hivemind", "failures");
+    const stem = path.join(dir, `${item.marker}.attempt${attempt + 1}`);
+    writeFile(stem + ".log", String(output == null ? "" : output));
+    if (impl != null) {
+      writeFile(stem + ".output", typeof impl === "string" ? impl : JSON.stringify(impl, null, 2));
+    }
+  } catch { /* diagnostics must never break a run */ }
 }
 
 async function pool(items, n, fn) {
@@ -529,8 +654,8 @@ function parseFlags(argv) {
     else if (a.startsWith("--limit=")) o.limit = +a.slice(8);
     else if (a.startsWith("--concurrency=")) o.concurrency = +a.slice(14);
     else if (a.startsWith("--attempts=")) o.attempts = +a.slice(11);
-    else if (a === "--flash") o.model = "deepseek-v4-flash";
-    else if (a === "--pro") o.model = "deepseek-v4-pro";
+    else if (a === "--flash") o.modelAlias = "flash";
+    else if (a === "--pro") o.modelAlias = "pro";
     else if (a.startsWith("--model=")) o.model = a.slice(8);
     else if (a.startsWith("--root=")) o.root = a.slice(7);
     else if (a === "--redo") o.redo = "";
@@ -548,6 +673,13 @@ function cmdList(root, cfg, opts) {
 
 async function cmdRun(root, cfg, opts) {
   if (opts.concurrency) cfg.concurrency = opts.concurrency;
+  // --model=NAME beats --flash/--pro; the aliases resolve against provider.aliases
+  // so they follow whatever id scheme this project's endpoint expects.
+  if (opts.modelAlias && !opts.model) {
+    const aliased = (cfg.provider.aliases || {})[opts.modelAlias];
+    if (!aliased) die(`--${opts.modelAlias}: no "${opts.modelAlias}" entry in provider.aliases`, 2);
+    opts.model = aliased;
+  }
   if (opts.model) { cfg.provider.model = opts.model; cfg.provider.modelEnv = null; }   // CLI flag wins over env
   if (opts.attempts) cfg.attempts = opts.attempts;
   if (opts.redo != null) {
@@ -568,7 +700,8 @@ async function cmdRun(root, cfg, opts) {
     return;
   }
 
-  const key = process.env[cfg.provider.keyEnv] || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
+  const key = process.env[cfg.provider.keyEnv] || process.env.DEEPSEEK_API_KEY
+    || process.env.OPENAI_API_KEY || process.env.AI_GATEWAY_API_KEY;
   if (!key) die(`set $${cfg.provider.keyEnv} (the API key)`, 2);
 
   const base = process.env[cfg.provider.baseUrlEnv] || cfg.provider.baseUrl;
@@ -592,7 +725,7 @@ async function cmdRun(root, cfg, opts) {
       for (const it of scan(root, cfg, tasks, opts)) {
         console.log("  - " + it.marker + "  (" + it.file + ")");
         const fb = failed.get(it.marker);
-        if (fb) console.log("      last failure: " + String(fb).split("\n")[0].slice(0, 160));
+        if (fb) console.log("      last failure: " + String(fb).split("\n")[0].slice(0, 400));
       }
       process.exitCode = 1;
       break;
@@ -790,9 +923,9 @@ Flags (run):
   --dry                 Print the model/base and the first full prompt; make no calls.
   --concurrency=N       Parallel agents (default from config).
   --attempts=N          Retries per unit with failure feedback (default from config).
-  --flash               use deepseek-v4-flash (fast, cheap)
-  --pro                 use deepseek-v4-pro (reasoning; the default)
-  --model=NAME          override the model for this run
+  --flash               use provider.aliases.flash (fast, cheap)
+  --pro                 use provider.aliases.pro (reasoning; the default)
+  --model=NAME          override the model for this run (beats --flash/--pro)
   --redo[=SUBSTR]       (manifest mode) clear completion state (all, or ids matching SUBSTR) and re-run.
 
 The gate: for each unit the model returns the code (and, when configured, a test); under a
