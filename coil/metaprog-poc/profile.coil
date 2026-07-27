@@ -1,0 +1,126 @@
+(module profile)
+; AUTO-PROFILER — a whole-program TRANSFORM that instruments every user function with
+; entry/exit timing, plus a tiny runtime that accumulates per-function totals and prints
+; a report when `main` returns. Zero source edits: turn it on with
+;
+;   coil run app.coil --use profile.coil
+;
+; and off by not passing it. Each user `(defn f …)` body B is rewritten to
+;
+;   (let [__prof_t0__ (prof-now)]
+;     (let [__prof_r__ (do B)]
+;       (prof-record "f" (isub (prof-now) __prof_t0__))
+;       __prof_r__))                       ; + (prof-report) injected before main returns
+;
+; The function name is baked in as a string literal via `code-str` (spliced as a value).
+; The rewrite is IDEMPOTENT (transforms run to a fixpoint) — an already-wrapped body is
+; recognized by its `__prof_t0__` binding and left alone.
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+(import "str.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+
+; ---- timing runtime ---------------------------------------------------------
+(defstruct Timespec [(sec i64) (nsec i64)])
+(extern clock_gettime :cc c [i32 (ptr Timespec)] (-> i32))
+(defn prof-now [] (-> i64)   ; monotonic nanoseconds (CLOCK_MONOTONIC = 6 on macOS)
+  (let [ts (alloc-stack Timespec)]
+    (clock_gettime 6 ts)
+    (iadd (imul (load (field ts sec)) 1000000000) (load (field ts nsec)))))
+
+; ---- accumulator table (one global cell, lazily initialized) ----------------
+(defstruct ProfEntry [(name (slice u8)) (total i64) (count i64)])
+(defstruct ProfTable [(entries (ArrayList ProfEntry)) (inited i64)])
+(defn prof-table [] (-> (ptr ProfTable)) (alloc-static ProfTable))
+(defn prof-ensure [] (-> i64)
+  (let [t (prof-table)]
+    (if (icmp-eq (load (field t inited)) 0)
+        (do (store! (field t entries) (al-new [ProfEntry] (malloc-allocator)))
+            (store! (field t inited) 1) 0)
+      0)))
+(defn prof-record [(name (slice u8)) (nanos i64)] (-> i64)
+  (do (prof-ensure)
+    (let [t (prof-table) n (al-len [ProfEntry] (load (field t entries))) (mut i) 0 (mut found) -1]
+      (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load found) 0)) (break)
+        (do (let [ev (alloc-stack ProfEntry)]
+              (store! ev (al-get [ProfEntry] (load (field t entries)) (load i)))
+              (if (str-eq (load (field ev name)) name) (do (store! found (load i)) 0) 0))
+            (store! i (iadd (load i) 1)))))
+      (if (icmp-ge (load found) 0)
+          (let [ev (alloc-stack ProfEntry)]
+            (store! ev (al-get [ProfEntry] (load (field t entries)) (load found)))
+            (store! (field ev total) (iadd (load (field ev total)) nanos))
+            (store! (field ev count) (iadd (load (field ev count)) 1))
+            (al-set! [ProfEntry] (mut (field t entries)) (load found) (load ev)) 0)
+        (let [ev (alloc-stack ProfEntry)]
+          (store! (field ev name) name) (store! (field ev total) nanos) (store! (field ev count) 1)
+          (al-push! [ProfEntry] (mut (field t entries)) (load ev)) 0)))))
+(defn prof-report [] (-> i64)
+  (do (prof-ensure)
+    (let [t (prof-table) n (al-len [ProfEntry] (load (field t entries))) w (stderr) (mut i) 0]
+      (fmt w "\n=== profile: function / calls / total ns / avg ns ===\n")
+      (loop (if (icmp-ge (load i) n) (break)
+        (do (let [ev (alloc-stack ProfEntry)]
+              (store! ev (al-get [ProfEntry] (load (field t entries)) (load i)))
+              (let [c (load (field ev count)) tot (load (field ev total))]
+                (fmt w "  {s}  calls={d}  total={d}ns  avg={d}ns\n"
+                     (load (field ev name)) c tot (if (icmp-gt c 0) (idiv tot c) 0))))
+            (store! i (iadd (load i) 1)))))
+      0)))
+
+; ---- the transform ----------------------------------------------------------
+(defn is-defn? [(f Code)] (-> bool)
+  (and (code-list? f)
+       (and (icmp-ge (code-count f) 5)
+            (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn)))))
+
+; body forms of a defn as a Code list (indices 4..)
+(defn forms-from [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(code-nth f i) ~@(forms-from f (iadd i 1) n))))
+
+; already wrapped? body[0] is a `let` whose first binding symbol is __prof_t0__
+(defn already-wrapped? [(f Code)] (-> bool)
+  (let [b (code-nth f 4)]
+    (if (and (code-list? b) (and (icmp-gt (code-count b) 1) (code-eq (code-nth b 0) `let)))
+        (let [bv (code-nth b 1)]
+          (and (code-list? bv) (and (icmp-gt (code-count bv) 0)
+               (code-eq (code-nth bv 0) `__prof_t0__))))
+      false)))
+
+; skip comptime functions (a Code return — macros/generators/checkers/transforms)
+(defn skip-defn? [(f Code)] (-> bool)
+  (let [ret (code-nth (code-nth f 3) 1)]
+    (code-eq ret `Code)))
+
+(defn wrap-defn [(f Code)] (-> Code)
+  (let [name (code-nth f 1) params (code-nth f 2) arrow (code-nth f 3)
+        nm (code-str name)
+        body (forms-from f 4 (code-count f))
+        rep (if (code-eq name `main) `((prof-report)) `())]
+    `(defn ~name ~params ~arrow
+       (let [__prof_t0__ (prof-now)]
+         (let [__prof_r__ (do ~@body)]
+           (prof-record ~nm (isub (prof-now) __prof_t0__))
+           ~@rep
+           __prof_r__)))))
+
+(defn prof-form [(f Code)] (-> Code)
+  (if (is-defn? f)
+      (if (if (already-wrapped? f) true (skip-defn? f)) f (wrap-defn f))
+    f))
+(defn prof-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(prof-form (code-nth m i)) ~@(prof-forms m (iadd i 1) n))))
+
+; process a module iff it is user code and NOT this runtime module
+(defn process-mod? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1)
+      (if (code-eq (code-nth m 0) `profile) false (code-from-user? (code-nth m 1)))
+    false))
+(defn prof-mod [(m Code)] (-> Code)
+  (if (process-mod? m) `(~(code-nth m 0) ~@(prof-forms m 1 (code-count m))) m))
+(defn prof-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(prof-mod (code-nth ms i)) ~@(prof-mods ms (iadd i 1) n))))
+(defn prof-transform [(mods Code)] (-> Code)
+  `(do ~@(prof-mods mods 0 (code-count mods))))
+(transform prof-transform)

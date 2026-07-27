@@ -1,0 +1,64 @@
+(module show)
+; A general, trait-based message builder for metaprograms. Diagnostics (`report`/
+; `warn`) and any comptime string building want to mix raw text, Code nodes, ints,
+; and types in one message WITHOUT the author hand-rendering each to a `(slice u8)`.
+; So render is a TRAIT, `Display`, and the message builders are variadic MACROS that
+; dispatch `dfmt` per-argument by its static type — the macro-power thesis: traits +
+; macros give a typed, extensible `report!`/`warn!` on top of the string-only builtins.
+;
+;   (report! node "match not exhaustive: missing " vname)   ; text + Code symbol
+;   (warn!   node "type " ty " has " (code-variant-count ty) " variants")
+;
+; Extend it to your own types by writing one `(impl Display YourType …)`.
+(import "lib/alloc.coil" :use *)
+(import "lib/str.coil" :use *)
+
+; Anything that can render itself into a StrBuf.
+(deftrait Display [Self] (dfmt [(x Self) (sb (mut StrBuf))] (-> i64)))
+
+; Raw text renders as itself.
+(impl Display (slice u8)
+  (dfmt [(x (slice u8)) (sb (mut StrBuf))] (-> i64) (sb-push-str! (mut sb) x)))
+
+; A Code node renders as its source text (`Jus`, `(ptr i64)`, `(f x)` …).
+(impl Display Code
+  (dfmt [(x Code) (sb (mut StrBuf))] (-> i64) (sb-push-str! (mut sb) (code-str x))))
+
+; Integers render as decimal — by plain arithmetic, NOT the comptime-only `int->str`
+; code-op, so this impl is a genuine runtime function (and works at comptime too).
+(defn sh--digits [(sb (mut StrBuf)) (n i64)] (-> i64)   ; n >= 0
+  (do (if (icmp-ge n 10) (sh--digits (mut sb) (idiv n 10)) 0)
+      (sb-push-byte! (mut sb) (cast u8 (iadd 48 (irem n 10))))))
+(impl Display i64
+  (dfmt [(x i64) (sb (mut StrBuf))] (-> i64)
+    (if (icmp-lt x 0)
+        (do (sb-push-byte! (mut sb) 45) (sh--digits (mut sb) (isub 0 x)))
+        (sh--digits (mut sb) x))))
+
+; Booleans render as the words.
+(impl Display bool
+  (dfmt [(x bool) (sb (mut StrBuf))] (-> i64)
+    (sb-push-str! (mut sb) (if x "true" "false"))))
+
+; ---- the builder macros -----------------------------------------------------
+; Expand `parts` into a sequence of `(dfmt PART sb)` over a shared, gensym'd StrBuf.
+(defn sh--emit [(sb Code) (parts Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `((dfmt ~(code-nth parts i) (mut ~sb)) ~@(sh--emit sb parts (iadd i 1) n))))
+
+; `(msg! a b c …)` → a `(slice u8)` with each arg Display-rendered and concatenated.
+(defn msg! [& (parts Code)] (-> Code)
+  (let [sb (gensym)]
+    `(let [(mut ~sb) (sb-new (malloc-allocator))]
+       ~@(sh--emit sb parts 0 (code-count parts))
+       (sb-str ~sb))))
+
+; `(report! NODE a b c …)` — a located error whose message is Display-built. Expands
+; to a statement that evaluates to i64 `0`, so it drops straight into a checker's
+; `(if cond (report! …) 0)` without a type clash (mirrors the `(do (report …) 0)` idiom).
+(defn report! [(node Code) & (parts Code)] (-> Code)
+  `(do (report ~node (msg! ~@parts)) 0))
+
+; `(warn! NODE a b c …)` — a located warning whose message is Display-built (statement, → 0).
+(defn warn! [(node Code) & (parts Code)] (-> Code)
+  `(do (warn ~node (msg! ~@parts)) 0))

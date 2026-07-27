@@ -1,0 +1,130 @@
+(module effects)
+; EFFECT / PURITY checker — a whole-program call-graph analysis as a metaprogram. A
+; function whose name ends in `-pure` is asserted to be PURE: it must not transitively
+; reach any `extern` (FFI is the effect boundary in a systems language — I/O, allocation,
+; syscalls all bottom out there). The checker runs after typecheck, so `(code-decl CALL)`
+; resolves every call to the EXACT entity it means — module + kind (`fn` vs `extern`) —
+; even across modules and through the bundled stdlib. It builds an index of every
+; function body in the whole program, then does a transitive DFS from each `-pure` root,
+; vetoing with the offending extern named.
+;
+;   coil run app.coil --use effects.coil
+;
+; SCOPE: it follows DIRECT (named) calls — `f-pure` calling `g` calling an `extern` is
+; caught across modules and through the bundled stdlib. It does NOT follow INDIRECT calls
+; through function pointers (the standard limit of static call-graph analysis), so effects
+; reached only via a vtable — e.g. buffered stdout behind the `Writer` API that `println`
+; and `fmt` lower to — are not seen. Direct externs and direct call chains are.
+(import "arraylist.coil" :use *)
+(import "hashmap.coil" :use *)
+(import "alloc.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "show.coil" :use *)
+
+; ---- small string helpers ---------------------------------------------------
+(defn eff-after-last-dot [(s (slice u8))] (-> (slice u8))
+  (let [n (slice-len s) (mut i) (isub n 1) (mut at) -1]
+    (loop (if (icmp-lt (load i) 0) (break)
+      (do (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! at (load i)) (break)) 0)
+          (store! i (isub (load i) 1)))))
+    (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
+(defn eff-ends-with? [(s (slice u8)) (suf (slice u8))] (-> bool)
+  (let [ns (slice-len s) nf (slice-len suf)]
+    (if (icmp-lt ns nf) false (str-eq (subslice s (isub ns nf) ns) suf))))
+(defn eff-key [(a (ptr Allocator)) (modname (slice u8)) (nm (slice u8))] (-> (slice u8))
+  (let [(mut sb) (sb-new a)]
+    (sb-push-str! (mut sb) modname) (sb-push-byte! (mut sb) 46) (sb-push-str! (mut sb) nm)
+    (sb-str sb)))
+
+; ---- whole-program function index ------------------------------------------
+(defstruct EffIx [(lookup (HashMap (slice u8) i64)) (bodies (ArrayList Code))])
+(defn eff-is-defn? [(f Code)] (-> bool)
+  (and (code-list? f) (and (icmp-ge (code-count f) 5)
+       (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `defn)))))
+(defn eff-index-mod! [(a (ptr Allocator)) (ix (ptr EffIx)) (m Code)] (-> i64)
+  (let [modname (code-str (code-nth m 0)) n (code-count m) (mut i) 1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [f (code-nth m (load i))]
+            (if (eff-is-defn? f)
+                (let [k (eff-key a modname (code-str (code-nth f 1)))
+                      idx (al-len [Code] (load (field ix bodies)))]
+                  (al-push! [Code] (mut (field ix bodies)) f)
+                  (hm-put! [(slice u8) i64] (mut (field ix lookup)) k idx) 0)
+              0))
+          (store! i (iadd (load i) 1)))))
+    0))
+
+; ---- transitive DFS: first extern name reachable from `form`, or "" if pure ----
+(defn eff-scan [(a (ptr Allocator)) (ix (ptr EffIx)) (visited (ptr (HashMap (slice u8) i64))) (form Code)] (-> (slice u8))
+  (if (not (code-list? form)) ""
+    (let [n (code-count form)
+          hit (if (and (icmp-gt n 0) (code-sym? (code-nth form 0)))
+                  (eff-call-check a ix visited form)
+                "")]
+      (if (icmp-gt (slice-len hit) 0) hit
+        (eff-scan-kids a ix visited form 0 n)))))
+(defn eff-scan-kids [(a (ptr Allocator)) (ix (ptr EffIx)) (visited (ptr (HashMap (slice u8) i64))) (form Code) (i i64) (n i64)] (-> (slice u8))
+  (if (icmp-ge i n) ""
+    (let [h (eff-scan a ix visited (code-nth form i))]
+      (if (icmp-gt (slice-len h) 0) h (eff-scan-kids a ix visited form (iadd i 1) n)))))
+; a call whose head is `(code-nth form 0)`: extern -> its name; user/stdlib fn -> recurse.
+(defn eff-call-check [(a (ptr Allocator)) (ix (ptr EffIx)) (visited (ptr (HashMap (slice u8) i64))) (form Code)] (-> (slice u8))
+  (let [d (code-decl form)]
+    (if (not (and (code-list? d) (icmp-ge (code-count d) 3))) ""
+      (let [kind (code-nth d 2)]
+        (if (code-eq kind `extern)
+            (eff-after-last-dot (code-str (code-nth form 0)))   ; the extern's name
+          (if (code-eq kind `fn)
+              (let [k (eff-key a (code-str (code-nth d 1)) (eff-after-last-dot (code-str (code-nth form 0))))]
+                (match (hm-get [(slice u8) i64] (load visited) k)
+                  (Some [_] "")                                  ; already visiting -> no new info
+                  (None []
+                    (do (hm-put! [(slice u8) i64] visited k 1)
+                      (match (hm-get [(slice u8) i64] (load (field ix lookup)) k)
+                        (Some [idx] (eff-body-scan a ix visited (al-get [Code] (load (field ix bodies)) idx)))
+                        (None [] ""))))))
+            ""))))))
+; scan a defn's body forms (indices 4..) for a reachable extern
+(defn eff-body-scan [(a (ptr Allocator)) (ix (ptr EffIx)) (visited (ptr (HashMap (slice u8) i64))) (f Code)] (-> (slice u8))
+  (let [n (code-count f) (mut i) 4 (mut hit) ""]
+    (loop (if (if (icmp-ge (load i) n) true (icmp-gt (slice-len (load hit)) 0)) (break)
+      (do (store! hit (eff-scan a ix visited (code-nth f (load i))))
+          (store! i (iadd (load i) 1)))))
+    (load hit)))
+
+; ---- driver: check every user `-pure` function -----------------------------
+(defn eff-check [(modules Code)] (-> Code)
+  (let [a (malloc-allocator)
+        ix (alloc-stack EffIx)
+        nm (code-count modules)]
+    (do
+      (store! (field ix lookup) (hm-new [(slice u8) i64] a (str-keyops)))
+      (store! (field ix bodies) (al-new [Code] a))
+      ; index EVERY module (user + bundled) so transitivity crosses into the stdlib
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nm) (break)
+          (do (eff-index-mod! a ix (code-nth modules (load i))) (store! i (iadd (load i) 1))))))
+      ; check user `-pure` functions
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nm) (break)
+          (do (let [m (code-nth modules (load i))]
+                (if (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false)
+                    (let [nf (code-count m) (mut j) 1]
+                      (loop (if (icmp-ge (load j) nf) (break)
+                        (do (let [f (code-nth m (load j))]
+                              (if (if (eff-is-defn? f) (eff-ends-with? (code-str (code-nth f 1)) "-pure") false)
+                                  (let [visited (hm-new [(slice u8) i64] a (str-keyops))
+                                        vp (alloc-stack (HashMap (slice u8) i64))]
+                                    (do (store! vp visited)
+                                      (let [ext (eff-body-scan a ix vp f)]
+                                        (if (icmp-gt (slice-len ext) 0)
+                                            (report! (code-nth f 1) "function " (code-nth f 1)
+                                                     " is marked pure but reaches extern '" ext "'")
+                                          0))))
+                                0))
+                            (store! j (iadd (load j) 1))))))
+                  0))
+              (store! i (iadd (load i) 1))))))
+      `0)))
+(checker eff-check)

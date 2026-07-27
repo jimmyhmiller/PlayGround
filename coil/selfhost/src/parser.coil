@@ -1004,6 +1004,13 @@
     (TArray [_e _n] "array")
     (TVec [_e _n] "vec")
     (TFn [_cc _p _r] "fn")
+    ; Code is a first-class value in the compiled metaprogram engine (checkers pass
+    ; it around, store it in HashMaps), so it can carry impls like any other data
+    ; type — e.g. `impl Display Code` for metaprogram diagnostics. Its methods take a
+    ; Code param, so they are comptime-only functions dropped before mono
+    ; (mono.coil::func-has-code) — no codegen impact. void/ref/never/externref stay
+    ; impl-less: they are non-values, places, or opaque host handles.
+    (TCode [] "code")
     (_ "")))
 
 ; Does `t` mention `nm` as a nominal type reference (a type parameter is a bare
