@@ -18,7 +18,9 @@ command -v node >/dev/null 2>&1 || { echo "  gate-wasm: SKIP (no node)"; exit 0;
 command -v wasm-tools >/dev/null 2>&1 || { echo "  gate-wasm: SKIP (no wasm-tools)"; exit 0; }
 
 W=/tmp/gate-wasm-coilc.wasm
-"$BIN" build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown -o "$W" >/dev/null 2>&1 \
+# The self-hosted compiler recurses deep, so it opts into a larger shadow stack than
+# the modest 16 MiB default (wasm.coil). 64 MiB self-builds main_a64 byte-identically.
+"$BIN" build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown --wasm-stack-size=64 -o "$W" >/dev/null 2>&1 \
   || { echo "  FAIL: cannot build the wasm compiler from main_wasm.coil"; exit 1; }
 wasm-tools validate --features=memory64 "$W" >/dev/null 2>&1 \
   || { echo "  FAIL: coilc.wasm is not a valid memory64 module"; exit 1; }

@@ -56,7 +56,9 @@ changing the compiler), from the repo root:
 # 1. build a native compiler
 ./coil build selfhost/src/main.coil -o /tmp/coil-i $(./selfhost/llvm-link-flags.sh dynamic)
 # 2. build the single static wasm64 module
-/tmp/coil-i build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown -o coil/bootstrap/coilc.wasm
+#    --wasm-stack-size=64: the compiler recurses deep, so it opts into a 64 MiB shadow
+#    stack (the default is a modest 16 MiB, generous for ordinary wasm programs).
+/tmp/coil-i build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown --wasm-stack-size=64 -o coil/bootstrap/coilc.wasm
 ```
 
 Then re-run `./build.sh`.

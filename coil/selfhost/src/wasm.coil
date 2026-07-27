@@ -21,17 +21,28 @@
 (defstruct WasmElem [(func i64) (tidx i64)])
 
 ; ============================ finalizer layout constants ====================
-; The shadow stack the linker would otherwise provide. A VM recurses deep, so
-; reserve generously (wasm-ld defaults to 64 KiB); this is placed just above the
-; static-data high-water and grows down, with the JS heap above it.
-; 256 MiB. The self-hosted compiler recurses DEEP — checking a whole module (let
-; alone all of main_a64.coil) nests the reader/parser/resolver/checker per form, and
-; the native build runs the pipeline on a 512 MiB pthread stack for exactly this
-; reason (driver.coil run-on-big-stack). At the old 1 MiB the wasm-hosted compiler
-; overflowed the shadow stack into the data/heap and mis-parsed valid code
-; ("unexpected vector", "table index out of bounds"). This is virtual address space in
-; linear memory; the pages only fault in (native) / grow (JS) as the stack is used.
-(defn wasm-stack-size [] (-> i64) 268435456)    ; 256 MiB
+; The shadow stack the linker would otherwise provide. It sits just above the
+; static-data high-water and grows down, with the heap above it. wasm-ld would
+; default to 64 KiB — far too little for anything recursive.
+;
+; Configurable via `--wasm-stack-size=<MiB>` (driver.coil -> set-wasm-stack-size!).
+; The DEFAULT (16 MiB) is generous for ordinary programs while staying cheap on
+; wasm32's 4 GiB address space. The self-hosted COMPILER recurses much deeper —
+; checking a whole module nests reader/parser/resolver/checker per form, and the
+; native build runs the pipeline on a 512 MiB pthread stack for exactly this reason
+; (driver.coil run-on-big-stack) — so its wasm build passes a larger stack (see
+; bootstrap/build*.sh and gate-wasm.sh). At too small a size the wasm-hosted
+; compiler overflowed the shadow stack into data/heap and mis-parsed valid code
+; ("unexpected vector", "table index out of bounds"). This is virtual address
+; space in linear memory; pages only fault in (native) / grow (JS) as used.
+(defstruct WStackCfg [(v i64)])
+(defn wasm-stack-cell    [] (-> (ptr WStackCfg)) (alloc-static WStackCfg))
+(defn wasm-stack-default [] (-> i64) 16777216)   ; 16 MiB
+(defn set-wasm-stack-size! [(bytes i64)] (-> i64) (store! (field (wasm-stack-cell) v) bytes) 0)
+; Reservation in bytes: the configured value, or the default when unset (cell is 0).
+(defn wasm-stack-size [] (-> i64)
+  (let [v (load (field (wasm-stack-cell) v))]
+    (if (icmp-eq v 0) (wasm-stack-default) v)))
 (defn wasm-page []       (-> i64) 65536)         ; wasm page size
 ; Round `v` up to a multiple of `a` (a must be a power of two).
 (defn wasm-align-up [(v i64) (a i64)] (-> i64) (iand (iadd v (isub a 1)) (isub 0 a)))

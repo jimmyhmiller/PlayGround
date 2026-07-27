@@ -57,7 +57,10 @@ else
 fi
 
 echo "[1/3] current coil -> wasm32 seed (main_wasm.coil -> coilc32.wasm)"
-"$SEED" build "$ROOT/selfhost/src/main_wasm.coil" --target wasm32-unknown-unknown -o coilc32.wasm
+# The compiler recurses deep — opt into a larger shadow stack than the 16 MiB default
+# (wasm.coil). 64 MiB self-builds main_a64 byte-identically (a 1 MiB stack once
+# overflowed into the data segment and mis-parsed valid source).
+"$SEED" build "$ROOT/selfhost/src/main_wasm.coil" --target wasm32-unknown-unknown --wasm-stack-size=64 -o coilc32.wasm
 
 echo "[2/3] building wasm2c translator + translating coilc32.wasm -> coilc32.c"
 $CC -O2 -o wasm2c wasm2c.c

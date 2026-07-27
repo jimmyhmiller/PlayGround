@@ -9,8 +9,9 @@
 ; its only imports are libc/fs. (The older side-module path in codegen_wasm.coil +
 ; run-coil-wasm.mjs is kept in the tree as a fallback; this entry simply doesn't use it.)
 ;
-; Build:
-;   coil-w64 build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown -o coilc.wasm
+; Build (--wasm-stack-size=64: this compiler recurses deep, so it reserves a larger
+; shadow stack than the 16 MiB default; see wasm.coil):
+;   coil-w64 build selfhost/src/main_wasm.coil --target wasm64-unknown-unknown --wasm-stack-size=64 -o coilc.wasm
 ;   node wasm-host/run-coil-wasm.mjs coilc.wasm check <file>
 ; Identical to main_a64.coil except the interp meta path is registered UNCONDITIONALLY.
 (module mainwasm)

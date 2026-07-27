@@ -758,6 +758,17 @@
        (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45))
             (icmp-eq (slice-get [u8] arg 1) (cast u8 108)))))    ; 'l'
 
+; --wasm-stack-size=<MiB>: set the wasm shadow-stack reservation (see wasm.coil).
+; Self-contained '='-form, so the scanner treats it as one token.
+(defn apply-wasm-stack-flag! [(arg (slice u8))] (-> i64)
+  (let [val (subslice [u8] arg 18 (slice-len [u8] arg))]   ; after "--wasm-stack-size="
+    (match (parse-int val)
+      (Some [mib]
+        (if (icmp-le mib 0)
+            (let [w (stderr)] (ps w "error: --wasm-stack-size needs a positive MiB value") (wb w 10) (exit 1) 0)
+            (set-wasm-stack-size! (imul mib 1048576))))
+      (None [] (let [w (stderr)] (ps w "error: --wasm-stack-size=<MiB> not a number") (wb w 10) (exit 1) 0)))))
+
 ; flags that consume the NEXT argv entry — the scanner must step over both.
 (defn flag-takes-value? [(arg (slice u8))] (-> bool)
   (cond (str-eq arg "-o")            true
@@ -778,6 +789,7 @@
         (str-eq arg "--debug-checks")     true
         (str-eq arg "--sanitize=address") true
         (str-eq arg "--wasm-side-module") true
+        (starts-with arg "--wasm-stack-size=") true
         false))
 
 ; index of the first positional at/after `start`, or 0 if there is none.
@@ -891,8 +903,9 @@
                   (if (or (str-eq arg "-g") (str-eq arg "--debug")) (do (store! backend 2) (store! wantg true) 0)
                     (if (str-eq arg "--debug-checks") (enable-debug-checks!)
                       (if (str-eq arg "--sanitize=address") (set-sanitize-address!)
+                       (if (starts-with arg "--wasm-stack-size=") (apply-wasm-stack-flag! arg)
                         (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc)) (str-eq arg "--emit-header"))
-                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0)))))))
+                            (do (store! ehdr (Some (cstr->slice (load (index argv (iadd (load j) 1)))))) 0) 0))))))))
             (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc)) (break)
