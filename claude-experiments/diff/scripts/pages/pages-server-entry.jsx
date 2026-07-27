@@ -330,7 +330,43 @@ function parseBody(headers, bodyText) {
       return bodyText;
     }
   }
+  if (type.includes("application/x-www-form-urlencoded")) {
+    // Next parses urlencoded bodies into a plain object (like req.query). Repeated
+    // keys collapse to the last value, matching URLSearchParams -> Object semantics.
+    const params = new URLSearchParams(bodyText);
+    const out = {};
+    for (const [key, value] of params.entries()) out[key] = value;
+    return out;
+  }
   return bodyText;
+}
+
+// Parse the `Cookie` request header into a `{ name: value }` map (values URL-decoded),
+// mirroring Next's `req.cookies`. Header names arrive already lowercased from Node's
+// http server, but we accept either case defensively. No Cookie header -> `{}`, which
+// is the correct empty-cookie state, not a silenced failure.
+function parseCookies(headers) {
+  const raw = headers && (headers.cookie || headers.Cookie);
+  const cookies = {};
+  if (!raw) return cookies;
+  for (const pair of String(raw).split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    const name = pair.slice(0, eq).trim();
+    if (!name) continue;
+    let value = pair.slice(eq + 1).trim();
+    // A quoted cookie value ("...") is unwrapped, then percent-decoded.
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+    try {
+      value = decodeURIComponent(value);
+    } catch {
+      // Leave a malformed percent-sequence as-is rather than throwing.
+    }
+    cookies[name] = value;
+  }
+  return cookies;
 }
 
 function renderError(statusCode, query, pathname) {
@@ -368,7 +404,7 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
       url: pathname,
       query: { ...query, ...apiMatch.params },
       headers: headers || {},
-      cookies: {},
+      cookies: parseCookies(headers),
       body: parseBody(headers, bodyText),
     };
     const res = makeRes();

@@ -676,6 +676,87 @@ mod tests {
     }
 
     #[test]
+    fn server_entry_api_request_surface_is_complete() {
+        let entry = include_str!("../scripts/pages/pages-server-entry.jsx");
+        // The Node (req, res) API surface the pages-router contract requires.
+        assert!(entry.contains("cookies: parseCookies(headers)"),
+            "req.cookies must be parsed from the Cookie header, never a silent empty stub");
+        assert!(entry.contains("function parseCookies"));
+        assert!(entry.contains("body: parseBody(headers, bodyText)"));
+        // Body parsing covers JSON and urlencoded, not just JSON.
+        assert!(entry.contains("application/json"));
+        assert!(entry.contains("application/x-www-form-urlencoded"));
+        // res.status().json() / setHeader / redirect are all present on the response.
+        assert!(entry.contains("status(code)"));
+        assert!(entry.contains("json(obj)"));
+        assert!(entry.contains("setHeader(key, value)"));
+        // Dynamic api routes dispatch through the same matcher as pages, merging params.
+        assert!(entry.contains("matchPath(apiRoutes, pathname)"));
+        assert!(entry.contains("...apiMatch.params"));
+    }
+
+    #[test]
+    fn api_routes_manifest_exposes_default_handler() {
+        // A dynamic api route (`api/user/[id]`) plus a static one must both land in the
+        // apiRoutes table with their default export wired as `handler`, most-specific
+        // first, and never in the pages table.
+        let discovery = Discovery {
+            pages: vec![Route {
+                pattern: "/".into(),
+                segments: vec![],
+                module: PathBuf::from("/x/pages/index.tsx"),
+            }],
+            api: vec![
+                Route {
+                    pattern: "/api/hello".into(),
+                    segments: vec![Segment::Literal("api".into()), Segment::Literal("hello".into())],
+                    module: PathBuf::from("/x/pages/api/hello.ts"),
+                },
+                Route {
+                    pattern: "/api/user/[id]".into(),
+                    segments: vec![
+                        Segment::Literal("api".into()),
+                        Segment::Literal("user".into()),
+                        Segment::Dynamic("id".into()),
+                    ],
+                    module: PathBuf::from("/x/pages/api/user/[id].ts"),
+                },
+            ],
+            ..Discovery::default()
+        };
+        let adapter = PathBuf::from("/x/.diffpack-next-pages");
+        let server = server_manifest_module(&discovery, &adapter);
+        assert!(server.contains("import * as Api0"));
+        assert!(server.contains("import * as Api1"));
+        assert!(server.contains("handler: Api0.default"));
+        assert!(server.contains("handler: Api1.default"));
+        assert!(server.contains("regex: /^\\/api\\/user\\/([^/]+)$/"));
+        // The client manifest never imports api handlers (server-only code).
+        let client = client_manifest_module(&discovery, &adapter);
+        assert!(!client.contains("api/hello"));
+        assert!(!client.contains("apiRoutes"));
+    }
+
+    #[test]
+    fn discover_classifies_api_and_dynamic_api_routes() {
+        // A `pages/api/**` tree (static + nested dynamic) must classify into `api`, and
+        // regular pages into `pages`, purely from the filesystem shape.
+        let dir = std::env::temp_dir().join(format!("diffpack-api-discover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("api/user")).unwrap();
+        std::fs::write(dir.join("index.tsx"), "export default function P(){return null}").unwrap();
+        std::fs::write(dir.join("api/hello.ts"), "export default function h(){}").unwrap();
+        std::fs::write(dir.join("api/user/[id].ts"), "export default function h(){}").unwrap();
+        let discovery = discover(&dir).unwrap();
+        let api_patterns: Vec<&str> = discovery.api.iter().map(|r| r.pattern.as_str()).collect();
+        assert!(api_patterns.contains(&"/api/hello"));
+        assert!(api_patterns.contains(&"/api/user/[id]"));
+        let page_patterns: Vec<&str> = discovery.pages.iter().map(|r| r.pattern.as_str()).collect();
+        assert_eq!(page_patterns, vec!["/"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn orchestrator_seeds_prerender_manifest() {
         assert!(ORCHESTRATOR.contains("prerender.json"));
         assert!(ORCHESTRATOR.contains("seedPrerender"));
