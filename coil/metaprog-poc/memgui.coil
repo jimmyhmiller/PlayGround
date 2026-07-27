@@ -46,6 +46,7 @@
 (extern MeasureText       :cc c [(ptr i8) i32] (-> i32))
 (extern snprintf          :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 (extern getenv            :cc c [(ptr i8)] (-> (ptr i8)))
+(extern usleep            :cc c [i32] (-> i32))   ; block the worker while paused
 (extern free              :cc c [(ptr i8)] (-> i64))   ; libc free is void; i64 return (ignored) matches other decls (e.g. the compiler's interp.coil) so instrumenting the compiler itself doesn't clash
 (defn rgb [(r i64) (g i64) (b i64)] (-> RLColor)
   (let [c (alloc-stack RLColor)]
@@ -67,7 +68,7 @@
    ; ---- heap-map density buckets (address range split into columns) ----
    (bk-bytes (array i64 1100)) (bk-site (array i64 1100)) (bk-max (array i64 1100))
    (hmin i64) (hcolspan i64)
-   (result i64) (worker-done i64)
+   (result i64) (worker-done i64) (paused i64)   ; paused: worker blocks at its next alloc
    ; ---- display snapshot: frozen when paused so hover/tooltip is stable ----
    (vcur i64) (vpeak i64) (vtotal i64) (valloc i64) (vfree i64) (vresize i64) (vlive i64)
    (vn i64) (vsites (array MgSite 128)) (vorder (array i64 128))])
@@ -167,17 +168,24 @@
   (do (if (icmp-ne oldaddr 0) (mg-track-free oldaddr) 0) (mg-track-alloc newaddr new) 0))
 
 ; ===== tracking allocator ====================================================
+; while paused, block the WORKER here — the program itself freezes at its next allocation, so
+; the heap map/stats show a truly frozen live state (not just a frozen display). The render
+; thread keeps running (separate thread) so SPACE can unpause. ~15ms poll.
+(defn mg-wait-if-paused [] (-> i64)
+  (loop (if (icmp-eq (load (field (mg) paused)) 0) (break) (do (usleep 15000) 0))) 0)
 (defn mg-ma-alloc [(ctx (ptr i8)) (size i64) (align i64)] (-> (Option (ptr i8)))
-  (let [p (malloc (cast isize size))]
-    (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (mg-track-alloc (cast i64 p) size) (Some p)))))
+  (do (mg-wait-if-paused)
+    (let [p (malloc (cast isize size))]
+      (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (mg-track-alloc (cast i64 p) size) (Some p))))))
 (defn mg-ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old i64) (new i64) (align i64)] (-> (Option (ptr i8)))
-  (let [q (realloc p (cast isize new))]
-    (if (icmp-eq (cast i64 q) 0) (None)
-      (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new))
-          (mg-track-resize (if (icmp-eq old 0) 0 (cast i64 p)) (cast i64 q) new)
-          (Some q)))))
+  (do (mg-wait-if-paused)
+    (let [q (realloc p (cast isize new))]
+      (if (icmp-eq (cast i64 q) 0) (None)
+        (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new))
+            (mg-track-resize (if (icmp-eq old 0) 0 (cast i64 p)) (cast i64 q) new)
+            (Some q))))))
 (defn mg-ma-free [(ctx (ptr i8)) (p (ptr i8)) (size i64) (align i64)] (-> i64)
-  (do (mg-acct-free size) (mg-track-free (cast i64 p)) (free p) 0))
+  (do (mg-wait-if-paused) (mg-acct-free size) (mg-track-free (cast i64 p)) (free p) 0))
 (defn mg-allocator [] (-> (ptr Allocator))
   (let [a (alloc-static Allocator)]
     (store! (field a alloc)  (fnptr-of mg-ma-alloc))
@@ -385,21 +393,23 @@
 (defn mg-thread [] (-> (ptr Thread)) (alloc-static Thread))
 (defn mg-autoclose-frames [] (-> i64)
   (if (icmp-eq (cast i64 (getenv c"MEMGUI_AUTOCLOSE")) 0) 0 90))
-; the render loop, on the MAIN thread, while the worker runs. SPACE toggles pause: when live,
-; each frame snapshots the tracker state (and re-sorts) so hover is stable; when paused, the
-; snapshot is frozen so you can mouse over a fixed picture while the worker keeps allocating.
+; the render loop, on the MAIN thread, while the worker runs. SPACE toggles the SHARED `paused`
+; flag, which the worker blocks on at its next allocation (mg-wait-if-paused) — so the program
+; itself freezes and the map shows a truly frozen live state. On exit we clear paused so the
+; blocked worker can finish and thread-join doesn't deadlock.
 (defn mg-loop [] (-> i64)
-  (let [s (mg) cap (mg-autoclose-frames) (mut frames) 0 (mut paused) 0]
+  (let [s (mg) cap (mg-autoclose-frames) (mut frames) 0]
     (do (mg-snapshot s)
         (loop (if (if (WindowShouldClose) true (if (icmp-gt cap 0) (icmp-ge (load frames) cap) false)) (break)
-          (do (if (IsKeyPressed 32) (store! paused (isub 1 (load paused))) 0)
-              (if (icmp-eq (load paused) 0) (mg-snapshot s) 0)
+          (do (if (IsKeyPressed 32) (store! (field s paused) (isub 1 (load (field s paused)))) 0)
+              (mg-snapshot s)   ; worker is frozen while paused, so the snapshot is naturally stable
               ; autoclose (headless test): force a hover over the top bar so the shot shows a tooltip
               (let [mx (if (icmp-gt cap 0) (iadd BARX (idiv (isub WINW 48) 2)) (cast i64 (GetMouseX)))
                     my (if (icmp-gt cap 0) 210 (cast i64 (GetMouseY)))]
-                (do (BeginDrawing) (mg-render s mx my (load paused)) (EndDrawing) 0))
+                (do (BeginDrawing) (mg-render s mx my (load (field s paused))) (EndDrawing) 0))
               (if (and (icmp-gt cap 0) (icmp-eq (load frames) 80)) (do (TakeScreenshot c"memgui.png") 0) 0)
               (store! frames (iadd (load frames) 1)))))
+        (store! (field s paused) 0)   ; unblock the worker before joining
         0)))
 
 ; ===== the transform =========================================================

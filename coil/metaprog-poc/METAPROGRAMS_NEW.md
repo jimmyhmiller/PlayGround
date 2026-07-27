@@ -81,7 +81,10 @@ blocks, and two visualizations:
 
 **Hover** a heap column or a bar for a tooltip (heap: address window, bytes, dominant type +
 `file:line:col`; bar: full type, `file:line:col`, allocs, bytes, % of total). **SPACE** pauses
-(freezes a snapshot so you can mouse over a stable picture while the worker keeps allocating).
+the PROGRAM: it sets a shared flag the worker blocks on at its next allocation
+(`mg-wait-if-paused`), so execution actually freezes and the map shows a truly frozen live
+state; the render thread keeps running so SPACE can unpause, and on window-close the flag is
+cleared so the blocked worker finishes and `thread-join` doesn't deadlock.
 raylib input: GetMouseX/Y, IsKeyPressed(KEY_SPACE=32). `for`/`while` from control.coil keep the
 render loops correct-by-construction.
 
