@@ -66,6 +66,29 @@ recognized by its `__prof_t0__` binding). The function name is baked into the in
 INCLUSIVE (a function's total includes its callees). Skips `Code`-returning
 (comptime) functions and its own runtime module.
 
+## `memgui.coil` — a memory inspector (transform + native raylib GUI)
+
+Instruments allocations and pops a native window when `main` returns, showing how memory was
+used: current / peak / total bytes, alloc/free/resize counts, outstanding (leaked) blocks, a
+live-bytes-over-time graph, and an allocation-size histogram.
+
+```
+LIBRARY_PATH=/opt/homebrew/lib  coil build app.coil -o app --use memgui.coil -lraylib
+./app     # runs, then the inspector window opens; close it to exit
+```
+
+Interception is by **allocator swap**, not call-site surgery: the transform rewrites every
+`(malloc-allocator)` in USER code to `(mg-allocator)`, whose alloc/resize/free vtable records
+byte accounting then delegates to malloc/realloc/free. Because collections take the allocator
+they are handed, everything built on it (ArrayList, HashMap, `create`, `box`, …) is tracked —
+with **no edits to the bundled stdlib**, and the tracker's own bookkeeping uses the real
+untracked allocator so it never recurses. `memgui_demo.coil` frees an ArrayList and leaks a
+HashMap; the GUI reports `outstanding blocks: 1`. Set `MEMGUI_AUTOCLOSE=1` to auto-close after
+90 frames and write `memgui.png` (used for headless testing).
+
+Limitation: tracks allocations made through `malloc-allocator` (the common case). Arenas or
+direct libc `malloc` calls are not swapped. raylib must be installed (`brew install raylib`).
+
 ## Two ideas that turned out to be already built in
 
 - **Match exhaustiveness** — Coil's `match` builtin is already checked by the typechecker

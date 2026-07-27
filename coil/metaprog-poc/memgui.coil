@@ -1,0 +1,257 @@
+(module memgui)
+; MEMORY INSPECTOR — a whole-program TRANSFORM that instruments allocations and pops a
+; raylib GUI when `main` returns, showing how memory was used. Zero source edits:
+;
+;   LIBRARY_PATH=/opt/homebrew/lib  coil build app.coil -o app --use memgui.coil -lraylib
+;   ./app                                  # runs, then the inspector window opens
+;
+; Interception is by ALLOCATOR SWAP, not call-site surgery: the transform rewrites every
+; `(malloc-allocator)` in USER code to `(mg-allocator)`, which returns an Allocator whose
+; alloc/resize/free vtable records byte accounting and then delegates to malloc/realloc/free.
+; Because collections take the allocator they're handed, everything built on the swapped
+; allocator (ArrayList, HashMap, create, box, …) is tracked — with NO edits to the bundled
+; stdlib. The tracker's own bookkeeping (its timeline) uses the REAL malloc-allocator, so it
+; is never counted and never recurses.
+;
+; Tracks current / peak / total bytes, alloc/free/resize counts, a live-bytes timeline, and
+; an allocation-size histogram (by power-of-two class). The GUI draws all of it.
+(import "arraylist.coil" :use *)
+(import "alloc.coil" :use *)
+
+; ===== raylib bindings (by-value Color works with Coil's C ABI) ==============
+(defstruct RLColor [(r u8) (g u8) (b u8) (a u8)])
+(extern InitWindow        :cc c [i32 i32 (ptr i8)] (-> void))
+(extern WindowShouldClose :cc c [] (-> bool))
+(extern BeginDrawing      :cc c [] (-> void))
+(extern EndDrawing        :cc c [] (-> void))
+(extern ClearBackground   :cc c [RLColor] (-> void))
+(extern DrawRectangle     :cc c [i32 i32 i32 i32 RLColor] (-> void))
+(extern DrawRectangleLines :cc c [i32 i32 i32 i32 RLColor] (-> void))
+(extern DrawText          :cc c [(ptr i8) i32 i32 i32 RLColor] (-> void))
+(extern SetTargetFPS      :cc c [i32] (-> void))
+(extern CloseWindow       :cc c [] (-> void))
+(extern TakeScreenshot    :cc c [(ptr i8)] (-> void))
+(extern snprintf          :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
+(extern getenv            :cc c [(ptr i8)] (-> (ptr i8)))
+; malloc/realloc/free the tracking allocator delegates to (alloc.coil declares malloc/realloc;
+; free is not exported there, so declare it here — it is the only `free` in this module)
+(extern free              :cc c [(ptr i8)] (-> void))
+(extern write             :cc c [i32 (ptr i8) i64] (-> i64))
+(defn rgb [(r i64) (g i64) (b i64)] (-> RLColor)
+  (let [c (alloc-stack RLColor)]
+    (store! (field c r) (cast u8 r)) (store! (field c g) (cast u8 g))
+    (store! (field c b) (cast u8 b)) (store! (field c a) (cast u8 255))
+    (load c)))
+
+; ===== tracked state =========================================================
+(defstruct MgState
+  [(inited i64)
+   (cur i64) (peak i64) (total i64)
+   (n-alloc i64) (n-free i64) (n-resize i64) (n-live i64)
+   (buckets (array i64 48))        ; alloc-size histogram, indexed by floor(log2(size))
+   (timeline (ArrayList i64))])    ; cur-bytes sampled at every event
+(defn mg [] (-> (ptr MgState)) (alloc-static MgState))
+(defn mg-init [] (-> i64)
+  (let [s (mg)]
+    (if (icmp-ne (load (field s inited)) 0) 0
+      (do (store! (field s timeline) (al-new [i64] (malloc-allocator)))   ; REAL allocator: untracked
+          (store! (field s inited) 1) 0))))
+(defn mg-log2 [(x i64)] (-> i64)     ; floor(log2 x), clamped to [0,47]
+  (let [(mut v) x (mut n) 0]
+    (loop (if (if (icmp-le (load v) 1) true (icmp-ge (load n) 47)) (break)
+      (do (store! v (idiv (load v) 2)) (store! n (iadd (load n) 1)))))
+    (load n)))
+
+; ===== accounting ============================================================
+(defn mg-acct-alloc [(size i64)] (-> i64)
+  (let [s (mg)]
+    (do (mg-init)
+        (store! (field s cur) (iadd (load (field s cur)) size))
+        (if (icmp-gt (load (field s cur)) (load (field s peak))) (store! (field s peak) (load (field s cur))) 0)
+        (store! (field s total) (iadd (load (field s total)) size))
+        (store! (field s n-alloc) (iadd (load (field s n-alloc)) 1))
+        (store! (field s n-live) (iadd (load (field s n-live)) 1))
+        (let [bi (mg-log2 size)] (store! (index (field s buckets) bi) (iadd (load (index (field s buckets) bi)) 1)))
+        (al-push! [i64] (mut (field s timeline)) (load (field s cur))) 0)))
+(defn mg-acct-free [(size i64)] (-> i64)
+  (let [s (mg)]
+    (do (mg-init)
+        (store! (field s cur) (isub (load (field s cur)) size))
+        (store! (field s n-free) (iadd (load (field s n-free)) 1))
+        (store! (field s n-live) (isub (load (field s n-live)) 1))
+        (al-push! [i64] (mut (field s timeline)) (load (field s cur))) 0)))
+(defn mg-acct-resize [(old i64) (new i64)] (-> i64)
+  (let [s (mg)]
+    (do (mg-init)
+        (store! (field s cur) (iadd (load (field s cur)) (isub new old)))
+        (if (icmp-gt (load (field s cur)) (load (field s peak))) (store! (field s peak) (load (field s cur))) 0)
+        (if (icmp-gt new old) (store! (field s total) (iadd (load (field s total)) (isub new old))) 0)
+        (store! (field s n-resize) (iadd (load (field s n-resize)) 1))
+        (al-push! [i64] (mut (field s timeline)) (load (field s cur))) 0)))
+
+; ===== the tracking allocator (vtable that records, then delegates to libc) =====
+(defn mg-ma-alloc [(ctx (ptr i8)) (size i64) (align i64)] (-> (Option (ptr i8)))
+  (let [p (malloc (cast isize size))]
+    (if (icmp-eq (cast i64 p) 0) (None) (do (mg-acct-alloc size) (Some p)))))
+(defn mg-ma-resize [(ctx (ptr i8)) (p (ptr i8)) (old i64) (new i64) (align i64)] (-> (Option (ptr i8)))
+  (let [q (realloc p (cast isize new))]
+    (if (icmp-eq (cast i64 q) 0) (None)
+      ; realloc(NULL, n) is really an allocation — count it as one, not a resize
+      (do (if (icmp-eq old 0) (mg-acct-alloc new) (mg-acct-resize old new)) (Some q)))))
+(defn mg-ma-free [(ctx (ptr i8)) (p (ptr i8)) (size i64) (align i64)] (-> i64)
+  (do (mg-acct-free size) (free p) 0))
+(defn mg-allocator [] (-> (ptr Allocator))
+  (let [a (alloc-static Allocator)]
+    (store! (field a alloc)  (fnptr-of mg-ma-alloc))
+    (store! (field a resize) (fnptr-of mg-ma-resize))
+    (store! (field a free)   (fnptr-of mg-ma-free))
+    (store! (field a ctx)    (cast (ptr i8) 0))
+    a))
+
+; ===== GUI ===================================================================
+(const WINW 900)
+(const WINH 620)
+(defn mg-timeline-max [(tl (ArrayList i64))] (-> i64)
+  (let [n (al-len [i64] tl) (mut i) 0 (mut m) 1]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [v (al-get [i64] tl (load i))] (if (icmp-gt v (load m)) (store! m v) 0)) (store! i (iadd (load i) 1)))))
+    (load m)))
+(defn mg-draw-timeline [(s (ptr MgState)) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
+  (let [tl (load (field s timeline)) n (al-len [i64] tl) mx (mg-timeline-max (load (field s timeline)))]
+    (do
+      (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
+      (if (icmp-gt n 0)
+          (let [(mut px) 0]
+            (loop (if (icmp-ge (load px) w) (break)
+              (do (let [idx (idiv (imul (load px) n) w)
+                        v   (al-get [i64] tl idx)
+                        bh  (idiv (imul v h) mx)]
+                    (DrawRectangle (cast i32 (iadd x0 (load px))) (cast i32 (iadd y0 (isub h bh)))
+                                   1 (cast i32 bh) (rgb 90 170 250)))
+                  (store! px (iadd (load px) 1))))))
+        0)
+      0)))
+(defn mg-draw-hist [(s (ptr MgState)) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
+  (let [(mut mx) 1 (mut i) 0]
+    (do
+      (loop (if (icmp-ge (load i) 48) (break)
+        (do (let [v (load (index (field s buckets) (load i)))] (if (icmp-gt v (load mx)) (store! mx v) 0)) (store! i (iadd (load i) 1)))))
+      (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
+      (let [(mut j) 0 bw (idiv w 48)]
+        (loop (if (icmp-ge (load j) 48) (break)
+          (do (let [v (load (index (field s buckets) (load j)))
+                    bh (idiv (imul v h) (load mx))]
+                (if (icmp-gt v 0)
+                    (do (DrawRectangle (cast i32 (iadd x0 (imul (load j) bw))) (cast i32 (iadd y0 (isub h bh)))
+                                   (cast i32 (isub bw 1)) (cast i32 bh) (rgb 250 170 90)) 0)
+                  0))
+              (store! j (iadd (load j) 1))))))
+      0)))
+(defn mg-render [(s (ptr MgState))] (-> i64)
+  (let [buf (alloc-stack (array i8 200)) p (cast (ptr i8) buf) fg (rgb 235 238 245) dim (rgb 150 158 175)]
+    (do
+      (ClearBackground (rgb 24 26 34))
+      (DrawText c"coil memory inspector" 24 20 28 fg)
+      (snprintf p 200 c"current: %ld bytes    peak: %ld bytes    total allocated: %ld bytes"
+                (load (field s cur)) (load (field s peak)) (load (field s total)))
+      (DrawText p 24 64 20 fg)
+      (snprintf p 200 c"allocs: %ld    frees: %ld    resizes: %ld    outstanding blocks: %ld"
+                (load (field s n-alloc)) (load (field s n-free)) (load (field s n-resize))
+                (load (field s n-live)))
+      (DrawText p 24 92 20 dim)
+      (DrawText c"live bytes over time" 24 132 20 fg)
+      (mg-draw-timeline s 24 158 (isub WINW 48) 200)
+      (DrawText c"allocation-size histogram (bars = count per power-of-two byte class)" 24 388 20 fg)
+      (mg-draw-hist s 24 414 (isub WINW 48) 160)
+      0)))
+(defn mg-autoclose-frames [] (-> i64)    ; MEMGUI_AUTOCLOSE set -> cap frames (for headless testing)
+  (if (icmp-eq (cast i64 (getenv c"MEMGUI_AUTOCLOSE")) 0) 0 90))
+(defn mg-summary [] (-> i64)    ; a one-line text summary to stderr (fd 2), alongside the GUI
+  (let [s (mg) buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf)]
+    (let [k (snprintf p 256 c"[memgui] current=%ld peak=%ld total=%ld allocs=%ld frees=%ld resizes=%ld outstanding=%ld\n"
+                (load (field s cur)) (load (field s peak)) (load (field s total))
+                (load (field s n-alloc)) (load (field s n-free)) (load (field s n-resize))
+                (load (field s n-live)))]
+      (write 2 p (cast i64 k)) 0)))
+(defn mg-show [] (-> i64)
+  (let [s (mg) cap (mg-autoclose-frames)]
+    (do
+      (mg-init)
+      (mg-summary)
+      (InitWindow WINW WINH c"coil memory inspector")
+      (SetTargetFPS 60)
+      (let [(mut frames) 0]
+        (loop (if (if (WindowShouldClose) true (if (icmp-gt cap 0) (icmp-ge (load frames) cap) false)) (break)
+          (do (BeginDrawing) (mg-render s) (EndDrawing)
+              (if (and (icmp-gt cap 0) (icmp-eq (load frames) 30)) (do (TakeScreenshot c"memgui.png") 0) 0)
+              (store! frames (iadd (load frames) 1))))))
+      (CloseWindow)
+      0)))
+
+; ===== the transform =========================================================
+; rewrite (malloc-allocator) -> (mg-allocator) in USER code; only rebuild subtrees that
+; contain the call, so `[…]` vectors and everything else stay byte-identical.
+(defn mg-has-target? [(f Code)] (-> bool)
+  (if (not (code-list? f)) false
+    (let [n (code-count f)]
+      (if (icmp-eq n 0) false
+        (if (and (code-sym? (code-nth f 0)) (code-eq (code-nth f 0) `malloc-allocator)) true
+          (mg-has-target-kids? f 0 n))))))
+(defn mg-has-target-kids? [(f Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) false
+    (if (mg-has-target? (code-nth f i)) true (mg-has-target-kids? f (iadd i 1) n))))
+; rebuild a `let` binding VECTOR as a vector (quasiquote `[…]`), rewriting each element —
+; the one place the target can sit inside a vector, e.g. (let [a (malloc-allocator)] …).
+; Blindly rebuilding it as a list (`(…)`) would corrupt the let; only vectors need this.
+(defn mg-rw-binds [(v Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `[] `[~(mg-rw (code-nth v i)) ~@(mg-rw-binds v (iadd i 1) n)]))
+(defn mg-rw [(f Code)] (-> Code)
+  (if (not (code-list? f)) f
+    (let [n (code-count f)]
+      (if (icmp-eq n 0) f
+        (let [head (code-nth f 0)]
+          (if (and (code-sym? head) (code-eq head `malloc-allocator))
+              `(mg-allocator ~@(mg-rw-kids f 1 n))
+            (if (not (mg-has-target? f)) f      ; no target anywhere -> byte-identical (vectors safe)
+              (if (and (code-sym? head) (and (code-eq head `let) (icmp-ge n 2)))
+                  `(let ~(mg-rw-binds (code-nth f 1) 0 (code-count (code-nth f 1))) ~@(mg-rw-kids f 2 n))
+                `(~@(mg-rw-kids f 0 n))))))))))
+(defn mg-rw-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(mg-rw (code-nth f i)) ~@(mg-rw-kids f (iadd i 1) n))))
+
+; wrap main so the inspector opens after its body (preserving the return value)
+(defn mg-is-main? [(f Code)] (-> bool)
+  (and (code-list? f) (and (icmp-ge (code-count f) 5)
+       (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `main)))))
+(defn mg-main-wrapped? [(f Code)] (-> bool)
+  (let [b (code-nth f 4)]
+    (if (and (code-list? b) (and (icmp-gt (code-count b) 1) (code-eq (code-nth b 0) `let)))
+        (let [bv (code-nth b 1)]
+          (and (code-list? bv) (and (icmp-gt (code-count bv) 0) (code-eq (code-nth bv 0) `__mg_r__))))
+      false)))
+(defn mg-forms-from [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(code-nth f i) ~@(mg-forms-from f (iadd i 1) n))))
+(defn mg-wrap-main [(f Code)] (-> Code)
+  (let [body (mg-forms-from f 4 (code-count f))]
+    `(defn ~(code-nth f 1) ~(code-nth f 2) ~(code-nth f 3)
+       (let [__mg_r__ (do ~@body)] (mg-show) __mg_r__))))
+
+(defn mg-form [(f Code)] (-> Code)
+  (if (mg-is-main? f)
+      (if (mg-main-wrapped? f) (mg-rw f) (mg-wrap-main (mg-rw f)))
+    (mg-rw f)))
+(defn mg-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(mg-form (code-nth m i)) ~@(mg-forms m (iadd i 1) n))))
+; process USER modules only, and NEVER this one — rewriting memgui's own
+; `(malloc-allocator)` (in mg-init) to the tracking allocator would recurse forever.
+(defn mg-proc? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1)
+      (if (code-eq (code-nth m 0) `memgui) false (code-from-user? (code-nth m 1)))
+    false))
+(defn mg-mod [(m Code)] (-> Code)
+  (if (mg-proc? m) `(~(code-nth m 0) ~@(mg-forms m 1 (code-count m))) m))
+(defn mg-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `() `(~(mg-mod (code-nth ms i)) ~@(mg-mods ms (iadd i 1) n))))
+(defn mg-transform [(mods Code)] (-> Code)
+  `(do ~@(mg-mods mods 0 (code-count mods))))
+(transform mg-transform)
