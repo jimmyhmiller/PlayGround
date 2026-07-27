@@ -41,7 +41,7 @@
 (extern TakeScreenshot    :cc c [(ptr i8)] (-> void))
 (extern snprintf          :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 (extern getenv            :cc c [(ptr i8)] (-> (ptr i8)))
-(extern free              :cc c [(ptr i8)] (-> void))
+(extern free              :cc c [(ptr i8)] (-> i64))   ; libc free is void; i64 return (ignored) matches other decls (e.g. the compiler's interp.coil) so instrumenting the compiler itself doesn't clash
 (defn rgb [(r i64) (g i64) (b i64)] (-> RLColor)
   (let [c (alloc-stack RLColor)]
     (store! (field c r) (cast u8 r)) (store! (field c g) (cast u8 g))
@@ -192,7 +192,7 @@
     (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
 (defn mg-draw-sites [(s (ptr MgState)) (x0 i64) (y0 i64)] (-> i64)
   (let [n (load (field s n-sites)) buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf) (mut i) 0 (mut row) 0]
-    (do (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load row) 14)) (break)
+    (do (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load row) 9)) (break)
           (do (let [sp (index (field s sites) (load i))]
                 (if (icmp-gt (load (field sp count)) 0)
                     (let [bn (mg-basename (load (field sp file)))]
@@ -283,7 +283,9 @@
           (if (icmp-eq kind 1)
               `(mg-allocator ~@(mg-rw-kids f 1 n))
             (if (icmp-eq kind 2)
-                `(do (mg-set-site ~(code-str (code-nth f 1)) ~(code-file f) ~(code-line f) ~(code-col f))
+                ; code-src (raw source text of the type-arg span) is robust — code-str aborts on
+                ; type nodes it can't name (generic instantiations in the compiler's own source)
+                `(do (mg-set-site ~(code-src (code-nth f 1)) ~(code-file f) ~(code-line f) ~(code-col f))
                      (~head ~@(mg-rw-kids f 1 n)))
               (if (not (mg-has-target? f)) f
                 (if (and (code-eq head `let) (icmp-ge n 2))
@@ -298,10 +300,22 @@
        (and (code-eq (code-nth f 0) `defn) (code-eq (code-nth f 1) `main)))))
 (defn mg-forms-from [(f Code) (i i64) (n i64)] (-> Code)
   (if (icmp-ge i n) `() `(~(code-nth f i) ~@(mg-forms-from f (iadd i 1) n))))
-; the launcher that replaces `main`: owns the raylib window on the main thread
+; main's params (e.g. argc/argv) are threaded to the worker through a static holder, since a
+; pthread body is `[(ptr i8)] -> (ptr i8)` and can't carry them directly. __MgArgs mirrors
+; main's param vector; the launcher stores each param into it, the worker re-binds them.
+(defn mg-nparams [(f Code)] (-> i64) (code-count (code-nth f 2)))
+(defn mg-pname [(f Code) (i i64)] (-> Code) (code-nth (code-nth (code-nth f 2) i) 0))
+(defn mg-arg-stores [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `()
+    `((store! (field (__mg_args) ~(mg-pname f i)) ~(mg-pname f i)) ~@(mg-arg-stores f (iadd i 1) n))))
+(defn mg-arg-binds [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `[]
+    `[~(mg-pname f i) (load (field (__mg_args) ~(mg-pname f i))) ~@(mg-arg-binds f (iadd i 1) n)]))
+; the launcher that replaces `main`: stores main's args, then owns the raylib window (main thread)
 (defn mg-launcher [(f Code)] (-> Code)
   `(defn ~(code-nth f 1) ~(code-nth f 2) ~(code-nth f 3)
-     (do (mg-init)
+     (do ~@(mg-arg-stores f 0 (mg-nparams f))
+         (mg-init)
          (InitWindow WINW WINH c"coil memory inspector")
          (SetTargetFPS 60)
          (thread-spawn (mg-thread) (fnptr-of __mg_worker__) (cast (ptr i8) 0))
@@ -309,11 +323,22 @@
          (thread-join (mg-thread))
          (CloseWindow)
          (mg-result))))
-; the worker that runs the ORIGINAL (allocation-tagged) main body on a spawned thread
+; the worker that runs the ORIGINAL (allocation-tagged) main body on a spawned thread,
+; re-binding main's params (argc/argv/…) from the holder before the body runs
 (defn mg-worker-of [(f Code)] (-> Code)
-  (let [body (mg-forms-from (mg-rw f) 4 (code-count f))]
-    `(defn __mg_worker__ [(__mg_arg (ptr i8))] (-> (ptr i8))
-       (let [__mg_r (do ~@body)] (mg-set-result __mg_r) (mg-set-done) (cast (ptr i8) 0)))))
+  (let [body (mg-forms-from (mg-rw f) 4 (code-count f)) np (mg-nparams f)]
+    (if (icmp-eq np 0)
+        `(defn __mg_worker__ [(__mg_arg (ptr i8))] (-> (ptr i8))
+           (let [__mg_r (do ~@body)] (mg-set-result __mg_r) (mg-set-done) (cast (ptr i8) 0)))
+      `(defn __mg_worker__ [(__mg_arg (ptr i8))] (-> (ptr i8))
+         (let [__mg_r (let ~(mg-arg-binds f 0 np) ~@body)] (mg-set-result __mg_r) (mg-set-done) (cast (ptr i8) 0))))))
+; the extra top-level forms to append when wrapping main (worker, + the args holder if main has params)
+(defn mg-aux-forms [(mf Code)] (-> Code)
+  (if (icmp-eq (mg-nparams mf) 0)
+      `(~(mg-worker-of mf))
+    `((defstruct __MgArgs ~(code-nth mf 2))
+      (defn __mg_args [] (-> (ptr __MgArgs)) (alloc-static __MgArgs))
+      ~(mg-worker-of mf))))
 ; When launching: wrap main -> launcher. Otherwise (module already has the worker): mg-rw only.
 (defn mg-form-launch [(f Code)] (-> Code)
   (if (mg-is-main? f) (mg-launcher f) (mg-rw f)))
@@ -340,8 +365,8 @@
       (let [mf (mg-find-main m 1 (code-count m))]
         (if (code-eq mf `_)
             `(~(code-nth m 0) ~@(mg-forms-plain m 1 (code-count m)))
-          ; first time: wrap main -> launcher AND append the worker built from main's body
-          `(~(code-nth m 0) ~@(mg-forms-launch m 1 (code-count m)) ~(mg-worker-of mf)))))))
+          ; first time: wrap main -> launcher AND append the worker (+ args holder if main has params)
+          `(~(code-nth m 0) ~@(mg-forms-launch m 1 (code-count m)) ~@(mg-aux-forms mf)))))))
 (defn mg-mods [(ms Code) (i i64) (n i64)] (-> Code)
   (if (icmp-ge i n) `() `(~(mg-mod (code-nth ms i)) ~@(mg-mods ms (iadd i 1) n))))
 (defn mg-transform [(mods Code)] (-> Code)
