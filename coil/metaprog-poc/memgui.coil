@@ -39,6 +39,10 @@
 (extern SetTargetFPS      :cc c [i32] (-> void))
 (extern CloseWindow       :cc c [] (-> void))
 (extern TakeScreenshot    :cc c [(ptr i8)] (-> void))
+(extern GetMouseX         :cc c [] (-> i32))
+(extern GetMouseY         :cc c [] (-> i32))
+(extern IsKeyPressed      :cc c [i32] (-> bool))
+(extern MeasureText       :cc c [(ptr i8) i32] (-> i32))
 (extern snprintf          :cc c [(ptr i8) i64 (ptr i8) ...] (-> i32))
 (extern getenv            :cc c [(ptr i8)] (-> (ptr i8)))
 (extern free              :cc c [(ptr i8)] (-> i64))   ; libc free is void; i64 return (ignored) matches other decls (e.g. the compiler's interp.coil) so instrumenting the compiler itself doesn't clash
@@ -56,7 +60,10 @@
    (cur-site i64) (n-sites i64) (sites (array MgSite 128))
    (buckets (array i64 48))
    (tl (array i64 2048)) (tl-head i64) (tl-count i64)     ; live-bytes ring buffer
-   (result i64) (worker-done i64)])
+   (result i64) (worker-done i64)
+   ; ---- display snapshot: frozen when paused so hover/tooltip is stable ----
+   (vcur i64) (vpeak i64) (vtotal i64) (valloc i64) (vfree i64) (vresize i64) (vlive i64)
+   (vn i64) (vsites (array MgSite 128)) (vorder (array i64 128))])
 (defn mg [] (-> (ptr MgState)) (alloc-static MgState))
 (defn mg-init [] (-> i64)
   (let [s (mg)]
@@ -154,8 +161,8 @@
     (store! (field a ctx)    (cast (ptr i8) 0)) a))
 
 ; ===== GUI ===================================================================
-(const WINW 960)
-(const WINH 720)
+(const WINW 1100)
+(const WINH 780)
 (defn mg-tl-max [(s (ptr MgState))] (-> i64)
   (let [n (load (field s tl-count)) (mut i) 0 (mut m) 1]
     (loop (if (icmp-ge (load i) n) (break)
@@ -175,49 +182,108 @@
                       (DrawRectangle (cast i32 (iadd x0 (load px))) (cast i32 (iadd y0 (isub h bh))) 1 (cast i32 bh) (rgb 90 170 250)))
                     (store! px (iadd (load px) 1)))))) 0)
         0)))
-(defn mg-draw-hist [(s (ptr MgState)) (x0 i64) (y0 i64) (w i64) (h i64)] (-> i64)
-  (let [(mut mx) 1 (mut i) 0]
-    (do (loop (if (icmp-ge (load i) 48) (break)
-          (do (let [v (load (index (field s buckets) (load i)))] (if (icmp-gt v (load mx)) (store! mx v) 0)) (store! i (iadd (load i) 1)))))
-        (DrawRectangleLines (cast i32 x0) (cast i32 y0) (cast i32 w) (cast i32 h) (rgb 70 78 100))
-        (let [(mut j) 0 bw (idiv w 48)]
-          (loop (if (icmp-ge (load j) 48) (break)
-            (do (let [v (load (index (field s buckets) (load j))) bh (idiv (imul v h) (load mx))]
-                  (if (icmp-gt v 0) (do (DrawRectangle (cast i32 (iadd x0 (imul (load j) bw))) (cast i32 (iadd y0 (isub h bh))) (cast i32 (isub bw 1)) (cast i32 bh) (rgb 250 170 90)) 0) 0))
-                (store! j (iadd (load j) 1)))))) 0)))
 (defn mg-basename [(s (slice u8))] (-> (slice u8))
   (let [n (slice-len s) (mut i) (isub n 1) (mut at) -1]
     (loop (if (icmp-lt (load i) 0) (break)
       (do (if (icmp-eq (cast i64 (slice-get s (load i))) 47) (do (store! at (load i)) (break)) 0) (store! i (isub (load i) 1)))))
     (if (icmp-lt (load at) 0) s (subslice s (iadd (load at) 1) n))))
-(defn mg-draw-sites [(s (ptr MgState)) (x0 i64) (y0 i64)] (-> i64)
-  (let [n (load (field s n-sites)) buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf) (mut i) 0 (mut row) 0]
-    (do (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load row) 9)) (break)
-          (do (let [sp (index (field s sites) (load i))]
-                (if (icmp-gt (load (field sp count)) 0)
-                    (let [bn (mg-basename (load (field sp file)))]
-                      (do (snprintf p 256 c"%.*s  @ %.*s:%ld:%ld    x%ld    %ld B"
+
+; ---- a categorical palette; each type gets a stable color by hashing its label ----
+(defn mg-palette [(k i64)] (-> RLColor)
+  (if (icmp-eq k 0) (rgb 90 170 250) (if (icmp-eq k 1) (rgb 250 170 90)
+   (if (icmp-eq k 2) (rgb 120 210 130) (if (icmp-eq k 3) (rgb 230 120 200)
+   (if (icmp-eq k 4) (rgb 240 220 100) (if (icmp-eq k 5) (rgb 150 140 250)
+   (if (icmp-eq k 6) (rgb 100 210 210) (if (icmp-eq k 7) (rgb 250 130 120)
+   (if (icmp-eq k 8) (rgb 180 200 120) (if (icmp-eq k 9) (rgb 210 150 230)
+   (if (icmp-eq k 10) (rgb 130 190 240) (rgb 240 180 140)))))))))))))
+(defn mg-type-color [(typ (slice u8))] (-> RLColor)
+  (let [h (str-hash typ)] (mg-palette (irem (if (icmp-lt h 0) (isub 0 h) h) 12))))
+
+; ---- display snapshot (frozen while paused) + sort sites by bytes, descending ----
+(defn mg-vbytes [(s (ptr MgState)) (i i64)] (-> i64) (load (field (index (field s vsites) i) bytes)))
+(defn mg-sort-order [(s (ptr MgState)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break)
+      (do (let [(mut j) (iadd (load i) 1) (mut best) (load i)]
+            (loop (if (icmp-ge (load j) n) (break)
+              (do (if (icmp-gt (mg-vbytes s (load (index (field s vorder) (load j))))
+                              (mg-vbytes s (load (index (field s vorder) (load best))))) (store! best (load j)) 0)
+                  (store! j (iadd (load j) 1)))))
+            (let [tmp (load (index (field s vorder) (load i)))]
+              (store! (index (field s vorder) (load i)) (load (index (field s vorder) (load best))))
+              (store! (index (field s vorder) (load best)) tmp) 0))
+          (store! i (iadd (load i) 1)))))
+    0))
+(defn mg-snapshot [(s (ptr MgState))] (-> i64)
+  (do (store! (field s vcur) (load (field s cur))) (store! (field s vpeak) (load (field s peak)))
+      (store! (field s vtotal) (load (field s total))) (store! (field s valloc) (load (field s n-alloc)))
+      (store! (field s vfree) (load (field s n-free))) (store! (field s vresize) (load (field s n-resize)))
+      (store! (field s vlive) (load (field s n-live)))
+      (let [n (load (field s n-sites))]
+        (store! (field s vn) n)
+        (let [(mut i) 0] (loop (if (icmp-ge (load i) n) (break)
+          (do (store! (index (field s vsites) (load i)) (load (index (field s sites) (load i))))
+              (store! (index (field s vorder) (load i)) (load i)) (store! i (iadd (load i) 1))))))
+        (mg-sort-order s n)) 0))
+
+(const BARX 24)
+(const BARY 300)
+(const BARROW 30)
+(defn mg-nbars [] (-> i64) (idiv (isub (isub WINH BARY) 12) BARROW))
+(defn in-rect? [(mx i64) (my i64) (x i64) (y i64) (w i64) (h i64)] (-> bool)
+  (and (and (icmp-ge mx x) (icmp-le mx (iadd x w))) (and (icmp-ge my y) (icmp-le my (iadd y h)))))
+; draw sorted, type-colored bars (length = bytes); return the site index under the mouse, or -1
+(defn mg-draw-bars [(s (ptr MgState)) (mx i64) (my i64)] (-> i64)
+  (let [n (load (field s vn)) barw (isub WINW (imul BARX 2)) (mut i) 0 (mut row) 0 (mut hov) -1
+        maxb (if (icmp-gt n 0) (mg-vbytes s (load (index (field s vorder) 0))) 1)
+        buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf)]
+    (do (loop (if (if (icmp-ge (load i) n) true (icmp-ge (load row) (mg-nbars))) (break)
+          (do (let [si (load (index (field s vorder) (load i))) sp (index (field s vsites) si)
+                    b (load (field sp bytes)) y (iadd BARY (imul (load row) BARROW))]
+                (if (icmp-gt b 0)
+                    (let [w (iadd 3 (idiv (imul b (isub barw 3)) (if (icmp-gt maxb 0) maxb 1)))
+                          hovered (in-rect? mx my BARX y barw (isub BARROW 6))
+                          bn (mg-basename (load (field sp file)))]
+                      (do (DrawRectangle (cast i32 BARX) (cast i32 y) (cast i32 w) (cast i32 (isub BARROW 6)) (mg-type-color (load (field sp typ))))
+                          (if hovered (do (DrawRectangleLines (cast i32 BARX) (cast i32 y) (cast i32 barw) (cast i32 (isub BARROW 6)) (rgb 255 255 255)) (store! hov si) 0) 0)
+                          (snprintf p 256 c"%.*s  %.*s:%ld:%ld   x%ld   %ld B"
                             (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ))))
                             (cast i32 (slice-len bn)) (cast (ptr i8) (slice-data bn))
-                            (load (field sp line)) (load (field sp col)) (load (field sp count)) (load (field sp bytes)))
-                          (DrawText p (cast i32 x0) (cast i32 (iadd y0 (imul (load row) 22))) 18 (rgb 200 210 225))
+                            (load (field sp line)) (load (field sp col)) (load (field sp count)) b)
+                          (DrawText p (cast i32 (iadd BARX 6)) (cast i32 (iadd y 3)) 16 (rgb 20 22 30))
                           (store! row (iadd (load row) 1)) 0))
                   0))
-              (store! i (iadd (load i) 1))))) 0)))
-(defn mg-render [(s (ptr MgState))] (-> i64)
+              (store! i (iadd (load i) 1)))))
+        (load hov))))
+; tooltip for the hovered site
+(defn mg-tooltip [(s (ptr MgState)) (si i64) (mx i64) (my i64)] (-> i64)
+  (let [sp (index (field s vsites) si) buf (alloc-stack (array i8 256)) p (cast (ptr i8) buf)
+        tot (load (field s vtotal)) bx (iadd mx 16) by my]
+    (do (DrawRectangle (cast i32 bx) (cast i32 by) 360 96 (rgb 12 14 20))
+        (DrawRectangleLines (cast i32 bx) (cast i32 by) 360 96 (mg-type-color (load (field sp typ))))
+        (snprintf p 256 c"type: %.*s" (cast i32 (slice-len (load (field sp typ)))) (cast (ptr i8) (slice-data (load (field sp typ)))))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 8)) 16 (rgb 235 238 245))
+        (snprintf p 256 c"at:   %.*s:%ld:%ld" (cast i32 (slice-len (load (field sp file)))) (cast (ptr i8) (slice-data (load (field sp file)))) (load (field sp line)) (load (field sp col)))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 30)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"allocs: %ld    bytes: %ld" (load (field sp count)) (load (field sp bytes)))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 52)) 16 (rgb 200 210 225))
+        (snprintf p 256 c"%ld%% of total bytes" (if (icmp-gt tot 0) (idiv (imul (load (field sp bytes)) 100) tot) 0))
+        (DrawText p (cast i32 (iadd bx 8)) (cast i32 (iadd by 74)) 16 (rgb 150 158 175)) 0)))
+(defn mg-render [(s (ptr MgState)) (mx i64) (my i64) (paused i64)] (-> i64)
   (let [buf (alloc-stack (array i8 220)) p (cast (ptr i8) buf) fg (rgb 235 238 245) dim (rgb 150 158 175)]
     (do (ClearBackground (rgb 24 26 34))
-        (DrawText (if (icmp-ne (load (field s worker-done)) 0) c"coil memory inspector  (finished)" c"coil memory inspector  (running)") 24 18 26 fg)
-        (snprintf p 220 c"current: %ld B    peak: %ld B    total: %ld B" (load (field s cur)) (load (field s peak)) (load (field s total)))
-        (DrawText p 24 58 20 fg)
-        (snprintf p 220 c"allocs: %ld   frees: %ld   resizes: %ld   outstanding: %ld" (load (field s n-alloc)) (load (field s n-free)) (load (field s n-resize)) (load (field s n-live)))
-        (DrawText p 24 84 20 dim)
-        (DrawText c"live bytes over time" 24 120 20 fg)
-        (mg-draw-timeline s 24 144 (isub WINW 48) 170)
-        (DrawText c"allocation sites  (type @ file:line:col   count   bytes)" 24 330 20 fg)
-        (mg-draw-sites s 24 358)
-        (DrawText c"allocation-size histogram (count per power-of-two byte class)" 24 566 18 fg)
-        (mg-draw-hist s 24 588 (isub WINW 48) 110)
+        (DrawText (if (icmp-ne paused 0) c"coil memory inspector  [PAUSED]"
+                    (if (icmp-ne (load (field s worker-done)) 0) c"coil memory inspector  (finished)" c"coil memory inspector  (running)")) 24 16 26 fg)
+        (DrawText c"SPACE pause    hover a bar for details" 470 22 16 dim)
+        (snprintf p 220 c"current: %ld B    peak: %ld B    total: %ld B" (load (field s vcur)) (load (field s vpeak)) (load (field s vtotal)))
+        (DrawText p 24 54 20 fg)
+        (snprintf p 220 c"allocs: %ld   frees: %ld   resizes: %ld   outstanding: %ld" (load (field s valloc)) (load (field s vfree)) (load (field s vresize)) (load (field s vlive)))
+        (DrawText p 24 80 20 dim)
+        (DrawText c"live bytes over time" 24 116 18 fg)
+        (mg-draw-timeline s 24 138 (isub WINW 48) 120)
+        (DrawText c"allocation by site  (bar length = bytes, color = type, sorted)" 24 276 18 fg)
+        (let [hov (mg-draw-bars s mx my)]
+          (if (icmp-ge hov 0) (mg-tooltip s hov mx my) 0))
         0)))
 
 ; ===== worker result plumbing + the live loop ================================
@@ -227,11 +293,19 @@
 (defn mg-thread [] (-> (ptr Thread)) (alloc-static Thread))
 (defn mg-autoclose-frames [] (-> i64)
   (if (icmp-eq (cast i64 (getenv c"MEMGUI_AUTOCLOSE")) 0) 0 90))
-; the render loop, on the MAIN thread, while the worker runs
+; the render loop, on the MAIN thread, while the worker runs. SPACE toggles pause: when live,
+; each frame snapshots the tracker state (and re-sorts) so hover is stable; when paused, the
+; snapshot is frozen so you can mouse over a fixed picture while the worker keeps allocating.
 (defn mg-loop [] (-> i64)
-  (let [s (mg) cap (mg-autoclose-frames) (mut frames) 0]
-    (do (loop (if (if (WindowShouldClose) true (if (icmp-gt cap 0) (icmp-ge (load frames) cap) false)) (break)
-          (do (BeginDrawing) (mg-render s) (EndDrawing)
+  (let [s (mg) cap (mg-autoclose-frames) (mut frames) 0 (mut paused) 0]
+    (do (mg-snapshot s)
+        (loop (if (if (WindowShouldClose) true (if (icmp-gt cap 0) (icmp-ge (load frames) cap) false)) (break)
+          (do (if (IsKeyPressed 32) (store! paused (isub 1 (load paused))) 0)
+              (if (icmp-eq (load paused) 0) (mg-snapshot s) 0)
+              ; autoclose (headless test): force a hover over the top bar so the shot shows a tooltip
+              (let [mx (if (icmp-gt cap 0) (iadd BARX 60) (cast i64 (GetMouseX)))
+                    my (if (icmp-gt cap 0) (iadd BARY 3) (cast i64 (GetMouseY)))]
+                (do (BeginDrawing) (mg-render s mx my (load paused)) (EndDrawing) 0))
               (if (and (icmp-gt cap 0) (icmp-eq (load frames) 80)) (do (TakeScreenshot c"memgui.png") 0) 0)
               (store! frames (iadd (load frames) 1)))))
         0)))

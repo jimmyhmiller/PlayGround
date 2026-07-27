@@ -68,10 +68,13 @@ INCLUSIVE (a function's total includes its callees). Skips `Code`-returning
 
 ## `memgui.coil` — a LIVE memory inspector (transform + native raylib GUI)
 
-Instruments allocations and shows a native window that updates **while the program runs**:
-current / peak / total bytes, alloc/free/resize counts, outstanding (leaked) blocks, a
-live-bytes-over-time graph, an allocation-size histogram, and a **per-site table** —
-`type @ file:line:col   count   bytes` for every allocation site.
+Instruments allocations and shows an **interactive** native window that updates **while the
+program runs**: current / peak / total bytes, alloc/free/resize counts, outstanding (leaked)
+blocks, a live-bytes-over-time graph, and a **per-site bar chart** — one bar per allocation
+site, **length = bytes, color = type** (stable per type via a hashed palette), sorted largest
+first. **Hover** a bar for a tooltip (full type, `file:line:col`, allocs, bytes, % of total);
+**SPACE** pauses (freezes a snapshot so you can mouse over a stable picture while the worker
+keeps allocating). raylib input: GetMouseX/Y, IsKeyPressed(KEY_SPACE=32), MeasureText.
 
 ```
 LIBRARY_PATH=/opt/homebrew/lib  coil build app.coil -o app --use memgui.coil -lraylib
