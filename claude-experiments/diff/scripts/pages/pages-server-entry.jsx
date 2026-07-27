@@ -29,6 +29,185 @@ import {
 
 const CLIENT_ENTRY = "/client.js";
 
+// --- Static generation (SSG) + Incremental Static Regeneration (ISR) cache --------
+//
+// `getStaticProps` pages are prerendered at BUILD time (`prerender()` below, driven
+// by `pages-prerender.mjs`) and their props seeded here (`seedPrerender`) so the
+// live server answers them from cache with ZERO per-request data fetch — the "static"
+// behaviour. When a page also sets `revalidate: N`, the cached entry expires after N
+// seconds and the NEXT request regenerates it in place (ISR): the value served stays
+// stable inside the window and changes once past it.
+//
+// Keyed by the concrete pathname (e.g. `/`, `/blog/a`). Entry shape:
+//   { pageProps, expires: number|Infinity, generation: number, prebuilt: boolean }
+const isrCache = new Map();
+
+// getStaticPaths tables, memoized per route pattern:
+//   { known: Set<paramsKey>, fallback: false | true | "blocking" }
+const staticPathsByPattern = new Map();
+
+// Seed the ISR cache from the build-time prerender manifest (`prerender.json`). Called
+// once by the orchestrator at startup. Revalidation windows start now (deploy time),
+// matching Next's "regenerate at most every N seconds after serving" contract.
+export function seedPrerender(data) {
+  const now = Date.now();
+  for (const entry of (data && data.entries) || []) {
+    const expires = typeof entry.revalidate === "number" ? now + entry.revalidate * 1000 : Infinity;
+    isrCache.set(entry.url, {
+      pageProps: entry.pageProps || {},
+      expires,
+      generation: 0,
+      prebuilt: true,
+    });
+  }
+}
+
+// A canonical key for a param set, in the route's declared key order (so `/blog/a`
+// and `/blog/b` collide with neither each other nor a wrong route).
+function paramsKey(page, params) {
+  return page.keys
+    .map((key) => {
+      const value = params[key.name];
+      return Array.isArray(value) ? value.join("/") : String(value);
+    })
+    .join("|");
+}
+
+// Reconstruct the concrete URL for a dynamic route + params (`/blog/[slug]` + {slug:"a"}
+// -> `/blog/a`). Catch-all arrays join on "/".
+function urlFor(page, params) {
+  if (!page.keys.length) return page.pattern;
+  let url = page.pattern;
+  for (const key of page.keys) {
+    const value = params[key.name];
+    const encoded = Array.isArray(value)
+      ? value.map(encodeURIComponent).join("/")
+      : encodeURIComponent(String(value));
+    const token = url.includes(`[[...${key.name}]]`)
+      ? `[[...${key.name}]]`
+      : url.includes(`[...${key.name}]`)
+        ? `[...${key.name}]`
+        : `[${key.name}]`;
+    url = url.replace(token, encoded);
+  }
+  return url;
+}
+
+// Extract params from a getStaticPaths string path (`"/blog/a"`) via the route regex.
+function paramsFromPath(page, pathString) {
+  const params = {};
+  const match = page.regex.exec(pathString);
+  if (!match) return params;
+  page.keys.forEach((key, index) => {
+    const raw = match[index + 1];
+    if (raw === undefined || raw === "") return;
+    params[key.name] = key.catchall ? raw.split("/") : raw;
+  });
+  return params;
+}
+
+// Load (memoized) the getStaticPaths table for a route: the set of prerendered param
+// keys plus the fallback mode. A dynamic `getStaticProps` route with no getStaticPaths
+// is a hard error (Next requires one) — never a silent empty table.
+async function getStaticPathsTable(page, mod) {
+  if (staticPathsByPattern.has(page.pattern)) return staticPathsByPattern.get(page.pattern);
+  const table = { known: new Set(), fallback: false };
+  if (typeof mod.getStaticPaths === "function") {
+    const result = await mod.getStaticPaths({});
+    table.fallback = result && "fallback" in result ? result.fallback : false;
+    for (const entry of (result && result.paths) || []) {
+      const params = typeof entry === "string" ? paramsFromPath(page, entry) : entry.params || {};
+      table.known.add(paramsKey(page, params));
+    }
+  } else if (page.keys.length) {
+    throw new Error(
+      `pages-router: dynamic route ${page.pattern} exports getStaticProps but no getStaticPaths — ` +
+        "Next requires getStaticPaths to enumerate (or fall back for) its static paths",
+    );
+  }
+  staticPathsByPattern.set(page.pattern, table);
+  return table;
+}
+
+// Resolve pageProps for a `getStaticProps` route with SSG/ISR semantics. Returns
+// `{ pageProps, state }` where state is one of "static" (served from the build-time
+// prerender), "hit" (served from a runtime-cached generation), "miss" (first runtime
+// generation), "stale" (revalidated after expiry) — or `{ notFound }` / `{ redirect }`.
+async function resolveStatic(page, mod, params, pathname) {
+  const now = Date.now();
+  const cached = isrCache.get(pathname);
+  if (cached && cached.expires > now) {
+    return { pageProps: cached.pageProps, state: cached.prebuilt ? "static" : "hit" };
+  }
+  // Cache miss on a dynamic route: consult getStaticPaths for the fallback policy.
+  if (!cached && page.keys.length) {
+    const table = await getStaticPathsTable(page, mod);
+    if (!table.known.has(paramsKey(page, params)) && table.fallback === false) {
+      return { notFound: true };
+    }
+    // fallback true / "blocking": generate on demand below.
+  }
+  const result = await mod.getStaticProps({ params });
+  if (result && result.notFound) return { notFound: true };
+  if (result && result.redirect) return { redirect: result.redirect };
+  const pageProps = (result && result.props) || {};
+  const revalidate = result && typeof result.revalidate === "number" ? result.revalidate : null;
+  const expires = revalidate != null ? now + revalidate * 1000 : Infinity;
+  const generation = cached ? cached.generation + 1 : 0;
+  isrCache.set(pathname, { pageProps, expires, generation, prebuilt: false });
+  return { pageProps, state: cached ? "stale" : "miss" };
+}
+
+// Run the `getInitialProps` lifecycle. A custom `_app` with `App.getInitialProps`
+// owns the whole thing (it decides whether/how to call the page's); otherwise the
+// page's own `Component.getInitialProps` runs. Returns the resolved pageProps.
+async function resolveInitialProps(Component, context, router) {
+  if (typeof App.getInitialProps === "function") {
+    const appResult = await App.getInitialProps({ Component, ctx: context, router });
+    return (appResult && appResult.pageProps) || {};
+  }
+  if (typeof Component.getInitialProps === "function") {
+    return (await Component.getInitialProps(context)) || {};
+  }
+  return {};
+}
+
+// Build-time static generation: run getStaticProps (and getStaticPaths for dynamic
+// routes) for every SSG page and return the manifest the orchestrator seeds. Skips
+// pages that opt out via notFound/redirect; never renders getServerSideProps pages.
+export async function prerender() {
+  const entries = [];
+  for (const page of pages) {
+    const mod = page.mod;
+    if (typeof mod.getStaticProps !== "function") continue;
+    let paramSets;
+    if (page.keys.length) {
+      if (typeof mod.getStaticPaths !== "function") {
+        throw new Error(
+          `pages-router prerender: dynamic route ${page.pattern} has getStaticProps but no getStaticPaths`,
+        );
+      }
+      const result = await mod.getStaticPaths({});
+      paramSets = ((result && result.paths) || []).map((entry) =>
+        typeof entry === "string" ? paramsFromPath(page, entry) : entry.params || {},
+      );
+    } else {
+      paramSets = [{}];
+    }
+    for (const params of paramSets) {
+      const result = await mod.getStaticProps({ params });
+      if (result && (result.notFound || result.redirect)) continue;
+      entries.push({
+        url: urlFor(page, params),
+        pattern: page.pattern,
+        pageProps: (result && result.props) || {},
+        revalidate: result && typeof result.revalidate === "number" ? result.revalidate : null,
+      });
+    }
+  }
+  return { entries };
+}
+
 // Neutralize `</script>` breakout and HTML-comment injection in the inline JSON.
 function escapeJson(json) {
   return json
@@ -209,20 +388,21 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
   const context = {
     params,
     query: { ...query, ...params },
+    pathname: page.pattern,
+    asPath: pathname,
     req: { method, url: pathname, headers: headers || {} },
     res: makeRes(),
     resolvedUrl: pathname,
   };
 
+  // Resolve pageProps through the data-fetching lifecycle. Exactly one of
+  // getServerSideProps / getStaticProps / getInitialProps drives a page; the first
+  // two are mutually exclusive with the third, mirroring Next.
   let pageProps = {};
-  const dataFn =
-    typeof mod.getServerSideProps === "function"
-      ? mod.getServerSideProps
-      : typeof mod.getStaticProps === "function"
-        ? mod.getStaticProps
-        : null;
-  if (dataFn) {
-    const result = await dataFn(context);
+  let isrState = null;
+  if (typeof mod.getServerSideProps === "function") {
+    // Per-request server rendering.
+    const result = await mod.getServerSideProps(context);
     if (result && result.notFound) return renderError(404, query, pathname);
     if (result && result.redirect) {
       return {
@@ -232,13 +412,36 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
       };
     }
     pageProps = (result && result.props) || {};
+  } else if (typeof mod.getStaticProps === "function") {
+    // Static generation + ISR (served from the build-time prerender, regenerated on
+    // expiry). getStaticPaths gates unknown dynamic paths.
+    const resolved = await resolveStatic(page, mod, params, pathname);
+    if (resolved.notFound) return renderError(404, query, pathname);
+    if (resolved.redirect) {
+      return {
+        status: resolved.redirect.permanent ? 308 : 307,
+        headers: { location: resolved.redirect.destination },
+        body: "",
+      };
+    }
+    pageProps = resolved.pageProps;
+    isrState = resolved.state;
+  } else {
+    // getInitialProps (page and/or _app), run per request.
+    const router = serverRouter(pathname, query, params, page.pattern);
+    pageProps = await resolveInitialProps(Component, context, router);
   }
+
+  // A getServerSideProps/getStaticProps page may set response headers/status via
+  // context.res (e.g. res.setHeader). Surface them.
+  const extraHeaders = { ...context.res._headers };
+  if (isrState) extraHeaders["x-diffpack-isr"] = isrState;
 
   // Client navigation: return props as JSON instead of a full document.
   if (query.__nextDataReq) {
     return {
       status: 200,
-      headers: { "content-type": "application/json; charset=utf-8" },
+      headers: { ...extraHeaders, "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({ pageProps, page: page.pattern }),
     };
   }
@@ -246,9 +449,9 @@ export async function handleRequest(method, pathname, query, headers, bodyText) 
   const html = renderDocument(Component, pageProps, pathname, query, params, page.pattern);
   return {
     status: 200,
-    headers: { "content-type": "text/html; charset=utf-8" },
+    headers: { ...extraHeaders, "content-type": "text/html; charset=utf-8" },
     body: html,
   };
 }
 
-export default { handleRequest };
+export default { handleRequest, prerender, seedPrerender };

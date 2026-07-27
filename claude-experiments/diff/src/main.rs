@@ -1010,6 +1010,29 @@ fn build_pages_app(
     Ok(())
 }
 
+/// Run the pages-router SSG prerenderer against a completed `.diffpack-output`: writes
+/// the `pages-prerender.mjs` driver, spawns node on it (the app's own bundled React —
+/// the same oracle the orchestrator uses; the graph bundling stayed native Rust), and
+/// leaves `prerender.json` next to the SSR bundle. A prerender failure fails the build
+/// (never silently skipped).
+fn pages_prerender(output_root: &Path) -> Result<(), String> {
+    let driver = output_root.join("pages-prerender.mjs");
+    std::fs::write(&driver, diffpack::next_pages::PRERENDER_DRIVER)
+        .map_err(|error| format!("cannot write {}: {error}", driver.display()))?;
+    let status = std::process::Command::new("node")
+        .arg(&driver)
+        .arg(output_root)
+        .status()
+        .map_err(|error| format!("cannot spawn node for the pages SSG prerenderer: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "the pages SSG prerenderer (node {}) failed with {status}",
+            driver.display()
+        ));
+    }
+    Ok(())
+}
+
 /// `diffpack build-app <root> production` — the one-command production build. Builds
 /// every graph in order (self-invoking the per-environment build so each runs exactly
 /// as it does standalone) and assembles a single deployable output.
@@ -1043,6 +1066,11 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         println!("=== production build (next pages-router): client -> ssr ===");
         run("client")?;
         run("ssr")?;
+        // SSG prerender: run every getStaticProps (and getStaticPaths) page ONCE at
+        // build time and write `prerender.json`; the orchestrator seeds its ISR cache
+        // from it so static pages are served with zero per-request data fetch.
+        println!("=== prerender (SSG getStaticProps) ===");
+        pages_prerender(&out)?;
         // Emit the pages orchestrator (`pages-server.mjs`): plain Node that imports
         // the SSR bundle's `handleRequest` and serves the client `public/` assets.
         std::fs::write(out.join("pages-server.mjs"), diffpack::next_pages::ORCHESTRATOR)

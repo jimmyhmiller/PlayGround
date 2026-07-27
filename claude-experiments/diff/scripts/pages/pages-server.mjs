@@ -40,6 +40,23 @@ if (typeof handleRequest !== "function") {
   fail("the SSR bundle does not export handleRequest");
 }
 
+// Seed the SSG/ISR cache from the build-time prerender manifest so getStaticProps
+// pages are answered from cache with zero per-request data fetch (and regenerate on
+// their revalidate window). Absent manifest = no prerendered pages (SSG opted out).
+const seedPrerender =
+  ssrModule.seedPrerender || (ssrModule.default && ssrModule.default.seedPrerender);
+const prerenderManifest = join(outputDir, "prerender.json");
+if (existsSync(prerenderManifest) && typeof seedPrerender === "function") {
+  try {
+    const data = JSON.parse(readFileSync(prerenderManifest, "utf8"));
+    seedPrerender(data);
+    const count = (data.entries || []).length;
+    console.log(`pages-server: seeded ${count} prerendered SSG page(s)`);
+  } catch (error) {
+    fail(`cannot read prerender manifest ${prerenderManifest}: ${error}`);
+  }
+}
+
 const MIME = {
   ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",

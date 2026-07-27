@@ -448,6 +448,11 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
 /// The Node orchestrator source (`pages-server.mjs`) the production build emits.
 pub const ORCHESTRATOR: &str = include_str!("../scripts/pages/pages-server.mjs");
 
+/// The build-time SSG prerender driver (`pages-prerender.mjs`): imports the built SSR
+/// bundle and calls its `prerender()` export, writing `prerender.json` the orchestrator
+/// seeds its ISR cache from.
+pub const PRERENDER_DRIVER: &str = include_str!("../scripts/pages/pages-prerender.mjs");
+
 /// If `root` is a pages-router project, scaffold `.diffpack-next-pages/` (runtime +
 /// shims + generated route-table manifests) and return the [`AppConfig`] for
 /// `environment` (`client` -> the browser build, anything else -> the Node server
@@ -651,5 +656,35 @@ mod tests {
     fn regex_lite_match(source: &str, input: &str) -> bool {
         // Only handles the exact `^\/$` case used by the root test.
         source == "^\\/$" && input == "/"
+    }
+
+    #[test]
+    fn server_entry_exposes_ssg_lifecycle_contract() {
+        let entry = include_str!("../scripts/pages/pages-server-entry.jsx");
+        // The build-time prerender + runtime seed the SSG/ISR pipeline depends on.
+        assert!(entry.contains("export async function prerender"));
+        assert!(entry.contains("export function seedPrerender"));
+        // The three data-fetching lifecycle branches, kept mutually exclusive.
+        assert!(entry.contains("getServerSideProps"));
+        assert!(entry.contains("getStaticProps"));
+        assert!(entry.contains("getStaticPaths"));
+        assert!(entry.contains("getInitialProps"));
+        // ISR state header used to prove static-vs-regenerated behaviour.
+        assert!(entry.contains("x-diffpack-isr"));
+        // Default export must carry the new exports so the orchestrator/driver find them.
+        assert!(entry.contains("prerender, seedPrerender"));
+    }
+
+    #[test]
+    fn orchestrator_seeds_prerender_manifest() {
+        assert!(ORCHESTRATOR.contains("prerender.json"));
+        assert!(ORCHESTRATOR.contains("seedPrerender"));
+    }
+
+    #[test]
+    fn prerender_driver_calls_prerender_export() {
+        assert!(PRERENDER_DRIVER.contains("prerender"));
+        assert!(PRERENDER_DRIVER.contains("prerender.json"));
+        assert!(PRERENDER_DRIVER.contains("server.mjs"));
     }
 }
