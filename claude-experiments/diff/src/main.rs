@@ -293,8 +293,27 @@ fn run() -> Result<(), String> {
             // server entry), so `diffpack start <out>` boots a deployable app. This
             // replaces the previous manual client -> react-server -> `cp` -> ssr shell
             // dance and is the only supported build->deploy path for a DYNAMIC app.
+            // `build_production` itself dispatches pages-router vs app-router vs SPA.
             if environment == "production" {
                 return build_production(Path::new(&project_root), &remaining);
+            }
+
+            // Next.js PAGES-router apps take a dedicated classic-SSR path (not the
+            // RSC spine): a `pages/` project with no app-router `app/page` builds a
+            // client hydration bundle (`build-app <root> client`) or a Node SSR bundle
+            // (`build-app <root> ssr`). Checked after `static`/`production` (handled
+            // above) and BEFORE the app-router/TanStack config so a pages project
+            // never falls into the RSC path. App-router wins on a hybrid (checked
+            // first) so a project with both `app/` and `pages/` builds as app-router.
+            if !diffpack::next_adapter::is_app_router(Path::new(&project_root))
+                && diffpack::next_pages::is_pages_router(Path::new(&project_root))
+            {
+                return build_pages_app(
+                    Path::new(&project_root),
+                    &environment,
+                    minify,
+                    source_map,
+                );
             }
 
             // Next.js app-router apps have no TanStack/src entry; their "entry" is
@@ -866,8 +885,11 @@ fn run() -> Result<(), String> {
                 .unwrap_or_else(|| "3000".to_string());
             let out = Path::new(&output_dir);
             let next_server = out.join("next-server.mjs");
+            let pages_server = out.join("pages-server.mjs");
             let entry = if next_server.exists() {
                 next_server
+            } else if pages_server.exists() {
+                pages_server
             } else {
                 out.join("server/index.mjs")
             };
@@ -917,6 +939,77 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The pages-router per-environment build (`build-app <root> client|ssr`). Classic
+/// (non-RSC) React SSR: the `client` environment emits the browser hydration bundle
+/// to `public/`; any other environment emits the Node ESM SSR bundle to
+/// `server/server.mjs` (whose `handleRequest` the pages orchestrator drives). The
+/// `production` one-command build (`build_production`) chains client -> ssr and
+/// writes the orchestrator.
+fn build_pages_app(
+    project_root: &Path,
+    environment: &str,
+    minify: bool,
+    source_map: bool,
+) -> Result<(), String> {
+    let config = diffpack::next_pages::configure(project_root, environment, false)?
+        .ok_or_else(|| "next pages-router configure returned None for a pages project".to_string())?;
+    println!(
+        "next pages-router adapter: scaffolded {} for environment={environment}",
+        diffpack::next_pages::ADAPTER_DIR,
+    );
+    let entry = config
+        .entry
+        .clone()
+        .ok_or_else(|| format!("no {environment} entry found for the pages app"))?;
+    let output_root = project_root.join(".diffpack-output");
+
+    println!(
+        "pages app: environment={} ({} aliases), entry={}",
+        config.environment,
+        config.build.aliases.len(),
+        entry.display(),
+    );
+    let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config.build)?;
+    let reachable = bundler.reachable_modules_direct();
+    println!(
+        "reachable {} modules; {} diagnostic(s)",
+        reachable.len(),
+        update.diagnostics.len()
+    );
+    for diagnostic in &update.diagnostics {
+        println!("  known gap: {diagnostic}");
+    }
+
+    let emit_options = EmitOptions {
+        minify,
+        source_map,
+        ..EmitOptions::default()
+    };
+    if config.environment == "client" {
+        let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
+        let static_files =
+            diffpack::config::copy_static_public(project_root, &summary.output_dir)?;
+        println!(
+            "emitted {}: {} public .js, {} .css, {} asset(s), {} static file(s)",
+            summary.output_dir.display(),
+            summary.javascript_files,
+            summary.css_files,
+            summary.asset_files,
+            static_files,
+        );
+    } else {
+        let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
+        println!(
+            "emitted {}: {} server .mjs, {} .css, {} asset(s)",
+            summary.output_dir.display(),
+            summary.javascript_files,
+            summary.css_files,
+            summary.asset_files,
+        );
+    }
+    Ok(())
+}
+
 /// `diffpack build-app <root> production` — the one-command production build. Builds
 /// every graph in order (self-invoking the per-environment build so each runs exactly
 /// as it does standalone) and assembles a single deployable output.
@@ -944,6 +1037,23 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         Ok(())
     };
     let out = project_root.join(".diffpack-output");
+    if !diffpack::next_adapter::is_app_router(project_root)
+        && diffpack::next_pages::is_pages_router(project_root)
+    {
+        println!("=== production build (next pages-router): client -> ssr ===");
+        run("client")?;
+        run("ssr")?;
+        // Emit the pages orchestrator (`pages-server.mjs`): plain Node that imports
+        // the SSR bundle's `handleRequest` and serves the client `public/` assets.
+        std::fs::write(out.join("pages-server.mjs"), diffpack::next_pages::ORCHESTRATOR)
+            .map_err(|error| format!("cannot write pages production server: {error}"))?;
+        println!(
+            "\nproduction build complete -> {}\n  serve it:  diffpack start {} [port]",
+            out.display(),
+            out.display()
+        );
+        return Ok(());
+    }
     if diffpack::next_adapter::is_app_router(project_root) {
         println!("=== production build (next app-router): client -> react-server -> ssr ===");
         run("client")?;

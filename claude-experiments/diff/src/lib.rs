@@ -16,6 +16,7 @@ pub mod mdx;
 #[cfg(feature = "memory-accounting")]
 pub mod memory;
 pub mod next_adapter;
+pub mod next_pages;
 pub mod parser;
 pub mod next_font;
 pub mod resource_id;
