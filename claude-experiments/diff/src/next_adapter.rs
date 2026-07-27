@@ -1999,6 +1999,10 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             // build-emitted responsive variants. ONLY the Next adapter opts in;
             // Vite/TanStack/generic builds keep bare-URL-string asset imports.
             image_import_shape: crate::bundler::ImageImportShape::NextObject,
+            css_preprocess: crate::bundler::CssPreprocess {
+                root: Some(root.to_path_buf()),
+                postcss: crate::postcss::discover(&root).map(std::sync::Arc::new),
+            },
         },
         entry: Some(entry),
     }))

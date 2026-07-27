@@ -535,6 +535,10 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
                 root: Some(root.clone()),
             },
             image_import_shape: crate::bundler::ImageImportShape::Url,
+            css_preprocess: crate::bundler::CssPreprocess {
+                root: Some(root.clone()),
+                postcss: crate::postcss::discover(&root).map(std::sync::Arc::new),
+            },
         },
         entry: Some(entry),
     }))

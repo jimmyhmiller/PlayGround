@@ -172,6 +172,8 @@ struct ResolutionCache {
     /// How default raster-image imports materialize (Vite bare-URL string vs the
     /// Next static-import object shape). Threaded to `synthesize_asset_url`.
     image_import_shape: ImageImportShape,
+    /// Less/Stylus + PostCSS wiring, threaded to the CSS loaders.
+    css_preprocess: CssPreprocess,
 }
 
 struct DirectoryResolutionCache {
@@ -200,6 +202,7 @@ impl ResolutionCache {
         asset_inline_limit: usize,
         scss: crate::sass::ScssOptions,
         image_import_shape: ImageImportShape,
+        css_preprocess: CssPreprocess,
     ) -> Self {
         Self {
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
@@ -213,6 +216,7 @@ impl ResolutionCache {
             asset_inline_limit,
             scss: Arc::new(scss),
             image_import_shape,
+            css_preprocess,
         }
     }
 
@@ -727,6 +731,7 @@ impl Bundler {
                 config.asset_inline_limit,
                 config.scss.clone(),
                 config.image_import_shape,
+                config.css_preprocess.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -4633,14 +4638,23 @@ fn load_special_module(
     if resource.query.is_some() {
         return Some(synthesize_query_module_impl(&resource, target, &cache.base, cache.asset_inline_limit));
     }
+    let postcss = cache.css_preprocess.postcss.as_deref();
     if crate::css::is_css_module_path(path) {
-        return Some(load_css_module(path, target));
+        return Some(load_css_module(path, target, postcss));
     }
     if is_css_path(path) {
-        return Some(load_stylesheet(path));
+        return Some(load_stylesheet(path, postcss));
     }
     if crate::sass::is_scss_path(path) {
-        return Some(load_scss(path, target, &cache.scss));
+        return Some(load_scss(path, target, &cache.scss, postcss));
+    }
+    if crate::less_stylus::is_less_or_stylus_path(path) {
+        return Some(load_less_or_stylus(
+            path,
+            target,
+            cache.css_preprocess.root_path(),
+            postcss,
+        ));
     }
     if is_asset_path(path) {
         return Some(synthesize_asset_url(
@@ -4662,14 +4676,40 @@ fn load_scss(
     path: &Path,
     target: Target,
     options: &crate::sass::ScssOptions,
+    postcss: Option<&crate::postcss::Postcss>,
 ) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let compiled = crate::sass::compile_scss(path, &text, options)?;
     if crate::sass::is_scss_module_path(path) {
-        load_css_module_from_text(path, &compiled.css, compiled.loaded_files, target)
+        load_css_module_from_text(path, &compiled.css, compiled.loaded_files, target, postcss)
     } else {
-        load_stylesheet_from_text(path, &compiled.css, compiled.loaded_files)
+        load_stylesheet_from_text(path, &compiled.css, compiled.loaded_files, postcss)
+    }
+}
+
+/// A Less/Stylus source: compiled to plain CSS by the app's own preprocessor
+/// (`node`, cwd = project root), then handed to the SAME pipeline a hand-written
+/// CSS file takes — `.module.less`/`.module.styl` through the CSS Modules scoper,
+/// everything else through the global-stylesheet loader. Every `@import`ed file
+/// the preprocessor pulled in is recorded so editing it re-derives this module.
+fn load_less_or_stylus(
+    path: &Path,
+    target: Target,
+    root: Option<&Path>,
+    postcss: Option<&crate::postcss::Postcss>,
+) -> Result<SpecialModule, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let compiled = if crate::less_stylus::is_less_path(path) {
+        crate::less_stylus::compile_less(path, &text, root)?
+    } else {
+        crate::less_stylus::compile_stylus(path, &text, root)?
+    };
+    if crate::less_stylus::is_css_module_path(path) {
+        load_css_module_from_text(path, &compiled.css, compiled.loaded_files, target, postcss)
+    } else {
+        load_stylesheet_from_text(path, &compiled.css, compiled.loaded_files, postcss)
     }
 }
 
@@ -4849,10 +4889,14 @@ fn is_valid_js_identifier(name: &str) -> bool {
 /// explicit throw if the composed name is not exported — never a silent
 /// `undefined`), so editing the composed file invalidates through the ordinary
 /// module graph without re-deriving the composer.
-fn load_css_module(path: &Path, target: Target) -> Result<SpecialModule, String> {
+fn load_css_module(
+    path: &Path,
+    target: Target,
+    postcss: Option<&crate::postcss::Postcss>,
+) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    load_css_module_from_text(path, &text, Vec::new(), target)
+    load_css_module_from_text(path, &text, Vec::new(), target, postcss)
 }
 
 /// The body of [`load_css_module`], parameterized over the stylesheet text so
@@ -4864,8 +4908,10 @@ fn load_css_module_from_text(
     text: &str,
     extra_source_files: Vec<PathBuf>,
     target: Target,
+    postcss: Option<&crate::postcss::Postcss>,
 ) -> Result<SpecialModule, String> {
-    let processed = crate::css::process_css_module(path, text)?;
+    let prefixed = maybe_postcss(text, path, postcss)?;
+    let processed = crate::css::process_css_module(path, &prefixed)?;
     let mut js = String::new();
     for (index, specifier) in processed.compose_imports.iter().enumerate() {
         js.push_str(&format!(
@@ -4953,6 +4999,7 @@ fn load_css_module_from_text(
     }
     let mut css_source_files = processed.inlined_files;
     css_source_files.extend(extra_source_files);
+    push_postcss_config(&mut css_source_files, postcss);
     Ok(SpecialModule {
         hash: content_hash(identity.as_bytes()),
         code: transformed.code,
@@ -4964,6 +5011,33 @@ fn load_css_module_from_text(
         dependency_specifiers,
         dependency_demands,
     })
+}
+
+/// Runs the app's PostCSS over `text` when a config was discovered, otherwise
+/// returns the text unchanged. The shared choke point every CSS-producing loader
+/// funnels through (plain CSS, Sass, Less, Stylus), so a project's PostCSS runs
+/// on every stylesheet exactly once per content, before the native pipeline
+/// extracts `@import`s, rebases `url(...)`s, and scopes CSS Modules.
+fn maybe_postcss<'a>(
+    text: &'a str,
+    path: &Path,
+    postcss: Option<&crate::postcss::Postcss>,
+) -> Result<std::borrow::Cow<'a, str>, String> {
+    match postcss {
+        Some(postcss) => Ok(std::borrow::Cow::Owned(postcss.process(text, path)?)),
+        None => Ok(std::borrow::Cow::Borrowed(text)),
+    }
+}
+
+/// Records the PostCSS config file as a build input for the module, so editing
+/// the config re-derives the stylesheet (dev-server invalidation).
+fn push_postcss_config(files: &mut Vec<PathBuf>, postcss: Option<&crate::postcss::Postcss>) {
+    if let Some(postcss) = postcss {
+        let config = postcss.config_file().to_path_buf();
+        if !files.contains(&config) {
+            files.push(config);
+        }
+    }
 }
 
 /// A `?tsr-split=<target>` virtual module: the route property extracted from the
@@ -5324,7 +5398,10 @@ fn synthesize_raw(source_path: &Path) -> Result<SpecialModule, String> {
 /// `@import`s become real graph dependency edges (the imported file's CSS is
 /// emitted before the importer's, deduped once per graph) and its relative
 /// `url(...)`s are rewritten to content-hashed public asset URLs.
-fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
+fn load_stylesheet(
+    path: &Path,
+    postcss: Option<&crate::postcss::Postcss>,
+) -> Result<SpecialModule, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     // A Tailwind v4 entry's `@import 'tailwindcss'` is a COMPILER invocation,
@@ -5350,7 +5427,7 @@ fn load_stylesheet(path: &Path) -> Result<SpecialModule, String> {
     // (Legacy Tailwind v3 `@tailwind base/components/utilities` entries are captured by
     // the `needs_native_tailwind_compile` gate above and compiled natively through the
     // v4 pipeline — the directives expand to the same base/components/utilities layers.)
-    load_stylesheet_from_text(path, &text, Vec::new())
+    load_stylesheet_from_text(path, &text, Vec::new(), postcss)
 }
 
 /// The body of [`load_stylesheet`], parameterized over the stylesheet text so
@@ -5362,8 +5439,10 @@ fn load_stylesheet_from_text(
     path: &Path,
     text: &str,
     extra_source_files: Vec<PathBuf>,
+    postcss: Option<&crate::postcss::Postcss>,
 ) -> Result<SpecialModule, String> {
-    let processed = crate::css::process_global_css(path, text)?;
+    let prefixed = maybe_postcss(text, path, postcss)?;
+    let processed = crate::css::process_global_css(path, &prefixed)?;
     let mut identity = processed.css.clone();
     for external in &processed.external_imports {
         identity.push('\0');
@@ -5381,6 +5460,7 @@ fn load_stylesheet_from_text(
         .collect();
     let mut css_source_files = processed.inlined_files;
     css_source_files.extend(extra_source_files);
+    push_postcss_config(&mut css_source_files, postcss);
     Ok(SpecialModule {
         hash: content_hash(identity.as_bytes()),
         code: String::new(),
@@ -6112,6 +6192,28 @@ pub enum ImageImportShape {
     NextObject,
 }
 
+/// CSS preprocessor + PostCSS wiring for a build. `.less`/`.styl` sources are
+/// compiled by the app's own Less/Stylus (`node`, cwd = `root`); a discovered
+/// PostCSS config runs the app's own plugins over every stylesheet. Default is
+/// off: no PostCSS, and Less/Stylus resolve their tool from each file's own
+/// directory. See [`crate::less_stylus`] and [`crate::postcss`].
+#[derive(Debug, Clone, Default)]
+pub struct CssPreprocess {
+    /// Project root, used as the `node` working directory so the app's own
+    /// `less`/`stylus`/`postcss` (and plugins) resolve from its node_modules.
+    pub root: Option<PathBuf>,
+    /// The discovered PostCSS setup, shared across the build (`None` = no
+    /// PostCSS step). Behind an `Arc` because [`BuildConfig`] is `Clone` and the
+    /// setup owns an interior content cache.
+    pub postcss: Option<Arc<crate::postcss::Postcss>>,
+}
+
+impl CssPreprocess {
+    fn root_path(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+}
+
 /// Build-time configuration a plugin host contributes. Currently the resolver
 /// aliases (specifier -> absolute target), such as TanStack's
 /// `#tanstack-router-entry` -> `<app>/src/router.tsx`. Kept small and owned by
@@ -6175,6 +6277,9 @@ pub struct BuildConfig {
     /// `import img from './x.png'` yields Next's `{ src, width, height,
     /// blurDataURL, variants }` shape with build-emitted responsive variants.
     pub image_import_shape: ImageImportShape,
+    /// Less/Stylus compilation + PostCSS. Default is off (no PostCSS; Less/Stylus
+    /// resolve their tool from each file's directory). See [`CssPreprocess`].
+    pub css_preprocess: CssPreprocess,
 }
 
 impl Default for BuildConfig {
@@ -6195,6 +6300,7 @@ impl Default for BuildConfig {
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
+            css_preprocess: CssPreprocess::default(),
         }
     }
 }
@@ -8438,6 +8544,7 @@ mod tests {
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
+            css_preprocess: CssPreprocess::default(),
         };
         (directory, entry, config)
     }
@@ -8510,6 +8617,7 @@ mod tests {
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
+            css_preprocess: CssPreprocess::default(),
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -8594,6 +8702,7 @@ mod tests {
             hmr: false,
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
+            css_preprocess: CssPreprocess::default(),
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.

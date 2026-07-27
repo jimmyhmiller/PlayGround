@@ -11,6 +11,7 @@ pub mod hmr;
 pub mod import_meta_env;
 pub mod import_meta_glob;
 pub mod js_reachability;
+pub mod less_stylus;
 pub mod manifest;
 pub mod mdx;
 #[cfg(feature = "memory-accounting")]
@@ -19,6 +20,7 @@ pub mod next_adapter;
 pub mod next_pages;
 pub mod parser;
 pub mod next_font;
+pub mod postcss;
 pub mod resource_id;
 pub mod rsc;
 pub mod route_split;

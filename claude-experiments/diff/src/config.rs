@@ -138,6 +138,10 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             .and_then(|resolved| resolved.scss_additional_data.clone()),
         root: Some(root.to_path_buf()),
     };
+    let css_preprocess = crate::bundler::CssPreprocess {
+        root: Some(root.to_path_buf()),
+        postcss: crate::postcss::discover(root).map(std::sync::Arc::new),
+    };
     let mut defines = resolved.map(|resolved| resolved.define).unwrap_or_default();
     set_node_env(&mut defines, "production");
     aliases.extend(alias);
@@ -166,6 +170,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             scss,
             // Vite parity: default raster imports stay bare-URL strings.
             image_import_shape: crate::bundler::ImageImportShape::Url,
+            css_preprocess,
         },
         entry,
     })
@@ -221,6 +226,12 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             },
             // Vite parity: default raster imports stay bare-URL strings.
             image_import_shape: crate::bundler::ImageImportShape::Url,
+            // A generic build still honors a project's PostCSS config and its
+            // Less/Stylus, resolving each tool from the project root.
+            css_preprocess: crate::bundler::CssPreprocess {
+                root: Some(root.to_path_buf()),
+                postcss: crate::postcss::discover(root).map(std::sync::Arc::new),
+            },
         },
         base: "/".to_string(),
         vite: false,
