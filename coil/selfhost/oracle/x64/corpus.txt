@@ -59,3 +59,10 @@ selfhost/oracle/arm64/tests/sums-deep.coil
 selfhost/oracle/arm64/tests/atomics-globals.coil
 selfhost/oracle/arm64/tests/impl-structural.coil
 selfhost/oracle/arm64/tests/comptime-readback.coil
+# x86-64-specific adversarial tests (docs/X64_BACKEND.md). The shared corpus is
+# backend-agnostic, so it exercises the SysV ABI and x86's pinned-register
+# instructions only incidentally — these target them directly. Both were written
+# against the LLVM backend first, so the expected values are independent of the
+# backend under test.
+selfhost/oracle/x64/tests/sysv-abi.coil
+selfhost/oracle/x64/tests/x86-quirks.coil

@@ -11,6 +11,10 @@
 #              reproduces itself exactly.
 #   GATE     : the x64-built compiler passes the behavioral corpus. It is not
 #              enough that it runs; it has to be a working compiler.
+#   CABI     : struct passing/returning agrees with a gcc-compiled object. The
+#              eightbyte rules only bite at the C boundary (internal calls pass
+#              aggregates by pointer), so this is the only check that reaches
+#              them — and the bug that broke the first self-host lived here.
 #   ENCODE   : every instruction the encoder emits still matches llvm-mc.
 #
 # stage1 comes from whatever compiler you point at (default ./coil-linux, the
@@ -53,7 +57,12 @@ echo "  ok — byte-identical, the compiler reproduces itself through the x64 ba
 echo "=== GATE: the x64-built compiler must itself pass the corpus ==="
 ./selfhost/oracle/x64/gate-run.sh /tmp/coil-x64-s2 >/dev/null 2>&1 \
   || { echo "x64 gate-run FAIL (run it directly to see which programs)"; exit 1; }
-echo "  ok — 54/54 corpus programs run identically to the LLVM reference"
+echo "  ok — every corpus program runs identically to the LLVM reference"
+
+echo "=== CABI: the SysV rules agree with a gcc-compiled translation unit ==="
+./selfhost/oracle/x64/gate-cabi.sh /tmp/coil-x64-s2 >/dev/null 2>&1 \
+  || { echo "x64 gate-cabi FAIL (run it directly to see which case)"; exit 1; }
+echo "  ok — struct passing/returning matches gcc across the C boundary"
 
 echo "=== ENCODE: the encoder still agrees with llvm-mc ==="
 if command -v llvm-mc >/dev/null 2>&1; then

@@ -73,10 +73,18 @@ Everything not listed here is deliberately identical.
   checks readelf's view and that the link produces no warnings (a missing
   `.note.GNU-stack` silently gives the whole program an executable stack).
   *Teeth: a wrong `sh_info` makes the real linker reject the object.*
-- `gate-run.sh` — builds the 54-program corpus with `--backend x64`, runs each,
+- `gate-run.sh` — builds the 56-program corpus with `--backend x64`, runs each,
   and diffs stdout+exit byte-for-byte against the LLVM backend's behavior.
   Runtime equality, not IR equality, is the contract between backends.
   *Teeth: compiling signed `<` as unsigned fails 8 programs.*
+- `gate-cabi.sh` — the SysV eightbyte rules, differentially against **gcc**.
+  This gate exists because the corpus structurally cannot reach those rules:
+  for Coil-to-Coil calls this backend passes aggregates BY POINTER (same as
+  arm64), so struct classification only happens at the C boundary. Here a
+  gcc-compiled translation unit is the callee, and every field carries a
+  distinct prime weight — the first draft summed them evenly, which meant a
+  backend that swapped two arguments still produced the right total.
+  *Teeth: this is where the bug that broke the first self-host attempt lived.*
 - `gate-gdb.sh` — 10 checks that the DWARF actually drives a debugger:
   breakpoint by name, correct line, `info args`/`info locals` showing real
   values, struct rendering through a pointer, stepping, backtrace.
@@ -101,7 +109,7 @@ Small programs are bound by the shared `cc`-link and process floor.
 ## Status
 - [x] x86-64 encoder, 108/108 cases byte-identical to llvm-mc.
 - [x] ELF64 writer; generated objects link with `cc` and run.
-- [x] Full lowering: 54/54 behavioral corpus, including the adversarial ABI
+- [x] Full lowering: 56/56 behavioral corpus, including the adversarial ABI
       stress, narrow/odd-width integers, NaN-aware float comparisons, atomics,
       6-arg variadics + fnptr tables, deep recursion, 8-variant sums, bitfields.
 - [x] DWARF always on: gdb resolves breakpoints by name, prints parameters and
@@ -125,3 +133,21 @@ Small programs are bound by the shared `cc`-link and process floor.
   `run-pipeline` takes several slices past the sixth argument.
 - Arm64 register numbers (`9`, `10`, `11`) leaking through the port as x86
   `r9`/`r10`/`r11`.
+- A `>16B` struct passed to a C function went by POINTER rather than as a stack
+  copy. AAPCS64 really does pass those indirectly, so the arm64 code this was
+  ported from was correct — the SysV rule is different, and the port inherited
+  the wrong one. Fixing it needed an explicit `isc` flag on the signature:
+  dyn-dispatch signatures also declare aggregate params by value while passing
+  references, so the two cases cannot be told apart from the types alone.
+
+## A pre-existing LLVM-backend bug this work surfaced
+`gate-cabi.sh` runs the LLVM backend as a control, and it fails one case.
+`codegen.coil` flattens a by-value `{double,double}` into two separate `double`
+parameters (visible in `emit-ir` as `double %abi.slot, double %abi.slot2`).
+SysV says such a struct spills to the stack **as a unit** once both eightbytes
+cannot fit, but two independent doubles put the first in the last free xmm and
+spill only the second. With seven doubles ahead of it the callee then reads
+`qx=5, qy=0` instead of `qx=3, qy=5`. Verified three ways: gcc alone says 418,
+the coil LLVM path says 357, the x64 backend says 418. The gate reports this as
+`known` rather than failing; remove that allowance when `codegen.coil` stops
+flattening aggregates at the C boundary.

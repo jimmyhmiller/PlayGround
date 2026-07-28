@@ -70,7 +70,11 @@
    (shim bool)
    (implsym i64)  ; :shim conventions (trampoline realization)
    (shimregs (ptr (ArrayList i64)))
-   (shimret i64)])
+   (shimret i64)
+   ; true for an (extern … :cc c …): calls to it cross the C boundary and so
+   ; follow the SysV by-value aggregate rules. Coil-to-Coil calls do not — this
+   ; backend passes aggregates by pointer internally, same as arm64.
+   (isc bool)])
 (defstruct GLoop
   [(label (Option (slice u8)))
    (contlabel i64)
@@ -639,6 +643,7 @@
                   (store! (field e implsym) -1)
                   (store! (field e shimregs) (box-al [i64] (load (field g a)) (al-new [i64] (load (field g a)))))
                   (store! (field e shimret) 0)
+                  (store! (field e isc) true)
                   ; duplicate extern declarations across modules are expected; keep the first
                   (when (icmp-lt (g-sig-idx g (load (field ed name))) 0) (al-push! (mut (field g sigs)) (load e))))
                 (store! i (iadd (load i) 1))))))
@@ -681,6 +686,7 @@
                   (store! (field e implsym) -1)
                   (store! (field e shimregs) (box-al [i64] (load (field g a)) (al-new [i64] (load (field g a)))))
                   (store! (field e shimret) 0)
+                  (store! (field e isc) false)
                   ; a :shim-convention function is realized as <name>__impl + trampoline
                   (let [ci (g-conv-idx g (load (field fd cc)))]
                     (when (icmp-ge ci 0)
@@ -1221,13 +1227,20 @@
 ;   4. for a variadic callee, set al = the number of SSE registers used. libc
 ;      varargs functions read it; getting it wrong corrupts printf("%f").
 ;   5. call; then spill the return value into a fresh slot.
-(defn emit-call! [(g (ptr Cga))
-                  (symidx i64)
-                  (fpav (ptr AVal))
-                  (params (ptr (ArrayList Type)))
-                  (variadic bool)
-                  (ret Type)
-                  (avs (ptr (ArrayList AVal)))] (-> AVal)
+; `cabi` selects the SysV by-value aggregate rules. It must be true ONLY for
+; calls that really cross the C boundary. Internal calls (including dyn
+; dispatch, whose trait signatures declare aggregate params BY VALUE while the
+; call site passes references) keep this backend's own convention of handing
+; aggregates around by pointer, and turning that into a stack copy corrupts the
+; callee's view of its arguments.
+(defn emit-call-abi! [(g (ptr Cga))
+                      (symidx i64)
+                      (fpav (ptr AVal))
+                      (params (ptr (ArrayList Type)))
+                      (variadic bool)
+                      (ret Type)
+                      (avs (ptr (ArrayList AVal)))
+                      (cabi bool)] (-> AVal)
   (let [s (field g asm)
         a (load (field g a))
         nargs (al-len [AVal] (load avs))
@@ -1254,10 +1267,41 @@
                   (do
                     (let [av (al-get [AVal] (load avs) (load i))
                           t (alloc-stack Type)]
-                      (store! t (av-ty av))
+                      ; Classify by the callee's DECLARED parameter type, not by
+                      ; the argument's own type. Internally this backend hands
+                      ; aggregates around as references, so an argument whose
+                      ; declared type is a by-value struct arrives here as a
+                      ; (ref S) — which would classify as a plain pointer and be
+                      ; passed in one register. That is right for AAPCS64 (which
+                      ; really does pass >16B indirectly) but WRONG for SysV,
+                      ; where the caller must place a COPY on the stack. Beyond
+                      ; the declared params the args are variadic, and variadic
+                      ; arguments are never by-value aggregates here, so the
+                      ; argument's own type is the right answer there.
+                      (store! t (if (and cabi (icmp-lt (load i) nparams))
+                                    (al-get [Type] (load params) (load i))
+                                    (av-ty av)))
                       (let [info (g-abi-info g t)
                             cls (abi-cls info)
-                            slot (av-slot! g av)]
+                            ; A by-value aggregate arrives as a reference, so the
+                            ; bytes to copy live at the address the slot HOLDS,
+                            ; not in the slot itself.
+                            ; the value arrives indirectly whenever the declared
+                            ; type is an aggregate but the ARGUMENT is a pointer
+                            ; or reference to it (how this backend moves
+                            ; aggregates internally).
+                            byref (and cabi
+                                       (and (icmp-ge (abi-cls info) 2)
+                                            (match-else (av-ty av)
+                                                        (TRef [_m _i] true)
+                                                        (TPtr [_i2] true)
+                                                        (_ false))))
+                            slot (if byref
+                                     (let [tmp (slot-for-ty! g t)]
+                                       (av-to-x! g av (x-scratch2))
+                                       (emit-copy-from-mem! g tmp (x-scratch2) (ty-size g t))
+                                       tmp)
+                                     (av-slot! g av))]
                         (al-push! (mut pslot) slot)
                         (cond
                           ; ---- scalar float
@@ -1449,6 +1493,16 @@
                       (mk-aval 1 resslot ret))
                   :else  ; cls 4: the callee wrote through the hidden pointer
                     (mk-aval 1 resslot ret)))))))
+
+; The internal convention: aggregates travel by pointer, exactly as on arm64.
+(defn emit-call! [(g (ptr Cga))
+                  (symidx i64)
+                  (fpav (ptr AVal))
+                  (params (ptr (ArrayList Type)))
+                  (variadic bool)
+                  (ret Type)
+                  (avs (ptr (ArrayList AVal)))] (-> AVal)
+  (emit-call-abi! g symidx fpav params variadic ret avs false))
 
 ; ============================ globals / strings ==============================
 ; intern an EStr/ECStr payload as a private const-section global; returns symidx.
@@ -2182,13 +2236,16 @@
                   (let [slot (slot-for-ty! g retp)]
                     (emit-store-int! g (load (field e shimret)) (x-slotbase) slot (ty-size g retp))
                     (mk-aval 1 slot (load (field e ret)))))))
-          (emit-call! g
-                      (load (field e symidx))
-                      dummy
-                      (load (field e params))
-                      (load (field e variadic))
-                      (load (field e ret))
-                      (box-al [AVal] (load (field g a)) (load avs)))))))
+          ; an extern call crosses the C boundary, so it takes the SysV
+          ; by-value aggregate rules; a Coil-to-Coil call does not.
+          (emit-call-abi! g
+                          (load (field e symidx))
+                          dummy
+                          (load (field e params))
+                          (load (field e variadic))
+                          (load (field e ret))
+                          (box-al [AVal] (load (field g a)) (load avs))
+                          (load (field e isc)))))))
 
 (defn emit-bitget [(g (ptr Cga)) (p (ptr Expr)) (fname (slice u8))] (-> AVal)
   (let [av (emit-expr g p)

@@ -93,6 +93,12 @@ jobs:
         run: ./selfhost/oracle/x64/gate-elf.sh /tmp/coil-ci-linux
       - name: x64 gate-run (54-program corpus, byte-exact vs the LLVM backend)
         run: ./selfhost/oracle/x64/gate-run.sh /tmp/coil-ci-linux
+      - name: x64 gate-cabi (SysV struct rules vs a gcc-compiled object)
+        # The eightbyte classification is only reachable across the C boundary
+        # (internal calls pass aggregates by pointer), so this is the gate that
+        # actually tests it — and where the bug that broke the first self-host
+        # attempt lived.
+        run: ./selfhost/oracle/x64/gate-cabi.sh /tmp/coil-ci-linux
       - name: x64 gate-gdb (DWARF actually drives a debugger)
         run: |
           sudo apt-get install -y gdb
