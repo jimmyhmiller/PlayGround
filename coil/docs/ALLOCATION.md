@@ -63,35 +63,62 @@ individually freed; `ma-free` is called almost never on them. That is precisely 
 lifetime a bump allocator is for: pointer increment to allocate, and either no free at
 all or one bulk reset.
 
-## The catch that has to be handled first
+## The catch that had to be handled first — DONE
 
-`ar-resize` returns `(None)` unconditionally. Look at what `al-reserve!` does with that
-(`lib/arraylist.coil:46`): it falls back to `alloc-slice` + element-by-element copy, and
+`ar-resize` used to return `(None)` unconditionally. Look at what `al-reserve!` does with
+that (`lib/arraylist.coil`): it falls back to `alloc-slice` + element-by-element copy, and
 **never frees the old block on an arena** (`ar-free` is a no-op). So an `ArrayList` that
-grows by doubling on an arena consumes `4 + 8 + 16 + … + n ≈ 2n` and strands all of it.
-Growable lists on an arena are quadratic in *space*.
+grew by doubling on an arena consumed `4 + 8 + 16 + … + n ≈ 2n` and stranded all of it.
+Growable lists on an arena were quadratic in *space*.
 
-Two ways out, and the first is worth doing regardless:
+`ar-resize` now has the standard bump-allocator in-place path: if the block being resized
+is the most recent allocation — `p + old == base + off` — it moves `off` and returns `p`.
+Any other block has live allocations stacked on top of it and still returns `(None)`, so
+the copy fallback is unchanged for that case.
 
-1. **Give `ar-resize` the standard bump-allocator in-place path.** If the block being
-   resized is the most recent allocation — `p + old == base + off` — just move `off` and
-   return `p`. That makes append-heavy `ArrayList` growth free on an arena and is about
-   six lines. Without it, routing lists through an arena is a memory regression.
-2. **Split the policy**: arena for immutable nodes (`Sexp`, `Expr`, `Type`), keep
-   `malloc-allocator` for the growable tables (`ArrayList`s in `Cx`, `LS`, the def table).
-   Coarser, but avoids the issue entirely.
+Measured, appending 100,000 `i64` to an arena (`examples/arena-growth.coil`):
 
-## Exhaustion is currently undiagnosable
+| | arena bytes consumed |
+| --- | --- |
+| before (`ar-resize` always `(None)`) | 2,097,120 |
+| after (in-place growth of the top block) | 1,048,576 |
+
+Exactly 2n → n, as predicted: the final 131,072-element buffer is now all the arena ever
+holds. The test asserts that number exactly rather than as a bound, because every growth
+after the first is a pure bump — and it fails on the old `ar-resize`, which is the only
+reason it is worth having.
+
+The alternative that was considered and is no longer needed — splitting the policy so
+arenas hold only immutable nodes (`Sexp`, `Expr`, `Type`) while growable tables stay on
+`malloc-allocator` — remains available if a future measurement wants it, but it is now a
+choice rather than a workaround.
+
+## Exhaustion is diagnosable — DONE
 
 `ar-alloc` returns `(None)` when full, `alloc-slice` propagates it, and `al-reserve!`
-finishes with `(oom)` — which is `(defn oom [] (abort) 0)`, a **silent** `abort()`. A
-compiler that runs out of arena dies with exit 134 and no message.
+finished with `(oom)` — which was `(defn oom [] (abort) 0)`, a **silent** `abort()`. A
+compiler that ran out of arena died with exit 134 and no message.
 
-**Make `oom` print before aborting** as the first commit of this work. It costs nothing
-and it is the difference between a five-minute diagnosis and an afternoon. There is
-already one open bug whose entire difficulty is that this abort is silent — see
-[OPEN-BUG-wasm64-reserve-abort.md](OPEN-BUG-wasm64-reserve-abort.md), which is very
-likely an allocation-exhaustion abort and which this work will touch directly.
+`oom` now reports before aborting, through `oom-at (site, bytes)`:
+
+```
+out of memory: arraylist al-reserve! failed to allocate 2048 bytes; the allocator is exhausted
+```
+
+The three call sites (`al-reserve!`, `hm-grow!`, `str-key-copy`) each name themselves and
+pass the request size. `oom` with no site or size is still there for callers that have
+neither, but nothing in the tree uses it. Printing goes through a local `write(2)` and a
+hand-rolled decimal formatter rather than `io.coil`, so the reporting path adds no module
+dependency to `alloc.coil` and stays usable from anywhere the allocator is.
+
+**It does not cost nothing** — see [What it cost](#what-it-cost). The earlier claim in
+this document that it would was wrong.
+
+The bug that motivated this — a silent exit-134 wasm64 build — turned out not to
+reproduce, and the allocation hypothesis behind it was disproved rather than confirmed:
+the compiler has no arena anywhere, so `al-reserve!` never leaves its `realloc` path. The
+investigation is recorded in [wasm64-reserve-abort.md](wasm64-reserve-abort.md), and the
+`read-file` defect it was blocking is fixed.
 
 ## Threading
 
@@ -108,19 +135,66 @@ Those 97 call sites are the actual work item. Most are convenience — a helper 
 either take the caller's `a` or deliberately keep `malloc` (a process-lifetime cache like
 the interner or a memo index legitimately wants malloc, not a per-compile arena).
 
-## Suggested staging
+## Staging
 
 Each step is independently verifiable; do not batch them.
 
-1. `oom` prints before aborting. Commit alone.
-2. `ar-resize` grows the last allocation in place. Add a unit test that an `ArrayList`
-   appending 100k items to an arena uses O(n) arena space, not O(n²).
+1. ~~`oom` prints before aborting.~~ **Done.**
+2. ~~`ar-resize` grows the last allocation in place, with a test that an `ArrayList`
+   appending 100k items to an arena uses O(n) arena space, not O(n²).~~ **Done** —
+   `examples/arena-growth.coil`, which the reader/load/expand corpora pick up
+   automatically because they glob `examples/*.coil`.
 3. Convert one leaf module's `malloc-allocator` sites to take `a` — `reader.coil` (1
-   site) then `ast.coil` (6) are the smallest. Gates after each.
+   site) then `ast.coil` (6) are the smallest. Gates after each. **Next.**
 4. Give the driver a per-compile arena and pass it as `a` for the AST. Measure peak RSS
    as well as wall time; a bump allocator trades memory for speed and 51k lines of AST in
    an arena that is never reset is a real number worth knowing.
 5. Only then look at `resolve.coil`'s 38 sites, which are the bulk.
+
+A bulk-append primitive landed alongside step 2 because `loader.read-file` needed it (see
+[wasm64-reserve-abort.md](wasm64-reserve-abort.md)):
+
+```coil
+(defn al-extend! [T] [(l (mut (ArrayList T))) (src (ptr T)) (n i64)] (-> i64)
+```
+
+It reserves the whole run up front and `mem-copy`s it, instead of a call plus a capacity
+test per element.
+
+## What it cost
+
+Steps 1 and 2 are not free, and this document previously asserted step 1 would be. The
+measured price of the whole batch — diagnostic `oom`, in-place `ar-resize`, `al-extend!`,
+and the `read-file` rewrite:
+
+| | binary | vs HEAD |
+| --- | --- | --- |
+| HEAD (`77a5d8032`) | 2,004,864 B | |
+| + `ar-resize`, `al-extend!`, `read-file` | 2,031,440 B | +26.6 KB |
+| + the `oom` message | 2,054,176 B | **+49.3 KB (+2.5%)** |
+
+Wall time, `coil build selfhost/src/main.coil -o /dev/null`, 15 **paired** runs
+alternating the two binaries so machine drift cancels (block-at-a-time rounds of this
+measurement wandered between 0.47s and 0.58s for the *same* binary, so pairing is not
+optional here):
+
+| | min | median |
+| --- | --- | --- |
+| HEAD | 0.460s | 0.470s |
+| after | 0.470s | 0.480s |
+
+Paired delta **+20 ms median, +14 ms mean, slower in 12 of 15 pairs**. About 3%.
+
+It is a size cost, not a hot-path cost: rebuilding with the `al-reserve!` call site back
+to the old argument-free `(oom)` produced a binary that timed identically to the full one,
+so the extra code is not slowing the allocator — there is simply ~49 KB more of it in
+every module that imports `alloc.coil`, which is every module. Whether 3% of the frontend
+is worth permanent OOM diagnosability is a judgement call; it is recorded here so it is a
+judgement call made with a number rather than a guess.
+
+The `read-file` rewrite is worth about 10 ms of that back (2,031,440-byte build measured
+between the other two), consistent with the ~14 ms the earlier estimate predicted and, as
+predicted, not separable from noise in a single measurement.
 
 ## How to verify
 
@@ -133,6 +207,20 @@ Benchmark honestly: min-of-3, back-to-back against the previous binary in the sa
 session. Single measurements at this scale move ±20% with machine load — during this work
 a "0.31 → 0.49s regression" turned out to be pure noise and the two binaries were
 identical when re-run.
+
+Two mechanical traps this work hit, both worth knowing before touching `lib/`:
+
+* **A new `lib/` function used by `selfhost/src` breaks the bootstrap.** `stage0` is the
+  committed seed, and it resolves `(import "arraylist.coil")` to its own *embedded* copy,
+  not the one on disk — so the seed cannot compile a `loader.coil` that calls a function
+  added to `lib/` in the same change. Build a bridge stage0 first
+  (`COIL_STDLIB_DIR=$PWD ./coil build selfhost/src/main.coil -o /tmp/coil-bridge`, which
+  bakes the new `lib/` in via `include-str`), run `STAGE0=/tmp/coil-bridge
+  selfhost/rebootstrap.sh`, then `STAGE0=./coil selfhost/refresh-seed.sh both` so a plain
+  rebootstrap works again. Verify by running `selfhost/rebootstrap.sh` with no overrides.
+* **`COIL_STDLIB_DIR=$PWD` is what makes a `lib/` edit visible** to an already-built
+  compiler. Without it you are testing the embedded stdlib and your edit does nothing —
+  silently.
 
 And check which backend built the binary you are timing. `rebootstrap.sh` used to install
 the arm64-backend build, which is ~11x slower than the LLVM one; a long stretch of

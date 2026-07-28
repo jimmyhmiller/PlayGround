@@ -19,17 +19,31 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %io.Writer = type { ptr, ptr }
 
+@cstr.0 = private constant [14 x i8] c"an allocation\00"
+
+@cstr.1 = private constant [16 x i8] c"out of memory: \00"
+
+@cstr.2 = private constant [20 x i8] c" failed to allocate\00"
+
+@cstr.3 = private constant [2 x i8] c" \00"
+
+@cstr.4 = private constant [7 x i8] c" bytes\00"
+
+@cstr.5 = private constant [30 x i8] c"; the allocator is exhausted\0A\00"
+
 @g.0 = global %alloc.Allocator zeroinitializer
 
-@g.1 = global %io.Writer zeroinitializer
+@g.1 = global [24 x i8] zeroinitializer
 
 @g.2 = global %io.Writer zeroinitializer
 
-@g.3 = global %io.Reader zeroinitializer
+@g.3 = global %io.Writer zeroinitializer
 
-@g.4 = global %io.Writer zeroinitializer
+@g.4 = global %io.Reader zeroinitializer
 
-@g.5 = global %io.FixBuf zeroinitializer
+@g.5 = global %io.Writer zeroinitializer
+
+@g.6 = global %io.FixBuf zeroinitializer
 
 @str.0 = private constant [8 x i8] c"answer=\00"
 
@@ -362,12 +376,54 @@ entry:
 
 define internal %coil.core.Option__ptr_i8 @alloc.ar-resize(ptr %ctx, ptr %p, i64 %old, i64 %new, i64 %align) {
 entry:
+  %sum.tmp17 = alloca %coil.core.Option__ptr_i8, align 8
+  %sum.tmp13 = alloca %coil.core.Option__ptr_i8, align 8
   %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
+  %ptrtoint = ptrtoint ptr %p to i64
+  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 0
+  %load = load ptr, ptr %field, align 8
+  %ptrtoint1 = ptrtoint ptr %load to i64
+  %sub = sub i64 %ptrtoint, %ptrtoint1
+  %add = add i64 %sub, %old
+  %field2 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %load3 = load i64, ptr %field2, align 8
+  %cmp = icmp eq i64 %add, %load3
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %add4 = add i64 %sub, %new
+  %field5 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 2
+  %load6 = load i64, ptr %field5, align 8
+  %cmp7 = icmp sgt i64 %add4, %load6
+  %ifc8 = icmp ne i1 %cmp7, false
+  br i1 %ifc8, label %then9, label %else10
+
+else:                                             ; preds = %entry
+  %tag18 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp17, i32 0, i32 0
+  store i32 0, ptr %tag18, align 4
+  %payload19 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp17, i32 0, i32 1
+  %sum20 = load %coil.core.Option__ptr_i8, ptr %sum.tmp17, align 8
+  ret %coil.core.Option__ptr_i8 %sum20
+
+then9:                                            ; preds = %then
   %tag = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 0
   store i32 0, ptr %tag, align 4
   %payload = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp, i32 0, i32 1
   %sum = load %coil.core.Option__ptr_i8, ptr %sum.tmp, align 8
   ret %coil.core.Option__ptr_i8 %sum
+
+else10:                                           ; preds = %then
+  %field11 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %add12 = add i64 %sub, %new
+  store i64 %add12, ptr %field11, align 8
+  %tag14 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp13, i32 0, i32 0
+  store i32 1, ptr %tag14, align 4
+  %payload15 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp13, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { ptr }, ptr %payload15, i32 0, i32 0
+  store ptr %p, ptr %vf, align 8
+  %sum16 = load %coil.core.Option__ptr_i8, ptr %sum.tmp13, align 8
+  ret %coil.core.Option__ptr_i8 %sum16
 }
 
 define internal ptr @alloc.arena-allocator(i64 %cap) {
@@ -469,8 +525,107 @@ entry:
 
 define internal i64 @alloc.oom() {
 entry:
-  %call = call i64 @abort()
+  %call = call i64 @alloc.oom-at(ptr @cstr.0, i64 -1)
+  ret i64 %call
+}
+
+define internal i64 @alloc.oom-at(ptr %site, i64 %bytes) {
+entry:
+  %call = call i64 @alloc.oom-puts(ptr @cstr.1)
+  %call1 = call i64 @alloc.oom-puts(ptr %site)
+  %call2 = call i64 @alloc.oom-puts(ptr @cstr.2)
+  %cmp = icmp sge i64 %bytes, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %call3 = call i64 @alloc.oom-puts(ptr @cstr.3)
+  %call4 = call i64 @alloc.oom-putd(i64 %bytes)
+  %call5 = call i64 @alloc.oom-puts(ptr @cstr.4)
+  br label %ifcont
+
+else:                                             ; preds = %entry
+  br label %ifcont
+
+ifcont:                                           ; preds = %else, %then
+  %ifval = phi i64 [ %call5, %then ], [ 0, %else ]
+  %call6 = call i64 @alloc.oom-puts(ptr @cstr.5)
+  %call7 = call i64 @abort()
   ret i64 0
+}
+
+define internal i64 @alloc.oom-putd(i64 %v) {
+entry:
+  %stack.slot = alloca i64, align 8
+  store i64 24, ptr %stack.slot, align 8
+  %stack.slot1 = alloca i64, align 8
+  store i64 %v, ptr %stack.slot1, align 8
+  br label %loop.body
+
+loop.body:                                        ; preds = %else, %entry
+  %load = load i64, ptr %stack.slot, align 8
+  %sub = sub i64 %load, 1
+  store i64 %sub, ptr %stack.slot, align 8
+  %load2 = load i64, ptr %stack.slot, align 8
+  %idx = getelementptr [24 x i8], ptr @g.1, i64 0, i64 %load2
+  %load3 = load i64, ptr %stack.slot1, align 8
+  %rem = srem i64 %load3, 10
+  %add = add i64 48, %rem
+  %trunc = trunc i64 %add to i8
+  store i8 %trunc, ptr %idx, align 1
+  %load4 = load i64, ptr %stack.slot1, align 8
+  %div = sdiv i64 %load4, 10
+  store i64 %div, ptr %stack.slot1, align 8
+  %load5 = load i64, ptr %stack.slot1, align 8
+  %cmp = icmp eq i64 %load5, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after:                                       ; preds = %then
+  %loop.val = phi i64 [ 0, %then ]
+  %load6 = load i64, ptr %stack.slot, align 8
+  %idx7 = getelementptr [24 x i8], ptr @g.1, i64 0, i64 %load6
+  %load8 = load i64, ptr %stack.slot, align 8
+  %sub9 = sub i64 24, %load8
+  %call = call i64 @write(i32 2, ptr %idx7, i64 %sub9)
+  ret i64 0
+
+then:                                             ; preds = %loop.body
+  br label %loop.after
+
+else:                                             ; preds = %loop.body
+  br label %loop.body
+}
+
+define internal i64 @alloc.oom-puts(ptr %s) {
+entry:
+  %stack.slot = alloca i64, align 8
+  store i64 0, ptr %stack.slot, align 8
+  br label %loop.body
+
+loop.body:                                        ; preds = %else, %entry
+  %load = load i64, ptr %stack.slot, align 8
+  %idx = getelementptr i8, ptr %s, i64 %load
+  %load1 = load i8, ptr %idx, align 1
+  %sext = sext i8 %load1 to i64
+  %cmp = icmp eq i64 %sext, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+loop.after:                                       ; preds = %then
+  %loop.val = phi i64 [ 0, %then ]
+  %load3 = load i64, ptr %stack.slot, align 8
+  %call = call i64 @write(i32 2, ptr %s, i64 %load3)
+  ret i64 0
+
+then:                                             ; preds = %loop.body
+  br label %loop.after
+
+else:                                             ; preds = %loop.body
+  %load2 = load i64, ptr %stack.slot, align 8
+  %add = add i64 %load2, 1
+  store i64 %add, ptr %stack.slot, align 8
+  br label %loop.body
 }
 
 define internal %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %size, i64 %align) {
@@ -1288,9 +1443,9 @@ entry:
 
 define internal ptr @io.null-writer() {
 entry:
-  store ptr @io.null-write, ptr @g.1, align 8
-  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.1, i32 0, i32 1), align 8
-  ret ptr @g.1
+  store ptr @io.null-write, ptr @g.2, align 8
+  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.2, i32 0, i32 1), align 8
+  ret ptr @g.2
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.print-cstr(ptr %w, ptr %s) {
@@ -1642,19 +1797,19 @@ entry:
 
 define internal ptr @io.stderr() {
 entry:
-  %call = call ptr @io.fd-writer(ptr @g.2, i64 2)
+  %call = call ptr @io.fd-writer(ptr @g.3, i64 2)
   ret ptr %call
 }
 
 define internal ptr @io.stdin() {
 entry:
-  %call = call ptr @io.fd-reader(ptr @g.3, i64 0)
+  %call = call ptr @io.fd-reader(ptr @g.4, i64 0)
   ret ptr %call
 }
 
 define internal ptr @io.stdout() {
 entry:
-  %call = call ptr @io.fd-writer(ptr @g.4, i64 1)
+  %call = call ptr @io.fd-writer(ptr @g.5, i64 1)
   ret ptr %call
 }
 
@@ -1794,14 +1949,14 @@ entry:
   %call1 = call %coil.core.Option__ptr_i8 @alloc.alloc-slice__i8(ptr %call, i64 64)
   store %coil.core.Option__ptr_i8 %call1, ptr %spill, align 8
   %call2 = call ptr @alloc.unwrap-ptr__i8(ptr %spill)
-  store ptr %call2, ptr @g.5, align 8
-  store i64 64, ptr getelementptr inbounds nuw (%io.FixBuf, ptr @g.5, i32 0, i32 2), align 8
+  store ptr %call2, ptr @g.6, align 8
+  store i64 64, ptr getelementptr inbounds nuw (%io.FixBuf, ptr @g.6, i32 0, i32 2), align 8
   %stack.slot = alloca %io.Writer, align 8
-  %call3 = call ptr @io.fixed-buffer-writer(ptr %stack.slot, ptr @g.5)
+  %call3 = call ptr @io.fixed-buffer-writer(ptr %stack.slot, ptr @g.6)
   %call4 = call %coil.core.Result__i64__io.IoError @app.greet(ptr %call3, i64 42)
   %call5 = call ptr @io.stdout()
-  %load = load ptr, ptr @g.5, align 8
-  %load6 = load i64, ptr getelementptr inbounds nuw (%io.FixBuf, ptr @g.5, i32 0, i32 1), align 8
+  %load = load ptr, ptr @g.6, align 8
+  %load6 = load i64, ptr getelementptr inbounds nuw (%io.FixBuf, ptr @g.6, i32 0, i32 1), align 8
   %call7 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %call5, ptr %load, i64 %load6)
   store %coil.core.Result__i64__io.IoError %call7, ptr %match.tmp, align 8
   %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0

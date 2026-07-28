@@ -1,0 +1,84 @@
+; Growable collections on a bump allocator: what `ar-resize`'s in-place path buys, and
+; that the copy fallback is still correct when it can't be taken.
+;   coil test examples/arena-growth.coil
+(module arenagrowth)
+(import "lib/alloc.coil" :use *)
+(import "lib/arraylist.coil" :use *)
+(import "lib/assert.coil" :use *)
+
+;; Bytes handed out by an arena so far — its bump offset. Reaching through the
+;; `Allocator` vtable's `ctx` is how you inspect the concrete allocator behind it.
+(defn arena-used [(a (ptr Allocator))] (-> i64)
+  (load (field (cast (ptr Arena) (load (field a ctx))) off)))
+
+;; The property ar-resize's in-place path exists for. A list that is the arena's TOP
+;; block grows by moving the bump pointer, so pushing n elements occupies exactly the
+;; final capacity. With `ar-resize` returning (None) unconditionally — as it used to —
+;; every doubling instead allocated a fresh block and `ar-free` stranded the old one,
+;; so the same loop burned 4+8+16+…+n ≈ 2n and could never reuse a byte of it.
+(deftest arena-top-block-grows-in-place
+  (let [a        (arena-allocator 4194304)                ; 4 MiB
+        (mut xs) (al-new [i64] a)
+        (mut i)  0]
+    (loop (if (>= (load i) 100000)
+              (break)
+              (do (al-push! (mut xs) (load i))
+                  (store! i (+ (load i) 1)))))
+    (assert-eq (al-len [i64] (load xs)) 100000)
+    (assert-eq (al-get (load xs) 0) 0)
+    (assert-eq (al-get (load xs) 99999) 99999)
+    ; 100000 elements doubles the capacity to 131072, and that ONE buffer is all the
+    ; arena ever holds: exact, not a bound, because every growth after the first is a
+    ; pure bump. Quadratic-space growth would show up here as ~2 MiB.
+    (assert-eq (arena-used a) (* 131072 8))))
+
+;; The other half of the contract: a block that is NOT on top cannot grow in place, and
+;; must fall back to allocate-and-copy without losing or corrupting an element. Two lists
+;; growing in lockstep guarantee that neither is the top block when it needs to grow.
+(deftest arena-interleaved-lists-keep-their-elements
+  (let [a        (arena-allocator 65536)
+        (mut xs) (al-new [i64] a)
+        (mut ys) (al-new [i64] a)
+        (mut i)  0]
+    (loop (if (>= (load i) 64)
+              (break)
+              (do (al-push! (mut xs) (load i))
+                  (al-push! (mut ys) (* (load i) 10))
+                  (store! i (+ (load i) 1)))))
+    (assert-eq (al-len [i64] (load xs)) 64)
+    (assert-eq (al-len [i64] (load ys)) 64)
+    (assert-eq (al-get (load xs) 0) 0)
+    (assert-eq (al-get (load ys) 0) 0)
+    (assert-eq (al-get (load xs) 63) 63)
+    (assert-eq (al-get (load ys) 63) 630)))
+
+;; `al-extend!` is the bulk append `read-file` uses instead of a per-byte `al-push!`
+;; loop. It must land exactly the same elements, whether or not it has to grow.
+(deftest al-extend-appends-in-bulk
+  (let [a        (malloc-allocator)
+        src      (unwrap-ptr [i64] (alloc-slice [i64] a 300))
+        (mut xs) (al-new [i64] a)
+        (mut i)  0]
+    (loop (if (>= (load i) 300)
+              (break)
+              (do (store! (index src (load i)) (load i))
+                  (store! i (+ (load i) 1)))))
+    (al-push! (mut xs) -1)                        ; a pre-existing element to append after
+    (al-extend! [i64] (mut xs) src 300)           ; one growth from cap 4 to 301
+    (al-extend! [i64] (mut xs) src 300)           ; and again, from 301 to 601
+    (assert-eq (al-len [i64] (load xs)) 601)
+    (assert-eq (al-get (load xs) 0) -1)
+    (assert-eq (al-get (load xs) 1) 0)
+    (assert-eq (al-get (load xs) 300) 299)
+    (assert-eq (al-get (load xs) 301) 0)
+    (assert-eq (al-get (load xs) 600) 299)))
+
+;; A zero-length extend is a no-op, not a growth — `read-file` never hits it (the read
+;; loop breaks on n <= 0) but the primitive has to be total.
+(deftest al-extend-of-nothing-changes-nothing
+  (let [a        (malloc-allocator)
+        (mut xs) (al-new [i64] a)]
+    (al-push! (mut xs) 7)
+    (al-extend! [i64] (mut xs) (cast (ptr i64) 0) 0)
+    (assert-eq (al-len [i64] (load xs)) 1)
+    (assert-eq (al-get (load xs) 0) 7)))

@@ -17,12 +17,62 @@
 (extern realloc :cc c [(ptr i8) isize] (-> (ptr i8)))   ; void* realloc(void*, size_t)
 (extern abort   :cc c [] (-> :i64))                    ; void abort() — unrecoverable hard-fail
 
-;; Hard-abort the process on an unrecoverable allocation failure. Exposed as a defn
-;; (not the bare extern) so callers share ONE `abort` declaration: Coil doesn't dedup
-;; identical externs across modules, and defns ARE shared via `:use *` while extern
-;; decls are not — so collections route OOM through `oom` instead of each declaring
-;; their own `abort` (which would collide when two such libs are imported together).
-(defn oom [] (-> :i64) (abort) 0)
+; ---- reporting an unrecoverable allocation failure -------------------------
+;; write(2), for the abort message below. io.coil and slice.coil already declare this
+;; exact signature; an identical redeclaration names the same symbol rather than adding
+;; a new one, and nothing here is referenced by a program that never allocates, so
+;; --gc-sections still drops it and freestanding builds stay libc-free.
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))   ; ssize_t write(int, const void*, size_t)
+
+;; Write a NUL-terminated literal to stderr. The length is measured by scanning so this
+;; needs no `strlen` extern, and the write is unbuffered so nothing is lost to `abort`.
+(defn oom-puts [(s (ptr i8))] (-> :i64)
+  (let [(mut n) 0]
+    (loop (if (icmp-eq (cast :i64 (load (index s (load n)))) 0)
+              (break)
+              (store! n (iadd (load n) 1))))
+    (write 2 s (cast isize (load n)))
+    0))
+
+;; Decimal-print a non-negative i64 to stderr. Digits are built back-to-front in a
+;; call-site-static scratch buffer — `alloc-static` gives one cell per call site, which
+;; is exactly right here: this runs once, on the way to `abort`.
+(defn oom-putd [(v :i64)] (-> :i64)
+  (let [buf     (alloc-static (array i8 24))
+        (mut i) 24
+        (mut x) v]
+    (loop
+      (do (store! i (isub (load i) 1))
+          (store! (index buf (load i)) (cast i8 (iadd 48 (irem (load x) 10))))
+          (store! x (idiv (load x) 10))
+          (if (icmp-eq (load x) 0) (break) 0)))
+    (write 2 (cast (ptr i8) (index buf (load i))) (cast isize (isub 24 (load i))))
+    0))
+
+;; Report a failed allocation, then hard-abort the process. `site` names the caller and
+;; `bytes` is the request that could not be satisfied (pass -1 when the size is not
+;; known). This used to be a bare `abort()`: exit 134, empty stdout, empty stderr — so
+;; every allocator-exhaustion bug cost an afternoon of bisecting builds to locate what
+;; one line of output identifies. See docs/ALLOCATION.md.
+(defn oom-at [(site (ptr i8)) (bytes :i64)] (-> :i64)
+  (oom-puts c"out of memory: ")
+  (oom-puts site)
+  (oom-puts c" failed to allocate")
+  (if (icmp-ge bytes 0)
+      (do (oom-puts c" ") (oom-putd bytes) (oom-puts c" bytes"))
+      0)
+  (oom-puts c"; the allocator is exhausted\n")
+  (abort)
+  0)
+
+;; Hard-abort on an unrecoverable allocation failure, without a known site or size.
+;; Prefer `oom-at` — the site and the request size are what make the abort diagnosable.
+;; Exposed as a defn (not the bare extern) so callers share ONE `abort` declaration:
+;; Coil doesn't dedup identical externs across modules, and defns ARE shared via
+;; `:use *` while extern decls are not — so collections route OOM through here instead
+;; of each declaring their own `abort` (which would collide when two such libs are
+;; imported together).
+(defn oom [] (-> :i64) (oom-at c"an allocation" -1))
 
 (defstruct Allocator
   [(alloc  (fnptr c [(ptr i8) :i64 :i64] (Option (ptr i8))))
@@ -102,9 +152,26 @@
         (None)                                  ; arena exhausted
         (do (store! (field ar off) (iadd o size))
             (Some (index (load (field ar base)) o))))))     ; base + o
+;; The standard bump-allocator in-place path: a block whose end is exactly the bump
+;; pointer is the MOST RECENT allocation, so it can grow (or shrink) by moving `off` and
+;; nothing else. Any other block has live allocations stacked on top of it and genuinely
+;; cannot grow — `(None)`, and the caller copies.
+;;
+;; This is not an optimisation, it is what makes growable collections usable on an arena
+;; at all. Without it `al-reserve!` always takes its allocate-new-and-copy fallback and
+;; `ar-free` is a no-op, so an ArrayList doubling to n strands 4+8+16+…+n ≈ 2n bytes it
+;; can never reuse: append-heavy growth is quadratic in SPACE. With it, a list that is
+;; the arena's top allocation grows by pure pointer bump.
 (defn ar-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
     (-> (Option (ptr i8)))
-  (None))                                         ; no in-place resize
+  (let [ar    (cast (ptr Arena) ctx)
+        start (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    (if (icmp-eq (iadd start old) (load (field ar off)))
+        (if (icmp-gt (iadd start new) (load (field ar cap)))
+            (None)                                  ; would run past the end of the arena
+            (do (store! (field ar off) (iadd start new))
+                (Some p)))
+        (None))))                                   ; not the top block — cannot grow
 (defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0) ; bulk-freed
 ;; Build an arena over a caller-provided buffer — no malloc, so it works
 ;; FREESTANDING (the buffer can be an `alloc-static` array in .bss). The malloc-backed

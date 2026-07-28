@@ -17,6 +17,7 @@
 (import "alloc.coil"  :use *)   ; Allocator, raw-*, alloc-slice, malloc-allocator
 (import "result.coil" :use *)   ; Option/Some/None for the allocator's results
 (import "slice.coil"  :use *)   ; (slice T) / slice-new, for al-slice + al-for
+(import "mem.coil"    :use *)   ; mem-copy, for the bulk al-extend! append
 ; OOM hard-fail routes through alloc's `oom` (a shared defn) rather than a local
 ; `abort` extern, so ArrayList + HashMap can be imported together (Coil doesn't
 ; dedup identical extern decls across modules).
@@ -55,7 +56,9 @@
                         0))
           (None []
             (match (alloc-slice [T] a newcap)
-              (None [] (do (oom) -1))   ; out of memory — hard fail, no silent wrong
+              ; out of memory — hard fail, no silent wrong. `oom-at` names the site and
+              ; the request so an exhausted arena says so instead of exiting 134 silently.
+              (None [] (do (oom-at c"arraylist al-reserve!" (imul newcap (sizeof T))) -1))
               (Some [np]
                 (do
                   (let [(mut i) 0]
@@ -83,6 +86,21 @@
     (store! (index (load (field l data)) n) v)
     (store! (field l len) (iadd n 1))
     (iadd n 1)))
+
+;; Append n elements from `src` in one shot. Reserves the whole run up front and block
+;; copies it — the equivalent `al-push!` loop costs a call plus a capacity test per
+;; element and a realloc-and-copy at every doubling, where this pays one growth and one
+;; `mem-copy`. `src` must not point into this list's own buffer (the copy is memcpy, and
+;; a growth moves the buffer anyway). Returns the new length.
+(defn al-extend! [T] [(l (mut (ArrayList T))) (src (ptr T)) (n i64)] (-> i64)
+  (let [old  (load (field l len))
+        need (iadd old n)]
+    (if (icmp-gt need (load (field l cap)))
+        (al-reserve! (mut l) need)
+        0)
+    (mem-copy [T] (index (load (field l data)) old) src n)
+    (store! (field l len) need)
+    need))
 
 ;; Remove and return the last element as (Some v); (None) if empty.
 (defn al-pop! [T] [(l (mut (ArrayList T)))] (-> (Option T))

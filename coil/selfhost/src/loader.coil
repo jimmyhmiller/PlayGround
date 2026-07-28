@@ -18,19 +18,20 @@
 (import "resolve.coil" :use *)
 (import "cimport.coil" :as ci)  ; the (cimport "h.h") source form generates bindings at load time
 
+; Drain an open fd into `bytes` through a 64 KB bounce buffer, appending each read in
+; one `al-extend!`. Shared by both readers below so the loop exists once.
+(defn drain-fd! [(fd :i64) (buf (ptr i8)) (bytes (mut (ArrayList u8)))] (-> :i64)
+  (loop (let [n (read (cast i32 fd) buf 65536)]
+          (if (icmp-le n 0)
+              (break)
+              (al-extend! [u8] (mut bytes) (cast (ptr u8) buf) (cast i64 n)))))
+  0)
+
 (defn read-file [(a (ptr Allocator)) (path (ptr i8))] (-> (slice u8))
   (let [fd (open path 0)
         buf (unwrap-ptr [i8] (raw-alloc a 65536 1))
         (mut bytes) (al-new [u8] a)]
-    (loop (let [n (read (cast i32 fd) buf 65536)]
-            (if (icmp-le n 0)
-                (break)
-                (let [(mut i) 0]
-                  (loop (if (icmp-ge (load i) (cast i64 n))
-                            (break)
-                            (do
-                              (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
-                              (store! i (iadd (load i) 1)))))))))
+    (drain-fd! (cast :i64 fd) buf (mut bytes))
     (close fd)
     (al-slice [u8] (load bytes))))
 
@@ -44,15 +45,7 @@
         (None [(slice u8)])
         (let [buf (unwrap-ptr [i8] (raw-alloc a 65536 1))
               (mut bytes) (al-new [u8] a)]
-          (loop (let [n (read (cast i32 fd) buf 65536)]
-                  (if (icmp-le n 0)
-                      (break)
-                      (let [(mut i) 0]
-                        (loop (if (icmp-ge (load i) (cast i64 n))
-                                  (break)
-                                  (do
-                                    (al-push! (mut bytes) (cast u8 (load (index buf (load i)))))
-                                    (store! i (iadd (load i) 1)))))))))
+          (drain-fd! (cast :i64 fd) buf (mut bytes))
           (close fd)
           (Some (al-slice [u8] (load bytes)))))))
 
