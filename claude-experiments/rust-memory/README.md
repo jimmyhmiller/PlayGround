@@ -222,6 +222,59 @@ live allocations is slow and memory-hungry. For large targets, capture **early**
 (`--at-bytes`), use **`Mode::Sampled`**, or dump a representative phase rather
 than the peak.
 
+### Rust used from a Node app (native addons, worker processes)
+
+A lot of Rust ships as a **module a host process loads** — a napi-rs / neon
+`.node` addon, a Python extension — rather than as a program. That breaks the
+usual assumptions: there's no `fn main()`, the executable is `node` (which has
+no Rust debug info at all), and the code you care about lives in a `.node` file
+dyld loaded at runtime.
+
+memscope handles it with **one call**, because everything else is env-driven:
+
+```rust
+#[global_allocator]
+static GLOBAL: memscope::MemScope = memscope::MemScope::system();
+
+#[napi::module_init]
+fn init() {
+    memscope::init();        // neon: first line of your #[neon::main] fn
+}                            // raw N-API: first line of napi_register_module_v1
+```
+
+`memscope::init()` does nothing unless a `MEMSCOPE_*` variable is set, so the
+call can ship permanently in place:
+
+```sh
+MEMSCOPE_RECORD=/tmp/addon-{pid}.mscope node app.js   # record the allocation stream
+memscope analyze /tmp/addon-1234.mscope               # ranked findings, addon source lines
+
+MEMSCOPE_LIVE=1 node app.js                           # live agent: memscope monitor / graph / dump
+MEMSCOPE_HPROF_ON_EXIT=1 node app.js                  # .hprof of the addon's heap → MAT
+MEMSCOPE_MODE=sampled:100 …                           # low-overhead sampling
+```
+
+`{pid}` expands per process, which is what you want the moment the host uses a
+**worker pool**: one env var, one recording per worker, no collisions.
+
+Two details this relies on, both handled for you:
+
+* **Symbolication targets the module, not the executable.** memscope resolves the
+  image it's compiled into via `dladdr`, so the recording names `your.node` and
+  types come from *its* DWARF. `node` has none.
+* **`memscope run` is the wrong tool here** and says so: injecting the host
+  records against the host's binary (every addon frame `[unknown]`) and traces
+  V8's own churn. Point `memscope check` at the module instead:
+
+```sh
+memscope check ./your.node          # or the cdylib project dir
+memscope check crates/your-addon    # finds the built module, checks the init hook
+```
+
+Verified end to end in `crates/memscope-cli/tests/node_addon.rs` against a real
+N-API addon (`crates/nodeaddon`) loaded by `node`: recording, live agent, hprof,
+and four concurrent worker processes.
+
 ### Checkpoints & diffs (snapshot exploration)
 
 Most memory debugging is *differential* — "it grew between request 1 and 100;
@@ -474,12 +527,13 @@ volume use `Mode::Sampled` to keep the file small.)
 | `memscope-graph` | **heap reference graph**: walks each allocation's pointer fields → edges → roots → dominator tree → retained sizes |
 | `memscope-proto` | the wire vocabulary: hot-path `RawEvent` POD + serializable `Snapshot` / `SiteInfo` / `TypeInfo` + client/server messages |
 | `memscope-agent` | in-process transport server (Unix socket, newline-JSON). Owns the type oracle and ships already-typed snapshots |
-| `memscope` | thin facade: `MemScope`, mode controls, `mark()`, `start_agent()` |
+| `memscope` | thin facade: `MemScope`, mode controls, `mark()`, `start_agent()`, `init()` (env-driven bring-up for `.node` addons / host-loaded modules) |
 | `memscope-replay` | **reusable recording reader + analysis**: parses a `.mscope`/`.jsonl` into sites/metadata/marks/events, reconstructs the live set at any checkpoint (`Timeline` / `LiveState`), classifies frames (`frames`), and runs the finding detectors (`analyze`) — the substrate for `marks` / `diff` / `analyze` |
 | `memscope-cli` | terminal consumer: `monitor` / `dump` / `events` / `mode` / `show` / `marks` / `diff` / `analyze` / `query` |
 | `memscope-mcp` | **MCP stdio server**: exposes `marks` / `diff` / `analyze` / `query` as tools an AI agent can call (thin wrapper over the CLI's `--json`) |
 | `memscope-hprof` | **HPROF writer**: serializes a `HeapGraph` + layout as a JVM `.hprof` (instances/arrays/byte-arrays + GC roots) for Eclipse MAT / VisualVM / heapster |
 | `memscope-preload` | **zero-instrumentation injector** (`cdylib`): dyld/`LD_PRELOAD` `malloc` interposition + `SIGUSR1` → `.hprof`, for dumping an unmodified binary's heap |
+| `nodeaddon` | test fixture: a real N-API addon (`cdylib`) instrumented with `memscope::init()`, driven by `node` in the end-to-end tests |
 | `spike` | the original proof that DWARF (not demangling) is what recovers types |
 
 ## Capture modes & overhead

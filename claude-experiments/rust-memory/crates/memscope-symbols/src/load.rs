@@ -190,6 +190,67 @@ pub(crate) fn is_stale(dsym: &Path, exe: &Path) -> bool {
     }
 }
 
+/// An exclusive `flock` on `<exe>.dSYM.lock`, held for as long as it lives.
+///
+/// Advisory and best-effort: if the lock file can't be created (read-only
+/// directory) or `flock` fails, we proceed unlocked rather than refuse to
+/// symbolicate — the same behavior as before this existed. `flock` is per open
+/// file description, so this serializes threads within a process too.
+#[cfg(target_os = "macos")]
+struct DsymLock(Option<std::fs::File>);
+
+// Declared here rather than pulling `libc` into this crate: memscope-symbols is
+// linked into the traced process, and this is two constants and one call.
+#[cfg(target_os = "macos")]
+const LOCK_EX: std::os::raw::c_int = 2;
+#[cfg(target_os = "macos")]
+const LOCK_UN: std::os::raw::c_int = 8;
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+#[cfg(target_os = "macos")]
+impl DsymLock {
+    fn acquire(exe: &Path) -> DsymLock {
+        let mut path = exe.as_os_str().to_os_string();
+        path.push(".dSYM.lock");
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(path))
+        {
+            Ok(f) => f,
+            Err(_) => return DsymLock(None),
+        };
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: plain flock on a file descriptor we own; blocks until acquired.
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX) } != 0 {
+            return DsymLock(None);
+        }
+        DsymLock(Some(file))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DsymLock {
+    fn drop(&mut self) {
+        if let Some(f) = &self.0 {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: releasing our own lock; the fd is still open here.
+            unsafe { flock(f.as_raw_fd(), LOCK_UN) };
+        }
+    }
+}
+
+/// The `<exe>.dSYM` bundle directory itself.
+#[cfg(target_os = "macos")]
+pub(crate) fn dsym_bundle_path(exe: &Path) -> Option<PathBuf> {
+    let name = exe.file_name()?;
+    Some(exe.parent()?.join(format!("{}.dSYM", name.to_string_lossy())))
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn dsym_dwarf_path(exe: &Path) -> Option<PathBuf> {
     let name = exe.file_name()?;
@@ -213,11 +274,36 @@ pub(crate) fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
     if path.exists() && !is_stale(&path, exe) {
         return Ok(path);
     }
-    // Generate it: `dsymutil <exe>` writes `<exe>.dSYM` alongside the binary.
-    // Capture (rather than inherit) its output — its "no debug symbols"
+
+    // Serialize generation across processes. Several processes routinely need the
+    // same dSYM at the same time — a Node app whose workers each dump, a reader
+    // symbolicating while the target dumps — and concurrent `dsymutil` runs write
+    // the same bundle, so one of them reads a half-written `.debug_info` and
+    // resolves NOTHING (empty labels, no error). Whoever gets the lock builds it;
+    // the others wait and then find it already fresh.
+    let _guard = DsymLock::acquire(exe);
+    if path.exists() && !is_stale(&path, exe) {
+        return Ok(path);
+    }
+    // Generate to a private bundle, then move it into place, so `<exe>.dSYM`
+    // NEVER exists in a half-written state. The fast path above only looks at
+    // existence + mtime, so a bundle appearing while dsymutil is still filling it
+    // in would be taken as ready — and a reader that mmaps it then resolves
+    // nothing at all, with no error to explain why. A rename also leaves any
+    // already-mmapped older bundle valid (the mapping holds the old inode).
+    let bundle = dsym_bundle_path(exe)
+        .ok_or_else(|| -> DynErr { "could not derive dSYM path from executable".into() })?;
+    let mut staging = bundle.clone().into_os_string();
+    staging.push(format!(".{}.tmp", std::process::id()));
+    let staging = PathBuf::from(staging);
+    let _ = std::fs::remove_dir_all(&staging);
+
+    // Capture (rather than inherit) dsymutil's output — its "no debug symbols"
     // warning is our Absent verdict, not something to splat on the terminal.
     let status = std::process::Command::new("dsymutil")
         .arg(exe)
+        .arg("-o")
+        .arg(&staging)
         .output()
         .map(|o| o.status)
         .map_err(|e| -> DynErr {
@@ -229,14 +315,32 @@ pub(crate) fn find_or_make_dsym(exe: &Path) -> Result<PathBuf, DynErr> {
             .into()
         })?;
     if !status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
         return Err(format!("dsymutil failed for {}", exe.display()).into());
     }
-    if !path.exists() {
+    let staged_dwarf = staging
+        .join("Contents")
+        .join("Resources")
+        .join("DWARF")
+        .join(exe.file_name().unwrap_or_default());
+    if !staged_dwarf.is_file() {
+        let _ = std::fs::remove_dir_all(&staging);
         return Err(format!(
             "dsymutil ran but no DWARF found at {}. Is the binary built with debuginfo?",
             path.display()
         )
         .into());
+    }
+    // Swap it in. We hold the lock, so no other memscope process is mid-generate;
+    // a reader that catches the gap sees "no dSYM", takes the lock, waits for us,
+    // and then finds the finished one.
+    let _ = std::fs::remove_dir_all(&bundle);
+    std::fs::rename(&staging, &bundle).map_err(|e| -> DynErr {
+        let _ = std::fs::remove_dir_all(&staging);
+        format!("could not move the generated dSYM into {}: {e}", bundle.display()).into()
+    })?;
+    if !path.exists() {
+        return Err(format!("dSYM moved into place but {} is missing", path.display()).into());
     }
     Ok(path)
 }
