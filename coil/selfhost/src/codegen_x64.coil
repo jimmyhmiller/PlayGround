@@ -940,8 +940,15 @@
           0))))
 
 ; copy from a slot to the memory pointed at by `dstreg`.
-(defn emit-copy-to-mem! [(g (ptr Cga)) (dstreg i64) (src i64) (size i64)] (-> i64)
+; The value scratch must not BE `dstreg`: the first load would overwrite the
+; destination pointer and every subsequent store would go through garbage
+; (this produced a literal `mov %rax,(%rax)`). When the caller hands us the
+; primary scratch, move the pointer somewhere safe first.
+(defn emit-copy-to-mem! [(g (ptr Cga)) (dstreg0 i64) (src i64) (size i64)] (-> i64)
   (let [s (field g asm)
+        dstreg (if (icmp-eq dstreg0 (x-scratch0))
+                   (do (x64-mov-rr! (mut s) (x-scratch2) dstreg0) (x-scratch2))
+                   dstreg0)
         (mut k) 0]
     (loop (if (icmp-gt (iadd (load k) 8) size)
               (break)
@@ -966,9 +973,13 @@
           0)
     0))
 
-; copy from the memory pointed at by `srcreg` into a slot.
-(defn emit-copy-from-mem! [(g (ptr Cga)) (dst i64) (srcreg i64) (size i64)] (-> i64)
+; copy from the memory pointed at by `srcreg` into a slot. Same aliasing hazard
+; as emit-copy-to-mem!: the loaded value would clobber the source pointer.
+(defn emit-copy-from-mem! [(g (ptr Cga)) (dst i64) (srcreg0 i64) (size i64)] (-> i64)
   (let [s (field g asm)
+        srcreg (if (icmp-eq srcreg0 (x-scratch0))
+                   (do (x64-mov-rr! (mut s) (x-scratch2) srcreg0) (x-scratch2))
+                   srcreg0)
         (mut k) 0]
     (loop (if (icmp-gt (iadd (load k) 8) size)
               (break)
@@ -2504,7 +2515,7 @@
                        (emit-load-from-mem! g (x-scratch1) (x-scratch0) sz)
                        (emit-store-int! g (x-scratch1) (x-slotbase) slot sz)
                        0)
-                     (emit-copy-from-mem! g slot 9 sz))
+                     (emit-copy-from-mem! g slot (x-scratch0) sz))
                  (mk-aval 1 slot (load pt))))))
     (EStore [p val]
             (let [pav (emit-expr g p)
@@ -2520,7 +2531,7 @@
                       0)
                     (do
                       (av-to-x! g pav (x-scratch0))
-                      (emit-copy-to-mem! g 9 (av-slot! g vav) sz)
+                      (emit-copy-to-mem! g (x-scratch0) (av-slot! g vav) sz)
                       0))
                 ; std-12: store! yields unit (canonical i64 0), matching its checked type.
                 (mk-aval 0 0 (TInt 64 true)))))
