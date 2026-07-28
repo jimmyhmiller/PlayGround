@@ -1,0 +1,703 @@
+; selfhost/src/x64.coil — x86-64 instruction encoder for the native backend.
+; Zero dependencies: encoders compose instruction bytes from the Intel SDM
+; encoding forms and append them to a plain byte buffer.
+;
+; This is the x86-64 sibling of a64.coil. The shape of the module is the same
+; (byte buffer, per-function labels + fixups, one `defn` per instruction form),
+; but x86 is variable-length, so the two differ in a few structural ways:
+;   - encoders APPEND to the buffer (`x64-*!`) instead of returning a 32-bit
+;     word. There is no fixed instruction width to return.
+;   - operand encoding goes through REX + ModRM (+ SIB + displacement), so the
+;     shared helpers `x64-rex!` / `x64-modrm!` / `x64-mem!` do the real work and
+;     each instruction is a thin opcode wrapper around them.
+;   - branch fixups patch a 4-byte rel32 measured from the END of the
+;     instruction, not a word-scaled field.
+;
+; Register numbering: 0..15 = rax rcx rdx rbx rsp rbp rsi rdi r8..r15 (the
+; hardware order — NOT alphabetical). XMM regs are also 0..15 and live in a
+; separate namespace; encoders document which they take.
+(module x64)
+
+(import "alloc.coil" :use *)
+(import "result.coil" :use *)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+(import "arraylist.coil" :use *)
+(import "io.coil" :use *)
+(import "control.coil" :use *)
+(import "match.coil" :use *)
+
+; ============================ byte buffer ====================================
+; Same little-endian helpers as a64.coil. Duplicated rather than imported so
+; the two encoders stay independently buildable (a64.coil is Mach-O/arm64-only
+; and must not be pulled into an ELF/x64 build just for byte pushing).
+
+(defn xb-u8! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (al-push! (mut b) (cast u8 (iand v 255)))
+  0)
+(defn xb-u16! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (xb-u8! (mut b) v)
+  (xb-u8! (mut b) (ishr v 8))
+  0)
+(defn xb-u32! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (xb-u8! (mut b) v)
+  (xb-u8! (mut b) (ishr v 8))
+  (xb-u8! (mut b) (ishr v 16))
+  (xb-u8! (mut b) (ishr v 24))
+  0)
+(defn xb-u64! [(b (mut (ArrayList u8))) (v i64)] (-> i64)
+  (xb-u32! (mut b) v)
+  (xb-u32! (mut b) (ishr v 32))
+  0)
+(defn xb-bytes! [(b (mut (ArrayList u8))) (s (slice u8))] (-> i64)
+  (let [n (slice-len s)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (al-push! (mut b) (slice-get s (load i)))
+                (store! i (iadd (load i) 1))))))
+  0)
+(defn xb-zeros! [(b (mut (ArrayList u8))) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut b) (cast u8 0)) (store! i (iadd (load i) 1))))))
+  0)
+; pad with zero bytes up to the next multiple of `align`.
+(defn xb-align! [(b (mut (ArrayList u8))) (align i64)] (-> i64)
+  (let [len (al-len [u8] (load b))
+        rem (urem len align)]
+    (unless (icmp-eq rem 0) (xb-zeros! (mut b) (isub align rem)))))
+(defn xb-patch-u32! [(b (mut (ArrayList u8))) (off i64) (v i64)] (-> i64)
+  (al-set! (mut b) off (cast u8 (iand v 255)))
+  (al-set! (mut b) (iadd off 1) (cast u8 (iand (ishr v 8) 255)))
+  (al-set! (mut b) (iadd off 2) (cast u8 (iand (ishr v 16) 255)))
+  (al-set! (mut b) (iadd off 3) (cast u8 (iand (ishr v 24) 255)))
+  0)
+(defn xb-patch-u64! [(b (mut (ArrayList u8))) (off i64) (v i64)] (-> i64)
+  (xb-patch-u32! (mut b) off v)
+  (xb-patch-u32! (mut b) (iadd off 4) (ishr v 32)))
+(defn xb-read-u32 [(b (ptr (ArrayList u8))) (off i64)] (-> i64)
+  (ior (ior (cast i64 (al-get [u8] (load b) off))
+            (ishl (cast i64 (al-get [u8] (load b) (iadd off 1))) 8))
+       (ior (ishl (cast i64 (al-get [u8] (load b) (iadd off 2))) 16)
+            (ishl (cast i64 (al-get [u8] (load b) (iadd off 3))) 24))))
+
+; pointer to element i of an ArrayList reached by pointer (live, mutable).
+; (named xal-at to avoid colliding with a64.coil's al-at under :use *)
+(defn xal-at [T] [(p (ptr (ArrayList T))) (i i64)] (-> (ptr T))
+  (index (load (field p data)) i))
+
+; ============================ register names =================================
+; Hardware encoding order. Named accessors keep call sites readable and stop
+; the classic "rsp is 4, not 3" transcription bug from spreading.
+(defn x64-rax [] (-> i64) 0)
+(defn x64-rcx [] (-> i64) 1)
+(defn x64-rdx [] (-> i64) 2)
+(defn x64-rbx [] (-> i64) 3)
+(defn x64-rsp [] (-> i64) 4)
+(defn x64-rbp [] (-> i64) 5)
+(defn x64-rsi [] (-> i64) 6)
+(defn x64-rdi [] (-> i64) 7)
+(defn x64-r8 [] (-> i64) 8)
+(defn x64-r9 [] (-> i64) 9)
+(defn x64-r10 [] (-> i64) 10)
+(defn x64-r11 [] (-> i64) 11)
+(defn x64-r12 [] (-> i64) 12)
+(defn x64-r13 [] (-> i64) 13)
+(defn x64-r14 [] (-> i64) 14)
+(defn x64-r15 [] (-> i64) 15)
+
+; ============================ assembler state ================================
+; Labels + fixups are per-function; the code buffer is program-wide.
+; fixup kinds: 0 = rel32 (jmp/jcc/call), 1 = rel8 (short jmp — unused for now,
+; reserved so the kind field never has to be widened later).
+(defstruct X64Fixup [(off i64) (label i64) (kind i64) (end i64)])
+(defstruct XAsm
+  [(buf (ArrayList u8))  ; the whole .text section
+   (labels (ArrayList i64))  ; label id -> offset (-1 = unbound)
+   (fixups (ArrayList X64Fixup))
+   (a (ptr Allocator))])
+
+(defn xasm-new [(a (ptr Allocator))] (-> XAsm)
+  (let [p (alloc-stack XAsm)]
+    (store! (field p buf) (al-new [u8] a))
+    (store! (field p labels) (al-new [i64] a))
+    (store! (field p fixups) (al-new [X64Fixup] a))
+    (store! (field p a) a)
+    (load p)))
+
+(defn x64-off [(s (mut XAsm))] (-> i64)
+  (al-len [u8] (load (field s buf))))
+
+(defn x64-b! [(s (mut XAsm)) (v i64)] (-> i64)
+  (xb-u8! (mut (field s buf)) v))
+(defn x64-w16! [(s (mut XAsm)) (v i64)] (-> i64)
+  (xb-u16! (mut (field s buf)) v))
+(defn x64-w32! [(s (mut XAsm)) (v i64)] (-> i64)
+  (xb-u32! (mut (field s buf)) v))
+(defn x64-w64! [(s (mut XAsm)) (v i64)] (-> i64)
+  (xb-u64! (mut (field s buf)) v))
+
+(defn x64-new-label [(s (mut XAsm))] (-> i64)
+  (let [id (al-len [i64] (load (field s labels)))]
+    (al-push! (mut (field s labels)) -1)
+    id))
+(defn x64-bind-label! [(s (mut XAsm)) (id i64)] (-> i64)
+  (al-set! (mut (field s labels)) id (x64-off (mut s))))
+
+; Record a rel32 fixup. `off` is where the 4 displacement bytes start; `end` is
+; the offset one past the whole instruction (rel32 is measured from there).
+; Callers emit the placeholder bytes themselves so the instruction length is
+; whatever the encoder actually produced.
+(defn x64-add-fixup! [(s (mut XAsm)) (off i64) (label i64) (kind i64) (end i64)] (-> i64)
+  (let [f (alloc-stack X64Fixup)]
+    (store! (field f off) off)
+    (store! (field f label) label)
+    (store! (field f kind) kind)
+    (store! (field f end) end)
+    (al-push! (mut (field s fixups)) (load f))))
+
+; Patch every recorded fixup; called once per function after its body is
+; emitted. Unbound labels are a compiler bug (hard error).
+(defn x64-resolve-fixups! [(s (mut XAsm))] (-> i64)
+  (let [n (al-len [X64Fixup] (load (field s fixups)))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [f (al-get [X64Fixup] (load (field s fixups)) (load i))
+                      fp (alloc-stack X64Fixup)]
+                  (store! fp f)
+                  (let [off (load (field fp off))
+                        end (load (field fp end))
+                        tgt (al-get [i64] (load (field s labels)) (load (field fp label)))]
+                    (when (icmp-lt tgt 0) (print-str (stderr) "x64: unbound label in fixup resolution\n") (abort) 0)
+                    ; rel32/rel8 are both measured from the end of the instruction.
+                    (let [delta (isub tgt end)]
+                      (if (icmp-eq (load (field fp kind)) 0)
+                          (xb-patch-u32! (mut (field s buf)) off delta)
+                          (do
+                            (when (or (icmp-gt delta 127) (icmp-lt delta -128))
+                              (print-str (stderr) "x64: rel8 fixup out of range\n") (abort) 0)
+                            (al-set! (mut (field s buf)) off (cast u8 (iand delta 255)))
+                            0)))))
+                (store! i (iadd (load i) 1))))))
+  ; clear fixups + labels for the next function
+  (store! (field (field s fixups) len) 0)
+  (store! (field (field s labels) len) 0)
+  0)
+
+; ============================ REX / ModRM / SIB ==============================
+; REX = 0100 W R X B. W=1 selects 64-bit operand size; R extends the ModRM.reg
+; field; X extends SIB.index; B extends ModRM.rm (or SIB.base, or the opcode
+; register). Emitted only when some field needs it — except for byte-register
+; operations, where a bare REX (0x40) is what distinguishes sil/dil/spl/bpl
+; from ah/ch/dh/bh; `x64-rex-byte!` handles that case.
+(defn x64-rex! [(s (mut XAsm)) (w i64) (r i64) (x i64) (b i64)] (-> i64)
+  (let [v (ior (ior (ishl (iand w 1) 3) (ishl (iand r 1) 2))
+               (ior (ishl (iand x 1) 1) (iand b 1)))]
+    (unless (icmp-eq v 0) (x64-b! (mut s) (ior 64 v)))
+    0))
+; REX for 64-bit ops: W is always set, so the prefix is unconditional.
+(defn x64-rexw! [(s (mut XAsm)) (r i64) (x i64) (b i64)] (-> i64)
+  (x64-b! (mut s) (ior 72 (ior (ior (ishl (iand (ishr r 3) 1) 2) (ishl (iand (ishr x 3) 1) 1))
+                               (iand (ishr b 3) 1)))))
+; REX for 8-bit register ops. Two separate reasons to emit a prefix:
+;   - REX.R/REX.B, when either operand is r8..r15 (the usual extension bits);
+;   - a BARE REX (0x40) when the BYTE-REGISTER operand is rsp/rbp/rsi/rdi
+;     (4..7), because without it those encodings mean ah/ch/dh/bh instead of
+;     spl/bpl/sil/dil.
+; Only the register accessed AS A BYTE triggers the bare-REX rule, and it is
+; not always the same operand: for `movb %sil, (%rbp)` it is the reg field, for
+; `setl %sil` it is the rm field. So the byte operand is named explicitly by
+; `breg` rather than inferred from a position. A memory BASE never counts —
+; `movb %al, -1(%rbp)` has base rbp=5 but needs no prefix, because rbp is a
+; full 64-bit address register there, not a byte operand.
+(defn x64-rex-byte-of! [(s (mut XAsm)) (r i64) (b i64) (breg i64)] (-> i64)
+  (let [v (ior (ishl (iand (ishr r 3) 1) 2) (iand (ishr b 3) 1))
+        needs (and (icmp-ge (iand breg 15) 4) (icmp-le (iand breg 15) 7))]
+    (if (or (icmp-ne v 0) needs)
+        (x64-b! (mut s) (ior 64 v))
+        0)))
+; the common case: the reg-field operand is the byte register.
+(defn x64-rex-byte! [(s (mut XAsm)) (r i64) (b i64)] (-> i64)
+  (x64-rex-byte-of! (mut s) r b r))
+
+; ModRM byte: mod(2) reg(3) rm(3). Only the low 3 bits of reg/rm land here;
+; bit 3 of each travels in REX.
+(defn x64-modrm! [(s (mut XAsm)) (md i64) (reg i64) (rm i64)] (-> i64)
+  (x64-b! (mut s) (ior (ishl (iand md 3) 6) (ior (ishl (iand reg 7) 3) (iand rm 7)))))
+(defn x64-sib! [(s (mut XAsm)) (scale i64) (index i64) (base i64)] (-> i64)
+  (x64-b! (mut s) (ior (ishl (iand scale 3) 6) (ior (ishl (iand index 7) 3) (iand base 7)))))
+
+; Emit the ModRM (+ SIB + disp) for a [base + disp] memory operand with `reg`
+; in the reg field. This is the single chokepoint for x86's three memory
+; irregularities, each of which is a silent-wrong-code bug if missed:
+;   - rsp/r12 (rm&7 == 4) always need a SIB byte to express "no index".
+;   - rbp/r13 (rm&7 == 5) cannot use mod=00 (that encoding means RIP-relative),
+;     so they need an explicit disp8 of 0.
+;   - disp fits in a signed byte -> mod=01, else mod=10 with a disp32.
+(defn x64-mem! [(s (mut XAsm)) (reg i64) (base i64) (disp i64)] (-> i64)
+  (let [b3 (iand base 7)
+        needsib (icmp-eq b3 4)
+        ; rbp/r13 with disp 0 must still carry a disp8
+        md (cond (and (icmp-eq disp 0) (icmp-ne b3 5)) 0
+                 (and (icmp-le disp 127) (icmp-ge disp -128)) 1
+                 :else 2)]
+    (x64-modrm! (mut s) md reg base)
+    (when needsib (x64-sib! (mut s) 0 4 base))
+    (cond (icmp-eq md 1) (x64-b! (mut s) (iand disp 255))
+          (icmp-eq md 2) (x64-w32! (mut s) disp)
+          :else 0)))
+
+; RIP-relative memory operand: mod=00, rm=101, then a rel32 displacement.
+; Used for globals/constants, where the displacement is filled in by a
+; relocation rather than by us.
+(defn x64-mem-rip! [(s (mut XAsm)) (reg i64) (disp i64)] (-> i64)
+  (x64-modrm! (mut s) 0 reg 5)
+  (x64-w32! (mut s) disp))
+
+; ============================ moves ==========================================
+; MOV r64, r/m64 (8B /r) and MOV r/m64, r64 (89 /r).
+(defn x64-mov-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) src 0 dst)
+  (x64-b! (mut s) 137)
+  (x64-modrm! (mut s) 3 src dst))
+; mov dst, [base+disp]  (8B /r)
+(defn x64-mov-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 139)
+  (x64-mem! (mut s) dst base disp))
+; mov [base+disp], src  (89 /r)
+(defn x64-mov-mr! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) src 0 base)
+  (x64-b! (mut s) 137)
+  (x64-mem! (mut s) src base disp))
+; movabs dst, imm64 (REX.W B8+rd io) — always 10 bytes, always correct.
+(defn x64-mov-imm64! [(s (mut XAsm)) (dst i64) (v i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) (iadd 184 (iand dst 7)))
+  (x64-w64! (mut s) v))
+; Materialize a constant, picking the shortest correct form:
+;   0            -> xor r32, r32   (2-3 bytes, and it is the idiomatic zero)
+;   fits in u32  -> mov r32, imm32 (5-6 bytes; the 32-bit write zero-extends)
+;   fits in i32  -> mov r/m64, imm32 sign-extended (7 bytes)
+;   otherwise    -> movabs imm64   (10 bytes)
+(defn x64-mov-imm! [(s (mut XAsm)) (dst i64) (v i64)] (-> i64)
+  (cond (icmp-eq v 0)
+          (do (x64-rex! (mut s) 0 (ishr dst 3) 0 (ishr dst 3))
+              (x64-b! (mut s) 49)
+              (x64-modrm! (mut s) 3 dst dst))
+        (and (icmp-ge v 0) (icmp-le v 4294967295))
+          (do (x64-rex! (mut s) 0 0 0 (ishr dst 3))
+              (x64-b! (mut s) (iadd 184 (iand dst 7)))
+              (x64-w32! (mut s) v))
+        (and (icmp-ge v -2147483648) (icmp-le v 2147483647))
+          (do (x64-rexw! (mut s) 0 0 dst)
+              (x64-b! (mut s) 199)
+              (x64-modrm! (mut s) 3 0 dst)
+              (x64-w32! (mut s) v))
+        :else (x64-mov-imm64! (mut s) dst v)))
+
+; ---- sized loads/stores (narrow widths) ----
+; movzx dst, byte [base+disp]   (0F B6 /r)
+(defn x64-movzx8-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 182)
+  (x64-mem! (mut s) dst base disp))
+; movsx dst, byte [base+disp]   (0F BE /r)
+(defn x64-movsx8-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 190)
+  (x64-mem! (mut s) dst base disp))
+; movzx dst, word [base+disp]   (0F B7 /r)
+(defn x64-movzx16-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 183)
+  (x64-mem! (mut s) dst base disp))
+; movsx dst, word [base+disp]   (0F BF /r)
+(defn x64-movsx16-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 191)
+  (x64-mem! (mut s) dst base disp))
+; mov dst32, [base+disp] — zero-extends to 64 for free (8B /r, no REX.W)
+(defn x64-mov32-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rex! (mut s) 0 (ishr dst 3) 0 (ishr base 3))
+  (x64-b! (mut s) 139)
+  (x64-mem! (mut s) dst base disp))
+; movsxd dst, dword [base+disp]  (REX.W 63 /r)
+(defn x64-movsx32-rm! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 99)
+  (x64-mem! (mut s) dst base disp))
+; mov byte [base+disp], src8   (88 /r)
+(defn x64-mov8-mr! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-rex-byte! (mut s) src base)
+  (x64-b! (mut s) 136)
+  (x64-mem! (mut s) src base disp))
+; mov word [base+disp], src16   (66 89 /r)
+(defn x64-mov16-mr! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-b! (mut s) 102)
+  (x64-rex! (mut s) 0 (ishr src 3) 0 (ishr base 3))
+  (x64-b! (mut s) 137)
+  (x64-mem! (mut s) src base disp))
+; mov dword [base+disp], src32   (89 /r)
+(defn x64-mov32-mr! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-rex! (mut s) 0 (ishr src 3) 0 (ishr base 3))
+  (x64-b! (mut s) 137)
+  (x64-mem! (mut s) src base disp))
+
+; lea dst, [base+disp]  (REX.W 8D /r)
+(defn x64-lea! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 141)
+  (x64-mem! (mut s) dst base disp))
+; lea dst, [rip+disp32] — the displacement is normally patched by a reloc.
+(defn x64-lea-rip! [(s (mut XAsm)) (dst i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 0)
+  (x64-b! (mut s) 141)
+  (x64-mem-rip! (mut s) dst disp))
+
+; ============================ ALU ============================================
+; The classic /r group. `op` selects the operation by its opcode base:
+;   add 01, or 09, and 21, sub 29, xor 31, cmp 39   (all "r/m64, r64" forms)
+(defn x64-alu-rr! [(s (mut XAsm)) (op i64) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) src 0 dst)
+  (x64-b! (mut s) op)
+  (x64-modrm! (mut s) 3 src dst))
+(defn x64-add-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 1 dst src))
+(defn x64-or-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 9 dst src))
+(defn x64-and-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 33 dst src))
+(defn x64-sub-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 41 dst src))
+(defn x64-xor-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 49 dst src))
+(defn x64-cmp-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64) (x64-alu-rr! (mut s) 57 dst src))
+
+; ALU with an immediate. Three encodings exist and we pick the shortest that
+; fits, matching what an assembler emits (these are the hottest instructions in
+; every prologue/epilogue, so the 3 saved bytes per site are worth the branch):
+;   imm8 sign-extended : 83 /n ib      (4 bytes) — any imm in -128..127
+;   rax special-case   : 2D/25/... id  (6 bytes) — no ModRM for the accumulator
+;   general imm32      : 81 /n id      (7 bytes)
+; `n` selects the operation (0 add, 1 or, 4 and, 5 sub, 6 xor, 7 cmp); `axop` is
+; the accumulator-form opcode for that operation. Larger immediates must be
+; materialized into a scratch register by the caller.
+(defn x64-alu-ri-ax [(n i64)] (-> i64)
+  ; the A-register short forms: add 05, or 0D, and 25, sub 2D, xor 35, cmp 3D
+  (cond (icmp-eq n 0) 5
+        (icmp-eq n 1) 13
+        (icmp-eq n 4) 37
+        (icmp-eq n 5) 45
+        (icmp-eq n 6) 53
+        (icmp-eq n 7) 61
+        :else -1))
+(defn x64-alu-ri! [(s (mut XAsm)) (n i64) (dst i64) (imm i64)] (-> i64)
+  (when (or (icmp-gt imm 2147483647) (icmp-lt imm -2147483648))
+    (print-str (stderr) "x64: ALU immediate does not fit in imm32\n") (abort) 0)
+  (cond
+    ; imm8 form — by far the common case (frame sizes, small comparisons)
+    (and (icmp-le imm 127) (icmp-ge imm -128))
+      (do (x64-rexw! (mut s) 0 0 dst)
+          (x64-b! (mut s) 131)
+          (x64-modrm! (mut s) 3 n dst)
+          (x64-b! (mut s) (iand imm 255)))
+    ; rax/eax accumulator form: one byte shorter than the general form
+    (and (icmp-eq dst 0) (icmp-ge (x64-alu-ri-ax n) 0))
+      (do (x64-rexw! (mut s) 0 0 0)
+          (x64-b! (mut s) (x64-alu-ri-ax n))
+          (x64-w32! (mut s) imm))
+    :else
+      (do (x64-rexw! (mut s) 0 0 dst)
+          (x64-b! (mut s) 129)
+          (x64-modrm! (mut s) 3 n dst)
+          (x64-w32! (mut s) imm))))
+(defn x64-add-ri! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-alu-ri! (mut s) 0 dst imm))
+(defn x64-and-ri! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-alu-ri! (mut s) 4 dst imm))
+(defn x64-sub-ri! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-alu-ri! (mut s) 5 dst imm))
+(defn x64-cmp-ri! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-alu-ri! (mut s) 7 dst imm))
+
+; neg/not: F7 /3 and F7 /2
+(defn x64-neg! [(s (mut XAsm)) (dst i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) 247)
+  (x64-modrm! (mut s) 3 3 dst))
+(defn x64-not! [(s (mut XAsm)) (dst i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) 247)
+  (x64-modrm! (mut s) 3 2 dst))
+
+; imul dst, src  (0F AF /r) — the two-operand signed multiply. The low 64 bits
+; are identical for signed and unsigned, so this serves both.
+(defn x64-imul-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 175)
+  (x64-modrm! (mut s) 3 dst src))
+
+; cqo (REX.W 99): sign-extend rax into rdx:rax, required before idiv.
+(defn x64-cqo! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 72)
+  (x64-b! (mut s) 153))
+; idiv src (REX.W F7 /7): rdx:rax / src -> quotient rax, remainder rdx.
+(defn x64-idiv! [(s (mut XAsm)) (src i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 src)
+  (x64-b! (mut s) 247)
+  (x64-modrm! (mut s) 3 7 src))
+; div src (REX.W F7 /6): unsigned; rdx must be zeroed first.
+(defn x64-div! [(s (mut XAsm)) (src i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 src)
+  (x64-b! (mut s) 247)
+  (x64-modrm! (mut s) 3 6 src))
+
+; ---- shifts ----
+; Variable shifts take their count in cl only (D3 /n): 4 shl, 5 shr, 7 sar.
+(defn x64-shift-cl! [(s (mut XAsm)) (n i64) (dst i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) 211)
+  (x64-modrm! (mut s) 3 n dst))
+(defn x64-shl-cl! [(s (mut XAsm)) (dst i64)] (-> i64) (x64-shift-cl! (mut s) 4 dst))
+(defn x64-shr-cl! [(s (mut XAsm)) (dst i64)] (-> i64) (x64-shift-cl! (mut s) 5 dst))
+(defn x64-sar-cl! [(s (mut XAsm)) (dst i64)] (-> i64) (x64-shift-cl! (mut s) 7 dst))
+; Immediate shifts: C1 /n ib
+(defn x64-shift-imm! [(s (mut XAsm)) (n i64) (dst i64) (imm i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) 193)
+  (x64-modrm! (mut s) 3 n dst)
+  (x64-b! (mut s) (iand imm 63)))
+(defn x64-shl-imm! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-shift-imm! (mut s) 4 dst imm))
+(defn x64-shr-imm! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-shift-imm! (mut s) 5 dst imm))
+(defn x64-sar-imm! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64) (x64-shift-imm! (mut s) 7 dst imm))
+
+; ---- setcc / cmov ----
+; Condition codes (the standard x86 tttn encoding).
+(defn x64-cc-e [] (-> i64) 4)
+(defn x64-cc-ne [] (-> i64) 5)
+(defn x64-cc-l [] (-> i64) 12)
+(defn x64-cc-ge [] (-> i64) 13)
+(defn x64-cc-le [] (-> i64) 14)
+(defn x64-cc-g [] (-> i64) 15)
+(defn x64-cc-b [] (-> i64) 2)
+(defn x64-cc-ae [] (-> i64) 3)
+(defn x64-cc-be [] (-> i64) 6)
+(defn x64-cc-a [] (-> i64) 7)
+(defn x64-cc-p [] (-> i64) 10)
+(defn x64-cc-np [] (-> i64) 11)
+; invert a condition code (flip the low bit) — mirrors a64's cond inversion.
+(defn x64-cc-inv [(c i64)] (-> i64)
+  (ixor c 1))
+
+; setcc dst8 (0F 90+cc /0). Writes only the low byte, so callers that want a
+; 0/1 i64 must zero-extend after — `x64-setcc-bool!` does both.
+(defn x64-setcc! [(s (mut XAsm)) (cc i64) (dst i64)] (-> i64)
+  ; setcc's byte operand is the rm field, not the reg field.
+  (x64-rex-byte-of! (mut s) 0 dst dst)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) (iadd 144 cc))
+  (x64-modrm! (mut s) 3 0 dst))
+; movzx dst, dst8 (0F B6 /r) — widen the setcc result to a full 0/1 i64.
+(defn x64-movzx8-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 182)
+  (x64-modrm! (mut s) 3 dst src))
+(defn x64-setcc-bool! [(s (mut XAsm)) (cc i64) (dst i64)] (-> i64)
+  (x64-setcc! (mut s) cc dst)
+  (x64-movzx8-rr! (mut s) dst dst))
+; cmovcc dst, src (0F 40+cc /r)
+(defn x64-cmovcc! [(s (mut XAsm)) (cc i64) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) (iadd 64 cc))
+  (x64-modrm! (mut s) 3 dst src))
+
+; ---- test ----
+; test dst, src (REX.W 85 /r) — the cheap "is it zero" for branches.
+(defn x64-test-rr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) src 0 dst)
+  (x64-b! (mut s) 133)
+  (x64-modrm! (mut s) 3 src dst))
+
+; ============================ control flow ===================================
+; push/pop (50+rd / 58+rd) — REX only for r8..r15, and never REX.W (push is
+; already 64-bit in long mode).
+(defn x64-push! [(s (mut XAsm)) (r i64)] (-> i64)
+  (x64-rex! (mut s) 0 0 0 (ishr r 3))
+  (x64-b! (mut s) (iadd 80 (iand r 7))))
+(defn x64-pop! [(s (mut XAsm)) (r i64)] (-> i64)
+  (x64-rex! (mut s) 0 0 0 (ishr r 3))
+  (x64-b! (mut s) (iadd 88 (iand r 7))))
+(defn x64-ret! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 195))
+(defn x64-leave! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 201))
+(defn x64-ud2! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 11))
+(defn x64-nop! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 144))
+
+; jmp rel32 (E9 cd) to a label.
+(defn x64-jmp-label! [(s (mut XAsm)) (label i64)] (-> i64)
+  (x64-b! (mut s) 233)
+  (let [off (x64-off (mut s))]
+    (x64-w32! (mut s) 0)
+    (x64-add-fixup! (mut s) off label 0 (x64-off (mut s)))))
+; jcc rel32 (0F 80+cc cd) to a label.
+(defn x64-jcc-label! [(s (mut XAsm)) (cc i64) (label i64)] (-> i64)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) (iadd 128 cc))
+  (let [off (x64-off (mut s))]
+    (x64-w32! (mut s) 0)
+    (x64-add-fixup! (mut s) off label 0 (x64-off (mut s)))))
+; jmp/call through a register (FF /4, FF /2)
+(defn x64-jmp-r! [(s (mut XAsm)) (r i64)] (-> i64)
+  (x64-rex! (mut s) 0 0 0 (ishr r 3))
+  (x64-b! (mut s) 255)
+  (x64-modrm! (mut s) 3 4 r))
+(defn x64-call-r! [(s (mut XAsm)) (r i64)] (-> i64)
+  (x64-rex! (mut s) 0 0 0 (ishr r 3))
+  (x64-b! (mut s) 255)
+  (x64-modrm! (mut s) 3 2 r))
+; call rel32 (E8 cd) — the displacement is filled in by a PLT32 relocation, so
+; this returns the offset of the 4 displacement bytes for the caller to relocate.
+(defn x64-call-rel32! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 232)
+  (let [off (x64-off (mut s))]
+    (x64-w32! (mut s) 0)
+    off))
+
+; ============================ SSE (floats) ===================================
+; Scalar float ops carry a mandatory prefix that selects the width: F2 for
+; double (sd), F3 for single (ss). The prefix comes BEFORE any REX.
+(defn x64-sse-prefix! [(s (mut XAsm)) (dbl bool)] (-> i64)
+  (x64-b! (mut s) (if dbl 242 243)))
+; REX for SSE ops: emitted only when an xmm8..15 is involved.
+(defn x64-sse-rex! [(s (mut XAsm)) (r i64) (b i64)] (-> i64)
+  (x64-rex! (mut s) 0 (ishr r 3) 0 (ishr b 3)))
+
+; movsd/movss xmm_dst, xmm_src   (F2/F3 0F 10 /r)
+(defn x64-movs-rr! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-sse-rex! (mut s) dst src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 16)
+  (x64-modrm! (mut s) 3 dst src))
+; movsd/movss xmm_dst, [base+disp]  (F2/F3 0F 10 /r)
+(defn x64-movs-rm! [(s (mut XAsm)) (dbl bool) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-sse-rex! (mut s) dst base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 16)
+  (x64-mem! (mut s) dst base disp))
+; movsd/movss [base+disp], xmm_src  (F2/F3 0F 11 /r)
+(defn x64-movs-mr! [(s (mut XAsm)) (dbl bool) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-sse-rex! (mut s) src base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 17)
+  (x64-mem! (mut s) src base disp))
+
+; arithmetic: add 58, sub 5C, mul 59, div 5E  (F2/F3 0F xx /r)
+(defn x64-sse-arith! [(s (mut XAsm)) (dbl bool) (op i64) (dst i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-sse-rex! (mut s) dst src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) op)
+  (x64-modrm! (mut s) 3 dst src))
+(defn x64-adds! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64) (x64-sse-arith! (mut s) dbl 88 dst src))
+(defn x64-muls! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64) (x64-sse-arith! (mut s) dbl 89 dst src))
+(defn x64-subs! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64) (x64-sse-arith! (mut s) dbl 92 dst src))
+(defn x64-divs! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64) (x64-sse-arith! (mut s) dbl 94 dst src))
+
+; ucomisd/ucomiss xmm1, xmm2 — sets ZF/PF/CF. NOTE the prefix rule inverts
+; here: 66 for double, NO prefix for single (0F 2E /r).
+(defn x64-ucomis! [(s (mut XAsm)) (dbl bool) (a i64) (b i64)] (-> i64)
+  (when dbl (x64-b! (mut s) 102) 0)
+  (x64-sse-rex! (mut s) a b)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 46)
+  (x64-modrm! (mut s) 3 a b))
+
+; conversions
+; cvtsi2sd/ss xmm, r64   (F2/F3 REX.W 0F 2A /r)
+(defn x64-cvtsi2s! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 42)
+  (x64-modrm! (mut s) 3 dst src))
+; cvttsd2si/ss r64, xmm  (F2/F3 REX.W 0F 2C /r) — truncating, which is what
+; every language-level float->int cast means.
+(defn x64-cvtts2si! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 44)
+  (x64-modrm! (mut s) 3 dst src))
+; cvtss2sd (F3 0F 5A) / cvtsd2ss (F2 0F 5A): float width conversion. The
+; prefix names the SOURCE width, so `dbl` here means "source is double".
+(defn x64-cvts2s! [(s (mut XAsm)) (dbl bool) (dst i64) (src i64)] (-> i64)
+  (x64-sse-prefix! (mut s) dbl)
+  (x64-sse-rex! (mut s) dst src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 90)
+  (x64-modrm! (mut s) 3 dst src))
+
+; movq between a GPR and an xmm — the bit-pattern moves used for float
+; bitcasts and for stuffing floats into integer registers.
+; movq xmm, r64  (66 REX.W 0F 6E /r)
+(defn x64-movq-xr! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-b! (mut s) 102)
+  (x64-rexw! (mut s) dst 0 src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 110)
+  (x64-modrm! (mut s) 3 dst src))
+; movq r64, xmm  (66 REX.W 0F 7E /r)
+(defn x64-movq-rx! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-b! (mut s) 102)
+  (x64-rexw! (mut s) src 0 dst)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 126)
+  (x64-modrm! (mut s) 3 src dst))
+; xorps xmm, xmm (0F 57 /r) — the standard "zero a float register".
+(defn x64-xorps! [(s (mut XAsm)) (dst i64) (src i64)] (-> i64)
+  (x64-sse-rex! (mut s) dst src)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 87)
+  (x64-modrm! (mut s) 3 dst src))
+
+; ============================ atomics ========================================
+; The LOCK prefix; the following instruction becomes atomic RMW.
+(defn x64-lock! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 240))
+; lock xadd [base+disp], src  (F0 REX.W 0F C1 /r) — returns the OLD value in
+; src, which is exactly atomicrmw add's semantics.
+(defn x64-lock-xadd! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-lock! (mut s))
+  (x64-rexw! (mut s) src 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 193)
+  (x64-mem! (mut s) src base disp))
+; xchg [base+disp], src (REX.W 87 /r) — implicitly locked, no prefix needed.
+(defn x64-xchg-mr! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-rexw! (mut s) src 0 base)
+  (x64-b! (mut s) 135)
+  (x64-mem! (mut s) src base disp))
+; lock cmpxchg [base+disp], src (F0 REX.W 0F B1 /r) — compares against rax,
+; and leaves the old value in rax either way.
+(defn x64-lock-cmpxchg! [(s (mut XAsm)) (base i64) (disp i64) (src i64)] (-> i64)
+  (x64-lock! (mut s))
+  (x64-rexw! (mut s) src 0 base)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 177)
+  (x64-mem! (mut s) src base disp))
+; mfence (0F AE F0) — seq_cst store fence.
+(defn x64-mfence! [(s (mut XAsm))] (-> i64)
+  (x64-b! (mut s) 15)
+  (x64-b! (mut s) 174)
+  (x64-b! (mut s) 240))
