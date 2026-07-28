@@ -1188,3 +1188,1135 @@
         (icmp-eq i 4) 8   ; r8
         (icmp-eq i 5) 9   ; r9
         :else (cgx-fail "x-argreg: more than 6 integer argument registers")))
+
+; ============================ calls ==========================================
+; One unified SysV AMD64 call emitter for direct calls (symidx >= 0) and
+; indirect calls through a function-pointer AVal (symidx < 0).
+; `params` = the callee's declared param types (named args); args beyond that
+; are variadic.
+;
+; The SysV sequence, in the order it must happen:
+;   1. classify every argument, assigning integer regs (rdi rsi rdx rcx r8 r9),
+;      SSE regs (xmm0-7), or stack slots. An argument that does not fit in the
+;      remaining registers goes on the stack — and once one does, ALL later
+;      arguments of that class do too.
+;   2. write stack arguments to [rsp + n] (the outgoing area rbx sits above).
+;   3. load register arguments LAST, so nothing we emit while computing an
+;      argument can clobber a register already loaded.
+;   4. for a variadic callee, set al = the number of SSE registers used. libc
+;      varargs functions read it; getting it wrong corrupts printf("%f").
+;   5. call; then spill the return value into a fresh slot.
+(defn emit-call! [(g (ptr Cga))
+                  (symidx i64)
+                  (fpav (ptr AVal))
+                  (params (ptr (ArrayList Type)))
+                  (variadic bool)
+                  (ret Type)
+                  (avs (ptr (ArrayList AVal)))] (-> AVal)
+  (let [s (field g asm)
+        a (load (field g a))
+        nargs (al-len [AVal] (load avs))
+        nparams (al-len [Type] (load params))
+        retp (alloc-stack Type)]
+    (store! retp ret)
+    (let [retvoid (match-else ret (TVoid [] true) (_ false))
+          retinfo (if retvoid (mk-abi-scalar) (g-abi-info g retp))
+          resslot (if retvoid -1 (slot-for-ty! g retp))
+          ; kinds: 0 int-reg, 1 sse-reg, 2 two-reg pair, 3 stack, 4 indirect(memory)
+          (mut pkind) (al-new [i64] a)
+          (mut pr0) (al-new [i64] a)   ; first register (or stack offset)
+          (mut pr1) (al-new [i64] a)   ; second register for pairs
+          (mut pslot) (al-new [i64] a)
+          (mut gp) 0
+          (mut fp) 0
+          (mut stk) 0]
+      ; a >16B return is passed as a hidden first INTEGER argument (rdi)
+      (when (icmp-eq (abi-cls retinfo) 4) (store! gp 1) 0)
+      ; ---- 1. classify
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nargs)
+                  (break)
+                  (do
+                    (let [av (al-get [AVal] (load avs) (load i))
+                          t (alloc-stack Type)]
+                      (store! t (av-ty av))
+                      (let [info (g-abi-info g t)
+                            cls (abi-cls info)
+                            slot (av-slot! g av)]
+                        (al-push! (mut pslot) slot)
+                        (cond
+                          ; ---- scalar float
+                          (icmp-eq cls 1)
+                            (if (icmp-lt (load fp) 8)
+                                (do (al-push! (mut pkind) 1) (al-push! (mut pr0) (load fp))
+                                    (al-push! (mut pr1) 0)
+                                    (store! fp (iadd (load fp) 1)) 0)
+                                (do (al-push! (mut pkind) 3) (al-push! (mut pr0) (load stk))
+                                    (al-push! (mut pr1) 0)
+                                    (store! stk (iadd (load stk) 8)) 0))
+                          ; ---- scalar int/ptr
+                          (icmp-eq cls 0)
+                            (if (icmp-lt (load gp) 6)
+                                (do (al-push! (mut pkind) 0) (al-push! (mut pr0) (load gp))
+                                    (al-push! (mut pr1) 0)
+                                    (store! gp (iadd (load gp) 1)) 0)
+                                (do (al-push! (mut pkind) 3) (al-push! (mut pr0) (load stk))
+                                    (al-push! (mut pr1) 0)
+                                    (store! stk (iadd (load stk) 8)) 0))
+                          ; ---- aggregate <= 8B: one register, class from eb0
+                          (icmp-eq cls 2)
+                            (let [sse (icmp-eq (abi-eb0 info) 2)]
+                              (if (if sse (icmp-lt (load fp) 8) (icmp-lt (load gp) 6))
+                                  (do (al-push! (mut pkind) (if sse 1 0))
+                                      (al-push! (mut pr0) (if sse (load fp) (load gp)))
+                                      (al-push! (mut pr1) 0)
+                                      (if sse (store! fp (iadd (load fp) 1)) (store! gp (iadd (load gp) 1)))
+                                      0)
+                                  (do (al-push! (mut pkind) 3) (al-push! (mut pr0) (load stk))
+                                      (al-push! (mut pr1) 0)
+                                      (store! stk (iadd (load stk) 8)) 0)))
+                          ; ---- aggregate <= 16B: two registers, one per eightbyte
+                          (icmp-eq cls 3)
+                            (let [s0 (icmp-eq (abi-eb0 info) 2)
+                                  s1 (icmp-eq (abi-eb1 info) 2)
+                                  needg (iadd (if s0 0 1) (if s1 0 1))
+                                  needf (iadd (if s0 1 0) (if s1 1 0))]
+                              ; both eightbytes must fit, or the whole thing goes on the stack
+                              (if (and (icmp-le (iadd (load gp) needg) 6)
+                                       (icmp-le (iadd (load fp) needf) 8))
+                                  (let [r0 (if s0 (load fp) (load gp))]
+                                    (if s0 (store! fp (iadd (load fp) 1)) (store! gp (iadd (load gp) 1)))
+                                    (let [r1 (if s1 (load fp) (load gp))]
+                                      (if s1 (store! fp (iadd (load fp) 1)) (store! gp (iadd (load gp) 1)))
+                                      ; encode the two classes alongside the two registers:
+                                      ; kind 2 means "pair"; the SSE-ness rides in pr0/pr1's
+                                      ; high bit so the emit pass knows which file to use.
+                                      (al-push! (mut pkind) 2)
+                                      (al-push! (mut pr0) (ior r0 (if s0 256 0)))
+                                      (al-push! (mut pr1) (ior r1 (if s1 256 0)))
+                                      0))
+                                  (do (al-push! (mut pkind) 3) (al-push! (mut pr0) (load stk))
+                                      (al-push! (mut pr1) 0)
+                                      (store! stk (iadd (load stk) 16)) 0)))
+                          ; ---- > 16B: passed in memory, by value, on the stack
+                          :else
+                            (let [sz (ty-size g t)
+                                  asz (imul (idiv (iadd sz 7) 8) 8)]
+                              (al-push! (mut pkind) 4)
+                              (al-push! (mut pr0) (load stk))
+                              (al-push! (mut pr1) asz)
+                              (store! stk (iadd (load stk) asz))
+                              0))))
+                    (store! i (iadd (load i) 1))))))
+      ; the outgoing area must be big enough for this call, and 16-byte aligned
+      ; so the callee sees the ABI's alignment guarantee at its entry.
+      (let [need (imul (idiv (iadd (load stk) 15) 16) 16)]
+        (when (icmp-gt need (load (field g outbytes))) (store! (field g outbytes) need) 0))
+
+      ; ---- 2. stack arguments first (they may need scratch registers)
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nargs)
+                  (break)
+                  (do
+                    (let [k (al-get [i64] (load pkind) (load i))
+                          off (al-get [i64] (load pr0) (load i))
+                          slot (al-get [i64] (load pslot) (load i))]
+                      (cond (icmp-eq k 3)
+                              (do (emit-load-int! g (x-scratch0) (x-slotbase) slot 8 false)
+                                  (x64-mov-mr! (mut s) 4 off (x-scratch0))
+                                  0)
+                            (icmp-eq k 4)
+                              ; by-value memory argument: copy the whole aggregate
+                              ; into the outgoing area.
+                              (let [sz (al-get [i64] (load pr1) (load i))
+                                    (mut j) 0]
+                                (loop (if (icmp-ge (load j) sz)
+                                          (break)
+                                          (do
+                                            (emit-load-int! g (x-scratch0) (x-slotbase) (iadd slot (load j)) 8 false)
+                                            (x64-mov-mr! (mut s) 4 (iadd off (load j)) (x-scratch0))
+                                            (store! j (iadd (load j) 8)))))
+                                0)
+                            :else 0))
+                    (store! i (iadd (load i) 1))))))
+
+      ; ---- 3. register arguments last
+      (let [(mut i) 0]
+        (loop (if (icmp-ge (load i) nargs)
+                  (break)
+                  (do
+                    (let [k (al-get [i64] (load pkind) (load i))
+                          r0 (al-get [i64] (load pr0) (load i))
+                          r1 (al-get [i64] (load pr1) (load i))
+                          slot (al-get [i64] (load pslot) (load i))
+                          av (al-get [AVal] (load avs) (load i))
+                          t (alloc-stack Type)]
+                      (store! t (av-ty av))
+                      (cond (icmp-eq k 0)
+                              ; a scalar is loaded at its own width; an aggregate
+                              ; eightbyte is always a full 8-byte load.
+                              (if (ty-is-scalar t)
+                                  (let [bytes (alloc-stack i64)
+                                        signed (alloc-stack bool)]
+                                    (ty-int-info g t bytes signed)
+                                    (emit-load-int! g (x-argreg r0) (x-slotbase) slot (load bytes) (load signed))
+                                    0)
+                                  (emit-load-int! g (x-argreg r0) (x-slotbase) slot 8 false))
+                            (icmp-eq k 1)
+                              (emit-load-fp! g r0 (x-slotbase) slot
+                                             (if (ty-is-scalar t) (ty-float-bytes t) 8))
+                            (icmp-eq k 2)
+                              (do
+                                (if (icmp-ne (iand r0 256) 0)
+                                    (emit-load-fp! g (iand r0 255) (x-slotbase) slot 8)
+                                    (emit-load-int! g (x-argreg (iand r0 255)) (x-slotbase) slot 8 false))
+                                (if (icmp-ne (iand r1 256) 0)
+                                    (emit-load-fp! g (iand r1 255) (x-slotbase) (iadd slot 8) 8)
+                                    (emit-load-int! g (x-argreg (iand r1 255)) (x-slotbase) (iadd slot 8) 8 false))
+                                0)
+                            :else 0))
+                    (store! i (iadd (load i) 1))))))
+
+      ; hidden sret pointer goes in rdi, after everything else has been placed
+      (when (icmp-eq (abi-cls retinfo) 4) (emit-slot-addr! g 7 resslot) 0)
+
+      ; ---- 4. variadic: al = number of SSE registers used
+      (when variadic (x64-mov-imm! (mut s) (x-scratch0) (load fp)) 0)
+
+      ; ---- 5. the call
+      (if (icmp-ge symidx 0)
+          (let [off (x64-call-rel32! (mut s))]
+            (eobj-add-reloc! (mut (field g obj)) (load (field g text)) off symidx (r-x86-64-plt32) -4)
+            0)
+          (do
+            ; the target must not be one of the argument registers, and r11 is
+            ; the one scratch guaranteed free at a call boundary.
+            (av-to-x! g (load fpav) (x-scratch2))
+            (x64-call-r! (mut s) (x-scratch2))
+            0))
+
+      ; ---- result
+      (if retvoid
+          (mk-aval 0 0 (TInt 64 true))
+          (let [cls (abi-cls retinfo)]
+            (cond (icmp-eq cls 0)
+                    (do (emit-store-int! g 0 (x-slotbase) resslot (ty-size g retp))
+                        (mk-aval 1 resslot ret))
+                  (icmp-eq cls 1)
+                    (do (emit-store-fp! g 0 (x-slotbase) resslot (ty-float-bytes retp))
+                        (mk-aval 1 resslot ret))
+                  (icmp-eq cls 2)
+                    (do (if (icmp-eq (abi-eb0 retinfo) 2)
+                            (emit-store-fp! g 0 (x-slotbase) resslot 8)
+                            (emit-store-int! g 0 (x-slotbase) resslot (ty-size g retp)))
+                        (mk-aval 1 resslot ret))
+                  (icmp-eq cls 3)
+                    ; two eightbytes come back in (rax,rdx) / (xmm0,xmm1) / a mix,
+                    ; each file numbered independently.
+                    (let [s0 (icmp-eq (abi-eb0 retinfo) 2)
+                          s1 (icmp-eq (abi-eb1 retinfo) 2)
+                          rem (isub (ty-size g retp) 8)]
+                      (if s0
+                          (emit-store-fp! g 0 (x-slotbase) resslot 8)
+                          (emit-store-int! g 0 (x-slotbase) resslot 8))
+                      (if s1
+                          ; second SSE eightbyte is xmm1 if the first was SSE, else xmm0
+                          (emit-store-fp! g (if s0 1 0) (x-slotbase) (iadd resslot 8)
+                                          (if (icmp-ge rem 8) 8 rem))
+                          ; second INTEGER eightbyte is rdx if the first was INTEGER, else rax
+                          (emit-store-int! g (if s0 0 2) (x-slotbase) (iadd resslot 8)
+                                           (if (icmp-ge rem 8) 8 rem)))
+                      (mk-aval 1 resslot ret))
+                  :else  ; cls 4: the callee wrote through the hidden pointer
+                    (mk-aval 1 resslot ret)))))))
+
+; ============================ globals / strings ==============================
+; intern an EStr/ECStr payload as a private const-section global; returns symidx.
+; `nul` appends a trailing NUL (ECStr); EStr arrays are exactly the bytes.
+(defn g-intern-str! [(g (ptr Cga)) (sv (slice u8)) (nul bool)] (-> i64)
+  (let [n (al-len [GStr] (load (field g strs)))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [e (xal-at [GStr] (field g strs) (load i))]
+                  ; entries are stored with a 1-byte kind prefix (0=str,1=cstr)
+                  (let [es (load (field e s))]
+                    (when (and (icmp-eq (cast i64 (slice-get es 0)) (when nul 1))
+                               (str-eq (subslice es 1 (slice-len es)) sv))
+                          (store! found (load (field e symidx)))
+                          0)))
+                (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load found) 0)
+        (load found)
+        (let [a (load (field g a))
+              buf (eobj-sect-buf (mut (field g obj)) (load (field g constsec)))
+              off (al-len [u8] (load buf))
+              ; ".L" is the ELF convention for a local label the linker may drop
+              ; from the final symbol table; "l_" is the Mach-O one.
+              nm (sconcat a (if nul ".Lcstr." ".Lstr.") (i64->str a (load (field g nglob))))]
+          (store! (field g nglob) (iadd (load (field g nglob)) 1))
+          (xb-bytes! (mut buf) sv)
+          (when nul (xb-u8! (mut buf) 0))
+          (let [sym (eobj-add-sym! (mut (field g obj)) nm (load (field g constsec)) off false)
+                e (alloc-stack GStr)
+                (mut tagged) (sb-new a)]
+            (sb-push-byte! (mut tagged) (cast u8 (when nul 1)))
+            (sb-push-str! (mut tagged) sv)
+            (store! (field e s) (sb-str (load tagged)))
+            (store! (field e symidx) sym)
+            (al-push! (mut (field g strs)) (load e))
+            sym)))))
+
+; a zero-initialized global in .data; returns symidx.
+(defn g-zero-global! [(g (ptr Cga)) (size i64) (align i64)] (-> i64)
+  (let [a (load (field g a))
+        buf (eobj-sect-buf (mut (field g obj)) (load (field g datasec)))]
+    (xb-align! (mut buf) (if (icmp-lt align 8) 8 align))
+    (let [off (al-len [u8] (load buf))
+          nm (sconcat a ".Lg." (i64->str a (load (field g nglob))))]
+      (store! (field g nglob) (iadd (load (field g nglob)) 1))
+      (xb-zeros! (mut buf) size)
+      (eobj-add-sym! (mut (field g obj)) nm (load (field g datasec)) off false))))
+
+; reg = address of a symbol. On x86-64 this is a single RIP-relative lea with
+; one PC32 relocation — no adrp/add pair. The addend is -4 because the
+; displacement is measured from the end of the instruction but the field starts
+; 4 bytes before it.
+(defn emit-sym-addr! [(g (ptr Cga)) (reg i64) (symidx i64)] (-> i64)
+  (let [s (field g asm)]
+    (x64-lea-rip! (mut s) reg 0)
+    (eobj-add-reloc! (mut (field g obj))
+                     (load (field g text))
+                     (isub (x64-off (mut s)) 4)
+                     symidx
+                     (r-x86-64-pc32)
+                     -4)
+    0))
+
+; store an AVal into a slot (any type).
+(defn emit-store-av! [(g (ptr Cga)) (av AVal) (dst i64)] (-> i64)
+  (let [t (alloc-stack Type)]
+    (store! t (av-ty av))
+    (if (ty-is-scalar t)
+        (if (ty-is-float t)
+            (do (av-to-d! g av 0)
+                (emit-store-fp! g 0 (x-slotbase) dst (ty-float-bytes t))
+                0)
+            (do (av-to-x! g av (x-scratch0))
+                (emit-store-int! g (x-scratch0) (x-slotbase) dst (ty-size g t))
+                0))
+        (emit-copy! g dst (av-slot! g av) (ty-size g t)))))
+
+; pointee type of a TPtr/TRef value
+(defn ty-pointee [(t (ptr Type))] (-> Type)
+  (match-else (load t)
+              (TPtr [inner] (load inner))
+              (TRef [_m inner] (load inner))
+              (_ (do (cgx-fail "load/store through a non-pointer") (TInt 64 true)))))
+
+; ============================ expression emission ============================
+(defn emit-body [(g (ptr Cga)) (body (ptr (ArrayList Expr)))] (-> AVal)
+  (let [n (al-len [Expr] (load body))
+        (mut i) 0
+        (mut last) (mk-aval 0 0 (TInt 64 true))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (load (field g terminated)) (break))
+                (store! last (emit-expr g (xal-at [Expr] body (load i))))
+                (store! i (iadd (load i) 1)))))
+    (load last)))
+(defn emit-binds [(g (ptr Cga)) (binds (ptr (ArrayList Bind)))] (-> i64)
+  (let [n (al-len [Bind] (load binds))
+        (mut i) 0
+        (mut a) (load (field g a))]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [b (xal-at [Bind] binds (load i))
+                      av (emit-expr g (field b value))]
+                  (if (load (field b mutable))
+                      ; mutable: give the value a stable slot and bind the NAME to a
+                      ; pointer to it (the checker reads it via (load name)).
+                      (let [t (alloc-stack Type)]
+                        (store! t (av-ty av))
+                        (let [vslot (av-slot! g av)
+                              pslot (slot-new! g 8 8)]
+                          (emit-slot-addr! g (x-scratch0) vslot)
+                          (emit-store-int! g (x-scratch0) (x-slotbase) pslot 8)
+                          (dw-note-var! g
+                                        (load (field b name))
+                                        t
+                                        pslot
+                                        true
+                                        false
+                                        (load (field (field b value) source))
+                                        (load (field (field b value) lo)))
+                          (store! (field g env)
+                                  (gscope-put (load a)
+                                              (load (field g env))
+                                              (load (field b name))
+                                              (mk-aval 1 pslot (TPtr (box-type (load a) (av-ty av))))))
+                          0))
+                      (do
+                        (when (icmp-eq (av-kind av) 1)
+                              (dw-note-bind! g
+                                             (load (field b name))
+                                             av
+                                             (load (field (field b value) source))
+                                             (load (field (field b value) lo))))
+                        (store! (field g env)
+                                (gscope-put (load a) (load (field g env)) (load (field b name)) av))
+                        0)))
+                (store! i (iadd (load i) 1))))))
+  0)
+
+(defn emit-stmts [(g (ptr Cga)) (body (ptr (ArrayList Expr)))] (-> i64)
+  (let [n (al-len [Expr] (load body))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (load (field g terminated)) (break))
+                (emit-expr g (xal-at [Expr] body (load i)))
+                (store! i (iadd (load i) 1))))))
+  0)
+
+; find the target loop index (labeled search from innermost, else innermost).
+
+(defn g-loop-index [(g (ptr Cga)) (label (Option (slice u8)))] (-> i64)
+  (let [n (al-len [GLoop] (load (field g loops)))]
+    (match label
+      (None []
+            (do
+              (when (icmp-eq n 0) (cgx-fail "break/continue outside a loop"))
+              (isub n 1)))
+      (Some [want]
+            (let [(mut i) (isub n 1)
+                  (mut r) -1]
+              (loop (if (icmp-lt (load i) 0)
+                        (break)
+                        (do
+                          (match (load (field (xal-at [GLoop] (field g loops) (load i)) label))
+                            (None [] 0)
+                            (Some [have]
+                                  (when (and (icmp-lt (load r) 0) (str-eq have want)) (store! r (load i)) 0)))
+                          (store! i (isub (load i) 1)))))
+              (when (icmp-lt (load r) 0) (cgx-fail2 "no such loop label: " want))
+              (load r))))))
+
+; ---- memory access through a pointer register -------------------------------
+(defn emit-load-from-mem! [(g (ptr Cga)) (reg i64) (addrreg i64) (bytes i64)] (-> i64)
+  (let [s (field g asm)]
+    (cond (icmp-eq bytes 1) (x64-movzx8-rm! (mut s) reg addrreg 0)
+          (icmp-eq bytes 2) (x64-movzx16-rm! (mut s) reg addrreg 0)
+          (icmp-eq bytes 4) (x64-mov32-rm! (mut s) reg addrreg 0)
+          :else (x64-mov-rm! (mut s) reg addrreg 0))))
+(defn emit-store-to-mem! [(g (ptr Cga)) (reg i64) (addrreg i64) (bytes i64)] (-> i64)
+  (let [s (field g asm)]
+    (cond (icmp-eq bytes 1) (x64-mov8-mr! (mut s) addrreg 0 reg)
+          (icmp-eq bytes 2) (x64-mov16-mr! (mut s) addrreg 0 reg)
+          (icmp-eq bytes 4) (x64-mov32-mr! (mut s) addrreg 0 reg)
+          :else (x64-mov-mr! (mut s) addrreg 0 reg))))
+
+; Canonicalize a narrow integer in `reg` to its declared width: shift left to
+; drop the high garbage, then shift back — arithmetically when signed, so the
+; sign bit replicates. Widths of 8/16/32 could use movsx/movzx, but odd widths
+; (u2, i3, u7, u11 …) exist in this language and only the shift pair handles
+; them, so one uniform path keeps the semantics identical for every width.
+(defn emit-canon-int! [(g (ptr Cga)) (reg i64) (bits i64) (signed bool)] (-> i64)
+  (let [s (field g asm)
+        sh (isub 64 bits)]
+    (when (icmp-gt sh 0)
+          (x64-shl-imm! (mut s) reg sh)
+          (if signed (x64-sar-imm! (mut s) reg sh) (x64-shr-imm! (mut s) reg sh))
+          0)
+    0))
+
+; ---- binary arithmetic ------------------------------------------------------
+; x86 is two-address (dst op= src), so the pattern is: lhs into rax, rhs into
+; r10, operate into rax, spill. Division is the awkward one: idiv/div take the
+; dividend in rdx:rax implicitly and write the quotient to rax and remainder to
+; rdx, so rdx must be prepared (cqo for signed, zeroed for unsigned) and the
+; divisor must live somewhere that is not rax or rdx — hence r10.
+(defn emit-bin [(g (ptr Cga)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr))] (-> AVal)
+  (let [lav (emit-expr g lhs)
+        rav (emit-expr g rhs)
+        t (alloc-stack Type)
+        s (field g asm)]
+    (store! t (av-ty lav))
+    (if (ty-is-float t)
+        ; float ops: 0 add 1 sub 2 mul 3 div 4 rem (via libm fmod)
+        (let [fb (ty-float-bytes t)
+              dbl (icmp-eq fb 8)]
+          (av-to-d! g lav 0)
+          (av-to-d! g rav 1)
+          (cond (icmp-eq op 0) (x64-adds! (mut s) dbl 0 1)
+                (icmp-eq op 1) (x64-subs! (mut s) dbl 0 1)
+                (icmp-eq op 2) (x64-muls! (mut s) dbl 0 1)
+                (icmp-eq op 3) (x64-divs! (mut s) dbl 0 1)
+                (icmp-eq op 4)
+                  ; frem: libm fmod(xmm0, xmm1) — the args are already in place,
+                  ; and it is a variadic-free call, but al must still be sane.
+                  (let [fsym (g-runtime-sym! g (if dbl "fmod" "fmodf"))
+                        off (do (x64-mov-imm! (mut s) (x-scratch0) 0) (x64-call-rel32! (mut s)))]
+                    (eobj-add-reloc! (mut (field g obj)) (load (field g text)) off fsym (r-x86-64-plt32) -4)
+                    0)
+                :else (cgx-fail "unsupported float binary op"))
+          (let [slot (slot-for-ty! g t)]
+            (emit-store-fp! g 0 (x-slotbase) slot fb)
+            (mk-aval 1 slot (av-ty lav))))
+        ; integer ops
+        (let [signed (match-else (load t) (TInt [_b sg] sg) (_ false))]
+          (av-to-x! g lav (x-scratch0))
+          (av-to-x! g rav (x-scratch1))
+          (cond (icmp-eq op 0) (x64-add-rr! (mut s) (x-scratch0) (x-scratch1))
+                (icmp-eq op 1) (x64-sub-rr! (mut s) (x-scratch0) (x-scratch1))
+                (icmp-eq op 2) (x64-imul-rr! (mut s) (x-scratch0) (x-scratch1))
+                ; signed division: cqo sign-extends rax into rdx:rax first.
+                (icmp-eq op 3)
+                  (if signed
+                      (do (x64-cqo! (mut s)) (x64-idiv! (mut s) (x-scratch1)))
+                      (do (x64-mov-imm! (mut s) 2 0) (x64-div! (mut s) (x-scratch1))))
+                ; signed remainder: the result is in rdx, so move it back to rax.
+                (icmp-eq op 4)
+                  (do
+                    (if signed
+                        (do (x64-cqo! (mut s)) (x64-idiv! (mut s) (x-scratch1)))
+                        (do (x64-mov-imm! (mut s) 2 0) (x64-div! (mut s) (x-scratch1))))
+                    (x64-mov-rr! (mut s) (x-scratch0) 2))
+                ; ops 5/6 are the explicitly-unsigned div/rem
+                (icmp-eq op 5)
+                  (do (x64-mov-imm! (mut s) 2 0) (x64-div! (mut s) (x-scratch1)))
+                (icmp-eq op 6)
+                  (do (x64-mov-imm! (mut s) 2 0)
+                      (x64-div! (mut s) (x-scratch1))
+                      (x64-mov-rr! (mut s) (x-scratch0) 2))
+                (icmp-eq op 7) (x64-and-rr! (mut s) (x-scratch0) (x-scratch1))
+                (icmp-eq op 8) (x64-or-rr! (mut s) (x-scratch0) (x-scratch1))
+                (icmp-eq op 9) (x64-xor-rr! (mut s) (x-scratch0) (x-scratch1))
+                ; variable shifts read the count from cl and nowhere else.
+                (icmp-eq op 10)
+                  (do (x64-mov-rr! (mut s) 1 (x-scratch1)) (x64-shl-cl! (mut s) (x-scratch0)))
+                (icmp-eq op 11)
+                  (do (x64-mov-rr! (mut s) 1 (x-scratch1))
+                      (if signed (x64-sar-cl! (mut s) (x-scratch0)) (x64-shr-cl! (mut s) (x-scratch0))))
+                :else (cgx-fail "unknown integer binary op"))
+          (match-else (load t)
+                      (TInt [bits sg] (emit-canon-int! g (x-scratch0) bits sg))
+                      (_ 0))
+          (let [slot (slot-for-ty! g t)]
+            (emit-store-int! g (x-scratch0) (x-slotbase) slot (ty-size g t))
+            (mk-aval 1 slot (av-ty lav)))))))
+
+; ---- comparisons ------------------------------------------------------------
+; cmp sets the flags; setcc materializes a 0/1 byte; movzx widens it. The
+; signed/unsigned distinction lives entirely in the condition code, and getting
+; it wrong is the classic silent miscompile (the arm64 gate proved its teeth by
+; catching exactly that), so the two families are spelled out separately.
+(defn emit-cmp [(g (ptr Cga)) (op i64) (lhs (ptr Expr)) (rhs (ptr Expr))] (-> AVal)
+  (let [lav (emit-expr g lhs)
+        rav (emit-expr g rhs)
+        t (alloc-stack Type)
+        s (field g asm)]
+    (store! t (av-ty lav))
+    (if (ty-is-float t)
+        ; ucomis sets CF/ZF/PF; unordered (NaN) sets PF. The ordered predicates
+        ; must therefore also require PF clear, or a NaN compares as "equal".
+        (let [dbl (icmp-eq (ty-float-bytes t) 8)]
+          (av-to-d! g lav 0)
+          (av-to-d! g rav 1)
+          (x64-ucomis! (mut s) dbl 0 1)
+          (cond
+            ; OEQ: equal AND ordered  -> sete && setnp
+            (icmp-eq op 4)
+              (do (x64-setcc-bool! (mut s) (x64-cc-e) (x-scratch0))
+                  (x64-setcc-bool! (mut s) (x64-cc-np) (x-scratch1))
+                  (x64-and-rr! (mut s) (x-scratch0) (x-scratch1))
+                  0)
+            ; ONE: not-equal AND ordered -> setne && setnp
+            (icmp-eq op 5)
+              (do (x64-setcc-bool! (mut s) (x64-cc-ne) (x-scratch0))
+                  (x64-setcc-bool! (mut s) (x64-cc-np) (x-scratch1))
+                  (x64-and-rr! (mut s) (x-scratch0) (x-scratch1))
+                  0)
+            ; the inequalities: ucomis is defined so that the UNSIGNED
+            ; conditions give the ordered float predicate (a NaN leaves CF=ZF=1,
+            ; which fails all of a/ae/b/be as required).
+            :else
+              (do (x64-setcc-bool! (mut s)
+                                   (cond (icmp-eq op 0) (x64-cc-b)
+                                         (icmp-eq op 1) (x64-cc-be)
+                                         (icmp-eq op 2) (x64-cc-a)
+                                         :else (x64-cc-ae))
+                                   (x-scratch0))
+                  0))
+          (let [slot (slot-new! g 8 8)]
+            (emit-store-int! g (x-scratch0) (x-slotbase) slot 1)
+            (mk-aval 1 slot (TBool))))
+        (let [signed (match-else (load t) (TInt [_b sg] sg) (TBool [] false) (_ true))]
+          (av-to-x! g lav (x-scratch0))
+          (av-to-x! g rav (x-scratch1))
+          (x64-cmp-rr! (mut s) (x-scratch0) (x-scratch1))
+          (x64-setcc-bool! (mut s)
+                           (cond (icmp-eq op 0) (if signed (x64-cc-l) (x64-cc-b))
+                                 (icmp-eq op 1) (if signed (x64-cc-le) (x64-cc-be))
+                                 (icmp-eq op 2) (if signed (x64-cc-g) (x64-cc-a))
+                                 (icmp-eq op 3) (if signed (x64-cc-ge) (x64-cc-ae))
+                                 (icmp-eq op 4) (x64-cc-e)
+                                 :else (x64-cc-ne))
+                           (x-scratch0))
+          (let [slot (slot-new! g 8 8)]
+            (emit-store-int! g (x-scratch0) (x-slotbase) slot 1)
+            (mk-aval 1 slot (TBool)))))))
+
+(defn emit-if [(g (ptr Cga)) (cnd (ptr Expr)) (thn (ptr Expr)) (els (ptr Expr))] (-> AVal)
+  (let [cav (emit-expr g cnd)
+        s (field g asm)
+        lelse (x64-new-label (mut (field g asm)))
+        lend (x64-new-label (mut (field g asm)))]
+    (av-to-x! g cav (x-scratch0))
+    (do (x64-test-rr! (mut (field g asm)) (x-scratch0) (x-scratch0))
+        (x64-jcc-label! (mut (field g asm)) (x64-cc-e) lelse))
+    (let [thnav (emit-expr g thn)
+          thnterm (load (field g terminated))
+          (mut rslot) -1
+          (mut rty) (TInt 64 true)]
+      (unless thnterm
+              (let [tt (alloc-stack Type)]
+                (store! tt (av-ty thnav))
+                (store! rslot (slot-for-ty! g tt))
+                (store! rty (av-ty thnav))
+                (emit-store-av! g thnav (load rslot)))
+              (x64-jmp-label! (mut (field g asm)) lend)
+              0)
+      (store! (field g terminated) false)
+      (x64-bind-label! (mut (field g asm)) lelse)
+      (let [elsav (emit-expr g els)
+            elsterm (load (field g terminated))]
+        (unless elsterm
+                (let [et (alloc-stack Type)]
+                  (store! et (av-ty elsav))
+                  (when (icmp-lt (load rslot) 0) (store! rslot (slot-for-ty! g et)) (store! rty (av-ty elsav)) 0)
+                  (emit-store-av! g elsav (load rslot)))
+                0)
+        (x64-bind-label! (mut (field g asm)) lend)
+        (store! (field g terminated) (and thnterm elsterm))
+        (if (icmp-ge (load rslot) 0)
+            (mk-aval 1 (load rslot) (load rty))
+            (mk-aval 0 0 (TInt 64 true)))))))
+
+(defn emit-loop [(g (ptr Cga)) (label (Option (slice u8))) (body (ptr (ArrayList Expr)))] (-> AVal)
+  (let [s (field g asm)
+        contlabel (x64-new-label (mut (field g asm)))
+        breaklabel (x64-new-label (mut (field g asm)))
+        gl (alloc-stack GLoop)]
+    (store! (field gl label) label)
+    (store! (field gl contlabel) contlabel)
+    (store! (field gl breaklabel) breaklabel)
+    (store! (field gl resslot) -1)
+    (store! (field gl resty) (TInt 64 true))
+    (store! (field gl has_res) false)
+    (al-push! (mut (field g loops)) (load gl))
+    (x64-bind-label! (mut (field g asm)) contlabel)
+    (emit-stmts g body)
+    (unless (load (field g terminated)) (x64-jmp-label! (mut (field g asm)) contlabel) 0)
+    ; pop the loop frame and read its break results
+    (let [n (al-len [GLoop] (load (field g loops)))
+          fin (al-get [GLoop] (load (field g loops)) (isub n 1))
+          fp (alloc-stack GLoop)]
+      (store! fp fin)
+      (store! (field (field g loops) len) (isub n 1))
+      (x64-bind-label! (mut (field g asm)) breaklabel)
+      (if (load (field fp has_res))
+          (do
+            (store! (field g terminated) false)
+            (mk-aval 1 (load (field fp resslot)) (load (field fp resty))))
+          (do
+            (store! (field g terminated) true)
+            (mk-aval 0 0 (TInt 64 true)))))))
+
+(defn emit-break [(g (ptr Cga)) (label (Option (slice u8))) (value (Option (ptr Expr)))] (-> AVal)
+  (if (load (field g terminated))
+      (mk-aval 0 0 (TInt 64 true))
+      (let [av
+              (match value
+                (Some [ve] (emit-expr g ve))
+                (None [] (mk-aval 0 0 (TInt 64 true))))
+            li (g-loop-index g label)
+            lp (xal-at [GLoop] (field g loops) li)]
+        (when (icmp-lt (load (field lp resslot)) 0)
+              (let [t (alloc-stack Type)]
+                (store! t (av-ty av))
+                (store! (field lp resslot) (slot-for-ty! g t))
+                (store! (field lp resty) (av-ty av))
+                (store! (field lp has_res) true))
+              0)
+        (emit-store-av! g av (load (field lp resslot)))
+        (x64-jmp-label! (mut (field g asm)) (load (field lp breaklabel)))
+        (store! (field g terminated) true)
+        (mk-aval 0 0 (TInt 64 true)))))
+
+; ---- casts ------------------------------------------------------------------
+; The awkward corner on x86-64 is UNSIGNED 64-bit <-> float: the hardware only
+; has signed conversions (cvtsi2sd / cvttsd2si operate on a signed i64), so a
+; u64 whose top bit is set has to be handled explicitly rather than fed
+; straight to the instruction. Both directions below do that, and both are
+; exercised by the int-edges gate.
+(defn emit-cast [(g (ptr Cga)) (t Type) (inner (ptr Expr))] (-> AVal)
+  (let [av (emit-expr g inner)
+        st (alloc-stack Type)
+        dt (alloc-stack Type)
+        s (field g asm)]
+    (store! st (av-ty av))
+    (store! dt t)
+    (match-else t
+                (TInt [dbits dsigned]
+                      (if (ty-is-float st)
+                          ; float -> int, truncating toward zero.
+                          (let [dbl (icmp-eq (ty-float-bytes st) 8)
+                                slot (slot-for-ty! g dt)]
+                            (av-to-d! g av 0)
+                            (if (and (not dsigned) (icmp-ge dbits 64))
+                                ; u64 target: values below 2^63 convert directly;
+                                ; at or above it, subtract 2^63, convert, and put
+                                ; the bit back. cvttsd2si would otherwise saturate
+                                ; to 0x8000000000000000 for the whole upper half.
+                                (let [lbig (x64-new-label (mut s))
+                                      ldone (x64-new-label (mut s))]
+                                  ; xmm1 = (double)2^63, built as 2^62 + 2^62 so the
+                                  ; constant itself only ever passes through a SIGNED
+                                  ; conversion (2^63 has no signed i64 representation).
+                                  (x64-mov-imm64! (mut s) (x-scratch1) 4611686018427387904)
+                                  (x64-cvtsi2s! (mut s) dbl 1 (x-scratch1))
+                                  (x64-adds! (mut s) dbl 1 1)
+                                  (x64-ucomis! (mut s) dbl 0 1)
+                                  (x64-jcc-label! (mut s) (x64-cc-ae) lbig)
+                                  (x64-cvtts2si! (mut s) dbl (x-scratch0) 0)
+                                  (x64-jmp-label! (mut s) ldone)
+                                  (x64-bind-label! (mut s) lbig)
+                                  (x64-subs! (mut s) dbl 0 1)
+                                  (x64-cvtts2si! (mut s) dbl (x-scratch0) 0)
+                                  (x64-mov-imm64! (mut s) (x-scratch1) -9223372036854775808)
+                                  (x64-xor-rr! (mut s) (x-scratch0) (x-scratch1))
+                                  (x64-bind-label! (mut s) ldone)
+                                  0)
+                                (do (x64-cvtts2si! (mut s) dbl (x-scratch0) 0)
+                                    (emit-canon-int! g (x-scratch0) dbits dsigned)
+                                    0))
+                            (emit-store-int! g (x-scratch0) (x-slotbase) slot (ty-size g dt))
+                            (mk-aval 1 slot t))
+                          ; int/ptr -> int: canonicalize to the destination width
+                          (let [slot (slot-for-ty! g dt)]
+                            (av-to-x! g av (x-scratch0))
+                            (emit-canon-int! g (x-scratch0) dbits dsigned)
+                            (emit-store-int! g (x-scratch0) (x-slotbase) slot (ty-size g dt))
+                            (mk-aval 1 slot t))))
+                (TFloat [dbits]
+                        (let [ddbl (icmp-eq dbits 64)
+                              slot (slot-for-ty! g dt)]
+                          (if (ty-is-float st)
+                              (do
+                                (av-to-d! g av 0)
+                                ; cvts2s' prefix names the SOURCE width
+                                (unless (icmp-eq (ty-float-bytes st) (idiv dbits 8))
+                                        (x64-cvts2s! (mut s) (icmp-eq (ty-float-bytes st) 8) 0 0))
+                                (emit-store-fp! g 0 (x-slotbase) slot (idiv dbits 8))
+                                0)
+                              ; int -> float, signedness of the SOURCE
+                              (let [ssigned (match-else (load st) (TInt [_b sg] sg) (_ true))
+                                    sbits (match-else (load st) (TInt [b _sg] b) (_ 64))]
+                                (av-to-x! g av (x-scratch0))
+                                (if (and (not ssigned) (icmp-ge sbits 64))
+                                    ; u64 source: if the top bit is clear the signed
+                                    ; conversion is already exact. Otherwise halve
+                                    ; (with the low bit preserved so nothing rounds
+                                    ; away), convert, and double back.
+                                    (let [lbig (x64-new-label (mut s))
+                                          ldone (x64-new-label (mut s))]
+                                      (x64-cmp-ri! (mut s) (x-scratch0) 0)
+                                      (x64-jcc-label! (mut s) (x64-cc-l) lbig)
+                                      (x64-cvtsi2s! (mut s) ddbl 0 (x-scratch0))
+                                      (x64-jmp-label! (mut s) ldone)
+                                      (x64-bind-label! (mut s) lbig)
+                                      (x64-mov-rr! (mut s) (x-scratch1) (x-scratch0))
+                                      (x64-shr-imm! (mut s) (x-scratch1) 1)
+                                      (x64-mov-rr! (mut s) (x-scratch2) (x-scratch0))
+                                      (x64-and-ri! (mut s) (x-scratch2) 1)
+                                      (x64-or-rr! (mut s) (x-scratch1) (x-scratch2))
+                                      (x64-cvtsi2s! (mut s) ddbl 0 (x-scratch1))
+                                      (x64-adds! (mut s) ddbl 0 0)
+                                      (x64-bind-label! (mut s) ldone)
+                                      0)
+                                    (do (x64-cvtsi2s! (mut s) ddbl 0 (x-scratch0)) 0))
+                                (emit-store-fp! g 0 (x-slotbase) slot (idiv dbits 8))
+                                0))
+                          (mk-aval 1 slot t)))
+                (_  ; ptr / fnptr targets: bit-identical 8-byte move
+                   (let [slot (slot-for-ty! g dt)]
+                     (av-to-x! g av (x-scratch0))
+                     (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
+                     (mk-aval 1 slot t))))))
+
+(defn emit-construct [(g (ptr Cga)) (sum (slice u8)) (variant (slice u8)) (args (ptr (ArrayList Expr)))] (-> AVal)
+  (let [su (g-sum-idx g sum)]
+    (when (icmp-lt su 0) (cgx-fail2 "construct of unknown sum: " sum))
+    (let [vidx (g-variant-idx g su variant)
+          sumty (alloc-stack Type)]
+      (store! sumty (TStruct sum))
+      (let [slot (slot-for-ty! g sumty)
+            vs (load (field (xal-at [GSum] (field g sums) su) variants))
+            vfields (load (field (xal-at [Variant] vs vidx) fields))
+            n (al-len [Expr] (load args))
+            (mut i) 0]
+        ; tag (i32 at offset 0)
+        (x64-mov-imm! (mut (field g asm)) (x-scratch0) vidx)
+        (emit-store-int! g (x-scratch0) (x-slotbase) slot 4)
+        ; payload fields at their natural offsets within the variant struct
+        (loop (if (icmp-ge (load i) n)
+                  (break)
+                  (do
+                    (let [av (emit-expr g (xal-at [Expr] args (load i)))
+                          off (g-natural-off g vfields (load i))]
+                      (emit-store-av-at! g av (iadd (iadd slot 8) off)))
+                    (store! i (iadd (load i) 1)))))
+        (mk-aval 1 slot (TStruct sum))))))
+
+; store an AVal at an absolute slot byte offset (may be unaligned-in-slot for
+; sub-slot fields — offsets are still 1/2/4/8-aligned by construction).
+
+(defn emit-store-av-at! [(g (ptr Cga)) (av AVal) (dst i64)] (-> i64)
+  (let [t (alloc-stack Type)]
+    (store! t (av-ty av))
+    (if (ty-is-scalar t)
+        (do
+          (av-to-x! g av (x-scratch0))
+          (emit-store-int! g (x-scratch0) (x-slotbase) dst (ty-size g t))
+          0)
+        (emit-copy! g dst (av-slot! g av) (ty-size g t)))))
+
+(defn g-runtime-sym! [(g (ptr Cga)) (nm (slice u8))] (-> i64)
+  (let [n (al-len [ESym] (load (field (field g obj) syms)))
+        (mut i) 0
+        (mut r) -1]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (load (field (xal-at [ESym] (field (field g obj) syms) (load i)) name)) nm)
+                      (store! r (load i)))
+                (store! i (iadd (load i) 1)))))
+    (if (icmp-ge (load r) 0)
+        (load r)
+        (eobj-add-sym! (mut (field g obj)) nm 0 0 true))))
+
+; memory load/store with a dynamic address register (widths 1/2/4/8)
+
+(defn emit-match [(g (ptr Cga)) (scrut (ptr Expr)) (arms (ptr (ArrayList Arm)))] (-> AVal)
+  (let [sav (emit-expr g scrut)
+        t (alloc-stack Type)
+        s (field g asm)
+        a (load (field g a))]
+    (store! t (av-ty sav))
+    (let [sumname (match-else (load t) (TStruct [nm] nm) (_ ""))
+          su (g-sum-idx g sumname)]
+      (when (icmp-lt su 0) (cgx-fail2 "match on non-sum: " sumname))
+      (let [sslot (av-slot! g sav)
+            vs (load (field (xal-at [GSum] (field g sums) su) variants))
+            narms (al-len [Arm] (load arms))
+            lend (x64-new-label (mut (field g asm)))
+            (mut armlabels) (al-new [i64] a)
+            (mut rslot) -1
+            (mut rty) (TInt 64 true)
+            (mut anylive) false]
+        ; tag -> x9, then the compare/branch chain
+        (emit-load-int! g (x-scratch0) (x-slotbase) sslot 4 false)
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) narms)
+                    (break)
+                    (do
+                      (let [arm (xal-at [Arm] arms (load i))
+                            vidx (g-variant-idx g su (load (field arm variant)))
+                            lab (x64-new-label (mut (field g asm)))]
+                        (al-push! (mut armlabels) lab)
+                        (x64-mov-imm! (mut (field g asm)) (x-scratch1) vidx)
+                        (x64-cmp-rr! (mut s) (x-scratch0) (x-scratch1))
+                        (x64-jcc-label! (mut (field g asm)) (x64-cc-e) lab))
+                      (store! i (iadd (load i) 1))))))
+        ; no arm matched: unreachable (mirrors the LLVM switch default)
+        (x64-ud2! (mut s))
+        ; arms
+        (let [(mut i) 0]
+          (loop (if (icmp-ge (load i) narms)
+                    (break)
+                    (do
+                      (let [arm (xal-at [Arm] arms (load i))
+                            vidx (g-variant-idx g su (load (field arm variant)))
+                            vfields (load (field (xal-at [Variant] vs vidx) fields))
+                            saved (load (field g env))]
+                        (x64-bind-label! (mut (field g asm)) (al-get [i64] (load armlabels) (load i)))
+                        (store! (field g terminated) false)
+                        ; bind payload fields BY VALUE into fresh slots
+                        (let [binds (load (field arm binds))
+                              nb (al-len [(slice u8)] (load binds))
+                              (mut j) 0]
+                          (loop (if (icmp-ge (load j) nb)
+                                    (break)
+                                    (do
+                                      (let [fty (load (field (xal-at [Field] vfields (load j)) ty))
+                                            ftp (alloc-stack Type)]
+                                        (store! ftp fty)
+                                        (let [foff (g-natural-off g vfields (load j))
+                                              bslot (slot-for-ty! g ftp)]
+                                          (emit-copy! g bslot (iadd (iadd sslot 8) foff) (ty-size g ftp))
+                                          (store! (field g env)
+                                                  (gscope-put a
+                                                              (load (field g env))
+                                                              (al-get [(slice u8)] (load binds) (load j))
+                                                              (mk-aval 1 bslot fty)))))
+                                      (store! j (iadd (load j) 1))))))
+                        (let [bav (emit-expr g (field arm body))]
+                          (store! (field g env) saved)
+                          (unless (load (field g terminated))
+                                  (when (icmp-lt (load rslot) 0)
+                                        (let [bt (alloc-stack Type)]
+                                          (store! bt (av-ty bav))
+                                          (store! rslot (slot-for-ty! g bt))
+                                          (store! rty (av-ty bav)))
+                                        0)
+                                  (emit-store-av! g bav (load rslot))
+                                  (store! anylive true)
+                                  (x64-jmp-label! (mut (field g asm)) lend)
+                                  0)))
+                      (store! i (iadd (load i) 1))))))
+        (x64-bind-label! (mut (field g asm)) lend)
+        (if (load anylive)
+            (do
+              (store! (field g terminated) false)
+              (mk-aval 1 (load rslot) (load rty)))
+            (do
+              (store! (field g terminated) true)
+              (mk-aval 0 0 (TInt 64 true))))))))
+
+(defn emit-call-named [(g (ptr Cga)) (func (slice u8)) (args (ptr (ArrayList Expr)))] (-> AVal)
+  (let [si (g-sig-idx g func)]
+    (when (icmp-lt si 0) (cgx-fail2 "call to unknown function: " func))
+    (let [e (xal-at [GSig] (field g sigs) si)
+          (mut avs) (al-new [AVal] (load (field g a)))
+          n (al-len [Expr] (load args))
+          (mut i) 0
+          dummy (alloc-stack AVal)]
+      (loop (if (icmp-ge (load i) n)
+                (break)
+                (do
+                  (al-push! (mut avs) (emit-expr g (xal-at [Expr] args (load i))))
+                  (store! i (iadd (load i) 1)))))
+      (store! dummy (mk-aval 0 0 (TInt 64 true)))
+      (if (load (field e shim))
+          ; register-constrained call: args in the convention's registers,
+          ; result read back from its return register.
+          (let [s (field g asm)
+                regs (load (field e shimregs))
+                (mut slots) (al-new [i64] (load (field g a)))
+                (mut j) 0]
+            (loop (if (icmp-ge (load j) n)
+                      (break)
+                      (do
+                        (al-push! (mut slots) (av-slot! g (al-get [AVal] (load avs) (load j))))
+                        (store! j (iadd (load j) 1)))))
+            (store! j 0)
+            (loop (if (icmp-ge (load j) n)
+                      (break)
+                      (do
+                        (emit-load-int! g
+                                        (al-get [i64] (load regs) (load j))
+                                        (x-slotbase)
+                                        (al-get [i64] (load slots) (load j))
+                                        8
+                                        false)
+                        (store! j (iadd (load j) 1)))))
+            (let [coff (x64-call-rel32! (mut s))]
+              (eobj-add-reloc! (mut (field g obj))
+                               (load (field g text))
+                               coff
+                               (load (field e symidx))
+                               (r-x86-64-plt32)
+                               -4))
+            (let [retp (alloc-stack Type)]
+              (store! retp (load (field e ret)))
+              (if (match-else (load (field e ret)) (TVoid [] true) (_ false))
+                  (mk-aval 0 0 (TInt 64 true))
+                  (let [slot (slot-for-ty! g retp)]
+                    (emit-store-int! g (load (field e shimret)) (x-slotbase) slot (ty-size g retp))
+                    (mk-aval 1 slot (load (field e ret)))))))
+          (emit-call! g
+                      (load (field e symidx))
+                      dummy
+                      (load (field e params))
+                      (load (field e variadic))
+                      (load (field e ret))
+                      (box-al [AVal] (load (field g a)) (load avs)))))))
+
+(defn emit-bitget [(g (ptr Cga)) (p (ptr Expr)) (fname (slice u8))] (-> AVal)
+  (let [av (emit-expr g p)
+        t (alloc-stack Type)
+        s (field g asm)]
+    (store! t (av-ty av))
+    (let [pt (alloc-stack Type)]
+      (store! pt (ty-pointee t))
+      (match-else (load pt)
+                  (TStruct [nm]
+                           (let [low (alloc-stack i64)
+                                 width (alloc-stack i64)
+                                 signed (alloc-stack bool)
+                                 back (alloc-stack i64)]
+                             (g-bits-info g nm fname low width signed back)
+                             (av-to-x! g av (x-scratch0))
+                             (emit-load-from-mem! g (x-scratch0) (x-scratch0) (idiv (load back) 8))
+                             (when (icmp-gt (load low) 0) (x64-shr-imm! (mut s) (x-scratch0) (load low)))
+                             ; mask/sign-extend to the field width via a shift pair:
+                             ; left to drop the high bits, then right — arithmetically
+                             ; when the field is signed so the sign bit replicates.
+                             (when (icmp-lt (load width) 64)
+                                   (x64-shl-imm! (mut s) (x-scratch0) (isub 64 (load width)))
+                                   (if (load signed)
+                                       (x64-sar-imm! (mut s) (x-scratch0) (isub 64 (load width)))
+                                       (x64-shr-imm! (mut s) (x-scratch0) (isub 64 (load width))))
+                                   0)
+                             (let [fty (if (icmp-eq (load width) 1) (TBool) (TInt (load width) (load signed)))
+                                   ftp (alloc-stack Type)]
+                               (store! ftp fty)
+                               (let [slot (slot-for-ty! g ftp)]
+                                 (emit-store-int! g (x-scratch0) (x-slotbase) slot (ty-size g ftp))
+                                 (mk-aval 1 slot fty)))))
+                  (_ (do (cgx-fail "bit-get through non-struct pointer") (mk-aval 0 0 (TInt 64 true))))))))
+
+(defn emit-bitset [(g (ptr Cga)) (p (ptr Expr)) (fname (slice u8)) (val (ptr Expr))] (-> AVal)
+  (let [pav (emit-expr g p)
+        vav (emit-expr g val)
+        t (alloc-stack Type)
+        s (field g asm)]
+    (store! t (av-ty pav))
+    (let [pt (alloc-stack Type)]
+      (store! pt (ty-pointee t))
+      (match-else (load pt)
+                  (TStruct [nm]
+                           (let [low (alloc-stack i64)
+                                 width (alloc-stack i64)
+                                 signed (alloc-stack bool)
+                                 back (alloc-stack i64)]
+                             (g-bits-info g nm fname low width signed back)
+                             ; r11 = container address, r10 = the container word,
+                             ; rax/rcx = the mask and value temporaries. The container
+                             ; address must survive the whole sequence, so it lives in
+                             ; r11 (never touched by the mask arithmetic below).
+                             (av-to-x! g pav (x-scratch2))
+                             (emit-load-from-mem! g (x-scratch1) (x-scratch2) (idiv (load back) 8))
+                             (let [fieldmask (if (icmp-ge (load width) 64) -1 (isub (ishl 1 (load width)) 1))]
+                               ; rax = ~(fieldmask << low); clear the field in place
+                               (x64-mov-imm! (mut s) (x-scratch0) (ishl fieldmask (load low)))
+                               (x64-not! (mut s) (x-scratch0))
+                               (x64-and-rr! (mut s) (x-scratch1) (x-scratch0))
+                               ; rcx = (value & fieldmask) << low
+                               (av-to-x! g vav 1)
+                               (x64-mov-imm! (mut s) (x-scratch0) fieldmask)
+                               (x64-and-rr! (mut s) 1 (x-scratch0))
+                               (when (icmp-gt (load low) 0) (x64-shl-imm! (mut s) 1 (load low)))
+                               (x64-or-rr! (mut s) (x-scratch1) 1)
+                               (emit-store-to-mem! g (x-scratch1) (x-scratch2) (idiv (load back) 8))
+                               vav)))
+                  (_ (do (cgx-fail "bit-set through non-struct pointer") (mk-aval 0 0 (TInt 64 true))))))))
+
+(defn emit-make-dyn [(g (ptr Cga))
+                     (ds (slice u8))
+                     (_vt (slice u8))
+                     (methods (ptr (ArrayList (slice u8))))
+                     (inner (ptr Expr))] (-> AVal)
+  (let [a (load (field g a))
+        buf (eobj-sect-buf (mut (field g obj)) (load (field g datasec)))]
+    ; the vtable: one 8-byte relocated function pointer per method
+    (xb-align! (mut buf) 8)
+    (let [vtoff (al-len [u8] (load buf))
+          nm (sconcat a "l_vtable." (i64->str a (load (field g nglob))))]
+      (store! (field g nglob) (iadd (load (field g nglob)) 1))
+      (let [n (al-len [(slice u8)] (load methods))
+            (mut i) 0]
+        (loop (if (icmp-ge (load i) n)
+                  (break)
+                  (do
+                    (let [mnm (al-get [(slice u8)] (load methods) (load i))
+                          msi (g-sig-idx g mnm)]
+                      (when (icmp-lt msi 0) (cgx-fail2 "make-dyn: unknown method " mnm))
+                      ; a vtable slot is an absolute 64-bit pointer to the method,
+                      ; so it takes an R_X86_64_64 with a zero addend.
+                      (eobj-add-reloc! (mut (field g obj))
+                                       (load (field g datasec))
+                                       (al-len [u8] (load buf))
+                                       (load (field (xal-at [GSig] (field g sigs) msi) symidx))
+                                       (r-x86-64-64)
+                                       0)
+                      (xb-u64! (mut buf) 0))
+                    (store! i (iadd (load i) 1))))))
+      (let [vtsym (eobj-add-sym! (mut (field g obj)) nm (load (field g datasec)) vtoff false)
+            iav (emit-expr g inner)
+            slot (slot-new! g 16 8)]
+        ; dyn object { data, vtable } by value
+        (av-to-x! g iav 9)
+        (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
+        (emit-sym-addr! g 9 vtsym)
+        (emit-store-int! g (x-scratch0) (x-slotbase) (iadd slot 8) 8)
+        (mk-aval 1 slot (TStruct ds))))))
+
+(defn emit-dyn-dispatch [(g (ptr Cga))
+                         (_ds (slice u8))
+                         (_vt (slice u8))
+                         (mi i64)
+                         (_cc (slice u8))
+                         (params (ptr (ArrayList Type)))
+                         (ret Type)
+                         (recv (ptr Expr))
+                         (args (ptr (ArrayList Expr)))] (-> AVal)
+  (let [a (load (field g a))
+        rav (emit-expr g recv)
+        rslot (av-slot! g rav)
+        ; fnptr = vtable[mi]
+        fpslot (slot-new! g 8 8)
+        dataslot (slot-new! g 8 8)]
+    ; data ptr
+    (emit-load-int! g (x-scratch0) (x-slotbase) rslot 8 false)
+    (emit-store-int! g (x-scratch0) (x-slotbase) dataslot 8)
+    ; vtable -> method fnptr
+    (emit-load-int! g (x-scratch0) (x-slotbase) (iadd rslot 8) 8 false)
+    (x64-mov-rm! (mut (field g asm)) (x-scratch0) (x-scratch0) (imul mi 8))
+    (emit-store-int! g (x-scratch0) (x-slotbase) fpslot 8)
+    ; assemble [data, args...] and the full param list [ptr, params...]
+    (let [(mut avs) (al-new [AVal] a)
+          (mut ptys) (al-new [Type] a)
+          fpav (alloc-stack AVal)]
+      (al-push! (mut ptys) (TPtr (box-type a (TInt 8 true))))
+      (let [np (al-len [Type] (load params))
+            (mut i) 0]
+        (loop (if (icmp-ge (load i) np)
+                  (break)
+                  (do
+                    (al-push! (mut ptys) (al-get [Type] (load params) (load i)))
+                    (store! i (iadd (load i) 1))))))
+      (al-push! (mut avs) (mk-aval 1 dataslot (TPtr (box-type a (TInt 8 true)))))
+      (let [na (al-len [Expr] (load args))
+            (mut i) 0]
+        (loop (if (icmp-ge (load i) na)
+                  (break)
+                  (do
+                    (al-push! (mut avs) (emit-expr g (xal-at [Expr] args (load i))))
+                    (store! i (iadd (load i) 1))))))
+      (store! fpav (mk-aval 1 fpslot (TFn "c" (box-al [Type] a (load ptys)) (box-type a ret))))
+      (emit-call! g
+                  -1
+                  fpav
+                  (box-al [Type] a (load ptys))
+                  false
+                  ret
+                  (box-al [AVal] a (load avs))))))
+
+; parse a (possibly negative) decimal integer token — llvm-ir literals.
