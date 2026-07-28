@@ -7,11 +7,16 @@ let package = Package(
     products: [
         .library(name: "CalorieModel", targets: ["CalorieModel"]),
         .executable(name: "ScenarioRunner", targets: ["ScenarioRunner"]),
+        .executable(name: "RealDataDiag", targets: ["RealDataDiag"]),
     ],
     targets: [
         .target(name: "CalorieModel"),
         .executableTarget(
             name: "ScenarioRunner",
+            dependencies: ["CalorieModel"]
+        ),
+        .executableTarget(
+            name: "RealDataDiag",
             dependencies: ["CalorieModel"]
         ),
         .testTarget(

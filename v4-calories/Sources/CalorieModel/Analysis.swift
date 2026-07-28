@@ -34,6 +34,12 @@ public struct Analysis: Sendable, Equatable {
     public var totalChangeLb: Double?     // trend - start (negative = lost)
     public var ratePerWeekLb: Double?     // current trend slope, lb/week (negative = losing)
     public var daysSinceLastWeighIn: Int?
+    /// Days where the raw smoother put the trend below every reading taken so far and it was
+    /// raised to that floor (see `TrendFilter.applyScaleFloor`). A running count of how often
+    /// the filter over-extrapolates; 0 means the floor never had to intervene.
+    public var trendFlooredDays: Int
+    /// Largest lb the floor had to lift the trend by. 0 when it never engaged.
+    public var trendFlooredMaxLb: Double
 
     // The model
     public var effectiveTDEE: Estimate?
@@ -207,6 +213,12 @@ public enum Analyzer {
         let (tdeeSeries, biasSeries) = rollingModelSeries(records: records, points: points,
                                                           goal: goal, config: config)
 
+        let flooredDays = points.filter(\.floored).count
+        let flooredMax = points.reduce(0.0) { worst, p in
+            guard p.floored, let t = p.trend, let raw = p.trendBeforeFloor else { return worst }
+            return max(worst, t - raw)
+        }
+
         return Analysis(
             cumulativeDeficitKcal: cumDeficit,
             cumulativeDeficitSE: cumDeficitSE,
@@ -218,6 +230,8 @@ public enum Analyzer {
             totalChangeLb: totalChange,
             ratePerWeekLb: rate,
             daysSinceLastWeighIn: daysSinceWeigh,
+            trendFlooredDays: flooredDays,
+            trendFlooredMaxLb: flooredMax,
             effectiveTDEE: effective,
             trueTDEE: truth,
             loggingBias: bias,

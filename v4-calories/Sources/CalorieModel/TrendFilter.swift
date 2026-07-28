@@ -47,10 +47,17 @@ public struct TrendFilter: Sendable {
 
     public struct Point: Sendable, Equatable {
         public var date: Date
-        public var trend: Double?        // smoothed level (lb)
+        public var trend: Double?        // smoothed level (lb), after the scale floor
         public var variance: Double?     // smoothed level variance (lb²)
         public var slopePerDay: Double?  // smoothed slope (lb/day)
         public var observed: Double?
+        /// True when `trend` was raised to the scale floor (see `applyScaleFloor`) — i.e. the
+        /// raw filter put the trend below every reading taken so far. Diagnostic only; the
+        /// ScenarioRunner reports how often it fires, which is a direct measure of how much
+        /// the underlying filter is over-extrapolating.
+        public var floored: Bool = false
+        /// The raw smoother output before the floor, kept for diagnostics.
+        public var trendBeforeFloor: Double?
     }
 
     /// When true, the water-noise level `R` is estimated from each user's own reading
@@ -204,7 +211,39 @@ public struct TrendFilter: Sendable {
         out[first].trend = mFilt[first].x
         out[first].variance = max(pSm[first].a, pFilt[first].a)
 
+        applyScaleFloor(&out)
         return (out, ())
+    }
+
+    /// Never report a trend weight below the lowest reading the scale has produced so far.
+    ///
+    /// The filter models the level as continuing along its current slope, so a weigh-in gap is
+    /// filled by extending that slope in a straight line. On a real diet the early rate is
+    /// transient (a fast first week, then a plateau), so over a long gap that straight line can
+    /// walk the trend clean out from under the data — the user is then told they weigh less than
+    /// any number their scale has ever shown, which reads as flatly wrong no matter how defensible
+    /// the statistics are.
+    ///
+    /// The floor is the running minimum, not the global one: it only ever uses readings the user
+    /// had already taken by that day, so the historical trend line is not retroactively rewritten
+    /// and a later regain cannot be pinned up to an old low. It binds only in the case being
+    /// guarded against — the trend below *every* reading to date — and is a no-op otherwise.
+    ///
+    /// NOTE: this is a floor on the *output*, not a fix to the model that produces the excursion.
+    /// While it is engaged the trend sits flat at the lowest reading instead of tracking, and the
+    /// cumulative deficit is correspondingly capped at what the scale can actually support.
+    /// `Point.floored` records where it fired.
+    private func applyScaleFloor(_ out: inout [Point]) {
+        var runningMin = Double.infinity
+        for i in out.indices {
+            if let z = out[i].observed, z.isFinite { runningMin = Swift.min(runningMin, z) }
+            guard let t = out[i].trend, runningMin.isFinite else { continue }
+            out[i].trendBeforeFloor = t
+            if t < runningMin {
+                out[i].trend = runningMin
+                out[i].floored = true
+            }
+        }
     }
 
     public static func lastTrendIndex(_ points: [Point]) -> Int? {
