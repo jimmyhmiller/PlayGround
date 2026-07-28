@@ -73,6 +73,59 @@
     (assert-eq (al-get (load xs) 301) 0)
     (assert-eq (al-get (load xs) 600) 299)))
 
+;; The overflow arena must NOT have a capacity cliff: past its region it keeps working.
+;; A strict arena aborts here — that is the whole reason this flavour exists.
+(deftest overflow-arena-outlives-its-region
+  (let [cap      4096
+        a        (overflow-arena-allocator cap)
+        (mut xs) (al-new [i64] a)
+        (mut i)  0]
+    (loop (if (>= (load i) 50000)                   ; ~400 KB into a 4 KB region
+              (break)
+              (do (al-push! (mut xs) (* (load i) 3))
+                  (store! i (+ (load i) 1)))))
+    (assert-eq (al-len [i64] (load xs)) 50000)
+    (assert-eq (al-get (load xs) 0) 0)
+    (assert-eq (al-get (load xs) 49999) 149997)
+    ; the bump region is spent, and everything past it came from malloc
+    (assert (<= (arena-used a) cap))))
+
+;; Small allocations still come out of the region, not malloc — an overflow arena that
+;; quietly routed everything to malloc would pass every other test here while being
+;; pointless. A list's FIRST growth goes through `resize` with a null pointer, which is
+;; exactly the path that would leak to malloc if it answered `realloc(NULL, n)`.
+(deftest overflow-arena-actually-bumps
+  (let [a        (overflow-arena-allocator 65536)
+        (mut xs) (al-new [i64] a)]
+    (assert-eq (arena-used a) 0)
+    (al-push! (mut xs) 1)                           ; first growth: cap 0 -> 4 elements
+    (assert-eq (arena-used a) 32)
+    (al-push! (mut xs) 2)
+    (al-push! (mut xs) 3)
+    (al-push! (mut xs) 4)
+    (assert-eq (arena-used a) 32)                   ; still within the 4-element buffer
+    (al-push! (mut xs) 5)                           ; grows to 8 in place: top block
+    (assert-eq (arena-used a) 64)
+    (assert-eq (al-get (load xs) 4) 5)))
+
+;; Overflow blocks are real malloc blocks, so freeing one must actually free it rather
+;; than no-op like an in-region block. Correctness is what is checked here (a double
+;; free or a free of an interior arena pointer would abort under the system allocator).
+(deftest overflow-arena-frees-only-overflow-blocks
+  (let [a        (overflow-arena-allocator 256)
+        (mut in)  (al-new [i64] a)                  ; lands in the region
+        (mut out) (al-new [i64] a)
+        (mut i)  0]
+    (al-push! (mut in) 42)
+    (loop (if (>= (load i) 2000)                    ; forced past the 256-byte region
+              (break)
+              (do (al-push! (mut out) (load i))
+                  (store! i (+ (load i) 1)))))
+    (al-free! (mut out))                            ; frees a malloc block
+    (al-free! (mut in))                             ; no-ops an in-region block
+    (assert-eq (al-len [i64] (load out)) 0)
+    (assert-eq (al-len [i64] (load in)) 0)))
+
 ;; A zero-length extend is a no-op, not a growth — `read-file` never hits it (the read
 ;; loop breaks on n <= 0) but the primitive has to be total.
 (deftest al-extend-of-nothing-changes-nothing

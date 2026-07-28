@@ -166,7 +166,11 @@
                                 (None [i64])
                                 (Some (if (load neg2) (isub 0 (load mag)) (load mag))))))))))))))
 
-(defn atom [(s (slice u8))] (-> SexpKind)
+; Takes the caller's allocator rather than grabbing `malloc-allocator` itself: the
+; `slice->cstr` below is a per-token scratch C string for `strtod`, so it belongs to
+; whatever allocator the compile is running on. Grabbing the global one here put it on
+; malloc no matter what the pipeline was threading.
+(defn atom [(a (ptr Allocator)) (s (slice u8))] (-> SexpKind)
   (let [n (slice-len s)]
     (if (and (icmp-gt n 0) (icmp-eq (cast i64 (slice-get s 0)) 58))
         (KKw (subslice s 1 n))
@@ -186,8 +190,7 @@
                                                  0))
                                          (store! j (iadd (load j) 1)))))
                              (load f))))
-                    (let [a (malloc-allocator)
-                          buf (slice->cstr a s)
+                    (let [buf (slice->cstr a s)
                           ep (alloc-stack (ptr i8))
                           x (strtod buf ep)
                           consumed (isub (cast i64 (load ep)) (cast i64 buf))]
@@ -427,7 +430,7 @@
               (TStr [s] (Ok (mk-sexp (KStr s) tlo thi)))
               (TCStr [s] (Ok (mk-sexp (KCStr s) tlo thi)))
               (TChar [v] (Ok (mk-sexp (KInt v) tlo thi)))
-              (TAtom [s] (Ok (mk-sexp (atom s) tlo thi)))
+              (TAtom [s] (Ok (mk-sexp (atom a s) tlo thi)))
               (TClose [c]
                       (let [cs
                               (slice-new [u8]

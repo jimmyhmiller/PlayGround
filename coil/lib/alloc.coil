@@ -166,13 +166,60 @@
     (-> (Option (ptr i8)))
   (let [ar    (cast (ptr Arena) ctx)
         start (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
-    (if (icmp-eq (iadd start old) (load (field ar off)))
-        (if (icmp-gt (iadd start new) (load (field ar cap)))
-            (None)                                  ; would run past the end of the arena
-            (do (store! (field ar off) (iadd start new))
-                (Some p)))
-        (None))))                                   ; not the top block — cannot grow
+    ; `p` must be one of OUR blocks before its address is interpreted as an offset. A
+    ; strict arena only ever hands out its own, but `p` is also NULL for a collection
+    ; that has not allocated yet, and the overflow flavour below passes malloc blocks
+    ; through here — both must miss, not land on a bogus `start`.
+    (if (and (icmp-ge start 0) (icmp-lt start (load (field ar cap))))
+        (if (icmp-eq (iadd start old) (load (field ar off)))
+            (if (icmp-gt (iadd start new) (load (field ar cap)))
+                (None)                              ; would run past the end of the arena
+                (do (store! (field ar off) (iadd start new))
+                    (Some p)))
+            (None))                                 ; not the top block — cannot grow
+        (None))))                                   ; not ours at all
 (defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0) ; bulk-freed
+
+; ---- an arena that OVERFLOWS to malloc instead of failing --------------------
+;; A bump allocator is the right shape for a compiler's root allocator — nearly nothing
+;; is individually freed — but a FIXED region is the wrong contract for one: a capacity
+;; cliff turns "this input is bigger than I guessed" into a hard abort. Measured on the
+;; REPL, which reuses one allocator across every evaluation and retains ~17 MiB per eval
+;; (that retention is not new — the malloc-backed build grows identically): a 4 GiB
+;; strict arena aborts at roughly 240 evaluations, where malloc simply keeps going.
+;;
+;; So this flavour bumps while the region lasts and falls back to malloc afterwards. It
+;; is strictly better than either half: the fast path stays a pointer increment, and the
+;; worst case degrades to exactly the malloc behaviour it replaced rather than dying.
+;;
+;; It is a SEPARATE vtable rather than a flag on `Arena` deliberately. `arena-over-buffer`
+;; must stay reachable from freestanding code, and a branch to `malloc` on the live path
+;; keeps the symbol referenced even when it can never be taken — `--gc-sections` can only
+;; drop what nothing mentions. Distinct hooks keep the bare-metal arena genuinely libc-free.
+(defn ar-in-block? [(ctx (ptr i8)) (p (ptr i8))] (-> bool)
+  (let [ar (cast (ptr Arena) ctx)
+        d  (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    (and (icmp-ge d 0) (icmp-lt d (load (field ar cap))))))
+
+(defn aro-alloc [(ctx (ptr i8)) (size :i64) (align :i64)] (-> (Option (ptr i8)))
+  (match (ar-alloc ctx size align)
+    (Some [p] (Some p))
+    (None []  (ma-alloc ctx size align))))          ; region full — malloc it (ctx unused)
+
+(defn aro-resize [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+    (-> (Option (ptr i8)))
+  ; A null `p` is a collection's first growth, not a block to resize. Answering it with
+  ; `realloc(NULL, n)` would silently route EVERY list's initial buffer to malloc and
+  ; leave the arena unused for exactly the allocations it exists to serve; `(None)` sends
+  ; the caller to `alloc-slice`, which bumps.
+  (if (icmp-eq (cast :i64 p) 0)
+      (None)
+      (if (ar-in-block? ctx p)
+          (ar-resize ctx p old new align)
+          (ma-resize ctx p old new align))))
+
+(defn aro-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64)
+  (if (ar-in-block? ctx p) 0 (ma-free ctx p size align)))   ; overflow blocks are real
 ;; Build an arena over a caller-provided buffer — no malloc, so it works
 ;; FREESTANDING (the buffer can be an `alloc-static` array in .bss). The malloc-backed
 ;; `arena-allocator` below is the convenience wrapper; this is the primitive.
@@ -205,3 +252,26 @@
   (arena-over-buffer (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
                      (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))
                      (malloc (cast isize cap)) cap))
+
+;; The overflow flavour (see `aro-alloc`): bump through a `cap`-byte region, then fall
+;; back to malloc. Suitable as a program's ROOT allocator, which the strict arena is not.
+;;
+;; If the region itself cannot be allocated this returns a plain `malloc-allocator`
+;; rather than an arena over a null base — a zero base with a nonzero cap would hand out
+;; addresses counted from NULL, which is not a failure you want to debug. Asking for a
+;; large region and getting the ordinary allocator is a graceful outcome; the caller sees
+;; a working `(ptr Allocator)` either way.
+(defn overflow-arena-allocator [(cap :i64)] (-> (ptr Allocator))
+  (let [buf (malloc (cast isize cap))]
+    (if (icmp-eq (cast :i64 buf) 0)
+        (malloc-allocator)
+        (let [ar (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
+              a  (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))]
+          (store! (field ar base) buf)
+          (store! (field ar off) 0)
+          (store! (field ar cap) cap)
+          (store! (field a alloc)  (fnptr-of aro-alloc))
+          (store! (field a resize) (fnptr-of aro-resize))
+          (store! (field a free)   (fnptr-of aro-free))
+          (store! (field a ctx)    (cast (ptr i8) ar))
+          a))))

@@ -3366,7 +3366,31 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
                    (default-backend i64)] (-> i64)
   ; argv[1] is NULL when argc < 2 — read it unguarded and `coil` with no args
   ; segfaults in cstr->slice before dispatch ever runs.
-  (let [a (malloc-allocator)
+  ;
+  ; THE ROOT ALLOCATOR. Every subcommand below is handed this one `a`, and the whole
+  ; pipeline threads it, so this binding decides how the compiler allocates. A bump
+  ; allocator is the right shape: AST nodes live until the process exits and almost
+  ; nothing is individually freed, which is precisely the lifetime an arena is for.
+  ;
+  ; Measured on `build selfhost/src/main.coil` (51k-line import closure), 15 paired runs
+  ; alternating binaries with COIL_STDLIB_DIR pinned so both compile the SAME source (each
+  ; binary embeds its own lib/*.coil, so without pinning the two sides are not compiling
+  ; the same input — that artifact produced two wrong findings before it was caught; see
+  ; docs/ALLOCATION.md): -30 ms median, faster in 12 of 15 pairs, and 1044 -> 1021 MiB of
+  ; peak RSS. The compiler already retained essentially everything it allocated, so
+  ; dropping `free` costs no memory and malloc's per-block bookkeeping is what goes away.
+  ;
+  ; The region is 1 GiB because the win scales with how much of the workload it covers —
+  ; a self-build allocates ~1 GB, and at 256 MiB the same change measured SLOWER than
+  ; malloc, since an overflowing allocation pays the failed bump AND the malloc. 2 GiB and
+  ; a strict 4 GiB arena measure the same as 1 GiB, so there is nothing past it to win.
+  ; The reservation is lazy: `check` on a two-line file has the same 44 MiB RSS and the
+  ; same 20 ms wall time as the malloc build, so small invocations are not taxed.
+  ;
+  ; `overflow-arena-allocator`, not `arena-allocator`, because this allocator is never
+  ; reset and outlives a single compile — `repl-cmd` reuses it across every evaluation.
+  ; A strict arena aborts once its region is spent; this one degrades to malloc.
+  (let [a (overflow-arena-allocator 1073741824)
         sub (if (icmp-lt (cast i64 argc) 2) "" (cstr->slice (load (index argv 1))))]
     (cond (or (str-eq sub "") (or (str-eq sub "--help") (or (str-eq sub "-h") (str-eq sub "help"))))
             (do (ps (stdout) (usage-text)) 0)

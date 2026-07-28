@@ -38,6 +38,13 @@ whole-compiler frontend is not reachable by allocator work alone — it needs th
 "actual compiler work" to come down too, which means fewer intermediate representations,
 not a faster `malloc`.
 
+**How that prediction held up.** The arena landed 20-30 ms of the ~124 ms, not the whole
+budget. The profile attributes time to `ma-alloc`/`ma-resize`, but only the part that is
+malloc's own bookkeeping goes away — the call, the vtable indirection through `call-ptr`,
+and the `Option` return around every allocation all remain, and they are most of it.
+"Allocation is 24%" was right; "a bump allocator removes 24%" was never what it said, and
+is not what happened.
+
 ## What already exists
 
 `lib/alloc.coil` already has a bump allocator. This work is **routing, not building**.
@@ -111,8 +118,8 @@ neither, but nothing in the tree uses it. Printing goes through a local `write(2
 hand-rolled decimal formatter rather than `io.coil`, so the reporting path adds no module
 dependency to `alloc.coil` and stays usable from anywhere the allocator is.
 
-**It does not cost nothing** — see [What it cost](#what-it-cost). The earlier claim in
-this document that it would was wrong.
+It costs ~23 KB of binary in every program that imports `alloc.coil`, and no measurable
+wall time — see [What it cost](#what-it-cost).
 
 The bug that motivated this — a silent exit-134 wasm64 build — turned out not to
 reproduce, and the allocation hypothesis behind it was disproved rather than confirmed:
@@ -130,10 +137,17 @@ resolve.coil 38   comptime.coil 24   codelib.coil 9   loader.coil 7
 metahost.coil 6   ast.coil 6         expander.coil 3  driver.coil 3   reader.coil 1
 ```
 
-Those 97 call sites are the actual work item. Most are convenience — a helper that needs
-*an* allocator and grabs the global one rather than taking a parameter. Each needs to
-either take the caller's `a` or deliberately keep `malloc` (a process-lifetime cache like
-the interner or a memo index legitimately wants malloc, not a per-compile arena).
+Most are convenience — a helper that needs *an* allocator and grabs the global one rather
+than taking a parameter. Each needs to either take the caller's `a` or deliberately keep
+`malloc` (a process-lifetime cache like the interner or a memo index legitimately wants
+malloc, not a per-compile arena).
+
+⚠ **This section called those 97 sites "the actual work item". That was wrong**, and it is
+the main thing to unlearn from the original draft. The one site that mattered was
+`driver.coil:3369` — the root binding every other allocation is threaded from. Changing
+it is what moved the number; the other 96 are cleanup of the paths that bypass `a`. See
+[What the arena actually bought](#what-the-arena-actually-bought). `reader.coil`'s single
+site is now converted, and `driver.coil`'s count is 2 rather than 3.
 
 ## Staging
 
@@ -144,12 +158,15 @@ Each step is independently verifiable; do not batch them.
    appending 100k items to an arena uses O(n) arena space, not O(n²).~~ **Done** —
    `examples/arena-growth.coil`, which the reader/load/expand corpora pick up
    automatically because they glob `examples/*.coil`.
-3. Convert one leaf module's `malloc-allocator` sites to take `a` — `reader.coil` (1
-   site) then `ast.coil` (6) are the smallest. Gates after each. **Next.**
-4. Give the driver a per-compile arena and pass it as `a` for the AST. Measure peak RSS
-   as well as wall time; a bump allocator trades memory for speed and 51k lines of AST in
-   an arena that is never reset is a real number worth knowing.
-5. Only then look at `resolve.coil`'s 38 sites, which are the bulk.
+3. ~~Convert one leaf module's `malloc-allocator` sites to take `a`.~~ `reader.coil`'s
+   single site (a per-token `slice->cstr` scratch buffer for `strtod`) **done** — `atom`
+   takes `a`, which was already in scope at its one call site. `ast.coil`'s 6 are
+   **deliberately still malloc**; see [The sites that should stay on
+   malloc](#the-sites-that-should-stay-on-malloc).
+4. ~~Give the driver an arena and pass it as `a`.~~ **Done, and it is the step that
+   mattered** — see [What the arena actually bought](#what-the-arena-actually-bought).
+5. `resolve.coil`'s 38 sites, which are the bulk. **Next**, and now worth much less than
+   it looked; read step 4's result first.
 
 A bulk-append primitive landed alongside step 2 because `loader.read-file` needed it (see
 [wasm64-reserve-abort.md](wasm64-reserve-abort.md)):
@@ -161,11 +178,107 @@ A bulk-append primitive landed alongside step 2 because `loader.read-file` neede
 It reserves the whole run up front and `mem-copy`s it, instead of a call plus a capacity
 test per element.
 
+## What the arena actually bought
+
+The 97 `malloc-allocator` call sites are **not** where the time was. The pipeline already
+threads `a` nearly everywhere, and `a` was `malloc-allocator` only because
+`driver-main` bound it that way at `driver.coil:3369`. Changing that one binding puts the
+whole AST on a bump allocator. Steps 3 and 5 are cleanup of the sites that *bypass* the
+threaded `a`; step 4 is the change.
+
+`build selfhost/src/main.coil -o /dev/null`, 15 paired runs alternating binaries, input
+pinned with `COIL_STDLIB_DIR` (see [How to measure this
+honestly](#how-to-measure-this-honestly) — without it these numbers are wrong):
+
+| | median | paired vs malloc root | faster |
+| --- | --- | --- | --- |
+| `malloc-allocator` root (was) | 0.550s | — | — |
+| overflow arena root, 1 GiB | 0.540s | **-30 ms** | 12/15 |
+
+**Peak RSS drops too: 1044 MiB → 1021 MiB.** This was the open question in step 4 —
+whether a never-reset arena would trade unacceptable memory for speed. It does the
+opposite, because the compiler was already retaining essentially everything it allocated;
+malloc's `free` was reclaiming almost nothing, so dropping it costs no memory and malloc's
+per-block bookkeeping is what goes away.
+
+Region size was chosen by measurement. Comparing the capacities against each other (these
+binaries share an embedded stdlib, so they are directly comparable):
+
+| region | median | note |
+| --- | --- | --- |
+| 256 MiB | 0.575s | **slower than malloc** — see below |
+| 1 GiB | 0.540s | shipped |
+| 2 GiB | 0.540s | no better |
+| 4 GiB, strict | 0.540s | no better |
+
+The win **scales with how much of the workload the region covers**. A self-build allocates
+about 1 GB; at 256 MiB most allocations overflow, and an overflowing allocation pays the
+failed bump *and* the malloc, so the change becomes a regression. Past 1 GiB there is
+nothing left to win, so 1 GiB is where it lands.
+
+The reservation does not tax small invocations. `check` on a two-line file: 44.3 MiB peak
+RSS and a 20 ms median against 45.2 MiB and 20 ms for the malloc build (paired delta
++0.0 ms median over 25 pairs). It is lazily backed, so it costs one `mmap` and no resident
+pages.
+
+### Why it is an *overflow* arena
+
+A fixed region is the wrong contract for a **root** allocator, and this is measurable
+rather than theoretical. `repl-cmd` reuses one allocator across every evaluation and
+retains about 17 MiB per eval — 200 evals reach 3.5 GiB of RSS. That retention is *not*
+new; the malloc build grows identically (3566 MiB vs 3482 MiB at 200 evals). But a strict
+4 GiB arena turns it into a hard abort at roughly 240 evaluations, where malloc simply
+keeps going.
+
+So `overflow-arena-allocator` bumps while its region lasts and falls back to malloc
+afterwards: the fast path stays a pointer increment and the worst case degrades to
+exactly the behaviour it replaced. 500 REPL evaluations run clean on it.
+
+It is a separate vtable (`aro-alloc`/`aro-resize`/`aro-free`) rather than a flag on
+`Arena`, because `arena-over-buffer` must stay reachable from freestanding code and a
+branch to `malloc` on the live path keeps the symbol referenced even when it can never be
+taken — `--gc-sections` can only drop what nothing mentions.
+
+Two traps that cost real time and are guarded by tests in `examples/arena-growth.coil`:
+
+* **`resize` with a null pointer.** A collection's first growth calls `resize(NULL, 0, n)`.
+  Answering it with `realloc(NULL, n)` is correct C and completely wrong here: it routes
+  *every* list's initial buffer to malloc and leaves the arena serving nothing. It must
+  return `(None)` so the caller reaches `alloc-slice`, which bumps.
+* **Interpreting a foreign pointer as an offset.** `ar-resize` computes `p - base`; with
+  overflow blocks in play, `p` may not be the arena's at all. It now range-checks before
+  treating the difference as an offset.
+
+### The sites that should stay on malloc
+
+`ast.coil`'s 6 sites back `type-res-box` and `src-mod-box` — `alloc-static` singletons
+holding the resolver's side tables, reached from `type-res-record`/`src-mod-record`, which
+take no allocator and are called from deep inside `resolve.coil`. Threading `a` to them
+means threading it through the whole resolver, which is step 5's job and not a leaf
+conversion. They are also process-lifetime by construction, which is the category this
+document already carved out as legitimately malloc. Left alone deliberately, not missed.
+
+(Both `-reset` functions overwrite their list with a fresh `al-new`, leaking the previous
+backing buffer. Harmless today — reset runs once per compile and the process exits — and
+noted here because an arena would make it free.)
+
+### What is left
+
+Step 5's 38 `resolve.coil` sites now look much less valuable than they did. Step 4 already
+moved every allocation that flows through the threaded `a`; what remains at those sites is
+whatever explicitly bypasses it. The honest expectation is single-digit milliseconds, not
+the 124 ms the profile attributes to allocation overall — that budget was mostly claimed
+by one binding.
+
+The larger remaining idea is the one the original staging hinted at with "per-compile":
+this arena is per-*process* and never reset. A driver that reset it between compiles would
+make the REPL's 17 MiB-per-eval retention vanish outright, which is a far bigger number
+than 40 ms. It needs the long-lived REPL state (`defs`, the interner) separated from
+per-compile state first, so it is genuinely a next piece of work rather than a tweak.
+
 ## What it cost
 
-Steps 1 and 2 are not free, and this document previously asserted step 1 would be. The
-measured price of the whole batch — diagnostic `oom`, in-place `ar-resize`, `al-extend!`,
-and the `read-file` rewrite:
+Binary size, which is a real cost and the only one:
 
 | | binary | vs HEAD |
 | --- | --- | --- |
@@ -173,28 +286,49 @@ and the `read-file` rewrite:
 | + `ar-resize`, `al-extend!`, `read-file` | 2,031,440 B | +26.6 KB |
 | + the `oom` message | 2,054,176 B | **+49.3 KB (+2.5%)** |
 
-Wall time, `coil build selfhost/src/main.coil -o /dev/null`, 15 **paired** runs
-alternating the two binaries so machine drift cancels (block-at-a-time rounds of this
-measurement wandered between 0.47s and 0.58s for the *same* binary, so pairing is not
-optional here):
+The `oom` message adds ~23 KB to every program that imports `alloc.coil`, which is every
+program. That is the price of never seeing a silent exit 134 again.
 
-| | min | median |
-| --- | --- | --- |
-| HEAD | 0.460s | 0.470s |
-| after | 0.470s | 0.480s |
+Wall time costs nothing — it is a small win. **An earlier revision of this document
+reported step 1 as a 3% regression. That was a measurement artifact**, described in the
+next section; the corrected numbers are in [How to measure this
+honestly](#how-to-measure-this-honestly).
 
-Paired delta **+20 ms median, +14 ms mean, slower in 12 of 15 pairs**. About 3%.
+## How to measure this honestly
 
-It is a size cost, not a hot-path cost: rebuilding with the `al-reserve!` call site back
-to the old argument-free `(oom)` produced a binary that timed identically to the full one,
-so the extra code is not slowing the allocator — there is simply ~49 KB more of it in
-every module that imports `alloc.coil`, which is every module. Whether 3% of the frontend
-is worth permanent OOM diagnosability is a judgement call; it is recorded here so it is a
-judgement call made with a number rather than a guess.
+⚠ **Two compiler binaries compiling `selfhost/src/main.coil` are not compiling the same
+input.** Each binary bakes its own copy of `lib/*.coil` in via `include-str`, and
+`main.coil`'s import closure resolves to *that embedded copy*, not to the disk. So a build
+whose only change is 60 added lines in `lib/alloc.coil` is compiling 60 more lines than
+the binary you are comparing it against — and it looks slower and hungrier for reasons
+that have nothing to do with the change.
 
-The `read-file` rewrite is worth about 10 ms of that back (2,031,440-byte build measured
-between the other two), consistent with the ~14 ms the earlier estimate predicted and, as
-predicted, not separable from noise in a single measurement.
+Pin the input with `COIL_STDLIB_DIR=$PWD` on **both** sides. Everything below does.
+
+This artifact produced two wrong conclusions before it was caught, both of which had been
+written into this document as findings:
+
+* Step 1 measured as **+20 ms (a 3% regression)**. Controlled, it is **-20 ms**, slower in
+  only 2 of 15 pairs. There was never a regression.
+* The arena measured as **+50 MiB of peak RSS**. Controlled, it is **-23 MiB**. Three
+  separate builds were made chasing that phantom — testing the `ar-resize` range guard,
+  then the `reader.coil` conversion, then strict-vs-overflow — and all three came back
+  identical, which is the clue that the variable was the input rather than the code.
+
+Corrected, `build selfhost/src/main.coil -o /dev/null`, 15 paired runs each, input pinned:
+
+| | median | paired vs previous | peak RSS |
+| --- | --- | --- | --- |
+| HEAD (`77a5d8032`), malloc root | 0.590s | — | 1045 MiB |
+| + `oom`, `ar-resize`, `al-extend!`, `read-file` | 0.570s | **-20 ms** (slower in 2/15) | 1044 MiB |
+| + arena root, `reader.coil` (this change) | 0.540s | **-30 ms** (faster in 12/15) | 1021 MiB |
+
+Cumulative against HEAD: **-40 ms median, -56 ms mean, faster in 11 of 15 pairs**, and
+**23 MiB less peak RSS**.
+
+Medians still drift between rounds with machine load — HEAD measured 0.590s here and
+0.550s an hour earlier — which is why every row is a *paired* delta against a binary run
+back-to-back with it, not a comparison of numbers from different rounds.
 
 ## How to verify
 
