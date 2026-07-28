@@ -1,6 +1,6 @@
-// The pages-router API-route runtime, spliced verbatim into diffpack's react-server
-// entry (see `rsc_entry_module`). It is real source, not a string, so the node
-// regression tests import THIS file and exercise the same code the entry runs.
+// The pages-router API-route runtime, spliced verbatim into diffpack's SSR entry
+// (see `ssr_entry_module`). It is real source, not a string, so the node regression
+// tests import THIS file and exercise the same code the entry runs.
 //
 // A Next app may be HYBRID: `app/` renders the pages while `pages/api/**` serves the
 // HTTP endpoints. Those endpoints use the pages-router contract — a Node
@@ -9,6 +9,21 @@
 // shape: next-auth (`pages/api/auth/[...nextauth].ts`) and every tRPC router are
 // pages API routes, and with them unserved the client cannot read a session, cannot
 // log in, and every data query 404s.
+//
+// WHICH GRAPH THIS LIVES IN IS LOAD-BEARING. Next compiles `pages/api/**` in its
+// `api-node` layer — a plain Node layer WITHOUT the `react-server` export condition —
+// while `app/**/route.ts` handlers are compiled in the react-server layer. diffpack
+// mirrors that: this runtime and the `pages/api/**` modules are bundled into the SSR
+// graph (node conditions, the ordinary React), NOT the react-server graph. Under the
+// `react-server` condition `react-dom/server` resolves to React's stub whose only
+// behaviour is `throw new Error("react-dom/server is not supported in React Server
+// Components")` — and cal.com's `packages/emails/src/renderEmail.ts` does exactly
+// `(await import("react-dom/server")).default` on every booking, so with these routes
+// in the react-server graph every POST /api/book/event answered 500. Aliasing the
+// module past the condition does not work either: the client-flavoured
+// `react-dom/server` reads the CLIENT internals of `react`, and the react-server graph
+// pins one React per environment (see `rsc_runtime_resolve::react_aliases`). The layer
+// has to be right, not the alias.
 //
 // The `req`/`res` pair here are REAL `http.IncomingMessage` / `http.ServerResponse`
 // objects driven over an in-memory socket, not hand-written look-alikes. That is what
@@ -275,4 +290,59 @@ export async function runPagesApiHandler({ routeLabel, handler, config, pathname
     bodyIsBase64: true,
     setCookies,
   };
+}
+
+/// Match one `pages/api/**` route's segment pattern against the request's path parts,
+/// capturing dynamic params. Same four segment kinds (and the same semantics) the
+/// app-router matcher in the react-server entry uses: Static matches one part exactly,
+/// Dynamic one part, CatchAll the (>=1) tail, OptionalCatchAll the (>=0) tail. Returns
+/// the params object or null.
+export function matchApiSegments(segments, parts) {
+  const params = {};
+  let i = 0;
+  for (const seg of segments) {
+    if (seg.k === "static") {
+      if (parts[i] !== seg.v) return null;
+      i += 1;
+    } else if (seg.k === "dynamic") {
+      if (i >= parts.length) return null;
+      params[seg.v] = decodeURIComponent(parts[i]);
+      i += 1;
+    } else if (seg.k === "catchall") {
+      if (i >= parts.length) return null;
+      params[seg.v] = parts.slice(i).map(decodeURIComponent);
+      i = parts.length;
+    } else if (seg.k === "optcatchall") {
+      params[seg.v] = parts.slice(i).map(decodeURIComponent);
+      i = parts.length;
+    } else {
+      return null;
+    }
+  }
+  return i === parts.length ? params : null;
+}
+
+/// Dispatch a request to the first matching entry of a `pages/api/**` route table.
+/// Each entry is `{ path, segments, load }` where `load()` imports the route module
+/// (its own chunk, so a route costs nothing until a request reaches it). Returns the
+/// `{ status, headers, body(base64), setCookies }` shape `runPagesApiHandler` produces,
+/// or `null` when no entry matches.
+export async function dispatchPagesApi(table, pathname, method, reqCtx) {
+  const parts = pathname.split("/").filter(Boolean);
+  for (const entry of table) {
+    const params = matchApiSegments(entry.segments, parts);
+    if (!params) continue;
+    const ns = await entry.load();
+    const mod = ns && ns.default !== undefined ? ns : { default: ns };
+    return runPagesApiHandler({
+      routeLabel: entry.path,
+      handler: mod.default,
+      config: ns && ns.config,
+      pathname,
+      method: method || "GET",
+      reqCtx: reqCtx || {},
+      params,
+    });
+  }
+  return null;
 }

@@ -170,7 +170,10 @@ async function writeRoute(urlPath, fileStem, workerCall, forceStatic) {
   writeFileSync(rscPath, flightBuf); // RAW flight — the soft-nav (?__rsc=1) source.
   // next/cache: the cache tags this page read (unstable_cache / tagged fetch), recorded in
   // the manifest so the orchestrator can map a tag back to this pathname for revalidateTag.
-  return { htmlPath, rscPath, tags: Array.isArray(tags) ? tags : [] };
+  // The route's dynamic params travel with the entry: a soft navigation to a
+  // PRERENDERED dynamic route (`/blog/[slug]`) is answered straight from `.rsc` with no
+  // render, so the orchestrator has nothing else to derive `useParams()` from.
+  return { htmlPath, rscPath, tags: Array.isArray(tags) ? tags : [], params: params || {} };
 }
 
 async function main() {
@@ -236,7 +239,7 @@ async function main() {
       if (outcome.demoted) {
         demoted[i] = { path: job.urlPath, reason: outcome.demoted };
       } else {
-        results[i] = { path: job.urlPath, file: job.fileStem, revalidate: job.revalidate, tags: outcome.tags };
+        results[i] = { path: job.urlPath, file: job.fileStem, revalidate: job.revalidate, tags: outcome.tags, params: outcome.params };
       }
       done += 1;
       if (done % 250 === 0 || done === jobs.length) {

@@ -2826,7 +2826,14 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     let eager_islands = recorded_eager_islands(&adapter_dir);
     write_if_changed(
         &adapter_dir.join("server.tsx"),
-        &ssr_entry_module(&adapter_dir, &islands, &eager_islands, &hooks_context_canon, &asset_base),
+        &ssr_entry_module(
+            &adapter_dir,
+            &islands,
+            &eager_islands,
+            &hooks_context_canon,
+            &asset_base,
+            &discovered.pages_api,
+        ),
     )?;
     write_if_changed(
         &adapter_dir.join("client.tsx"),
@@ -4059,23 +4066,20 @@ fn rsc_entry_module(
         .map(|(i, s)| format!("import * as H{i} from {};\n", js_str(s)))
         .collect();
 
-    // Pages-router API routes (`pages/api/**`) of a hybrid app. Each is loaded through
-    // its own `import()` so it lands in its own chunk: that mirrors Next's per-route
-    // entry, and it means a worker only pays a route's module-init cost when a request
-    // actually reaches it (cal.com has 45 of them behind next-auth and tRPC).
+    // Pages-router API routes (`pages/api/**`) of a hybrid app: PATTERNS ONLY here. The
+    // modules themselves are bundled into the SSR graph and invoked there (Next's
+    // `api-node` layer has no `react-server` export condition — see the header of
+    // src/next_runtime/pages_api.js). This entry still owns the table because it owns
+    // route discovery, and `routeManifest` publishes it so the orchestrator knows which
+    // paths to send to the SSR bundle instead of rendering a page for them.
     let mut pages_api_entries = String::new();
     for route in &disc.pages_api {
         pages_api_entries.push_str(&format!(
-            "  {{ path: {}, segments: {}, load: () => import({}) }},\n",
+            "  {{ path: {}, segments: {} }},\n",
             js_str(&route.url_path),
             segments_js(&route.segments),
-            js_str(&route.file.to_string_lossy()),
         ));
     }
-    // The pages-router API runtime is real source (src/next_runtime/pages_api.js),
-    // spliced verbatim so the node regression test imports the SAME code this entry
-    // runs. It carries its own `node:http` / `node:stream` imports.
-    let pages_api_runtime = include_str!("next_runtime/pages_api.js");
 
     // Middleware: namespace-import it (named `middleware` or default export) so
     // `runMiddleware` can invoke it; `null` when the app has none.
@@ -4196,9 +4200,6 @@ import {{ fileURLToPath, pathToFileURL }} from "node:url";
 import {{ handleServerAction }} from "#diffpack-rsc-action-handler";
 import {{ NextRequest }} from "next/server";
 {request_context_import}{imports}{ns_imports}{handler_imports}{middleware_import}
-// --- pages-router api runtime (src/next_runtime/pages_api.js, verbatim) -------------
-{pages_api_runtime}
-// --- end pages-router api runtime ---------------------------------------------------
 {middleware_const}
 {css_const}{font_const}const ROUTES = [
 {route_entries}];
@@ -4210,9 +4211,11 @@ const INTERCEPTS = [
 const ROUTE_HANDLERS = [
 {handler_entries}];
 // Pages-router API routes (`pages/api/**`) of a HYBRID app — `app/` renders the pages,
-// these serve the HTTP endpoints under the pages-router `(req, res)` contract. Matched
-// only after ROUTE_HANDLERS, so an `app/**/route.ts` wins a path both could answer
-// (Next's precedence). Each entry loads its module on first use.
+// these serve the HTTP endpoints under the pages-router `(req, res)` contract. PATTERNS
+// ONLY: the modules live in the SSR graph (Next's `api-node` layer has no `react-server`
+// condition) and run there. Published through `routeManifest` so the orchestrator can
+// match them; matched only after ROUTE_HANDLERS, so an `app/**/route.ts` wins a path
+// both could answer (Next's precedence).
 const PAGES_API = [
 {pages_api_entries}];
 // Ssg routes (a dynamic segment with generateStaticParams) → their module namespace,
@@ -5023,31 +5026,10 @@ export async function handleRoute(pathname, method, reqCtx) {{
       setCookies,
     }};
   }}
-  // No `app/**/route.ts` matched. A hybrid app's `pages/api/**` endpoints answer next.
-  return handlePagesApi(pathname, method, reqCtx);
-}}
-
-// Dispatch a PAGES-ROUTER api route (`pages/api/**`). Same result shape as
-// `handleRoute`, so the orchestrator serves both through one path; the handler contract
-// is the pages-router one (a single default-exported `(req, res)`), implemented by
-// `runPagesApiHandler` above.
-async function handlePagesApi(pathname, method, reqCtx) {{
-  const parts = pathname.split("/").filter(Boolean);
-  for (const entry of PAGES_API) {{
-    const params = matchSegments(entry.segments, parts);
-    if (!params) continue;
-    const ns = await entry.load();
-    const mod = ns && ns.default !== undefined ? ns : {{ default: ns }};
-    return runPagesApiHandler({{
-      routeLabel: entry.path,
-      handler: mod.default,
-      config: ns && ns.config,
-      pathname,
-      method: method || "GET",
-      reqCtx: reqCtx || {{}},
-      params,
-    }});
-  }}
+  // No `app/**/route.ts` matched. A hybrid app's `pages/api/**` endpoints answer next —
+  // but NOT from this graph: the orchestrator dispatches those to the SSR bundle's
+  // `handlePagesApi` (Next's `api-node` layer, no `react-server` condition). Returning
+  // null here is what makes it fall through to that path.
   return null;
 }}
 
@@ -5338,6 +5320,7 @@ fn ssr_entry_module(
     eager_islands: &BTreeSet<String>,
     hooks_context: &Path,
     asset_base: &str,
+    pages_api: &[PagesApiRoute],
 ) -> String {
     let pins = island_pins(adapter_dir, islands, eager_islands);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
@@ -5349,6 +5332,23 @@ fn ssr_entry_module(
     // in verbatim so the node regression test can import the SAME code this entry runs.
     // It carries this module's `node:stream` import.
     let flight_sink = include_str!("next_runtime/flight_sink.js");
+    // Pages-router API routes (`pages/api/**`) of a hybrid app live in THIS graph, not
+    // the react-server one: Next compiles them in its `api-node` layer, without the
+    // `react-server` export condition (see the header of src/next_runtime/pages_api.js
+    // for the concrete failure that layering them wrong produces). Each is reached
+    // through its own `import()` so it lands in its own chunk and a route only costs
+    // module-init time when a request actually reaches it (cal.com has 45 of them
+    // behind next-auth and tRPC).
+    let pages_api_runtime = include_str!("next_runtime/pages_api.js");
+    let mut pages_api_entries = String::new();
+    for route in pages_api {
+        pages_api_entries.push_str(&format!(
+            "  {{ path: {}, segments: {}, load: () => import({}) }},\n",
+            js_str(&route.url_path),
+            segments_js(&route.segments),
+            js_str(&route.file.to_string_lossy()),
+        ));
+    }
     format!(
         r#"// Generated by diffpack's next app-router adapter — the SSR-of-flight entry
 // (Target::Server, node conditions: react + react-dom/server +
@@ -5363,6 +5363,23 @@ import {{ renderToPipeableStream, renderToStaticMarkup }} from "react-dom/server
 import {{ createElement }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext, ServerInsertedHTMLContext }} from {hooks_import};
 {flight_sink}
+// --- pages-router api runtime (src/next_runtime/pages_api.js, verbatim) -------------
+{pages_api_runtime}
+// --- end pages-router api runtime ---------------------------------------------------
+// Pages-router API routes (`pages/api/**`) of a HYBRID app — `app/` renders the pages,
+// these serve the HTTP endpoints under the pages-router `(req, res)` contract. The
+// orchestrator matches a request against these patterns (published by the react-server
+// entry's `routeManifest`, which knows the same build-time table) and calls
+// `handlePagesApi` below, IN THIS PROCESS, because this is the graph whose React is the
+// ordinary one.
+const PAGES_API = [
+{pages_api_entries}];
+// Dispatch a pages-router API request. Same result shape an app-router `route.ts`
+// handler returns, so the orchestrator serves both through one path; `null` means no
+// `pages/api/**` route matched.
+export async function handlePagesApi(pathname, method, reqCtx) {{
+  return dispatchPagesApi(PAGES_API, pathname, method, reqCtx);
+}}
 {pins}
 // Force a code split so the build uses the registry runtime the seam maps onto.
 import({lazy}).then((module) => {{
@@ -5656,6 +5673,10 @@ async function fetchFlight(href) {{
   const sep = href.includes("?") ? "&" : "?";
   const res = await fetch(href + sep + "__rsc=1");
   const intercept = res.headers.get("x-diffpack-intercept") === "1";
+  // The matched route's dynamic params, sent by the orchestrator with the flight. A soft
+  // navigation changes the route, so `useParams()` has to change with it, and the client
+  // cannot derive `{{ uid: "…" }}` from a URL whose segment pattern only the server knows.
+  const params = parseFlightParams(res.headers.get("x-diffpack-params"));
   // A server-side `redirect()` cannot be a 3xx on this channel — `fetch` follows those
   // transparently and the Router would never learn the URL changed — so the orchestrator
   // reports it as JSON. Handing that JSON to the flight reader (which is what happened
@@ -5670,7 +5691,50 @@ async function fetchFlight(href) {{
     );
   }}
   const tree = createFromReadableStream(res.body, {{ callServer }});
-  return {{ tree, intercept }};
+  return {{ tree, intercept, params }};
+}}
+
+// Decode the `x-diffpack-params` header the orchestrator stamps on a soft-navigation
+// flight. A PRESENT-but-malformed value is a server bug and throws, rather than being
+// papered over with `{{}}`: silently empty params are exactly the failure this header
+// exists to fix, and they resurface far away as "Required" on a zod schema. An ABSENT
+// header is a different case and legitimately means "no params known": a `--static-export`
+// host is a plain file server (scripts/rsc/next-static-serve.mjs) that hands back the
+// prerendered `.rsc` with no idea which segments were dynamic.
+function parseFlightParams(raw) {{
+  if (raw == null) return EMPTY_PARAMS;
+  let decoded;
+  try {{
+    decoded = JSON.parse(decodeURIComponent(raw));
+  }} catch (error) {{
+    throw new Error(
+      "diffpack next client: the x-diffpack-params header on the soft-navigation channel is not " +
+        "percent-encoded JSON (" + String(raw).slice(0, 120) + "): " + String(error),
+    );
+  }}
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {{
+    throw new Error(
+      "diffpack next client: the x-diffpack-params header must decode to an object, got " +
+        JSON.stringify(decoded).slice(0, 120),
+    );
+  }}
+  return decoded;
+}}
+
+// The route identity the app-router hooks read: `useParams()`, `usePathname()` and
+// `useSearchParams()`. Recomputed on EVERY navigation (params come from the server with
+// the flight; pathname/search are the href the navigation settled on, after redirects),
+// so the three hooks describe the route currently rendered rather than the one the
+// document was first loaded with.
+const EMPTY_PARAMS = {{}};
+function routeIdentity(href, params) {{
+  const noHash = href.split("#")[0];
+  const query = noHash.indexOf("?");
+  return {{
+    params: params || EMPTY_PARAMS,
+    pathname: query === -1 ? noHash : noHash.slice(0, query),
+    search: query === -1 ? "" : noHash.slice(query),
+  }};
 }}
 
 // Follow a soft navigation through any server-side redirects, returning the final
@@ -5702,12 +5766,21 @@ function ModalPortal({{ thenable }}) {{
 // INTERCEPT soft-nav does NOT swap the document — it keeps the current page mounted (so
 // its state/scroll survive) and renders the overlay via a body portal, masking the URL to
 // the target. Back on a masked modal URL closes the overlay without refetching.
-function Router({{ initialTree }}) {{
+function Router({{ initialTree, initialRoute }}) {{
   const [tree, setTree] = useState(initialTree);
   const [modal, setModal] = useState(null); // {{ tree }} overlay, or null
+  // The route the hooks contexts describe. Swapped together with the tree so
+  // useParams/usePathname/useSearchParams never lag a navigation behind.
+  const [route, setRoute] = useState(initialRoute);
   const [, startTransition] = useTransition();
   const modalOpen = useRef(false);
   const underlying = useRef(location.pathname + location.search);
+  // The route to restore when an intercept overlay closes (the underlying page stays
+  // mounted, so its params/pathname/search must come back with it). `currentRoute`
+  // mirrors the state for the navigate/close closures, which are created once (the
+  // effect has no deps) and so cannot read the `route` state variable.
+  const underlyingRoute = useRef(initialRoute);
+  const currentRoute = useRef(initialRoute);
   useEffect(() => {{
     // A bounded, single-use prefetch cache: next/link hover/focus (and
     // useRouter().prefetch) warm the target route's flight here; navigate() consumes the
@@ -5736,20 +5809,27 @@ function Router({{ initialTree }}) {{
         if (warmed) prefetchCache.delete(target);
         return warmed;
       }};
-      const {{ tree: next, intercept, href }} = await fetchFlightFollowing(requested, take);
+      const {{ tree: next, intercept, params, href }} = await fetchFlightFollowing(requested, take);
+      const identity = routeIdentity(href, params);
       if (intercept) {{
         underlying.current = location.pathname + location.search;
+        underlyingRoute.current = currentRoute.current;
         modalOpen.current = true;
+        currentRoute.current = identity;
         startTransition(() => {{
           setModal({{ tree: next }});
+          // The URL is masked to the overlay's target, so the hooks must describe it too.
+          setRoute(identity);
           if (push) history.pushState({{ __diffpackModal: true }}, "", href);
         }});
         return;
       }}
       modalOpen.current = false;
+      currentRoute.current = identity;
       startTransition(() => {{
         setModal(null);
         setTree(next);
+        setRoute(identity);
         if (push) history[replace ? "replaceState" : "pushState"](null, "", href);
         // A back/forward navigation does not push, but if the server redirected, the
         // address bar still shows the URL that no longer renders — correct it in place.
@@ -5761,6 +5841,10 @@ function Router({{ initialTree }}) {{
       if (!modalOpen.current) return;
       modalOpen.current = false;
       setModal(null);
+      // The URL un-masks back to the still-mounted underlying page, so the hooks go back
+      // to describing it.
+      currentRoute.current = underlyingRoute.current;
+      setRoute(underlyingRoute.current);
       history.pushState(null, "", underlying.current);
     }}
     // router.refresh(): a SOFT RSC refresh — re-fetch the CURRENT route's flight (bypassing
@@ -5768,12 +5852,15 @@ function Router({{ initialTree }}) {{
     // mounted so island state survives. Never a window.location.reload().
     async function refresh() {{
       const current = location.pathname + location.search;
-      const {{ tree: next, href }} = await fetchFlightFollowing(current, () => undefined);
+      const {{ tree: next, params, href }} = await fetchFlightFollowing(current, () => undefined);
       // The route redirected since it was last rendered — land on the new URL.
       if (href !== current) history.replaceState(null, "", href);
+      const identity = routeIdentity(href, params);
+      currentRoute.current = identity;
       startTransition(() => {{
         setModal(null);
         setTree(next);
+        setRoute(identity);
       }});
     }}
     window.__diffpack_navigate = navigate;
@@ -5793,11 +5880,27 @@ function Router({{ initialTree }}) {{
     window.addEventListener("popstate", onpop);
     return () => window.removeEventListener("popstate", onpop);
   }}, []);
+  // The app-router hooks contexts are provided HERE, inside the Router, so a soft
+  // navigation re-provides them with the new route. Providers render no DOM, so this is
+  // the same markup the SSR entry produced (which wraps the flight root in the identical
+  // three providers) — hydration sees no difference.
   return createElement(
-    Fragment,
-    null,
-    use(tree),
-    modal ? createElement(Suspense, {{ fallback: null }}, createElement(ModalPortal, {{ thenable: modal.tree }})) : null,
+    PathParamsContext.Provider,
+    {{ value: route.params }},
+    createElement(
+      PathnameContext.Provider,
+      {{ value: route.pathname }},
+      createElement(
+        SearchParamsContext.Provider,
+        {{ value: route.search }},
+        createElement(
+          Fragment,
+          null,
+          use(tree),
+          modal ? createElement(Suspense, {{ fallback: null }}, createElement(ModalPortal, {{ thenable: modal.tree }})) : null,
+        ),
+      ),
+    ),
   );
 }}
 
@@ -5851,21 +5954,15 @@ function boot() {{
   const initialTree = createFromReadableStream(stream, {{ callServer }});
   // Feed the hooks contexts from the request globals the SSR bootstrap injected —
   // the SAME values the SSR entry rendered with, so hydration matches exactly.
-  const params = window.__DIFFPACK_PARAMS__ || {{}};
+  const params = window.__DIFFPACK_PARAMS__ || EMPTY_PARAMS;
   const urlInfo = window.__DIFFPACK_URL__ || {{ pathname: location.pathname, search: location.search }};
-  const app = createElement(
-    PathParamsContext.Provider,
-    {{ value: params }},
-    createElement(
-      PathnameContext.Provider,
-      {{ value: urlInfo.pathname }},
-      createElement(
-        SearchParamsContext.Provider,
-        {{ value: urlInfo.search }},
-        createElement(Router, {{ initialTree }}),
-      ),
-    ),
-  );
+  // The Router owns the hooks contexts from here on: it re-provides them on every soft
+  // navigation. This is only their INITIAL value, and it is the same one the SSR entry
+  // rendered with, so hydration matches exactly.
+  const app = createElement(Router, {{
+    initialTree,
+    initialRoute: {{ params, pathname: urlInfo.pathname, search: urlInfo.search }},
+  }});
   // The RootLayout owns the document, so we hydrate the whole document.
   hydrateRoot(document, app, {{
     // A redirect()/notFound() that reaches the browser is CONTROL FLOW, not a failure:
@@ -9033,10 +9130,14 @@ console.log(JSON.stringify({{
             ssr_src.contains("assertFlushHookFired"),
             "a react-dom without flushBuffered must be a hard error, not a silent fallback: {ssr_src}"
         );
+        // Exactly TWO node:stream imports, and both belong to a spliced runtime file:
+        // the flight sink's `Writable` and the pages-api runtime's `Duplex`. The
+        // generated code around them must never add a third of its own — that is the
+        // regression this counts.
         assert_eq!(
             ssr_src.matches("from \"node:stream\"").count(),
-            1,
-            "exactly one node:stream import (the spliced flight sink owns it): {ssr_src}"
+            2,
+            "only the two spliced runtimes import node:stream: {ssr_src}"
         );
         // The client reconstructs the flight from the incremental __DF_FLIGHT stream.
         assert!(client_src.contains("flightStreamFromDF"), "client rebuilds flight from the __DF_FLIGHT stream: {client_src}");
@@ -9664,7 +9765,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let dir = scratch("ssr-asset-base");
         let hooks = dir.join("hooks-context.ts");
         // With an asset base the browser bootstrap is fetched under the prefix.
-        let with_prefix = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "/cdn/docs");
+        let with_prefix = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "/cdn/docs", &[]);
         assert!(
             with_prefix.contains(r#"bootstrapModules: ["/cdn/docs/client.js"]"#),
             "bootstrapModules carry the asset base (both render paths): {with_prefix}",
@@ -9675,7 +9776,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
             "both the buffered and streaming render paths are prefixed",
         );
         // Empty asset base keeps the bare `/client.js`.
-        let plain = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "");
+        let plain = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "", &[]);
         assert!(plain.contains(r#"bootstrapModules: ["/client.js"]"#), "no prefix -> bare client.js");
     }
 
@@ -10753,6 +10854,7 @@ console.log(out.join("|"));
             &BTreeSet::new(),
             Path::new("/app/.diffpack-next/hooks-context.ts"),
             "",
+            &[],
         );
         assert!(
             ssr.contains("if (!shellStarted && !res.headersSent) {"),
@@ -10772,6 +10874,7 @@ console.log(out.join("|"));
             &BTreeSet::new(),
             Path::new("/app/.diffpack-next/hooks-context.ts"),
             "",
+            &[],
         );
         assert_eq!(
             ssr.matches("nonce: nonce || undefined").count(),
@@ -10816,7 +10919,7 @@ console.log(out.join("|"));
         let islands = [PathBuf::from("/app/.diffpack-next/shims/script.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
         let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
-        let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, "");
+        let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, "", &[]);
         for (label, source) in [("client", &client), ("ssr", &ssr)] {
             assert!(
                 source.contains("shims/script.tsx") || source.contains("shims\\script.tsx"),
@@ -10886,13 +10989,17 @@ console.log(out.join("|"));
         assert!(discover_pages_api_routes(&app).unwrap().is_empty());
     }
 
-    /// The react-server entry must carry the PAGES_API table, load each endpoint, and
-    /// publish the patterns in `routeManifest` — the orchestrator routes a request to a
-    /// handler only when the manifest claims the path, so a missing entry means the
-    /// request is rendered as a page instead (which is how `/api/auth/session` came back
-    /// as an HTML 404 body and next-auth died on `Unexpected token '<'`).
+    /// `pages/api/**` endpoints must be bundled and run in the SSR graph, NOT the
+    /// react-server one. Next compiles them in its `api-node` layer, which has no
+    /// `react-server` export condition; under that condition `react-dom/server` resolves
+    /// to React's stub that only throws `react-dom/server is not supported in React
+    /// Server Components`, and cal.com's `renderEmail` imports it on every booking — so
+    /// with these routes in the wrong graph every `POST /api/book/event` answered 500.
+    /// The react-server entry keeps the PATTERNS (it owns route discovery) and publishes
+    /// them through `routeManifest` so the orchestrator knows which paths to send to the
+    /// SSR bundle instead of rendering a page for them.
     #[test]
-    fn the_react_server_entry_dispatches_pages_api_routes() {
+    fn pages_api_routes_run_in_the_ssr_graph_not_the_react_server_graph() {
         let dir = scratch("hybrid-pages-api-entry");
         let app = write_hybrid_app(&dir);
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
@@ -10917,26 +11024,139 @@ console.log(out.join("|"));
             "each endpoint is in the table",
         );
         assert!(
-            source.contains("load: () => import(") && source.contains("nextauth"),
-            "each endpoint is loaded through its own import() so it gets its own chunk",
-        );
-        assert!(
-            source.contains("return handlePagesApi(pathname, method, reqCtx);"),
-            "handleRoute falls through to the pages api table",
-        );
-        assert!(
             source.contains("pagesApi: PAGES_API.map("),
             "routeManifest publishes the patterns so the orchestrator routes them",
         );
-        // The runtime is the real file, spliced verbatim — not a second copy.
+        // The react-server graph must NOT pull these modules in: no import() of an
+        // endpoint, and no invocation runtime.
         assert!(
-            source.contains("export async function runPagesApiHandler("),
-            "src/next_runtime/pages_api.js is spliced into the entry",
+            !source.contains("load: () => import("),
+            "the react-server entry must not import a pages/api module: {source}",
+        );
+        assert!(
+            !source.contains("runPagesApiHandler"),
+            "the pages-api runtime must not be spliced into the react-server entry: {source}",
+        );
+        assert!(
+            source.contains("return null;"),
+            "handleRoute returns null so the orchestrator falls through to the SSR bundle",
         );
         // An app-router `route.ts` must still be matched FIRST (Next's precedence).
         let handlers = source.find("const ROUTE_HANDLERS = [").unwrap();
         let pages_api = source.find("const PAGES_API = [").unwrap();
         assert!(handlers < pages_api, "ROUTE_HANDLERS is declared before PAGES_API");
+
+        // ...and the SSR entry is where they actually live and run.
+        let hooks = dir.join("hooks-context.ts");
+        let ssr = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "", &disc.pages_api);
+        assert!(ssr.contains("const PAGES_API = ["), "the SSR entry carries the table: {ssr}");
+        assert!(
+            ssr.contains("load: () => import(") && ssr.contains("nextauth"),
+            "each endpoint is loaded through its own import() so it gets its own chunk: {ssr}",
+        );
+        assert!(
+            ssr.contains("export async function handlePagesApi("),
+            "the SSR entry exports the dispatcher the orchestrator calls: {ssr}",
+        );
+        // The runtime is the real file, spliced verbatim — not a second copy.
+        assert!(
+            ssr.contains("export async function runPagesApiHandler("),
+            "src/next_runtime/pages_api.js is spliced into the SSR entry: {ssr}",
+        );
+        // The orchestrator must dispatch a pages-api path to the SSR bundle, not the
+        // react-server worker.
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        assert!(
+            SERVER.contains(r#"if (endpointKind === "pages-api") {"#),
+            "the orchestrator splits the two endpoint kinds",
+        );
+        assert!(
+            SERVER.contains("getPagesApiHandler()"),
+            "the orchestrator resolves the dispatcher from the SSR bundle",
+        );
+    }
+
+    /// A SOFT navigation changes the route, so `useParams()`/`usePathname()`/
+    /// `useSearchParams()` must change with it. They used to be provided ONCE, at boot,
+    /// from the document's injected globals and never touched again — so after
+    /// `router.push("/booking/<uid>")` the params context still described the page the
+    /// tab was opened on. cal.com's booking-success page zod-parses `useParams()` and
+    /// died with `uid: Required` on every booking made through the UI (a hard reload of
+    /// the same URL rendered fine, which is what made it look like a server bug).
+    /// The params cannot be derived on the client — only the server knows the segment
+    /// pattern — so they travel with the flight on `x-diffpack-params`.
+    #[test]
+    fn a_soft_navigation_reprovides_the_route_identity_hooks() {
+        let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
+        let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+
+        // The producer: BOTH orchestrator paths that can answer `?__rsc=1` stamp the
+        // header — the live render and the prerendered `.rsc` served straight off disk.
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        assert_eq!(
+            SERVER.matches("x-diffpack-params").count(),
+            2,
+            "the live render AND the prerender cache must both stamp the params header",
+        );
+        assert!(
+            SERVER.contains(
+                r#"rscHeaders["x-diffpack-params"] = encodeURIComponent(JSON.stringify(meta.params || {}));"#
+            ),
+            "the live soft-nav response carries the matched params",
+        );
+        assert!(
+            SERVER.contains(r#"tags, params: e.params || {} }"#),
+            "the prerender manifest's recorded params reach the cache entry",
+        );
+        const PRERENDER: &str = include_str!("../scripts/rsc/next-prerender.mjs");
+        assert!(
+            PRERENDER.contains("params: params || {}"),
+            "the prerender records the params it rendered with",
+        );
+
+        // The consumer: params ride along through the redirect-following fetch, and the
+        // Router swaps the whole route identity with the tree.
+        assert!(
+            client.contains("const params = parseFlightParams(res.headers.get(\"x-diffpack-params\"));"),
+            "fetchFlight reads the header: {client}",
+        );
+        assert!(
+            client.contains("return { tree, intercept, params };"),
+            "the params travel with the tree: {client}",
+        );
+        assert!(
+            client.contains("const identity = routeIdentity(href, params);"),
+            "navigate() computes the new route identity from the href it settled on: {client}",
+        );
+        for setter in ["setTree(next);", "setRoute(identity);"] {
+            assert!(client.contains(setter), "navigate() swaps {setter}: {client}");
+        }
+        // The providers live INSIDE the Router (they are re-rendered per navigation),
+        // not in boot() where they could only ever hold the document's initial values.
+        let router_at = client.find("function Router({ initialTree, initialRoute })").unwrap();
+        let boot_at = client.find("function boot()").unwrap();
+        let provider_at = client.find("PathParamsContext.Provider").unwrap();
+        assert!(
+            router_at < provider_at && provider_at < boot_at,
+            "the hooks providers must be rendered by the Router, not by boot(): {client}",
+        );
+        assert!(
+            client.contains("{ value: route.params }"),
+            "the params provider reads the Router's live route: {client}",
+        );
+        // router.refresh() re-reads them too (a refresh can follow a redirect onto a
+        // different route).
+        assert!(
+            client.contains("const { tree: next, params, href } = await fetchFlightFollowing(current, () => undefined);"),
+            "refresh() picks up the refreshed route's params: {client}",
+        );
+        // A malformed header is a hard error, never silently empty params.
+        assert!(
+            client.contains("percent-encoded JSON (")
+                && client.contains("must decode to an object, got"),
+            "a malformed params header throws with a diagnosable message: {client}",
+        );
     }
 
     /// A server-side `redirect()` reached over the SOFT-NAVIGATION channel must be
@@ -10978,7 +11198,9 @@ console.log(out.join("|"));
             "the follow loop is bounded and diagnosable: {client}",
         );
         assert!(
-            client.contains("const { tree: next, intercept, href } = await fetchFlightFollowing(requested, take);"),
+            client.contains(
+                "const { tree: next, intercept, params, href } = await fetchFlightFollowing(requested, take);"
+            ),
             "navigate() follows redirects: {client}",
         );
         assert!(

@@ -201,7 +201,11 @@ function pickRender(mod) {
   // notFound) still uses `doc`.
   const stream = ns.renderFlightToStream;
   if (typeof stream !== "function") fail("the SSR bundle does not export renderFlightToStream");
-  return { doc, stream };
+  // A hybrid app's `pages/api/**` endpoints run out of THIS bundle (Next's `api-node`
+  // layer has no `react-server` condition, and neither does this graph). Not required to
+  // exist — an app with no `pages/api` still has none — so it is only demanded at the
+  // moment a request actually matches one of those patterns.
+  return { doc, stream, pagesApi: ns.handlePagesApi };
 }
 async function getSsrRenderers() {
   if (!__ssrCache.fns) __ssrCache.fns = pickRender(await import(pathToFileURL(ssrEntry).href));
@@ -212,6 +216,21 @@ async function getRenderFlightToDocument() {
 }
 async function getRenderFlightToStream() {
   return (await getSsrRenderers()).stream;
+}
+// The SSR bundle's `pages/api/**` dispatcher. Reached only after the route manifest said
+// this path IS a pages API route, so a missing export is a build inconsistency, not a
+// routing miss — fail loudly rather than answering a wrong 404.
+async function getPagesApiHandler() {
+  const fn = (await getSsrRenderers()).pagesApi;
+  if (typeof fn !== "function") {
+    // Thrown, not `fail()`ed: this is a per-request path, and a production server must
+    // answer 500 for the request rather than take the whole process down.
+    throw new Error(
+      "next-server: the route manifest matched a pages/api route but the SSR bundle exports no handlePagesApi; " +
+        "the pages-router API routes were not bundled into the SSR graph",
+    );
+  }
+  return fn;
 }
 // Priming + validating the SSR bundle up front (fail fast if it is malformed)
 // happens below, AFTER the worker pool is prespawned — the two most expensive
@@ -848,16 +867,25 @@ function isStaticFile(filePath) {
   }
 }
 
-async function pathIsRouteHandler(pathname) {
+// Which KIND of endpoint owns this path, or null when none does. The two kinds are
+// served by DIFFERENT GRAPHS, which is why this cannot collapse to a boolean:
+//   "handler"  -> an `app/**/route.ts`, react-server layer, dispatched to the worker.
+//   "pages-api" -> a `pages/api/**` module, Next's `api-node` layer (no `react-server`
+//                  export condition), bundled into the SSR graph and called in THIS
+//                  process. Getting this wrong resolves `react-dom/server` to React's
+//                  "not supported in React Server Components" stub — see the header of
+//                  src/next_runtime/pages_api.js.
+// `app/**/route.ts` wins a path both could answer, which is Next's own precedence.
+async function routeEndpointKind(pathname) {
   const parts = pathname.split("/").filter(Boolean);
   const manifest = await getManifest();
   for (const h of manifest.handlers) {
-    if (matchHandlerSegments(h.segments, parts)) return true;
+    if (matchHandlerSegments(h.segments, parts)) return "handler";
   }
   for (const h of manifest.pagesApi) {
-    if (matchHandlerSegments(h.segments, parts)) return true;
+    if (matchHandlerSegments(h.segments, parts)) return "pages-api";
   }
-  return false;
+  return null;
 }
 
 // Run middleware for a request and interpret its NextResponse (via Next's
@@ -914,7 +942,7 @@ async function runMiddleware(reqCtx) {
 // the STALE copy immediately AND kicks a background regeneration (stale-while-
 // revalidate), so no request ever waits on the render.
 const staticDir = join(outputDir, "static");
-const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null, tags:[] }
+const prerenderCache = new Map(); // pathname -> { path, file, revalidate|null, tags:[], params:{} }
 // next/cache on-demand revalidation. `tagToPaths` maps a cache tag to the set of cached
 // pathnames that read it (captured per page at prerender time — no per-request work).
 // `forcedStale` holds pathnames an action / route handler invalidated (revalidatePath /
@@ -944,7 +972,7 @@ function registerTags(pathname, tags) {
   for (const e of manifest.entries || []) {
     if (e && e.path && e.file) {
       const tags = Array.isArray(e.tags) ? e.tags : [];
-      prerenderCache.set(e.path, { path: e.path, file: e.file, revalidate: e.revalidate ?? null, tags });
+      prerenderCache.set(e.path, { path: e.path, file: e.file, revalidate: e.revalidate ?? null, tags, params: e.params || {} });
       registerTags(e.path, tags);
     }
   }
@@ -1071,6 +1099,10 @@ function servePrerendered(entry, isRsc, res, configHeaders, mwSetCookies) {
     "content-type": isRsc ? "text/x-component" : "text/html; charset=utf-8",
     "x-diffpack-cache": cacheState,
   };
+  // A soft navigation to a PRERENDERED route is answered from `.rsc` with no render, so
+  // the matched params have to come off the manifest entry the prerender recorded them
+  // on — the client Router reads this header to update `useParams()`.
+  if (isRsc) headers["x-diffpack-params"] = encodeURIComponent(JSON.stringify(entry.params || {}));
   for (const [k, v] of configHeaders) headers[k] = v;
   if (mwSetCookies.length) headers["set-cookie"] = mwSetCookies;
   res.writeHead(200, headers);
@@ -1607,9 +1639,11 @@ const server = createServer(async (req, res) => {
       return;
     }
     const configHeaders = nc.headers;
-    // Route handlers (`route.ts`): a request whose path matches a handler is served by
-    // it (any method) via the worker's `route` op, not by page rendering.
-    if (await pathIsRouteHandler(url.pathname)) {
+    // Endpoints (`app/**/route.ts` and a hybrid app's `pages/api/**`): a request whose
+    // path matches one is served by it (any method), not by page rendering. Which graph
+    // runs it depends on the kind — see `routeEndpointKind`.
+    const endpointKind = await routeEndpointKind(url.pathname);
+    if (endpointKind) {
       const bodyChunks = [];
       if (req.method !== "GET" && req.method !== "HEAD") {
         for await (const chunk of req) bodyChunks.push(Buffer.from(chunk));
@@ -1628,16 +1662,23 @@ const server = createServer(async (req, res) => {
         locale: reqLocale,
       };
       for (const h of mwRequestHeaders) reqCtx.headers.push(h);
-      const msg = await nextWorker().call({
-        op: "route",
-        pathname: url.pathname,
-        method: req.method,
-        reqCtx,
-      });
-      // next/cache: a route handler can call revalidatePath/revalidateTag — bust the
-      // matching prerendered pages so the next request to them re-renders.
-      applyRevalidation(msg.revalidated);
-      const result = msg.routeResult;
+      let result = null;
+      if (endpointKind === "pages-api") {
+        // Pages-router API route: run it in THIS process, out of the SSR bundle. Same
+        // `{ status, headers, body(base64), setCookies }` shape a route handler returns.
+        result = await (await getPagesApiHandler())(url.pathname, req.method, reqCtx);
+      } else {
+        const msg = await nextWorker().call({
+          op: "route",
+          pathname: url.pathname,
+          method: req.method,
+          reqCtx,
+        });
+        // next/cache: a route handler can call revalidatePath/revalidateTag — bust the
+        // matching prerendered pages so the next request to them re-renders.
+        applyRevalidation(msg.revalidated);
+        result = msg.routeResult;
+      }
       if (result) {
         const headers = {};
         for (const [k, v] of result.headers || []) headers[k] = v;
@@ -1819,6 +1860,14 @@ const server = createServer(async (req, res) => {
       // the current page (masking the URL) instead of swapping the document.
       if (url.searchParams.has("__rsc")) {
         const rscHeaders = { "content-type": "text/x-component" };
+        // The matched route's dynamic params travel WITH the flight. A soft navigation
+        // changes the route, so `useParams()` must change with it — the client Router
+        // has no way to derive `{ uid: "…" }` from a URL it does not know the segment
+        // pattern of. Without this the params context stayed frozen on whatever the
+        // document was first loaded with, and cal.com's `/booking/[uid]` page (reached
+        // by `router.push` after a booking) parsed `uid: undefined` and rendered its 500
+        // page. Percent-encoded because a param value may hold non-ASCII bytes.
+        rscHeaders["x-diffpack-params"] = encodeURIComponent(JSON.stringify(meta.params || {}));
         if (meta.intercept) rscHeaders["x-diffpack-intercept"] = "1";
         if (mwSetCookies.length) rscHeaders["set-cookie"] = mwSetCookies;
         mergeSetCookie(rscHeaders, meta.setCookies);

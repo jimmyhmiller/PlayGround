@@ -4411,22 +4411,39 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
             })
             .collect::<String>();
         let mut prelude = match format {
-            ModuleFormat::Esm if is_main => {
-                // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE` at
-                // module-init time and caches it as the prefix it matches
-                // server-function requests against, so the default must be in
-                // place before any bundled module evaluates. This runs at the very
-                // top of the entry, before the module-graph IIFE. It is a `??=`
-                // default (never clobbers a real value) and a harmless no-op for a
-                // non-TanStack Node bundle.
+            ModuleFormat::Esm => {
                 // `__dirname`/`__filename` are CommonJS globals absent in an ES module,
                 // but bundled CJS modules (e.g. Next's ncc-compiled internals doing
-                // `__nccwpck_require__.ab = __dirname + "/"`) still reference them. Define
-                // them once at the top of the Node ESM entry (from `import.meta.url`); the
-                // module-graph IIFE and every module factory close over these bindings, so
-                // an inlined CJS module resolves `__dirname` to the bundle's location
-                // instead of throwing a ReferenceError at init.
-                "import { createRequire as __diffpackCreateRequire } from \"node:module\";\nimport { fileURLToPath as __diffpackFileURLToPath } from \"node:url\";\nimport { dirname as __diffpackDirname } from \"node:path\";\nconst __filename = __diffpackFileURLToPath(import.meta.url);\nconst __dirname = __diffpackDirname(__filename);\nprocess.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n".to_string()
+                // `__nccwpck_require__.ab = __dirname + "/"`, or Prisma's generated
+                // client) still reference them. Define them from `import.meta.url` at the
+                // top of EVERY Node ESM chunk, not only the entry: a chunk is its own ES
+                // module, so it does NOT close over the entry's bindings, and a CJS module
+                // that lands in a split chunk would throw `ReferenceError: __dirname is
+                // not defined in ES module scope` the moment that chunk is imported. (That
+                // is exactly how cal.com's `pages/api/**` routes died once they were
+                // bundled into the SSR graph, where Prisma's generated client is reachable
+                // ONLY through their lazily-imported chunks.) Every chunk is emitted into
+                // the same directory as the entry, so the value each computes is the same
+                // one the entry computes.
+                let mut prelude = "import { fileURLToPath as __diffpackFileURLToPath } from \"node:url\";\nimport { dirname as __diffpackDirname } from \"node:path\";\nconst __filename = __diffpackFileURLToPath(import.meta.url);\nconst __dirname = __diffpackDirname(__filename);\n".to_string();
+                if is_main {
+                    // `createStartHandler` reads `process.env.TSS_SERVER_FN_BASE` at
+                    // module-init time and caches it as the prefix it matches
+                    // server-function requests against, so the default must be in
+                    // place before any bundled module evaluates. This runs at the very
+                    // top of the entry, before the module-graph IIFE. It is a `??=`
+                    // default (never clobbers a real value) and a harmless no-op for a
+                    // non-TanStack Node bundle.
+                    // `createRequire` backs the entry's `requireNative` (host `require`
+                    // for native addons); only the entry installs the runtime, so only
+                    // the entry needs it.
+                    prelude.insert_str(
+                        0,
+                        "import { createRequire as __diffpackCreateRequire } from \"node:module\";\n",
+                    );
+                    prelude.push_str("process.env.TSS_SERVER_FN_BASE ??= \"/_serverFn/\";\n");
+                }
+                prelude
             }
             ModuleFormat::BrowserEsm if is_main && self.config.browser_process_shim => {
                 BROWSER_GLOBALS_PRELUDE.to_string()
@@ -14335,6 +14352,76 @@ mod tests {
         );
         assert!(!fs::read_to_string(&chunk).unwrap().contains("sourceMappingURL"));
         assert!(!directory.path().join("client.hmr.js.map").exists());
+    }
+
+    /// `__dirname`/`__filename` in a SPLIT Node ESM build. Every chunk is its own ES
+    /// module, so it does NOT close over the entry's bindings: a bundled CommonJS module
+    /// that reads `__dirname` and lands behind a dynamic `import()` threw
+    /// `ReferenceError: __dirname is not defined in ES module scope` the moment its chunk
+    /// was loaded. That is not hypothetical — it is how cal.com's `pages/api/**` routes
+    /// died: Prisma's generated client reads `__dirname`, and in the SSR graph it is
+    /// reachable ONLY through those lazily-imported route chunks. The prelude therefore
+    /// belongs on every Node ESM chunk, not just the entry.
+    #[test]
+    fn a_split_node_chunk_defines_dirname_for_a_bundled_commonjs_module() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        // The exact shape ncc-compiled / generated CJS packages emit at module scope.
+        fs::write(
+            directory.path().join("vendored.js"),
+            "const base = __dirname + \"/\";\nmodule.exports = { base, file: __filename };\n",
+        )
+        .unwrap();
+        // `lazy.js` is only reachable through the dynamic import, so it (and the CJS
+        // module it pulls in) lands in a chunk of its own.
+        fs::write(
+            directory.path().join("lazy.js"),
+            "const vendored = require(\"./vendored.js\");\nexport const where = vendored.base;\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import(\"./lazy.js\").then(({ where }) => console.log(\"base:\" + where));\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("entry.js");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        let server_dir = output_root.join("server");
+        let chunk = server_dir.join("server.chunk-1.mjs");
+        assert!(chunk.is_file(), "the dynamic import lands in its own chunk");
+        assert!(
+            fs::read_to_string(&chunk)
+                .unwrap()
+                .contains("const __dirname = __diffpackDirname(__filename)"),
+            "the split chunk must define __dirname from its own import.meta.url",
+        );
+
+        // Running it is the real proof: the chunk is imported at runtime, and without
+        // the prelude that import rejects with a ReferenceError.
+        let executed = node_command().arg(server_dir.join("server.mjs")).output().unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&executed.stdout);
+        // Compared against the CANONICAL path: macOS resolves the temp dir through
+        // `/private`, and `import.meta.url` carries the resolved form.
+        let canonical = server_dir.canonicalize().unwrap();
+        assert!(
+            stdout.contains(&format!("base:{}/", canonical.display())),
+            "the chunk resolves __dirname to its own directory: {stdout}"
+        );
     }
 
     /// A hot-updated module must land in the SAME environment its graph was emitted
