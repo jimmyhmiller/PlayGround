@@ -2294,6 +2294,482 @@
         (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") 2)
         (load rc))))
 
+; ============================ `coil lint` ===================================
+; Run the registered checkers and, with `--fix`, apply the rewrites they proposed
+; to the source on disk. `--use` already means "load this metaprogram without
+; editing the source", so a rule set is opt-in per invocation:
+;
+;   coil lint app.coil --use condlint-on.coil            report + `help: try:` lines
+;   coil lint app.coil --use condlint-on.coil --diff     show the patch, write nothing
+;   coil lint app.coil --use condlint-on.coil --fix      apply it
+;
+; A plain `coil build` NEVER writes to your source. Only this command does, and it
+; is the only caller that reads the suggestion table at all. See docs/AUTOFIX.md.
+
+; One rewrite of one file's byte range. `text` is the already-rendered replacement.
+(defstruct LintEdit [(source i64) (lo i64) (hi i64) (text (slice u8))])
+; What one file looked like before the round that is currently being applied — the
+; whole undo buffer, because a round that fails to compile is reverted wholesale.
+(defstruct LintSaved [(path (slice u8)) (text (slice u8))])
+
+; A round is thrown away rather than half-applied, so it must be possible to put
+; every file back exactly as it was.
+(defn lint-restore [(a (ptr Allocator)) (saved (ptr (ArrayList LintSaved)))] (-> i64)
+  (let [n (al-len [LintSaved] (load saved))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sp (al-elem [LintSaved] saved (load i))]
+                  (d-write-file a (load (field sp path)) (load (field sp text))))
+                (store! i (iadd (load i) 1)))))
+    0))
+
+; Every suggestion the last analysis recorded, rendered and sorted so they can be
+; spliced back-to-front. Overlapping edits (an outer form and something inside it
+; both rewritten) cannot both be applied to the same text: the first wins and the
+; rest are dropped for THIS round — the next round finds them again on re-analysis.
+; Sort key: file ascending, then offset DESCENDING. Equal offsets keep discovery
+; order, which puts the OUTER form first — the walker reports a form before anything
+; inside it — so when two nested rewrites collide the wider one is the one that lands.
+(defn lint-edit-before? [(x LintEdit) (y LintEdit)] (-> bool)
+  (let [xp (alloc-stack LintEdit)
+        yp (alloc-stack LintEdit)]
+    (store! xp x)
+    (store! yp y)
+    (if (icmp-ne (load (field xp source)) (load (field yp source)))
+        (icmp-lt (load (field xp source)) (load (field yp source)))
+        (icmp-gt (load (field xp lo)) (load (field yp lo))))))
+
+(defn lint-edits [(a (ptr Allocator)) (verbose bool)] (-> (ptr (ArrayList LintEdit)))
+  (let [n (sug-count)
+        (mut out) (al-new [LintEdit] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sp (alloc-stack Suggestion)
+                      e (alloc-stack LintEdit)]
+                  (store! sp (sug-at (load i)))
+                  (let [src (sug-file-text (load (field sp source)))
+                        lo (load (field sp lo))
+                        hi (load (field sp hi))
+                        txt (sug-render a (load sp))]
+                    ; A fix that would delete one of the author's comments is downgraded
+                    ; to advice: the `help: try:` line still stands, but nothing is
+                    ; written. Said out loud, because a silently skipped fix reads as
+                    ; "there was nothing to do".
+                    (if (sug-drops-comment? src lo hi txt)
+                        (let [w (stderr)]
+                          (if verbose
+                              (do
+                                (ps w "note: ")
+                                (ps w (sug-file-name (load (field sp source))))
+                                (ps w ":")
+                                (ps w (i64->str a (lint-line-of src lo)))
+                                (ps w ": not applying this fix — it would drop a comment; make the change by hand")
+                                (wb w 10)
+                                0)
+                              0)
+                          0)
+                        (do
+                          (store! (field e source) (load (field sp source)))
+                          (store! (field e lo) lo)
+                          (store! (field e hi) hi)
+                          (store! (field e text) txt)
+                          (al-push! (mut out) (load e))
+                          0))))
+                (store! i (iadd (load i) 1)))))
+    ; stable insertion sort — the list is one round's worth of findings, never large
+    (let [m (al-len [LintEdit] (load out))
+          (mut p) 1]
+      (loop (if (icmp-ge (load p) m)
+                (break)
+                (do
+                  (let [cur (alloc-stack LintEdit)
+                        (mut q) (isub (load p) 1)]
+                    (store! cur (al-get [LintEdit] (load out) (load p)))
+                    (loop (if (icmp-lt (load q) 0)
+                              (break)
+                              (let [pv (alloc-stack LintEdit)]
+                                (store! pv (al-get [LintEdit] (load out) (load q)))
+                                (if (lint-edit-before? (load pv) (load cur))
+                                    (break)
+                                    (do
+                                      (al-set! (mut out) (iadd (load q) 1) (load pv))
+                                      (store! q (isub (load q) 1)))))))
+                    (al-set! (mut out) (iadd (load q) 1) (load cur)))
+                  (store! p (iadd (load p) 1)))))
+      0)
+    (box-al [LintEdit] a (load out))))
+
+; Apply the edits for source `sid` to `src`, skipping any that overlap one already
+; taken. Edits arrive sorted by descending `lo`, so each splice leaves the offsets of
+; the ones still to come untouched. Returns the rewritten text (== `src` if nothing applied).
+(defn lint-apply [(a (ptr Allocator)) (src (slice u8)) (edits (ptr (ArrayList LintEdit))) (sid i64)] (-> (slice u8))
+  (let [n (al-len [LintEdit] (load edits))
+        (mut out) src
+        (mut floor) (slice-len [u8] src)  ; lowest offset already rewritten
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [ep (al-elem [LintEdit] edits (load i))]
+                  (if (and (icmp-eq (load (field ep source)) sid)
+                           (and (icmp-le (load (field ep hi)) (load floor))
+                                (and (icmp-ge (load (field ep lo)) 0)
+                                     (icmp-le (load (field ep hi)) (slice-len [u8] (load out))))))
+                      (do
+                        (store! out
+                                (sconcat3 a
+                                          (subslice [u8] (load out) 0 (load (field ep lo)))
+                                          (load (field ep text))
+                                          (subslice [u8] (load out) (load (field ep hi)) (slice-len [u8] (load out)))))
+                        (store! floor (load (field ep lo)))
+                        0)
+                      0))
+                (store! i (iadd (load i) 1)))))
+    (load out)))
+
+; The distinct source ids the pending edits touch, in first-seen order.
+(defn lint-edit-sources [(a (ptr Allocator)) (edits (ptr (ArrayList LintEdit)))] (-> (ptr (ArrayList i64)))
+  (let [n (al-len [LintEdit] (load edits))
+        (mut out) (al-new [i64] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sid (load (field (al-elem [LintEdit] edits (load i)) source))
+                      m (al-len [i64] (load out))
+                      (mut seen) false
+                      (mut j) 0]
+                  (loop (if (icmp-ge (load j) m)
+                            (break)
+                            (if (icmp-eq (al-get [i64] (load out) (load j)) sid)
+                                (do (store! seen true) (break))
+                                (store! j (iadd (load j) 1)))))
+                  (if (load seen) 0 (do (al-push! (mut out) sid) 0)))
+                (store! i (iadd (load i) 1)))))
+    (box-al [i64] a (load out))))
+
+; 1-based line number of byte `off`, and how many lines the range [lo,hi) spans —
+; the two numbers a unified-diff hunk header is made of.
+(defn lint-line-of [(src (slice u8)) (off i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        cap (if (icmp-gt off n) n off)
+        (mut i) 0
+        (mut line) 1]
+    (loop (if (icmp-ge (load i) cap)
+              (break)
+              (do
+                (if (icmp-eq (cast i64 (slice-get [u8] src (load i))) 10) (store! line (iadd (load line) 1)) 0)
+                (store! i (iadd (load i) 1)))))
+    (load line)))
+
+; Start of the line containing `off`, and end of the line containing `off` (exclusive
+; of the newline) — a hunk replaces WHOLE lines, so a fix inside a line still produces
+; a patch a human (or `git apply`) can read.
+(defn lint-line-start [(src (slice u8)) (off i64)] (-> i64)
+  (let [(mut i) off]
+    (loop (if (icmp-le (load i) 0)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] src (isub (load i) 1))) 10)
+                  (break)
+                  (store! i (isub (load i) 1)))))
+    (load i)))
+(defn lint-line-end [(src (slice u8)) (off i64)] (-> i64)
+  (let [n (slice-len [u8] src)
+        (mut i) (if (icmp-gt off n) n off)]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] src (load i))) 10) (break) (store! i (iadd (load i) 1)))))
+    (load i)))
+
+; Print `text` as diff body lines, each prefixed with `mark`.
+(defn lint-diff-lines [(w (ptr Writer)) (mark i64) (text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) 0
+        (mut count) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [e (lint-line-end text (load i))]
+                (wb w mark)
+                (ps w (subslice [u8] text (load i) e))
+                (wb w 10)
+                (store! count (iadd (load count) 1))
+                (store! i (iadd e 1)))))
+    (load count)))
+
+; A unified diff of one edit. Deliberately ZERO context lines: the exact bytes that
+; change are known, so a hunk is stated rather than recovered by a diff algorithm.
+; The result still applies with `git apply --unidiff-zero`.
+(defn lint-print-diff [(a (ptr Allocator)) (w (ptr Writer)) (path (slice u8)) (src (slice u8)) (e (ptr LintEdit))] (-> i64)
+  (let [lo (load (field e lo))
+        hi (load (field e hi))
+        ls (lint-line-start src lo)
+        le (lint-line-end src hi)
+        old (subslice [u8] src ls le)
+        new (sconcat3 a (subslice [u8] src ls lo) (load (field e text)) (subslice [u8] src hi le))]
+    (ps w "--- a/")
+    (ps w path)
+    (wb w 10)
+    (ps w "+++ b/")
+    (ps w path)
+    (wb w 10)
+    (let [oldn (lint-count-lines old)
+          newn (lint-count-lines new)
+          start (lint-line-of src ls)]
+      (ps w "@@ -")
+      (ps w (i64->str a start))
+      (ps w ",")
+      (ps w (i64->str a oldn))
+      (ps w " +")
+      (ps w (i64->str a start))
+      (ps w ",")
+      (ps w (i64->str a newn))
+      (ps w " @@")
+      (wb w 10))
+    (lint-diff-lines w 45 old)
+    (lint-diff-lines w 43 new)
+    0))
+
+(defn lint-count-lines [(text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) 0
+        (mut c) 1]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (if (icmp-eq (cast i64 (slice-get [u8] text (load i))) 10) (store! c (iadd (load c) 1)) 0)
+                (store! i (iadd (load i) 1)))))
+    (load c)))
+
+; The undo button for an autofix is `git checkout`, so insist the button exists:
+; refuse to rewrite a TRACKED file that has uncommitted changes. A file git does not
+; track — including every file outside a repository — has no baseline to compare
+; against and is allowed through; the guard is about not burying edits you have not
+; committed, not about forbidding new files.
+;
+; A path containing a single quote cannot be passed to the shell safely, so it is
+; reported as untracked rather than quoted wrong.
+(defn lint-shell-safe? [(path (slice u8))] (-> bool)
+  (let [n (slice-len [u8] path)
+        (mut i) 0
+        (mut ok) true]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] path (load i))) 39)
+                  (do (store! ok false) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load ok)))
+
+(defn lint-git-status [(a (ptr Allocator)) (cmd (slice u8)) (path (slice u8))] (-> i64)
+  (wait-code (cast i64
+                   (system (slice->cstr a (sconcat3 a cmd (sconcat3 a "'" path "'") " >/dev/null 2>&1"))))))
+
+(defn lint-dirty? [(a (ptr Allocator)) (path (slice u8))] (-> bool)
+  (if (not (lint-shell-safe? path))
+      false
+      (if (icmp-ne (lint-git-status a "git ls-files --error-unmatch -- " path) 0)
+          false  ; untracked / not a repo
+          (icmp-ne (lint-git-status a "git diff --quiet HEAD -- " path) 0))))
+
+(defn lint-round-limit [] (-> i64)
+  8)
+
+(defn lint-usage [] (-> i64)
+  (ps (stderr) "usage: coil lint <file.coil> [--use <rules.coil>]... [--fix|--diff] [--allow-dirty]\n")
+  2)
+
+(defn lint-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [(mut fix) false
+        (mut diff) false
+        (mut allow-dirty) false
+        (mut pathc) (cast (ptr i8) 0)
+        (mut i) 2]
+    (loop (if (icmp-ge (load i) (cast i64 argc))
+              (break)
+              (let [arg (cstr->slice (load (index argv (load i))))]
+                (if (str-eq arg "--fix")
+                    (do (store! fix true) (store! i (iadd (load i) 1)) 0)
+                    (if (str-eq arg "--diff")
+                        (do (store! diff true) (store! i (iadd (load i) 1)) 0)
+                        (if (str-eq arg "--allow-dirty")
+                            (do (store! allow-dirty true) (store! i (iadd (load i) 1)) 0)
+                            (if (str-eq arg "--use")
+                                (do
+                                  (if (icmp-ge (iadd (load i) 1) (cast i64 argc))
+                                      (do (ps (stderr) "error: --use needs a path\n") (exit 2) 0)
+                                      0)
+                                  (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
+                                  (store! i (iadd (load i) 2))
+                                  0)
+                                (if (is-flag? arg)
+                                    (do
+                                      (ps (stderr) "error: unknown flag '")
+                                      (ps (stderr) arg)
+                                      (ps (stderr) "'")
+                                      (wb (stderr) 10)
+                                      (exit 2)
+                                      0)
+                                    (do
+                                      (store! pathc (load (index argv (load i))))
+                                      (store! i (iadd (load i) 1))
+                                      0)))))))))
+    (if (icmp-eq (cast i64 (load pathc)) 0)
+        (lint-usage)
+        (lint-run a (load pathc) (load fix) (load diff) (load allow-dirty)))))
+
+; The apply loop: analyse, edit, re-analyse — a fixpoint with a fuel guard, the same
+; shape as macro expansion and the transform loop. Level-1 gate: after a round the
+; program must still read, resolve and typecheck; if it doesn't, the WHOLE round is
+; reverted, so the working tree is always at least as valid as it started.
+(defn lint-run [(a (ptr Allocator)) (pathc (ptr i8)) (fix bool) (diff bool) (allow-dirty bool)] (-> i64)
+  (let [w (stderr)
+        path (cstr->slice pathc)
+        cwd (cwd-slice a)
+        (mut rc) 0]
+    ; PHASE 1 — apply to a fixpoint, quietly. Each round's analysis is also the
+    ; previous round's gate: if the program stopped compiling, WE broke it, so the
+    ; whole round goes back and nothing else is attempted.
+    (if fix (store! rc (lint-fix-loop a pathc path cwd allow-dirty)) 0)
+    ; PHASE 2 — one analysis with output. This is the report: what the checkers say
+    ; about the file as it now stands, with a `help: try:` line under anything still
+    ; fixable. `--diff` renders its patch from the same pass.
+    (if (icmp-eq (load rc) 2)
+        (load rc)
+        (do
+          (set-diag-quiet false)
+          (sug-reset)
+          (diag-reset)
+          (let [src (read-src a pathc)
+                ok (run-dump-on-big-stack a src cwd path (fnptr-of check-src-program))]
+            (if (icmp-eq ok 0)
+                (store! rc 1)
+                ; Collect in every mode, not just --diff: `lint-edits` is what says a
+                ; fix cannot be applied, and a `help: try:` line with no such note
+                ; would read as "--fix will do this for you" when it will not.
+                (let [es (lint-edits a true)] (if diff (lint-print-patch a es) 0))))
+          (load rc)))))
+
+; Rewrite until nothing changes: a fuel-guarded fixpoint, the same shape as macro
+; expansion and the transform loop. Returns 0, 1 (broken / did not settle) or 2
+; (refused because a file has uncommitted changes).
+(defn lint-fix-loop [(a (ptr Allocator))
+                     (pathc (ptr i8))
+                     (path (slice u8))
+                     (cwd (slice u8))
+                     (allow-dirty bool)] (-> i64)
+  (let [w (stderr)
+        (mut saved) (al-new [LintSaved] a)
+        (mut applied) false
+        (mut rounds) 0
+        (mut rc) 0]
+    (set-diag-quiet true)
+    (loop (do
+            (sug-reset)
+            (diag-reset)
+            (let [src (read-src a pathc)
+                  ok (run-dump-on-big-stack a src cwd path (fnptr-of check-src-program))]
+              ; The program does not compile. Before the first edit that is simply the
+              ; state of the file — phase 2 will say so. After one it means a fix we
+              ; applied is at fault, so the round is put back exactly as it was.
+              (if (icmp-eq ok 0)
+                  (do
+                    (if (load applied)
+                        (do
+                          (lint-restore a (box-al [LintSaved] a (load saved)))
+                          (ps w "error: a suggested fix produced code that does not compile — round reverted")
+                          (wb w 10)
+                          (store! rc 1)
+                          0)
+                        0)
+                    (break))
+                  0)
+              (let [edits (lint-edits a (icmp-eq (load rounds) 0))
+                    nedits (al-len [LintEdit] (load edits))]
+                (if (icmp-eq nedits 0) (break) 0)
+                (let [srcs (lint-edit-sources a edits)
+                      ns (al-len [i64] (load srcs))
+                      (mut k) 0
+                      (mut wrote) false]
+                  (store! saved (al-new [LintSaved] a))
+                  (loop (if (icmp-ge (load k) ns)
+                            (break)
+                            (do
+                              (let [sid (al-get [i64] (load srcs) (load k))
+                                    fpath (sug-file-name sid)
+                                    ftext (sug-file-text sid)
+                                    out (lint-apply a ftext edits sid)]
+                                (if (or (icmp-eq (slice-len [u8] fpath) 0) (str-eq out ftext))
+                                    0
+                                    (if (and (not allow-dirty) (lint-dirty? a fpath))
+                                        (do
+                                          (ps w "error: ")
+                                          (ps w fpath)
+                                          (ps w " has uncommitted changes; commit them or pass --allow-dirty")
+                                          (wb w 10)
+                                          (store! rc 2)
+                                          0)
+                                        (let [sv (alloc-stack LintSaved)]
+                                          (store! (field sv path) fpath)
+                                          (store! (field sv text) ftext)
+                                          (al-push! (mut saved) (load sv))
+                                          (d-write-file a fpath out)
+                                          (ps w "fixed ")
+                                          (ps w fpath)
+                                          (wb w 10)
+                                          (store! wrote true)
+                                          0))))
+                              (store! k (iadd (load k) 1)))))
+                  (if (icmp-eq (load rc) 2) (break) 0)
+                  (if (not (load wrote)) (break) 0)
+                  (store! applied true)
+                  (store! rounds (iadd (load rounds) 1))
+                  ; Fuel exhaustion is a real outcome and is reported, not swallowed: it
+                  ; means two rules disagree and keep undoing each other.
+                  (if (icmp-ge (load rounds) (lint-round-limit))
+                      (do
+                        (ps w "error: --fix did not settle after ")
+                        (ps w (i64->str a (lint-round-limit)))
+                        (ps w " rounds — two rules are probably undoing each other")
+                        (wb w 10)
+                        (store! rc 1)
+                        (break))
+                      0))))))
+    (set-diag-quiet false)
+    (load rc)))
+
+; Print the patch every pending edit would make, grouped by file. Writes nothing.
+(defn lint-print-patch [(a (ptr Allocator)) (edits (ptr (ArrayList LintEdit)))] (-> i64)
+  (let [srcs (lint-edit-sources a edits)
+        ns (al-len [i64] (load srcs))
+        (mut k) 0]
+    (loop (if (icmp-ge (load k) ns)
+              (break)
+              (do
+                (let [sid (al-get [i64] (load srcs) (load k))]
+                  (lint-diff-file a (stdout) (sug-file-name sid) (sug-file-text sid) edits sid))
+                (store! k (iadd (load k) 1)))))
+    0))
+
+; Print every pending edit for one file as a diff hunk.
+(defn lint-diff-file [(a (ptr Allocator))
+                      (w (ptr Writer))
+                      (path (slice u8))
+                      (src (slice u8))
+                      (edits (ptr (ArrayList LintEdit)))
+                      (sid i64)] (-> i64)
+  (let [n (al-len [LintEdit] (load edits))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [ep (al-elem [LintEdit] edits (load i))]
+                  (if (icmp-eq (load (field ep source)) sid) (lint-print-diff a w path src ep) 0))
+                (store! i (iadd (load i) 1)))))
+    0))
+
 ; `new <name>` — scaffold Coil.toml + src/main.coil.
 (defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (if (icmp-lt (cast i64 argc) 3)
@@ -2727,6 +3203,7 @@ Build & run
   new   <name>                             scaffold Coil.toml + src/main.coil
   repl                                     interactive session
   fmt   [--check|--write] <file.coil>      format source (default: print to stdout)
+  lint  <file.coil> [--fix|--diff]         run checkers; --fix applies their suggestions
 
 Artifacts
   emit-obj <file.coil> [-o <out.o>]        build the object file, no link
@@ -2821,6 +3298,19 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
               (ps w "crashing test never stops the suite. Exit: 0 iff all pass, 1 if any fails.\n\n")
               (ps w (common-flags-text))
               0)
+          (str-eq sub "lint")
+            (do
+              (ps w "usage: coil lint <file.coil> [--use <rules.coil>]... [--fix|--diff] [--allow-dirty]\n\n")
+              (ps w "  (default)      report what the registered checkers say, plus a `help: try:`\n")
+              (ps w "                 line for every fix they propose\n")
+              (ps w "  --diff         print the patch those fixes would make; write nothing\n")
+              (ps w "  --fix          apply them, re-analysing to a fixpoint (max 8 rounds)\n")
+              (ps w "  --allow-dirty  allow --fix on a file with uncommitted changes\n\n")
+              (ps w "Rules are ordinary metaprograms loaded with --use, so nothing has to be edited\n")
+              (ps w "to opt in. A round that produces code which does not compile is REVERTED, so\n")
+              (ps w "--fix can never leave the tree worse than it found it. A plain `coil build`\n")
+              (ps w "never writes to your source; only this command does.\n")
+              0)
           (str-eq sub "fmt")
             (do
               (ps w "usage: coil fmt [--check|--write] <file.coil>...\n\n")
@@ -2911,8 +3401,10 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
                                             (run-cmd a argc argv))
                                         (if (str-eq sub "test")
                                             (test-cmd a argc argv)
-                                            (if (str-eq sub "fmt")
-                                                (fmt-cmd a argc argv)
+                                            (if (or (str-eq sub "fmt") (str-eq sub "lint"))
+                                                (if (str-eq sub "lint")
+                                                    (lint-cmd a argc argv)
+                                                    (fmt-cmd a argc argv))
                                                 (if (str-eq sub "new")
                                                     (new-cmd a argc argv)
                                                     (if (str-eq sub "emit-obj")

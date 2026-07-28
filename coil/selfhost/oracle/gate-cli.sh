@@ -1061,6 +1061,115 @@ expect_out 'warning: Documented on purpose\.' "code-doc: a checker reads a defin
   "$COIL" run "$T/docs/op.coil"
 expect_rc 3 "code-doc: the program still builds and runs"  "$COIL" run "$T/docs/op.coil"
 
+# ── `cond` with `:else`, and `coil lint` (report / --diff / --fix) ────────────
+# The fix half of a linter writes to your source, so its contract is exactly the kind
+# of thing that has to be gated: a fix must preserve behaviour, be idempotent, never
+# delete a comment, and revert itself if it produces code that does not compile.
+mkdir -p "$T/lint"
+cat > "$T/lint/cond.coil" <<'EOF'
+(defn pick [(x i64)] (-> i64)
+  (cond (= x 1) 10
+        (= x 2) 20
+        :else   7))
+(defn old [(x i64)] (-> i64)
+  (cond (= x 1) 10
+        7))
+(defn main [] (-> i64) (+ (pick 9) (old 9)))
+EOF
+expect_rc 14 "cond: :else is the fallback, and the flat trailing else still works" \
+  "$COIL" run "$T/lint/cond.coil"
+
+cp metaprog-poc/condlint.coil metaprog-poc/condlint-on.coil "$T/lint/"
+cat > "$T/lint/target.coil" <<'EOF'
+(module app)
+(defn classify [(x i64)] (-> i64)
+  (if (= x 1)
+      100
+      (if (= x 2)
+          200
+          (if (= x 3)
+              300
+              999))))
+(defn two-armed [(x i64)] (-> i64)
+  (if (< x 0) -1 (if (> x 0) 1 0)))
+(defn already [(x i64)] (-> i64)
+  (cond (= x 1) 1
+        (= x 2) 2
+        (= x 3) 3
+        9))
+(defn commented [(x i64)] (-> i64)
+  (if (= x 1)
+      1
+      (if (= x 2)
+          ; a comment between a test and its body
+          2
+          (if (= x 3) 3 0))))
+(defn main [] (-> i64)
+  (+ (classify 3) (+ (two-armed -5) (+ (already 9) (commented 2)))))
+EOF
+cp "$T/lint/target.coil" "$T/lint/target.orig"
+
+expect_rc 54 "lint: the target program runs before any fix"   "$COIL" run "$T/lint/target.coil"
+expect_out 'help: try: \(cond \(= x 1\) 100' "lint: reports the chain with a help line" \
+  "$COIL" lint "$T/lint/target.coil" --use condlint-on.coil
+# The lint reports the 3-test chain and the commented one — but NOT the two-armed if,
+# and NOT the `cond` the author wrote (which is nested ifs by the time a checker sees it).
+expect_out '^2$' "lint: flags the two hand-written chains and nothing else" \
+  sh -c "\"$COIL\" lint \"$T/lint/target.coil\" --use condlint-on.coil 2>&1 | grep -c 'nested ifs'"
+cmp -s "$T/lint/target.coil" "$T/lint/target.orig" \
+  && ok "lint: reporting writes nothing" || bad "lint: reporting writes nothing" "the file changed"
+
+expect_out '^\+  \(cond \(= x 1\) 100' "lint --diff: prints the patch" \
+  sh -c "\"$COIL\" lint \"$T/lint/target.coil\" --use condlint-on.coil --diff 2>/dev/null"
+cmp -s "$T/lint/target.coil" "$T/lint/target.orig" \
+  && ok "lint --diff: writes nothing" || bad "lint --diff: writes nothing" "the file changed"
+
+expect_out 'would drop a comment' "lint --fix: refuses the fix that would delete a comment" \
+  "$COIL" lint "$T/lint/target.coil" --use condlint-on.coil --fix
+expect_out 'cond \(= x 1\) 100 \(= x 2\) 200 \(= x 3\) 300 :else 999' \
+  "lint --fix: rewrote the chain as a cond with :else" cat "$T/lint/target.coil"
+expect_out '; a comment between a test and its body' \
+  "lint --fix: left the commented chain, comment and all, alone" cat "$T/lint/target.coil"
+expect_rc 54 "lint --fix: the program still behaves identically" "$COIL" run "$T/lint/target.coil"
+cp "$T/lint/target.coil" "$T/lint/target.fixed"
+"$COIL" lint "$T/lint/target.coil" --use condlint-on.coil --fix >/dev/null 2>&1
+cmp -s "$T/lint/target.coil" "$T/lint/target.fixed" \
+  && ok "lint --fix: idempotent" || bad "lint --fix: idempotent" "a second --fix changed the file"
+
+# A rule whose fix does not compile must leave the file byte-identical. Fail-closed is
+# the whole reason --fix is allowed near anyone's source.
+cat > "$T/lint/badrule.coil" <<'EOF'
+(module badrule)
+(defn br-walk [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (icmp-gt (code-count f) 0)
+          (do (if (code-eq (code-nth f 0) `+)
+                  (do (suggest f "nonsense" `(no-such-function ~(code-nth f 1) ~(code-nth f 2))) 0)
+                  0)
+              (br-kids f 0 (code-count f)))
+          `0)
+      `0))
+(defn br-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (br-walk (code-nth f i)) (br-kids f (iadd i 1) n))))
+(defn br-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (br-walk (code-nth m i)) (br-forms m (iadd i 1) n))))
+(defn br-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0
+      (do (let [m (code-nth ms i)]
+            (if (icmp-gt (code-count m) 1)
+                (if (code-from-user? (code-nth m 1)) (br-forms m 1 (code-count m)) `0) `0))
+          (br-mods ms (iadd i 1) n))))
+(defn lint-bad [(modules Code)] (-> Code) (br-mods modules 0 (code-count modules)))
+(checker lint-bad)
+EOF
+printf '(module app)\n(defn main [] (-> i64)\n  (+ 40 2))\n' > "$T/lint/victim.coil"
+cp "$T/lint/victim.coil" "$T/lint/victim.orig"
+expect_rc 1 "lint --fix: a fix that does not compile fails the run" \
+  "$COIL" lint "$T/lint/victim.coil" --use badrule.coil --fix
+cmp -s "$T/lint/victim.coil" "$T/lint/victim.orig" \
+  && ok "lint --fix: the reverted round left the file byte-identical" \
+  || bad "lint --fix: the reverted round left the file byte-identical" "the file was left broken"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

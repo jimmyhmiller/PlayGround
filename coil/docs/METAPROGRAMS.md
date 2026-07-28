@@ -65,6 +65,19 @@ New API this project added (all shipped):
 - **`(warn NODE MSG)`** — a located, **non-fatal** warning at `NODE`; collects and all
   print, the build succeeds. What a *linter* wants — `metaprog-poc/lint.coil` warns at
   every `icmp-*`, suggesting `< > = …`.
+- **`(suggest NODE MSG REPLACEMENT)`** — a `warn` that also proposes a **rewrite**.
+  `REPLACEMENT` is a `Code` value, normally built from the author's own subnodes; the
+  diagnostic gains a `help: try: …` line, and `coil lint --fix` (and only it) splices it
+  into the file. Any node that came from source is written back as its ORIGINAL bytes,
+  so comments and formatting in untouched branches survive. A round that stops compiling
+  is reverted; a fix that would delete a comment is reported and skipped. Demo:
+  `metaprog-poc/condlint.coil` rewrites a chain of 3+ nested `if`s as a `cond` with
+  `:else`. Full design + what changed on contact with reality: `docs/AUTOFIX.md`.
+- **`(code-macro? NODE)` → bool** — true for a node the expander produced. Checkers run
+  on the EXPANDED program, so every `cond`/`when`/`case` the author wrote is already
+  nested `if`s by the time a rule sees it; this is how a rule about `if` tells the two
+  apart. It is the same `ctxt ≠ 0` test autofix uses internally to refuse to edit
+  macro-generated code.
 - **Metaprograms are fed the WHOLE program, including all imports** (their own modules
   and bundled stdlib). A checker sees imported code too — `metaprog-poc/imports_test.coil`
   shows the linter flag an `icmp` in an imported user module.

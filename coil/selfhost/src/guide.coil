@@ -25,6 +25,7 @@ inside it, so `coil` and every `(import \"…\")` below work from any directory.
     coil build file.coil -lm             # link a library (-l<name>)
     coil repl                            # interactive session
     coil fmt   file.coil                 # print formatted source (--write / --check)
+    coil lint  file.coil --use rules.coil # run checkers (--diff / --fix applies them)
     coil doc   file.coil                 # markdown for the module's `;;`-documented surface
 
 `main`'s `i64` return is the process exit code. There is no JIT. A file that is
@@ -177,7 +178,8 @@ reexported from core): `when unless cond case case-by while for and or not`.
     (do a b c)               ; sequence, yields last
     (let [x e (mut y) e0] …) ; bindings; (mut y) is a mutable stack cell
     (loop … (break) … (break v) … (continue))
-    (cond t1 e1 t2 e2 … else)      ; lone trailing = else
+    (cond t1 e1 t2 e2 … :else e)   ; :else is always true; a lone trailing clause
+                                   ;   is also an else (the older flat spelling)
     (case x k1 e1 k2 e2 … default) ; x evaluated once; a dense integer case
                                    ;   compiles to a JUMP TABLE
 
@@ -409,6 +411,25 @@ code. Scope yourself with `(code-from-user? NODE)` (false for bundled stdlib) or
 is a located error. Both **collect** — you get every diagnostic in one pass, with the
 source span underlined, and the build fails after printing them all if any was a
 `report`.
+
+**Fixing.** `(suggest NODE MSG REPLACEMENT)` is a `warn` that also proposes a rewrite:
+`REPLACEMENT` is a `Code` value, normally built out of the author's own subnodes, and
+the diagnostic gains a `help: try: …` line. Nothing is written by an ordinary build —
+`coil lint --fix` is the only writer, and it renders any node that came from source as
+its **original bytes**, so comments and formatting inside an untouched branch survive
+and only the part that changed is new text. A round that stops compiling is reverted,
+and a fix that would delete a comment is reported but never applied. See
+`docs/AUTOFIX.md`, and `metaprog-poc/condlint.coil` for a rule that turns a chain of
+three or more nested `if`s into a `cond`:
+
+    coil lint app.coil --use condlint-on.coil          # report + `help: try:` lines
+    coil lint app.coil --use condlint-on.coil --diff   # the patch; writes nothing
+    coil lint app.coil --use condlint-on.coil --fix    # apply it
+
+⚠ Checkers see the program **after macro expansion**, so every `cond`/`when`/`case` in
+the file has already become nested `if`s. `(code-macro? NODE)` is true for a node the
+expander produced, which is how a rule about `if` tells the author's ifs from the
+ones a macro wrote.
 
 **Checkers run after the program is resolved and typechecked**, so they read the
 compiler's authoritative output and layer *policy* on code that already typechecks:

@@ -421,12 +421,22 @@
 ; ── source table for `(code-file NODE)` — lets a checker tell WHICH file a node is
 ; from (a real path = user code; "<bundled …>"/"<prelude>" = stdlib) so a linter can
 ; scope itself. Set once before checkers run.
-(defstruct SrcBox [(lst (ptr (ArrayList Source)))])
+; `own` holds the table BY VALUE and `lst` points at it. The caller's `ArrayList`
+; header lives in an `LS` on the pipeline's stack — and the pipeline runs on its own
+; pthread, so that stack is gone the moment it returns. Keeping the caller's pointer
+; therefore left a dangling read for anything that consults the table AFTER a run,
+; which is exactly what `coil lint --fix` does when it goes to write the files back.
+; Copying the header is enough: the elements themselves are malloc'd and outlive the
+; run, and the table is complete before this is called (every source is registered
+; during load, which finishes before expansion starts).
+(defstruct SrcBox [(lst (ptr (ArrayList Source))) (own (ArrayList Source))])
 (defn src-box [] (-> (ptr SrcBox))
   (alloc-static SrcBox))
 (defn set-cli-sources [(ss (ptr (ArrayList Source)))] (-> i64)
-  (store! (field (src-box) lst) ss)
-  0)
+  (let [b (src-box)]
+    (store! (field b own) (load ss))
+    (store! (field b lst) (field b own))
+    0))
 (defn code-file-of [(node Sexp)] (-> (slice u8))
   (let [b (src-box)
         lst (load (field b lst))]
@@ -436,6 +446,13 @@
           (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
               ""
               (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid)) (load (field sp name))))))))
+; `(code-from-user? NODE)` — is this node from a real file the user wrote, rather than
+; the bundled stdlib/prelude? Those are registered under a `<…>` pseudo-name, so the
+; test is "has a name that doesn't start with `<`". One definition: op 34 answers with
+; it, and the autofix filter refuses to edit anything it says false to.
+(defn code-from-user-node? [(node Sexp)] (-> bool)
+  (let [nm (code-file-of node)]
+    (and (icmp-gt (slice-len [u8] nm) 0) (icmp-ne (cast i64 (slice-get [u8] nm 0)) 60))))
 ; `(code-line NODE)` — the 1-based source LINE of a node's span, so a macro (e.g.
 ; lib/assert.coil) can bake `file:line` into the code it emits, matching the span
 ; machinery diag.coil's `locate` uses. Same source table as `code-file-of` (set once
@@ -605,7 +622,427 @@
                 (store! sp (al-get [Source] (load lst) sid))
                 (ct-doc-at (malloc-allocator) (load (field sp text)) (sx-lo node))))))))
 
-; `(target-arch)` used to be the constant "aarch64" — so it was WRONG in exactly the
+; ── autofix: `(suggest NODE MSG REPLACEMENT)` ─────────────────────────────────
+; A checker only ever RECORDS a proposed rewrite; nothing here opens a file, and
+; every build that is not `coil lint --fix` drops this table on the floor. That
+; keeps `coil build` pure by construction rather than by convention. The suggestion
+; also emits an ordinary `(warn …)`, so the `help: try:` line shows up whether or
+; not anyone ever runs `--fix`. See docs/AUTOFIX.md.
+;
+; `diag` is the index of that warning in `warn-list`, which is how the printer
+; pairs a suggestion with the diagnostic it belongs under.
+(defstruct Suggestion
+  [(source i64) (lo i64) (hi i64) (col i64) (repl Sexp) (msg (slice u8)) (diag i64)])
+(defstruct SugBox [(init i64) (lst (ptr (ArrayList Suggestion)))])
+(defn sug-box [] (-> (ptr SugBox))
+  (alloc-static SugBox))
+(defn sug-list [] (-> (ptr (ArrayList Suggestion)))
+  (let [b (sug-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        (do
+          (store! (field b lst)
+                  (unwrap-ptr [(ArrayList Suggestion)] (create [(ArrayList Suggestion)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+        0)
+    (load (field b lst))))
+(defn sug-push [(s Suggestion)] (-> i64)
+  (al-push! (sug-list) s)
+  0)
+(defn sug-count [] (-> i64)
+  (al-len [Suggestion] (load (sug-list))))
+(defn sug-at [(i i64)] (-> Suggestion)
+  (al-get [Suggestion] (load (sug-list)) i))
+; `coil lint --fix` re-analyses the program after every round; both collectors are
+; per-round state, so a round starts from empty rather than re-reporting the last one.
+(defn sug-reset [] (-> i64)
+  (let [b (sug-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        0
+        (do (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator))) 0))))
+; `coil lint --fix` re-analyses the program once per round; printing every round's
+; diagnostics would repeat the same list N times and bury the one that matters. The
+; rounds run quiet and the final pass reports.
+(defstruct DiagQuietCell [(on i64)])
+(defn diag-quiet-cell [] (-> (ptr DiagQuietCell))
+  (alloc-static DiagQuietCell))
+(defn set-diag-quiet [(on bool)] (-> i64)
+  (store! (field (diag-quiet-cell) on) (if on 1 0))
+  0)
+(defn diag-quiet? [] (-> bool)
+  (icmp-ne (load (field (diag-quiet-cell) on)) 0))
+(defn diag-reset [] (-> i64)
+  (let [b (warn-box)]
+    (if (icmp-eq (load (field b init)) 0)
+        0
+        (do (store! (load (field b lst)) (al-new [Diag] (malloc-allocator))) (store! (field b errs) 0) 0))))
+
+; The text of the source file a node came from, or "" — the raw material both the
+; column lookup and the verbatim printer below work over.
+(defn sug-file-text [(source i64)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0)
+        ""
+        (if (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst))))
+            ""
+            (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp text)))))))
+
+; The path of the source file a node came from, or "" — what `coil lint --fix`
+; writes back to.
+(defn sug-file-name [(source i64)] (-> (slice u8))
+  (let [b (src-box)
+        lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0)
+        ""
+        (if (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst))))
+            ""
+            (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp name)))))))
+
+; 0-based column of byte `off` in `txt` — how far it sits past the last newline.
+(defn sug-col-at [(txt (slice u8)) (off i64)] (-> i64)
+  (let [n (slice-len [u8] txt)
+        (mut i) (if (icmp-gt off n) n off)
+        (mut c) 0]
+    (loop (if (icmp-le (load i) 0)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] txt (isub (load i) 1))) 10)
+                  (break)
+                  (do (store! c (iadd (load c) 1)) (store! i (isub (load i) 1))))))
+    (load c)))
+
+; ---- rendering a replacement back to source text ----------------------------
+; THE rule that makes a fix surgical: a node that CAME FROM SOURCE is emitted as
+; its ORIGINAL bytes, and only a freshly-built node is pretty-printed. So a fix
+; that reuses the author's subexpressions preserves them byte-for-byte — comments,
+; string escapes, line breaks and all — and only what actually changed is new text.
+;
+; This is a different job from `sx-emit` (expander.coil), which reprints the whole
+; expanded program for `coil expand`: that one is a debugging view with no source to
+; be faithful to, this one edits a file the author has to keep reading.
+(defn sug-verbatim [(node Sexp)] (-> (slice u8))
+  ; ctxt ≠ 0 = macro-generated: its span points at the macro or the call site, so
+  ; those bytes are NOT this node's text and must never be copied.
+  (if (icmp-ne (sx-ctxt node) 0) "" (code-src-of node)))
+
+(defn sug-has-nl [(s (slice u8))] (-> bool)
+  (let [n (slice-len [u8] s)
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 10)
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
+; Width of `x` rendered on one line. Verbatim text that already spans lines can
+; never be flattened, so it reports a width nothing fits in — the same trick
+; fmt/doc.coil's `doc-inf` uses to force every enclosing form to break.
+(defn sug-width [(a (ptr Allocator)) (x Sexp)] (-> i64)
+  (let [v (sug-verbatim x)]
+    (if (icmp-gt (slice-len [u8] v) 0)
+        (if (sug-has-nl v) 1000000000 (slice-len [u8] v))
+        (let [tg (sx-tag x)]
+          ; NOTE: written with cond's flat trailing-else, NOT `:else` — the bootstrap
+          ; seed predates `:else`, and compiler source has to build under it.
+          (cond (icmp-eq tg 0) (slice-len [u8] (i64->str a (sx-ival x)))
+                (icmp-eq tg 2) (slice-len [u8] (sx-sval x))
+                (icmp-eq tg 3) (iadd 1 (slice-len [u8] (sx-sval x)))
+                (icmp-eq tg 4) (iadd 2 (slice-len [u8] (sx-sval x)))
+                (icmp-eq tg 5) (iadd 3 (slice-len [u8] (sx-sval x)))
+                (or (icmp-eq tg 6) (icmp-eq tg 7))
+                  (let [items (sx-items x)
+                        n (sx-len items)
+                        (mut w) 2
+                        (mut i) 0]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (do
+                                (store! w
+                                        (iadd (iadd (load w) (if (icmp-gt (load i) 0) 1 0))
+                                              (sug-width a (sx-at items (load i)))))
+                                (store! i (iadd (load i) 1)))))
+                    (load w))
+                3)))))
+
+(defn sug-spaces! [(buf (mut (ArrayList u8))) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut buf) (cast u8 32)) (store! i (iadd (load i) 1))))))
+  0)
+
+; Copy verbatim text that was written at column `from` into a form now sitting at
+; column `to`. Lisp alignment is column-based, so every line after the first is
+; shifted by the difference: a form that moves left (an `if` chain collapsing into
+; a `cond`) takes its whole body with it instead of stranding it at the old indent.
+; A leftward shift only ever removes SPACES, so it can't eat code.
+(defn sug-put-reindent! [(buf (mut (ArrayList u8))) (s (slice u8)) (from i64) (to i64)] (-> i64)
+  (let [n (slice-len [u8] s)
+        delta (isub to from)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [c (cast i64 (slice-get [u8] s (load i)))]
+                (al-push! (mut buf) (cast u8 c))
+                (store! i (iadd (load i) 1))
+                (if (icmp-eq c 10)
+                    (if (icmp-gt delta 0)
+                        (sug-spaces! (mut buf) delta)
+                        (let [drop (isub 0 delta)
+                              (mut k) 0]
+                          (loop (if (icmp-ge (load k) drop)
+                                    (break)
+                                    (if (and (icmp-lt (load i) n)
+                                             (icmp-eq (cast i64 (slice-get [u8] s (load i))) 32))
+                                        (do (store! i (iadd (load i) 1)) (store! k (iadd (load k) 1)))
+                                        (break))))
+                          0))
+                    0))))
+    0))
+
+(defn sug-atom! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp)] (-> i64)
+  (let [tg (sx-tag x)]
+    (cond (icmp-eq tg 0) (append-bytes! (mut buf) (i64->str a (sx-ival x)))
+          (icmp-eq tg 2) (append-bytes! (mut buf) (sx-sval x))
+          (icmp-eq tg 3) (do (al-push! (mut buf) (cast u8 58)) (append-bytes! (mut buf) (sx-sval x)))
+          (icmp-eq tg 4)
+            (do
+              (al-push! (mut buf) (cast u8 34))
+              (append-bytes! (mut buf) (sx-sval x))
+              (al-push! (mut buf) (cast u8 34)))
+          (icmp-eq tg 5)
+            (do
+              (al-push! (mut buf) (cast u8 99))
+              (al-push! (mut buf) (cast u8 34))
+              (append-bytes! (mut buf) (sx-sval x))
+              (al-push! (mut buf) (cast u8 34)))
+          (append-bytes! (mut buf) "<?>"))
+    0))
+
+; The head symbol of a list, or "" — the one thing layout dispatches on.
+(defn sug-head [(x Sexp)] (-> (slice u8))
+  (let [items (sx-items x)]
+    (if (icmp-eq (sx-len items) 0)
+        ""
+        (let [h (sx-at items 0)] (if (icmp-eq (sx-tag h) 2) (sx-sval h) "")))))
+
+; `cond`/`case` lay their tail out as test/body PAIRS, one clause per line, aligned
+; past the head — the same shape `coil fmt` gives them (fmt/rules.coil layout-clauses,
+; nest = headlen + 2), so a fixed file is already fmt-clean.
+(defn sug-clause-style? [(h (slice u8))] (-> bool)
+  (or (str-eq h "cond") (or (str-eq h "case") (str-eq h "case-by"))))
+
+(defn sug-newline! [(buf (mut (ArrayList u8))) (col i64)] (-> i64)
+  (al-push! (mut buf) (cast u8 10))
+  (sug-spaces! (mut buf) col)
+  0)
+
+; `coil fmt`'s line budget, so a rendered replacement breaks where fmt would.
+(defn sug-width-budget [] (-> i64)
+  120)
+
+; The column the NEXT byte written to `buf` will land in, given that the buffer's own
+; first byte sits at column `start`. Derived from the buffer rather than threaded
+; through the recursion: a node's true column depends on everything already written
+; before it, and passing an estimate down is how re-indentation silently goes wrong.
+(defn sug-cur-col [(buf (ArrayList u8)) (start i64)] (-> i64)
+  (let [s (al-slice [u8] buf)
+        n (slice-len [u8] s)
+        (mut i) n]
+    (loop (if (icmp-le (load i) 0)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] s (isub (load i) 1))) 10)
+                  (break)
+                  (store! i (isub (load i) 1)))))
+    (if (icmp-eq (load i) 0) (iadd start n) (isub n (load i)))))
+
+; Render `x` into `buf` as source text. `start` is the column `buf`'s first byte
+; occupies, which is all the renderer needs to know about the text around it.
+(defn sug-emit! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp) (start i64)] (-> i64)
+  (let [col (sug-cur-col (load buf) start)
+        v (sug-verbatim x)]
+    (if (icmp-gt (slice-len [u8] v) 0)
+        (sug-put-reindent! (mut buf) v (sug-col-at (sug-file-text (sx-source x)) (sx-lo x)) col)
+        (let [tg (sx-tag x)]
+          (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))
+              (sug-atom! a (mut buf) x)
+              (let [items (sx-items x)
+                    n (sx-len items)
+                    open (if (icmp-eq tg 7) 91 40)
+                    close (if (icmp-eq tg 7) 93 41)]
+                (if (icmp-eq n 0)
+                    (do (al-push! (mut buf) (cast u8 open)) (al-push! (mut buf) (cast u8 close)) 0)
+                    (do
+                      (al-push! (mut buf) (cast u8 open))
+                      (if (icmp-le (iadd col (sug-width a x)) (sug-width-budget))
+                          ; fits: one line, single spaces
+                          (let [(mut i) 0]
+                            (loop (if (icmp-ge (load i) n)
+                                      (break)
+                                      (do
+                                        (if (icmp-gt (load i) 0) (al-push! (mut buf) (cast u8 32)) 0)
+                                        (sug-emit! a (mut buf) (sx-at items (load i)) start)
+                                        (store! i (iadd (load i) 1))))))
+                          ; breaks: the head (or a vector's first element) stays on this
+                          ; line and everything after aligns under the first argument —
+                          ; fmt's CALL shape. `cond`/`case` additionally pair up.
+                          (let [h (if (icmp-eq tg 6) (sug-head x) "")
+                                pairs (and (icmp-eq tg 6) (sug-clause-style? h))
+                                ind (if (icmp-eq tg 7) (iadd col 1) (iadd (iadd col (slice-len [u8] h)) 2))
+                                step (if pairs 2 1)]
+                            (sug-emit! a (mut buf) (sx-at items 0) start)
+                            (let [(mut i) 1]
+                              (loop (if (icmp-ge (load i) n)
+                                        (break)
+                                        (do
+                                          (if (icmp-eq (load i) 1)
+                                              (al-push! (mut buf) (cast u8 32))
+                                              (sug-newline! (mut buf) ind))
+                                          ; one clause: test, then body on the same line
+                                          (let [(mut k) 0]
+                                            (loop (if (or (icmp-ge (load k) step) (icmp-ge (iadd (load i) (load k)) n))
+                                                      (break)
+                                                      (do
+                                                        (if (icmp-gt (load k) 0) (al-push! (mut buf) (cast u8 32)) 0)
+                                                        (sug-emit! a
+                                                                   (mut buf)
+                                                                   (sx-at items (iadd (load i) (load k)))
+                                                                   start)
+                                                        (store! k (iadd (load k) 1))))))
+                                          (store! i (iadd (load i) step))))))))
+                      (al-push! (mut buf) (cast u8 close))
+                      0)))))))
+  0)
+
+; ---- the comment guard ------------------------------------------------------
+; A replacement is assembled from the author's own nodes, so anything INSIDE a node
+; survives. What does not survive is text between nodes — and in a Lisp the text
+; between two nodes is a comment. Nothing in a Code value records it, so a rule that
+; drops a clause boundary would delete the author's comment with it.
+;
+; Rather than let that happen quietly, the fix is checked before it is applied: count
+; the comment marks in the span being replaced and in the text replacing it, and if
+; any went missing the rewrite is not a rewrite the author would accept. `;` inside a
+; string literal is not a comment, so string state is tracked.
+(defn sug-comment-marks [(s (slice u8))] (-> i64)
+  (let [n (slice-len [u8] s)
+        (mut i) 0
+        (mut instr) false
+        (mut count) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [c (cast i64 (slice-get [u8] s (load i)))]
+                (if (load instr)
+                    (if (icmp-eq c 92)
+                        (store! i (iadd (load i) 2))  ; escape: skip the escaped byte
+                        (do (if (icmp-eq c 34) (store! instr false) 0) (store! i (iadd (load i) 1))))
+                    (do
+                      (if (icmp-eq c 34)
+                          (store! instr true)
+                          (if (icmp-eq c 59) (store! count (iadd (load count) 1)) 0))
+                      (store! i (iadd (load i) 1)))))))
+    (load count)))
+
+; Would splicing `repl` over [lo,hi) of `src` lose a comment?
+(defn sug-drops-comment? [(src (slice u8)) (lo i64) (hi i64) (repl (slice u8))] (-> bool)
+  (let [n (slice-len [u8] src)]
+    (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi)))
+        false
+        (icmp-gt (sug-comment-marks (subslice [u8] src lo hi)) (sug-comment-marks repl)))))
+
+; Record a proposed rewrite. The filters live HERE rather than at apply time, so a
+; node a fix could never legally touch never advertises one either:
+;   * ctxt ≠ 0     — macro-generated. Its span points at the macro or the call site,
+;                    so "fixing" it would write nonsense into an unrelated form. This
+;                    filter is not optional and not configurable.
+;   * not user code — a bundled stdlib node has no file on disk to edit.
+(defn cop-record-fix [(node Sexp) (repl Sexp) (msg (slice u8)) (di i64)] (-> i64)
+  (if (or (icmp-ne (sx-ctxt node) 0) (not (code-from-user-node? node)))
+      0
+      (let [s (alloc-stack Suggestion)]
+        (store! (field s source) (sx-source node))
+        (store! (field s lo) (sx-lo node))
+        (store! (field s hi) (sx-hi node))
+        (store! (field s col) (sug-col-at (sug-file-text (sx-source node)) (sx-lo node)))
+        (store! (field s repl) repl)
+        (store! (field s msg) msg)
+        (store! (field s diag) di)
+        (sug-push (load s))
+        0)))
+
+; ops 32 `(warn NODE MSG)` and 44 `(suggest NODE MSG REPLACEMENT)`. Both record a
+; located, non-fatal warning at NODE — that half is identical, so it is written once —
+; and `suggest` additionally records the rewrite it proposes.
+(defn cop-warn-or-suggest [(a (ptr Allocator)) (op i64) (args (ptr (ArrayList CtVal)))] (-> (Result CtVal Diag))
+  (let [fixing (icmp-eq op 44)
+        nm (if fixing "suggest" "warn")
+        usage
+          (if fixing
+              "suggest: expects (suggest NODE MSG REPLACEMENT), REPLACEMENT a Code value"
+              "warn: expects (warn NODE MSG)")
+        repl
+          (if fixing
+              (match (cv-get args 2)
+                (None [] (None [Sexp]))
+                (Some [rv] (if (is-ccode rv) (Some (ccode-of rv)) (None [Sexp]))))
+              (None [Sexp]))]
+    (if (and fixing (not (some? [Sexp] repl)))
+        (Err [CtVal Diag] (derr usage))
+        (match (cv-get args 0)
+          (None [] (Err [CtVal Diag] (derr usage)))
+          (Some [nodev]
+                (if (not (is-ccode nodev))
+                    (Err [CtVal Diag] (derr (sconcat a nm ": first arg must be a Code node")))
+                    (match (cv-get args 1)
+                      (None [] (Err [CtVal Diag] (derr usage)))
+                      (Some [msgv]
+                            (if (not (is-cstr msgv))
+                                (Err [CtVal Diag] (derr (sconcat a nm ": message must be a string")))
+                                (let [node (ccode-of nodev)
+                                      d (alloc-stack Diag)
+                                      di (al-len [Diag] (load (warn-list)))]
+                                  (store! (field d lo) (sx-lo node))
+                                  (store! (field d hi) (sx-hi node))
+                                  (store! (field d msg) (sconcat a "warning: " (cstr-of msgv)))
+                                  (store! (field d source) (sx-source node))
+                                  (store! (field d ctxt) 0)
+                                  (warn-push (load d))
+                                  (match repl
+                                    (None [] 0)
+                                    (Some [r] (cop-record-fix node r (cstr-of msgv) di)))
+                                  (Ok [CtVal Diag] (CInt 0))))))))))))
+
+; A suggestion's replacement as text, laid out as if it began at column `col`.
+(defn sug-render-at [(a (ptr Allocator)) (s Suggestion) (col i64)] (-> (slice u8))
+  (let [sp (alloc-stack Suggestion)
+        (mut buf) (al-new [u8] a)]
+    (store! sp s)
+    (sug-emit! a (mut buf) (load (field sp repl)) col)
+    (al-slice [u8] (load buf))))
+
+; The text that would be spliced over the suggestion's own span.
+(defn sug-render [(a (ptr Allocator)) (s Suggestion)] (-> (slice u8))
+  (let [sp (alloc-stack Suggestion)] (store! sp s) (sug-render-at a s (load (field sp col)))))
+
+; Print `help: try: …` for any suggestion attached to warning `di`. This is where
+; most of autofix's value lands: the proposed rewrite is visible from an ordinary
+; build, whether or not anyone ever runs `coil lint --fix`. Continuation lines are
+; laid out to align under the start of the replacement, past the `help: try: ` label.
+(defn sug-print-help [(w (ptr Writer)) (a (ptr Allocator)) (di i64)] (-> i64)
+  (let [n (sug-count)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sp (alloc-stack Suggestion)]
+                  (store! sp (sug-at (load i)))
+                  (if (icmp-eq (load (field sp diag)) di)
+                      (do (ps w "help: try: ") (ps w (sug-render-at a (load sp) 11)) (wb w 10) 0)
+                      0))
+                (store! i (iadd (load i) 1))))))
+  0)
+
 ; case it exists for: cross-compiling. A macro branching on it baked the host branch
 ; into a wasm build, silently. The arch is one value per compile, set from the resolved
 ; --target triple before expansion runs (like the nid/gensym counters, it is a
@@ -1988,26 +2425,8 @@
                                           (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
                                         (Err [CtVal Diag] (derr "report: first arg must be a Code node"))))
                               (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
-                            (if (icmp-eq op 32)
-                                (match (cv-get args 0)
-                                  (Some [nodev]
-                                        (if (is-ccode nodev)
-                                            (match (cv-get args 1)
-                                              (Some [msgv]
-                                                    (if (is-cstr msgv)
-                                                        (let [node (ccode-of nodev)
-                                                              d (alloc-stack Diag)]
-                                                          (store! (field d lo) (sx-lo node))
-                                                          (store! (field d hi) (sx-hi node))
-                                                          (store! (field d msg) (sconcat a "warning: " (cstr-of msgv)))
-                                                          (store! (field d source) (sx-source node))
-                                                          (store! (field d ctxt) 0)
-                                                          (warn-push (load d))
-                                                          (Ok [CtVal Diag] (CInt 0)))
-                                                        (Err [CtVal Diag] (derr "warn: message must be a string"))))
-                                              (None [] (Err [CtVal Diag] (derr "warn: expects (warn NODE MSG)"))))
-                                            (Err [CtVal Diag] (derr "warn: first arg must be a Code node"))))
-                                  (None [] (Err [CtVal Diag] (derr "warn: expects (warn NODE MSG)"))))
+                            (if (or (icmp-eq op 32) (icmp-eq op 44))
+                                (cop-warn-or-suggest a op args)
                                 (if (icmp-eq op 33)
                                     (match (cv-get args 0)
                                       (Some [nodev]
@@ -2047,18 +2466,15 @@
                                                       (None []
                                                             (Err [CtVal Diag]
                                                                  (derr "code-doc: expects (code-doc NODE)"))))
-                                                    (if (icmp-eq op 34)
+                                                    (if (or (icmp-eq op 34) (icmp-eq op 45))
                                                         (match (cv-get args 0)
                                                           (Some [nodev]
                                                                 (if (is-ccode nodev)
-                                                                    (let [nm (code-file-of (ccode-of nodev))]
-                                                                      (Ok [CtVal Diag]
-                                                                          (CBool (and (icmp-gt (slice-len [u8] nm) 0)
-                                                                                      (icmp-ne (cast i64
-                                                                                                     (slice-get [u8]
-                                                                                                                nm
-                                                                                                                0))
-                                                                                               60)))))
+                                                                    (Ok [CtVal Diag]
+                                                                        (CBool (if (icmp-eq op 45)
+                                                                                   (icmp-ne (sx-ctxt (ccode-of nodev))
+                                                                                            0)
+                                                                                   (code-from-user-node? (ccode-of nodev)))))
                                                                     (Err [CtVal Diag]
                                                                          (derr "code-from-user?: expects a Code node"))))
                                                           (None []

@@ -1948,17 +1948,20 @@
           (match (load errf)
             (Some [d] (Err [(ptr (ArrayList TaggedForm)) Diag] d))
             (None [] (Ok [(ptr (ArrayList TaggedForm)) Diag] (load cur))))))))
-; print all collected `(warn …)` diagnostics (located, non-fatal) to stderr.
+; print all collected `(warn …)` diagnostics (located, non-fatal) to stderr, each
+; followed by the `help: try: …` line of any `(suggest …)` that produced it.
 (defn drain-warnings [(s (mut LS))] (-> i64)
   (let [w (stderr)
+        a (load (field s a))
         lst (warn-list)
-        n (al-len [Diag] (load lst))
+        n (if (diag-quiet?) 0 (al-len [Diag] (load lst)))
         (mut i) 0]
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
                 (render-diag w (mut s) (al-get [Diag] (load lst) (load i)))
                 (wb w 10)
+                (sug-print-help w a (load i))
                 (store! i (iadd (load i) 1)))))
     0))
 (defn run-expand [(s (mut LS))

@@ -1,8 +1,11 @@
 # Autofix — Design
 
-**Status:** design (not yet implemented). Builds on `METAPROGRAMS.md` (the checker
-hook, `warn`/`report`) and `SEMANTIC_METAPROGRAMS.md` (checkers run post-typecheck
-against the authoritative model).
+**Status: SHIPPED.** `(suggest NODE MSG REPLACEMENT)` (code op 44) and `coil lint
+[--fix|--diff]` are implemented; the first rule on top of them is the nested-`if`
+lint in `metaprog-poc/condlint.coil`. Builds on `METAPROGRAMS.md` (the checker hook,
+`warn`/`report`) and `SEMANTIC_METAPROGRAMS.md` (checkers run post-typecheck against
+the authoritative model). See **§12 — What shipped** at the end for where each piece
+lives and the three places reality differed from this design.
 
 ## Goal
 
@@ -358,3 +361,58 @@ everywhere else; **(3)** `ctxt ≠ 0` is dropped unconditionally, so macro-gener
 code is never edited; **(4)** application is a gated fixpoint that reverts any round
 that fails to compile, so the tree never gets worse. Checkers only ever record; only
 `coil lint --fix` writes.
+
+---
+
+## 12. What shipped
+
+`(suggest NODE MSG REPLACEMENT)` is code op **44**, parsed alongside `warn` and
+handled by the same function (`comptime.coil::cop-warn-or-suggest`) — the diagnostic
+half of the two is identical, so it is written once. It records into a `Suggestion`
+table that mirrors `warn-list` and that only `coil lint --fix` ever reads; the ctxt/
+user filters run at record time (`cop-record-fix`). The verbatim-if-spanned renderer
+is `sug-emit!` in the same file, and `sug-print-help` puts a `help: try:` line under
+every warning a suggestion produced — so an ordinary build shows the fix whether or
+not anyone runs `--fix`.
+
+`coil lint` (`driver.coil::lint-cmd`) is a two-phase command: a quiet fuel-guarded
+apply loop (`lint-fix-loop`), then one analysis pass that reports whatever is left.
+Each round's analysis is the previous round's gate; a round that stops compiling is
+reverted whole (`lint-restore`).
+
+Three things the design got wrong, found by running it:
+
+1. **A fix can silently delete a comment, and §5's filters do not catch it.** A
+   replacement is assembled from the author's nodes, so anything *inside* a node
+   survives — but in a Lisp the text *between* two nodes is a comment, and no `Code`
+   value records it. Collapsing an `if` chain whose branches have comments between
+   test and body would drop them. There is now a guard: count the comment marks in
+   the span being replaced and in the text replacing it (`sug-drops-comment?`,
+   string-literal aware), and if any went missing the fix is downgraded to advice —
+   reported with a `note:` naming the line, never applied.
+
+2. **Verbatim text has to be re-indented, and the column must come from the buffer.**
+   A form that moves left takes its multi-line body with it; copying the bytes
+   unchanged strands the body at the old indent. `sug-put-reindent!` shifts every line
+   after the first by the column delta (a leftward shift only removes spaces, so it
+   cannot eat code). The column itself is derived from the output buffer
+   (`sug-cur-col`), not threaded down the recursion — a node's true column depends on
+   everything already written before it, and passing an estimate down is exactly how
+   re-indentation goes wrong.
+
+3. **The source table did not outlive a pipeline run.** `set-cli-sources` held a
+   pointer to an `ArrayList` header living in an `LS` on the pipeline's stack — and
+   the pipeline runs on its own pthread. Every existing consumer (`code-file`,
+   `code-src`, `code-doc`) reads it *during* the run, so nothing had noticed; `--fix`
+   reads it *after*, to know which files to write, and segfaulted. The box now holds
+   the header by value.
+
+A fourth thing the design did not anticipate: **checkers see the program after macro
+expansion**, so every `cond`, `when` and `case` in the file has already become nested
+ifs by the time a rule looks at it. A rule about `if` therefore needs to tell the
+author's ifs from the expander's. That is code op **45**, `(code-macro? NODE)` — the
+same `ctxt ≠ 0` test the fix filter applies internally, exposed to rules.
+
+`--verify` (§6 level 2) and `suggest-maybe` (§7) are still unimplemented; the
+comment guard above turned out to be the applicability distinction that actually
+came up first.
