@@ -30,14 +30,15 @@
   (Some [(val T)]))
 
 (defsum Result [T E]
-  (Ok  [(val T)])
+  (Ok [(val T)])
   (Err [(err E)]))
 
 ; structural equality — the method is `=` (so `(= a b)` at runtime).
 (deftrait Eq [Self]
   (= [(a Self) (b Self)] (-> bool)))
 ; inequality for free on any `Eq` type — `(!= a b)` is `(not (= a b))`.
-(defn != [(T Eq)] [(a T) (b T)] (-> bool) (not (= a b)))
+(defn != [(T Eq)] [(a T) (b T)] (-> bool)
+  (not (= a b)))
 
 ; a hash of the value (FNV-1a over fields, when derived)
 (deftrait Hash [Self]
@@ -53,9 +54,9 @@
 (deftrait Div [Self] (/ [(a Self) (b Self)] (-> Self)))
 (deftrait Rem [Self] (% [(a Self) (b Self)] (-> Self)))
 (deftrait Ord [Self]
-  (<  [(a Self) (b Self)] (-> bool))
+  (< [(a Self) (b Self)] (-> bool))
   (<= [(a Self) (b Self)] (-> bool))
-  (>  [(a Self) (b Self)] (-> bool))
+  (> [(a Self) (b Self)] (-> bool))
   (>= [(a Self) (b Self)] (-> bool)))
 
 ; standard equality impls for every integer primitive.
@@ -77,9 +78,9 @@
 (impl Div i64 (/ [(a i64) (b i64)] (-> i64) (idiv a b)))
 (impl Rem i64 (% [(a i64) (b i64)] (-> i64) (irem a b)))
 (impl Ord i64
-  (<  [(a i64) (b i64)] (-> bool) (icmp-lt a b))
+  (< [(a i64) (b i64)] (-> bool) (icmp-lt a b))
   (<= [(a i64) (b i64)] (-> bool) (icmp-le a b))
-  (>  [(a i64) (b i64)] (-> bool) (icmp-gt a b))
+  (> [(a i64) (b i64)] (-> bool) (icmp-gt a b))
   (>= [(a i64) (b i64)] (-> bool) (icmp-ge a b)))
 
 ; f64 arithmetic + ordering
@@ -88,9 +89,9 @@
 (impl Mul f64 (* [(a f64) (b f64)] (-> f64) (fmul a b)))
 (impl Div f64 (/ [(a f64) (b f64)] (-> f64) (fdiv a b)))
 (impl Ord f64
-  (<  [(a f64) (b f64)] (-> bool) (fcmp-lt a b))
+  (< [(a f64) (b f64)] (-> bool) (fcmp-lt a b))
   (<= [(a f64) (b f64)] (-> bool) (fcmp-le a b))
-  (>  [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
+  (> [(a f64) (b f64)] (-> bool) (fcmp-gt a b))
   (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
 
 ; ---- pointers are ordered and compared BY ADDRESS ---------------------------
@@ -104,9 +105,9 @@
 (impl [T] Eq (ptr T)
   (= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-eq (cast u64 a) (cast u64 b))))
 (impl [T] Ord (ptr T)
-  (<  [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-lt (cast u64 a) (cast u64 b)))
+  (< [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-lt (cast u64 a) (cast u64 b)))
   (<= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-le (cast u64 a) (cast u64 b)))
-  (>  [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-gt (cast u64 a) (cast u64 b)))
+  (> [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-gt (cast u64 a) (cast u64 b)))
   (>= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-ge (cast u64 a) (cast u64 b))))
 
 ; ---- bitwise, as traits ----------------------------------------------------
@@ -114,16 +115,16 @@
 ; core op — so `(& op 0xC7)` reads like C's `op & 0xC7` with no overhead. (Unary
 ; bitwise-not has no operator: `~` is the reader's unquote; use `(^ a -1)`.)
 (deftrait BitAnd [Self] (& [(a Self) (b Self)] (-> Self)))
-(deftrait BitOr  [Self] (| [(a Self) (b Self)] (-> Self)))
+(deftrait BitOr [Self] (| [(a Self) (b Self)] (-> Self)))
 (deftrait BitXor [Self] (^ [(a Self) (b Self)] (-> Self)))
-(deftrait Shl    [Self] (<< [(a Self) (b Self)] (-> Self)))
-(deftrait Shr    [Self] (>> [(a Self) (b Self)] (-> Self)))
+(deftrait Shl [Self] (<< [(a Self) (b Self)] (-> Self)))
+(deftrait Shr [Self] (>> [(a Self) (b Self)] (-> Self)))
 
 (impl BitAnd i64 (& [(a i64) (b i64)] (-> i64) (iand a b)))
-(impl BitOr  i64 (| [(a i64) (b i64)] (-> i64) (ior a b)))
+(impl BitOr i64 (| [(a i64) (b i64)] (-> i64) (ior a b)))
 (impl BitXor i64 (^ [(a i64) (b i64)] (-> i64) (ixor a b)))
-(impl Shl    i64 (<< [(a i64) (b i64)] (-> i64) (ishl a b)))
-(impl Shr    i64 (>> [(a i64) (b i64)] (-> i64) (ishr a b)))
+(impl Shl i64 (<< [(a i64) (b i64)] (-> i64) (ishl a b)))
+(impl Shr i64 (>> [(a i64) (b i64)] (-> i64) (ishr a b)))
 
 ; ---- collections, as traits -------------------------------------------------
 ; The everyday collection vocabulary — `(len xs)`, `(get xs k)`, `(push! xs v)`

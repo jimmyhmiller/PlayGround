@@ -36,38 +36,41 @@
 ; FIELD ORDER IS ABI: metahost.coil builds the identical struct (same names, same
 ; order, all pointer-sized) and metaengine passes it through coil_mp_init.
 (defstruct MetaVt
-  [(arg_new   (fnptr c [] (ptr i8)))
-   (arg_c     (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
-   (arg_i     (fnptr c [(ptr i8) i64] (ptr i8)))
-   (arg_s     (fnptr c [(ptr i8) (ptr u8) i64] (ptr i8)))
-   (arg_b     (fnptr c [(ptr i8) i64] (ptr i8)))
-   (arg_f     (fnptr c [(ptr i8) f64] (ptr i8)))
-   (op_i      (fnptr c [i64 (ptr i8)] i64))
-   (op_h      (fnptr c [i64 (ptr i8)] (ptr i8)))
-   (op_s      (fnptr c [i64 (ptr i8)] (ptr i8)))
-   (quoted    (fnptr c [i64] (ptr i8)))
-   (qq_new    (fnptr c [] (ptr i8)))
-   (qq_push   (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+  [(arg_new (fnptr c [] (ptr i8)))
+   (arg_c (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
+   (arg_i (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_s (fnptr c [(ptr i8) (ptr u8) i64] (ptr i8)))
+   (arg_b (fnptr c [(ptr i8) i64] (ptr i8)))
+   (arg_f (fnptr c [(ptr i8) f64] (ptr i8)))
+   (op_i (fnptr c [i64 (ptr i8)] i64))
+   (op_h (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (op_s (fnptr c [i64 (ptr i8)] (ptr i8)))
+   (quoted (fnptr c [i64] (ptr i8)))
+   (qq_new (fnptr c [] (ptr i8)))
+   (qq_push (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
    (qq_splice (fnptr c [(ptr i8) (ptr i8)] (ptr i8)))
-   (qq_list   (fnptr c [(ptr i8)] (ptr i8)))
-   (qq_listq  (fnptr c [(ptr i8)] (ptr i8)))
-   (qq_vec    (fnptr c [(ptr i8)] (ptr i8)))
-   (unq_int   (fnptr c [i64] (ptr i8)))
-   (unq_bool  (fnptr c [i64] (ptr i8)))
+   (qq_list (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_listq (fnptr c [(ptr i8)] (ptr i8)))
+   (qq_vec (fnptr c [(ptr i8)] (ptr i8)))
+   (unq_int (fnptr c [i64] (ptr i8)))
+   (unq_bool (fnptr c [i64] (ptr i8)))
    (unq_float (fnptr c [f64] (ptr i8)))
-   (unq_str   (fnptr c [(ptr u8) i64] (ptr i8)))
-   (fail      (fnptr c [i64] i64))])
+   (unq_str (fnptr c [(ptr u8) i64] (ptr i8)))
+   (fail (fnptr c [i64] i64))])
 
 (defstruct MpVtBox [(vt (ptr MetaVt))])
-(defn mp-vtbox [] (-> (ptr MpVtBox)) (alloc-static MpVtBox))
-(defn mp-vt [] (-> (ptr MetaVt)) (load (field (mp-vtbox) vt)))
+(defn mp-vtbox [] (-> (ptr MpVtBox))
+  (alloc-static MpVtBox))
+(defn mp-vt [] (-> (ptr MetaVt))
+  (load (field (mp-vtbox) vt)))
 
 ; The dylib's ONE exported symbol: the engine calls it right after dlopen, before
 ; any entry runs. (Its export-c record is appended by metalower.coil — an export-c
 ; form here would be dropped, since closure-subprogram builds the sub-program with
 ; empty exports.)
 (defn mp-init [(vt (ptr i8))] (-> i64)
-  (store! (field (mp-vtbox) vt) (cast (ptr MetaVt) vt)) 0)
+  (store! (field (mp-vtbox) vt) (cast (ptr MetaVt) vt))
+  0)
 
 ; String results: host-owned {ptr,len}. Layout shared with metahost.coil by
 ; construction (same compiler lays out both).
@@ -81,8 +84,9 @@ ret $ret %d"))
   (llvm-ir i64 [s] "%l = extractvalue $t0 $0, 1
 ret $ret %l"))
 (defn mp-mkslice [(p (ptr u8)) (n i64)] (-> (slice u8))
-  (llvm-ir (slice u8) [p n]
-    "%s0 = insertvalue $ret undef, $t0 $0, 0
+  (llvm-ir (slice u8)
+           [p n]
+           "%s0 = insertvalue $ret undef, $t0 $0, 0
 %s1 = insertvalue $ret %s0, $t1 $1, 1
 ret $ret %s1"))
 
@@ -91,34 +95,55 @@ ret $ret %s1"))
     (mp-mkslice (load (field b p)) (load (field b n)))))
 
 ; ---- code-op argument builder -------------------------------------------------
-(defn mp-arg-new [] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_new))))
-(defn mp-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_c)) b c))
-(defn mp-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_i)) b v))
-(defn mp-arg-s [(b (ptr i8)) (s (slice u8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_s)) b (mp-sdata s) (mp-slen s)))
-(defn mp-arg-b [(b (ptr i8)) (v bool)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_b)) b (if v 1 0)))
-(defn mp-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) arg_f)) b x))
+(defn mp-arg-new [] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_new))))
+(defn mp-arg-c [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_c)) b c))
+(defn mp-arg-i [(b (ptr i8)) (v i64)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_i)) b v))
+(defn mp-arg-s [(b (ptr i8)) (s (slice u8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_s)) b (mp-sdata s) (mp-slen s)))
+(defn mp-arg-b [(b (ptr i8)) (v bool)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_b)) b (if v 1 0)))
+(defn mp-arg-f [(b (ptr i8)) (x f64)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) arg_f)) b x))
 
 ; ---- run an op (result shape = codeop-rty, known statically per op) -----------
-(defn mp-op-int  [(op i64) (b (ptr i8))] (-> i64) (call-ptr (load (field (mp-vt) op_i)) op b))
-(defn mp-op-bool [(op i64) (b (ptr i8))] (-> bool) (icmp-ne (call-ptr (load (field (mp-vt) op_i)) op b) 0))
-(defn mp-op-code [(op i64) (b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) op_h)) op b))
-(defn mp-op-str  [(op i64) (b (ptr i8))] (-> (slice u8)) (mp-buf->str (call-ptr (load (field (mp-vt) op_s)) op b)))
+(defn mp-op-int [(op i64) (b (ptr i8))] (-> i64)
+  (call-ptr (load (field (mp-vt) op_i)) op b))
+(defn mp-op-bool [(op i64) (b (ptr i8))] (-> bool)
+  (icmp-ne (call-ptr (load (field (mp-vt) op_i)) op b) 0))
+(defn mp-op-code [(op i64) (b (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) op_h)) op b))
+(defn mp-op-str [(op i64) (b (ptr i8))] (-> (slice u8))
+  (mp-buf->str (call-ptr (load (field (mp-vt) op_s)) op b)))
 ; op 9 `(error MSG)`: the host records the diagnostic and terminates the
 ; metaprogram thread — never returns. metalower wraps the call site in
 ; (do (mp-op-int 9 b) (loop 0)) so the expression is never-typed downstream.
 
 ; ---- quote / quasiquote -------------------------------------------------------
-(defn mp-quoted [(k i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) quoted)) k))
-(defn mp-qq-new [] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_new))))
-(defn mp-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_push)) b c))
-(defn mp-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_splice)) b c))
-(defn mp-qq-list [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_list)) b))
-(defn mp-qq-listq [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_listq)) b))
-(defn mp-qq-vec [(b (ptr i8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) qq_vec)) b))
-(defn mp-unq-int [(v i64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_int)) v))
-(defn mp-unq-bool [(v bool)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_bool)) (if v 1 0)))
-(defn mp-unq-float [(x f64)] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_float)) x))
-(defn mp-unq-str [(s (slice u8))] (-> (ptr i8)) (call-ptr (load (field (mp-vt) unq_str)) (mp-sdata s) (mp-slen s)))
+(defn mp-quoted [(k i64)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) quoted)) k))
+(defn mp-qq-new [] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_new))))
+(defn mp-qq-push [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_push)) b c))
+(defn mp-qq-splice [(b (ptr i8)) (c (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_splice)) b c))
+(defn mp-qq-list [(b (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_list)) b))
+(defn mp-qq-listq [(b (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_listq)) b))
+(defn mp-qq-vec [(b (ptr i8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) qq_vec)) b))
+(defn mp-unq-int [(v i64)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) unq_int)) v))
+(defn mp-unq-bool [(v bool)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) unq_bool)) (if v 1 0)))
+(defn mp-unq-float [(x f64)] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) unq_float)) x))
+(defn mp-unq-str [(s (slice u8))] (-> (ptr i8))
+  (call-ptr (load (field (mp-vt) unq_str)) (mp-sdata s) (mp-slen s)))
 
 ; ---- interpreter-parity runtime failures --------------------------------------
 ; Where the interpreter fails only WHEN EVALUATED (unquoting an aggregate, splicing

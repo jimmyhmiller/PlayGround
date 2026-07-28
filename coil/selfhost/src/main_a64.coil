@@ -31,12 +31,12 @@
 (import "comptime.coil" :use *)
 (import "metaengine.coil" :use *)
 (import "expander.coil" :use *)
-(import "comptime_eval.coil" :use *)   ; compiled comptime/const fold (interp deletion step 1)
+(import "comptime_eval.coil" :use *)  ; compiled comptime/const fold (interp deletion step 1)
 (import "codegen_a64.coil" :use *)
-(import "macho.coil" :use *)     ; MObj — for the in-memory comptime builder below
+(import "macho.coil" :use *)  ; MObj — for the in-memory comptime builder below
 (import "driver.coil" :use *)
-(import "cimport.coil" :as ci)   ; `coil cimport` — qualified, no name leak
-(import "interp.coil" :as ip)    ; COIL_META_INTERP: run metaprograms via the interpreter
+(import "cimport.coil" :as ci)  ; `coil cimport` — qualified, no name leak
+(import "interp.coil" :as ip)  ; COIL_META_INTERP: run metaprograms via the interpreter
 (import "metahost.coil" :as mh)  ; the mh_* code-op callbacks + interp dispatch/halt hooks
 
 ; ---- hard-error stubs for the (excluded) LLVM backend ----
@@ -44,17 +44,26 @@
 ; a caller that reaches them (e.g. `build` without --backend arm64, or `emit-ir`)
 ; gets a clear diagnostic instead of mysterious behavior. Signatures mirror the real
 ; build-ir-program / dump-ir-program / do-normalize in main.coil.
-(defn no-llvm-build [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
+(defn no-llvm-build [(a (ptr Allocator))
+                     (src (slice u8))
+                     (cwd (slice u8))
+                     (obj-cstr (ptr i8))
+                     (triple (ptr i8))
+                     (path (slice u8))] (-> i64)
   (ps (stderr) "error: this coil was built without the LLVM backend; `build` requires `--backend arm64`\n")
-  (abort) 1)
+  (abort)
+  1)
 
 (defn no-llvm-emitir [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
-  (ps (stderr) "error: this coil was built without the LLVM backend; `emit-ir` / `dump-ir` are unavailable (no textual LLVM IR without libLLVM)\n")
-  (abort) 1)
+  (ps (stderr)
+      "error: this coil was built without the LLVM backend; `emit-ir` / `dump-ir` are unavailable (no textual LLVM IR without libLLVM)\n")
+  (abort)
+  1)
 
 (defn no-normalize [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (ps (stderr) "error: this coil was built without the LLVM backend; `__normalize` is unavailable\n")
-  (abort) 1)
+  (abort)
+  1)
 
 ; default-backend = 2 (arm64): a bare `build` uses the native backend; there is no
 ; LLVM backend to fall back to.
@@ -69,7 +78,11 @@
 ; build. No DWARF for the dylib (a metaprogram needs no debug info, and there are
 ; no registered source paths to describe).
 (defn meta-build-obj-a64 [(a (ptr Allocator)) (mp (ptr Program)) (obj (ptr i8))] (-> i64)
-  (cga64-build-object a mp obj "" ""
+  (cga64-build-object a
+                      mp
+                      obj
+                      ""
+                      ""
                       (box-al [(slice u8)] a (al-new [(slice u8)] a))
                       (box-al [(slice u8)] a (al-new [(slice u8)] a))
                       false))
@@ -77,7 +90,10 @@
 ; the same object, handed back in memory instead of written to a file. comptime_eval
 ; loads this straight into executable pages (jit.coil) — no .o, no `cc`, no dlopen.
 (defn meta-build-mobj-a64 [(a (ptr Allocator)) (mp (ptr Program))] (-> MObj)
-  (cga64-build-mobj a mp "" ""
+  (cga64-build-mobj a
+                    mp
+                    ""
+                    ""
                     (box-al [(slice u8)] a (al-new [(slice u8)] a))
                     (box-al [(slice u8)] a (al-new [(slice u8)] a))
                     false))
@@ -99,11 +115,12 @@
           (let [argbuf (alloc-stack (array i64 1))]
             (store! (index (cast (ptr i64) argbuf) 0) (cast i64 cell))
             (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) argbuf) 1))
-        (let [r (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) 0) 0)]
-          (store! (cast (ptr i64) cell) r) 0))
+          (let [r (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) 0) 0)]
+            (store! (cast (ptr i64) cell) r)
+            0))
       (if (ip/interp-has-entry? icx "coil.ct.status")
           (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)
-        0))))
+          0))))
 (defn meta-interp-env? [] (-> bool)
   (let [v (getenv c"COIL_META_INTERP")]
     (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
@@ -114,12 +131,15 @@
   ; opt-in interpreter meta path: register the run hooks + the interp extern/abort
   ; hooks. Off by default ⇒ the native dylib/JIT path is byte-unchanged.
   (if (meta-interp-env?)
-      (do (set-meta-interp! (fnptr-of meta-build-interp) (fnptr-of meta-run-interp) (fnptr-of meta-run-ct-interp))
-          (ip/set-interp-extern-hook! (fnptr-of mh/mh-interp-dispatch))
-          (ip/set-interp-abort-check! (fnptr-of mh/mh-interp-halted?)) 0)
-    0)
-  (register-comptime-fold!)   ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
-  (driver-main argc argv
+      (do
+        (set-meta-interp! (fnptr-of meta-build-interp) (fnptr-of meta-run-interp) (fnptr-of meta-run-ct-interp))
+        (ip/set-interp-extern-hook! (fnptr-of mh/mh-interp-dispatch))
+        (ip/set-interp-abort-check! (fnptr-of mh/mh-interp-halted?))
+        0)
+      0)
+  (register-comptime-fold!)  ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
+  (driver-main argc
+               argv
                (fnptr-of no-llvm-build)
                (fnptr-of no-llvm-emitir)
                (fnptr-of no-normalize)
