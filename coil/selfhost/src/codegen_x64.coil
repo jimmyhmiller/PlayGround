@@ -1310,8 +1310,13 @@
                                       (al-push! (mut pr0) (ior r0 (if s0 256 0)))
                                       (al-push! (mut pr1) (ior r1 (if s1 256 0)))
                                       0))
-                                  (do (al-push! (mut pkind) 3) (al-push! (mut pr0) (load stk))
-                                      (al-push! (mut pr1) 0)
+                                  ; Both eightbytes go on the stack. This is kind 4
+                                  ; (a by-value memory argument of a known size), NOT
+                                  ; kind 3 — kind 3 writes a single 8-byte slot, which
+                                  ; would leave the callee's second eightbyte reading
+                                  ; whatever happened to be on the stack.
+                                  (do (al-push! (mut pkind) 4) (al-push! (mut pr0) (load stk))
+                                      (al-push! (mut pr1) 16)
                                       (store! stk (iadd (load stk) 16)) 0)))
                           ; ---- > 16B: passed in memory, by value, on the stack
                           :else
