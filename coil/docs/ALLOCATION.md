@@ -262,6 +262,56 @@ document already carved out as legitimately malloc. Left alone deliberately, not
 backing buffer. Harmless today — reset runs once per compile and the process exits — and
 noted here because an arena would make it free.)
 
+### Where the gigabyte goes
+
+Compile-checking the compiler costs ~1 GB of peak RSS, which is ~20 KB per source line.
+That number deserved an explanation, so here is the measurement.
+
+**It is linear, not quadratic.** Synthetic files of N trivial one-line functions,
+`coil check`:
+
+| defns | peak RSS |
+| --- | --- |
+| 1,000 | 103.9 MiB |
+| 2,000 | 163.5 MiB |
+| 4,000 | 282.0 MiB |
+| 8,000 | 511.2 MiB |
+| 16,000 | 971.9 MiB |
+
+A dead-straight line: ~59 KB per trivial function on a ~46 MiB baseline. There is no
+runaway; the constant is simply enormous.
+
+Separating the two variables — 4,000 defns × 1 expression vs 4,000 × 10 vs 1 × 40,000 —
+gives roughly **36 KB per definition plus 10 KB per expression**. For scale, `sizeof Sexp`
+is 64 bytes and `sizeof Expr` is 168. An `(iadd x 5)` is a few hundred bytes of actual
+data and costs about 10 KB, so we spend on the order of 100× the size of the thing being
+represented.
+
+Peak RSS by stage, same input (4,000 defns × 10 expressions), against an empty module so
+the fixed prelude cost is visible:
+
+| stage | empty | 4,000 exprs | 40,000 exprs | per expr |
+| --- | --- | --- | --- | --- |
+| `dump-read` | 21 MiB | 32 MiB | 56 MiB | ~0.9 KB |
+| `dump-expand` | 41 MiB | 181 MiB | 440 MiB | **~10 KB** |
+| `dump-ir` | 48 MiB | 250 MiB | 674 MiB | ~16 KB |
+
+**Macro expansion is the multiplier: it costs about 11× what parsing the same program
+costs.** The parsed `Sexp` tree is comparatively cheap. Note the test input barely uses
+macros — the bodies are `do` and `iadd`, both core — so this is not the price of a
+macro-heavy program, it is what the expander costs on a program that has almost nothing
+to expand.
+
+And nothing is ever released: no stage frees its predecessor's tree, so peak RSS is
+simply *total bytes ever allocated*. That is why moving to an arena did not raise RSS —
+`free` was already reclaiming nothing.
+
+This is the same conclusion this document reached from the profile at the top, arrived at
+from the memory side: the remaining wins are **fewer intermediate representations**, not a
+faster allocator. A single unnecessary whole-tree copy in the expander is worth more than
+everything in this document put together. Worth checking first: whether the expander
+re-materializes the tree on every pass even when a pass expands nothing.
+
 ### What is left
 
 Step 5's 38 `resolve.coil` sites now look much less valuable than they did. Step 4 already
