@@ -386,61 +386,46 @@
   (let [w (stderr)] (ps w "error: ") (ps w msg) (wb w 10) (exit 1) 0))
 (defn const-eval-bin [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
   (let [uns (or lu ru)]
-    (mk-ceval (if (icmp-eq op 0)
-                  (iadd l r)
-                  (if (icmp-eq op 1)
-                      (isub l r)
-                      (if (icmp-eq op 2)
-                          (imul l r)
-                          (if (icmp-eq op 7)
-                              (iand l r)
-                              (if (icmp-eq op 8)
-                                  (ior l r)
-                                  (if (icmp-eq op 9)
-                                      (ixor l r)
-                                      (if (icmp-eq op 10)
-                                          (ishl l r)
-                                          (if (icmp-eq op 11)
-                                              (if uns (cast i64 (ishr (cast u64 l) (cast u64 r))) (ishr l r))
-                                              (if (icmp-eq op 3)
-                                                  (if (icmp-eq r 0)
-                                                      (do (cg-fail "static-assert: divide/mod by zero") 0)
-                                                      (if uns (udiv l r) (idiv l r)))
-                                                  (if (icmp-eq op 4)
-                                                      (if (icmp-eq r 0)
-                                                          (do (cg-fail "static-assert: divide/mod by zero") 0)
-                                                          (if uns (urem l r) (irem l r)))
-                                                      (if (icmp-eq op 5)
-                                                          (if (icmp-eq r 0)
-                                                              (do (cg-fail "static-assert: divide/mod by zero") 0)
-                                                              (udiv l r))
-                                                          (if (icmp-eq r 0)
-                                                              (do (cg-fail "static-assert: divide/mod by zero") 0)
-                                                              (urem l r)))))))))))))
+    (mk-ceval (cond (icmp-eq op 0) (iadd l r)
+                    (icmp-eq op 1) (isub l r)
+                    (icmp-eq op 2) (imul l r)
+                    (icmp-eq op 7) (iand l r)
+                    (icmp-eq op 8) (ior l r)
+                    (icmp-eq op 9) (ixor l r)
+                    (icmp-eq op 10) (ishl l r)
+                    (icmp-eq op 11) (if uns (cast i64 (ishr (cast u64 l) (cast u64 r))) (ishr l r))
+                    (icmp-eq op 3)
+                      (if (icmp-eq r 0)
+                          (do (cg-fail "static-assert: divide/mod by zero") 0)
+                          (if uns (udiv l r) (idiv l r)))
+                    (icmp-eq op 4)
+                      (if (icmp-eq r 0)
+                          (do (cg-fail "static-assert: divide/mod by zero") 0)
+                          (if uns (urem l r) (irem l r)))
+                    (icmp-eq op 5)
+                      (if (icmp-eq r 0)
+                          (do (cg-fail "static-assert: divide/mod by zero") 0)
+                          (udiv l r))
+                    (icmp-eq r 0) (do (cg-fail "static-assert: divide/mod by zero") 0)
+                    :else (urem l r))
               uns)))
 (defn const-eval-cmp [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> CEval)
   (let [b
-          (if (or lu ru)
-              (let [lx (cast u64 l)
-                    rx (cast u64 r)]
-                (if (icmp-eq op 0)
-                    (icmp-lt lx rx)
-                    (if (icmp-eq op 1)
-                        (icmp-le lx rx)
-                        (if (icmp-eq op 2)
-                            (icmp-gt lx rx)
-                            (if (icmp-eq op 3)
-                                (icmp-ge lx rx)
-                                (if (icmp-eq op 4) (icmp-eq lx rx) (icmp-ne lx rx)))))))
-              (if (icmp-eq op 0)
-                  (icmp-lt l r)
-                  (if (icmp-eq op 1)
-                      (icmp-le l r)
-                      (if (icmp-eq op 2)
-                          (icmp-gt l r)
-                          (if (icmp-eq op 3)
-                              (icmp-ge l r)
-                              (if (icmp-eq op 4) (icmp-eq l r) (icmp-ne l r)))))))]
+          (cond (or lu ru)
+                  (let [lx (cast u64 l)
+                        rx (cast u64 r)]
+                    (cond (icmp-eq op 0) (icmp-lt lx rx)
+                          (icmp-eq op 1) (icmp-le lx rx)
+                          (icmp-eq op 2) (icmp-gt lx rx)
+                          (icmp-eq op 3) (icmp-ge lx rx)
+                          (icmp-eq op 4) (icmp-eq lx rx)
+                          :else (icmp-ne lx rx)))
+                (icmp-eq op 0) (icmp-lt l r)
+                (icmp-eq op 1) (icmp-le l r)
+                (icmp-eq op 2) (icmp-gt l r)
+                (icmp-eq op 3) (icmp-ge l r)
+                (icmp-eq op 4) (icmp-eq l r)
+                :else (icmp-ne l r))]
     (mk-ceval (if b 1 0) false)))
 (defn const-eval-t [(cg (ptr Cg)) (e (ptr Expr))] (-> CEval)
   (let [a (load (field cg a))]
@@ -549,13 +534,10 @@
     (load r)))
 ; native-cc code (0=c 1=fast 2=cold) -> LLVM CallingConv.h id (stable: c=0 fast=8 cold=9).
 (defn native-cc-llvm-id [(code i64)] (-> i64)
-  (if (icmp-eq code 0)
-      0
-      (if (icmp-eq code 1)
-          8
-          (if (icmp-eq code 2)
-              9
-              (do (unimplemented "codegen: unknown native calling-convention code") 0)))))
+  (cond (icmp-eq code 0) 0
+        (icmp-eq code 1) 8
+        (icmp-eq code 2) 9
+        :else (do (unimplemented "codegen: unknown native calling-convention code") 0)))
 ; LLVM call-conv id for a native convention; -1 for a :shim (no native id).
 (defn conv-native-id [(c (ptr Convention))] (-> i64)
   (match (load (field c lowering)) (LNative [cc] (native-cc-llvm-id cc)) (LShim [] -1)))
@@ -599,37 +581,23 @@
   (if (load (field cg mach_o)) (sconcat (load (field cg a)) "_" name) name))
 ; the i-th C-ABI integer/pointer argument register.
 (defn cg-c-arg-reg [(cg (ptr Cg)) (i i64)] (-> (slice u8))
-  (if (icmp-eq (load (field cg arch)) 0)
-      (if (icmp-eq i 0)
-          "rdi"
-          (if (icmp-eq i 1)
-              "rsi"
-              (if (icmp-eq i 2)
-                  "rdx"
-                  (if (icmp-eq i 3)
-                      "rcx"
-                      (if (icmp-eq i 4)
-                          "r8"
-                          (if (icmp-eq i 5)
-                              "r9"
-                              (do (unimplemented "codegen: too many shim args for the x86_64 C ABI") "")))))))
-      (if (icmp-eq i 0)
-          "x0"
-          (if (icmp-eq i 1)
-              "x1"
-              (if (icmp-eq i 2)
-                  "x2"
-                  (if (icmp-eq i 3)
-                      "x3"
-                      (if (icmp-eq i 4)
-                          "x4"
-                          (if (icmp-eq i 5)
-                              "x5"
-                              (if (icmp-eq i 6)
-                                  "x6"
-                                  (if (icmp-eq i 7)
-                                      "x7"
-                                      (do (unimplemented "codegen: too many shim args for the aarch64 C ABI") "")))))))))))
+  (cond (icmp-eq (load (field cg arch)) 0)
+          (cond (icmp-eq i 0) "rdi"
+                (icmp-eq i 1) "rsi"
+                (icmp-eq i 2) "rdx"
+                (icmp-eq i 3) "rcx"
+                (icmp-eq i 4) "r8"
+                (icmp-eq i 5) "r9"
+                :else (do (unimplemented "codegen: too many shim args for the x86_64 C ABI") ""))
+        (icmp-eq i 0) "x0"
+        (icmp-eq i 1) "x1"
+        (icmp-eq i 2) "x2"
+        (icmp-eq i 3) "x3"
+        (icmp-eq i 4) "x4"
+        (icmp-eq i 5) "x5"
+        (icmp-eq i 6) "x6"
+        (icmp-eq i 7) "x7"
+        :else (do (unimplemented "codegen: too many shim args for the aarch64 C ABI") "")))
 ; the C-ABI integer return register.
 (defn cg-c-ret-reg [(cg (ptr Cg))] (-> (slice u8))
   (if (icmp-eq (load (field cg arch)) 0) "rax" "x0"))
@@ -991,48 +959,33 @@
                   l (tv-val lv)
                   r (tv-val rv)]
               (if (match-else lt (TFloat [x] true) (_ false))
-                  (mk-tv (if (icmp-eq op 0)
-                             (LLVMBuildFAdd b l r (cg-bl cg "fadd"))
-                             (if (icmp-eq op 1)
-                                 (LLVMBuildFSub b l r (cg-bl cg "fsub"))
-                                 (if (icmp-eq op 2)
-                                     (LLVMBuildFMul b l r (cg-bl cg "fmul"))
-                                     (if (icmp-eq op 3)
-                                         (LLVMBuildFDiv b l r (cg-bl cg "fdiv"))
-                                         (if (icmp-eq op 4)
-                                             (LLVMBuildFRem b l r (cg-bl cg "frem"))
-                                             (do (cg-fail "codegen: bitwise op on a float") (cast (ptr i8) 0)))))))
+                  (mk-tv (cond (icmp-eq op 0) (LLVMBuildFAdd b l r (cg-bl cg "fadd"))
+                               (icmp-eq op 1) (LLVMBuildFSub b l r (cg-bl cg "fsub"))
+                               (icmp-eq op 2) (LLVMBuildFMul b l r (cg-bl cg "fmul"))
+                               (icmp-eq op 3) (LLVMBuildFDiv b l r (cg-bl cg "fdiv"))
+                               (icmp-eq op 4) (LLVMBuildFRem b l r (cg-bl cg "frem"))
+                               :else (do (cg-fail "codegen: bitwise op on a float") (cast (ptr i8) 0)))
                          lt)
                   (let [signed (match-else lt (TInt [bits s] s) (_ false))]
-                    (mk-tv (if (icmp-eq op 0)
-                               (LLVMBuildAdd b l r (cg-bl cg "add"))
-                               (if (icmp-eq op 1)
-                                   (LLVMBuildSub b l r (cg-bl cg "sub"))
-                                   (if (icmp-eq op 2)
-                                       (LLVMBuildMul b l r (cg-bl cg "mul"))
-                                       (if (icmp-eq op 3)
-                                           (if signed
-                                               (LLVMBuildSDiv b l r (cg-bl cg "div"))
-                                               (LLVMBuildUDiv b l r (cg-bl cg "div")))
-                                           (if (icmp-eq op 4)
-                                               (if signed
-                                                   (LLVMBuildSRem b l r (cg-bl cg "rem"))
-                                                   (LLVMBuildURem b l r (cg-bl cg "rem")))
-                                               (if (icmp-eq op 5)
-                                                   (LLVMBuildUDiv b l r (cg-bl cg "udiv"))
-                                                   (if (icmp-eq op 6)
-                                                       (LLVMBuildURem b l r (cg-bl cg "urem"))
-                                                       (if (icmp-eq op 7)
-                                                           (LLVMBuildAnd b l r (cg-bl cg "and"))
-                                                           (if (icmp-eq op 8)
-                                                               (LLVMBuildOr b l r (cg-bl cg "or"))
-                                                               (if (icmp-eq op 9)
-                                                                   (LLVMBuildXor b l r (cg-bl cg "xor"))
-                                                                   (if (icmp-eq op 10)
-                                                                       (LLVMBuildShl b l r (cg-bl cg "shl"))
-                                                                       (if signed
-                                                                           (LLVMBuildAShr b l r (cg-bl cg "shr"))
-                                                                           (LLVMBuildLShr b l r (cg-bl cg "shr"))))))))))))))
+                    (mk-tv (cond (icmp-eq op 0) (LLVMBuildAdd b l r (cg-bl cg "add"))
+                                 (icmp-eq op 1) (LLVMBuildSub b l r (cg-bl cg "sub"))
+                                 (icmp-eq op 2) (LLVMBuildMul b l r (cg-bl cg "mul"))
+                                 (icmp-eq op 3)
+                                   (if signed
+                                       (LLVMBuildSDiv b l r (cg-bl cg "div"))
+                                       (LLVMBuildUDiv b l r (cg-bl cg "div")))
+                                 (icmp-eq op 4)
+                                   (if signed
+                                       (LLVMBuildSRem b l r (cg-bl cg "rem"))
+                                       (LLVMBuildURem b l r (cg-bl cg "rem")))
+                                 (icmp-eq op 5) (LLVMBuildUDiv b l r (cg-bl cg "udiv"))
+                                 (icmp-eq op 6) (LLVMBuildURem b l r (cg-bl cg "urem"))
+                                 (icmp-eq op 7) (LLVMBuildAnd b l r (cg-bl cg "and"))
+                                 (icmp-eq op 8) (LLVMBuildOr b l r (cg-bl cg "or"))
+                                 (icmp-eq op 9) (LLVMBuildXor b l r (cg-bl cg "xor"))
+                                 (icmp-eq op 10) (LLVMBuildShl b l r (cg-bl cg "shl"))
+                                 signed (LLVMBuildAShr b l r (cg-bl cg "shr"))
+                                 :else (LLVMBuildLShr b l r (cg-bl cg "shr")))
                            lt)))))
       (ENot [x]
             (let [xv (emit-expr cg x scp)]
@@ -1045,21 +998,21 @@
                   r (tv-val rv)]
               (if (match-else lt (TFloat [x] true) (_ false))
                   (let [pred
-                          (if (icmp-eq op 0)
-                              4
-                              (if (icmp-eq op 1) 5 (if (icmp-eq op 2) 2 (if (icmp-eq op 3) 3 (if (icmp-eq op 4) 1 6)))))]
+                          (cond (icmp-eq op 0) 4
+                                (icmp-eq op 1) 5
+                                (icmp-eq op 2) 2
+                                (icmp-eq op 3) 3
+                                (icmp-eq op 4) 1
+                                :else 6)]
                     (mk-tv (LLVMBuildFCmp b (cast i32 pred) l r (cg-bl cg "fcmp")) (TBool)))
                   (let [signed (match-else lt (TInt [bits s] s) (_ false))
                         pred
-                          (if (icmp-eq op 0)
-                              (if signed 40 36)
-                              (if (icmp-eq op 1)
-                                  (if signed 41 37)
-                                  (if (icmp-eq op 2)
-                                      (if signed 38 34)
-                                      (if (icmp-eq op 3)
-                                          (if signed 39 35)
-                                          (if (icmp-eq op 4) 32 33)))))]
+                          (cond (icmp-eq op 0) (if signed 40 36)
+                                (icmp-eq op 1) (if signed 41 37)
+                                (icmp-eq op 2) (if signed 38 34)
+                                (icmp-eq op 3) (if signed 39 35)
+                                (icmp-eq op 4) 32
+                                :else 33)]
                     (mk-tv (LLVMBuildICmp b (cast i32 pred) l r (cg-bl cg "cmp")) (TBool))))))
       (EDo [body] (emit-body cg body scp))
       (ELet [binds body]
@@ -1594,30 +1547,29 @@
       (let [ev (emit-expr cg els scp)
             else-end (cg-cur-block cg)
             else-div (icmp-ne (cast i64 (LLVMGetBasicBlockTerminator else-end)) 0)]
-        (if (and (not then-div) (not else-div))
-            (let [merge-bb (cg-append cg func (cg-bl cg "ifcont"))]
-              (cg-pos cg then-end)
-              (LLVMBuildBr b merge-bb)
-              (cg-pos cg else-end)
-              (LLVMBuildBr b merge-bb)
-              (cg-pos cg merge-bb)
-              (let [phi (LLVMBuildPhi b (basic-ty cg (box-type a (tv-ty tv))) (cg-bl cg "ifval"))
-                    (mut vs) (al-new [(ptr i8)] a)
-                    (mut bs) (al-new [(ptr i8)] a)]
-                (al-push! (mut vs) (tv-val tv))
-                (al-push! (mut vs) (tv-val ev))
-                (al-push! (mut bs) then-end)
-                (al-push! (mut bs) else-end)
-                (LLVMAddIncoming phi (carr a (load vs)) (carr a (load bs)) 2)
-                (mk-tv phi (tv-ty tv))))
-            (if (and (not then-div) else-div)
-                (do (cg-pos cg then-end) tv)
-                (if (and then-div (not else-div))
-                    (do (cg-pos cg else-end) ev)
-                    (let [dead-bb (cg-append cg func (cg-bl cg "ifcont.dead"))]
-                      (cg-pos cg dead-bb)
-                      (LLVMBuildUnreachable b)
-                      (mk-tv (cg-zero-i64 cg) (tv-ty tv))))))))))
+        (cond (and (not then-div) (not else-div))
+                (let [merge-bb (cg-append cg func (cg-bl cg "ifcont"))]
+                  (cg-pos cg then-end)
+                  (LLVMBuildBr b merge-bb)
+                  (cg-pos cg else-end)
+                  (LLVMBuildBr b merge-bb)
+                  (cg-pos cg merge-bb)
+                  (let [phi (LLVMBuildPhi b (basic-ty cg (box-type a (tv-ty tv))) (cg-bl cg "ifval"))
+                        (mut vs) (al-new [(ptr i8)] a)
+                        (mut bs) (al-new [(ptr i8)] a)]
+                    (al-push! (mut vs) (tv-val tv))
+                    (al-push! (mut vs) (tv-val ev))
+                    (al-push! (mut bs) then-end)
+                    (al-push! (mut bs) else-end)
+                    (LLVMAddIncoming phi (carr a (load vs)) (carr a (load bs)) 2)
+                    (mk-tv phi (tv-ty tv))))
+              (and (not then-div) else-div) (do (cg-pos cg then-end) tv)
+              (and then-div (not else-div)) (do (cg-pos cg else-end) ev)
+              :else
+                (let [dead-bb (cg-append cg func (cg-bl cg "ifcont.dead"))]
+                  (cg-pos cg dead-bb)
+                  (LLVMBuildUnreachable b)
+                  (mk-tv (cg-zero-i64 cg) (tv-ty tv))))))))
 
 (defn emit-loop [(cg (ptr Cg)) (label (Option (slice u8))) (body (ptr (ArrayList Expr))) (scp (ptr Scope))] (-> Tv)
   (let [a (load (field cg a))
@@ -2587,13 +2539,11 @@
               (break)
               (store! i (iadd (load i) 1))))
     (let [a0 (substr triple 0 (load i))]
-      (if (or (str-eq a0 "x86_64") (str-eq a0 "amd64"))
-          0
-          (if (or (str-eq a0 "aarch64") (or (str-eq a0 "arm64") (str-eq a0 "arm64e")))
-              1
-              (if (or (str-eq a0 "wasm32") (str-eq a0 "wasm64"))
-                  2  ; wasm ABI class is width-agnostic; word width comes from the triple's datalayout
-                  (do (unimplemented "abi: unsupported target architecture") -1)))))))
+      (cond (or (str-eq a0 "x86_64") (str-eq a0 "amd64")) 0
+            (or (str-eq a0 "aarch64") (or (str-eq a0 "arm64") (str-eq a0 "arm64e"))) 1
+            (or (str-eq a0 "wasm32") (str-eq a0 "wasm64")) 2
+            :else  ; wasm ABI class is width-agnostic; word width comes from the triple's datalayout
+              (do (unimplemented "abi: unsupported target architecture") -1)))))
 
 ; LLVM subtarget-feature string for a triple's TargetMachine, as a C string for
 ; LLVMCreateTargetMachine's `Features` arg. wasm64's 64-bit memory is IMPLIED by the
@@ -2607,7 +2557,7 @@
 
 ; smallest power-of-two-byte int width (bits) covering `bytes` data bytes.
 (defn abi-int-bits-for-bytes [(bytes i64)] (-> i64)
-  (if (icmp-le bytes 1) 8 (if (icmp-eq bytes 2) 16 (if (icmp-le bytes 4) 32 64))))
+  (cond (icmp-le bytes 1) 8 (icmp-eq bytes 2) 16 (icmp-le bytes 4) 32 :else 64))
 
 ; abi_struct: CgStruct index of a non-bits by-value struct type, else -1.
 (defn cg-abi-struct-cs [(cg (ptr Cg)) (t (ptr Type))] (-> i64)

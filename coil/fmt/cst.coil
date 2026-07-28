@@ -139,27 +139,23 @@
 ; whitespace skipped just before the node.
 (defn read-node [(r (ptr Rdr))] (-> (ptr Node))
   (let [nl (skip-ws r) c (r-peek r) a (load (field r a))]
-    (if (icmp-eq c -1) (cast (ptr Node) 0)
-      (if (or (icmp-eq c 41) (icmp-eq c 93)) (cast (ptr Node) 0)   ; close delim
-        (if (icmp-eq c 59)
-            (box-node a (NComment (read-comment r)) nl)
-          (if (or (icmp-eq c 40) (icmp-eq c 91))
-              (box-node a (read-list r c) nl)
-            (if (or (icmp-eq c 39) (or (icmp-eq c 96) (icmp-eq c 126)))
-                (box-node a (read-prefix r c) nl)
-              (if (icmp-eq c 34)
-                  (box-node a (NAtom (read-string r (load (field r pos)))) nl)
-                (if (icmp-eq c 92) (box-node a (NAtom (read-char-lit r)) nl)
-                  (box-node a (NAtom (read-atom r)) nl))))))))))
+    (cond (icmp-eq c -1) (cast (ptr Node) 0)
+          (or (icmp-eq c 41) (icmp-eq c 93)) (cast (ptr Node) 0)
+          ; close delim
+          (icmp-eq c 59) (box-node a (NComment (read-comment r)) nl)
+          (or (icmp-eq c 40) (icmp-eq c 91)) (box-node a (read-list r c) nl)
+          (or (icmp-eq c 39) (or (icmp-eq c 96) (icmp-eq c 126))) (box-node a (read-prefix r c) nl)
+          (icmp-eq c 34) (box-node a (NAtom (read-string r (load (field r pos)))) nl)
+          (icmp-eq c 92) (box-node a (NAtom (read-char-lit r)) nl)
+          :else (box-node a (NAtom (read-atom r)) nl))))
 
 (defn read-prefix [(r (ptr Rdr)) (c i64)] (-> NodeKind)
   (let [a (load (field r a))]
     (r-adv r)
-    (let [op (if (icmp-eq c 39) "'"
-               (if (icmp-eq c 96) "`"
-                 (if (and (icmp-eq c 126) (icmp-eq (r-peek r) 64))
-                     (do (r-adv r) "~@")
-                     "~")))
+    (let [op (cond (icmp-eq c 39) "'"
+                   (icmp-eq c 96) "`"
+                   (and (icmp-eq c 126) (icmp-eq (r-peek r) 64)) (do (r-adv r) "~@")
+                   :else "~")
           inner (read-node r)]
       (NPrefix op (if (icmp-eq (cast i64 inner) 0)
                       (box-node a (NAtom "") 0)   ; dangling prefix (best-effort)

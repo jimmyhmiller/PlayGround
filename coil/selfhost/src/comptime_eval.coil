@@ -808,7 +808,7 @@
 ; struct = its widest field). Only ever reached for a cte-readable? type.
 (defn cte-ty-align [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
   (match-else (load t)
-              (TInt [b s] (if (icmp-le b 8) 1 (if (icmp-le b 16) 2 (if (icmp-le b 32) 4 8))))
+              (TInt [b s] (cond (icmp-le b 8) 1 (icmp-le b 16) 2 (icmp-le b 32) 4 :else 8))
               (TFloat [b] (idiv b 8))
               (TBool [] 1)
               (TPtr [i] 8)
@@ -852,7 +852,7 @@
     (imul (idiv (iadd (load off) (isub (load maxal) 1)) (load maxal)) (load maxal))))
 (defn cte-ty-size [(cx (ptr CtCtx)) (t (ptr Type))] (-> i64)
   (match-else (load t)
-              (TInt [b s] (if (icmp-le b 8) 1 (if (icmp-le b 16) 2 (if (icmp-le b 32) 4 8))))
+              (TInt [b s] (cond (icmp-le b 8) 1 (icmp-le b 16) 2 (icmp-le b 32) 4 :else 8))
               (TFloat [b] (idiv b 8))
               (TBool [] 1)
               (TPtr [i] 8)

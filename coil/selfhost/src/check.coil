@@ -310,32 +310,29 @@
 
 ; typename_to_type
 (defn typename-to-type [(name (slice u8))] (-> Type)
-  (if (str-eq name "bool")
-      (TBool)
-      (if (str-eq name "externref")
-          (TExternRef)
-          (if (str-eq name "f32")
-              (TFloat 32)
-              (if (str-eq name "f64")
-                  (TFloat 64)
-                  (let [n (slice-len name)]
-                    (if (icmp-lt n 2)
-                        (TStruct name)
-                        (let [c0 (cast i64 (slice-get name 0))]
-                          (if (or (icmp-eq c0 105) (icmp-eq c0 117))
-                              (let [(mut ok) true
-                                    (mut val) 0
-                                    (mut j) 1]
-                                (loop (if (icmp-ge (load j) n)
-                                          (break)
-                                          (do
-                                            (let [ch (cast i64 (slice-get name (load j)))]
-                                              (if (and (icmp-ge ch 48) (icmp-le ch 57))
-                                                  (do (store! val (iadd (imul (load val) 10) (isub ch 48))) 0)
-                                                  (do (store! ok false) (break))))
-                                            (store! j (iadd (load j) 1)))))
-                                (if (load ok) (TInt (load val) (icmp-eq c0 105)) (TStruct name)))
-                              (TStruct name))))))))))
+  (cond (str-eq name "bool") (TBool)
+        (str-eq name "externref") (TExternRef)
+        (str-eq name "f32") (TFloat 32)
+        (str-eq name "f64") (TFloat 64)
+        :else
+          (let [n (slice-len name)]
+            (if (icmp-lt n 2)
+                (TStruct name)
+                (let [c0 (cast i64 (slice-get name 0))]
+                  (if (or (icmp-eq c0 105) (icmp-eq c0 117))
+                      (let [(mut ok) true
+                            (mut val) 0
+                            (mut j) 1]
+                        (loop (if (icmp-ge (load j) n)
+                                  (break)
+                                  (do
+                                    (let [ch (cast i64 (slice-get name (load j)))]
+                                      (if (and (icmp-ge ch 48) (icmp-le ch 57))
+                                          (do (store! val (iadd (imul (load val) 10) (isub ch 48))) 0)
+                                          (do (store! ok false) (break))))
+                                    (store! j (iadd (load j) 1)))))
+                        (if (load ok) (TInt (load val) (icmp-eq c0 105)) (TStruct name)))
+                      (TStruct name)))))))
 
 ; subst_self
 (defn subst-self-list [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (selfp (slice u8)) (concrete (ptr Type))] (-> (ptr (ArrayList Type)))
@@ -418,15 +415,13 @@
   (if (type-eq got want) true (and is_extern (and (type-is-ptr got) (type-is-ptr want)))))
 ; fits
 (defn fits [(n i64) (bits i64) (signed bool)] (-> bool)
-  (if (icmp-ge bits 64)
-      true
-      (if signed
+  (cond (icmp-ge bits 64) true
+        signed
           (let [lo (isub 0 (ishl 1 (isub bits 1)))
                 hi (isub (ishl 1 (isub bits 1)) 1)]
             (and (icmp-ge n lo) (icmp-le n hi)))
-          (if (icmp-ge bits 63)
-              (icmp-ge n 0)
-              (and (icmp-ge n 0) (icmp-lt n (ishl 1 bits)))))))
+        (icmp-ge bits 63) (icmp-ge n 0)
+        :else (and (icmp-ge n 0) (icmp-lt n (ishl 1 bits)))))
 
 (defn prefix-diag [(a (ptr Allocator)) (d Diag) (pre (slice u8))] (-> Diag)
   (let [dp (alloc-stack Diag)] (store! dp d) (derr (sconcat a pre (load (field dp msg))))))
@@ -476,31 +471,40 @@
               (what (slice u8))] (-> (Result Expr Diag))
   (let [ep (alloc-stack Expr)]
     (store! ep e)
-    (if (type-eq et target)
-        (Ok (load ep))
-        (if (type-is-void target)
-            (Ok (load ep))
-            (if (type-is-void et)
-                (Err [Expr Diag]
-                     (derr (sconcat a
-                                    (sconcat3 a "in '" fname "': ")
-                                    (sconcat a what " uses a void value (a (-> void) call yields nothing)"))))
-                (if (type-is-never et)
-                    (Ok (load ep))
-                    (if (and (same-number-kind et target) (is-literal ep))
-                        (coerce-lit a (load ep) target fname)
-                        (if (arg-ok et target is_extern)
-                            (Ok (load ep))
-                            (match-else (load et)
-                                        (TRef [m inner]
-                                              (if (type-eq inner target)
-                                                  (Ok (mk-expr (ELoad (box-expr a (load ep)))
-                                                               (load (field ep lo))
-                                                               (load (field ep hi))
-                                                               (load (field ep source))
-                                                               (load (field ep ctxt))))
-                                                  (coerce-fail a et target fname what)))
-                                        (_ (coerce-fail a et target fname what)))))))))))
+    (cond (type-eq et target) (Ok (load ep))
+          (type-is-void target) (Ok (load ep))
+          (type-is-void et)
+            (Err [Expr Diag]
+                 (derr (sconcat a
+                                (sconcat3 a "in '" fname "': ")
+                                (sconcat a what " uses a void value (a (-> void) call yields nothing)"))))
+          (type-is-never et) (Ok (load ep))
+          (and (same-number-kind et target) (is-literal ep)) (coerce-lit a (load ep) target fname)
+          (arg-ok et target is_extern) (Ok (load ep))
+          :else
+            (match (load et)
+              (TRef [m inner]
+                    (if (type-eq inner target)
+                        (Ok (mk-expr (ELoad (box-expr a (load ep)))
+                                     (load (field ep lo))
+                                     (load (field ep hi))
+                                     (load (field ep source))
+                                     (load (field ep ctxt))))
+                        (coerce-fail a et target fname what)))
+              (TInt [$g2038 $g2039] (coerce-fail a et target fname what))
+              (TFloat [$g2040] (coerce-fail a et target fname what))
+              (TBool [] (coerce-fail a et target fname what))
+              (TVoid [] (coerce-fail a et target fname what))
+              (TPtr [$g2041] (coerce-fail a et target fname what))
+              (TStruct [$g2042] (coerce-fail a et target fname what))
+              (TArray [$g2043 $g2044] (coerce-fail a et target fname what))
+              (TSlice [$g2045] (coerce-fail a et target fname what))
+              (TVec [$g2046 $g2047] (coerce-fail a et target fname what))
+              (TFn [$g2048 $g2049 $g2050] (coerce-fail a et target fname what))
+              (TApp [$g2051 $g2052] (coerce-fail a et target fname what))
+              (TNever [] (coerce-fail a et target fname what))
+              (TCode [] (coerce-fail a et target fname what))
+              (TExternRef [] (coerce-fail a et target fname what))))))
 
 ; const_entry
 (defn const-entry [(a (ptr Allocator)) (cp (ptr Const))] (-> (Result EvalPair Diag))
@@ -687,21 +691,21 @@
           (if (icmp-lt (load arity) 0)
               (Err [i64 Diag] (derr (sconcat3 a "unknown generic type '" name "'")))
               (let [na (al-len [Type] (load args))]
-                (if (icmp-ne (load arity) na)
-                    (Err [i64 Diag]
-                         (derr (sconcat a
-                                        (sconcat a
-                                                 (sconcat a
-                                                          (sconcat3 a "generic type '" name "' expects ")
-                                                          (i64->str a (load arity)))
-                                                 " type arguments, got ")
-                                        (i64->str a na))))
-                    ; arity ok — now enforce the type's declared bounds on concrete args.
-                    (if (icmp-ne (cast i64 si) 0)
+                (cond (icmp-ne (load arity) na)
+                        (Err [i64 Diag]
+                             (derr (sconcat a
+                                            (sconcat a
+                                                     (sconcat a
+                                                              (sconcat3 a "generic type '" name "' expects ")
+                                                              (i64->str a (load arity)))
+                                                     " type arguments, got ")
+                                            (i64->str a na))))
+                      ; arity ok — now enforce the type's declared bounds on concrete args.
+                      (icmp-ne (cast i64 si) 0)
                         (check-app-bounds a cx name (load (field si bounds)) (load (field si type_params)) args tps)
-                        (if (icmp-ne (cast i64 su) 0)
-                            (check-app-bounds a cx name (load (field su bounds)) (load (field su type_params)) args tps)
-                            (Ok [i64 Diag] 0))))))))))
+                      (icmp-ne (cast i64 su) 0)
+                        (check-app-bounds a cx name (load (field su bounds)) (load (field su type_params)) args tps)
+                      :else (Ok [i64 Diag] 0))))))))
 (defn validate-type [(t (ptr Type)) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [a (load (field cx a))]
     (match (load t)
@@ -1941,11 +1945,10 @@
   (if (icmp-eq (type-tag place) 5) (TRef (t-ref-mut place) (box-type a (load new))) (TPtr (box-type a (load new)))))
 (defn is-place-value-type [(t (ptr Type)) (cx (ptr Cx))] (-> bool)
   (let [tg (type-tag t)]
-    (if (icmp-eq tg 6)
-        (icmp-ne (cast i64 (struct-find cx (type-struct-name t))) 0)
-        (if (icmp-eq tg 11)
-            (icmp-ne (cast i64 (struct-find cx (t-app-name t))) 0)
-            (if (icmp-eq tg 7) true false)))))
+    (cond (icmp-eq tg 6) (icmp-ne (cast i64 (struct-find cx (type-struct-name t))) 0)
+          (icmp-eq tg 11) (icmp-ne (cast i64 (struct-find cx (t-app-name t))) 0)
+          (icmp-eq tg 7) true
+          :else false)))
 ; The dispatch key. There is exactly ONE definition of it — `parser.coil::impl-base-name`
 ; — and check/mono both delegate here. This used to be three hand-synced copies (here,
 ; the parser, and `mono.coil::mono-impl-name`); adding pointers to two of the three
@@ -2289,40 +2292,44 @@
   (let [aep (alloc-stack Expr)]
     (store! aep ae)
     (let [wtg (type-tag want)]
-      (if (icmp-eq wtg 5)
-          (let [wp (t-inner want)
-                want_mut (t-ref-mut want)
-                ap (place-pointee at)]
-            (if (icmp-eq (cast i64 ap) 0)
-                (if want_mut
-                    (Err [Expr Diag]
-                         (derr (sconcat a
-                                        (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " is a (mut "))
-                                        (sconcat a (ty-str a wp) ") parameter; pass a mutable place as (mut …)"))))
-                    (if (not (type-eq at wp))
+      (cond (icmp-eq wtg 5)
+              (let [wp (t-inner want)
+                    want_mut (t-ref-mut want)
+                    ap (place-pointee at)]
+                (cond (icmp-eq (cast i64 ap) 0)
+                        (if want_mut
+                            (Err [Expr Diag]
+                                 (derr (sconcat a
+                                                (sconcat a
+                                                         (sconcat3 a "in '" fname "': ")
+                                                         (sconcat a what " is a (mut "))
+                                                (sconcat a
+                                                         (ty-str a wp)
+                                                         ") parameter; pass a mutable place as (mut …)"))))
+                            (if (not (type-eq at wp))
+                                (Err [Expr Diag]
+                                     (derr (sconcat a
+                                                    (sconcat a
+                                                             (sconcat a
+                                                                      (sconcat3 a "in '" fname "': ")
+                                                                      (sconcat a what " expects a reference to "))
+                                                             (ty-str a wp))
+                                                    (sconcat a ", got " (ty-str a at)))))
+                                (Ok (mk-expr (ESpillRef (box-expr a (load aep)))
+                                             (load (field aep lo))
+                                             (load (field aep hi))
+                                             (load (field aep source))
+                                             (load (field aep ctxt))))))
+                      (not (type-eq ap wp))
                         (Err [Expr Diag]
                              (derr (sconcat a
                                             (sconcat a
                                                      (sconcat a
                                                               (sconcat3 a "in '" fname "': ")
-                                                              (sconcat a what " expects a reference to "))
-                                                     (ty-str a wp))
-                                            (sconcat a ", got " (ty-str a at)))))
-                        (Ok (mk-expr (ESpillRef (box-expr a (load aep)))
-                                     (load (field aep lo))
-                                     (load (field aep hi))
-                                     (load (field aep source))
-                                     (load (field aep ctxt))))))
-                (if (not (type-eq ap wp))
-                    (Err [Expr Diag]
-                         (derr (sconcat a
-                                        (sconcat a
-                                                 (sconcat a
-                                                          (sconcat3 a "in '" fname "': ")
-                                                          (sconcat a what " has type "))
-                                                 (ty-str a at))
-                                        (sconcat a " but expected a reference to " (ty-str a wp)))))
-                    (if want_mut
+                                                              (sconcat a what " has type "))
+                                                     (ty-str a at))
+                                            (sconcat a " but expected a reference to " (ty-str a wp)))))
+                      want_mut
                         (let [explicitly_mut (or is_mut_borrow (type-is-ptr at))]
                           (if (not explicitly_mut)
                               (Err [Expr Diag]
@@ -2339,8 +2346,8 @@
                                                       (sconcat3 a "in '" fname "': ")
                                                       (sconcat a what " cannot be mutably borrowed (it is immutable)"))))
                                   (Ok (load aep)))))
-                        (Ok (load aep))))))
-          (if (icmp-eq wtg 6)
+                      :else (Ok (load aep))))
+            (icmp-eq wtg 6)
               (if (type-eq at want)
                   (Ok (load aep))
                   (if is_extern
@@ -2349,13 +2356,13 @@
                             (Ok (load aep))
                             (coerce a (load aep) at want is_extern fname what)))
                       (coerce a (load aep) at want is_extern fname what)))
-              (if (icmp-eq wtg 4)
-                  (let [wp (t-inner want)
-                        pp (place-pointee at)]
-                    (if (and (icmp-ne (cast i64 pp) 0) (and (type-eq pp wp) (is-writable at)))
-                        (Ok (load aep))
-                        (coerce a (load aep) at want is_extern fname what)))
-                  (coerce a (load aep) at want is_extern fname what)))))))
+            (icmp-eq wtg 4)
+              (let [wp (t-inner want)
+                    pp (place-pointee at)]
+                (if (and (icmp-ne (cast i64 pp) 0) (and (type-eq pp wp) (is-writable at)))
+                    (Ok (load aep))
+                    (coerce a (load aep) at want is_extern fname what)))
+            :else (coerce a (load aep) at want is_extern fname what)))))
 (defn coerce-arg [(a (ptr Allocator))
                   (is_mut_borrow bool)
                   (ae Expr)
@@ -2422,45 +2429,39 @@
                 (do (subst-insert! subst p act) (Ok [i64 Diag] 0))))
           (let [dt (type-tag decl)
                 at2 (type-tag actual)]
-            (if (and (icmp-eq dt 4) (icmp-eq at2 4))
-                (unify a (t-inner decl) (t-inner actual) tpset subst fname)
-                ; a (ptr T) argument satisfies a (mut T)/(ref T) parameter — see through
-                ; BOTH wrappers; a BARE type-parameter pointee keeps the
-                ; general Ref-arm reading below (T := the whole pointer)
-                (if (and (and (icmp-eq dt 5) (icmp-eq at2 4))
-                         (not (and (icmp-eq (type-tag (t-inner decl)) 6)
-                                   (set-contains tpset (type-struct-name (t-inner decl))))))
+            (cond (and (icmp-eq dt 4) (icmp-eq at2 4)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+                  ; a (ptr T) argument satisfies a (mut T)/(ref T) parameter — see through
+                  ; BOTH wrappers; a BARE type-parameter pointee keeps the
+                  ; general Ref-arm reading below (T := the whole pointer)
+                  (and (and (icmp-eq dt 5) (icmp-eq at2 4))
+                       (not (and (icmp-eq (type-tag (t-inner decl)) 6)
+                                 (set-contains tpset (type-struct-name (t-inner decl))))))
                     (unify a (t-inner decl) (t-inner actual) tpset subst fname)
-                    (if (icmp-eq dt 5)
-                        (unify a (t-inner decl) actual tpset subst fname)
-                        (if (icmp-eq at2 5)
-                            (unify a decl (t-inner actual) tpset subst fname)
-                            (if (and (icmp-eq dt 7) (icmp-eq at2 7))
-                                (unify a (t-inner decl) (t-inner actual) tpset subst fname)
-                                ; TVec(9), same as the array arm above. Absent until structural impls made
-                                ; `(impl [T] Trait (vec T N))` expressible: nothing had ever been generic over
-                                ; a vector, so `(vec T 4)` vs `(vec i64 4)` fell through and T went unsolved.
-                                (if (and (icmp-eq dt 9) (icmp-eq at2 9))
-                                    (unify a (t-inner decl) (t-inner actual) tpset subst fname)
-                                    (if (and (icmp-eq dt 8) (icmp-eq at2 8))
-                                        (unify a (t-inner decl) (t-inner actual) tpset subst fname)
-                                        (if (and (and (icmp-eq dt 11) (icmp-eq at2 11))
-                                                 (and (str-eq (t-app-name decl) (t-app-name actual))
-                                                      (icmp-eq (al-len [Type] (load (t-fn-params decl)))
-                                                               (al-len [Type] (load (t-fn-params actual))))))
-                                            (unify-list a (t-fn-params decl) (t-fn-params actual) tpset subst fname)
-                                            (if (and (and (icmp-eq dt 10) (icmp-eq at2 10))
-                                                     (icmp-eq (al-len [Type] (load (t-fn-params decl)))
-                                                              (al-len [Type] (load (t-fn-params actual)))))
-                                                (match (unify-list a
-                                                                   (t-fn-params decl)
-                                                                   (t-fn-params actual)
-                                                                   tpset
-                                                                   subst
-                                                                   fname)
-                                                  (Err [d] (Err [i64 Diag] d))
-                                                  (Ok [_] (unify a (t-fn-ret decl) (t-fn-ret actual) tpset subst fname)))
-                                                (Ok [i64 Diag] 0))))))))))))))
+                  (icmp-eq dt 5) (unify a (t-inner decl) actual tpset subst fname)
+                  (icmp-eq at2 5) (unify a decl (t-inner actual) tpset subst fname)
+                  (and (icmp-eq dt 7) (icmp-eq at2 7)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+                  ; TVec(9), same as the array arm above. Absent until structural impls made
+                  ; `(impl [T] Trait (vec T N))` expressible: nothing had ever been generic over
+                  ; a vector, so `(vec T 4)` vs `(vec i64 4)` fell through and T went unsolved.
+                  (and (icmp-eq dt 9) (icmp-eq at2 9)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+                  (and (icmp-eq dt 8) (icmp-eq at2 8)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
+                  (and (and (icmp-eq dt 11) (icmp-eq at2 11))
+                       (and (str-eq (t-app-name decl) (t-app-name actual))
+                            (icmp-eq (al-len [Type] (load (t-fn-params decl)))
+                                     (al-len [Type] (load (t-fn-params actual))))))
+                    (unify-list a (t-fn-params decl) (t-fn-params actual) tpset subst fname)
+                  (and (and (icmp-eq dt 10) (icmp-eq at2 10))
+                       (icmp-eq (al-len [Type] (load (t-fn-params decl)))
+                                (al-len [Type] (load (t-fn-params actual)))))
+                    (match (unify-list a
+                                       (t-fn-params decl)
+                                       (t-fn-params actual)
+                                       tpset
+                                       subst
+                                       fname)
+                      (Err [d] (Err [i64 Diag] d))
+                      (Ok [_] (unify a (t-fn-ret decl) (t-fn-ret actual) tpset subst fname)))
+                  :else (Ok [i64 Diag] 0))))))
 (defn unify-list [(a (ptr Allocator))
                   (xs (ptr (ArrayList Type)))
                   (ys (ptr (ArrayList Type)))
@@ -4274,15 +4275,17 @@
             (store! sp vsp)
             (let [ve (load (load (field sp e)))
                   vt (load (field sp t))]
-              (if (type-is-void vt)
-                  (Err [i64 Diag]
-                       (derr (sconcat1 a
-                                       (sconcat4 a
-                                                 "in '"
-                                                 fname
-                                                 "': cannot bind '"
-                                                 (sconcat a name "' to a void value (a (-> void) call yields nothing)")))))
-                  (if (icmp-eq (type-tag vt) 5)
+              (cond (type-is-void vt)
+                      (Err [i64 Diag]
+                           (derr (sconcat1 a
+                                           (sconcat4 a
+                                                     "in '"
+                                                     fname
+                                                     "': cannot bind '"
+                                                     (sconcat a
+                                                              name
+                                                              "' to a void value (a (-> void) call yields nothing)")))))
+                    (icmp-eq (type-tag vt) 5)
                       (let [src_mut (t-ref-mut vt)
                             pointee (t-inner vt)]
                         (if (and mutable (not src_mut))
@@ -4297,31 +4300,32 @@
                               (env-insert! env name (box-type a (TRef mutable pointee)))
                               (al-push! [Bind] nbinds (mk-bind name false ve))
                               (Ok [i64 Diag] 0))))
-                      (if (or mutable (is-place-value-type vt cx))
-                          (let [slot (sconcat a name ".slot")
-                                (mut initdo) (al-new [Expr] a)]
-                            (env-insert! env name (box-type a (TRef mutable (box-type a (load vt)))))
-                            (al-push! (mut initdo)
-                                      (mk-expr (EStore (box-expr a (mk-expr (EVar slot) elo ehi esrc ectxt))
-                                                       (box-expr a ve))
-                                               elo
-                                               ehi
-                                               esrc
-                                               ectxt))
-                            (al-push! (mut initdo) (mk-expr (EVar slot) elo ehi esrc ectxt))
-                            (al-push! [Bind]
-                                      nbinds
-                                      (mk-bind slot false (mk-expr (EAlloc 0 (erase-refs a vt)) elo ehi esrc ectxt)))
-                            (al-push! [Bind]
-                                      nbinds
-                                      (mk-bind name
-                                               false
-                                               (mk-expr (EDo (box-al [Expr] a (load initdo))) elo ehi esrc ectxt)))
-                            (Ok [i64 Diag] 0))
-                          (do
-                            (env-insert! env name (box-type a (load vt)))
-                            (al-push! [Bind] nbinds (mk-bind name false ve))
-                            (Ok [i64 Diag] 0)))))))))))
+                    (or mutable (is-place-value-type vt cx))
+                      (let [slot (sconcat a name ".slot")
+                            (mut initdo) (al-new [Expr] a)]
+                        (env-insert! env name (box-type a (TRef mutable (box-type a (load vt)))))
+                        (al-push! (mut initdo)
+                                  (mk-expr (EStore (box-expr a (mk-expr (EVar slot) elo ehi esrc ectxt))
+                                                   (box-expr a ve))
+                                           elo
+                                           ehi
+                                           esrc
+                                           ectxt))
+                        (al-push! (mut initdo) (mk-expr (EVar slot) elo ehi esrc ectxt))
+                        (al-push! [Bind]
+                                  nbinds
+                                  (mk-bind slot false (mk-expr (EAlloc 0 (erase-refs a vt)) elo ehi esrc ectxt)))
+                        (al-push! [Bind]
+                                  nbinds
+                                  (mk-bind name
+                                           false
+                                           (mk-expr (EDo (box-al [Expr] a (load initdo))) elo ehi esrc ectxt)))
+                        (Ok [i64 Diag] 0))
+                    :else
+                      (do
+                        (env-insert! env name (box-type a (load vt)))
+                        (al-push! [Bind] nbinds (mk-bind name false ve))
+                        (Ok [i64 Diag] 0)))))))))
 
 (defn process-let-binds [(a (ptr Allocator))
                          (binds (ptr (ArrayList Bind)))
@@ -4448,21 +4452,21 @@
                       av (load (field arm variant))
                       abinds (load (field arm binds))
                       v (variant-by-name variants av)]
-                  (if (icmp-eq (cast i64 v) 0)
-                      (do
-                        (store! err
-                                (derr (sconcat a
-                                               (sconcat a
-                                                        (sconcat4 a
-                                                                  "in '"
-                                                                  fname
-                                                                  "': sum '"
-                                                                  (sconcat a sumname "' has no variant '"))
-                                                        av)
-                                               "'")))
-                        (store! failed true)
-                        (break))
-                      (if (set-contains covered av)
+                  (cond (icmp-eq (cast i64 v) 0)
+                          (do
+                            (store! err
+                                    (derr (sconcat a
+                                                   (sconcat a
+                                                            (sconcat4 a
+                                                                      "in '"
+                                                                      fname
+                                                                      "': sum '"
+                                                                      (sconcat a sumname "' has no variant '"))
+                                                            av)
+                                                   "'")))
+                            (store! failed true)
+                            (break))
+                        (set-contains covered av)
                           (do
                             (store! err
                                     (derr (sconcat a
@@ -4472,67 +4476,68 @@
                                                    "")))
                             (store! failed true)
                             (break))
-                          (if (not (icmp-eq (al-len [(slice u8)] (load abinds))
-                                            (al-len [Field] (load (field v fields)))))
-                              (do
-                                (store! err
-                                        (derr (sconcat a
-                                                       (sconcat a
-                                                                (sconcat a
-                                                                         (sconcat a
-                                                                                  (sconcat4 a
-                                                                                            "in '"
-                                                                                            fname
-                                                                                            "': arm '"
-                                                                                            (sconcat a av "' binds "))
-                                                                                  (i64->str a
-                                                                                            (al-len [(slice u8)]
-                                                                                                    (load abinds))))
-                                                                         " name(s) but the variant has ")
-                                                                (i64->str a (al-len [Field] (load (field v fields)))))
-                                                       " field(s)")))
-                                (store! failed true)
-                                (break))
-                              (do
-                                (al-push! [(slice u8)] covered av)
-                                (let [saved (al-len [EnvEntry] (load env))
-                                      fs (load (field v fields))
-                                      nbn (al-len [(slice u8)] (load abinds))
-                                      (mut k) 0]
-                                  (loop (if (icmp-ge (load k) nbn)
-                                            (break)
-                                            (do
-                                              (env-insert! env
-                                                           (al-get [(slice u8)] (load abinds) (load k))
-                                                           (field (al-elem [Field] fs (load k)) ty))
-                                              (store! k (iadd (load k) 1)))))
-                                  (if (expected-some? expected)
-                                      (match (check-to a (field arm body) expected env cx tps fname "match arm")
-                                        (Err [d]
-                                             (do (env-truncate! env saved) (store! err d) (store! failed true) (break)))
-                                        (Ok [be]
-                                            (do
-                                              (let [na (alloc-stack Arm)]
-                                                (store! (field na variant) av)
-                                                (store! (field na binds) abinds)
-                                                (store! (field na body) be)
-                                                (al-push! [Arm] checked (load na)))
-                                              (env-truncate! env saved)
-                                              0)))
-                                      (match (do-synth a (field arm body) (null-type) env cx tps fname)
-                                        (Err [d]
-                                             (do (env-truncate! env saved) (store! err d) (store! failed true) (break)))
-                                        (Ok [sp0]
-                                            (let [sp (alloc-stack SynPair)
-                                                  br (alloc-stack Branch)]
-                                              (store! sp sp0)
-                                              (store! (field br e) (load (field sp e)))
-                                              (store! (field br t) (load (field sp t)))
-                                              (al-push! [Branch] synb (load br))
-                                              (al-push! [(slice u8)] metav av)
-                                              (al-push! [(ptr (ArrayList (slice u8)))] metab abinds)
-                                              (env-truncate! env saved)
-                                              0)))))))))
+                        (not (icmp-eq (al-len [(slice u8)] (load abinds))
+                                      (al-len [Field] (load (field v fields)))))
+                          (do
+                            (store! err
+                                    (derr (sconcat a
+                                                   (sconcat a
+                                                            (sconcat a
+                                                                     (sconcat a
+                                                                              (sconcat4 a
+                                                                                        "in '"
+                                                                                        fname
+                                                                                        "': arm '"
+                                                                                        (sconcat a av "' binds "))
+                                                                              (i64->str a
+                                                                                        (al-len [(slice u8)]
+                                                                                                (load abinds))))
+                                                                     " name(s) but the variant has ")
+                                                            (i64->str a (al-len [Field] (load (field v fields)))))
+                                                   " field(s)")))
+                            (store! failed true)
+                            (break))
+                        :else
+                          (do
+                            (al-push! [(slice u8)] covered av)
+                            (let [saved (al-len [EnvEntry] (load env))
+                                  fs (load (field v fields))
+                                  nbn (al-len [(slice u8)] (load abinds))
+                                  (mut k) 0]
+                              (loop (if (icmp-ge (load k) nbn)
+                                        (break)
+                                        (do
+                                          (env-insert! env
+                                                       (al-get [(slice u8)] (load abinds) (load k))
+                                                       (field (al-elem [Field] fs (load k)) ty))
+                                          (store! k (iadd (load k) 1)))))
+                              (if (expected-some? expected)
+                                  (match (check-to a (field arm body) expected env cx tps fname "match arm")
+                                    (Err [d]
+                                         (do (env-truncate! env saved) (store! err d) (store! failed true) (break)))
+                                    (Ok [be]
+                                        (do
+                                          (let [na (alloc-stack Arm)]
+                                            (store! (field na variant) av)
+                                            (store! (field na binds) abinds)
+                                            (store! (field na body) be)
+                                            (al-push! [Arm] checked (load na)))
+                                          (env-truncate! env saved)
+                                          0)))
+                                  (match (do-synth a (field arm body) (null-type) env cx tps fname)
+                                    (Err [d]
+                                         (do (env-truncate! env saved) (store! err d) (store! failed true) (break)))
+                                    (Ok [sp0]
+                                        (let [sp (alloc-stack SynPair)
+                                              br (alloc-stack Branch)]
+                                          (store! sp sp0)
+                                          (store! (field br e) (load (field sp e)))
+                                          (store! (field br t) (load (field sp t)))
+                                          (al-push! [Branch] synb (load br))
+                                          (al-push! [(slice u8)] metav av)
+                                          (al-push! [(ptr (ArrayList (slice u8)))] metab abinds)
+                                          (env-truncate! env saved)
+                                          0)))))))
                   (store! i (iadd (load i) 1))))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
@@ -4910,27 +4915,26 @@
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 (defn codeop-rty [(op i64)] (-> Type)
-  (if (or (icmp-eq op 40)
-          (or (icmp-eq op 37)
-              (or (icmp-eq op 3)
-                  (or (icmp-eq op 6)
-                      (or (icmp-eq op 14)
-                          (or (icmp-eq op 16)
-                              (or (icmp-eq op 19) (or (icmp-eq op 21) (or (icmp-eq op 22) (icmp-eq op 24))))))))))
-      (TInt 64 true)
-      (if (or (icmp-eq op 41)
-              (or (icmp-eq op 43) (or (icmp-eq op 5) (or (icmp-eq op 13) (or (icmp-eq op 33) (icmp-eq op 38))))))
+  (cond (or (icmp-eq op 40)
+            (or (icmp-eq op 37)
+                (or (icmp-eq op 3)
+                    (or (icmp-eq op 6)
+                        (or (icmp-eq op 14)
+                            (or (icmp-eq op 16)
+                                (or (icmp-eq op 19) (or (icmp-eq op 21) (or (icmp-eq op 22) (icmp-eq op 24))))))))))
+          (TInt 64 true)
+        (or (icmp-eq op 41)
+            (or (icmp-eq op 43) (or (icmp-eq op 5) (or (icmp-eq op 13) (or (icmp-eq op 33) (icmp-eq op 38))))))
           (TSlice (box-type (malloc-allocator) (TInt 8 false)))
-          (if (or (icmp-eq op 0)
-                  (or (icmp-eq op 1)
-                      (or (icmp-eq op 2)
-                          (or (icmp-eq op 10)
-                              (or (icmp-eq op 11)
-                                  (or (icmp-eq op 34) (or (icmp-eq op 45) (icmp-eq op 39))))))))
-              (TBool)
-              (if (icmp-eq op 9)
-                  (TNever)
-                  (TCode))))))
+        (or (icmp-eq op 0)
+            (or (icmp-eq op 1)
+                (or (icmp-eq op 2)
+                    (or (icmp-eq op 10)
+                        (or (icmp-eq op 11)
+                            (or (icmp-eq op 34) (or (icmp-eq op 45) (icmp-eq op 39))))))))
+          (TBool)
+        (icmp-eq op 9) (TNever)
+        :else (TCode)))
 
 (defn synth-callptr-args [(a (ptr Allocator))
                           (params (ptr (ArrayList Type)))
@@ -5298,9 +5302,9 @@
                    (esrc i64)
                    (ectxt i64)] (-> (Result EvalPair Diag))
   (let [sig (sig-find cx name)]
-    (if (icmp-eq (cast i64 sig) 0)
-        (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': fnptr-of unknown function '" name) "'")))
-        (if (icmp-gt (al-len [(slice u8)] (load (field sig type_params))) 0)
+    (cond (icmp-eq (cast i64 sig) 0)
+            (err-ep (derr (sconcat a (sconcat4 a "in '" fname "': fnptr-of unknown function '" name) "'")))
+          (icmp-gt (al-len [(slice u8)] (load (field sig type_params))) 0)
             (err-ep (derr (sconcat a
                                    (sconcat4 a
                                              "in '"
@@ -5308,12 +5312,13 @@
                                              "': cannot take a function pointer to generic function '"
                                              name)
                                    "'")))
-            (if (not (load (field sig fnptr_ok)))
-                (err-ep (derr (sconcat a
-                                       (sconcat4 a "in '" fname "': cannot take a function pointer to '" name)
-                                       "' (shim-convention functions are not supported yet)")))
-                (ok-ep (mk-expr (EFnPtrOf name) elo ehi esrc ectxt)
-                       (TFn (load (field sig cc)) (load (field sig params)) (box-type a (load (field sig ret))))))))))
+          (not (load (field sig fnptr_ok)))
+            (err-ep (derr (sconcat a
+                                   (sconcat4 a "in '" fname "': cannot take a function pointer to '" name)
+                                   "' (shim-convention functions are not supported yet)")))
+          :else
+            (ok-ep (mk-expr (EFnPtrOf name) elo ehi esrc ectxt)
+                   (TFn (load (field sig cc)) (load (field sig params)) (box-type a (load (field sig ret))))))))
 
 (defn synth-callptr [(a (ptr Allocator))
                      (fp (ptr Expr))

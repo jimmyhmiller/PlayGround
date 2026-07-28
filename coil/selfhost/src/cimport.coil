@@ -251,11 +251,11 @@
   (p-adv p)
   (let [start (load (field p pos))]
     (loop (let [c (p-peek p)]
-            (if (icmp-eq c 34)
-                (break)
-                (if (icmp-eq c 92)
-                    (do (p-adv p) (p-adv p))  ; backslash: skip 2
-                    (if (icmp-lt c 0) (break) (p-adv p))))))
+            (cond (icmp-eq c 34) (break)
+                  (icmp-eq c 92) (do (p-adv p) (p-adv p))
+                  ; backslash: skip 2
+                  (icmp-lt c 0) (break)
+                  :else (p-adv p))))
     (let [s (subslice [u8] (load (field p src)) start (load (field p pos)))]
       (p-adv p)
       s)))
@@ -279,19 +279,13 @@
 (defn j-value [(p (ptr P))] (-> Json)
   (j-skip-ws p)
   (let [c (p-peek p)]
-    (if (icmp-eq c 110)
-        (do (j-eat p 4) (JNull))
-        (if (icmp-eq c 116)
-            (do (j-eat p 4) (JBool 1))
-            (if (icmp-eq c 102)
-                (do (j-eat p 5) (JBool 0))
-                (if (icmp-eq c 34)
-                    (JStr (j-string p))
-                    (if (icmp-eq c 91)
-                        (j-array p)
-                        (if (icmp-eq c 123)
-                            (j-object p)
-                            (j-number p)))))))))
+    (cond (icmp-eq c 110) (do (j-eat p 4) (JNull))
+          (icmp-eq c 116) (do (j-eat p 4) (JBool 1))
+          (icmp-eq c 102) (do (j-eat p 5) (JBool 0))
+          (icmp-eq c 34) (JStr (j-string p))
+          (icmp-eq c 91) (j-array p)
+          (icmp-eq c 123) (j-object p)
+          :else (j-number p))))
 
 (defn j-array [(p (ptr P))] (-> Json)
   (p-adv p)
@@ -361,33 +355,20 @@
   (trim (remove-all a (remove-all a (remove-all a (trim c) "const ") "volatile ") "restrict ")))
 
 (defn scalar [(s (slice u8))] (-> (Option (slice u8)))
-  (if (or (str-eq s "char") (str-eq s "signed char"))
-      (Some "i8")
-      (if (str-eq s "unsigned char")
-          (Some "u8")
-          (if (or (str-eq s "short") (str-eq s "short int"))
-              (Some "i16")
-              (if (or (str-eq s "unsigned short") (str-eq s "unsigned short int"))
-                  (Some "u16")
-                  (if (or (str-eq s "int") (or (str-eq s "signed int") (str-eq s "signed")))
-                      (Some "i32")
-                      (if (or (str-eq s "unsigned int") (str-eq s "unsigned"))
-                          (Some "u32")
-                          (if (or (str-eq s "long") (str-eq s "long int"))
-                              (Some "i64")
-                              (if (or (str-eq s "unsigned long") (str-eq s "unsigned long int"))
-                                  (Some "u64")
-                                  (if (or (str-eq s "long long") (str-eq s "long long int"))
-                                      (Some "i64")
-                                      (if (or (str-eq s "unsigned long long") (str-eq s "unsigned long long int"))
-                                          (Some "u64")
-                                          (if (str-eq s "float")
-                                              (Some "f32")
-                                              (if (str-eq s "double")
-                                                  (Some "f64")
-                                                  (if (or (str-eq s "_Bool") (str-eq s "bool"))
-                                                      (Some "u8")
-                                                      (None [(slice u8)])))))))))))))))
+  (cond (or (str-eq s "char") (str-eq s "signed char")) (Some "i8")
+        (str-eq s "unsigned char") (Some "u8")
+        (or (str-eq s "short") (str-eq s "short int")) (Some "i16")
+        (or (str-eq s "unsigned short") (str-eq s "unsigned short int")) (Some "u16")
+        (or (str-eq s "int") (or (str-eq s "signed int") (str-eq s "signed"))) (Some "i32")
+        (or (str-eq s "unsigned int") (str-eq s "unsigned")) (Some "u32")
+        (or (str-eq s "long") (str-eq s "long int")) (Some "i64")
+        (or (str-eq s "unsigned long") (str-eq s "unsigned long int")) (Some "u64")
+        (or (str-eq s "long long") (str-eq s "long long int")) (Some "i64")
+        (or (str-eq s "unsigned long long") (str-eq s "unsigned long long int")) (Some "u64")
+        (str-eq s "float") (Some "f32")
+        (str-eq s "double") (Some "f64")
+        (or (str-eq s "_Bool") (str-eq s "bool")) (Some "u8")
+        :else (None [(slice u8)])))
 
 (defn map-type-d [(a (ptr Allocator)) (c (slice u8)) (ctx (ptr Ctx)) (depth i64)] (-> (Result (slice u8) (slice u8)))
   (if (icmp-gt depth 64)
@@ -405,18 +386,17 @@
             (match (scalar s)
               (Some [m] (Ok m))
               (None []
-                    (if (starts-with s "struct ")
-                        (Ok (trim (subslice [u8] s 7 (slice-len [u8] s))))
-                        (if (starts-with s "union ")
-                            (Ok (trim (subslice [u8] s 6 (slice-len [u8] s))))
-                            (if (starts-with s "enum ")
-                                (let [tag (trim (subslice [u8] s 5 (slice-len [u8] s)))]
-                                  (match (hm-get [(slice u8) (slice u8)] (load (field ctx enums)) tag)
-                                    (Some [t] (Ok t))
-                                    (None [] (Ok "i32"))))
-                                (match (hm-get [(slice u8) (slice u8)] (load (field ctx typedefs)) s)
-                                  (Some [under] (map-type-d a under ctx (iadd depth 1)))
-                                  (None [] (Err (cat3 a "unsupported C type '" s "'")))))))))))))
+                    (cond (starts-with s "struct ") (Ok (trim (subslice [u8] s 7 (slice-len [u8] s))))
+                          (starts-with s "union ") (Ok (trim (subslice [u8] s 6 (slice-len [u8] s))))
+                          (starts-with s "enum ")
+                            (let [tag (trim (subslice [u8] s 5 (slice-len [u8] s)))]
+                              (match (hm-get [(slice u8) (slice u8)] (load (field ctx enums)) tag)
+                                (Some [t] (Ok t))
+                                (None [] (Ok "i32"))))
+                          :else
+                            (match (hm-get [(slice u8) (slice u8)] (load (field ctx typedefs)) s)
+                              (Some [under] (map-type-d a under ctx (iadd depth 1)))
+                              (None [] (Err (cat3 a "unsupported C type '" s "'")))))))))))
 
 (defn map-type [(a (ptr Allocator)) (c (slice u8)) (ctx (ptr Ctx))] (-> (Result (slice u8) (slice u8)))
   (map-type-d a c ctx 0))
@@ -426,17 +406,12 @@
 ; size + align (bytes) of a mapped scalar/pointer type; None for aggregates.
 (defstruct SzAl [(size i64) (align i64)])
 (defn scalar-size-align [(t (slice u8))] (-> (Option SzAl))
-  (if (or (starts-with t "(ptr") (starts-with t "(fnptr"))
-      (Some (mk-szal 8 8))
-      (if (or (str-eq t "i8") (str-eq t "u8"))
-          (Some (mk-szal 1 1))
-          (if (or (str-eq t "i16") (str-eq t "u16"))
-              (Some (mk-szal 2 2))
-              (if (or (str-eq t "i32") (or (str-eq t "u32") (str-eq t "f32")))
-                  (Some (mk-szal 4 4))
-                  (if (or (str-eq t "i64") (or (str-eq t "u64") (str-eq t "f64")))
-                      (Some (mk-szal 8 8))
-                      (None [SzAl])))))))
+  (cond (or (starts-with t "(ptr") (starts-with t "(fnptr")) (Some (mk-szal 8 8))
+        (or (str-eq t "i8") (str-eq t "u8")) (Some (mk-szal 1 1))
+        (or (str-eq t "i16") (str-eq t "u16")) (Some (mk-szal 2 2))
+        (or (str-eq t "i32") (or (str-eq t "u32") (str-eq t "f32"))) (Some (mk-szal 4 4))
+        (or (str-eq t "i64") (or (str-eq t "u64") (str-eq t "f64"))) (Some (mk-szal 8 8))
+        :else (None [SzAl])))
 (defn mk-szal [(sz i64) (al i64)] (-> SzAl)
   (let [r (alloc-stack SzAl)] (store! (field r size) sz) (store! (field r align) al) (load r)))
 
@@ -890,14 +865,12 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (let [c (slice-get [u8] s (load i))]
-                (if (and (icmp-ge c (cast u8 48)) (icmp-le c (cast u8 57)))
-                    (store! i (iadd (load i) 1))
-                    (if (icmp-eq c (cast u8 46))
-                        (do (store! dots (iadd (load dots) 1)) (store! i (iadd (load i) 1)))
-                        (if (or (icmp-eq c (cast u8 101))
-                                (or (icmp-eq c (cast u8 69)) (or (icmp-eq c (cast u8 43)) (icmp-eq c (cast u8 45)))))
-                            (store! i (iadd (load i) 1))
-                            (do (store! ok false) (break))))))))
+                (cond (and (icmp-ge c (cast u8 48)) (icmp-le c (cast u8 57))) (store! i (iadd (load i) 1))
+                      (icmp-eq c (cast u8 46)) (do (store! dots (iadd (load dots) 1)) (store! i (iadd (load i) 1)))
+                      (or (icmp-eq c (cast u8 101))
+                          (or (icmp-eq c (cast u8 69)) (or (icmp-eq c (cast u8 43)) (icmp-eq c (cast u8 45)))))
+                        (store! i (iadd (load i) 1))
+                      :else (do (store! ok false) (break))))))
     (and (load ok) (icmp-le (load dots) 1))))
 
 ; A float #define body → its verbatim literal text (suffix stripped, `.0` appended
@@ -953,15 +926,13 @@
 ; Parse decimal / 0x-hex / 0-octal magnitude; -9999999999 on failure.
 (defn parse-int-radix [(s (slice u8))] (-> i64)
   (let [n (slice-len [u8] s)]
-    (if (icmp-eq n 0)
-        -9999999999
-        (if (and (icmp-gt n 2)
-                 (and (icmp-eq (slice-get [u8] s 0) (cast u8 48))
-                      (or (icmp-eq (slice-get [u8] s 1) (cast u8 120)) (icmp-eq (slice-get [u8] s 1) (cast u8 88)))))
+    (cond (icmp-eq n 0) -9999999999
+          (and (icmp-gt n 2)
+               (and (icmp-eq (slice-get [u8] s 0) (cast u8 48))
+                    (or (icmp-eq (slice-get [u8] s 1) (cast u8 120)) (icmp-eq (slice-get [u8] s 1) (cast u8 88)))))
             (parse-hex (subslice [u8] s 2 n))
-            (if (and (icmp-gt n 1) (icmp-eq (slice-get [u8] s 0) (cast u8 48)))
-                (parse-oct s)
-                (let [d (parse-dec s)] (if (icmp-lt d 0) -9999999999 d)))))))
+          (and (icmp-gt n 1) (icmp-eq (slice-get [u8] s 0) (cast u8 48))) (parse-oct s)
+          :else (let [d (parse-dec s)] (if (icmp-lt d 0) -9999999999 d)))))
 (defn parse-hex [(s (slice u8))] (-> i64)
   (let [n (slice-len [u8] s)
         (mut v) 0
@@ -971,13 +942,13 @@
               (break)
               (let [c (slice-get [u8] s (load i))
                     (mut dv) -1]
-                (if (and (icmp-ge c (cast u8 48)) (icmp-le c (cast u8 57)))
-                    (store! dv (cast i64 (isub c (cast u8 48))))
-                    (if (and (icmp-ge c (cast u8 97)) (icmp-le c (cast u8 102)))
+                (cond (and (icmp-ge c (cast u8 48)) (icmp-le c (cast u8 57)))
+                        (store! dv (cast i64 (isub c (cast u8 48))))
+                      (and (icmp-ge c (cast u8 97)) (icmp-le c (cast u8 102)))
                         (store! dv (iadd 10 (cast i64 (isub c (cast u8 97)))))
-                        (if (and (icmp-ge c (cast u8 65)) (icmp-le c (cast u8 70)))
-                            (store! dv (iadd 10 (cast i64 (isub c (cast u8 65)))))
-                            0)))
+                      (and (icmp-ge c (cast u8 65)) (icmp-le c (cast u8 70)))
+                        (store! dv (iadd 10 (cast i64 (isub c (cast u8 65)))))
+                      :else 0)
                 (if (icmp-lt (load dv) 0)
                     (do (store! ok false) (break))
                     (do (store! v (iadd (imul (load v) 16) (load dv))) (store! i (iadd (load i) 1)))))))
@@ -1104,20 +1075,20 @@
                         (if (not (load from-header))
                             0
                             (let [k (jkind d)]
-                              (if (str-eq k "FunctionDecl")
-                                  (let [key (cat a "fn:" (jname d))]
-                                    (match (hm-get [(slice u8) i64] (load seen) key)
-                                      (Some [_] 0)
-                                      (None []
-                                            (do
-                                              (hm-put! [(slice u8) i64] seen key 1)
-                                              (match (function-extern a d ctx)
-                                                (Ok [s] (sb-push-str! (mut externs) s))
-                                                (Err [why]
-                                                     (al-push! [(slice u8)]
-                                                               (mut skipped)
-                                                               (cat3 a "fn " (jname d) (cat a " — " why)))))))))
-                                  (if (str-eq k "RecordDecl")
+                              (cond (str-eq k "FunctionDecl")
+                                      (let [key (cat a "fn:" (jname d))]
+                                        (match (hm-get [(slice u8) i64] (load seen) key)
+                                          (Some [_] 0)
+                                          (None []
+                                                (do
+                                                  (hm-put! [(slice u8) i64] seen key 1)
+                                                  (match (function-extern a d ctx)
+                                                    (Ok [s] (sb-push-str! (mut externs) s))
+                                                    (Err [why]
+                                                         (al-push! [(slice u8)]
+                                                                   (mut skipped)
+                                                                   (cat3 a "fn " (jname d) (cat a " — " why)))))))))
+                                    (str-eq k "RecordDecl")
                                       (match (record-defstruct a d ctx)
                                         (Ok [opt]
                                             (match opt
@@ -1140,14 +1111,14 @@
                                                          (al-push! [(slice u8)]
                                                                    (mut skipped)
                                                                    (cat3 a "struct " (jname d) (cat a " — " why)))))))))
-                                      (if (str-eq k "EnumDecl")
-                                          (match (enum-consts a d seen)
-                                            (Ok [s] (sb-push-str! (mut consts) s))
-                                            (Err [why]
-                                                 (al-push! [(slice u8)]
-                                                           (mut skipped)
-                                                           (cat3 a "enum " (jname d) (cat a " — " why)))))
-                                          0)))))
+                                    (str-eq k "EnumDecl")
+                                      (match (enum-consts a d seen)
+                                        (Ok [s] (sb-push-str! (mut consts) s))
+                                        (Err [why]
+                                             (al-push! [(slice u8)]
+                                                       (mut skipped)
+                                                       (cat3 a "enum " (jname d) (cat a " — " why)))))
+                                    :else 0)))
                         (store! i (iadd (load i) 1)))))
             ; #define pass
             (let [baseline (each-line a (dump-macros a "" "base" flags))
@@ -1277,7 +1248,7 @@
                 (if (icmp-lt cx cy)
                     (do (store! r -1) (break))
                     (if (icmp-gt cx cy) (do (store! r 1) (break)) (store! i (iadd (load i) 1)))))))
-    (if (icmp-ne (load r) 0) (load r) (if (icmp-lt nx ny) -1 (if (icmp-gt nx ny) 1 0)))))
+    (cond (icmp-ne (load r) 0) (load r) (icmp-lt nx ny) -1 (icmp-gt nx ny) 1 :else 0)))
 
 ; Generate bindings for `header` → write to `out` file (Some) or stdout (None).
 ; ============================ probe (compute ABI VALUES) ====================
@@ -1307,11 +1278,10 @@
 (defn pget [(p Probe) (which i64)] (-> (slice u8))
   (let [q (alloc-stack Probe)]
     (store! q p)
-    (if (icmp-eq which 0)
-        (load (field q name))
-        (if (icmp-eq which 1)
-            (load (field q expr))
-            (if (icmp-eq which 2) (load (field q sname)) (load (field q fname)))))))
+    (cond (icmp-eq which 0) (load (field q name))
+          (icmp-eq which 1) (load (field q expr))
+          (icmp-eq which 2) (load (field q sname))
+          :else (load (field q fname)))))
 (defn pkind [(p Probe)] (-> i64)
   (let [q (alloc-stack Probe)] (store! q p) (load (field q kind))))
 

@@ -170,16 +170,16 @@
 (defn jit-patch! [(loc (ptr u8)) (tgt (ptr i8)) (rtype i64)] (-> (Result i64 (slice u8)))
   (let [p (cast i64 loc)
         (mut s) (cast i64 tgt)]
-    (if (icmp-eq rtype (reloc-branch26))
-        (let [w (jit-ld32 loc)
-              delta (isub (load s) p)]
-          (if (or (icmp-ge delta (branch26-max))
-                  (icmp-lt delta (isub 0 (branch26-max))))
-              (Err [i64 (slice u8)] "jit: branch target out of range even after veneering (compiler bug)")
-              (let [imm (iand (ishr delta 2) 67108863)]  ; 0x3ffffff
-                (jit-st32! loc (ior (iand w (jit-not 67108863)) imm))
-                (Ok [i64 (slice u8)] 0))))
-        (if (icmp-eq rtype (reloc-page21))
+    (cond (icmp-eq rtype (reloc-branch26))
+            (let [w (jit-ld32 loc)
+                  delta (isub (load s) p)]
+              (if (or (icmp-ge delta (branch26-max))
+                      (icmp-lt delta (isub 0 (branch26-max))))
+                  (Err [i64 (slice u8)] "jit: branch target out of range even after veneering (compiler bug)")
+                  (let [imm (iand (ishr delta 2) 67108863)]  ; 0x3ffffff
+                    (jit-st32! loc (ior (iand w (jit-not 67108863)) imm))
+                    (Ok [i64 (slice u8)] 0))))
+          (icmp-eq rtype (reloc-page21))
             (let [w (jit-ld32 loc)
                   delta (isub (iand (load s) (jit-not 4095)) (iand p (jit-not 4095)))
                   imm (ishr delta 12)]
@@ -195,16 +195,16 @@
                         keep (iand w (jit-not (ior (ishl 3 29) (ishl 524287 5))))]
                     (jit-st32! loc (ior keep (ior (ishl immlo 29) (ishl immhi 5))))
                     (Ok [i64 (slice u8)] 0))))
-            (if (icmp-eq rtype (reloc-pageoff12))
-                (let [w (jit-ld32 loc)
-                      imm (iand (load s) 4095)]
-                  (jit-st32! loc (ior (iand w (jit-not (ishl 4095 10))) (ishl imm 10)))
-                  (Ok [i64 (slice u8)] 0))
-                (if (icmp-eq rtype (reloc-unsigned))
-                    (do
-                      (jit-st64! loc (iadd (load s) (jit-ld64 loc)))
-                      (Ok [i64 (slice u8)] 0))
-                    (Err [i64 (slice u8)] "jit: unhandled arm64 relocation type in the in-memory loader")))))))
+          (icmp-eq rtype (reloc-pageoff12))
+            (let [w (jit-ld32 loc)
+                  imm (iand (load s) 4095)]
+              (jit-st32! loc (ior (iand w (jit-not (ishl 4095 10))) (ishl imm 10)))
+              (Ok [i64 (slice u8)] 0))
+          (icmp-eq rtype (reloc-unsigned))
+            (do
+              (jit-st64! loc (iadd (load s) (jit-ld64 loc)))
+              (Ok [i64 (slice u8)] 0))
+          :else (Err [i64 (slice u8)] "jit: unhandled arm64 relocation type in the in-memory loader"))))
 
 ; ---- the loader ----------------------------------------------------------------
 (defn jit-load [(a (ptr Allocator)) (o (mut MObj))] (-> (Result JitImage (slice u8)))

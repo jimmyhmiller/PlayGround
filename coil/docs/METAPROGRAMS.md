@@ -70,7 +70,8 @@ New API this project added (all shipped):
   diagnostic gains a `help: try: …` line, and `coil lint --fix` (and only it) splices it
   into the file. Any node that came from source is written back as its ORIGINAL bytes,
   so comments and formatting in untouched branches survive. A round that stops compiling
-  is reverted; a fix that would delete a comment is reported and skipped. Demo:
+  is reverted. Comments BETWEEN nodes — the one thing no `Code` value records — are
+  carried across the rewrite too, so a commented chain is fixed like any other. Demo:
   `metaprog-poc/condlint.coil` rewrites a chain of 3+ nested `if`s as a `cond` with
   `:else`. Full design + what changed on contact with reality: `docs/AUTOFIX.md`.
 - **`(code-macro? NODE)` → bool** — true for a node the expander produced. Checkers run

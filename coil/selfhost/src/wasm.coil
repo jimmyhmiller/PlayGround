@@ -416,21 +416,18 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (do (wr-skip-limits ir) 0)
-                                                  (if (icmp-eq kind 3)
-                                                      (do
-                                                        (wr-byte ir)
-                                                        (wr-byte ir)
-                                                        (if (and (str-eq imod mod) (str-eq inm name))
-                                                            (do (store! found true) 0)
-                                                            0)
-                                                        0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 3)
+                                              (do
+                                                (wr-byte ir)
+                                                (wr-byte ir)
+                                                (if (and (str-eq imod mod) (str-eq inm name))
+                                                    (do (store! found true) 0)
+                                                    0)
+                                                0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     (load found)))
@@ -461,19 +458,16 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (do (wr-skip-limits ir) 0)
-                                                  (if (icmp-eq kind 3)
-                                                      (do
-                                                        (wr-byte ir)
-                                                        (wr-byte ir)
-                                                        (store! count (iadd (load count) 1))
-                                                        0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 3)
+                                              (do
+                                                (wr-byte ir)
+                                                (wr-byte ir)
+                                                (store! count (iadd (load count) 1))
+                                                0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     (load count)))
@@ -507,21 +501,18 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (do (wr-skip-limits ir) 0)
-                                                  (if (icmp-eq kind 3)
-                                                      (do
-                                                        (wr-byte ir)
-                                                        (wr-byte ir)
-                                                        (if (and (str-eq imod mod) (str-eq inm name))
-                                                            (store! ans (load idx))
-                                                            (store! idx (iadd (load idx) 1)))
-                                                        0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 3)
+                                              (do
+                                                (wr-byte ir)
+                                                (wr-byte ir)
+                                                (if (and (str-eq imod mod) (str-eq inm name))
+                                                    (store! ans (load idx))
+                                                    (store! idx (iadd (load idx) 1)))
+                                                0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     (load ans)))
@@ -538,13 +529,10 @@
 ; for a single unit; __stack_pointer is the top of the reserved shadow stack.
 (defn wasm-global-value [(obj (slice u8)) (offs (ArrayList i64)) (mod (slice u8)) (name (slice u8))] (-> i64)
   (if (str-eq mod "env")
-      (if (str-eq name "__memory_base")
-          0
-          (if (str-eq name "__table_base")
-              0
-              (if (str-eq name "__stack_pointer")
-                  (wasm-stack-top obj)
-                  -1)))
+      (cond (str-eq name "__memory_base") 0
+            (str-eq name "__table_base") 0
+            (str-eq name "__stack_pointer") (wasm-stack-top obj)
+            :else -1)
       (if (str-eq mod "GOT.mem")
           (wasm-datasym-addr obj offs name)  ; -1 when the symbol is absent
           -1)))
@@ -576,24 +564,21 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (do (wr-skip-limits ir) 0)
-                                                  (if (icmp-eq kind 3)
-                                                      (do
-                                                        (wr-byte ir)
-                                                        (wr-byte ir)
-                                                        (if (icmp-lt (wasm-global-value obj offs imod inm) 0)
-                                                            (do
-                                                              (store! msg
-                                                                      "wasm: unresolved global import (env.__memory_base/__table_base/__stack_pointer and GOT.mem.* are supported)")
-                                                              0)
-                                                            0)
-                                                        0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 3)
+                                              (do
+                                                (wr-byte ir)
+                                                (wr-byte ir)
+                                                (if (icmp-lt (wasm-global-value obj offs imod inm) 0)
+                                                    (do
+                                                      (store! msg
+                                                              "wasm: unresolved global import (env.__memory_base/__table_base/__stack_pointer and GOT.mem.* are supported)")
+                                                      0)
+                                                    0)
+                                                0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     (load msg)))
@@ -629,34 +614,30 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (do (wr-skip-limits ir) 0)
-                                                  (if (icmp-eq kind 3)
-                                                      (let [valtype0 (wr-byte ir)
-                                                            gmut (wr-byte ir)
-                                                            value (wasm-global-value obj offs imod inm)
-                                                            ; LLVM's wasm64 backend declares GOT.mem.* (addresses) and
-                                                            ; GOT.func.* (64-bit table indices under table64) as i32 in the
-                                                            ; RELOCATABLE object even though the code uses them as i64;
-                                                            ; wasm-ld defines them as i64 at final link — so must we. Promote
-                                                            ; any GOT.* global to i64 under memory64; other globals keep type.
-                                                            valtype
-                                                              (if (and mem64 (starts-with imod "GOT.")) 126 valtype0)
-                                                            ; init-expr const opcode must match the global's valtype:
-                                                            ; i64.const (0x42=66) for an i64 global, else i32.const (0x41=65).
-                                                            constop (if (icmp-eq (cast i64 valtype) 126) 66 65)]
-                                                        (wb! (mut body) valtype)
-                                                        (wb! (mut body) gmut)
-                                                        (wb! (mut body) constop)
-                                                        (wsleb! (mut body) value)
-                                                        (wb! (mut body) 11)
-                                                        (store! count (iadd (load count) 1))
-                                                        0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2) (do (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 3)
+                                              (let [valtype0 (wr-byte ir)
+                                                    gmut (wr-byte ir)
+                                                    value (wasm-global-value obj offs imod inm)
+                                                    ; LLVM's wasm64 backend declares GOT.mem.* (addresses) and
+                                                    ; GOT.func.* (64-bit table indices under table64) as i32 in the
+                                                    ; RELOCATABLE object even though the code uses them as i64;
+                                                    ; wasm-ld defines them as i64 at final link — so must we. Promote
+                                                    ; any GOT.* global to i64 under memory64; other globals keep type.
+                                                    valtype (if (and mem64 (starts-with imod "GOT.")) 126 valtype0)
+                                                    ; init-expr const opcode must match the global's valtype:
+                                                    ; i64.const (0x42=66) for an i64 global, else i32.const (0x41=65).
+                                                    constop (if (icmp-eq (cast i64 valtype) 126) 66 65)]
+                                                (wb! (mut body) valtype)
+                                                (wb! (mut body) gmut)
+                                                (wb! (mut body) constop)
+                                                (wsleb! (mut body) value)
+                                                (wb! (mut body) 11)
+                                                (store! count (iadd (load count) 1))
+                                                0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     ; Appended __heap_base: immutable, = heap-base (const init expr). It is an ADDRESS,
@@ -710,15 +691,11 @@
                       name (wr-name r)
                       kind (wr-byte r)
                       type-start (load (field r pos))]
-                  (if (icmp-eq kind 0)
-                      (wr-uleb r)
-                      (if (icmp-eq kind 1)
-                          (do (wr-byte r) (wr-skip-limits r))
-                          (if (icmp-eq kind 2)
-                              (wr-skip-limits r)
-                              (if (icmp-eq kind 3)
-                                  (do (wr-byte r) (wr-byte r))
-                                  (wr-uleb r)))))
+                  (cond (icmp-eq kind 0) (wr-uleb r)
+                        (icmp-eq kind 1) (do (wr-byte r) (wr-skip-limits r))
+                        (icmp-eq kind 2) (wr-skip-limits r)
+                        (icmp-eq kind 3) (do (wr-byte r) (wr-byte r))
+                        :else (wr-uleb r))
                   (let [end (load (field r pos))]
                     (if (and (icmp-eq kind 2) (and (str-eq mod "env") (str-eq name "__linear_memory")))
                         (do
@@ -1109,18 +1086,16 @@
                                     (let [imod (wr-name ir)
                                           inm (wr-name ir)
                                           kind (wr-byte ir)]
-                                      (if (icmp-eq kind 0)
-                                          (do (wr-uleb ir) 0)
-                                          (if (icmp-eq kind 1)
-                                              (do (wr-byte ir) (wr-skip-limits ir) 0)
-                                              (if (icmp-eq kind 2)
-                                                  (let [flags (wr-byte ir)]
-                                                    (if (icmp-ne (iand (cast i64 flags) 4) 0) (store! ans true) 0)
-                                                    (wr-uleb ir)  ; min
-                                                    (if (icmp-ne (iand (cast i64 flags) 1) 0) (do (wr-uleb ir) 0) 0))  ; max
-                                                  (if (icmp-eq kind 3)
-                                                      (do (wr-byte ir) (wr-byte ir) 0)
-                                                      (do (wr-uleb ir) 0))))))
+                                      (cond (icmp-eq kind 0) (do (wr-uleb ir) 0)
+                                            (icmp-eq kind 1) (do (wr-byte ir) (wr-skip-limits ir) 0)
+                                            (icmp-eq kind 2)
+                                              (let [flags (wr-byte ir)]
+                                                (if (icmp-ne (iand (cast i64 flags) 4) 0) (store! ans true) 0)
+                                                (wr-uleb ir)  ; min
+                                                (if (icmp-ne (iand (cast i64 flags) 1) 0) (do (wr-uleb ir) 0) 0))
+                                            ; max
+                                            (icmp-eq kind 3) (do (wr-byte ir) (wr-byte ir) 0)
+                                            :else (do (wr-uleb ir) 0)))
                                     (store! k (iadd (load k) 1)))))))
                     0))))
     (load ans)))
@@ -1148,116 +1123,112 @@
             elems (wasm-elems obj a)
             symfuncs (wasm-sym-funcs obj a)
             treloc-err (wasm-table-reloc-error obj symfuncs elems)]
-        (if (icmp-gt (slice-len gerr) 0)
-            (Err gerr)
-            (if (icmp-gt (slice-len treloc-err) 0)
-                (Err treloc-err)
-                (if (not (wasm-exports-have-main exports))
-                    (Err "wasm: cannot find main in the object symbol table")
-                    ; Shadow stack (C0): when the object imports __stack_pointer, reserve a stack
-                    ; region above the static data, size memory to cover it, and export __heap_base.
-                    ; Function table (C1): when there are elem entries, define a table and patch
-                    ; the code's table-index relocation placeholders.
-                    (let [r (alloc-stack WasmReader)
-                          (mut out) (al-new [u8] a)
-                          (mut im) (zeroed WasmImports)
-                          (mut have-imports) false
-                          (mut put-mem) false
-                          (mut put-globals) false
-                          (mut put-exports) false
-                          has-sp (wasm-has-global-import obj "env" "__stack_pointer")
-                          heap-base (wasm-align-up (wasm-stack-top obj) (wasm-page))
-                          req-pages (if has-sp (idiv heap-base (wasm-page)) 0)
-                          hb-idx (wasm-count-global-imports obj)
-                          sp-idx (if has-sp (wasm-global-import-index obj "env" "__stack_pointer") -1)
-                          maxtidx (wasm-elem-max elems)
-                          tsec (wasm-table-section maxtidx (wasm-obj-mem64? obj) a)
-                          gsec (wasm-globals-section obj has-sp heap-base a)
-                          n (slice-len obj)]
-                      (store! r (zeroed WasmReader))
-                      (store! (field r data) obj)
-                      (store! (field r pos) 8)
-                      (wbytes! (mut out) (subslice obj 0 8))
-                      (loop (if (icmp-ge (load (field r pos)) n)
-                                (break)
-                                (let [id (wr-byte r)
-                                      size (wr-uleb r)
-                                      payload (wr-bytes r size)]
-                                  ; table (id 4) then memory (id 5) precede globals/exports/elem (id 6/7/9).
-                                  (if (and (not (load put-mem))
-                                           (or (icmp-eq id 6)
-                                               (or (icmp-eq id 7)
-                                                   (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12))))))
-                                      (do
-                                        (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
-                                        (if (and (load have-imports) (load (field im has-mem)))
-                                            (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages))
-                                            0)
-                                        (store! put-mem true)
-                                        0)
+        (cond (icmp-gt (slice-len gerr) 0) (Err gerr)
+              (icmp-gt (slice-len treloc-err) 0) (Err treloc-err)
+              (not (wasm-exports-have-main exports)) (Err "wasm: cannot find main in the object symbol table")
+              :else  ; Shadow stack (C0): when the object imports __stack_pointer, reserve a stack
+              ; region above the static data, size memory to cover it, and export __heap_base.
+              ; Function table (C1): when there are elem entries, define a table and patch
+              ; the code's table-index relocation placeholders.
+              (let [r (alloc-stack WasmReader)
+                    (mut out) (al-new [u8] a)
+                    (mut im) (zeroed WasmImports)
+                    (mut have-imports) false
+                    (mut put-mem) false
+                    (mut put-globals) false
+                    (mut put-exports) false
+                    has-sp (wasm-has-global-import obj "env" "__stack_pointer")
+                    heap-base (wasm-align-up (wasm-stack-top obj) (wasm-page))
+                    req-pages (if has-sp (idiv heap-base (wasm-page)) 0)
+                    hb-idx (wasm-count-global-imports obj)
+                    sp-idx (if has-sp (wasm-global-import-index obj "env" "__stack_pointer") -1)
+                    maxtidx (wasm-elem-max elems)
+                    tsec (wasm-table-section maxtidx (wasm-obj-mem64? obj) a)
+                    gsec (wasm-globals-section obj has-sp heap-base a)
+                    n (slice-len obj)]
+                (store! r (zeroed WasmReader))
+                (store! (field r data) obj)
+                (store! (field r pos) 8)
+                (wbytes! (mut out) (subslice obj 0 8))
+                (loop (if (icmp-ge (load (field r pos)) n)
+                          (break)
+                          (let [id (wr-byte r)
+                                size (wr-uleb r)
+                                payload (wr-bytes r size)]
+                            ; table (id 4) then memory (id 5) precede globals/exports/elem (id 6/7/9).
+                            (if (and (not (load put-mem))
+                                     (or (icmp-eq id 6)
+                                         (or (icmp-eq id 7)
+                                             (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12))))))
+                                (do
+                                  (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
+                                  (if (and (load have-imports) (load (field im has-mem)))
+                                      (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages))
                                       0)
-                                  ; globals (id 6) sit between memory (5) and export (7): emit the resolved
-                                  ; linker globals here, after memory, before the export section.
-                                  (if (and (not (load put-globals))
-                                           (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
-                                      (do
-                                        (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0)
-                                        (store! put-globals true)
-                                        0)
-                                      0)
-                                  (if (and (not (load put-exports))
-                                           (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
-                                      (do
-                                        (wasm-section! (mut out)
-                                                       7
-                                                       (wasm-export-payload a
-                                                                            exports
-                                                                            (and (load have-imports)
-                                                                                 (load (field im has-mem)))
-                                                                            has-sp
-                                                                            hb-idx
-                                                                            sp-idx))
-                                        (store! put-exports true)
-                                        0)
-                                      0)
-                                  (if (icmp-eq id 2)
-                                      (do
-                                        (store! im (wasm-imports payload a))
-                                        (store! have-imports true)
-                                        (let [clean (wasm-import-payload a (load im))]
-                                          (if (icmp-gt (slice-len clean) 1) (wasm-section! (mut out) 2 clean) 0)))
-                                      (if (icmp-eq id 7)
+                                  (store! put-mem true)
+                                  0)
+                                0)
+                            ; globals (id 6) sit between memory (5) and export (7): emit the resolved
+                            ; linker globals here, after memory, before the export section.
+                            (if (and (not (load put-globals))
+                                     (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
+                                (do
+                                  (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0)
+                                  (store! put-globals true)
+                                  0)
+                                0)
+                            (if (and (not (load put-exports))
+                                     (or (icmp-eq id 7) (or (icmp-eq id 9) (or (icmp-eq id 10) (icmp-eq id 12)))))
+                                (do
+                                  (wasm-section! (mut out)
+                                                 7
+                                                 (wasm-export-payload a
+                                                                      exports
+                                                                      (and (load have-imports)
+                                                                           (load (field im has-mem)))
+                                                                      has-sp
+                                                                      hb-idx
+                                                                      sp-idx))
+                                  (store! put-exports true)
+                                  0)
+                                0)
+                            (cond (icmp-eq id 2)
+                                    (do
+                                      (store! im (wasm-imports payload a))
+                                      (store! have-imports true)
+                                      (let [clean (wasm-import-payload a (load im))]
+                                        (if (icmp-gt (slice-len clean) 1) (wasm-section! (mut out) 2 clean) 0)))
+                                  (icmp-eq id 7) 0
+                                  (icmp-eq id 0)
+                                    (let [nm (wasm-custom-name payload a)]
+                                      (if (or (str-eq nm "linking") (starts-with nm "reloc."))
                                           0
-                                          (if (icmp-eq id 0)
-                                              (let [nm (wasm-custom-name payload a)]
-                                                (if (or (str-eq nm "linking") (starts-with nm "reloc."))
-                                                    0
-                                                    (wasm-section! (mut out) id payload)))
-                                              (if (icmp-eq id 10)
-                                                  (wasm-section! (mut out)
-                                                                 10
-                                                                 (if (icmp-ge maxtidx 0)
-                                                                     (wasm-patch-code payload obj symfuncs elems a)
-                                                                     payload))
-                                                  (wasm-section! (mut out) id payload))))))))
-                      (if (not (load put-mem))
-                          (do
-                            (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
-                            (if (and (load have-imports) (load (field im has-mem)))
-                                (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages))
-                                0))
-                          0)
-                      (if (not (load put-globals))
-                          (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0)
-                          0)
-                      (if (not (load put-exports))
-                          (wasm-section! (mut out)
-                                         7
-                                         (wasm-export-payload a
-                                                              exports
-                                                              (and (load have-imports) (load (field im has-mem)))
-                                                              has-sp
-                                                              hb-idx
-                                                              sp-idx))
-                          0)
-                      (Ok (al-slice [u8] (load out))))))))))
+                                          (wasm-section! (mut out) id payload)))
+                                  (icmp-eq id 10)
+                                    (wasm-section! (mut out)
+                                                   10
+                                                   (if (icmp-ge maxtidx 0)
+                                                       (wasm-patch-code payload obj symfuncs elems a)
+                                                       payload))
+                                  :else (wasm-section! (mut out) id payload)))))
+                (if (not (load put-mem))
+                    (do
+                      (if (icmp-gt (slice-len tsec) 0) (wasm-section! (mut out) 4 tsec) 0)
+                      (if (and (load have-imports) (load (field im has-mem)))
+                          (wasm-section! (mut out) 5 (wasm-memory-payload a (load im) req-pages))
+                          0))
+                    0)
+                (if (not (load put-globals))
+                    (if (icmp-gt (slice-len gsec) 0) (wasm-section! (mut out) 6 gsec) 0)
+                    0)
+                (if (not (load put-exports))
+                    (wasm-section! (mut out)
+                                   7
+                                   (wasm-export-payload a
+                                                        exports
+                                                        (and (load have-imports) (load (field im has-mem)))
+                                                        has-sp
+                                                        hb-idx
+                                                        sp-idx))
+                    0)
+                (Ok (al-slice [u8] (load out))))))))

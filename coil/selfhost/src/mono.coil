@@ -109,37 +109,26 @@
 ; ---- type_key / mangle — mutually recursive -------------------
 (defn type-key [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
-    (if (icmp-eq tg 12)
-        "never"
-        (if (icmp-eq tg 13)
-            "code"
-            (if (icmp-eq tg 3)
-                "void"
-                (if (icmp-eq tg 0)
-                    (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
-                    (if (icmp-eq tg 1)
-                        (sconcat a "f" (i64->str a (t-int-bits t)))
-                        (if (icmp-eq tg 2)
-                            "bool"
-                            (if (icmp-eq tg 4)
-                                (sconcat a "ptr_" (type-key a (t-inner t)))
-                                (if (icmp-eq tg 5)
-                                    (sconcat a "ref_" (type-key a (t-inner t)))
-                                    (if (icmp-eq tg 6)
-                                        (type-struct-name t)
-                                        (if (icmp-eq tg 7)
-                                            (sconcat a
-                                                     (sconcat a "arr" (i64->str a (t-arrn t)))
-                                                     (sconcat a "_" (type-key a (t-inner t))))
-                                            (if (icmp-eq tg 8)
-                                                (sconcat a "slice_" (type-key a (t-inner t)))
-                                                (if (icmp-eq tg 9)
-                                                    (sconcat a
-                                                             (sconcat a "vec" (i64->str a (t-arrn t)))
-                                                             (sconcat a "_" (type-key a (t-inner t))))
-                                                    (if (icmp-eq tg 10)
-                                                        "fn"
-                                                        (mangle a (t-app-name t) (t-app-args t)))))))))))))))))
+    (cond (icmp-eq tg 12) "never"
+          (icmp-eq tg 13) "code"
+          (icmp-eq tg 3) "void"
+          (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
+          (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
+          (icmp-eq tg 2) "bool"
+          (icmp-eq tg 4) (sconcat a "ptr_" (type-key a (t-inner t)))
+          (icmp-eq tg 5) (sconcat a "ref_" (type-key a (t-inner t)))
+          (icmp-eq tg 6) (type-struct-name t)
+          (icmp-eq tg 7)
+            (sconcat a
+                     (sconcat a "arr" (i64->str a (t-arrn t)))
+                     (sconcat a "_" (type-key a (t-inner t))))
+          (icmp-eq tg 8) (sconcat a "slice_" (type-key a (t-inner t)))
+          (icmp-eq tg 9)
+            (sconcat a
+                     (sconcat a "vec" (i64->str a (t-arrn t)))
+                     (sconcat a "_" (type-key a (t-inner t))))
+          (icmp-eq tg 10) "fn"
+          :else (mangle a (t-app-name t) (t-app-args t)))))
 (defn mangle [(a (ptr Allocator)) (name (slice u8)) (args (ptr (ArrayList Type)))] (-> (slice u8))
   (let [(mut s) name
         n (al-len [Type] (load args))
@@ -427,52 +416,45 @@
 (defn resolve-ty [(m (ptr MonoCtx)) (t (ptr Type)) (map (ptr Subst))] (-> (Result Type Diag))
   (let [a (load (field m a))
         tg (type-tag t)]
-    (if (icmp-eq tg 12)
-        (Ok (TNever))
-        (if (icmp-eq tg 13)
-            (Ok (TCode))
-            (if (icmp-eq tg 14)
-                (Ok (TExternRef))
-                (if (icmp-eq tg 3)
-                    (Ok (TVoid))
-                    (if (icmp-eq tg 0)
-                        (Ok (TInt (t-int-bits t) (t-int-signed t)))
-                        (if (icmp-eq tg 1)
-                            (Ok (TFloat (t-int-bits t)))
-                            (if (icmp-eq tg 2)
-                                (Ok (TBool))
-                                (if (icmp-eq tg 4)
-                                    (match (resolve-ty m (t-inner t) map)
-                                      (Err [d] (Err [Type Diag] d))
-                                      (Ok [it] (Ok (TPtr (box-type a it)))))
-                                    (if (icmp-eq tg 5)
-                                        (match (resolve-ty m (t-inner t) map)
-                                          (Err [d] (Err [Type Diag] d))
-                                          (Ok [it] (Ok (TRef (t-ref-mut t) (box-type a it)))))
-                                        (if (icmp-eq tg 7)
-                                            (match (resolve-ty m (t-inner t) map)
-                                              (Err [d] (Err [Type Diag] d))
-                                              (Ok [it] (Ok (TArray (box-type a it) (t-arrn t)))))
-                                            (if (icmp-eq tg 8)
-                                                (match (resolve-ty m (t-inner t) map)
-                                                  (Err [d] (Err [Type Diag] d))
-                                                  (Ok [it] (Ok (TSlice (box-type a it)))))
-                                                (if (icmp-eq tg 9)
-                                                    (match (resolve-ty m (t-inner t) map)
-                                                      (Err [d] (Err [Type Diag] d))
-                                                      (Ok [it] (Ok (TVec (box-type a it) (t-arrn t)))))
-                                                    (if (icmp-eq tg 10)
-                                                        (match (resolve-ty-list m (t-fn-params t) map)
-                                                          (Err [d] (Err [Type Diag] d))
-                                                          (Ok [ps]
-                                                              (match (resolve-ty m (t-fn-ret t) map)
-                                                                (Err [d] (Err [Type Diag] d))
-                                                                (Ok [r] (Ok (TFn (t-fn-cc t) ps (box-type a r)))))))
-                                                        (if (icmp-eq tg 6)
-                                                            (match (subst-lookup map (type-struct-name t))
-                                                              (Some [ct] (Ok ct))
-                                                              (None [] (Ok (TStruct (type-struct-name t)))))
-                                                            (resolve-ty-app m t map)))))))))))))))))
+    (cond (icmp-eq tg 12) (Ok (TNever))
+          (icmp-eq tg 13) (Ok (TCode))
+          (icmp-eq tg 14) (Ok (TExternRef))
+          (icmp-eq tg 3) (Ok (TVoid))
+          (icmp-eq tg 0) (Ok (TInt (t-int-bits t) (t-int-signed t)))
+          (icmp-eq tg 1) (Ok (TFloat (t-int-bits t)))
+          (icmp-eq tg 2) (Ok (TBool))
+          (icmp-eq tg 4)
+            (match (resolve-ty m (t-inner t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [it] (Ok (TPtr (box-type a it)))))
+          (icmp-eq tg 5)
+            (match (resolve-ty m (t-inner t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [it] (Ok (TRef (t-ref-mut t) (box-type a it)))))
+          (icmp-eq tg 7)
+            (match (resolve-ty m (t-inner t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [it] (Ok (TArray (box-type a it) (t-arrn t)))))
+          (icmp-eq tg 8)
+            (match (resolve-ty m (t-inner t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [it] (Ok (TSlice (box-type a it)))))
+          (icmp-eq tg 9)
+            (match (resolve-ty m (t-inner t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [it] (Ok (TVec (box-type a it) (t-arrn t)))))
+          (icmp-eq tg 10)
+            (match (resolve-ty-list m (t-fn-params t) map)
+              (Err [d] (Err [Type Diag] d))
+              (Ok [ps]
+                  (match (resolve-ty m (t-fn-ret t) map)
+                    (Err [d] (Err [Type Diag] d))
+                    (Ok [r] (Ok (TFn (t-fn-cc t) ps (box-type a r)))))))
+          (icmp-eq tg 6)
+            (match (subst-lookup map (type-struct-name t))
+              (Some [ct] (Ok ct))
+              (None [] (Ok (TStruct (type-struct-name t)))))
+          :else (resolve-ty-app m t map))))
 
 ; ---- resolve a sum / its variants -----------------
 (defn resolve-fields [(m (ptr MonoCtx)) (fs (ptr (ArrayList Field))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Field))
@@ -888,35 +870,35 @@
     (loop (if (load done)
               (break)
               (do
-                (if (icmp-lt (load sc) (al-len [PendInst] (load (field m pending-structs))))
-                    (do
-                      (let [pi (al-elem [PendInst] (field m pending-structs) (load sc))
-                            nm (load (field pi name))
-                            args (load (field pi args))
-                            gs
-                              (al-elem [StructDef]
-                                       (load (field m gstructs))
-                                       (find-struct-named (load (field m gstructs)) nm))
-                            smap (subst-map a (load (field gs type_params)) args)
-                            mng (mangle a nm args)]
-                        (if (mono-runaway? args mng)
-                            (do
-                              (store! err (mono-runaway-diag a "generic type" nm mng))
-                              (store! failed true)
-                              (store! done true)
-                              0)
-                            (match (resolve-fields m (load (field gs fields)) smap)
-                              (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                              (Ok [nfs]
-                                  (let [nd (alloc-stack StructDef)]
-                                    (store! (field nd name) mng)
-                                    (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                                    (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
-                                    (store! (field nd layout) (load (field gs layout)))
-                                    (store! (field nd fields) nfs)
-                                    (upsert-struct m (load nd)))))))
-                      (store! sc (iadd (load sc) 1)))
-                    (if (icmp-lt (load uc) (al-len [PendInst] (load (field m pending-sums))))
+                (cond (icmp-lt (load sc) (al-len [PendInst] (load (field m pending-structs))))
+                        (do
+                          (let [pi (al-elem [PendInst] (field m pending-structs) (load sc))
+                                nm (load (field pi name))
+                                args (load (field pi args))
+                                gs
+                                  (al-elem [StructDef]
+                                           (load (field m gstructs))
+                                           (find-struct-named (load (field m gstructs)) nm))
+                                smap (subst-map a (load (field gs type_params)) args)
+                                mng (mangle a nm args)]
+                            (if (mono-runaway? args mng)
+                                (do
+                                  (store! err (mono-runaway-diag a "generic type" nm mng))
+                                  (store! failed true)
+                                  (store! done true)
+                                  0)
+                                (match (resolve-fields m (load (field gs fields)) smap)
+                                  (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                                  (Ok [nfs]
+                                      (let [nd (alloc-stack StructDef)]
+                                        (store! (field nd name) mng)
+                                        (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                                        (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
+                                        (store! (field nd layout) (load (field gs layout)))
+                                        (store! (field nd fields) nfs)
+                                        (upsert-struct m (load nd)))))))
+                          (store! sc (iadd (load sc) 1)))
+                      (icmp-lt (load uc) (al-len [PendInst] (load (field m pending-sums))))
                         (do
                           (let [pi (al-elem [PendInst] (field m pending-sums) (load uc))
                                 nm (load (field pi name))
@@ -934,28 +916,28 @@
                                   (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
                                   (Ok [ns] (upsert-sum m ns)))))
                           (store! uc (iadd (load uc) 1)))
-                        (if (icmp-lt (load fc) (al-len [PendInst] (load (field m pending-funcs))))
-                            (do
-                              (let [pi (al-elem [PendInst] (field m pending-funcs) (load fc))
-                                    nm (load (field pi name))
-                                    args (load (field pi args))
-                                    gf
-                                      (al-elem [Func]
-                                               (load (field m gfuncs))
-                                               (find-func-named (load (field m gfuncs)) nm))
-                                    smap (subst-map a (load (field gf type_params)) args)
-                                    mng (mangle a nm args)]
-                                (if (mono-runaway? args mng)
-                                    (do
-                                      (store! err (mono-runaway-diag a "generic function" nm mng))
-                                      (store! failed true)
-                                      (store! done true)
-                                      0)
-                                    (match (resolve-func m gf smap mng)
-                                      (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
-                                      (Ok [nf] (upsert-func m nf)))))
-                              (store! fc (iadd (load fc) 1)))
-                            (do (store! done true) 0)))))))
+                      (icmp-lt (load fc) (al-len [PendInst] (load (field m pending-funcs))))
+                        (do
+                          (let [pi (al-elem [PendInst] (field m pending-funcs) (load fc))
+                                nm (load (field pi name))
+                                args (load (field pi args))
+                                gf
+                                  (al-elem [Func]
+                                           (load (field m gfuncs))
+                                           (find-func-named (load (field m gfuncs)) nm))
+                                smap (subst-map a (load (field gf type_params)) args)
+                                mng (mangle a nm args)]
+                            (if (mono-runaway? args mng)
+                                (do
+                                  (store! err (mono-runaway-diag a "generic function" nm mng))
+                                  (store! failed true)
+                                  (store! done true)
+                                  0)
+                                (match (resolve-func m gf smap mng)
+                                  (Err [d] (do (store! err d) (store! failed true) (store! done true) 0))
+                                  (Ok [nf] (upsert-func m nf)))))
+                          (store! fc (iadd (load fc) 1)))
+                      :else (do (store! done true) 0)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
 ; ---- orchestration ------------------------------

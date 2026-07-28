@@ -198,13 +198,10 @@
         (None [] 0))
       0))
 (defn hyg-is-let [(items (ptr (ArrayList Sexp)))] (-> bool)
-  (if (icmp-lt (sx-len items) 2)
-      false
-      (if (icmp-ne (sx-tag (sx-at items 0)) 2)
-          false
-          (if (not (str-eq (sx-sval (sx-at items 0)) "let"))
-              false
-              (icmp-eq (sx-tag (sx-at items 1)) 7)))))
+  (cond (icmp-lt (sx-len items) 2) false
+        (icmp-ne (sx-tag (sx-at items 0)) 2) false
+        (not (str-eq (sx-sval (sx-at items 0)) "let")) false
+        :else (icmp-eq (sx-tag (sx-at items 1)) 7)))
 ; the plain symbol pointer of a binder: `x` -> that node; `(mut x)` -> the `x` node;
 ; null for anything else (a destructure/mut-of-non-symbol we conservatively skip).
 (defn hyg-binder-sym [(bp (ptr Sexp))] (-> (ptr Sexp))
@@ -2148,44 +2145,34 @@
 ; so a metaprogram's effect is directly readable. An Sexp → source pretty-printer.
 (defn sx-atom-text [(w (ptr Writer)) (a (ptr Allocator)) (x Sexp)] (-> i64)
   (let [tg (sx-tag x)]
-    (if (icmp-eq tg 0)
-        (ps w (i64->str a (sx-ival x)))
-        (if (icmp-eq tg 2)
-            (ps w (sx-sval x))
-            (if (icmp-eq tg 3)
-                (do (wb w 58) (ps w (sx-sval x)) 0)
-                (if (icmp-eq tg 4)
-                    (do (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
-                    (if (icmp-eq tg 5)
-                        (do (wb w 99) (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
-                        (do (ps w "<") (ps w (i64->str a tg)) (ps w ">") 0))))))))
+    (cond (icmp-eq tg 0) (ps w (i64->str a (sx-ival x)))
+          (icmp-eq tg 2) (ps w (sx-sval x))
+          (icmp-eq tg 3) (do (wb w 58) (ps w (sx-sval x)) 0)
+          (icmp-eq tg 4) (do (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
+          (icmp-eq tg 5) (do (wb w 99) (wb w 34) (ps w (sx-sval x)) (wb w 34) 0)
+          :else (do (ps w "<") (ps w (i64->str a tg)) (ps w ">") 0))))
 ; rendered inline width of a node — used to decide whether to break a list
 (defn sx-width [(a (ptr Allocator)) (x Sexp)] (-> i64)
   (let [tg (sx-tag x)]
-    (if (icmp-eq tg 0)
-        (slice-len (i64->str a (sx-ival x)))
-        (if (icmp-eq tg 2)
-            (slice-len (sx-sval x))
-            (if (icmp-eq tg 3)
-                (iadd 1 (slice-len (sx-sval x)))
-                (if (icmp-eq tg 4)
-                    (iadd 2 (slice-len (sx-sval x)))
-                    (if (icmp-eq tg 5)
-                        (iadd 3 (slice-len (sx-sval x)))
-                        (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-                            (let [items (sx-items x)
-                                  n (sx-len items)
-                                  (mut wsum) 2
-                                  (mut i) 0]
-                              (loop (if (icmp-ge (load i) n)
-                                        (break)
-                                        (do
-                                          (store! wsum
-                                                  (iadd (iadd (load wsum) (if (icmp-gt (load i) 0) 1 0))
-                                                        (sx-width a (sx-at items (load i)))))
-                                          (store! i (iadd (load i) 1)))))
-                              (load wsum))
-                            3))))))))
+    (cond (icmp-eq tg 0) (slice-len (i64->str a (sx-ival x)))
+          (icmp-eq tg 2) (slice-len (sx-sval x))
+          (icmp-eq tg 3) (iadd 1 (slice-len (sx-sval x)))
+          (icmp-eq tg 4) (iadd 2 (slice-len (sx-sval x)))
+          (icmp-eq tg 5) (iadd 3 (slice-len (sx-sval x)))
+          (or (icmp-eq tg 6) (icmp-eq tg 7))
+            (let [items (sx-items x)
+                  n (sx-len items)
+                  (mut wsum) 2
+                  (mut i) 0]
+              (loop (if (icmp-ge (load i) n)
+                        (break)
+                        (do
+                          (store! wsum
+                                  (iadd (iadd (load wsum) (if (icmp-gt (load i) 0) 1 0))
+                                        (sx-width a (sx-at items (load i)))))
+                          (store! i (iadd (load i) 1)))))
+              (load wsum))
+          :else 3)))
 (defn sx-emit [(w (ptr Writer)) (a (ptr Allocator)) (x Sexp) (col i64)] (-> i64)
   (let [tg (sx-tag x)]
     (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))

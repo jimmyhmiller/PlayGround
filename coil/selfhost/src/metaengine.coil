@@ -253,7 +253,7 @@
   (let [b (meta-opt-box)] (if (icmp-eq (load (field b isset)) 0) (opt-level) (load (field b level)))))
 (defn opt-level-tag [] (-> (slice u8))
   (let [n (meta-opt-level)]
-    (if (icmp-eq n 0) "O0|" (if (icmp-eq n 1) "O1|" (if (icmp-eq n 2) "O2|" "O3|")))))
+    (cond (icmp-eq n 0) "O0|" (icmp-eq n 1) "O1|" (icmp-eq n 2) "O2|" :else "O3|")))
 (defn set-meta-build-obj! [(fp (fnptr c [(ptr Allocator) (ptr Program) (ptr i8)] i64))] (-> i64)
   (let [b (meta-build-box)] (store! (field b fp) fp) (store! (field b isset) 1) 0))
 
@@ -976,22 +976,21 @@
                 (let [v (load (field (al-elem [EnvBind] env (load i)) val))]
                   (if (is-ccode v) (do (al-push! (mut argv) (ccode-of v)) 0) (do (store! bad true) (break))))
                 (store! i (iadd (load i) 1)))))
-    (if (load bad)
-        (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
-        (if (meta-interp-active?)
-            ; the interpreter looks the entry up by its coil FUNCTION name (the qual
-            ; name), not the export-c symbol (coil_mp_<k>) the compiled backends emit.
-            (meta-engine-invoke-interp a
-                                       (load (field e name))
-                                       (load (field e interpcx))
-                                       (load (field e registry))
-                                       cx
-                                       (box-al [Sexp] a (load argv)))
-            (if (meta-wasm-active?)
-                (meta-engine-invoke-wasm a
-                                         (load (field e symbol))
-                                         (load (field e modbytes))
-                                         (load (field e registry))
-                                         cx
-                                         (box-al [Sexp] a (load argv)))
-                (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))))
+    (cond (load bad) (Err [Sexp Diag] (derr "metaengine: non-Code value in a metaprogram argument env (compiler bug)"))
+          (meta-interp-active?)  ; the interpreter looks the entry up by its coil FUNCTION name (the qual
+          ; name), not the export-c symbol (coil_mp_<k>) the compiled backends emit.
+          (meta-engine-invoke-interp a
+                                     (load (field e name))
+                                     (load (field e interpcx))
+                                     (load (field e registry))
+                                     cx
+                                     (box-al [Sexp] a (load argv)))
+            (meta-wasm-active?)
+          (meta-engine-invoke-wasm a
+                                   (load (field e symbol))
+                                   (load (field e modbytes))
+                                   (load (field e registry))
+                                   cx
+                                   (box-al [Sexp] a (load argv)))
+            :else
+          (meta-engine-invoke a (load (field e fp)) (load (field e registry)) cx (box-al [Sexp] a (load argv))))))

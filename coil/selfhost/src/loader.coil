@@ -514,58 +514,58 @@
                 (store! it (al-get [Sexp] (load items) (load i)))
                 (match (load (field it kind))
                   (KKw [k]
-                       (if (str-eq k "as")
-                           (let [a2 (alloc-stack Sexp)]
-                             (store! a2 (al-get [Sexp] (load items) (iadd (load i) 1)))
-                             (match (l-sym-name a2)
-                               (Some [al] (do (store! alias (Some al)) (store! i (iadd (load i) 2))))
-                               (None []
-                                     (do
-                                       (loader-abort "import: :as expects an alias symbol")
-                                       (store! i (iadd (load i) 2))))))
-                           (if (str-eq k "reexport")
-                               (do (store! reexport true) (store! i (iadd (load i) 1)))
-                               (if (str-eq k "use")
-                                   (let [v2 (alloc-stack Sexp)]
-                                     (store! v2 (al-get [Sexp] (load items) (iadd (load i) 1)))
-                                     (match (load (field v2 kind))
-                                       (KSym [sm]
-                                             (if (str-eq sm "*")
-                                                 (do (store! use-spec (Some (UAll))) (store! i (iadd (load i) 2)))
-                                                 (do
-                                                   (loader-abort "import: :use expects * or [names]")
-                                                   (store! i (iadd (load i) 2)))))
-                                       (KVec [vit]
-                                             (do
-                                               (store! use-spec (Some (UNames (collect-syms a vit))))
-                                               (store! i (iadd (load i) 2))))
-                                       (KInt [_]
+                       (cond (str-eq k "as")
+                               (let [a2 (alloc-stack Sexp)]
+                                 (store! a2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                                 (match (l-sym-name a2)
+                                   (Some [al] (do (store! alias (Some al)) (store! i (iadd (load i) 2))))
+                                   (None []
+                                         (do
+                                           (loader-abort "import: :as expects an alias symbol")
+                                           (store! i (iadd (load i) 2))))))
+                             (str-eq k "reexport") (do (store! reexport true) (store! i (iadd (load i) 1)))
+                             (str-eq k "use")
+                               (let [v2 (alloc-stack Sexp)]
+                                 (store! v2 (al-get [Sexp] (load items) (iadd (load i) 1)))
+                                 (match (load (field v2 kind))
+                                   (KSym [sm]
+                                         (if (str-eq sm "*")
+                                             (do (store! use-spec (Some (UAll))) (store! i (iadd (load i) 2)))
                                              (do
                                                (loader-abort "import: :use expects * or [names]")
-                                               (store! i (iadd (load i) 2))))
-                                       (KFloat [_]
-                                               (do
-                                                 (loader-abort "import: :use expects * or [names]")
-                                                 (store! i (iadd (load i) 2))))
-                                       (KKw [_]
-                                            (do
-                                              (loader-abort "import: :use expects * or [names]")
-                                              (store! i (iadd (load i) 2))))
-                                       (KStr [_]
-                                             (do
-                                               (loader-abort "import: :use expects * or [names]")
-                                               (store! i (iadd (load i) 2))))
-                                       (KCStr [_]
-                                              (do
-                                                (loader-abort "import: :use expects * or [names]")
-                                                (store! i (iadd (load i) 2))))
-                                       (KList [_]
-                                              (do
-                                                (loader-abort "import: :use expects * or [names]")
-                                                (store! i (iadd (load i) 2))))))
-                                   (do
-                                     (loader-abort "import: expected :as alias, :use *|[names], or :reexport")
-                                     (store! i (iadd (load i) 1)))))))
+                                               (store! i (iadd (load i) 2)))))
+                                   (KVec [vit]
+                                         (do
+                                           (store! use-spec (Some (UNames (collect-syms a vit))))
+                                           (store! i (iadd (load i) 2))))
+                                   (KInt [_]
+                                         (do
+                                           (loader-abort "import: :use expects * or [names]")
+                                           (store! i (iadd (load i) 2))))
+                                   (KFloat [_]
+                                           (do
+                                             (loader-abort "import: :use expects * or [names]")
+                                             (store! i (iadd (load i) 2))))
+                                   (KKw [_]
+                                        (do
+                                          (loader-abort "import: :use expects * or [names]")
+                                          (store! i (iadd (load i) 2))))
+                                   (KStr [_]
+                                         (do
+                                           (loader-abort "import: :use expects * or [names]")
+                                           (store! i (iadd (load i) 2))))
+                                   (KCStr [_]
+                                          (do
+                                            (loader-abort "import: :use expects * or [names]")
+                                            (store! i (iadd (load i) 2))))
+                                   (KList [_]
+                                          (do
+                                            (loader-abort "import: :use expects * or [names]")
+                                            (store! i (iadd (load i) 2))))))
+                             :else
+                               (do
+                                 (loader-abort "import: expected :as alias, :use *|[names], or :reexport")
+                                 (store! i (iadd (load i) 1)))))
                   (KInt [_]
                         (do
                           (loader-abort "import: expected :as alias, :use *|[names], or :reexport")
@@ -899,23 +899,21 @@
                   (store! f (al-get [Sexp] (load forms) (load i)))
                   (match (l-list-head f)
                     (Some [h]
-                          (if (str-eq h "module")
-                              (let [name (module-name f)] (imp-entry (mut s) name) (store! cur (Some name)) 0)
-                              (if (str-eq h "export")
-                                  (handle-export (mut s) f (load cur))
-                                  (if (str-eq h "import")
-                                      (match (load cur)
-                                        (Some [m] (process-import (mut s) f base (load cur)))
-                                        (None []
-                                              (ls-set-err! (mut s)
-                                                           (diag-at-form f
-                                                                         "import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved"))))
-                                      (if (str-eq h "cimport")
-                                          (process-cimport (mut s) f (load cur))
-                                          (if (form-has-include-str f)
-                                              (al-push! (mut (field s out))
-                                                        (mk-tagged (expand-includes-in-form (mut s) f base) (load cur)))
-                                              (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))))))
+                          (cond (str-eq h "module")
+                                  (let [name (module-name f)] (imp-entry (mut s) name) (store! cur (Some name)) 0)
+                                (str-eq h "export") (handle-export (mut s) f (load cur))
+                                (str-eq h "import")
+                                  (match (load cur)
+                                    (Some [m] (process-import (mut s) f base (load cur)))
+                                    (None []
+                                          (ls-set-err! (mut s)
+                                                       (diag-at-form f
+                                                                     "import requires a (module …) declaration: add one (e.g. `(module app)`) at the top of the file, before any imports — otherwise imported types and functions cannot be resolved"))))
+                                (str-eq h "cimport") (process-cimport (mut s) f (load cur))
+                                (form-has-include-str f)
+                                  (al-push! (mut (field s out))
+                                            (mk-tagged (expand-includes-in-form (mut s) f base) (load cur)))
+                                :else (al-push! (mut (field s out)) (mk-tagged (load f) (load cur)))))
                     (None []
                           (al-push! (mut (field s out)) (mk-tagged (load f) (load cur))))))
                 (store! i (iadd (load i) 1)))))

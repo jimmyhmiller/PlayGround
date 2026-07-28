@@ -55,17 +55,15 @@
 ; LLVMRunPasses takes a C string and these are the only four.
 (defn opt-pipeline [(sanitize bool) (n i64)] (-> (ptr i8))
   (do
-    (if sanitize
-        (if (icmp-eq n 0)
-            c"default<O0>,asan"
-            (if (icmp-eq n 1)
-                c"default<O1>,asan"
-                (if (icmp-eq n 2) c"default<O2>,asan" c"default<O3>,asan")))
-        (if (icmp-eq n 0)
-            c"default<O0>"
-            (if (icmp-eq n 1)
-                c"default<O1>"
-                (if (icmp-eq n 2) c"default<O2>" c"default<O3>"))))))
+    (cond sanitize
+            (cond (icmp-eq n 0) c"default<O0>,asan"
+                  (icmp-eq n 1) c"default<O1>,asan"
+                  (icmp-eq n 2) c"default<O2>,asan"
+                  :else c"default<O3>,asan")
+          (icmp-eq n 0) c"default<O0>"
+          (icmp-eq n 1) c"default<O1>"
+          (icmp-eq n 2) c"default<O2>"
+          :else c"default<O3>")))
 ; mono'd Program -> native object file. Mirrors
 ; (the release/`src_path = None` path): build the module (codegen-module already
 ; sets target + datalayout), create a host target machine (cpu "generic", no

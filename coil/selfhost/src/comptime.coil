@@ -140,21 +140,16 @@
 (defn icmp-ord [(x i64) (y i64)] (-> i64)
   (if (icmp-lt x y) -1 (if (icmp-gt x y) 1 0)))
 (defn fcmp-ord [(x f64) (y f64)] (-> i64)
-  (if (fcmp-lt x y) -1 (if (fcmp-eq x y) 0 (if (fcmp-gt x y) 1 -1))))
+  (cond (fcmp-lt x y) -1 (fcmp-eq x y) 0 (fcmp-gt x y) 1 :else -1))
 (defn bool-ord [(x bool) (y bool)] (-> i64)
   (if (and (not x) y) -1 (if (and x (not y)) 1 0)))
 (defn cmp-apply [(op i64) (ord i64)] (-> bool)
-  (if (icmp-eq op 0)
-      (icmp-eq ord -1)
-      (if (icmp-eq op 1)
-          (icmp-ne ord 1)
-          (if (icmp-eq op 2)
-              (icmp-eq ord 1)
-              (if (icmp-eq op 3)
-                  (icmp-ne ord -1)
-                  (if (icmp-eq op 4)
-                      (icmp-eq ord 0)
-                      (icmp-ne ord 0)))))))
+  (cond (icmp-eq op 0) (icmp-eq ord -1)
+        (icmp-eq op 1) (icmp-ne ord 1)
+        (icmp-eq op 2) (icmp-eq ord 1)
+        (icmp-eq op 3) (icmp-ne ord -1)
+        (icmp-eq op 4) (icmp-eq ord 0)
+        :else (icmp-ne ord 0)))
 (defn ct-divzero-msg [(rem bool)] (-> (slice u8))
   (if rem "comptime: remainder by zero" "comptime: division by zero"))
 (defn wrap-mut [(v CtVal)] (-> CtVal)
@@ -857,14 +852,135 @@
                   (store! i (isub (load i) 1)))))
     (if (icmp-eq (load i) 0) (iadd start n) (isub n (load i)))))
 
+; ---- carrying the author's comments across a rewrite ------------------------
+; A replacement is assembled from the author's own nodes, so anything INSIDE a node
+; is copied verbatim and survives on its own. What no Code value records is the text
+; BETWEEN nodes — and in a Lisp the text between two nodes is the comments. Closing
+; an `if` staircase into a `cond` closes exactly those gaps, so left alone the
+; rewrite would quietly delete them.
+;
+; So the renderer walks the ORIGINAL span alongside the replacement it is building:
+; a cursor tracks how far into the source the nodes emitted so far have reached, and
+; whenever the next node starts past the cursor, the comments in the text skipped
+; over are written out first. Every fix that reuses the author's nodes emits them in
+; source order, so the cursor only moves forward; a node that would move it backwards
+; carries nothing rather than duplicating text that was already written.
+(defstruct SugGap [(on i64) (source i64) (at i64) (brk i64)])
+(defn sug-gap-cell [] (-> (ptr SugGap))
+  (alloc-static SugGap))
+(defn sug-gap-begin [(source i64) (lo i64) (hi i64)] (-> i64)
+  (let [g (sug-gap-cell)
+        src (sug-file-text source)
+        n (slice-len [u8] src)
+        span (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi))) "" (subslice [u8] src lo hi))]
+    (store! (field g on) 1)
+    (store! (field g source) source)
+    (store! (field g at) lo)
+    ; A comment ends its line, so a replacement carrying one CANNOT be laid out flat.
+    ; The width pass runs before the carry and would never find out on its own, so the
+    ; whole rendering is put in broken layout up front — the same thing verbatim text
+    ; containing a newline already does by reporting an unfittable width.
+    (store! (field g brk) (if (icmp-gt (sug-comment-marks span) 0) 1 0))
+    0))
+(defn sug-gap-end [] (-> i64)
+  (store! (field (sug-gap-cell) on) 0)
+  0)
+(defn sug-gap-break? [] (-> bool)
+  (let [g (sug-gap-cell)] (and (icmp-ne (load (field g on)) 0) (icmp-ne (load (field g brk)) 0))))
+
+; Write every comment in `s` into `buf`, each on its own line at column `col`. A `;`
+; in the gap between two nodes can only start a comment: a string or a char literal
+; is a node in its own right and would never sit loose in a gap.
+;
+; `lead` says which side the line break goes on. Mid-form the buffer is already
+; indented and waiting for the node that follows, so the break comes AFTER each
+; comment (leaving that indent behind for it). After the form there is nothing to
+; follow, so the break comes BEFORE — otherwise the edit ends in trailing blanks.
+(defn sug-put-comments! [(buf (mut (ArrayList u8))) (s (slice u8)) (col i64) (lead bool)] (-> i64)
+  (let [n (slice-len [u8] s)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-ne (cast i64 (slice-get [u8] s (load i))) 59)
+                  (store! i (iadd (load i) 1))
+                  (let [start (load i)
+                        (mut e) (load i)]
+                    (if lead (sug-newline! (mut buf) col) 0)
+                    ; a comment runs to end of line
+                    (loop (if (or (icmp-ge (load e) n) (icmp-eq (cast i64 (slice-get [u8] s (load e))) 10))
+                              (break)
+                              (store! e (iadd (load e) 1))))
+                    ; ...minus any trailing blanks, which would become dangling
+                    ; whitespace once the line is re-laid-out somewhere else
+                    (let [(mut t) (load e)]
+                      (loop (if (icmp-le (load t) start)
+                                (break)
+                                (let [c (cast i64 (slice-get [u8] s (isub (load t) 1)))]
+                                  (if (or (icmp-eq c 32) (or (icmp-eq c 9) (icmp-eq c 13)))
+                                      (store! t (isub (load t) 1))
+                                      (break)))))
+                      (append-bytes! (mut buf) (subslice [u8] s start (load t))))
+                    (if lead 0 (sug-newline! (mut buf) col))
+                    (store! i (load e))))))
+    0))
+
+; The source text between where the cursor stopped and where `x` begins: the gap the
+; rewrite is about to close, and the only place the author's text can go missing.
+; Empty when `x` sits behind the cursor — a fix that reordered the author's nodes,
+; where carrying would re-emit text already written.
+(defn sug-gap-before [(x Sexp)] (-> (slice u8))
+  (let [g (sug-gap-cell)]
+    (if (or (icmp-eq (load (field g on)) 0) (icmp-ne (sx-source x) (load (field g source))))
+        ""
+        (let [lo (sx-lo x)
+              at (load (field g at))
+              src (sug-file-text (load (field g source)))
+              n (slice-len [u8] src)]
+          (if (or (icmp-lt lo at) (or (icmp-gt lo n) (icmp-gt at n))) "" (subslice [u8] src at lo))))))
+
+(defn sug-gap-commented? [(x Sexp)] (-> bool)
+  (icmp-gt (sug-comment-marks (sug-gap-before x)) 0))
+
+; Carry the comments sitting in front of `x`, leaving the buffer indented at `col` for
+; `x` itself, and move the cursor past `x` so nothing is written twice.
+(defn sug-carry-at! [(buf (mut (ArrayList u8))) (x Sexp) (col i64)] (-> i64)
+  (let [g (sug-gap-cell)]
+    (sug-put-comments! (mut buf) (sug-gap-before x) col false)
+    (if (and (icmp-ne (load (field g on)) 0) (icmp-eq (sx-source x) (load (field g source))))
+        (if (icmp-gt (sx-hi x) (load (field g at))) (store! (field g at) (sx-hi x)) 0)
+        0)
+    0))
+
+; Comments inside the replaced span but after the last node the replacement reused
+; would otherwise go out with the closing parens. They are written after the rendered
+; form, on their own line — the one place left that is still inside the edit.
+(defn sug-carry-tail! [(buf (mut (ArrayList u8))) (hi i64) (col i64)] (-> i64)
+  (let [g (sug-gap-cell)]
+    (if (icmp-eq (load (field g on)) 0)
+        0
+        (let [at (load (field g at))
+              src (sug-file-text (load (field g source)))
+              n (slice-len [u8] src)]
+          (if (or (icmp-ge at hi) (icmp-gt hi n))
+              0
+              (sug-put-comments! (mut buf) (subslice [u8] src at hi) col true))))))
+
 ; Render `x` into `buf` as source text. `start` is the column `buf`'s first byte
 ; occupies, which is all the renderer needs to know about the text around it.
 (defn sug-emit! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp) (start i64)] (-> i64)
-  (let [col (sug-cur-col (load buf) start)
-        v (sug-verbatim x)]
+  (let [v (sug-verbatim x)]
     (if (icmp-gt (slice-len [u8] v) 0)
-        (sug-put-reindent! (mut buf) v (sug-col-at (sug-file-text (sx-source x)) (sx-lo x)) col)
-        (let [tg (sx-tag x)]
+        ; A node that came from source. Carry the comments skipped over on the way to
+        ; it FIRST — that may open a new line, so its landing column has to be read
+        ; from the buffer afterwards rather than before.
+        (do
+          (sug-carry-at! (mut buf) x (sug-cur-col (load buf) start))
+          (sug-put-reindent! (mut buf)
+                             v
+                             (sug-col-at (sug-file-text (sx-source x)) (sx-lo x))
+                             (sug-cur-col (load buf) start)))
+        (let [col (sug-cur-col (load buf) start)
+              tg (sx-tag x)]
           (if (not (or (icmp-eq tg 6) (icmp-eq tg 7)))
               (sug-atom! a (mut buf) x)
               (let [items (sx-items x)
@@ -875,7 +991,7 @@
                     (do (al-push! (mut buf) (cast u8 open)) (al-push! (mut buf) (cast u8 close)) 0)
                     (do
                       (al-push! (mut buf) (cast u8 open))
-                      (if (icmp-le (iadd col (sug-width a x)) (sug-width-budget))
+                      (if (and (not (sug-gap-break?)) (icmp-le (iadd col (sug-width a x)) (sug-width-budget)))
                           ; fits: one line, single spaces
                           (let [(mut i) 0]
                             (loop (if (icmp-ge (load i) n)
@@ -899,22 +1015,38 @@
                                           (if (icmp-eq (load i) 1)
                                               (al-push! (mut buf) (cast u8 32))
                                               (sug-newline! (mut buf) ind))
-                                          ; one clause: test, then body on the same line
+                                          ; one clause: test, then its body — on the same
+                                          ; line if it still fits, else broken onto the
+                                          ; next one indented two past the clause column,
+                                          ; which is where fmt puts a body it cannot fit
+                                          ; (fmt/rules.coil layout-clauses).
                                           (let [(mut k) 0]
                                             (loop (if (or (icmp-ge (load k) step) (icmp-ge (iadd (load i) (load k)) n))
                                                       (break)
-                                                      (do
-                                                        (if (icmp-gt (load k) 0) (al-push! (mut buf) (cast u8 32)) 0)
-                                                        (sug-emit! a
-                                                                   (mut buf)
-                                                                   (sx-at items (iadd (load i) (load k)))
-                                                                   start)
+                                                      (let [it (sx-at items (iadd (load i) (load k)))]
+                                                        (if (icmp-gt (load k) 0)
+                                                            (if (sug-gap-commented? it)
+                                                                ; fmt/rules.coil: a comment BETWEEN a clause
+                                                                ; test and its body forces the hang — two
+                                                                ; spaces, the comment, then the body alone on
+                                                                ; the next line. Nothing may share that line.
+                                                                (do
+                                                                  (al-push! (mut buf) (cast u8 32))
+                                                                  (al-push! (mut buf) (cast u8 32))
+                                                                  (sug-carry-at! (mut buf) it (iadd ind 2)))
+                                                                (if (icmp-le (iadd (iadd (sug-cur-col (load buf) start)
+                                                                                         1)
+                                                                                   (sug-width a it))
+                                                                             (sug-width-budget))
+                                                                    (al-push! (mut buf) (cast u8 32))
+                                                                    (sug-newline! (mut buf) (iadd ind 2))))
+                                                            0)
+                                                        (sug-emit! a (mut buf) it start)
                                                         (store! k (iadd (load k) 1))))))
                                           (store! i (iadd (load i) step))))))))
                       (al-push! (mut buf) (cast u8 close))
                       0)))))))
   0)
-
 ; ---- the comment guard ------------------------------------------------------
 ; A replacement is assembled from the author's own nodes, so anything INSIDE a node
 ; survives. What does not survive is text between nodes — and in a Lisp the text
@@ -1018,7 +1150,12 @@
   (let [sp (alloc-stack Suggestion)
         (mut buf) (al-new [u8] a)]
     (store! sp s)
+    ; the cursor runs over the span being replaced, so the comments in the gaps the
+    ; rewrite closes come along with the nodes it reuses
+    (sug-gap-begin (load (field sp source)) (load (field sp lo)) (load (field sp hi)))
     (sug-emit! a (mut buf) (load (field sp repl)) col)
+    (sug-carry-tail! (mut buf) (load (field sp hi)) col)
+    (sug-gap-end)
     (al-slice [u8] (load buf))))
 
 ; The text that would be spliced over the suggestion's own span.
@@ -1344,37 +1481,22 @@
     (mk-sexp (KList (box-al [Sexp] a (load it))) -1 -1)))
 (defn ty->sexp [(a (ptr Allocator)) (t (ptr Type))] (-> Sexp)
   (let [tg (type-tag t)]
-    (if (icmp-eq tg 0)
-        (sx-sym (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
-        (if (icmp-eq tg 1)
-            (sx-sym (sconcat a "f" (i64->str a (t-int-bits t))))
-            (if (icmp-eq tg 2)
-                (sx-sym "bool")
-                (if (icmp-eq tg 3)
-                    (sx-sym "void")
-                    (if (icmp-eq tg 4)
-                        (ty-list2 a "ptr" (ty->sexp a (t-inner t)))
-                        (if (icmp-eq tg 5)
-                            (ty-list2 a (if (t-ref-mut t) "mut" "ref") (ty->sexp a (t-inner t)))
-                            (if (icmp-eq tg 6)
-                                (sx-sym (type-struct-name t))
-                                (if (icmp-eq tg 7)
-                                    (ty-list3 a "array" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
-                                    (if (icmp-eq tg 8)
-                                        (ty-list2 a "slice" (ty->sexp a (t-inner t)))
-                                        (if (icmp-eq tg 9)
-                                            (ty-list3 a "vec" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
-                                            (if (icmp-eq tg 12)
-                                                (sx-sym "!")
-                                                (if (icmp-eq tg 13)
-                                                    (sx-sym "code")
-                                                    (if (icmp-eq tg 14)
-                                                        (sx-sym "externref")
-                                                        (if (icmp-eq tg 11)
-                                                            (ty-app-sexp a t)
-                                                            (if (icmp-eq tg 10)
-                                                                (ty-fn-sexp a t)
-                                                                (sx-sym "?"))))))))))))))))))
+    (cond (icmp-eq tg 0) (sx-sym (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t))))
+          (icmp-eq tg 1) (sx-sym (sconcat a "f" (i64->str a (t-int-bits t))))
+          (icmp-eq tg 2) (sx-sym "bool")
+          (icmp-eq tg 3) (sx-sym "void")
+          (icmp-eq tg 4) (ty-list2 a "ptr" (ty->sexp a (t-inner t)))
+          (icmp-eq tg 5) (ty-list2 a (if (t-ref-mut t) "mut" "ref") (ty->sexp a (t-inner t)))
+          (icmp-eq tg 6) (sx-sym (type-struct-name t))
+          (icmp-eq tg 7) (ty-list3 a "array" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+          (icmp-eq tg 8) (ty-list2 a "slice" (ty->sexp a (t-inner t)))
+          (icmp-eq tg 9) (ty-list3 a "vec" (ty->sexp a (t-inner t)) (sx-mkint (t-arrn t)))
+          (icmp-eq tg 12) (sx-sym "!")
+          (icmp-eq tg 13) (sx-sym "code")
+          (icmp-eq tg 14) (sx-sym "externref")
+          (icmp-eq tg 11) (ty-app-sexp a t)
+          (icmp-eq tg 10) (ty-fn-sexp a t)
+          :else (sx-sym "?"))))
 ; The params-vector `[T…]` of a function's signature, as Code.
 (defn fn-params-vec [(a (ptr Allocator)) (fp (ptr Func))] (-> Sexp)
   (let [ps (load (field fp params))
@@ -1748,27 +1870,22 @@
 (defn type-query [(q i64) (ty Type) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [named (ty-is-named ty)
         nm (ty-name-opt ty)]
-    (if (icmp-eq q 0)
-        (let [sd (if named (ct-struct-find cx nm) (cast (ptr StructDef) 0))]
-          (if (icmp-eq (cast i64 sd) 0)
-              (Err [CtVal Diag] (derr "field-count: type is not a struct"))
-              (Ok [CtVal Diag] (CInt (al-len [Field] (load (field sd fields)))))))
-        (if (icmp-eq q 1)
+    (cond (icmp-eq q 0)
+            (let [sd (if named (ct-struct-find cx nm) (cast (ptr StructDef) 0))]
+              (if (icmp-eq (cast i64 sd) 0)
+                  (Err [CtVal Diag] (derr "field-count: type is not a struct"))
+                  (Ok [CtVal Diag] (CInt (al-len [Field] (load (field sd fields)))))))
+          (icmp-eq q 1)
             (let [sd (if named (ct-sum-find cx nm) (cast (ptr SumDef) 0))]
               (if (icmp-eq (cast i64 sd) 0)
                   (Err [CtVal Diag] (derr "variant-count: type is not a sum"))
                   (Ok [CtVal Diag] (CInt (al-len [Variant] (load (field sd variants)))))))
-            (if (icmp-eq q 2)
-                (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-struct-find cx nm)) 0))))
-                (if (icmp-eq q 3)
-                    (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-sum-find cx nm)) 0))))
-                    (if (icmp-eq q 4)
-                        (Ok [CtVal Diag] (CBool (match-else ty (TInt [b s] true) (_ false))))
-                        (if (icmp-eq q 5)
-                            (Ok [CtVal Diag] (CBool (match-else ty (TFloat [b] true) (_ false))))
-                            (if (icmp-eq q 6)
-                                (Ok [CtVal Diag] (CBool (match-else ty (TPtr [i] true) (TRef [m i] true) (_ false))))
-                                (Ok [CtVal Diag] (CBool (match-else ty (TArray [e k] true) (_ false)))))))))))))
+          (icmp-eq q 2) (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-struct-find cx nm)) 0))))
+          (icmp-eq q 3) (Ok [CtVal Diag] (CBool (and named (icmp-ne (cast i64 (ct-sum-find cx nm)) 0))))
+          (icmp-eq q 4) (Ok [CtVal Diag] (CBool (match-else ty (TInt [b s] true) (_ false))))
+          (icmp-eq q 5) (Ok [CtVal Diag] (CBool (match-else ty (TFloat [b] true) (_ false))))
+          (icmp-eq q 6) (Ok [CtVal Diag] (CBool (match-else ty (TPtr [i] true) (TRef [m i] true) (_ false))))
+          :else (Ok [CtVal Diag] (CBool (match-else ty (TArray [e k] true) (_ false)))))))
 (defn field-meta [(meta i64) (ty Type) (i i64) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (if (not (ty-is-named ty))
@@ -1827,15 +1944,11 @@
 (defn sexp-eq [(x Sexp) (y Sexp)] (-> bool)
   (let [tx (sx-tag x)
         ty (sx-tag y)]
-    (if (icmp-ne tx ty)
-        false
-        (if (or (icmp-eq tx 0) (icmp-eq tx 1))
-            (icmp-eq (sx-ival x) (sx-ival y))
-            (if (or (icmp-eq tx 2) (or (icmp-eq tx 3) (or (icmp-eq tx 4) (icmp-eq tx 5))))
-                (str-eq (sx-sval x) (sx-sval y))
-                (if (or (icmp-eq tx 6) (icmp-eq tx 7))
-                    (sexp-list-eq (sx-items x) (sx-items y))
-                    false))))))
+    (cond (icmp-ne tx ty) false
+          (or (icmp-eq tx 0) (icmp-eq tx 1)) (icmp-eq (sx-ival x) (sx-ival y))
+          (or (icmp-eq tx 2) (or (icmp-eq tx 3) (or (icmp-eq tx 4) (icmp-eq tx 5)))) (str-eq (sx-sval x) (sx-sval y))
+          (or (icmp-eq tx 6) (icmp-eq tx 7)) (sexp-list-eq (sx-items x) (sx-items y))
+          :else false)))
 (defn ctval->sexp [(v CtVal)] (-> (Result Sexp Diag))
   (match-else v
               (CCode [c] (Ok [Sexp Diag] c))
@@ -1978,46 +2091,40 @@
 ; only. Returns "" for a shape that is not a nameable type — the caller errors.
 (defn inst-node-mangle [(a (ptr Allocator)) (node Sexp)] (-> (slice u8))
   (let [tg (sx-tag node)]
-    (if (or (icmp-eq tg 2) (icmp-eq tg 4))
-        (sx-sval node)
-        (if (icmp-eq tg 0)
-            (dec->str a (sx-ival node))
-            (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-                (let [items (sx-items node)
-                      n (sx-len items)]
-                  (if (or (icmp-eq n 0) (icmp-ne (sx-tag (sx-at items 0)) 2))
-                      ""
-                      (let [(mut s) (sx-sval (sx-at items 0))
-                            (mut i) 1]
-                        (loop (if (icmp-ge (load i) n)
-                                  (break)
-                                  (let [part (inst-node-mangle a (sx-at items (load i)))]
-                                    (if (str-eq part "")
-                                        (do (store! s "") (break))
-                                        (do
-                                          (store! s (sconcat a (load s) (sconcat a "__" part)))
-                                          (store! i (iadd (load i) 1)))))))
-                        (load s))))
-                "")))))
+    (cond (or (icmp-eq tg 2) (icmp-eq tg 4)) (sx-sval node)
+          (icmp-eq tg 0) (dec->str a (sx-ival node))
+          (or (icmp-eq tg 6) (icmp-eq tg 7))
+            (let [items (sx-items node)
+                  n (sx-len items)]
+              (if (or (icmp-eq n 0) (icmp-ne (sx-tag (sx-at items 0)) 2))
+                  ""
+                  (let [(mut s) (sx-sval (sx-at items 0))
+                        (mut i) 1]
+                    (loop (if (icmp-ge (load i) n)
+                              (break)
+                              (let [part (inst-node-mangle a (sx-at items (load i)))]
+                                (if (str-eq part "")
+                                    (do (store! s "") (break))
+                                    (do
+                                      (store! s (sconcat a (load s) (sconcat a "__" part)))
+                                      (store! i (iadd (load i) 1)))))))
+                    (load s))))
+          :else "")))
 (defn concat-one! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (v CtVal) (tg i64)] (-> (Option Diag))
-  (if (icmp-eq tg 3)
-      (do (append-bytes! (mut buf) (cstr-of v)) (None [Diag]))
-      (if (icmp-eq tg 0)
-          (do (append-bytes! (mut buf) (dec->str a (cint-of v))) (None [Diag]))
-          (if (icmp-eq tg 4)
-              (let [c (ccode-of v)
-                    ctg (sx-tag c)]
-                (if (or (icmp-eq ctg 2) (icmp-eq ctg 4))
-                    (do (append-bytes! (mut buf) (sx-sval c)) (None [Diag]))
-                    (if (icmp-eq ctg 0)
-                        (do (append-bytes! (mut buf) (dec->str a (sx-ival c))) (None [Diag]))
-                        (if (or (icmp-eq ctg 6) (icmp-eq ctg 7))
-                            (let [m (inst-node-mangle a c)]
-                              (if (str-eq m "")
-                                  (Some (derr "comptime: code-symbol/str part is not a nameable type (expected a symbol, string, int, or instantiation (Gen …))"))
-                                  (do (append-bytes! (mut buf) m) (None [Diag]))))
-                            (Some (derr "comptime: code-symbol/str part must be a symbol/string/int"))))))
-              (Some (derr "comptime: code-symbol/str part must be a string/int/code"))))))
+  (cond (icmp-eq tg 3) (do (append-bytes! (mut buf) (cstr-of v)) (None [Diag]))
+        (icmp-eq tg 0) (do (append-bytes! (mut buf) (dec->str a (cint-of v))) (None [Diag]))
+        (icmp-eq tg 4)
+          (let [c (ccode-of v)
+                ctg (sx-tag c)]
+            (cond (or (icmp-eq ctg 2) (icmp-eq ctg 4)) (do (append-bytes! (mut buf) (sx-sval c)) (None [Diag]))
+                  (icmp-eq ctg 0) (do (append-bytes! (mut buf) (dec->str a (sx-ival c))) (None [Diag]))
+                  (or (icmp-eq ctg 6) (icmp-eq ctg 7))
+                    (let [m (inst-node-mangle a c)]
+                      (if (str-eq m "")
+                          (Some (derr "comptime: code-symbol/str part is not a nameable type (expected a symbol, string, int, or instantiation (Gen …))"))
+                          (do (append-bytes! (mut buf) m) (None [Diag]))))
+                  :else (Some (derr "comptime: code-symbol/str part must be a symbol/string/int"))))
+        :else (Some (derr "comptime: code-symbol/str part must be a string/int/code"))))
 (defn concat-into! [(args (ptr (ArrayList CtVal))) (i i64) (n i64) (a (ptr Allocator)) (buf (mut (ArrayList u8)))] (-> (Option Diag))
   (if (icmp-ge i n)
       (None [Diag])
@@ -2123,10 +2230,8 @@
                                                 fname (load (field fp name))
                                                 ftyp (field fp ty)
                                                 hasargs (icmp-gt (al-len [Sexp] (load targs)) 0)]
-                                            (if (icmp-eq op 15)
-                                                (Ok [CtVal Diag] (CCode (sx-sym fname)))
-                                                (if (icmp-eq op 16)
-                                                    ; kind: substituted when an instantiation was given, else EXACTLY as before
+                                            (cond (icmp-eq op 15) (Ok [CtVal Diag] (CCode (sx-sym fname)))
+                                                  (icmp-eq op 16)  ; kind: substituted when an instantiation was given, else EXACTLY as before
                                                     (if (not hasargs)
                                                         (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx)))
                                                         (match (parse-type a
@@ -2136,14 +2241,14 @@
                                                           (Ok [st] (Ok [CtVal Diag] (CInt (type-kind-tag st cx))))
                                                           (Err [d]
                                                                (Ok [CtVal Diag] (CInt (type-kind-tag (load ftyp) cx))))))
-                                                    ; type: structured & substituted for a generic instantiation,
-                                                    ; else the historical bare-name symbol (byte-identical to before)
-                                                    (if hasargs
-                                                        (Ok [CtVal Diag]
-                                                            (CCode (subst-type-code (type->code ftyp)
-                                                                                    (load (field sd type_params))
-                                                                                    targs)))
-                                                        (Ok [CtVal Diag] (CCode (sx-sym (type-name-str a ftyp)))))))))))))))))))))
+                                                  ; type: structured & substituted for a generic instantiation,
+                                                  ; else the historical bare-name symbol (byte-identical to before)
+                                                  hasargs
+                                                    (Ok [CtVal Diag]
+                                                        (CCode (subst-type-code (type->code ftyp)
+                                                                                (load (field sd type_params))
+                                                                                targs)))
+                                                  :else (Ok [CtVal Diag] (CCode (sx-sym (type-name-str a ftyp)))))))))))))))))))
 (defn cop-variant [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))
         arg (code-symname args)]
@@ -2230,29 +2335,27 @@
 (defn cop-trait-method [(op i64) (args (ptr (ArrayList CtVal))) (m (ptr TraitMethod)) (cx (ptr CtCtx))] (-> (Result CtVal
                                                                                                                     Diag))
   (let [a (load (field cx a))]
-    (if (icmp-eq op 23)
-        (Ok [CtVal Diag] (CCode (sx-sym (load (field m name)))))
-        (if (icmp-eq op 24)
-            (Ok [CtVal Diag] (CInt (al-len [Param] (load (field m params)))))
-            (if (icmp-eq op 27)
-                (Ok [CtVal Diag] (CCode (type->code (field m ret))))
-                (match (cv-get args 2)
-                  (None []
-                        (Err [CtVal Diag] (derr "comptime: code-trait-param-* needs a method index and a param index")))
-                  (Some [pv]
-                        (if (icmp-ne (ct-tag pv) 0)
-                            (Err [CtVal Diag]
-                                 (derr "comptime: code-trait-param-* needs a method index and a param index"))
-                            (let [pj (cint-of pv)
-                                  ps (load (field m params))
-                                  np (al-len [Param] (load ps))]
-                              (if (or (icmp-lt pj 0) (icmp-ge pj np))
-                                  (Err [CtVal Diag]
-                                       (derr (sconcat3 a "comptime: trait param index " (dec->str a pj) " out of range")))
-                                  (let [p (al-elem [Param] ps pj)]
-                                    (if (icmp-eq op 25)
-                                        (Ok [CtVal Diag] (CCode (sx-sym (load (field p name)))))
-                                        (Ok [CtVal Diag] (CCode (type->code (field p ty))))))))))))))))
+    (cond (icmp-eq op 23) (Ok [CtVal Diag] (CCode (sx-sym (load (field m name)))))
+          (icmp-eq op 24) (Ok [CtVal Diag] (CInt (al-len [Param] (load (field m params)))))
+          (icmp-eq op 27) (Ok [CtVal Diag] (CCode (type->code (field m ret))))
+          :else
+            (match (cv-get args 2)
+              (None []
+                    (Err [CtVal Diag] (derr "comptime: code-trait-param-* needs a method index and a param index")))
+              (Some [pv]
+                    (if (icmp-ne (ct-tag pv) 0)
+                        (Err [CtVal Diag]
+                             (derr "comptime: code-trait-param-* needs a method index and a param index"))
+                        (let [pj (cint-of pv)
+                              ps (load (field m params))
+                              np (al-len [Param] (load ps))]
+                          (if (or (icmp-lt pj 0) (icmp-ge pj np))
+                              (Err [CtVal Diag]
+                                   (derr (sconcat3 a "comptime: trait param index " (dec->str a pj) " out of range")))
+                              (let [p (al-elem [Param] ps pj)]
+                                (if (icmp-eq op 25)
+                                    (Ok [CtVal Diag] (CCode (sx-sym (load (field p name)))))
+                                    (Ok [CtVal Diag] (CCode (type->code (field p ty))))))))))))))
 (defn cop-strbytes [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (let [a (load (field cx a))]
     (match (cv-get args 0)
@@ -2316,71 +2419,68 @@
                 (Err [CtVal Diag] (derr "comptime: code op expects a Code value"))
                 (let [code (ccode-of v0)
                       tg (sx-tag code)]
-                  (if (icmp-eq op 0)
-                      (Ok [CtVal Diag] (CBool (or (icmp-eq tg 6) (icmp-eq tg 7))))
-                      (if (icmp-eq op 1)
-                          (Ok [CtVal Diag] (CBool (icmp-eq tg 2)))
-                          (if (icmp-eq op 2)
-                              (Ok [CtVal Diag] (CBool (icmp-eq tg 0)))
-                              (if (icmp-eq op 11)
-                                  (Ok [CtVal Diag] (CBool (icmp-eq tg 3)))
-                                  (if (icmp-eq op 3)
+                  (cond (icmp-eq op 0) (Ok [CtVal Diag] (CBool (or (icmp-eq tg 6) (icmp-eq tg 7))))
+                        (icmp-eq op 1) (Ok [CtVal Diag] (CBool (icmp-eq tg 2)))
+                        (icmp-eq op 2) (Ok [CtVal Diag] (CBool (icmp-eq tg 0)))
+                        (icmp-eq op 11) (Ok [CtVal Diag] (CBool (icmp-eq tg 3)))
+                        (icmp-eq op 3)
+                          (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+                              (Ok [CtVal Diag] (CInt (sx-len (sx-items code))))
+                              (Err [CtVal Diag] (derr "comptime: code-count expects a list/vector")))
+                        (icmp-eq op 5)
+                          (if (icmp-eq tg 2)
+                              (Ok [CtVal Diag] (CStr (sx-sval code)))
+                              (Err [CtVal Diag] (derr "comptime: code-sym expects a symbol")))
+                        (icmp-eq op 6)
+                          (if (icmp-eq tg 0)
+                              (Ok [CtVal Diag] (CInt (sx-ival code)))
+                              (Err [CtVal Diag] (derr "comptime: code-int expects an integer")))
+                        (icmp-eq op 7)
+                          (if (or (icmp-eq tg 6) (icmp-eq tg 7))
+                              (let [items (sx-items code)
+                                    n (sx-len items)
+                                    (mut xs) (al-new [Sexp] a)
+                                    (mut i) 1]
+                                (loop (if (icmp-ge (load i) n)
+                                          (break)
+                                          (do
+                                            (al-push! (mut xs) (sx-at items (load i)))
+                                            (store! i (iadd (load i) 1)))))
+                                (Ok [CtVal Diag]
+                                    (CCode (sx-mklist (box-al [Sexp] a (load xs))))))
+                              (Err [CtVal Diag] (derr "comptime: code-rest expects a list")))
+                        (icmp-eq op 4)
+                          (match (cv-get args 1)
+                            (None []
+                                  (Err [CtVal Diag]
+                                       (derr "comptime: code-nth index must be an integer")))
+                            (Some [iv]
+                                  (if (icmp-ne (ct-tag iv) 0)
+                                      (Err [CtVal Diag]
+                                           (derr "comptime: code-nth index must be an integer"))
                                       (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-                                          (Ok [CtVal Diag] (CInt (sx-len (sx-items code))))
-                                          (Err [CtVal Diag] (derr "comptime: code-count expects a list/vector")))
-                                      (if (icmp-eq op 5)
-                                          (if (icmp-eq tg 2)
-                                              (Ok [CtVal Diag] (CStr (sx-sval code)))
-                                              (Err [CtVal Diag] (derr "comptime: code-sym expects a symbol")))
-                                          (if (icmp-eq op 6)
-                                              (if (icmp-eq tg 0)
-                                                  (Ok [CtVal Diag] (CInt (sx-ival code)))
-                                                  (Err [CtVal Diag] (derr "comptime: code-int expects an integer")))
-                                              (if (icmp-eq op 7)
-                                                  (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-                                                      (let [items (sx-items code)
-                                                            n (sx-len items)
-                                                            (mut xs) (al-new [Sexp] a)
-                                                            (mut i) 1]
-                                                        (loop (if (icmp-ge (load i) n)
-                                                                  (break)
-                                                                  (do
-                                                                    (al-push! (mut xs) (sx-at items (load i)))
-                                                                    (store! i (iadd (load i) 1)))))
-                                                        (Ok [CtVal Diag]
-                                                            (CCode (sx-mklist (box-al [Sexp] a (load xs))))))
-                                                      (Err [CtVal Diag] (derr "comptime: code-rest expects a list")))
-                                                  (if (icmp-eq op 4)
-                                                      (match (cv-get args 1)
-                                                        (None []
-                                                              (Err [CtVal Diag]
-                                                                   (derr "comptime: code-nth index must be an integer")))
-                                                        (Some [iv]
-                                                              (if (icmp-ne (ct-tag iv) 0)
-                                                                  (Err [CtVal Diag]
-                                                                       (derr "comptime: code-nth index must be an integer"))
-                                                                  (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-                                                                      (let [items (sx-items code)
-                                                                            i (cint-of iv)]
-                                                                        (if (or (icmp-lt i 0)
-                                                                                (icmp-ge i (sx-len items)))
-                                                                            (Err [CtVal Diag]
-                                                                                 (derr (sconcat3 a
-                                                                                                 "comptime: code-nth index "
-                                                                                                 (dec->str a i)
-                                                                                                 " out of range")))
-                                                                            (Ok [CtVal Diag] (CCode (sx-at items i)))))
-                                                                      (Err [CtVal Diag]
-                                                                           (derr "comptime: code-nth expects a list/vector"))))))
-                                                      (match (cv-get args 1)
-                                                        (None []
-                                                              (Err [CtVal Diag]
-                                                                   (derr "comptime: code-eq expects two Code values")))
-                                                        (Some [v1]
-                                                              (if (not (is-ccode v1))
-                                                                  (Err [CtVal Diag]
-                                                                       (derr "comptime: code-eq expects two Code values"))
-                                                                  (Ok [CtVal Diag] (CBool (sexp-eq code (ccode-of v1))))))))))))))))))))))
+                                          (let [items (sx-items code)
+                                                i (cint-of iv)]
+                                            (if (or (icmp-lt i 0)
+                                                    (icmp-ge i (sx-len items)))
+                                                (Err [CtVal Diag]
+                                                     (derr (sconcat3 a
+                                                                     "comptime: code-nth index "
+                                                                     (dec->str a i)
+                                                                     " out of range")))
+                                                (Ok [CtVal Diag] (CCode (sx-at items i)))))
+                                          (Err [CtVal Diag]
+                                               (derr "comptime: code-nth expects a list/vector"))))))
+                        :else
+                          (match (cv-get args 1)
+                            (None []
+                                  (Err [CtVal Diag]
+                                       (derr "comptime: code-eq expects two Code values")))
+                            (Some [v1]
+                                  (if (not (is-ccode v1))
+                                      (Err [CtVal Diag]
+                                           (derr "comptime: code-eq expects two Code values"))
+                                      (Ok [CtVal Diag] (CBool (sexp-eq code (ccode-of v1))))))))))))))
 (defn code-op [(op i64) (args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   ; The structural ops a metaprogram actually spends its life on — code-list? (0),
   ; code-sym? (1), code-int? (2), code-count (3), code-nth (4), code-sym (5),
@@ -2391,125 +2491,114 @@
   (if (or (icmp-le op 7) (icmp-eq op 11))
       (cop-codearg op args cx)
       (let [a (load (field cx a))]
-        (if (icmp-eq op 8)
-            (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
-            (if (icmp-eq op 30)
-                (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
-                (if (icmp-eq op 39)
-                    (Ok [CtVal Diag] (CBool (debug-checks-on?)))
-                    (if (icmp-eq op 9)
-                        (match (cv-get args 0)
-                          (Some [v]
-                                (if (is-cstr v)
-                                    (Err [CtVal Diag] (derr (cstr-of v)))
-                                    (Err [CtVal Diag] (derr "error: message must be a string"))))
-                          (None [] (Err [CtVal Diag] (derr "error: message must be a string"))))
-                        (if (icmp-eq op 31)
-                            (match (cv-get args 0)
-                              (Some [nodev]
-                                    (if (is-ccode nodev)
-                                        (match (cv-get args 1)
-                                          (Some [msgv]
-                                                (if (is-cstr msgv)
-                                                    (let [node (ccode-of nodev)
-                                                          d (alloc-stack Diag)]
-                                                      (store! (field d lo) (sx-lo node))
-                                                      (store! (field d hi) (sx-hi node))
-                                                      (store! (field d msg) (sconcat a "error: " (cstr-of msgv)))
-                                                      (store! (field d source) (sx-source node))
-                                                      (store! (field d ctxt) 0)
-                                                      (warn-push (load d))
-                                                      (diag-err-bump)
-                                                      (Ok [CtVal Diag] (CInt 0)))
-                                                    (Err [CtVal Diag] (derr "report: message must be a string"))))
-                                          (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
-                                        (Err [CtVal Diag] (derr "report: first arg must be a Code node"))))
+        (cond (icmp-eq op 8) (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
+              (icmp-eq op 30) (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
+              (icmp-eq op 39) (Ok [CtVal Diag] (CBool (debug-checks-on?)))
+              (icmp-eq op 9)
+                (match (cv-get args 0)
+                  (Some [v]
+                        (if (is-cstr v)
+                            (Err [CtVal Diag] (derr (cstr-of v)))
+                            (Err [CtVal Diag] (derr "error: message must be a string"))))
+                  (None [] (Err [CtVal Diag] (derr "error: message must be a string"))))
+              (icmp-eq op 31)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (match (cv-get args 1)
+                              (Some [msgv]
+                                    (if (is-cstr msgv)
+                                        (let [node (ccode-of nodev)
+                                              d (alloc-stack Diag)]
+                                          (store! (field d lo) (sx-lo node))
+                                          (store! (field d hi) (sx-hi node))
+                                          (store! (field d msg) (sconcat a "error: " (cstr-of msgv)))
+                                          (store! (field d source) (sx-source node))
+                                          (store! (field d ctxt) 0)
+                                          (warn-push (load d))
+                                          (diag-err-bump)
+                                          (Ok [CtVal Diag] (CInt 0)))
+                                        (Err [CtVal Diag] (derr "report: message must be a string"))))
                               (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
-                            (if (or (icmp-eq op 32) (icmp-eq op 44))
-                                (cop-warn-or-suggest a op args)
-                                (if (icmp-eq op 33)
-                                    (match (cv-get args 0)
-                                      (Some [nodev]
-                                            (if (is-ccode nodev)
-                                                (Ok [CtVal Diag] (CStr (code-file-of (ccode-of nodev))))
-                                                (Err [CtVal Diag] (derr "code-file: expects a Code node"))))
-                                      (None [] (Err [CtVal Diag] (derr "code-file: expects (code-file NODE)"))))
-                                    (if (icmp-eq op 40)
-                                        (match (cv-get args 0)
-                                          (Some [nodev]
-                                                (if (is-ccode nodev)
-                                                    (Ok [CtVal Diag] (CInt (code-line-of (ccode-of nodev))))
-                                                    (Err [CtVal Diag] (derr "code-line: expects a Code node"))))
-                                          (None [] (Err [CtVal Diag] (derr "code-line: expects (code-line NODE)"))))
-                                        (if (icmp-eq op 41)
-                                            (match (cv-get args 0)
-                                              (Some [nodev]
-                                                    (if (is-ccode nodev)
-                                                        (Ok [CtVal Diag] (CStr (code-src-of (ccode-of nodev))))
-                                                        (Err [CtVal Diag] (derr "code-src: expects a Code node"))))
-                                              (None [] (Err [CtVal Diag] (derr "code-src: expects (code-src NODE)"))))
-                                            (if (icmp-eq op 42)
-                                                (match (cv-get args 0)
-                                                  (Some [nodev]
-                                                        (if (is-ccode nodev)
-                                                            (Ok [CtVal Diag] (CInt (code-col-of (ccode-of nodev))))
-                                                            (Err [CtVal Diag] (derr "code-col: expects a Code node"))))
-                                                  (None []
-                                                        (Err [CtVal Diag] (derr "code-col: expects (code-col NODE)"))))
-                                                (if (icmp-eq op 43)
-                                                    (match (cv-get args 0)
-                                                      (Some [nodev]
-                                                            (if (is-ccode nodev)
-                                                                (Ok [CtVal Diag] (CStr (code-doc-of (ccode-of nodev))))
-                                                                (Err [CtVal Diag]
-                                                                     (derr "code-doc: expects a Code node"))))
-                                                      (None []
-                                                            (Err [CtVal Diag]
-                                                                 (derr "code-doc: expects (code-doc NODE)"))))
-                                                    (if (or (icmp-eq op 34) (icmp-eq op 45))
-                                                        (match (cv-get args 0)
-                                                          (Some [nodev]
-                                                                (if (is-ccode nodev)
-                                                                    (Ok [CtVal Diag]
-                                                                        (CBool (if (icmp-eq op 45)
-                                                                                   (icmp-ne (sx-ctxt (ccode-of nodev))
-                                                                                            0)
-                                                                                   (code-from-user-node? (ccode-of nodev)))))
-                                                                    (Err [CtVal Diag]
-                                                                         (derr "code-from-user?: expects a Code node"))))
-                                                          (None []
-                                                                (Err [CtVal Diag]
-                                                                     (derr "code-from-user?: expects (code-from-user? NODE)"))))
-                                                        (if (or (icmp-eq op 12) (icmp-eq op 13))
-                                                            (cop-concat op args cx)
-                                                            (if (or (icmp-eq op 14)
-                                                                    (or (icmp-eq op 15)
-                                                                        (or (icmp-eq op 16) (icmp-eq op 17))))
-                                                                (cop-field op args cx)
-                                                                (if (or (icmp-eq op 18)
-                                                                        (or (icmp-eq op 19)
-                                                                            (or (icmp-eq op 20) (icmp-eq op 21))))
-                                                                    (cop-variant op args cx)
-                                                                    (if (or (icmp-eq op 22)
-                                                                            (or (icmp-eq op 23)
-                                                                                (or (icmp-eq op 24)
-                                                                                    (or (icmp-eq op 25)
-                                                                                        (or (icmp-eq op 26)
-                                                                                            (icmp-eq op 27))))))
-                                                                        (cop-trait op args cx)
-                                                                        (if (icmp-eq op 28)
-                                                                            (cop-strbytes args cx)
-                                                                            (if (icmp-eq op 29)
-                                                                                (cop-bytestostr args cx)
-                                                                                (if (icmp-eq op 38)
-                                                                                    (cop-inttostr args cx)
-                                                                                    (if (icmp-eq op 35)
-                                                                                        (cop-decl args cx)
-                                                                                        (if (icmp-eq op 36)
-                                                                                            (cop-type-of args cx)
-                                                                                            (if (icmp-eq op 37)
-                                                                                                (cop-binding-of args cx)
-                                                                                                (cop-codearg op args cx))))))))))))))))))))))))))
+                            (Err [CtVal Diag] (derr "report: first arg must be a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "report: expects (report NODE MSG)"))))
+              (or (icmp-eq op 32) (icmp-eq op 44)) (cop-warn-or-suggest a op args)
+              (icmp-eq op 33)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-file-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-file: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-file: expects (code-file NODE)"))))
+              (icmp-eq op 40)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CInt (code-line-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-line: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-line: expects (code-line NODE)"))))
+              (icmp-eq op 41)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-src-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-src: expects a Code node"))))
+                  (None [] (Err [CtVal Diag] (derr "code-src: expects (code-src NODE)"))))
+              (icmp-eq op 42)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CInt (code-col-of (ccode-of nodev))))
+                            (Err [CtVal Diag] (derr "code-col: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag] (derr "code-col: expects (code-col NODE)"))))
+              (icmp-eq op 43)
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag] (CStr (code-doc-of (ccode-of nodev))))
+                            (Err [CtVal Diag]
+                                 (derr "code-doc: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag]
+                             (derr "code-doc: expects (code-doc NODE)"))))
+              (or (icmp-eq op 34) (icmp-eq op 45))
+                (match (cv-get args 0)
+                  (Some [nodev]
+                        (if (is-ccode nodev)
+                            (Ok [CtVal Diag]
+                                (CBool (if (icmp-eq op 45)
+                                           (icmp-ne (sx-ctxt (ccode-of nodev))
+                                                    0)
+                                           (code-from-user-node? (ccode-of nodev)))))
+                            (Err [CtVal Diag]
+                                 (derr "code-from-user?: expects a Code node"))))
+                  (None []
+                        (Err [CtVal Diag]
+                             (derr "code-from-user?: expects (code-from-user? NODE)"))))
+              (or (icmp-eq op 12) (icmp-eq op 13)) (cop-concat op args cx)
+              (or (icmp-eq op 14)
+                  (or (icmp-eq op 15)
+                      (or (icmp-eq op 16) (icmp-eq op 17))))
+                (cop-field op args cx)
+              (or (icmp-eq op 18)
+                  (or (icmp-eq op 19)
+                      (or (icmp-eq op 20) (icmp-eq op 21))))
+                (cop-variant op args cx)
+              (or (icmp-eq op 22)
+                  (or (icmp-eq op 23)
+                      (or (icmp-eq op 24)
+                          (or (icmp-eq op 25)
+                              (or (icmp-eq op 26)
+                                  (icmp-eq op 27))))))
+                (cop-trait op args cx)
+              (icmp-eq op 28) (cop-strbytes args cx)
+              (icmp-eq op 29) (cop-bytestostr args cx)
+              (icmp-eq op 38) (cop-inttostr args cx)
+              (icmp-eq op 35) (cop-decl args cx)
+              (icmp-eq op 36) (cop-type-of args cx)
+              (icmp-eq op 37) (cop-binding-of args cx)
+              :else (cop-codearg op args cx)))))
 ; module-fns-has is asked once per QUASIQUOTE HEAD a metaprogram builds
 ; (metahost.mh-qualify-head! -> resolve-in-module), against every defn name in the
 ; whole program. As a linear str-eq scan that is O(program) per template list, which

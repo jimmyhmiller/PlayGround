@@ -954,48 +954,57 @@ echo "== gen-10: monomorphization instantiation lookup is O(1) (hash-indexed), n
 # instantiations = 14s before LLVM even starts). The fix is behaviour-preserving — gate-full
 # proves the emitted IR is byte-identical — so the ONLY observable is SPEED.
 #
-# TEETH (perf, so it must be a timing check): on a many-instantiation program, $COIL must be
-# MEASURABLY faster than the pre-gen-10 seed. This is a RELATIVE, load-invariant comparison —
-# both binaries are timed back-to-back under the same machine load, best-of-2 min (so a
-# transient scheduler spike can't false-fail it), and only the RATIO is asserted (a uniformly
-# slow/fast machine cancels out). It FAILS on the seed (seed-vs-seed is 1.00x, below the
-# threshold) and on any future regression that reintroduces a scan into the worklist.
-SEED_BIN=selfhost/seed/coil-seed
-# `-x` alone is not enough: the committed seed is a Mach-O arm64 binary, so on a
-# Linux host the file is "executable" but exec fails — probe an actual run.
-if [ -x "$SEED_BIN" ] && [ -x /usr/bin/time ] && "$SEED_BIN" >/dev/null 2>&1; then
-  perf_src="$T/mono_perf.coil"
-  # One generic `hub` fans out to 250 generic structs; calling it at 12 distinct array types
-  # forces ~3000 DISTINCT struct instantiations (the O(n^2) regime) while keeping check/codegen
-  # cheap (structs have no bodies) so the mono cost is the dominant differ- between the two builds.
-  {
-    for j in $(seq 1 250); do printf '(defstruct S%s [T] [(v T)])\n' "$j"; done
-    printf '(defn hub [T] [] (-> i64) (do'
-    for j in $(seq 1 250); do printf ' (zeroed (S%s T))' "$j"; done
-    printf ' 0))\n(defn main [] (-> i64)\n'
-    for k in $(seq 1 12); do printf '  (hub [(array i8 %s)])\n' "$k"; done
-    printf '  0)\n'
-  } > "$perf_src"
+# TEETH (perf, so it must be a timing check): this measures how $COIL's OWN cost SCALES as the
+# instantiation count grows, rather than racing it against a baseline binary. Racing cannot work
+# here: the only pre-gen-10 binary in the tree was the committed seed, and refreshing the seed —
+# which every change to the language the compiler is written in eventually forces — folds the fix
+# INTO the baseline, so the comparison silently degrades to seed-vs-seed = 1.00x and fails
+# forever. A scaling check has no baseline to go stale.
+#
+# The two probes hold the struct COUNT fixed and only TRIPLE the number of distinct
+# instantiations, so parse/check/codegen cost is identical between them and mono is the only
+# term that grows. Measured on this corpus: 3x the work costs ~3.5x with the hash lookups and
+# ~7.5x with the old linear scans. The threshold sits between, far enough from both that
+# scheduler noise cannot reach it, and both runs are best-of-2 minima under the same load.
+if [ -x /usr/bin/time ]; then
+  # One generic `hub` fans out to 250 generic structs; calling it at N distinct array types
+  # forces 250*N DISTINCT struct instantiations (the O(n^2) regime) while keeping check/codegen
+  # cheap (the structs have no bodies) so mono dominates what is being timed.
+  mono_probe() {   # <n-array-types> <out-path>
+    {
+      for j in $(seq 1 250); do printf '(defstruct S%s [T] [(v T)])\n' "$j"; done
+      printf '(defn hub [T] [] (-> i64) (do'
+      for j in $(seq 1 250); do printf ' (zeroed (S%s T))' "$j"; done
+      printf ' 0))\n(defn main [] (-> i64)\n'
+      for k in $(seq 1 "$1"); do printf '  (hub [(array i8 %s)])\n' "$k"; done
+      printf '  0)\n'
+    } > "$2"
+  }
+  mono_probe 6  "$T/mono_small.coil"     # 1500 instantiations
+  mono_probe 18 "$T/mono_large.coil"     # 4500 — exactly 3x the mono work
   # min wall-clock of 2 `emit-ir` runs; empty string on a compile failure (guarded below).
   monotime() {
     local best="" t
     for _ in 1 2; do
-      t=$( { /usr/bin/time -p "$1" emit-ir "$perf_src" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
+      t=$( { /usr/bin/time -p "$COIL" emit-ir "$1" >/dev/null; } 2>&1 | awk '/^real/{print $2}')
       [ -n "$t" ] || { best=""; break; }
       best=$(awk -v a="$best" -v b="$t" 'BEGIN{ if (a=="" || b+0<a+0) print b; else print a }')
     done
     printf '%s' "$best"
   }
-  t_coil=$(monotime "$COIL"); t_seed=$(monotime "$SEED_BIN")
-  if [ -z "$t_coil" ] || [ -z "$t_seed" ]; then
-    bad "gen-10 mono lookup is O(1) (faster than the pre-fix seed)" "emit-ir failed on the perf probe (coil='$t_coil' seed='$t_seed')"
-  elif awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{ exit !(c*1.25 < s) }'; then
-    ok "gen-10 mono lookup is O(1) — $(awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{printf "%.2fx", s/c}') faster than the seed (${t_coil}s vs ${t_seed}s)"
+  t_small=$(monotime "$T/mono_small.coil"); t_large=$(monotime "$T/mono_large.coil")
+  growth=$(awk -v s="$t_small" -v l="$t_large" 'BEGIN{ if (s+0>0) printf "%.2f", l/s; else printf "?" }')
+  if [ -z "$t_small" ] || [ -z "$t_large" ]; then
+    bad "gen-10 mono lookup is O(1) (near-linear in instantiation count)" \
+        "emit-ir failed on the perf probe (small='$t_small' large='$t_large')"
+  elif awk -v s="$t_small" -v l="$t_large" 'BEGIN{ exit !(s+0 > 0 && l < s*5.0) }'; then
+    ok "gen-10 mono lookup is O(1) — 3x the instantiations costs ${growth}x the time (${t_small}s -> ${t_large}s)"
   else
-    bad "gen-10 mono lookup is O(1) (faster than the pre-fix seed)" "want >=1.25x vs seed, got ${t_seed}s/${t_coil}s = $(awk -v c="$t_coil" -v s="$t_seed" 'BEGIN{printf "%.2fx", s/c}')"
+    bad "gen-10 mono lookup is O(1) (near-linear in instantiation count)" \
+        "3x the instantiations must cost <5.0x the time (a scan costs ~7.5x); got ${growth}x (${t_small}s -> ${t_large}s)"
   fi
 else
-  echo "  (skip: no runnable $SEED_BIN or /usr/bin/time for the gen-10 perf probe)"
+  echo "  (skip: no /usr/bin/time for the gen-10 perf probe)"
 fi
 
 echo "== doc comments (;;): coil doc + the code-doc comptime op =="
@@ -1124,17 +1133,90 @@ expect_out '^\+  \(cond \(= x 1\) 100' "lint --diff: prints the patch" \
 cmp -s "$T/lint/target.coil" "$T/lint/target.orig" \
   && ok "lint --diff: writes nothing" || bad "lint --diff: writes nothing" "the file changed"
 
-expect_out 'would drop a comment' "lint --fix: refuses the fix that would delete a comment" \
-  "$COIL" lint "$T/lint/target.coil" --use condlint-on.coil --fix
+"$COIL" lint "$T/lint/target.coil" --use condlint-on.coil --fix >/dev/null 2>&1
 expect_out 'cond \(= x 1\) 100 \(= x 2\) 200 \(= x 3\) 300 :else 999' \
   "lint --fix: rewrote the chain as a cond with :else" cat "$T/lint/target.coil"
+# The comment sits in the GAP between two nodes, the one thing no Code value records.
+# The renderer carries it across, so a commented chain is fixed like any other rather
+# than being refused (or, worse, rewritten with the comment silently gone).
+expect_out 'cond \(= x 1\) 1$' \
+  "lint --fix: rewrote the commented chain too" cat "$T/lint/target.coil"
 expect_out '; a comment between a test and its body' \
-  "lint --fix: left the commented chain, comment and all, alone" cat "$T/lint/target.coil"
+  "lint --fix: carried the comment across the rewrite" cat "$T/lint/target.coil"
 expect_rc 54 "lint --fix: the program still behaves identically" "$COIL" run "$T/lint/target.coil"
 cp "$T/lint/target.coil" "$T/lint/target.fixed"
 "$COIL" lint "$T/lint/target.coil" --use condlint-on.coil --fix >/dev/null 2>&1
 cmp -s "$T/lint/target.coil" "$T/lint/target.fixed" \
   && ok "lint --fix: idempotent" || bad "lint --fix: idempotent" "a second --fix changed the file"
+
+# Every awkward place a comment can sit in an `if` staircase, in one file. Each one
+# lands in a gap the rewrite closes, so each one is a chance to lose the author's
+# text: right after the head, at the end of a body line, stacked several deep, and
+# alone before the closing parens. The last function has a `;` INSIDE a string, which
+# is not a comment and must not be treated as one.
+cat > "$T/lint/comments.coil" <<'EOF'
+(module comments)
+(defn a [(x i64)] (-> i64)
+  (if ; leading, right after the head
+      (= x 1)
+      10 ; trailing on the body line
+      (if (= x 2)
+          20
+          (if (= x 3)
+              30
+              ; alone before the closing parens
+              40))))
+(defn b [(x i64)] (-> i64)
+  (if (= x 1)
+      1
+      ; first line
+      ; second line
+      ;; even a doc-style one
+      (if (= x 2)
+          2
+          (if (= x 3) 3 4))))
+(defn s [(x i64)] (-> (slice u8))
+  (if (= x 1) "a; b" (if (= x 2) "c; d" (if (= x 3) "e" "f"))))
+(defn main [] (-> i64)
+  (+ (a 3) (b 2)))
+EOF
+cp "$T/lint/comments.coil" "$T/lint/comments.orig"
+expect_rc 32 "lint --fix (comments): the program runs before the fix" \
+  "$COIL" run "$T/lint/comments.coil"
+expect_out '^0$' "lint --fix (comments): no fix is refused over a comment" \
+  sh -c "\"$COIL\" lint \"$T/lint/comments.coil\" --use condlint-on.coil --fix 2>&1 | grep -c 'drop a comment'"
+expect_rc 32 "lint --fix (comments): the program behaves identically after" \
+  "$COIL" run "$T/lint/comments.coil"
+expect_out '^0$' "lint --fix (comments): no nested-if chain is left" \
+  sh -c "\"$COIL\" lint \"$T/lint/comments.coil\" --use condlint-on.coil 2>&1 | grep -c 'nested ifs'"
+# Every comment the author wrote is still in the file, byte for byte.
+miss=0
+while IFS= read -r c; do
+  grep -qF "$c" "$T/lint/comments.coil" || { miss=$((miss+1)); echo "         missing: $c"; }
+done <<'EOF'
+; leading, right after the head
+; trailing on the body line
+; alone before the closing parens
+; first line
+; second line
+;; even a doc-style one
+EOF
+[ "$miss" = 0 ] && ok "lint --fix (comments): every comment survived the rewrite" \
+  || bad "lint --fix (comments): every comment survived the rewrite" "$miss comment(s) lost"
+# A `;` inside a string is not a comment: that chain has nothing to carry, so it stays
+# flat on one line instead of being broken up as a commented one would be.
+expect_out 'cond \(= x 1\) "a; b" \(= x 2\) "c; d" \(= x 3\) "e" :else "f"' \
+  "lint --fix (comments): a ';' inside a string is not treated as a comment" \
+  cat "$T/lint/comments.coil"
+cp "$T/lint/comments.coil" "$T/lint/comments.fixed"
+"$COIL" lint "$T/lint/comments.coil" --use condlint-on.coil --fix >/dev/null 2>&1
+cmp -s "$T/lint/comments.coil" "$T/lint/comments.fixed" \
+  && ok "lint --fix (comments): idempotent" \
+  || bad "lint --fix (comments): idempotent" "a second --fix changed the file"
+# What --fix writes is what `coil fmt` would write: a fixed file needs no reformatting.
+"$COIL" fmt --check "$T/lint/comments.coil" >/dev/null 2>&1 \
+  && ok "lint --fix (comments): the result is already fmt-clean" \
+  || bad "lint --fix (comments): the result is already fmt-clean" "coil fmt would rewrite it"
 
 # A rule whose fix does not compile must leave the file byte-identical. Fail-closed is
 # the whole reason --fix is allowed near anyone's source.

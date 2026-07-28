@@ -193,7 +193,7 @@
 ; byte size / alignment in the interpreter's memory model.
 (defn isize-of [(cx (ptr Interp)) (tp (ptr Type))] (-> i64)
   (match-else (load tp)
-              (TInt [bits sg] (if (icmp-le bits 8) 1 (if (icmp-le bits 16) 2 (if (icmp-le bits 32) 4 8))))
+              (TInt [bits sg] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
               (TFloat [bits] (idiv bits 8))
               (TBool [] 1)
               (TVoid [] 0)
@@ -216,7 +216,7 @@
 
 (defn ialign-of [(cx (ptr Interp)) (tp (ptr Type))] (-> i64)
   (match-else (load tp)
-              (TInt [bits sg] (if (icmp-le bits 8) 1 (if (icmp-le bits 16) 2 (if (icmp-le bits 32) 4 8))))
+              (TInt [bits sg] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
               (TFloat [bits] (idiv bits 8))
               (TBool [] 1)
               (TPtr [i0] 8)
@@ -1670,43 +1670,34 @@
   (let [a (load (field cx a))
         tk (irtok toks (load tokp))]
     (store! tokp (iadd (load tokp) 1))
-    (if (str-eq tk "$ret")
-        result
-        (if (str-eq tk "i64")
-            (TInt 64 true)
-            (if (str-eq tk "i32")
-                (TInt 32 true)
-                (if (str-eq tk "i16")
-                    (TInt 16 true)
-                    (if (str-eq tk "i8")
-                        (TInt 8 true)
-                        (if (str-eq tk "i1")
-                            (TBool)
-                            (if (str-eq tk "ptr")
-                                (TPtr (box-type a (TInt 8 true)))
-                                (if (str-eq tk "float")
-                                    (TFloat 32)
-                                    (if (str-eq tk "double")
-                                        (TFloat 64)
-                                        (if (str-eq tk "{")
-                                            (let [t0 (ir-parse-type2 cx result argtys toks tokp)
-                                                  t1 (ir-parse-type2 cx result argtys toks tokp)]
-                                              (store! tokp (iadd (load tokp) 1))  ; skip }
-                                              (TSlice (box-type a t0)))
-                                            (if (str-eq tk "<")
-                                                (let [nstr (irtok toks (load tokp))]
-                                                  (store! tokp (iadd (load tokp) 1))  ; N
-                                                  (store! tokp (iadd (load tokp) 1))  ; x
-                                                  (let [elem (ir-parse-type2 cx result argtys toks tokp)]
-                                                    (store! tokp (iadd (load tokp) 1))  ; >
-                                                    (TVec (box-type a elem) (istr->i64 nstr))))
-                                                (if (and (icmp-ge (slice-len tk) 3)
-                                                         (and (icmp-eq (cast i64 (slice-get tk 0)) 36)
-                                                              (icmp-eq (cast i64 (slice-get tk 1)) 116)))
-                                                    (al-get [Type]
-                                                            (load argtys)
-                                                            (istr->i64 (subslice tk 2 (slice-len tk))))
-                                                    (do (idie2 "llvm-ir: unsupported type token: " tk) (TInt 64 true))))))))))))))))
+    (cond (str-eq tk "$ret") result
+          (str-eq tk "i64") (TInt 64 true)
+          (str-eq tk "i32") (TInt 32 true)
+          (str-eq tk "i16") (TInt 16 true)
+          (str-eq tk "i8") (TInt 8 true)
+          (str-eq tk "i1") (TBool)
+          (str-eq tk "ptr") (TPtr (box-type a (TInt 8 true)))
+          (str-eq tk "float") (TFloat 32)
+          (str-eq tk "double") (TFloat 64)
+          (str-eq tk "{")
+            (let [t0 (ir-parse-type2 cx result argtys toks tokp)
+                  t1 (ir-parse-type2 cx result argtys toks tokp)]
+              (store! tokp (iadd (load tokp) 1))  ; skip }
+              (TSlice (box-type a t0)))
+          (str-eq tk "<")
+            (let [nstr (irtok toks (load tokp))]
+              (store! tokp (iadd (load tokp) 1))  ; N
+              (store! tokp (iadd (load tokp) 1))  ; x
+              (let [elem (ir-parse-type2 cx result argtys toks tokp)]
+                (store! tokp (iadd (load tokp) 1))  ; >
+                (TVec (box-type a elem) (istr->i64 nstr))))
+          (and (icmp-ge (slice-len tk) 3)
+               (and (icmp-eq (cast i64 (slice-get tk 0)) 36)
+                    (icmp-eq (cast i64 (slice-get tk 1)) 116)))
+            (al-get [Type]
+                    (load argtys)
+                    (istr->i64 (subslice tk 2 (slice-len tk))))
+          :else (do (idie2 "llvm-ir: unsupported type token: " tk) (TInt 64 true)))))
 
 ; aggregate element (offset, elem type) for extract/insert.
 (defn ir-agg-elem2 [(cx (ptr Interp)) (tp (ptr Type)) (idx i64) (offp (ptr i64))] (-> Type)
@@ -1733,16 +1724,15 @@
                  (fm i64)
                  (moff (ptr i64))] (-> i64)
   (let [c0 (cast i64 (slice-get tk 0))]
-    (if (icmp-eq c0 37)  ; %
-        (ir-env-get names vals tk)
-        (if (icmp-eq c0 36)  ; $N  (value arg)
+    (cond (icmp-eq c0 37)  ; %
+            (ir-env-get names vals tk)
+          (icmp-eq c0 36)  ; $N  (value arg)
             (load (index args (istr->i64 (subslice tk 1 (slice-len tk)))))
-            (if (str-eq tk "undef")
-                (frame-alloc fm moff (isize-of cx tp) (ialign-of cx tp))
-                (if (str-eq tk "zeroinitializer")
-                    (let [addr (frame-alloc fm moff (isize-of cx tp) (ialign-of cx tp))]
-                      (do (memzero addr (isize-of cx tp)) addr))
-                    (istr->i64 tk)))))))
+          (str-eq tk "undef") (frame-alloc fm moff (isize-of cx tp) (ialign-of cx tp))
+          (str-eq tk "zeroinitializer")
+            (let [addr (frame-alloc fm moff (isize-of cx tp) (ialign-of cx tp))]
+              (do (memzero addr (isize-of cx tp)) addr))
+          :else (istr->i64 tk))))
 (defn ir-env-get [(names (ptr (ArrayList (slice u8)))) (vals (ptr (ArrayList i64))) (nm (slice u8))] (-> i64)
   (let [n (al-len [(slice u8)] (load names))
         (mut i) (isub n 1)
@@ -1807,9 +1797,8 @@
     (if (icmp-eq ntk 0)
         0
         (let [t0 (irtok toks 0)]
-          (if (str-eq t0 "declare")
-              0
-              (if (str-eq t0 "ret")
+          (cond (str-eq t0 "declare") 0
+                (str-eq t0 "ret")
                   (let [tokp (alloc-stack i64)
                         rtp (alloc-stack Type)]
                     (store! tokp 1)
@@ -1817,310 +1806,301 @@
                     (store! retvalp (ir-value2 cx names vals args (irtok toks (load tokp)) rtp fm moff))
                     (store! donep true)
                     0)
-                  (if (str-eq t0 "store")
-                      ; store atomic TYPE VAL, ptr PTR seq_cst, align N   (sequential model)
-                      (if (and (icmp-ge ntk 7) (str-eq (irtok toks 1) "atomic"))
-                          (let [tokp (alloc-stack i64)
-                                vtp (alloc-stack Type)]
-                            (store! tokp 2)
-                            (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                            (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
+                (str-eq t0 "store")  ; store atomic TYPE VAL, ptr PTR seq_cst, align N   (sequential model)
+                  (if (and (icmp-ge ntk 7) (str-eq (irtok toks 1) "atomic"))
+                      (let [tokp (alloc-stack i64)
+                            vtp (alloc-stack Type)]
+                        (store! tokp 2)
+                        (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                        (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
+                              ptp (alloc-stack Type)]
+                          (store! ptp (TPtr (box-type a (TInt 8 true))))
+                          (let [p (ir-value2 cx names vals args (irtok toks (iadd (load tokp) 2)) ptp fm moff)]
+                            (mem-store p v (isize-of cx vtp))
+                            0)))
+                      (do (idie2 "llvm-ir: unsupported store line: " line) 0))
+                (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
+                  (let [op (irtok toks 2)]
+                    (cond (str-eq op "extractvalue")
+                            (let [tokp (alloc-stack i64)
+                                  aggtp (alloc-stack Type)]
+                              (store! tokp 3)
+                              (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
+                              (let [aggv (ir-value2 cx names vals args (irtok toks (load tokp)) aggtp fm moff)
+                                    idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
+                                    offp (alloc-stack i64)
+                                    etp (alloc-stack Type)]
+                                (store! etp (ir-agg-elem2 cx aggtp idx offp))
+                                (if (ty-is-agg etp)
+                                    (let [ns (frame-alloc fm moff (isize-of cx etp) (ialign-of cx etp))]
+                                      (memcopy ns (iadd aggv (load offp)) (isize-of cx etp))
+                                      (ir-env-put! names vals t0 ns))
+                                    (ir-env-put! names
+                                                 vals
+                                                 t0
+                                                 (mem-load (iadd aggv (load offp))
+                                                           (isize-of cx etp)
+                                                           (signed-of etp))))
+                                0))
+                          (str-eq op "insertvalue")
+                            (let [tokp (alloc-stack i64)
+                                  aggtp (alloc-stack Type)]
+                              (store! tokp 3)
+                              (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
+                              (let [aggtk (irtok toks (load tokp))]
+                                (store! tokp (iadd (load tokp) 1))
+                                (let [aggv (ir-value2 cx names vals args aggtk aggtp fm moff)
+                                      eltp (alloc-stack Type)]
+                                  (store! eltp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [elv (ir-value2 cx names vals args (irtok toks (load tokp)) eltp fm moff)
+                                        idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
+                                        dslot (frame-alloc fm moff (isize-of cx aggtp) (ialign-of cx aggtp))
+                                        offp (alloc-stack i64)]
+                                    (memcopy dslot aggv (isize-of cx aggtp))
+                                    (ir-agg-elem2 cx aggtp idx offp)
+                                    (ir-store-at cx (iadd dslot (load offp)) elv eltp)
+                                    (ir-env-put! names vals t0 dslot)
+                                    0))))
+                          (str-eq op "atomicrmw")  ; %old = atomicrmw SUB ptr PTR, TYPE VAL seq_cst
+                            (let [sub (irtok toks 3)
                                   ptp (alloc-stack Type)]
                               (store! ptp (TPtr (box-type a (TInt 8 true))))
-                              (let [p (ir-value2 cx names vals args (irtok toks (iadd (load tokp) 2)) ptp fm moff)]
-                                (mem-store p v (isize-of cx vtp))
-                                0)))
-                          (do (idie2 "llvm-ir: unsupported store line: " line) 0))
-                      (if (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
-                          (let [op (irtok toks 2)]
-                            (if (str-eq op "extractvalue")
+                              (let [p (ir-value2 cx names vals args (irtok toks 5) ptp fm moff)
+                                    tokp (alloc-stack i64)
+                                    vtp (alloc-stack Type)]
+                                (store! tokp 6)
+                                (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
+                                      sz (isize-of cx vtp)
+                                      old (mem-load p sz false)]
+                                  (cond (str-eq sub "add") (mem-store p (iadd old v) sz)
+                                        (str-eq sub "sub") (mem-store p (isub old v) sz)
+                                        (str-eq sub "xchg") (mem-store p v sz)
+                                        :else (idie2 "llvm-ir: unsupported atomicrmw op: " sub))
+                                  (ir-env-put! names vals t0 old)
+                                  0)))
+                          (str-eq op "cmpxchg")  ; %r = cmpxchg ptr PTR, TYPE EXP, TYPE NEW seq_cst seq_cst -> {old,success}
+                            (let [ptp (alloc-stack Type)]
+                              (store! ptp (TPtr (box-type a (TInt 8 true))))
+                              (let [p (ir-value2 cx names vals args (irtok toks 4) ptp fm moff)
+                                    tokp (alloc-stack i64)
+                                    etp (alloc-stack Type)]
+                                (store! tokp 5)
+                                (store! etp (ir-parse-type2 cx result argtys toks tokp))
+                                (let [exp
+                                        (ir-value2 cx
+                                                   names
+                                                   vals
+                                                   args
+                                                   (irtok toks (load tokp))
+                                                   etp
+                                                   fm
+                                                   moff)]
+                                  (store! tokp (iadd (load tokp) 1))
+                                  (let [ntp (alloc-stack Type)]
+                                    (store! ntp (ir-parse-type2 cx result argtys toks tokp))
+                                    (let [nv
+                                            (ir-value2 cx
+                                                       names
+                                                       vals
+                                                       args
+                                                       (irtok toks (load tokp))
+                                                       ntp
+                                                       fm
+                                                       moff)
+                                          old (mem-load p 8 false)
+                                          ok (icmp-eq old exp)
+                                          slot (frame-alloc fm moff 16 8)]
+                                      (if ok (mem-store p nv 8) 0)
+                                      (mem-store slot old 8)
+                                      (mem-store (iadd slot 8) (if ok 1 0) 8)
+                                      (ir-env-put! names vals t0 slot)
+                                      0)))))
+                          (str-eq op "load")  ; %v = load atomic TYPE, ptr PTR seq_cst, align N
+                            (if (str-eq (irtok toks 3) "atomic")
                                 (let [tokp (alloc-stack i64)
-                                      aggtp (alloc-stack Type)]
-                                  (store! tokp 3)
-                                  (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
-                                  (let [aggv (ir-value2 cx names vals args (irtok toks (load tokp)) aggtp fm moff)
-                                        idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
-                                        offp (alloc-stack i64)
-                                        etp (alloc-stack Type)]
-                                    (store! etp (ir-agg-elem2 cx aggtp idx offp))
-                                    (if (ty-is-agg etp)
-                                        (let [ns (frame-alloc fm moff (isize-of cx etp) (ialign-of cx etp))]
-                                          (memcopy ns (iadd aggv (load offp)) (isize-of cx etp))
-                                          (ir-env-put! names vals t0 ns))
-                                        (ir-env-put! names
+                                      vtp (alloc-stack Type)]
+                                  (store! tokp 4)
+                                  (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [ptp (alloc-stack Type)]
+                                    (store! ptp (TPtr (box-type a (TInt 8 true))))
+                                    (let [p
+                                            (ir-value2 cx
+                                                       names
+                                                       vals
+                                                       args
+                                                       (irtok toks (iadd (load tokp) 1))
+                                                       ptp
+                                                       fm
+                                                       moff)]
+                                      (ir-env-put! names
+                                                   vals
+                                                   t0
+                                                   (mem-load p (isize-of cx vtp) (signed-of vtp)))
+                                      0)))
+                                (do (idie2 "llvm-ir: unsupported load line: " line) 0))
+                          (str-eq op "insertelement")  ; %v = insertelement <N x T> AGG, ET EV, i32 K
+                            (let [tokp (alloc-stack i64)
+                                  vtp (alloc-stack Type)]
+                              (store! tokp 3)
+                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                              (let [aggtk (irtok toks (load tokp))]
+                                (store! tokp (iadd (load tokp) 1))
+                                (let [aggv (ir-value2 cx names vals args aggtk vtp fm moff)
+                                      etp (alloc-stack Type)]
+                                  (store! etp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [ev
+                                          (ir-value2 cx
+                                                     names
                                                      vals
-                                                     t0
-                                                     (mem-load (iadd aggv (load offp))
-                                                               (isize-of cx etp)
-                                                               (signed-of etp))))
-                                    0))
-                                (if (str-eq op "insertvalue")
-                                    (let [tokp (alloc-stack i64)
-                                          aggtp (alloc-stack Type)]
-                                      (store! tokp 3)
-                                      (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
-                                      (let [aggtk (irtok toks (load tokp))]
-                                        (store! tokp (iadd (load tokp) 1))
-                                        (let [aggv (ir-value2 cx names vals args aggtk aggtp fm moff)
-                                              eltp (alloc-stack Type)]
-                                          (store! eltp (ir-parse-type2 cx result argtys toks tokp))
-                                          (let [elv (ir-value2 cx names vals args (irtok toks (load tokp)) eltp fm moff)
-                                                idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
-                                                dslot (frame-alloc fm moff (isize-of cx aggtp) (ialign-of cx aggtp))
-                                                offp (alloc-stack i64)]
-                                            (memcopy dslot aggv (isize-of cx aggtp))
-                                            (ir-agg-elem2 cx aggtp idx offp)
-                                            (ir-store-at cx (iadd dslot (load offp)) elv eltp)
-                                            (ir-env-put! names vals t0 dslot)
-                                            0))))
-                                    (if (str-eq op "atomicrmw")
-                                        ; %old = atomicrmw SUB ptr PTR, TYPE VAL seq_cst
-                                        (let [sub (irtok toks 3)
-                                              ptp (alloc-stack Type)]
-                                          (store! ptp (TPtr (box-type a (TInt 8 true))))
-                                          (let [p (ir-value2 cx names vals args (irtok toks 5) ptp fm moff)
-                                                tokp (alloc-stack i64)
-                                                vtp (alloc-stack Type)]
-                                            (store! tokp 6)
-                                            (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                            (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
-                                                  sz (isize-of cx vtp)
-                                                  old (mem-load p sz false)]
-                                              (if (str-eq sub "add")
-                                                  (mem-store p (iadd old v) sz)
-                                                  (if (str-eq sub "sub")
-                                                      (mem-store p (isub old v) sz)
-                                                      (if (str-eq sub "xchg")
-                                                          (mem-store p v sz)
-                                                          (idie2 "llvm-ir: unsupported atomicrmw op: " sub))))
-                                              (ir-env-put! names vals t0 old)
-                                              0)))
-                                        (if (str-eq op "cmpxchg")
-                                            ; %r = cmpxchg ptr PTR, TYPE EXP, TYPE NEW seq_cst seq_cst -> {old,success}
-                                            (let [ptp (alloc-stack Type)]
-                                              (store! ptp (TPtr (box-type a (TInt 8 true))))
-                                              (let [p (ir-value2 cx names vals args (irtok toks 4) ptp fm moff)
-                                                    tokp (alloc-stack i64)
-                                                    etp (alloc-stack Type)]
-                                                (store! tokp 5)
-                                                (store! etp (ir-parse-type2 cx result argtys toks tokp))
-                                                (let [exp
-                                                        (ir-value2 cx
-                                                                   names
-                                                                   vals
-                                                                   args
-                                                                   (irtok toks (load tokp))
-                                                                   etp
-                                                                   fm
-                                                                   moff)]
-                                                  (store! tokp (iadd (load tokp) 1))
-                                                  (let [ntp (alloc-stack Type)]
-                                                    (store! ntp (ir-parse-type2 cx result argtys toks tokp))
-                                                    (let [nv
-                                                            (ir-value2 cx
-                                                                       names
-                                                                       vals
-                                                                       args
-                                                                       (irtok toks (load tokp))
-                                                                       ntp
-                                                                       fm
-                                                                       moff)
-                                                          old (mem-load p 8 false)
-                                                          ok (icmp-eq old exp)
-                                                          slot (frame-alloc fm moff 16 8)]
-                                                      (if ok (mem-store p nv 8) 0)
-                                                      (mem-store slot old 8)
-                                                      (mem-store (iadd slot 8) (if ok 1 0) 8)
-                                                      (ir-env-put! names vals t0 slot)
-                                                      0)))))
-                                            (if (str-eq op "load")
-                                                ; %v = load atomic TYPE, ptr PTR seq_cst, align N
-                                                (if (str-eq (irtok toks 3) "atomic")
-                                                    (let [tokp (alloc-stack i64)
-                                                          vtp (alloc-stack Type)]
-                                                      (store! tokp 4)
-                                                      (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                                      (let [ptp (alloc-stack Type)]
-                                                        (store! ptp (TPtr (box-type a (TInt 8 true))))
-                                                        (let [p
-                                                                (ir-value2 cx
-                                                                           names
-                                                                           vals
-                                                                           args
-                                                                           (irtok toks (iadd (load tokp) 1))
-                                                                           ptp
-                                                                           fm
-                                                                           moff)]
-                                                          (ir-env-put! names
-                                                                       vals
-                                                                       t0
-                                                                       (mem-load p (isize-of cx vtp) (signed-of vtp)))
-                                                          0)))
-                                                    (do (idie2 "llvm-ir: unsupported load line: " line) 0))
-                                                (if (str-eq op "insertelement")
-                                                    ; %v = insertelement <N x T> AGG, ET EV, i32 K
-                                                    (let [tokp (alloc-stack i64)
-                                                          vtp (alloc-stack Type)]
-                                                      (store! tokp 3)
-                                                      (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                                      (let [aggtk (irtok toks (load tokp))]
-                                                        (store! tokp (iadd (load tokp) 1))
-                                                        (let [aggv (ir-value2 cx names vals args aggtk vtp fm moff)
-                                                              etp (alloc-stack Type)]
-                                                          (store! etp (ir-parse-type2 cx result argtys toks tokp))
-                                                          (let [ev
-                                                                  (ir-value2 cx
-                                                                             names
-                                                                             vals
-                                                                             args
-                                                                             (irtok toks (load tokp))
-                                                                             etp
-                                                                             fm
-                                                                             moff)
-                                                                k (istr->i64 (irtok toks (iadd (load tokp) 2)))
-                                                                lb (isize-of cx etp)
-                                                                dslot
-                                                                  (frame-alloc fm
-                                                                               moff
-                                                                               (isize-of cx vtp)
-                                                                               (ialign-of cx vtp))]
-                                                            (memcopy dslot aggv (isize-of cx vtp))
-                                                            (mem-store (iadd dslot (imul k lb)) ev lb)
-                                                            (ir-env-put! names vals t0 dslot)
-                                                            0))))
-                                                    (if (str-eq op "shufflevector")
-                                                        ; splat: %r = shufflevector VTY V, VTY undef, <N x i32> zeroinitializer
-                                                        (let [tokp (alloc-stack i64)
-                                                              vtp (alloc-stack Type)]
-                                                          (store! tokp 3)
-                                                          (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                                          (let [v
-                                                                  (ir-value2 cx
-                                                                             names
-                                                                             vals
-                                                                             args
-                                                                             (irtok toks (load tokp))
-                                                                             vtp
-                                                                             fm
-                                                                             moff)]
-                                                            (store! tokp (iadd (load tokp) 1))
-                                                            (ir-parse-type2 cx result argtys toks tokp)  ; 2nd operand type
-                                                            (store! tokp (iadd (load tokp) 1))  ; undef
-                                                            (ir-parse-type2 cx result argtys toks tokp)  ; mask type
-                                                            (if (str-eq (irtok toks (load tokp)) "zeroinitializer")
-                                                                0
-                                                                (idie2 "llvm-ir: only splat shuffles supported: " line))
-                                                            (match-else (load vtp)
-                                                                        (TVec [elem lanes]
-                                                                              (let [lb (isize-of cx elem)
-                                                                                    dslot
-                                                                                      (frame-alloc fm
-                                                                                                   moff
-                                                                                                   (isize-of cx vtp)
-                                                                                                   (ialign-of cx vtp))
-                                                                                    lane0 (mem-load v lb false)
-                                                                                    (mut k) 0]
-                                                                                (loop (if (icmp-ge (load k) lanes)
-                                                                                          (break)
-                                                                                          (do
-                                                                                            (mem-store (iadd dslot
-                                                                                                             (imul (load k)
-                                                                                                                   lb))
-                                                                                                       lane0
-                                                                                                       lb)
-                                                                                            (store! k (iadd (load k) 1)))))
-                                                                                (ir-env-put! names vals t0 dslot)
-                                                                                0))
-                                                                        (_ (do
-                                                                             (idie "llvm-ir: shufflevector on non-vector")
-                                                                             0)))))
-                                                        (if (or (or (str-eq op "fadd") (str-eq op "fsub"))
-                                                                (str-eq op "fmul"))
-                                                            (let [tokp (alloc-stack i64)
-                                                                  opn
-                                                                    (if (str-eq op "fadd")
-                                                                        0
-                                                                        (if (str-eq op "fsub") 1 2))
-                                                                  vtp (alloc-stack Type)]
-                                                              (store! tokp 3)
-                                                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                                              (let [av
-                                                                      (ir-value2 cx
-                                                                                 names
-                                                                                 vals
-                                                                                 args
-                                                                                 (irtok toks (load tokp))
-                                                                                 vtp
-                                                                                 fm
-                                                                                 moff)
-                                                                    bv
-                                                                      (ir-value2 cx
-                                                                                 names
-                                                                                 vals
-                                                                                 args
-                                                                                 (irtok toks (iadd (load tokp) 1))
-                                                                                 vtp
-                                                                                 fm
-                                                                                 moff)]
-                                                                (match-else (load vtp)
-                                                                            (TVec [elem lanes]
-                                                                                  (let [lb (isize-of cx elem)
-                                                                                        dslot
-                                                                                          (frame-alloc fm
-                                                                                                       moff
-                                                                                                       (isize-of cx vtp)
-                                                                                                       (ialign-of cx
-                                                                                                                  vtp))]
-                                                                                    (ir-vec-fbin opn
-                                                                                                 dslot
-                                                                                                 av
-                                                                                                 bv
-                                                                                                 lanes
-                                                                                                 lb)
-                                                                                    (ir-env-put! names vals t0 dslot)
-                                                                                    0))
-                                                                            (TFloat [bits]
-                                                                                    (let [rv
-                                                                                            (if (icmp-eq bits 32)
-                                                                                                (f32->bits (if (icmp-eq opn
-                                                                                                                        0)
-                                                                                                               (fadd (bits->f32 av)
-                                                                                                                     (bits->f32 bv))
-                                                                                                               (if (icmp-eq opn
-                                                                                                                            1)
-                                                                                                                   (fsub (bits->f32 av)
-                                                                                                                         (bits->f32 bv))
-                                                                                                                   (fmul (bits->f32 av)
-                                                                                                                         (bits->f32 bv)))))
-                                                                                                (f64->bits (if (icmp-eq opn
-                                                                                                                        0)
-                                                                                                               (fadd (bits->f64 av)
-                                                                                                                     (bits->f64 bv))
-                                                                                                               (if (icmp-eq opn
-                                                                                                                            1)
-                                                                                                                   (fsub (bits->f64 av)
-                                                                                                                         (bits->f64 bv))
-                                                                                                                   (fmul (bits->f64 av)
-                                                                                                                         (bits->f64 bv))))))]
-                                                                                      (ir-env-put! names vals t0 rv)
-                                                                                      0))
-                                                                            (_ (do
-                                                                                 (idie "llvm-ir: float op on unsupported type")
-                                                                                 0)))))
-                                                            (if (str-eq op "call")
-                                                                (ir-call! cx
-                                                                          names
-                                                                          vals
-                                                                          args
-                                                                          argtys
-                                                                          result
-                                                                          toks
-                                                                          t0
-                                                                          line
-                                                                          fm
-                                                                          moff)
-                                                                (do (idie2 "llvm-ir: unsupported op: " op) 0)))))))))))
-                          (do (idie2 "llvm-ir: unsupported line: " line) 0)))))))))
+                                                     args
+                                                     (irtok toks (load tokp))
+                                                     etp
+                                                     fm
+                                                     moff)
+                                        k (istr->i64 (irtok toks (iadd (load tokp) 2)))
+                                        lb (isize-of cx etp)
+                                        dslot
+                                          (frame-alloc fm
+                                                       moff
+                                                       (isize-of cx vtp)
+                                                       (ialign-of cx vtp))]
+                                    (memcopy dslot aggv (isize-of cx vtp))
+                                    (mem-store (iadd dslot (imul k lb)) ev lb)
+                                    (ir-env-put! names vals t0 dslot)
+                                    0))))
+                          (str-eq op "shufflevector")  ; splat: %r = shufflevector VTY V, VTY undef, <N x i32> zeroinitializer
+                            (let [tokp (alloc-stack i64)
+                                  vtp (alloc-stack Type)]
+                              (store! tokp 3)
+                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                              (let [v
+                                      (ir-value2 cx
+                                                 names
+                                                 vals
+                                                 args
+                                                 (irtok toks (load tokp))
+                                                 vtp
+                                                 fm
+                                                 moff)]
+                                (store! tokp (iadd (load tokp) 1))
+                                (ir-parse-type2 cx result argtys toks tokp)  ; 2nd operand type
+                                (store! tokp (iadd (load tokp) 1))  ; undef
+                                (ir-parse-type2 cx result argtys toks tokp)  ; mask type
+                                (if (str-eq (irtok toks (load tokp)) "zeroinitializer")
+                                    0
+                                    (idie2 "llvm-ir: only splat shuffles supported: " line))
+                                (match-else (load vtp)
+                                            (TVec [elem lanes]
+                                                  (let [lb (isize-of cx elem)
+                                                        dslot
+                                                          (frame-alloc fm
+                                                                       moff
+                                                                       (isize-of cx vtp)
+                                                                       (ialign-of cx vtp))
+                                                        lane0 (mem-load v lb false)
+                                                        (mut k) 0]
+                                                    (loop (if (icmp-ge (load k) lanes)
+                                                              (break)
+                                                              (do
+                                                                (mem-store (iadd dslot
+                                                                                 (imul (load k)
+                                                                                       lb))
+                                                                           lane0
+                                                                           lb)
+                                                                (store! k (iadd (load k) 1)))))
+                                                    (ir-env-put! names vals t0 dslot)
+                                                    0))
+                                            (_ (do
+                                                 (idie "llvm-ir: shufflevector on non-vector")
+                                                 0)))))
+                          (or (or (str-eq op "fadd") (str-eq op "fsub"))
+                              (str-eq op "fmul"))
+                            (let [tokp (alloc-stack i64)
+                                  opn
+                                    (if (str-eq op "fadd")
+                                        0
+                                        (if (str-eq op "fsub") 1 2))
+                                  vtp (alloc-stack Type)]
+                              (store! tokp 3)
+                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                              (let [av
+                                      (ir-value2 cx
+                                                 names
+                                                 vals
+                                                 args
+                                                 (irtok toks (load tokp))
+                                                 vtp
+                                                 fm
+                                                 moff)
+                                    bv
+                                      (ir-value2 cx
+                                                 names
+                                                 vals
+                                                 args
+                                                 (irtok toks (iadd (load tokp) 1))
+                                                 vtp
+                                                 fm
+                                                 moff)]
+                                (match-else (load vtp)
+                                            (TVec [elem lanes]
+                                                  (let [lb (isize-of cx elem)
+                                                        dslot
+                                                          (frame-alloc fm
+                                                                       moff
+                                                                       (isize-of cx vtp)
+                                                                       (ialign-of cx
+                                                                                  vtp))]
+                                                    (ir-vec-fbin opn
+                                                                 dslot
+                                                                 av
+                                                                 bv
+                                                                 lanes
+                                                                 lb)
+                                                    (ir-env-put! names vals t0 dslot)
+                                                    0))
+                                            (TFloat [bits]
+                                                    (let [rv
+                                                            (if (icmp-eq bits 32)
+                                                                (f32->bits (if (icmp-eq opn
+                                                                                        0)
+                                                                               (fadd (bits->f32 av)
+                                                                                     (bits->f32 bv))
+                                                                               (if (icmp-eq opn
+                                                                                            1)
+                                                                                   (fsub (bits->f32 av)
+                                                                                         (bits->f32 bv))
+                                                                                   (fmul (bits->f32 av)
+                                                                                         (bits->f32 bv)))))
+                                                                (f64->bits (if (icmp-eq opn
+                                                                                        0)
+                                                                               (fadd (bits->f64 av)
+                                                                                     (bits->f64 bv))
+                                                                               (if (icmp-eq opn
+                                                                                            1)
+                                                                                   (fsub (bits->f64 av)
+                                                                                         (bits->f64 bv))
+                                                                                   (fmul (bits->f64 av)
+                                                                                         (bits->f64 bv))))))]
+                                                      (ir-env-put! names vals t0 rv)
+                                                      0))
+                                            (_ (do
+                                                 (idie "llvm-ir: float op on unsupported type")
+                                                 0)))))
+                          (str-eq op "call")
+                            (ir-call! cx
+                                      names
+                                      vals
+                                      args
+                                      argtys
+                                      result
+                                      toks
+                                      t0
+                                      line
+                                      fm
+                                      moff)
+                          :else (do (idie2 "llvm-ir: unsupported op: " op) 0)))
+                :else (do (idie2 "llvm-ir: unsupported line: " line) 0))))))
 
 ; intrinsic calls: @llvm.fma.v4f32 and @llvm.vector.reduce.fadd.v4f32
 (defn ir-call! [(cx (ptr Interp))

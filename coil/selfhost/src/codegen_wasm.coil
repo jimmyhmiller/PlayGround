@@ -228,7 +228,7 @@
 
 (defn wty-align [(g (ptr Wcg)) (t (ptr Type))] (-> i64)
   (match-else (load t)
-              (TInt [bits _s] (if (icmp-le bits 8) 1 (if (icmp-le bits 16) 2 (if (icmp-le bits 32) 4 8))))
+              (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
               (TFloat [bits] (idiv bits 8))
               (TBool [] 1)
               (TPtr [_] 8)
@@ -249,7 +249,7 @@
 
 (defn wty-size [(g (ptr Wcg)) (t (ptr Type))] (-> i64)
   (match-else (load t)
-              (TInt [bits _s] (if (icmp-le bits 8) 1 (if (icmp-le bits 16) 2 (if (icmp-le bits 32) 4 8))))
+              (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
               (TFloat [bits] (idiv bits 8))
               (TBool [] 1)
               (TPtr [_] 8)
@@ -593,22 +593,16 @@
 
 ; width-aware memory load: address on stack -> i64 (sign/zero-extended). bytes 1/2/4/8.
 (defn we-load-mem! [(b (mut (ArrayList u8))) (bytes i64) (signed bool)] (-> i64)
-  (if (icmp-eq bytes 1)
-      (do (wb! (mut b) (if signed 48 49)) (wb! (mut b) 0) (wb! (mut b) 0) 0)
-      (if (icmp-eq bytes 2)
-          (do (wb! (mut b) (if signed 50 51)) (wb! (mut b) 1) (wb! (mut b) 0) 0)
-          (if (icmp-eq bytes 4)
-              (do (wb! (mut b) (if signed 52 53)) (wb! (mut b) 2) (wb! (mut b) 0) 0)
-              (do (wb! (mut b) 41) (wb! (mut b) 3) (wb! (mut b) 0) 0)))))
+  (cond (icmp-eq bytes 1) (do (wb! (mut b) (if signed 48 49)) (wb! (mut b) 0) (wb! (mut b) 0) 0)
+        (icmp-eq bytes 2) (do (wb! (mut b) (if signed 50 51)) (wb! (mut b) 1) (wb! (mut b) 0) 0)
+        (icmp-eq bytes 4) (do (wb! (mut b) (if signed 52 53)) (wb! (mut b) 2) (wb! (mut b) 0) 0)
+        :else (do (wb! (mut b) 41) (wb! (mut b) 3) (wb! (mut b) 0) 0)))
 ; width-aware memory store: [addr, value] on stack. bytes 1/2/4/8.
 (defn we-store-mem! [(b (mut (ArrayList u8))) (bytes i64)] (-> i64)
-  (if (icmp-eq bytes 1)
-      (do (wb! (mut b) 60) (wb! (mut b) 0) (wb! (mut b) 0) 0)
-      (if (icmp-eq bytes 2)
-          (do (wb! (mut b) 61) (wb! (mut b) 1) (wb! (mut b) 0) 0)
-          (if (icmp-eq bytes 4)
-              (do (wb! (mut b) 62) (wb! (mut b) 2) (wb! (mut b) 0) 0)
-              (do (wb! (mut b) 55) (wb! (mut b) 3) (wb! (mut b) 0) 0)))))
+  (cond (icmp-eq bytes 1) (do (wb! (mut b) 60) (wb! (mut b) 0) (wb! (mut b) 0) 0)
+        (icmp-eq bytes 2) (do (wb! (mut b) 61) (wb! (mut b) 1) (wb! (mut b) 0) 0)
+        (icmp-eq bytes 4) (do (wb! (mut b) 62) (wb! (mut b) 2) (wb! (mut b) 0) 0)
+        :else (do (wb! (mut b) 55) (wb! (mut b) 3) (wb! (mut b) 0) 0)))
 
 ; push the ADDRESS of frame slot `off` onto the operand stack: global.get $sp (+off).
 ; `spidx` is the wasm global index of $sp (0 standalone; 1 side-module, after the
@@ -1139,45 +1133,27 @@
 
 ; ============================ op-code tables ================================
 (defn wbin-opcode [(op i64) (signed bool)] (-> i64)
-  (if (icmp-eq op 0)
-      124
-      (if (icmp-eq op 1)
-          125
-          (if (icmp-eq op 2)
-              126
-              (if (icmp-eq op 3)
-                  (if signed 127 128)
-                  (if (icmp-eq op 4)
-                      (if signed 129 130)
-                      (if (icmp-eq op 5)
-                          128
-                          (if (icmp-eq op 6)
-                              130
-                              (if (icmp-eq op 7)
-                                  131
-                                  (if (icmp-eq op 8)
-                                      132
-                                      (if (icmp-eq op 9)
-                                          133
-                                          (if (icmp-eq op 10)
-                                              134
-                                              (if (icmp-eq op 11)
-                                                  (if signed 135 136)
-                                                  (wcg-fail "unknown integer binary op"))))))))))))))
+  (cond (icmp-eq op 0) 124
+        (icmp-eq op 1) 125
+        (icmp-eq op 2) 126
+        (icmp-eq op 3) (if signed 127 128)
+        (icmp-eq op 4) (if signed 129 130)
+        (icmp-eq op 5) 128
+        (icmp-eq op 6) 130
+        (icmp-eq op 7) 131
+        (icmp-eq op 8) 132
+        (icmp-eq op 9) 133
+        (icmp-eq op 10) 134
+        (icmp-eq op 11) (if signed 135 136)
+        :else (wcg-fail "unknown integer binary op")))
 (defn wcmp-opcode [(op i64) (signed bool)] (-> i64)
-  (if (icmp-eq op 0)
-      (if signed 83 84)
-      (if (icmp-eq op 1)
-          (if signed 87 88)
-          (if (icmp-eq op 2)
-              (if signed 85 86)
-              (if (icmp-eq op 3)
-                  (if signed 89 90)
-                  (if (icmp-eq op 4)
-                      81
-                      (if (icmp-eq op 5)
-                          82
-                          (wcg-fail "unknown comparison op"))))))))
+  (cond (icmp-eq op 0) (if signed 83 84)
+        (icmp-eq op 1) (if signed 87 88)
+        (icmp-eq op 2) (if signed 85 86)
+        (icmp-eq op 3) (if signed 89 90)
+        (icmp-eq op 4) 81
+        (icmp-eq op 5) 82
+        :else (wcg-fail "unknown comparison op")))
 (defn wg-canon-int! [(g (ptr Wcg)) (bits i64) (signed bool)] (-> i64)
   (if (or (or (icmp-eq bits 8) (icmp-eq bits 16)) (or (icmp-eq bits 32) (icmp-eq bits 64)))
       0
@@ -1634,29 +1610,20 @@
   (let [a (load (field g a))
         tk (al-get [(slice u8)] (load toks) (load tokp))]
     (store! tokp (iadd (load tokp) 1))
-    (if (str-eq tk "$ret")
-        result
-        (if (str-eq tk "i64")
-            (TInt 64 true)
-            (if (str-eq tk "i32")
-                (TInt 32 true)
-                (if (str-eq tk "i16")
-                    (TInt 16 true)
-                    (if (str-eq tk "i8")
-                        (TInt 8 true)
-                        (if (str-eq tk "i1")
-                            (TBool)
-                            (if (str-eq tk "ptr")
-                                (TPtr (box-type a (TInt 8 true)))
-                                (if (str-eq tk "double")
-                                    (TFloat 64)
-                                    (if (str-eq tk "float")
-                                        (TFloat 32)
-                                        (if (and (icmp-ge (slice-len tk) 3)
-                                                 (and (icmp-eq (cast i64 (slice-get tk 0)) 36)
-                                                      (icmp-eq (cast i64 (slice-get tk 1)) 116)))
-                                            (al-get [Type] (load argtys) (ir-str->i64 (subslice tk 2 (slice-len tk))))
-                                            (do (wcg-fail2 "llvm-ir: unsupported type token: " tk) (TInt 64 true))))))))))))))
+    (cond (str-eq tk "$ret") result
+          (str-eq tk "i64") (TInt 64 true)
+          (str-eq tk "i32") (TInt 32 true)
+          (str-eq tk "i16") (TInt 16 true)
+          (str-eq tk "i8") (TInt 8 true)
+          (str-eq tk "i1") (TBool)
+          (str-eq tk "ptr") (TPtr (box-type a (TInt 8 true)))
+          (str-eq tk "double") (TFloat 64)
+          (str-eq tk "float") (TFloat 32)
+          (and (icmp-ge (slice-len tk) 3)
+               (and (icmp-eq (cast i64 (slice-get tk 0)) 36)
+                    (icmp-eq (cast i64 (slice-get tk 1)) 116)))
+            (al-get [Type] (load argtys) (ir-str->i64 (subslice tk 2 (slice-len tk))))
+          :else (do (wcg-fail2 "llvm-ir: unsupported type token: " tk) (TInt 64 true)))))
 (defn ir-agg-elem [(g (ptr Wcg)) (t (ptr Type)) (idx i64) (offp (ptr i64))] (-> Type)
   (match-else (load t)
               (TSlice [elem] (if (icmp-eq idx 0) (do (store! offp 0) (TPtr elem)) (do (store! offp 8) (TInt 64 true))))
@@ -1670,25 +1637,24 @@
 (defn ir-value [(g (ptr Wcg)) (env (ptr WScope)) (avs (ptr (ArrayList WAVal))) (tk (slice u8)) (t Type)] (-> WAVal)
   (let [tp (alloc-stack Type)]
     (store! tp t)
-    (if (icmp-eq (cast i64 (slice-get tk 0)) 37)  ; %name
-        (match (wscope-get env tk)
-          (Some [av] av)
-          (None [] (do (wcg-fail2 "llvm-ir: undefined value " tk) (mk-av 0 0 (TInt 64 true)))))
-        (if (icmp-eq (cast i64 (slice-get tk 0)) 36)  ; $N
+    (cond (icmp-eq (cast i64 (slice-get tk 0)) 37)  ; %name
+            (match (wscope-get env tk)
+              (Some [av] av)
+              (None [] (do (wcg-fail2 "llvm-ir: undefined value " tk) (mk-av 0 0 (TInt 64 true)))))
+          (icmp-eq (cast i64 (slice-get tk 0)) 36)  ; $N
             (al-get [WAVal] (load avs) (ir-str->i64 (subslice tk 1 (slice-len tk))))
-            (if (str-eq tk "undef")
-                (mk-av 1 (wslot-for-ty! g tp) t)
-                (if (str-eq tk "zeroinitializer")
-                    (let [slot (wslot-for-ty! g tp)]
-                      ; zero the slot bytes
-                      (wg-push-addr! g slot)
-                      (wg-i64-const! g 0)
-                      (wg-i64-const! g (wty-size g tp))
-                      (wg-op! g 252)
-                      (wg-op! g 11)
-                      (wg-op! g 0)
-                      (mk-av 1 slot t))
-                    (mk-av 0 (ir-str->i64 tk) t)))))))
+          (str-eq tk "undef") (mk-av 1 (wslot-for-ty! g tp) t)
+          (str-eq tk "zeroinitializer")
+            (let [slot (wslot-for-ty! g tp)]
+              ; zero the slot bytes
+              (wg-push-addr! g slot)
+              (wg-i64-const! g 0)
+              (wg-i64-const! g (wty-size g tp))
+              (wg-op! g 252)
+              (wg-op! g 11)
+              (wg-op! g 0)
+              (mk-av 1 slot t))
+          :else (mk-av 0 (ir-str->i64 tk) t))))
 (defn wemit-llvmir [(g (ptr Wcg)) (result Type) (args (ptr (ArrayList Expr))) (body (slice u8))] (-> WAVal)
   (let [a (load (field g a))
         (mut avs) (al-new [WAVal] a)
@@ -1743,9 +1709,8 @@
     (if (icmp-eq ntk 0)
         0
         (let [t0 (al-get [(slice u8)] (load toks) 0)]
-          (if (str-eq t0 "declare")
-              0
-              (if (str-eq t0 "ret")
+          (cond (str-eq t0 "declare") 0
+                (str-eq t0 "ret")
                   (let [tokp (alloc-stack i64)]
                     (store! tokp 1)
                     (let [rt (ir-parse-type g result argtysp toks tokp)
@@ -1753,51 +1718,51 @@
                       (store! retp (mk-av (av-kind av) (av-v av) result))
                       (store! donep true)
                       0))
-                  (if (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
-                      (let [op (al-get [(slice u8)] (load toks) 2)]
-                        (if (str-eq op "extractvalue")
+                (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
+                  (let [op (al-get [(slice u8)] (load toks) 2)]
+                    (if (str-eq op "extractvalue")
+                        (let [tokp (alloc-stack i64)]
+                          (store! tokp 3)
+                          (let [aggty (ir-parse-type g result argtysp toks tokp)
+                                vtk (al-get [(slice u8)] (load toks) (load tokp))
+                                idx (ir-str->i64 (al-get [(slice u8)] (load toks) (iadd (load tokp) 1)))
+                                av (ir-value g (load envp) avsp vtk aggty)
+                                atp (alloc-stack Type)]
+                            (store! atp aggty)
+                            (let [offp (alloc-stack i64)
+                                  ety (ir-agg-elem g atp idx offp)
+                                  etp (alloc-stack Type)]
+                              (store! etp ety)
+                              (let [eslot (wslot-for-ty! g etp)]
+                                (wg-copy-field-from! g eslot (iadd (av-v av) (load offp)) etp)
+                                (store! envp (wscope-put a (load envp) t0 (mk-av 1 eslot ety)))
+                                0))))
+                        (if (str-eq op "insertvalue")
                             (let [tokp (alloc-stack i64)]
                               (store! tokp 3)
                               (let [aggty (ir-parse-type g result argtysp toks tokp)
-                                    vtk (al-get [(slice u8)] (load toks) (load tokp))
-                                    idx (ir-str->i64 (al-get [(slice u8)] (load toks) (iadd (load tokp) 1)))
-                                    av (ir-value g (load envp) avsp vtk aggty)
-                                    atp (alloc-stack Type)]
-                                (store! atp aggty)
-                                (let [offp (alloc-stack i64)
-                                      ety (ir-agg-elem g atp idx offp)
-                                      etp (alloc-stack Type)]
-                                  (store! etp ety)
-                                  (let [eslot (wslot-for-ty! g etp)]
-                                    (wg-copy-field-from! g eslot (iadd (av-v av) (load offp)) etp)
-                                    (store! envp (wscope-put a (load envp) t0 (mk-av 1 eslot ety)))
+                                    aggtk (al-get [(slice u8)] (load toks) (load tokp))]
+                                (store! tokp (iadd (load tokp) 1))
+                                (let [aggav (ir-value g (load envp) avsp aggtk aggty)
+                                      elty (ir-parse-type g result argtysp toks tokp)
+                                      eltk (al-get [(slice u8)] (load toks) (load tokp))
+                                      idx (ir-str->i64 (al-get [(slice u8)] (load toks) (iadd (load tokp) 1)))
+                                      eav (ir-value g (load envp) avsp eltk elty)
+                                      atp (alloc-stack Type)]
+                                  (store! atp aggty)
+                                  (let [dslot (wslot-for-ty! g atp)
+                                        offp (alloc-stack i64)]
+                                    ; copy the whole aggregate in, then overwrite the element
+                                    (wg-push-addr! g dslot)
+                                    (wg-addr-of-av! g aggav)
+                                    (wg-i64-const! g (wty-size g atp))
+                                    (wg-memcopy! g)
+                                    (ir-agg-elem g atp idx offp)
+                                    (wg-store-av-at-off! g eav (iadd dslot (load offp)))
+                                    (store! envp (wscope-put a (load envp) t0 (mk-av 1 dslot aggty)))
                                     0))))
-                            (if (str-eq op "insertvalue")
-                                (let [tokp (alloc-stack i64)]
-                                  (store! tokp 3)
-                                  (let [aggty (ir-parse-type g result argtysp toks tokp)
-                                        aggtk (al-get [(slice u8)] (load toks) (load tokp))]
-                                    (store! tokp (iadd (load tokp) 1))
-                                    (let [aggav (ir-value g (load envp) avsp aggtk aggty)
-                                          elty (ir-parse-type g result argtysp toks tokp)
-                                          eltk (al-get [(slice u8)] (load toks) (load tokp))
-                                          idx (ir-str->i64 (al-get [(slice u8)] (load toks) (iadd (load tokp) 1)))
-                                          eav (ir-value g (load envp) avsp eltk elty)
-                                          atp (alloc-stack Type)]
-                                      (store! atp aggty)
-                                      (let [dslot (wslot-for-ty! g atp)
-                                            offp (alloc-stack i64)]
-                                        ; copy the whole aggregate in, then overwrite the element
-                                        (wg-push-addr! g dslot)
-                                        (wg-addr-of-av! g aggav)
-                                        (wg-i64-const! g (wty-size g atp))
-                                        (wg-memcopy! g)
-                                        (ir-agg-elem g atp idx offp)
-                                        (wg-store-av-at-off! g eav (iadd dslot (load offp)))
-                                        (store! envp (wscope-put a (load envp) t0 (mk-av 1 dslot aggty)))
-                                        0))))
-                                (wcg-fail2 "llvm-ir: unsupported op (only extractvalue/insertvalue/ret): " op))))
-                      (wcg-fail2 "llvm-ir: unsupported line: " line))))))))
+                            (wcg-fail2 "llvm-ir: unsupported op (only extractvalue/insertvalue/ret): " op))))
+                :else (wcg-fail2 "llvm-ir: unsupported line: " line))))))
 
 (defn wemit-expr [(g (ptr Wcg)) (e (ptr Expr))] (-> WAVal)
   (match (load (field e kind))

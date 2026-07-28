@@ -299,13 +299,10 @@
 ; byte size of a type DIE (fixed per kind; strp/ref4 are 4 bytes each)
 (defn dw-ty-size [(e (ptr DwTy))] (-> i64)
   (let [k (load (field e kind))]
-    (if (icmp-eq k 0)
-        7
-        (if (icmp-eq k 1)
-            (if (icmp-lt (load (field e to)) 0) 1 5)
-            (if (icmp-eq k 2)
-                (iadd 8 (imul 11 (al-len [DwField] (load (field e fields)))))
-                15)))))  ; array: 5 + subrange 9 + null 1
+    (cond (icmp-eq k 0) 7
+          (icmp-eq k 1) (if (icmp-lt (load (field e to)) 0) 1 5)
+          (icmp-eq k 2) (iadd 8 (imul 11 (al-len [DwField] (load (field e fields)))))
+          :else 15)))  ; array: 5 + subrange 9 + null 1
 
 ; record a DWARF address relocation: an 8-byte UNSIGNED fixup at `off` bytes into
 ; `sect` (1 = __debug_info, 2 = __debug_line). It targets the __text section (codegen_a64
@@ -389,48 +386,48 @@
                     (do
                       (let [e (al-at [DwTy] tys (load i))
                             k (load (field e kind))]
-                        (if (icmp-eq k 0)
-                            (do
-                              (uleb! (mut info) 3)
-                              (b-u32! (mut info) (dwstr! strs (load (field e name))))
-                              (b-u8! (mut info) (load (field e enc)))
-                              (b-u8! (mut info) (load (field e size)))
-                              0)
-                            (if (icmp-eq k 1)
+                        (cond (icmp-eq k 0)
+                                (do
+                                  (uleb! (mut info) 3)
+                                  (b-u32! (mut info) (dwstr! strs (load (field e name))))
+                                  (b-u8! (mut info) (load (field e enc)))
+                                  (b-u8! (mut info) (load (field e size)))
+                                  0)
+                              (icmp-eq k 1)
                                 (if (icmp-lt (load (field e to)) 0)
                                     (uleb! (mut info) 5)
                                     (do
                                       (uleb! (mut info) 4)
                                       (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field e to))) off)))
                                       0))
-                                (if (icmp-eq k 2)
-                                    (do
-                                      (uleb! (mut info) 8)
-                                      (b-u32! (mut info) (dwstr! strs (load (field e name))))
-                                      (b-u16! (mut info) (load (field e size)))
-                                      (let [nf (al-len [DwField] (load (field e fields)))
-                                            (mut j) 0]
-                                        (loop (if (icmp-ge (load j) nf)
-                                                  (break)
-                                                  (do
-                                                    (let [f (al-at [DwField] (field e fields) (load j))]
-                                                      (uleb! (mut info) 9)
-                                                      (b-u32! (mut info) (dwstr! strs (load (field f name))))
-                                                      (b-u32! (mut info)
-                                                              (load (field (al-at [DwTy] tys (load (field f tyidx)))
-                                                                           off)))
-                                                      (b-u16! (mut info) (load (field f off))))
-                                                    (store! j (iadd (load j) 1))))))
-                                      (uleb! (mut info) 0)
-                                      0)
-                                    ; array
-                                    (do
-                                      (uleb! (mut info) 10)
-                                      (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field e to))) off)))
-                                      (uleb! (mut info) 11)
-                                      (b-u64! (mut info) (load (field e count)))
-                                      (uleb! (mut info) 0)
-                                      0)))))
+                              (icmp-eq k 2)
+                                (do
+                                  (uleb! (mut info) 8)
+                                  (b-u32! (mut info) (dwstr! strs (load (field e name))))
+                                  (b-u16! (mut info) (load (field e size)))
+                                  (let [nf (al-len [DwField] (load (field e fields)))
+                                        (mut j) 0]
+                                    (loop (if (icmp-ge (load j) nf)
+                                              (break)
+                                              (do
+                                                (let [f (al-at [DwField] (field e fields) (load j))]
+                                                  (uleb! (mut info) 9)
+                                                  (b-u32! (mut info) (dwstr! strs (load (field f name))))
+                                                  (b-u32! (mut info)
+                                                          (load (field (al-at [DwTy] tys (load (field f tyidx)))
+                                                                       off)))
+                                                  (b-u16! (mut info) (load (field f off))))
+                                                (store! j (iadd (load j) 1))))))
+                                  (uleb! (mut info) 0)
+                                  0)
+                              :else  ; array
+                                (do
+                                  (uleb! (mut info) 10)
+                                  (b-u32! (mut info) (load (field (al-at [DwTy] tys (load (field e to))) off)))
+                                  (uleb! (mut info) 11)
+                                  (b-u64! (mut info) (load (field e count)))
+                                  (uleb! (mut info) 0)
+                                  0)))
                       (store! i (iadd (load i) 1))))))
         ; subprogram DIEs
         (let [(mut i) 0]

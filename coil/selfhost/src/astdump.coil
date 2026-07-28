@@ -64,144 +64,109 @@
 ; ---- enum-tag dumpers (i64 code -> string) ----
 (defn d-binop [(w (ptr Writer)) (op i64)] (-> i64)
   (ps w
-      (if (icmp-eq op 0)
-          "add"
-          (if (icmp-eq op 1)
-              "sub"
-              (if (icmp-eq op 2)
-                  "mul"
-                  (if (icmp-eq op 3)
-                      "div"
-                      (if (icmp-eq op 4)
-                          "rem"
-                          (if (icmp-eq op 5)
-                              "udiv"
-                              (if (icmp-eq op 6)
-                                  "urem"
-                                  (if (icmp-eq op 7)
-                                      "and"
-                                      (if (icmp-eq op 8)
-                                          "or"
-                                          (if (icmp-eq op 9) "xor" (if (icmp-eq op 10) "shl" "shr")))))))))))))
+      (cond (icmp-eq op 0) "add"
+            (icmp-eq op 1) "sub"
+            (icmp-eq op 2) "mul"
+            (icmp-eq op 3) "div"
+            (icmp-eq op 4) "rem"
+            (icmp-eq op 5) "udiv"
+            (icmp-eq op 6) "urem"
+            (icmp-eq op 7) "and"
+            (icmp-eq op 8) "or"
+            (icmp-eq op 9) "xor"
+            (icmp-eq op 10) "shl"
+            :else "shr")))
 (defn d-cmpop [(w (ptr Writer)) (op i64)] (-> i64)
   (ps w
-      (if (icmp-eq op 0)
-          "lt"
-          (if (icmp-eq op 1)
-              "le"
-              (if (icmp-eq op 2)
-                  "gt"
-                  (if (icmp-eq op 3) "ge" (if (icmp-eq op 4) "eq" "ne")))))))
+      (cond (icmp-eq op 0) "lt"
+            (icmp-eq op 1) "le"
+            (icmp-eq op 2) "gt"
+            (icmp-eq op 3) "ge"
+            (icmp-eq op 4) "eq"
+            :else "ne")))
 (defn d-storage [(w (ptr Writer)) (s i64)] (-> i64)
   (ps w (if (icmp-eq s 0) "stack" (if (icmp-eq s 1) "static" "heap"))))
 (defn d-typequery [(w (ptr Writer)) (q i64)] (-> i64)
   (ps w
-      (if (icmp-eq q 0)
-          "fieldcount"
-          (if (icmp-eq q 1)
-              "variantcount"
-              (if (icmp-eq q 2)
-                  "isstruct"
-                  (if (icmp-eq q 3)
-                      "issum"
-                      (if (icmp-eq q 4)
-                          "isint"
-                          (if (icmp-eq q 5) "isfloat" (if (icmp-eq q 6) "isptr" "isarray")))))))))
+      (cond (icmp-eq q 0) "fieldcount"
+            (icmp-eq q 1) "variantcount"
+            (icmp-eq q 2) "isstruct"
+            (icmp-eq q 3) "issum"
+            (icmp-eq q 4) "isint"
+            (icmp-eq q 5) "isfloat"
+            (icmp-eq q 6) "isptr"
+            :else "isarray")))
 (defn d-fieldmeta [(w (ptr Writer)) (m i64)] (-> i64)
   (ps w (if (icmp-eq m 0) "name" (if (icmp-eq m 1) "typekind" "typename"))))
 (defn d-codeop [(w (ptr Writer)) (op i64)] (-> i64)
   (ps w
-      (if (icmp-eq op 0)
-          "islist"
-          (if (icmp-eq op 1)
-              "issym"
-              (if (icmp-eq op 2)
-                  "isint"
-                  (if (icmp-eq op 3)
-                      "count"
-                      (if (icmp-eq op 4)
-                          "nth"
-                          (if (icmp-eq op 5)
-                              "sym"
-                              (if (icmp-eq op 6)
-                                  "int"
-                                  (if (icmp-eq op 7)
-                                      "rest"
-                                      (if (icmp-eq op 8)
-                                          "gensym"
-                                          (if (icmp-eq op 9)
-                                              "error"
-                                              (if (icmp-eq op 10)
-                                                  "eq"
-                                                  (if (icmp-eq op 11)
-                                                      "iskeyword"
-                                                      (if (icmp-eq op 12)
-                                                          "symbol"
-                                                          (if (icmp-eq op 13)
-                                                              "str"
-                                                              (if (icmp-eq op 14)
-                                                                  "cfieldcount"
-                                                                  (if (icmp-eq op 15)
-                                                                      "cfieldname"
-                                                                      (if (icmp-eq op 16)
-                                                                          "cfieldkind"
-                                                                          (if (icmp-eq op 17)
-                                                                              "cfieldtype"
-                                                                              (if (icmp-eq op 18)
-                                                                                  "cvariantsum"
-                                                                                  (if (icmp-eq op 19)
-                                                                                      "cvariantcount"
-                                                                                      (if (icmp-eq op 20)
-                                                                                          "cvariantname"
-                                                                                          (if (icmp-eq op 21)
-                                                                                              "cvariantfields"
-                                                                                              (if (icmp-eq op 22)
-                                                                                                  "ctraitmethodcount"
-                                                                                                  (if (icmp-eq op 23)
-                                                                                                      "ctraitmethodname"
-                                                                                                      (if (icmp-eq op
-                                                                                                                   24)
-                                                                                                          "ctraitarity"
-                                                                                                          (if (icmp-eq op
-                                                                                                                       25)
-                                                                                                              "ctraitparamname"
-                                                                                                              (if (icmp-eq op
-                                                                                                                           26)
-                                                                                                                  "ctraitparamtype"
-                                                                                                                  (if (icmp-eq op
-                                                                                                                               27)
-                                                                                                                      "ctraitrettype"
-                                                                                                                      (if (icmp-eq op
-                                                                                                                                   28)
-                                                                                                                          "strbytes"
-                                                                                                                          (if (icmp-eq op
-                                                                                                                                       29)
-                                                                                                                              "bytestostr"
-                                                                                                                              (if (icmp-eq op
-                                                                                                                                           30)
-                                                                                                                                  "targetarch"
-                                                                                                                                  (if (icmp-eq op
-                                                                                                                                               31)
-                                                                                                                                      "report"
-                                                                                                                                      (if (icmp-eq op
-                                                                                                                                                   32)
-                                                                                                                                          "warn"
-                                                                                                                                          (if (icmp-eq op
-                                                                                                                                                       33)
-                                                                                                                                              "codefile"
-                                                                                                                                              (if (icmp-eq op
-                                                                                                                                                           34)
-                                                                                                                                                  "codefromuser"
-                                                                                                                                                  (if (icmp-eq op
-                                                                                                                                                               35)
-                                                                                                                                                      "codedecl"
-                                                                                                                                                      (if (icmp-eq op
-                                                                                                                                                                   36)
-                                                                                                                                                          "typeof"
-                                                                                                                                                          (if (icmp-eq op
-                                                                                                                                                                       37)
-                                                                                                                                                              "bindingof"
-                                                                                                                                                              "codefromuser"))))))))))))))))))))))))))))))))))))))))
+      (cond (icmp-eq op 0) "islist"
+            (icmp-eq op 1) "issym"
+            (icmp-eq op 2) "isint"
+            (icmp-eq op 3) "count"
+            (icmp-eq op 4) "nth"
+            (icmp-eq op 5) "sym"
+            (icmp-eq op 6) "int"
+            (icmp-eq op 7) "rest"
+            (icmp-eq op 8) "gensym"
+            (icmp-eq op 9) "error"
+            (icmp-eq op 10) "eq"
+            (icmp-eq op 11) "iskeyword"
+            (icmp-eq op 12) "symbol"
+            (icmp-eq op 13) "str"
+            (icmp-eq op 14) "cfieldcount"
+            (icmp-eq op 15) "cfieldname"
+            (icmp-eq op 16) "cfieldkind"
+            (icmp-eq op 17) "cfieldtype"
+            (icmp-eq op 18) "cvariantsum"
+            (icmp-eq op 19) "cvariantcount"
+            (icmp-eq op 20) "cvariantname"
+            (icmp-eq op 21) "cvariantfields"
+            (icmp-eq op 22) "ctraitmethodcount"
+            (icmp-eq op 23) "ctraitmethodname"
+            (icmp-eq op
+                     24)
+              "ctraitarity"
+            (icmp-eq op
+                     25)
+              "ctraitparamname"
+            (icmp-eq op
+                     26)
+              "ctraitparamtype"
+            (icmp-eq op
+                     27)
+              "ctraitrettype"
+            (icmp-eq op
+                     28)
+              "strbytes"
+            (icmp-eq op
+                     29)
+              "bytestostr"
+            (icmp-eq op
+                     30)
+              "targetarch"
+            (icmp-eq op
+                     31)
+              "report"
+            (icmp-eq op
+                     32)
+              "warn"
+            (icmp-eq op
+                     33)
+              "codefile"
+            (icmp-eq op
+                     34)
+              "codefromuser"
+            (icmp-eq op
+                     35)
+              "codedecl"
+            (icmp-eq op
+                     36)
+              "typeof"
+            (icmp-eq op
+                     37)
+              "bindingof"
+            :else "codefromuser")))
 
 ; ---- exprs ----
 (defn d-exprs [(w (ptr Writer)) (v (ptr (ArrayList Expr)))] (-> i64)

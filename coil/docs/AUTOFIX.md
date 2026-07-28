@@ -386,10 +386,36 @@ Three things the design got wrong, found by running it:
    replacement is assembled from the author's nodes, so anything *inside* a node
    survives — but in a Lisp the text *between* two nodes is a comment, and no `Code`
    value records it. Collapsing an `if` chain whose branches have comments between
-   test and body would drop them. There is now a guard: count the comment marks in
-   the span being replaced and in the text replacing it (`sug-drops-comment?`,
-   string-literal aware), and if any went missing the fix is downgraded to advice —
-   reported with a `note:` naming the line, never applied.
+   test and body would drop them.
+
+   The first answer was to refuse: count the comment marks in the span being replaced
+   and in the text replacing it (`sug-drops-comment?`, string-literal aware) and
+   downgrade the fix to advice if any went missing. That is the wrong trade. On the
+   self-hosted compiler it declined 36 of 178 real fixes, and "there is a comment near
+   it" is not a reason to leave a staircase standing — it just moves the work back to
+   a human for the cases most likely to *need* the comment kept.
+
+   So the renderer carries them instead. It walks the ORIGINAL span alongside the
+   replacement it is building: a cursor tracks how far into the source the emitted
+   nodes have reached, and when the next node starts past the cursor, the comments in
+   the skipped-over text are written out first (`sug-gap-before` / `sug-carry-at!`).
+   Nodes are emitted in source order by any fix that reuses them, so the cursor only
+   moves forward; a node that would move it backwards carries nothing rather than
+   duplicating text. Three details the layout needs:
+
+   * A comment ends its line, so a replacement carrying one can never be laid out
+     flat. The width pass runs *before* the carry and cannot find out on its own, so
+     a span containing a comment forces broken layout up front.
+   * fmt distinguishes a comment BETWEEN a clause test and its body — which forces the
+     hang: two spaces, the comment, then the body alone on the next line
+     (`fmt/rules.coil` layout-clauses) — from one between clauses, which is its own
+     row. The renderer reproduces both.
+   * A comment after the last node the replacement reused still sits inside the span
+     being replaced, and is written after the rendered form rather than going out with
+     the closing parens.
+
+   `sug-drops-comment?` is kept as a backstop for a rule whose fix drops a node
+   outright, but it no longer fires on the `if`-chain rule.
 
 2. **Verbatim text has to be re-indented, and the column must come from the buffer.**
    A form that moves left takes its multi-line body with it; copying the bytes
@@ -413,6 +439,18 @@ ifs by the time a rule looks at it. A rule about `if` therefore needs to tell th
 author's ifs from the expander's. That is code op **45**, `(code-macro? NODE)` — the
 same `ctxt ≠ 0` test the fix filter applies internally, exposed to rules.
 
-`--verify` (§6 level 2) and `suggest-maybe` (§7) are still unimplemented; the
-comment guard above turned out to be the applicability distinction that actually
-came up first.
+`--verify` (§6 level 2) and `suggest-maybe` (§7) are still unimplemented.
+
+## Where the renderer still differs from `coil fmt`
+
+The renderer aims to emit what `coil fmt` would, so a fixed file needs no reformatting,
+and it does for the shapes the `if`-chain rule produces on ordinary code. Three shapes
+still differ, all of them cases where fmt breaks a line the renderer keeps:
+
+* a clause whose TEST spans several lines (fmt always drops the body to its own line),
+* a standalone carried comment's column in a deeply nested clause,
+* `let` binding vectors, which fmt pairs up and the renderer does not.
+
+None change meaning. A large `--fix` run over a tree that is kept fmt-clean should be
+followed by `coil fmt --write` on the files it touched; that is what was done for the
+self-hosted compiler.

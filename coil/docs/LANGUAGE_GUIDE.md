@@ -412,8 +412,9 @@ source span underlined, and the build fails after printing them all if any was a
 the diagnostic gains a `help: try: …` line. Nothing is written by an ordinary build —
 `coil lint --fix` is the only writer, and it renders any node that came from source as
 its **original bytes**, so comments and formatting inside an untouched branch survive
-and only the part that changed is new text. A round that stops compiling is reverted,
-and a fix that would delete a comment is reported but never applied. See
+and only the part that changed is new text. A round that stops compiling is reverted.
+Comments between nodes — the one thing no `Code` value records — are carried across the
+rewrite, so collapsing a commented `if` chain keeps every comment. See
 `docs/AUTOFIX.md`, and `metaprog-poc/condlint.coil` for a rule that turns a chain of
 three or more nested `if`s into a `cond`:
 

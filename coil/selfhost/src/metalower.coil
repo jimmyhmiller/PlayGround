@@ -204,44 +204,41 @@
                              t (try! (ml-node-type st ap))
                              k (let [tp (alloc-stack Type)] (store! tp t) (ml-kind-of-type tp))
                              le (try! (ml-expr st ap))]
-                         (if (icmp-eq k 6)
-                             ; never-typed argument: evaluate the chain so far, then it
-                             (do
-                               (al-push! (mut evald) (load chain))
-                               (al-push! (mut evald) le)
-                               (store! diverged
-                                       (Some (mk-expr (EDo (box-al [Expr] a (load evald)))
-                                                      (load (field proto lo))
-                                                      (load (field proto hi))
-                                                      (load (field proto source))
-                                                      (load (field proto ctxt)))))
-                               (break))
-                             (if (icmp-eq k 1)
-                                 (store! chain (ml-call2 st "metashim.mp-arg-c" (load chain) le proto))
-                                 (if (icmp-eq k 2)
-                                     (store! chain
-                                             (ml-call2 st
-                                                       "metashim.mp-arg-i"
-                                                       (load chain)
-                                                       (ml-widen-int st t le proto)
-                                                       proto))
-                                     (if (icmp-eq k 3)
-                                         (store! chain (ml-call2 st "metashim.mp-arg-s" (load chain) le proto))
-                                         (if (icmp-eq k 4)
-                                             (store! chain (ml-call2 st "metashim.mp-arg-b" (load chain) le proto))
-                                             (if (icmp-eq k 5)
-                                                 (store! chain
-                                                         (ml-call2 st
-                                                                   "metashim.mp-arg-f"
-                                                                   (load chain)
-                                                                   (ml-widen-float st t le proto)
-                                                                   proto))
-                                                 (return-from :try
-                                                              (Err [Expr Diag]
-                                                                   (derr-at-src (load (field ap source))
-                                                                                (load (field ap lo))
-                                                                                (load (field ap hi))
-                                                                                "metalower: this value cannot cross into a code op (only Code, integers, bools, floats and (slice u8) can; the interpreter rejects it at run time too)")))))))))
+                         (cond (icmp-eq k 6)  ; never-typed argument: evaluate the chain so far, then it
+                                 (do
+                                   (al-push! (mut evald) (load chain))
+                                   (al-push! (mut evald) le)
+                                   (store! diverged
+                                           (Some (mk-expr (EDo (box-al [Expr] a (load evald)))
+                                                          (load (field proto lo))
+                                                          (load (field proto hi))
+                                                          (load (field proto source))
+                                                          (load (field proto ctxt)))))
+                                   (break))
+                               (icmp-eq k 1) (store! chain (ml-call2 st "metashim.mp-arg-c" (load chain) le proto))
+                               (icmp-eq k 2)
+                                 (store! chain
+                                         (ml-call2 st
+                                                   "metashim.mp-arg-i"
+                                                   (load chain)
+                                                   (ml-widen-int st t le proto)
+                                                   proto))
+                               (icmp-eq k 3) (store! chain (ml-call2 st "metashim.mp-arg-s" (load chain) le proto))
+                               (icmp-eq k 4) (store! chain (ml-call2 st "metashim.mp-arg-b" (load chain) le proto))
+                               (icmp-eq k 5)
+                                 (store! chain
+                                         (ml-call2 st
+                                                   "metashim.mp-arg-f"
+                                                   (load chain)
+                                                   (ml-widen-float st t le proto)
+                                                   proto))
+                               :else
+                                 (break :try
+                                        (Err [Expr Diag]
+                                             (derr-at-src (load (field ap source))
+                                                          (load (field ap lo))
+                                                          (load (field ap hi))
+                                                          "metalower: this value cannot cross into a code op (only Code, integers, bools, floats and (slice u8) can; the interpreter rejects it at run time too)"))))
                          (store! i (iadd (load i) 1))))))
            (match (load diverged)
              (Some [de] (Ok [Expr Diag] de))
@@ -271,25 +268,20 @@
          (let [t (try! (ml-node-type st e))
                k (let [tp (alloc-stack Type)] (store! tp t) (ml-kind-of-type tp))
                le (try! (ml-expr st e))]
-           (if (icmp-eq k 1)
-               (Ok [Expr Diag] le)
-               (if (icmp-eq k 2)
-                   (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-int" (ml-widen-int st t le proto) proto))
-                   (if (icmp-eq k 4)
-                       (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-bool" le proto))
-                       (if (icmp-eq k 5)
-                           (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-float" (ml-widen-float st t le proto) proto))
-                           (if (icmp-eq k 3)
-                               (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-str" le proto))
-                               (if (icmp-eq k 6)
-                                   (Ok [Expr Diag] le)
-                                   ; aggregate: evaluate it (side effects first, like the interpreter's
-                                   ; eval-then-convert), then fail with ctval->sexp's own message
-                                   (Ok [Expr Diag]
-                                       (ml-do2 st
-                                               le
-                                               (ml-call1 st "metashim.mp-parity-fail" (ml-int st 1 proto) proto)
-                                               proto))))))))))))
+           (cond (icmp-eq k 1) (Ok [Expr Diag] le)
+                 (icmp-eq k 2) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-int" (ml-widen-int st t le proto) proto))
+                 (icmp-eq k 4) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-bool" le proto))
+                 (icmp-eq k 5)
+                   (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-float" (ml-widen-float st t le proto) proto))
+                 (icmp-eq k 3) (Ok [Expr Diag] (ml-call1 st "metashim.mp-unq-str" le proto))
+                 (icmp-eq k 6) (Ok [Expr Diag] le)
+                 :else  ; aggregate: evaluate it (side effects first, like the interpreter's
+                 ; eval-then-convert), then fail with ctval->sexp's own message
+                 (Ok [Expr Diag]
+                     (ml-do2 st
+                             le
+                             (ml-call1 st "metashim.mp-parity-fail" (ml-int st 1 proto) proto)
+                             proto)))))))
 
 ; the builder chain for a quasi list/vector's items
 (defn ml-quasi-items [(st (ptr MLS)) (items (ptr (ArrayList Quasi))) (proto (ptr Expr))] (-> (Result Expr Diag))

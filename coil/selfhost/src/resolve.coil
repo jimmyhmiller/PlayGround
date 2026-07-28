@@ -124,27 +124,25 @@
 
 ; is_scalar_typename: bool / f32 / f64 / (i|u)<digits>.
 (defn is-scalar-typename [(s (slice u8))] (-> bool)
-  (if (str-eq s "bool")
-      true
-      (if (str-eq s "f32")
-          true
-          (if (str-eq s "f64")
-              true
-              (let [n (slice-len s)]
-                (if (icmp-lt n 2)
-                    false
-                    (let [c0 (cast i64 (slice-get s 0))]
-                      (if (or (icmp-eq c0 105) (icmp-eq c0 117))
-                          (let [(mut ok) true
-                                (mut j) 1]
-                            (loop (if (icmp-ge (load j) n)
-                                      (break)
-                                      (do
-                                        (let [ch (cast i64 (slice-get s (load j)))]
-                                          (if (and (icmp-ge ch 48) (icmp-le ch 57)) 0 (do (store! ok false) (break))))
-                                        (store! j (iadd (load j) 1)))))
-                            (load ok))
-                          false))))))))
+  (cond (str-eq s "bool") true
+        (str-eq s "f32") true
+        (str-eq s "f64") true
+        :else
+          (let [n (slice-len s)]
+            (if (icmp-lt n 2)
+                false
+                (let [c0 (cast i64 (slice-get s 0))]
+                  (if (or (icmp-eq c0 105) (icmp-eq c0 117))
+                      (let [(mut ok) true
+                            (mut j) 1]
+                        (loop (if (icmp-ge (load j) n)
+                                  (break)
+                                  (do
+                                    (let [ch (cast i64 (slice-get s (load j)))]
+                                      (if (and (icmp-ge ch 48) (icmp-le ch 57)) 0 (do (store! ok false) (break))))
+                                    (store! j (iadd (load j) 1)))))
+                        (load ok))
+                      false))))))
 
 ; ---- error messages (faithful to) --------------------------
 (defn priv-msg [(a (ptr Allocator)) (m (slice u8)) (rest (slice u8)) (target (slice u8))] (-> (slice u8))
@@ -219,15 +217,11 @@
 
 ; ---- table / import / export queries --------------------------------------
 (defn defs-set [(d (ptr Defs)) (kind i64)] (-> (ptr (ArrayList (slice u8))))
-  (if (icmp-eq kind 0)
-      (field d callables)
-      (if (icmp-eq kind 1)
-          (field d types)
-          (if (icmp-eq kind 2)
-              (field d traits)
-              (if (icmp-eq kind 3)
-                  (field d convs)
-                  (field d externs))))))
+  (cond (icmp-eq kind 0) (field d callables)
+        (icmp-eq kind 1) (field d types)
+        (icmp-eq kind 2) (field d traits)
+        (icmp-eq kind 3) (field d convs)
+        :else (field d externs)))
 
 (defn set-contains [(setp (ptr (ArrayList (slice u8)))) (name (slice u8))] (-> bool)
   (let [n (al-len [(slice u8)] (load setp))
@@ -591,34 +585,24 @@
   (if (not (icmp-eq (type-tag x) (type-tag y)))
       false
       (let [tg (type-tag x)]
-        (if (icmp-eq tg 0)
-            (and (icmp-eq (t-int-bits x) (t-int-bits y)) (booleq (t-int-signed x) (t-int-signed y)))
-            (if (icmp-eq tg 1)
-                (icmp-eq (t-int-bits x) (t-int-bits y))
-                (if (icmp-eq tg 2)
-                    true
-                    (if (icmp-eq tg 3)
-                        true
-                        (if (icmp-eq tg 4)
-                            (type-eq (t-inner x) (t-inner y))
-                            (if (icmp-eq tg 5)
-                                (and (booleq (t-ref-mut x) (t-ref-mut y)) (type-eq (t-inner x) (t-inner y)))
-                                (if (icmp-eq tg 6)
-                                    (str-eq (type-struct-name x) (type-struct-name y))
-                                    (if (icmp-eq tg 7)
-                                        (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
-                                        (if (icmp-eq tg 8)
-                                            (type-eq (t-inner x) (t-inner y))
-                                            (if (icmp-eq tg 9)
-                                                (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
-                                                (if (icmp-eq tg 10)
-                                                    (and (str-eq (t-fn-cc x) (t-fn-cc y))
-                                                         (and (type-list-eq (t-fn-params x) (t-fn-params y))
-                                                              (type-eq (t-fn-ret x) (t-fn-ret y))))
-                                                    (if (icmp-eq tg 11)
-                                                        (and (str-eq (t-app-name x) (t-app-name y))
-                                                             (type-list-eq (t-fn-params x) (t-fn-params y)))
-                                                        true)))))))))))))))
+        (cond (icmp-eq tg 0) (and (icmp-eq (t-int-bits x) (t-int-bits y)) (booleq (t-int-signed x) (t-int-signed y)))
+              (icmp-eq tg 1) (icmp-eq (t-int-bits x) (t-int-bits y))
+              (icmp-eq tg 2) true
+              (icmp-eq tg 3) true
+              (icmp-eq tg 4) (type-eq (t-inner x) (t-inner y))
+              (icmp-eq tg 5) (and (booleq (t-ref-mut x) (t-ref-mut y)) (type-eq (t-inner x) (t-inner y)))
+              (icmp-eq tg 6) (str-eq (type-struct-name x) (type-struct-name y))
+              (icmp-eq tg 7) (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
+              (icmp-eq tg 8) (type-eq (t-inner x) (t-inner y))
+              (icmp-eq tg 9) (and (icmp-eq (t-arrn x) (t-arrn y)) (type-eq (t-inner x) (t-inner y)))
+              (icmp-eq tg 10)
+                (and (str-eq (t-fn-cc x) (t-fn-cc y))
+                     (and (type-list-eq (t-fn-params x) (t-fn-params y))
+                          (type-eq (t-fn-ret x) (t-fn-ret y))))
+              (icmp-eq tg 11)
+                (and (str-eq (t-app-name x) (t-app-name y))
+                     (type-list-eq (t-fn-params x) (t-fn-params y)))
+              :else true))))
 
 (defn extern-eq [(x (ptr Extern)) (y (ptr Extern))] (-> bool)
   (and (str-eq (load (field x cc)) (load (field y cc)))
@@ -685,52 +669,43 @@
 
 (defn ty-str [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
-    (if (icmp-eq tg 12)
-        "!"
-        (if (icmp-eq tg 14)
-            "externref"
-            (if (icmp-eq tg 13)
-                "code"
-                (if (icmp-eq tg 3)
-                    "void"
-                    (if (icmp-eq tg 0)
-                        (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
-                        (if (icmp-eq tg 1)
-                            (sconcat a "f" (i64->str a (t-int-bits t)))
-                            (if (icmp-eq tg 2)
-                                "bool"
-                                (if (icmp-eq tg 4)
-                                    (sconcat3 a "(ptr " (ty-str a (t-inner t)) ")")
-                                    (if (icmp-eq tg 5)
-                                        (if (t-ref-mut t)
-                                            (sconcat3 a "(mut " (ty-str a (t-inner t)) ")")
-                                            (sconcat3 a "(ref " (ty-str a (t-inner t)) ")"))
-                                        (if (icmp-eq tg 6)
-                                            (assoc-render a (type-struct-name t))
-                                            (if (icmp-eq tg 7)
-                                                (sconcat3 a
-                                                          (sconcat3 a "(array " (ty-str a (t-inner t)) " ")
-                                                          (i64->str a (t-arrn t))
-                                                          ")")
-                                                (if (icmp-eq tg 8)
-                                                    (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
-                                                    (if (icmp-eq tg 9)
-                                                        (sconcat3 a
-                                                                  (sconcat3 a "(vec " (ty-str a (t-inner t)) " ")
-                                                                  (i64->str a (t-arrn t))
-                                                                  ")")
-                                                        (if (icmp-eq tg 10)
-                                                            (sconcat3 a
-                                                                      (sconcat3 a
-                                                                                (sconcat3 a "(fnptr " (t-fn-cc t) " [")
-                                                                                (ty-str-join a (t-fn-params t))
-                                                                                "] ")
-                                                                      (ty-str a (t-fn-ret t))
-                                                                      ")")
-                                                            (sconcat3 a
-                                                                      (sconcat3 a "(" (t-app-name t) " ")
-                                                                      (ty-str-join a (t-fn-params t))
-                                                                      ")")))))))))))))))))
+    (cond (icmp-eq tg 12) "!"
+          (icmp-eq tg 14) "externref"
+          (icmp-eq tg 13) "code"
+          (icmp-eq tg 3) "void"
+          (icmp-eq tg 0) (sconcat a (if (t-int-signed t) "i" "u") (i64->str a (t-int-bits t)))
+          (icmp-eq tg 1) (sconcat a "f" (i64->str a (t-int-bits t)))
+          (icmp-eq tg 2) "bool"
+          (icmp-eq tg 4) (sconcat3 a "(ptr " (ty-str a (t-inner t)) ")")
+          (icmp-eq tg 5)
+            (if (t-ref-mut t)
+                (sconcat3 a "(mut " (ty-str a (t-inner t)) ")")
+                (sconcat3 a "(ref " (ty-str a (t-inner t)) ")"))
+          (icmp-eq tg 6) (assoc-render a (type-struct-name t))
+          (icmp-eq tg 7)
+            (sconcat3 a
+                      (sconcat3 a "(array " (ty-str a (t-inner t)) " ")
+                      (i64->str a (t-arrn t))
+                      ")")
+          (icmp-eq tg 8) (sconcat3 a "(slice " (ty-str a (t-inner t)) ")")
+          (icmp-eq tg 9)
+            (sconcat3 a
+                      (sconcat3 a "(vec " (ty-str a (t-inner t)) " ")
+                      (i64->str a (t-arrn t))
+                      ")")
+          (icmp-eq tg 10)
+            (sconcat3 a
+                      (sconcat3 a
+                                (sconcat3 a "(fnptr " (t-fn-cc t) " [")
+                                (ty-str-join a (t-fn-params t))
+                                "] ")
+                      (ty-str a (t-fn-ret t))
+                      ")")
+          :else
+            (sconcat3 a
+                      (sconcat3 a "(" (t-app-name t) " ")
+                      (ty-str-join a (t-fn-params t))
+                      ")"))))
 
 ; ---- qualify a Type in place ----------------
 (defn qualify-type-list [(c (ptr Ctx)) (lst (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64

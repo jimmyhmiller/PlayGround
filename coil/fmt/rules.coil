@@ -35,15 +35,17 @@
 
 ; Look up the layout rule for a list whose head symbol is `h`.
 (defn list-rule [(h (slice u8))] (-> Rule)
-  (if (is-def-family h)                                       (mk-rule 2 0)
-    (if (is h "do")                                            (mk-rule 1 0)
-      (if (or (is h "let") (or (is h "loop") (or (is h "binding") (is h "let*")))) (mk-rule 1 1)
-        (if (or (is h "when") (or (is h "when-not") (or (is h "unless") (or (is h "while") (is h "when-let"))))) (mk-rule 1 1)
-          (if (is h "if")                                      (mk-rule 0 0)   ; align then/else under the condition
-            (if (is h "fn")                                    (mk-rule 1 1)
-              (if (or (is h "cond") (or (is h "case") (is h "condp"))) (mk-rule 3 0)
-              (if (is h "match")                                 (mk-rule 1 1)
-                (mk-rule 0 0))))))))))   ; default: function call
+  (cond (is-def-family h) (mk-rule 2 0)
+        (is h "do") (mk-rule 1 0)
+        (or (is h "let") (or (is h "loop") (or (is h "binding") (is h "let*")))) (mk-rule 1 1)
+        (or (is h "when") (or (is h "when-not") (or (is h "unless") (or (is h "while") (is h "when-let")))))
+          (mk-rule 1 1)
+        (is h "if") (mk-rule 0 0)
+        ; align then/else under the condition
+        (is h "fn") (mk-rule 1 1)
+        (or (is h "cond") (or (is h "case") (is h "condp"))) (mk-rule 3 0)
+        (is h "match") (mk-rule 1 1)
+        :else (mk-rule 0 0)))   ; default: function call
 ; (defstruct/defsum/deftrait/defenum/impl are dispatched ahead of this table, in
 ;  list->doc — their head line depends on the shape of the form, not just the head
 ;  symbol, so a fixed Rule cannot express them. Each admits an optional leading
@@ -324,35 +326,28 @@
         (let [h (head-sym n) rp (alloc-stack Rule)]
           (store! rp (list-rule h))
           (let [style (load (field rp style)) rn (load (field rp n))]
-          (if (is-binding-form h)
-              (layout-binding-form a n)
-          (if (is h "defstruct")
-              ; name + [type-params] + :layout/:size/… options inline; field vector body.
-              (layout a n 40 41 (defstruct-inline-n n) 2 false)
-          (if (or (is h "defsum") (or (is h "deftrait") (is h "defenum")))
-              ; name + optional [type-params] inline; variants/methods are the body.
-              (layout a n 40 41 (defsum-inline-n n) 2 false)
-          (if (is h "impl")
-              ; optional [type-params] + Trait + Type inline; methods are the body.
-              (layout a n 40 41 (impl-inline-n n) 2 false)
-          (if (icmp-eq style 3)
-              (layout-clauses a n)
-          (if (icmp-eq style 0)
-              ; CALL: arg1 inline, rest align under it (nest = headlen + 2)
-              (let [headlen (slice-len (node-raw-flat a (node-nth n 0)))]
-                (layout a n 40 41 1 (iadd headlen 2) false))
-            (if (icmp-eq style 2)
-                ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2.
-                ; With no param vector (def, defmulti, multi-arity defn): just the
-                ; name on the head line, body +2 — never function-call alignment.
-                (let [sig-end (defn-sig-end n)]
-                  (if (icmp-eq sig-end 0)
-                      (layout a n 40 41 1 2 false)
-                    ; force the body onto its own line(s): a defn signature is
-                    ; never joined with its body, even when it would fit flat.
-                    (layout a n 40 41 sig-end 2 true)))
-              ; BLOCK n
-              (layout a n 40 41 rn 2 false))))))))))))))
+          (cond (is-binding-form h) (layout-binding-form a n)
+                (is h "defstruct")  ; name + [type-params] + :layout/:size/… options inline; field vector body.
+                  (layout a n 40 41 (defstruct-inline-n n) 2 false)
+                (or (is h "defsum") (or (is h "deftrait") (is h "defenum")))  ; name + optional [type-params] inline; variants/methods are the body.
+                  (layout a n 40 41 (defsum-inline-n n) 2 false)
+                (is h "impl")  ; optional [type-params] + Trait + Type inline; methods are the body.
+                  (layout a n 40 41 (impl-inline-n n) 2 false)
+                (icmp-eq style 3) (layout-clauses a n)
+                (icmp-eq style 0)  ; CALL: arg1 inline, rest align under it (nest = headlen + 2)
+                  (let [headlen (slice-len (node-raw-flat a (node-nth n 0)))]
+                    (layout a n 40 41 1 (iadd headlen 2) false))
+                (icmp-eq style 2)  ; DEFN: signature = up to the param vector (+ optional (-> ...)), body +2.
+                  ; With no param vector (def, defmulti, multi-arity defn): just the
+                  ; name on the head line, body +2 — never function-call alignment.
+                  (let [sig-end (defn-sig-end n)]
+                    (if (icmp-eq sig-end 0)
+                        (layout a n 40 41 1 2 false)
+                      ; force the body onto its own line(s): a defn signature is
+                      ; never joined with its body, even when it would fit flat.
+                      (layout a n 40 41 sig-end 2 true)))
+                :else  ; BLOCK n
+                  (layout a n 40 41 rn 2 false))))))))
 
 ; true if child `i` is a list whose head symbol equals `lit`.
 (defn list-head-is [(n (ptr Node)) (i i64) (lit (slice u8))] (-> bool)
@@ -365,17 +360,17 @@
 
 ; ---- node dispatch ---------------------------------------------------------
 (defn node->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
-  (if (node-atom? n) (d-text a (node-raw n))
-    (if (node-comment? n) (d-text a (node-raw n))
-      (if (node-list? n) (list->doc a n)
-        ; prefix: op glued to inner
-        (match (node-kind n)
-          (NPrefix [op inner]
-            (let [dl (dl-new a)]
-              (dl-push! dl (d-text a op)) (dl-push! dl (node->doc a inner)) (dl-done a dl)))
-          (NAtom [_] (d-text a ""))
-          (NList [_ _] (d-text a ""))
-          (NComment [_] (d-text a "")))))))
+  (cond (node-atom? n) (d-text a (node-raw n))
+        (node-comment? n) (d-text a (node-raw n))
+        (node-list? n) (list->doc a n)
+        :else  ; prefix: op glued to inner
+          (match (node-kind n)
+            (NPrefix [op inner]
+              (let [dl (dl-new a)]
+                (dl-push! dl (d-text a op)) (dl-push! dl (node->doc a inner)) (dl-done a dl)))
+            (NAtom [_] (d-text a ""))
+            (NList [_ _] (d-text a ""))
+            (NComment [_] (d-text a "")))))
 
 ; ---- document (top level) --------------------------------------------------
 ; The whole file: each top-level node on its own line(s), blank lines preserved.

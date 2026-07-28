@@ -804,38 +804,39 @@
 (defn dump-thread-entry [(arg (ptr i8))] (-> (ptr i8))
   (let [ctx (cast (ptr DumpCtx) arg)
         r
-          (if (icmp-eq (load (field ctx mode)) 3)
-              (call-ptr (load (field ctx dump-fn))
-                        (load (field ctx a))
-                        (load (field ctx src))
-                        (load (field ctx cwd))
-                        (load (field ctx path)))
-              (if (icmp-eq (load (field ctx mode)) 4)
+          (cond (icmp-eq (load (field ctx mode)) 3)
+                  (call-ptr (load (field ctx dump-fn))
+                            (load (field ctx a))
+                            (load (field ctx src))
+                            (load (field ctx cwd))
+                            (load (field ctx path)))
+                (icmp-eq (load (field ctx mode)) 4)
                   (build-wasm-program (load (field ctx a))
                                       (load (field ctx src))
                                       (load (field ctx cwd))
                                       (load (field ctx obj))
                                       (load (field ctx path)))
-                  (if (icmp-eq (load (field ctx mode)) 2)
-                      (build-arm64-program (load (field ctx a))
-                                           (load (field ctx src))
-                                           (load (field ctx cwd))
-                                           (load (field ctx obj))
-                                           (load (field ctx path)))
-                      (if (icmp-eq (load (field ctx mode)) 1)
-                          (call-ptr (load (field ctx build-fn))
-                                    (load (field ctx a))
-                                    (load (field ctx src))
-                                    (load (field ctx cwd))
-                                    (load (field ctx obj))
-                                    (load (field ctx triple))
-                                    (load (field ctx path)))
-                          (call-ptr (load (field ctx emitir-fn))
-                                    (load (field ctx a))
-                                    (load (field ctx src))
-                                    (load (field ctx cwd))
-                                    (load (field ctx triple))
-                                    (load (field ctx path)))))))]
+                (icmp-eq (load (field ctx mode)) 2)
+                  (build-arm64-program (load (field ctx a))
+                                       (load (field ctx src))
+                                       (load (field ctx cwd))
+                                       (load (field ctx obj))
+                                       (load (field ctx path)))
+                (icmp-eq (load (field ctx mode)) 1)
+                  (call-ptr (load (field ctx build-fn))
+                            (load (field ctx a))
+                            (load (field ctx src))
+                            (load (field ctx cwd))
+                            (load (field ctx obj))
+                            (load (field ctx triple))
+                            (load (field ctx path)))
+                :else
+                  (call-ptr (load (field ctx emitir-fn))
+                            (load (field ctx a))
+                            (load (field ctx src))
+                            (load (field ctx cwd))
+                            (load (field ctx triple))
+                            (load (field ctx path))))]
     (store! (field ctx ok) r)
     ; release the main thread if it is servicing metaprogram calls (COIL_META_MAIN=1)
     (main-svc-finish!)
@@ -1191,27 +1192,26 @@
     (loop (if (icmp-ge (load i) (cast i64 argc))
               (break)
               (let [arg (cstr->slice (load (index argv (load i))))]
-                (if (str-eq arg "--")
-                    (break)
-                    (if (icmp-eq (load i) fidx)
-                        (do (store! i (iadd (load i) 1)) 0)
-                        (if (is-flag? arg)
-                            (if (flag-known? arg)
-                                (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
-                                (let [w (stderr)]
-                                  (ps w "error: unknown flag '")
-                                  (ps w arg)
-                                  (ps w "'")
-                                  (wb w 10)
-                                  (exit 1)
-                                  0))
+                (cond (str-eq arg "--") (break)
+                      (icmp-eq (load i) fidx) (do (store! i (iadd (load i) 1)) 0)
+                      (is-flag? arg)
+                        (if (flag-known? arg)
+                            (do (store! i (iadd (load i) (if (flag-takes-value? arg) 2 1))) 0)
                             (let [w (stderr)]
-                              (ps w "error: unexpected argument '")
+                              (ps w "error: unknown flag '")
                               (ps w arg)
                               (ps w "'")
                               (wb w 10)
                               (exit 1)
-                              0))))))))
+                              0))
+                      :else
+                        (let [w (stderr)]
+                          (ps w "error: unexpected argument '")
+                          (ps w arg)
+                          (ps w "'")
+                          (wb w 10)
+                          (exit 1)
+                          0))))))
   0)
 
 (defn dir? [(path (ptr i8))] (-> bool)
@@ -1294,67 +1294,60 @@
                 (break)
                 (do
                   (let [arg (cstr->slice (load (index argv (load j))))]
-                    (if (str-eq arg "--lib")
-                        (store! libmode 1)
-                        (if (str-eq arg "--shared")
-                            (store! libmode 2)
-                            (if (or (str-eq arg "-g") (str-eq arg "--debug"))
-                                (do (store! backend 2) (store! wantg true) 0)
-                                (if (str-eq arg "--debug-checks")
-                                    (enable-debug-checks!)
-                                    (if (str-eq arg "--sanitize=address")
-                                        (set-sanitize-address!)
-                                        (if (opt-flag? arg)
-                                            (apply-opt-flag! arg)
-                                            (if (meta-opt-flag? arg)
-                                                (apply-meta-opt-flag! arg)
-                                                (if (starts-with arg "--wasm-stack-size=")
-                                                    (apply-wasm-stack-flag! arg)
-                                                    (if (and (icmp-lt (iadd (load j) 1) (cast i64 argc))
-                                                             (str-eq arg "--emit-header"))
-                                                        (do
-                                                          (store! ehdr
-                                                                  (Some (cstr->slice (load (index argv
-                                                                                                  (iadd (load j) 1))))))
-                                                          0)
-                                                        0))))))))))
+                    (cond (str-eq arg "--lib") (store! libmode 1)
+                          (str-eq arg "--shared") (store! libmode 2)
+                          (or (str-eq arg "-g") (str-eq arg "--debug")) (do (store! backend 2) (store! wantg true) 0)
+                          (str-eq arg "--debug-checks") (enable-debug-checks!)
+                          (str-eq arg "--sanitize=address") (set-sanitize-address!)
+                          (opt-flag? arg) (apply-opt-flag! arg)
+                          (meta-opt-flag? arg) (apply-meta-opt-flag! arg)
+                          (starts-with arg "--wasm-stack-size=") (apply-wasm-stack-flag! arg)
+                          (and (icmp-lt (iadd (load j) 1) (cast i64 argc))
+                               (str-eq arg "--emit-header"))
+                            (do
+                              (store! ehdr
+                                      (Some (cstr->slice (load (index argv
+                                                                      (iadd (load j) 1))))))
+                              0)
+                          :else 0))
                   (store! j (iadd (load j) 1))))))
     ; parse -o / --link-flag / -l<lib> / --backend / --target from argv[3..].
     (loop (if (icmp-ge (load i) (cast i64 argc))
               (break)
               (do
                 (let [arg (cstr->slice (load (index argv (load i))))]
-                  (if (str-eq arg "-o")
-                      (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
-                      (if (str-eq arg "--link-flag")
+                  (cond (str-eq arg "-o")
+                          (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                        (str-eq arg "--link-flag")
                           (do
                             (al-push! (mut flags) (cstr->slice (load (index argv (iadd (load i) 1)))))
                             (store! i (iadd (load i) 2))
                             0)
-                          (if (str-eq arg "--target")
-                              (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
-                              (if (str-eq arg "--use")
-                                  (do
-                                    (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
-                                    (store! i (iadd (load i) 2))
-                                    0)
-                                  (if (and (icmp-ge (slice-len [u8] arg) 2)
-                                           (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45))
-                                                (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
-                                      (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)  ; -l<lib>
-                                      (if (str-eq arg "--backend")
-                                          (do
-                                            (let [bn (cstr->slice (load (index argv (iadd (load i) 1))))]
-                                              (if (str-eq bn "arm64")
-                                                  (store! backend 2)
-                                                  (if (str-eq bn "wasm")
-                                                      (store! backend 4)  ; native wasm64 (memory64) backend
-                                                      (store! backend 1))))
-                                            (store! i (iadd (load i) 2))
-                                            0)
-                                          (if (str-eq arg "--wasm-side-module")
-                                              (do (set-wasm-side-module! true) (store! i (iadd (load i) 1)) 0)
-                                              (do (store! i (iadd (load i) 1)) 0))))))))))))
+                        (str-eq arg "--target")
+                          (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                        (str-eq arg "--use")
+                          (do
+                            (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
+                            (store! i (iadd (load i) 2))
+                            0)
+                        (and (icmp-ge (slice-len [u8] arg) 2)
+                             (and (icmp-eq (slice-get [u8] arg 0) (cast u8 45))
+                                  (icmp-eq (slice-get [u8] arg 1) (cast u8 108))))
+                          (do (al-push! (mut flags) arg) (store! i (iadd (load i) 1)) 0)
+                        ; -l<lib>
+                        (str-eq arg "--backend")
+                          (do
+                            (let [bn (cstr->slice (load (index argv (iadd (load i) 1))))]
+                              (if (str-eq bn "arm64")
+                                  (store! backend 2)
+                                  (if (str-eq bn "wasm")
+                                      (store! backend 4)  ; native wasm64 (memory64) backend
+                                      (store! backend 1))))
+                            (store! i (iadd (load i) 2))
+                            0)
+                        (str-eq arg "--wasm-side-module")
+                          (do (set-wasm-side-module! true) (store! i (iadd (load i) 1)) 0)
+                        :else (do (store! i (iadd (load i) 1)) 0))))))
     ; a usage mistake is exit 1, not SIGABRT — abort here made `coil build f.coil`
     ; look like the compiler had panicked, and any CI reporting on signals agreed.
     (if (icmp-eq (cast i64 (load outp)) 0)
@@ -1913,48 +1906,45 @@
                                 (let [key (m-trim (subslice [u8] line 0 eq))
                                       val (m-trim (subslice [u8] line (iadd eq 1) (slice-len [u8] line)))
                                       ln (iadd (load i) 1)]
-                                  (if (str-eq (load section) "package")
-                                      (if (str-eq key "name")
-                                          (do (store! (field m name) (m-unquote val)) 0)
-                                          (if (str-eq key "entry")
-                                              (do (store! (field m entry) (m-unquote val)) 0)
-                                              (m-bad-key a ln (load section) key)))
-                                      (if (str-eq (load section) "build")
-                                          (if (str-eq key "out")
-                                              (do (store! (field m out) (m-unquote val)) 0)
-                                              (if (str-eq key "target")
+                                  (cond (str-eq (load section) "package")
+                                          (if (str-eq key "name")
+                                              (do (store! (field m name) (m-unquote val)) 0)
+                                              (if (str-eq key "entry")
+                                                  (do (store! (field m entry) (m-unquote val)) 0)
+                                                  (m-bad-key a ln (load section) key)))
+                                        (str-eq (load section) "build")
+                                          (cond (str-eq key "out") (do (store! (field m out) (m-unquote val)) 0)
+                                                (str-eq key "target")
                                                   (do
                                                     (store! (field m target) (m-unquote val))
                                                     (store! (field m has-target) true)
                                                     0)
-                                                  (if (str-eq key "debug")
-                                                      (do (store! (field m debug) (str-eq val "true")) 0)
-                                                      (m-bad-key a ln (load section) key))))
-                                          (if (str-eq (load section) "link")
-                                              (if (str-eq key "frameworks")
+                                                (str-eq key "debug") (do (store! (field m debug) (str-eq val "true")) 0)
+                                                :else (m-bad-key a ln (load section) key))
+                                        (str-eq (load section) "link")
+                                          (cond (str-eq key "frameworks")
                                                   (do (m-parse-array a val (load (field m frameworks))) 0)
-                                                  (if (str-eq key "libs")
-                                                      (do (m-parse-array a val (load (field m libs))) 0)
-                                                      (if (str-eq key "flags")
-                                                          (do (m-parse-array a val (load (field m flags))) 0)
-                                                          (m-bad-key a ln (load section) key))))
-                                              (if (str-eq (load section) "cc")
-                                                  (if (str-eq key "sources")
-                                                      (do (m-parse-array a val (load (field m sources))) 0)
-                                                      (if (str-eq key "flags")
-                                                          (do (m-parse-array a val (load (field m ccflags))) 0)
-                                                          (m-bad-key a ln (load section) key)))
-                                                  (if (str-eq (load section) "run")
-                                                      (if (str-eq key "args")
-                                                          (do (m-parse-array a val (load (field m rargs))) 0)
-                                                          (m-bad-key a ln (load section) key))
-                                                      (m-err a
-                                                             ln
-                                                             (cat3-d a
-                                                                     "key '"
-                                                                     (cat3-d a
-                                                                             key
-                                                                             "' appears before any [section] header")))))))))))))
+                                                (str-eq key "libs") (do (m-parse-array a val (load (field m libs))) 0)
+                                                (str-eq key "flags") (do (m-parse-array a val (load (field m flags))) 0)
+                                                :else (m-bad-key a ln (load section) key))
+                                        (str-eq (load section) "cc")
+                                          (if (str-eq key "sources")
+                                              (do (m-parse-array a val (load (field m sources))) 0)
+                                              (if (str-eq key "flags")
+                                                  (do (m-parse-array a val (load (field m ccflags))) 0)
+                                                  (m-bad-key a ln (load section) key)))
+                                        (str-eq (load section) "run")
+                                          (if (str-eq key "args")
+                                              (do (m-parse-array a val (load (field m rargs))) 0)
+                                              (m-bad-key a ln (load section) key))
+                                        :else
+                                          (m-err a
+                                                 ln
+                                                 (cat3-d a
+                                                         "key '"
+                                                         (cat3-d a
+                                                                 key
+                                                                 "' appears before any [section] header")))))))))
                   (store! i (iadd (load i) 1)))))
       m)))
 
@@ -2590,32 +2580,30 @@
     (loop (if (icmp-ge (load i) (cast i64 argc))
               (break)
               (let [arg (cstr->slice (load (index argv (load i))))]
-                (if (str-eq arg "--fix")
-                    (do (store! fix true) (store! i (iadd (load i) 1)) 0)
-                    (if (str-eq arg "--diff")
-                        (do (store! diff true) (store! i (iadd (load i) 1)) 0)
-                        (if (str-eq arg "--allow-dirty")
-                            (do (store! allow-dirty true) (store! i (iadd (load i) 1)) 0)
-                            (if (str-eq arg "--use")
-                                (do
-                                  (if (icmp-ge (iadd (load i) 1) (cast i64 argc))
-                                      (do (ps (stderr) "error: --use needs a path\n") (exit 2) 0)
-                                      0)
-                                  (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
-                                  (store! i (iadd (load i) 2))
-                                  0)
-                                (if (is-flag? arg)
-                                    (do
-                                      (ps (stderr) "error: unknown flag '")
-                                      (ps (stderr) arg)
-                                      (ps (stderr) "'")
-                                      (wb (stderr) 10)
-                                      (exit 2)
-                                      0)
-                                    (do
-                                      (store! pathc (load (index argv (load i))))
-                                      (store! i (iadd (load i) 1))
-                                      0)))))))))
+                (cond (str-eq arg "--fix") (do (store! fix true) (store! i (iadd (load i) 1)) 0)
+                      (str-eq arg "--diff") (do (store! diff true) (store! i (iadd (load i) 1)) 0)
+                      (str-eq arg "--allow-dirty") (do (store! allow-dirty true) (store! i (iadd (load i) 1)) 0)
+                      (str-eq arg "--use")
+                        (do
+                          (if (icmp-ge (iadd (load i) 1) (cast i64 argc))
+                              (do (ps (stderr) "error: --use needs a path\n") (exit 2) 0)
+                              0)
+                          (cli-use-add (cstr->slice (load (index argv (iadd (load i) 1)))))
+                          (store! i (iadd (load i) 2))
+                          0)
+                      (is-flag? arg)
+                        (do
+                          (ps (stderr) "error: unknown flag '")
+                          (ps (stderr) arg)
+                          (ps (stderr) "'")
+                          (wb (stderr) 10)
+                          (exit 2)
+                          0)
+                      :else
+                        (do
+                          (store! pathc (load (index argv (load i))))
+                          (store! i (iadd (load i) 1))
+                          0)))))
     (if (icmp-eq (cast i64 (load pathc)) 0)
         (lint-usage)
         (lint-run a (load pathc) (load fix) (load diff) (load allow-dirty)))))
@@ -2800,18 +2788,18 @@
     (loop (if (icmp-ge (load i) (cast i64 argc))
               (break)
               (let [arg (cstr->slice (load (index argv (load i))))]
-                (if (str-eq arg "-o")
-                    (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
-                    (if (str-eq arg "--target")
+                (cond (str-eq arg "-o")
+                        (do (store! outp (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
+                      (str-eq arg "--target")
                         (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
-                        (if (str-eq arg "--backend")
-                            (do
-                              (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
-                                  (store! backend 2)
-                                  (store! backend 1))
-                              (store! i (iadd (load i) 2))
-                              0)
-                            (do (store! i (iadd (load i) 1)) 0)))))))
+                      (str-eq arg "--backend")
+                        (do
+                          (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
+                              (store! backend 2)
+                              (store! backend 1))
+                          (store! i (iadd (load i) 2))
+                          0)
+                      :else (do (store! i (iadd (load i) 1)) 0)))))
     ; `emit-obj -o /dev/null`: no writable object destination — route to compile-check
     ; rather than abending in codegen. (diag-12)
     (if (and (icmp-ne (cast i64 (load outp)) 0) (str-eq (cstr->slice (load outp)) "/dev/null"))
@@ -3064,45 +3052,45 @@
   (let [tp (alloc-stack Type)]
     (store! tp ty)
     (let [tag (type-tag tp)]
-      (if (icmp-eq tag 0)  ; any int
-          (repl-emit-run a
-                         self
-                         defs
-                         ""
-                         (sconcat a
-                                  (if (t-int-signed tp)
-                                      "(do (printf c\"%ld\\n\" (cast i64 "
-                                      "(do (printf c\"%lu\\n\" (cast u64 ")
-                                  (sconcat a uinput ")) 0)")))
-          (if (icmp-eq tag 1)  ; float
+      (cond (icmp-eq tag 0)  ; any int
+              (repl-emit-run a
+                             self
+                             defs
+                             ""
+                             (sconcat a
+                                      (if (t-int-signed tp)
+                                          "(do (printf c\"%ld\\n\" (cast i64 "
+                                          "(do (printf c\"%lu\\n\" (cast u64 ")
+                                      (sconcat a uinput ")) 0)")))
+            (icmp-eq tag 1)  ; float
               (repl-emit-run a self defs "" (sconcat a "(do (printf c\"%g\\n\" (cast f64 " (sconcat a uinput ")) 0)")))
-              (if (icmp-eq tag 2)  ; bool
-                  (repl-emit-run a
-                                 self
-                                 defs
-                                 ""
-                                 (sconcat a
-                                          "(do (if "
-                                          (sconcat a uinput " (printf c\"true\\n\") (printf c\"false\\n\")) 0)")))
-                  (if (icmp-eq tag 4)  ; pointer -> address
-                      (repl-emit-run a
-                                     self
-                                     defs
-                                     ""
-                                     (sconcat a "(do (printf c\"0x%lx\\n\" (cast i64 " (sconcat a uinput ")) 0)")))
-                      (if (or (icmp-eq tag 3) (icmp-eq tag 12))  ; void / never -> statement (no print)
-                          (repl-emit-run a self defs "" (sconcat a "(do " (sconcat a uinput " 0)")))
-                          (if (and (icmp-eq tag 8) (repl-slice-u8? tp))  ; (slice u8) -> the bytes
-                              (repl-emit-run a
-                                             self
-                                             defs
-                                             (repl-str-helpers)
-                                             (sconcat a
-                                                      "(let [__v "
-                                                      (sconcat a
-                                                               uinput
-                                                               "] (do (printf c\"%.*s\\n\" (cast i32 (__repl_slen __v)) (__repl_sdat __v)) 0))")))
-                              (repl-unsupported a tp))))))))))
+            (icmp-eq tag 2)  ; bool
+              (repl-emit-run a
+                             self
+                             defs
+                             ""
+                             (sconcat a
+                                      "(do (if "
+                                      (sconcat a uinput " (printf c\"true\\n\") (printf c\"false\\n\")) 0)")))
+            (icmp-eq tag 4)  ; pointer -> address
+              (repl-emit-run a
+                             self
+                             defs
+                             ""
+                             (sconcat a "(do (printf c\"0x%lx\\n\" (cast i64 " (sconcat a uinput ")) 0)")))
+            (or (icmp-eq tag 3) (icmp-eq tag 12))  ; void / never -> statement (no print)
+              (repl-emit-run a self defs "" (sconcat a "(do " (sconcat a uinput " 0)")))
+            (and (icmp-eq tag 8) (repl-slice-u8? tp))  ; (slice u8) -> the bytes
+              (repl-emit-run a
+                             self
+                             defs
+                             (repl-str-helpers)
+                             (sconcat a
+                                      "(let [__v "
+                                      (sconcat a
+                                               uinput
+                                               "] (do (printf c\"%.*s\\n\" (cast i32 (__repl_slen __v)) (__repl_sdat __v)) 0))")))
+            :else (repl-unsupported a tp)))))
 
 ; Evaluate a value expression: infer its type, then print it faithfully.
 (defn repl-eval [(a (ptr Allocator)) (self (slice u8)) (defs (slice u8)) (expr (slice u8))] (-> i64)
@@ -3142,28 +3130,24 @@ line is a value expression: it is type-checked and its result is printed.
         (None [] (break))
         (Some [line]
               (let [t (m-trim line)]
-                (if (icmp-eq (slice-len [u8] t) 0)
-                    0
-                    (if (or (str-eq t ":quit") (str-eq t ":q"))
-                        (break)
-                        (if (or (str-eq t ":help") (str-eq t ":h"))
-                            (do (ps (stdout) (repl-help-text)) 0)
-                            (if (repl-head? t ":type ")
-                                (repl-type-cmd a (sb-str (load defs)) (m-trim (subslice [u8] t 6 (slice-len [u8] t))))
-                                (if (repl-head? t ":")
-                                    (do (ps (stderr) "; unknown command; :help for help\n") 0)
-                                    (if (and (repl-is-def? t) (not (repl-head? t "(module")))
-                                        (do
-                                          (if (repl-head? t "(def ")  ; (def name v) is repl sugar for a coil (const …)
-                                              (do
-                                                (sb-push-str! (mut defs) "(const ")
-                                                (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t)))
-                                                0)
-                                              (sb-push-str! (mut defs) t))
-                                          (sb-push-byte! (mut defs) (cast u8 10))
-                                          (ps (stdout) "; ok\n")
-                                          0)
-                                        (repl-eval a self (sb-str (load defs)) t)))))))))))
+                (cond (icmp-eq (slice-len [u8] t) 0) 0
+                      (or (str-eq t ":quit") (str-eq t ":q")) (break)
+                      (or (str-eq t ":help") (str-eq t ":h")) (do (ps (stdout) (repl-help-text)) 0)
+                      (repl-head? t ":type ")
+                        (repl-type-cmd a (sb-str (load defs)) (m-trim (subslice [u8] t 6 (slice-len [u8] t))))
+                      (repl-head? t ":") (do (ps (stderr) "; unknown command; :help for help\n") 0)
+                      (and (repl-is-def? t) (not (repl-head? t "(module")))
+                        (do
+                          (if (repl-head? t "(def ")  ; (def name v) is repl sugar for a coil (const …)
+                              (do
+                                (sb-push-str! (mut defs) "(const ")
+                                (sb-push-str! (mut defs) (subslice [u8] t 5 (slice-len [u8] t)))
+                                0)
+                              (sb-push-str! (mut defs) t))
+                          (sb-push-byte! (mut defs) (cast u8 10))
+                          (ps (stdout) "; ok\n")
+                          0)
+                      :else (repl-eval a self (sb-str (load defs)) t))))))
     (ps (stdout) "\n")
     0))
 
@@ -3375,255 +3359,244 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
   ; segfaults in cstr->slice before dispatch ever runs.
   (let [a (malloc-allocator)
         sub (if (icmp-lt (cast i64 argc) 2) "" (cstr->slice (load (index argv 1))))]
-    (if (or (str-eq sub "") (or (str-eq sub "--help") (or (str-eq sub "-h") (str-eq sub "help"))))
-        (do (ps (stdout) (usage-text)) 0)
-        ; `<cmd> --help` before any dispatch, so it never reaches a parser that would
-        ; reject it as an unknown flag or try to build a project.
-        (if (wants-help? argc argv)
-            (sub-usage sub)
-            (if (str-eq sub "__smoke")
-                (smoke a)
-                (if (str-eq sub "guide")
-                    (do (ps (stdout) (guide-text)) 0)
-                    (if (str-eq sub "doc")
-                        (doc-cmd a (need-file argc argv sub))
-                        (if (str-eq sub "__normalize")
-                            (let [path (need-file argc argv sub)
-                                  src (read-src a path)]
-                              (call-ptr normalize-fn a src))
-                            (if (str-eq sub "cimport")
-                                (call-ptr cimport-fn a argc argv)
-                                (if (str-eq sub "repl")
-                                    (repl-cmd a argv)
-                                    (if (str-eq sub "run")
-                                        (if (manifest-mode? argc argv)
-                                            (manifest-cmd a "run" argc argv)
-                                            (run-cmd a argc argv))
-                                        (if (str-eq sub "test")
-                                            (test-cmd a argc argv)
-                                            (if (or (str-eq sub "fmt") (str-eq sub "lint"))
-                                                (if (str-eq sub "lint")
-                                                    (lint-cmd a argc argv)
-                                                    (fmt-cmd a argc argv))
-                                                (if (str-eq sub "new")
-                                                    (new-cmd a argc argv)
-                                                    (if (str-eq sub "emit-obj")
-                                                        (emit-obj-cmd a argc argv build-fn emitir-fn default-backend)
-                                                        (if (str-eq sub "cheader")
-                                                            (cheader-cmd a argc argv)
-                                                            (if (str-eq sub "build")
-                                                                (if (manifest-mode? argc argv)
-                                                                    (manifest-cmd a "build" argc argv)
-                                                                    (build-cmd a
-                                                                               argc
-                                                                               argv
-                                                                               build-fn
-                                                                               emitir-fn
-                                                                               default-backend))
-                                                                ; `check <file>`: typecheck/compile through mono, emit NO object. Exit 0 on a
-                                                                ; clean compile, 1 with a located diagnostic on failure. (diag-12)
-                                                                (if (str-eq sub "check")
-                                                                    (let [path (need-file argc argv sub)]
-                                                                      (set-target-arch! (argv-triple argc argv))
-                                                                      (if (icmp-eq (run-dump-on-big-stack a
-                                                                                                          (read-src a
-                                                                                                                    path)
-                                                                                                          (cwd-slice a)
-                                                                                                          (cstr->slice path)
-                                                                                                          (fnptr-of check-src-program))
-                                                                                   0)
-                                                                          1
-                                                                          0))
-                                                                    ; `interp <file>`: run through mono, then interpret. main's i64 return is
-                                                                    ; the process exit code (returned straight from the big-stack pipeline).
-                                                                    (if (str-eq sub "interp")
-                                                                        (let [path (need-file argc argv sub)]
-                                                                          (set-target-arch! (argv-triple argc argv))
-                                                                          ; hand the program its own argc/argv: argv[0] = the source file, then
-                                                                          ; any extra command-line args (everything after `interp <file>`).
-                                                                          (set-interp-args (cast i64
-                                                                                                 (isub (cast i64 argc)
-                                                                                                       2))
-                                                                                           (cast i64 (index argv 2)))
-                                                                          (run-dump-on-big-stack a
-                                                                                                 (read-src a path)
-                                                                                                 (cwd-slice a)
-                                                                                                 (cstr->slice path)
-                                                                                                 (fnptr-of interp-src-program)))
-                                                                        (if (str-eq sub "dump-read")
-                                                                            (let [path (need-file argc argv sub)]
-                                                                              (run-dump-on-big-stack a
-                                                                                                     (read-src a path)
-                                                                                                     (cwd-slice a)
-                                                                                                     (cstr->slice path)
-                                                                                                     (fnptr-of dump-read-w)))
-                                                                            (if (str-eq sub "dump-ast")
-                                                                                (let [path (need-file argc argv sub)]
-                                                                                  (run-dump-on-big-stack a
-                                                                                                         (read-src a
-                                                                                                                   path)
-                                                                                                         (cwd-slice a)
-                                                                                                         (cstr->slice path)
-                                                                                                         (fnptr-of dump-ast-w)))
-                                                                                (if (str-eq sub "dump-load")
-                                                                                    (let [path (need-file argc argv sub)]
-                                                                                      (run-dump-on-big-stack a
-                                                                                                             (read-src a
-                                                                                                                       path)
-                                                                                                             (cwd-slice a)
-                                                                                                             (cstr->slice path)
-                                                                                                             (fnptr-of dump-load-w)))
-                                                                                    (if (str-eq sub "expand")
-                                                                                        (let [path
-                                                                                                (need-file argc
-                                                                                                           argv
-                                                                                                           sub)]
-                                                                                          (set-target-arch! (argv-triple argc
-                                                                                                                         argv))
-                                                                                          (run-dump-on-big-stack a
-                                                                                                                 (read-src a
-                                                                                                                           path)
-                                                                                                                 (cwd-slice a)
-                                                                                                                 (cstr->slice path)
-                                                                                                                 (fnptr-of expand-src-w)))
-                                                                                        (if (str-eq sub "dump-expand")
-                                                                                            (let [path
-                                                                                                    (need-file argc
-                                                                                                               argv
-                                                                                                               sub)]
-                                                                                              (set-target-arch! (argv-triple argc
-                                                                                                                             argv))
-                                                                                              (run-dump-on-big-stack a
-                                                                                                                     (read-src a
-                                                                                                                               path)
-                                                                                                                     (cwd-slice a)
-                                                                                                                     (cstr->slice path)
-                                                                                                                     (fnptr-of dump-expand-w)))
-                                                                                            (if (str-eq sub
-                                                                                                        "dump-resolved")
-                                                                                                (let [path
-                                                                                                        (need-file argc
-                                                                                                                   argv
-                                                                                                                   sub)]
-                                                                                                  (run-dump-on-big-stack a
-                                                                                                                         (read-src a
-                                                                                                                                   path)
-                                                                                                                         (cwd-slice a)
-                                                                                                                         (cstr->slice path)
-                                                                                                                         (fnptr-of dump-resolved-w)))
-                                                                                                (if (str-eq sub
-                                                                                                            "dump-checked")
-                                                                                                    (let [path
-                                                                                                            (need-file argc
-                                                                                                                       argv
-                                                                                                                       sub)]
-                                                                                                      (run-dump-on-big-stack a
-                                                                                                                             (read-src a
-                                                                                                                                       path)
-                                                                                                                             (cwd-slice a)
-                                                                                                                             (cstr->slice path)
-                                                                                                                             (fnptr-of dump-checked-w)))
-                                                                                                    (if (str-eq sub
-                                                                                                                "dump-mono")
-                                                                                                        (let [path
-                                                                                                                (need-file argc
-                                                                                                                           argv
-                                                                                                                           sub)]
-                                                                                                          (run-dump-on-big-stack a
-                                                                                                                                 (read-src a
-                                                                                                                                           path)
-                                                                                                                                 (cwd-slice a)
-                                                                                                                                 (cstr->slice path)
-                                                                                                                                 (fnptr-of dump-mono-w)))
-                                                                                                        ; fallthrough = emit-ir / dump-ir. Anything else is a typo, not an
-                                                                                                        ; alias for emit-ir — report it instead of compiling argv[2] (NULL).
-                                                                                                        (if (not (or (str-eq sub
-                                                                                                                             "emit-ir")
-                                                                                                                     (str-eq sub
-                                                                                                                             "dump-ir")))
-                                                                                                            (do
-                                                                                                              (ps (stderr)
-                                                                                                                  "coil: unknown command '")
-                                                                                                              (ps (stderr)
-                                                                                                                  sub)
-                                                                                                              (ps (stderr)
-                                                                                                                  "'\n\n")
-                                                                                                              (ps (stderr)
-                                                                                                                  (usage-text))
-                                                                                                              1)
-                                                                                                            (let [path
-                                                                                                                    (need-file argc
-                                                                                                                               argv
-                                                                                                                               sub)
-                                                                                                                  ctx
-                                                                                                                    (alloc-stack DumpCtx)
-                                                                                                                  (mut trip)
-                                                                                                                    (cast (ptr i8)
-                                                                                                                          0)
-                                                                                                                  (mut i)
-                                                                                                                    3]
-                                                                                                              ; parse `--target <triple>` from argv[3..] (cross-compile override).
-                                                                                                              (loop (if (icmp-ge (load i)
-                                                                                                                                 (cast i64
-                                                                                                                                       argc))
-                                                                                                                        (break)
-                                                                                                                        (if (and (icmp-lt (iadd (load i)
-                                                                                                                                                1)
-                                                                                                                                          (cast i64
-                                                                                                                                                argc))
-                                                                                                                                 (str-eq (cstr->slice (load (index argv
-                                                                                                                                                                   (load i))))
-                                                                                                                                         "--target"))
-                                                                                                                            (do
-                                                                                                                              (store! trip
-                                                                                                                                      (load (index argv
-                                                                                                                                                   (iadd (load i)
-                                                                                                                                                         1))))
-                                                                                                                              (store! i
-                                                                                                                                      (iadd (load i)
-                                                                                                                                            2))
-                                                                                                                              0)
-                                                                                                                            (do
-                                                                                                                              (store! i
-                                                                                                                                      (iadd (load i)
-                                                                                                                                            1))
-                                                                                                                              0))))
-                                                                                                              (store! (field ctx
-                                                                                                                             a)
-                                                                                                                      a)
-                                                                                                              (store! (field ctx
-                                                                                                                             src)
-                                                                                                                      (read-src a
-                                                                                                                                path))
-                                                                                                              (store! (field ctx
-                                                                                                                             cwd)
-                                                                                                                      (cwd-slice a))
-                                                                                                              (store! (field ctx
-                                                                                                                             path)
-                                                                                                                      (cstr->slice path))
-                                                                                                              (store! (field ctx
-                                                                                                                             mode)
-                                                                                                                      0)
-                                                                                                              (store! (field ctx
-                                                                                                                             obj)
-                                                                                                                      (cast (ptr i8)
-                                                                                                                            0))
-                                                                                                              (store! (field ctx
-                                                                                                                             triple)
-                                                                                                                      (load trip))
-                                                                                                              (set-target-arch! (load trip))
-                                                                                                              (store! (field ctx
-                                                                                                                             ok)
-                                                                                                                      0)
-                                                                                                              (store! (field ctx
-                                                                                                                             build-fn)
-                                                                                                                      build-fn)
-                                                                                                              (store! (field ctx
-                                                                                                                             emitir-fn)
-                                                                                                                      emitir-fn)
-                                                                                                              ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
-                                                                                                              ; `report(emit_ir(...))` returning ExitCode::FAILURE.
-                                                                                                              (if (icmp-eq (run-on-big-stack ctx)
-                                                                                                                           0)
-                                                                                                                  1
-                                                                                                                  0))))))))))))))))))))))))))))))  ;; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
+    (cond (or (str-eq sub "") (or (str-eq sub "--help") (or (str-eq sub "-h") (str-eq sub "help"))))
+            (do (ps (stdout) (usage-text)) 0)
+          ; `<cmd> --help` before any dispatch, so it never reaches a parser that would
+          ; reject it as an unknown flag or try to build a project.
+          (wants-help? argc argv) (sub-usage sub)
+          (str-eq sub "__smoke") (smoke a)
+          (str-eq sub "guide") (do (ps (stdout) (guide-text)) 0)
+          (str-eq sub "doc") (doc-cmd a (need-file argc argv sub))
+          (str-eq sub "__normalize")
+            (let [path (need-file argc argv sub)
+                  src (read-src a path)]
+              (call-ptr normalize-fn a src))
+          (str-eq sub "cimport") (call-ptr cimport-fn a argc argv)
+          (str-eq sub "repl") (repl-cmd a argv)
+          (str-eq sub "run")
+            (if (manifest-mode? argc argv)
+                (manifest-cmd a "run" argc argv)
+                (run-cmd a argc argv))
+          (str-eq sub "test") (test-cmd a argc argv)
+          (or (str-eq sub "fmt") (str-eq sub "lint"))
+            (if (str-eq sub "lint")
+                (lint-cmd a argc argv)
+                (fmt-cmd a argc argv))
+          (str-eq sub "new") (new-cmd a argc argv)
+          (str-eq sub "emit-obj") (emit-obj-cmd a argc argv build-fn emitir-fn default-backend)
+          (str-eq sub "cheader") (cheader-cmd a argc argv)
+          (str-eq sub "build")
+            (if (manifest-mode? argc argv)
+                (manifest-cmd a "build" argc argv)
+                (build-cmd a
+                           argc
+                           argv
+                           build-fn
+                           emitir-fn
+                           default-backend))
+          ; `check <file>`: typecheck/compile through mono, emit NO object. Exit 0 on a
+          ; clean compile, 1 with a located diagnostic on failure. (diag-12)
+          (str-eq sub "check")
+            (let [path (need-file argc argv sub)]
+              (set-target-arch! (argv-triple argc argv))
+              (if (icmp-eq (run-dump-on-big-stack a
+                                                  (read-src a
+                                                            path)
+                                                  (cwd-slice a)
+                                                  (cstr->slice path)
+                                                  (fnptr-of check-src-program))
+                           0)
+                  1
+                  0))
+          ; `interp <file>`: run through mono, then interpret. main's i64 return is
+          ; the process exit code (returned straight from the big-stack pipeline).
+          (str-eq sub "interp")
+            (let [path (need-file argc argv sub)]
+              (set-target-arch! (argv-triple argc argv))
+              ; hand the program its own argc/argv: argv[0] = the source file, then
+              ; any extra command-line args (everything after `interp <file>`).
+              (set-interp-args (cast i64
+                                     (isub (cast i64 argc)
+                                           2))
+                               (cast i64 (index argv 2)))
+              (run-dump-on-big-stack a
+                                     (read-src a path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of interp-src-program)))
+          (str-eq sub "dump-read")
+            (let [path (need-file argc argv sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-read-w)))
+          (str-eq sub "dump-ast")
+            (let [path (need-file argc argv sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-ast-w)))
+          (str-eq sub "dump-load")
+            (let [path (need-file argc argv sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-load-w)))
+          (str-eq sub "expand")
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)]
+              (set-target-arch! (argv-triple argc
+                                             argv))
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of expand-src-w)))
+          (str-eq sub "dump-expand")
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)]
+              (set-target-arch! (argv-triple argc
+                                             argv))
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-expand-w)))
+          (str-eq sub
+                  "dump-resolved")
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-resolved-w)))
+          (str-eq sub
+                  "dump-checked")
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-checked-w)))
+          (str-eq sub
+                  "dump-mono")
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)]
+              (run-dump-on-big-stack a
+                                     (read-src a
+                                               path)
+                                     (cwd-slice a)
+                                     (cstr->slice path)
+                                     (fnptr-of dump-mono-w)))
+          ; fallthrough = emit-ir / dump-ir. Anything else is a typo, not an
+          ; alias for emit-ir — report it instead of compiling argv[2] (NULL).
+          (not (or (str-eq sub
+                           "emit-ir")
+                   (str-eq sub
+                           "dump-ir")))
+            (do
+              (ps (stderr)
+                  "coil: unknown command '")
+              (ps (stderr)
+                  sub)
+              (ps (stderr)
+                  "'\n\n")
+              (ps (stderr)
+                  (usage-text))
+              1)
+          :else
+            (let [path
+                    (need-file argc
+                               argv
+                               sub)
+                  ctx (alloc-stack DumpCtx)
+                  (mut trip)
+                    (cast (ptr i8)
+                          0)
+                  (mut i) 3]
+              ; parse `--target <triple>` from argv[3..] (cross-compile override).
+              (loop (if (icmp-ge (load i)
+                                 (cast i64
+                                       argc))
+                        (break)
+                        (if (and (icmp-lt (iadd (load i)
+                                                1)
+                                          (cast i64
+                                                argc))
+                                 (str-eq (cstr->slice (load (index argv
+                                                                   (load i))))
+                                         "--target"))
+                            (do
+                              (store! trip
+                                      (load (index argv
+                                                   (iadd (load i)
+                                                         1))))
+                              (store! i
+                                      (iadd (load i)
+                                            2))
+                              0)
+                            (do
+                              (store! i
+                                      (iadd (load i)
+                                            1))
+                              0))))
+              (store! (field ctx
+                             a)
+                      a)
+              (store! (field ctx
+                             src)
+                      (read-src a
+                                path))
+              (store! (field ctx
+                             cwd)
+                      (cwd-slice a))
+              (store! (field ctx
+                             path)
+                      (cstr->slice path))
+              (store! (field ctx
+                             mode)
+                      0)
+              (store! (field ctx
+                             obj)
+                      (cast (ptr i8)
+                            0))
+              (store! (field ctx
+                             triple)
+                      (load trip))
+              (set-target-arch! (load trip))
+              (store! (field ctx
+                             ok)
+                      0)
+              (store! (field ctx
+                             build-fn)
+                      build-fn)
+              (store! (field ctx
+                             emitir-fn)
+                      emitir-fn)
+              ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
+              ; `report(emit_ir(...))` returning ExitCode::FAILURE.
+              (if (icmp-eq (run-on-big-stack ctx)
+                           0)
+                  1
+                  0)))))  ;; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====
