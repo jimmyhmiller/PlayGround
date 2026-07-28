@@ -59,15 +59,12 @@ In order:
 `alias/name` skips straight to M's `:as` aliases (export-checked). A `.`-qualified
 head (`control.for`) is hygiene-generated and trusted as already-resolved.
 
-The same scoping is mirrored in three places, by design:
-
-- `resolve.rs::resolve` — the canonical name resolver (functions, types, traits, …).
-- `lib.rs::resolve_macro` — which `(head …)` calls are macro calls.
-- `comptime.rs::resolve_in_module` — **referential hygiene**: a symbol written in a
-  macro template resolves in the *macro's* namespace (own defs + the macro's own
-  `:use`d imports), not the use site. This is why `slice-for`'s generated `(for …)`
-  becomes `control.for` regardless of who calls `slice-for`, so a library's macros
-  work without the user importing the library's dependencies.
+The same scoping is mirrored in three places, by design: the canonical name resolver,
+the decision of which `(head …)` calls are macro calls, and **referential hygiene** — a
+symbol written in a macro template resolves in the *macro's* namespace (own defs + the
+macro's own `:use`d imports), not the use site. This is why `slice-for`'s generated
+`(for …)` becomes `control.for` regardless of who calls `slice-for`, so a library's
+macros work without the user importing the library's dependencies.
 
 ## coil.core (the prelude)
 
@@ -75,15 +72,13 @@ The same scoping is mirrored in three places, by design:
 auto-loaded. It defines the operator traits (`Eq`/`Hash`/`Add`/`Sub`/`Mul`/`Div`/
 `Rem`/`Ord`) and their `i64`/`f64` impls, so `=`, `+`, `<`, `hash`, `case` work in
 any module with **no import** — exactly like `clojure.core`. The auto-refer is the
-last step of name resolution (`resolve.rs`, `CORE` constant). Diagnostics strip the
-`coil.core.` prefix (`check.rs::display_name`) so errors read `Eq`, not
-`coil.core.Eq`.
+last step of name resolution. Diagnostics strip the `coil.core.` prefix so errors read
+`Eq`, not `coil.core.Eq`.
 
 ## Trait-method resolution (the per-module part)
 
-Method names are **not** globally unique. `check.rs` maps a method name to *every*
-trait that declares it; a call resolves it like so (`resolve_method` /
-`trait_visible`):
+Method names are **not** globally unique. The checker maps a method name to *every*
+trait that declares it; a call resolves it like so:
 
 - **one** candidate (every operator) → use it directly.
 - **several** (two modules each define a trait with a `show` method) → keep only the
@@ -91,18 +86,17 @@ trait that declares it; a call resolves it like so (`resolve_method` /
   Exactly one visible → use it; **zero or many** → a hard error telling you to
   `:use` the one you mean or rename.
 
-`check::check_with(program, imports, exports)` threads the import tables for this;
-plain `check::check` passes empty tables (fine for single-module and the comptime
-sub-program checks, where every method is single-candidate anyway).
+The checker threads the import tables for this; the comptime sub-program checks pass
+empty tables, which is fine because every method there is single-candidate anyway.
 
 ## The undefined-reference check and the staged-resolution gating
 
 A still-bare callee after resolution that is **neither an extern nor a trait
-method** is an undefined reference, reported at resolve time (`resolve.rs`: a
-`bare_ok` allowlist = externs ∪ method names).
+method** is an undefined reference, reported at resolve time (the allowlist of
+legitimately-bare names is externs ∪ method names).
 
-This check is **gated** by a `strict: bool` flag on `resolve_program`, and that
-gating exists because of staged macros.
+This check is **gated** by a `strict` flag on the resolver, and that gating exists
+because of staged macros.
 
 ### Why two resolve passes
 
@@ -117,7 +111,7 @@ into the program**:
 
 When the resolver first walks `main`, `answer` does not exist — it only appears once
 `gen` *runs*. But to run `gen`, you must resolve + check it (it's a real function).
-Chicken-and-egg → resolution is staged (`lib.rs::elaborate`):
+Chicken-and-egg → resolution is staged:
 
 1. **Intermediate resolve** (`strict = false`): produce a well-formed `program` so
    the generators can be found and checked. The program still references
@@ -154,14 +148,17 @@ Coil's two separate passes are the coarse-grained version. If meta-generated cod
 ever needed to contain *more* metas, the two passes would become a fixpoint loop
 (as in Racket).
 
-## Tests
+## How this is gated
 
-- `tests/modules.rs` — `macros_are_namespaced_not_global`,
-  `macro_references_resolve_in_defining_module`,
-  `second_order_macro_hygiene_across_modules`,
-  `trait_methods_are_namespaced_per_module`, `undefined_call_is_a_resolve_error`,
-  export/`:as`/`:use` coverage.
-- `tests/meta.rs` — generation + `undefined_call_still_caught_in_a_meta_program`
-  (the gating soundness test).
-- `tests/traits.rs`, `tests/operators.rs` — trait/operator dispatch (the
-  single-candidate method path).
+Covered by `selfhost/oracle`:
+
+- **`gate-cli.sh`** — end-to-end teeth, each written to FAIL on the pre-change seed:
+  sibling imports resolving against the importing file's directory, imports from an
+  arbitrary CWD, the bundled prelude reaching bundled `io` despite a same-named decoy
+  in the entry directory, and `(:use [name])` of a symbol a module does not export
+  being a located error that names the symbol and the module.
+- **`gate-resolved.sh` / `gate-expand.sh`** — snapshot the resolver's and expander's
+  output over the whole corpus, so any drift in name resolution or macro hygiene
+  (including the second-order cross-module case) shows up as a diff.
+- **`gate-full.sh`** — emitted IR, byte-exact, which catches a resolution change that
+  survives to codegen.

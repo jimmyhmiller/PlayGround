@@ -14,7 +14,7 @@ TARGET=x86_64-apple-macosx11.0.0
 REF=selfhost/oracle/x86/reference
 LIST=selfhost/oracle/x86/corpus.txt
 
-[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
+[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (build one with selfhost/rebootstrap.sh, or set COIL_REF_BIN)"; exit 1; }
 
 rm -rf "$REF"; mkdir -p "$REF"
 find selfhost/oracle/features -name '*x86*.coil' 2>/dev/null | sort > "$LIST"

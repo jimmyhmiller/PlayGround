@@ -25,7 +25,7 @@
 ; reflection helpers (over a trait given as a Code symbol, at expansion time)
 ; ============================================================================
 
-; A Code form that mentions the bare symbol `Self` anywhere (object-safety check).
+;; A Code form that mentions the bare symbol `Self` anywhere (object-safety check).
 (defn dyn--has-self? [(c Code)] (-> bool)
   (if (code-sym? c) (code-eq c `Self)
     (if (code-list? c) (dyn--has-self-list? c 0 (code-count c))
@@ -36,7 +36,7 @@
     (if (dyn--has-self? (code-nth c i)) true
       (dyn--has-self-list? c (iadd i 1) n))))
 
-; Error out unless method `mi` is object-safe (arity >= 1; no `Self` past self).
+;; Error out unless method `mi` is object-safe (arity >= 1; no `Self` past self).
 (defn dyn--check-method [(tn Code) (mi i64)] (-> bool)
   (let [arity (code-trait-arity tn mi)]
     (if (icmp-le arity 0)
@@ -61,13 +61,13 @@
 ; defdyn — vtable struct + fat-pointer struct + forwarding impl
 ; ============================================================================
 
-; param-type list for the vtable fnptr of method mi (self slot -> (ptr i8)).
+;; param-type list for the vtable fnptr of method mi (self slot -> (ptr i8)).
 (defn dyn--vt-params [(tn Code) (mi i64) (j i64) (arity i64)] (-> Code)
   (if (icmp-eq j arity) `()
     (let [pty (if (icmp-eq j 0) `(ptr i8) (code-trait-param-type tn mi j))]
       `(~pty ~@(dyn--vt-params tn mi (iadd j 1) arity)))))
 
-; one vtable field: (mname (fnptr c [erased-params] ret))
+;; one vtable field: (mname (fnptr c [erased-params] ret))
 (defn dyn--vt-field [(tn Code) (mi i64)] (-> Code)
   (let [mname (code-trait-method-name tn mi)
         arity (code-trait-arity tn mi)
@@ -78,19 +78,19 @@
   (if (icmp-eq i n) `()
     `(~(dyn--vt-field tn i) ~@(dyn--vt-fields tn (iadd i 1) n))))
 
-; param list for a forwarding impl method (self -> (ptr DynName), rest verbatim).
+;; param list for a forwarding impl method (self -> (ptr DynName), rest verbatim).
 (defn dyn--impl-params [(tn Code) (dynname Code) (mi i64) (j i64) (arity i64)] (-> Code)
   (if (icmp-eq j arity) `()
     (let [p (if (icmp-eq j 0) `(self (ptr ~dynname))
               `(~(code-trait-param-name tn mi j) ~(code-trait-param-type tn mi j)))]
       `(~p ~@(dyn--impl-params tn dynname mi (iadd j 1) arity)))))
 
-; call arguments j..arity (the param NAMES; self/data handled separately).
+;; call arguments j..arity (the param NAMES; self/data handled separately).
 (defn dyn--arg-names [(tn Code) (mi i64) (j i64) (arity i64)] (-> Code)
   (if (icmp-eq j arity) `()
     `(~(code-trait-param-name tn mi j) ~@(dyn--arg-names tn mi (iadd j 1) arity))))
 
-; one forwarding method: load fnptr from the vtable, call-ptr with (data, args...).
+;; one forwarding method: load fnptr from the vtable, call-ptr with (data, args...).
 (defn dyn--impl-method [(tn Code) (dynname Code) (mi i64)] (-> Code)
   (let [mname (code-trait-method-name tn mi)
         arity (code-trait-arity tn mi)

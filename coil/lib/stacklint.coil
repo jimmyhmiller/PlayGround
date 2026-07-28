@@ -10,33 +10,33 @@
 ; compiler pass: the syntactic "returns a just-alloc-stack'd local" case needs no
 ; analysis the checker API doesn't already give.
 
-; the form `(alloc-stack …)`?
+;; the form `(alloc-stack …)`?
 (defn sl-is-alloc-stack? [(e Code)] (-> bool)
   (and (code-list? e)
        (and (icmp-gt (code-count e) 0)
             (and (code-sym? (code-nth e 0)) (code-eq (code-nth e 0) `alloc-stack)))))
 
-; head symbol of a list form equals `name`?
+;; head symbol of a list form equals `name`?
 (defn sl-head-is? [(e Code) (name Code)] (-> bool)
   (and (code-list? e)
        (and (icmp-gt (code-count e) 0)
             (and (code-sym? (code-nth e 0)) (code-eq (code-nth e 0) name)))))
 
-; the value a body ultimately RETURNS: peel `let`/`do` down to their last (tail) form.
-; `if` is left as-is (a value from either branch — not the clear syntactic case).
+;; the value a body ultimately RETURNS: peel `let`/`do` down to their last (tail) form.
+;; `if` is left as-is (a value from either branch — not the clear syntactic case).
 (defn sl-peel-tail [(e Code)] (-> Code)
   (if (or (sl-head-is? e `let) (sl-head-is? e `do))
       (sl-peel-tail (code-nth e (isub (code-count e) 1)))
     e))
 
-; walk a `let` binding vector [k0 v0 k1 v1 …] pairwise: is `sym` bound to (alloc-stack …)?
+;; walk a `let` binding vector [k0 v0 k1 v1 …] pairwise: is `sym` bound to (alloc-stack …)?
 (defn sl-binds-loop [(sym Code) (binds Code) (i i64) (n i64)] (-> bool)
   (if (icmp-ge (iadd i 1) n) false
     (if (and (code-eq (code-nth binds i) sym) (sl-is-alloc-stack? (code-nth binds (iadd i 1)))) true
       (sl-binds-loop sym binds (iadd i 2) n))))
 
-; does THIS form directly bind `sym` to (alloc-stack …) as a `let`? (kept in a plain
-; `if` so the closure walk seeds sl-binds-loop — see sl-check-defn's note on and/or.)
+;; does THIS form directly bind `sym` to (alloc-stack …) as a `let`? (kept in a plain
+;; `if` so the closure walk seeds sl-binds-loop — see sl-check-defn's note on and/or.)
 (defn sl-let-here? [(sym Code) (scope Code)] (-> bool)
   (if (sl-head-is? scope `let)
       (if (icmp-gt (code-count scope) 1)
@@ -44,7 +44,7 @@
         false)
     false))
 
-; anywhere in `scope`, is `sym` bound to (alloc-stack …) by a `let`? (a syntactic search)
+;; anywhere in `scope`, is `sym` bound to (alloc-stack …) by a `let`? (a syntactic search)
 (defn sl-binds-stack? [(sym Code) (scope Code)] (-> bool)
   (if (code-list? scope)
       (if (sl-let-here? sym scope)
@@ -55,16 +55,16 @@
   (if (icmp-ge i n) false
     (if (sl-binds-stack? sym (code-nth scope i)) true (sl-scan-kids sym scope (iadd i 1) n))))
 
-; index of the (-> RET) element in a defn form, or -1.
+;; index of the (-> RET) element in a defn form, or -1.
 (defn sl-arrow-idx [(f Code) (i i64) (n i64)] (-> i64)
   (if (icmp-ge i n) -1
     (if (sl-head-is? (code-nth f i) `->) i (sl-arrow-idx f (iadd i 1) n))))
 
-; RET is a (ptr …) / (mut …) — a reference the returned value borrows from the frame.
+;; RET is a (ptr …) / (mut …) — a reference the returned value borrows from the frame.
 (defn sl-ret-is-ptr? [(ret Code)] (-> bool)
   (or (sl-head-is? ret `ptr) (sl-head-is? ret `mut)))
 
-; check one (defn …) form: does it return a stack-local pointer? warn if so.
+;; check one (defn …) form: does it return a stack-local pointer? warn if so.
 (defn sl-check-defn [(f Code)] (-> i64)
   (let [n (code-count f) ai (sl-arrow-idx f 0 n)]
     (if (icmp-lt ai 0) 0
@@ -84,7 +84,7 @@
 (defn sl-warn-dangling [(node Code)] (-> i64)
   (warn node "returns a pointer to a stack local; it dangles once this function returns (--debug-checks)") 0)
 
-; a top-level form: lint only USER `defn`s (skip the bundled stdlib and this module).
+;; a top-level form: lint only USER `defn`s (skip the bundled stdlib and this module).
 (defn sl-check-form [(f Code)] (-> i64)
   (if (and (sl-head-is? f `defn) (code-from-user? f)) (sl-check-defn f) 0))
 (defn sl-check-mod-forms [(m Code) (i i64) (n i64)] (-> i64)

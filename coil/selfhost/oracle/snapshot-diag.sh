@@ -22,7 +22,7 @@ REF=selfhost/oracle/diag/reference
 LIST=selfhost/oracle/diag/corpus.txt
 COIL=${COIL_REF_BIN:-./coil}
 
-[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
+[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (build one with selfhost/rebootstrap.sh, or set COIL_REF_BIN)"; exit 1; }
 
 rm -rf "$REF"; mkdir -p "$REF"
 find selfhost/oracle/diag/inputs -name '*.coil' 2>/dev/null | sort > "$LIST"

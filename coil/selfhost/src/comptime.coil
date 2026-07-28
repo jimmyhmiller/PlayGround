@@ -345,6 +345,81 @@
             (let [txt (load (field sp text)) n (slice-len [u8] txt)]
               (if (or (icmp-lt lo 0) (or (icmp-gt hi n) (icmp-gt lo hi))) ""
                 (subslice [u8] txt lo hi)))))))))
+; ---- doc comments (`;;`) ------------------------------------------------------
+; A DOC COMMENT is a run of lines whose first non-blank characters are `;;`,
+; immediately above a form. A single `;` stays an ordinary throwaway comment, so
+; documenting something is opt-in and an incidental note never becomes API docs.
+; The reader discards all comments, so the doc is recovered from the SOURCE TEXT by
+; scanning backwards from the node's `lo` — no new AST field, one definition of a
+; doc (the source itself), and nothing to keep in sync.
+
+; Offset of the first byte of the line containing `off` (0 if on line 1).
+(defn ct-line-start [(src (slice u8)) (off i64)] (-> i64)
+  (let [(mut k) off]
+    (loop (if (icmp-le (load k) 0) (break)
+      (if (icmp-eq (cast i64 (slice-get [u8] src (isub (load k) 1))) 10) (break)
+        (store! k (isub (load k) 1)))))
+    (load k)))
+
+; If the line starting at `ls` is a `;;` doc line, return the offset just past its
+; `;;` (and one optional following space); otherwise -1. A line of only whitespace,
+; or one holding code, is not a doc line.
+(defn ct-doc-line-body [(src (slice u8)) (ls i64)] (-> i64)
+  (let [n (slice-len [u8] src) (mut k) ls]
+    (loop (if (icmp-ge (load k) n) (break)
+      (let [c (cast i64 (slice-get [u8] src (load k)))]
+        (if (or (icmp-eq c 32) (icmp-eq c 9)) (store! k (iadd (load k) 1)) (break)))))
+    (if (icmp-ge (iadd (load k) 1) n) -1
+      (if (not (and (icmp-eq (cast i64 (slice-get [u8] src (load k))) 59)
+                    (icmp-eq (cast i64 (slice-get [u8] src (iadd (load k) 1))) 59))) -1
+        (let [(mut b) (iadd (load k) 2)]
+          ; a third `;` is still a doc line (`;;;` banners); skip the run
+          (loop (if (icmp-ge (load b) n) (break)
+            (if (icmp-eq (cast i64 (slice-get [u8] src (load b))) 59) (store! b (iadd (load b) 1)) (break))))
+          (if (and (icmp-lt (load b) n) (icmp-eq (cast i64 (slice-get [u8] src (load b))) 32))
+              (iadd (load b) 1) (load b)))))))
+
+; End offset (exclusive) of the line starting at `ls`, not counting its newline.
+(defn ct-line-end [(src (slice u8)) (ls i64)] (-> i64)
+  (let [n (slice-len [u8] src) (mut k) ls]
+    (loop (if (icmp-ge (load k) n) (break)
+      (if (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (break) (store! k (iadd (load k) 1)))))
+    (load k)))
+
+; The doc comment attached to `off`: the contiguous `;;` block ending on the line
+; directly above it, joined with newlines. "" when there is none.
+(defn ct-doc-at [(a (ptr Allocator)) (src (slice u8)) (off i64)] (-> (slice u8))
+  (let [n (slice-len [u8] src)]
+    (if (or (icmp-lt off 0) (icmp-gt off n)) ""
+      (let [(mut ls) (ct-line-start src off) (mut lines) (al-new [(slice u8)] a)]
+        ; walk upwards while the previous line is a doc line
+        (loop
+          (if (icmp-le (load ls) 0) (break)
+            (let [pls (ct-line-start src (isub (load ls) 1))
+                  body (ct-doc-line-body src pls)]
+              (if (icmp-lt body 0) (break)
+                (do (al-push! (mut lines) (subslice [u8] src body (ct-line-end src pls)))
+                    (store! ls pls))))))
+        (let [cnt (al-len [(slice u8)] lines)]
+          (if (icmp-eq cnt 0) ""
+            ; collected bottom-up; emit top-down
+            (let [(mut out) (sb-new a) (mut i) cnt]
+              (loop (if (icmp-le (load i) 0) (break)
+                (do (store! i (isub (load i) 1))
+                    (sb-push-str! (mut out) (al-get [(slice u8)] lines (load i)))
+                    (if (icmp-gt (load i) 0) (sb-push-byte! (mut out) (cast u8 10)) 0))))
+              (sb-str (load out)))))))))
+
+; `(code-doc NODE)` — the `;;` doc comment written above NODE, or "" if it has none
+; (including any macro-generated node, which has no source of its own).
+(defn code-doc-of [(node Sexp)] (-> (slice u8))
+  (let [b (src-box) lst (load (field b lst))]
+    (if (icmp-eq (cast i64 lst) 0) ""
+      (let [sid (sx-source node)]
+        (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst)))) ""
+          (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid))
+            (ct-doc-at (malloc-allocator) (load (field sp text)) (sx-lo node))))))))
+
 ; `(target-arch)` used to be the constant "aarch64" — so it was WRONG in exactly the
 ; case it exists for: cross-compiling. A macro branching on it baked the host branch
 ; into a wasm build, silently. The arch is one value per compile, set from the resolved
@@ -1213,6 +1288,10 @@
         (match (cv-get args 0)
           (Some [nodev] (if (is-ccode nodev) (Ok [CtVal Diag] (CInt (code-col-of (ccode-of nodev)))) (Err [CtVal Diag] (derr "code-col: expects a Code node"))))
           (None [] (Err [CtVal Diag] (derr "code-col: expects (code-col NODE)"))))
+    (if (icmp-eq op 43)
+        (match (cv-get args 0)
+          (Some [nodev] (if (is-ccode nodev) (Ok [CtVal Diag] (CStr (code-doc-of (ccode-of nodev)))) (Err [CtVal Diag] (derr "code-doc: expects a Code node"))))
+          (None [] (Err [CtVal Diag] (derr "code-doc: expects (code-doc NODE)"))))
     (if (icmp-eq op 34)
         (match (cv-get args 0)
           (Some [nodev] (if (is-ccode nodev)
@@ -1230,7 +1309,7 @@
     (if (icmp-eq op 35) (cop-decl args cx)
     (if (icmp-eq op 36) (cop-type-of args cx)
     (if (icmp-eq op 37) (cop-binding-of args cx)
-        (cop-codearg op args cx)))))))))))))))))))))))))
+        (cop-codearg op args cx))))))))))))))))))))))))))
 ; module-fns-has is asked once per QUASIQUOTE HEAD a metaprogram builds
 ; (metahost.mh-qualify-head! -> resolve-in-module), against every defn name in the
 ; whole program. As a linear str-eq scan that is O(program) per template list, which

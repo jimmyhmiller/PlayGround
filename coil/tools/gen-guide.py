@@ -10,7 +10,7 @@ Run from the repo root after editing docs/LANGUAGE_GUIDE.md:
     python3 tools/gen-guide.py
 then rebuild the compiler (selfhost/rebootstrap.sh) — and because main.coil is in
 the gate corpus, regenerate the snapshot first:
-    COIL_REF_BIN=./target/release/coil ./selfhost/oracle/snapshot-full.sh
+    COIL_REF_BIN=./coil ./selfhost/oracle/snapshot-full.sh
 """
 import os
 

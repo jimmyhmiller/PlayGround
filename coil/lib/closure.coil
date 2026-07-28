@@ -3,14 +3,14 @@
 ; then `(defclosure NAME [captures] [params] RET body...)` to get a heap closure
 ; with NAME-new / NAME-call / NAME-free. Nothing in the compiler knows about it.
 
-; Stage-3 comptime helpers (recurse by index over Code vectors of (name type) pairs).
+;; Stage-3 comptime helpers (recurse by index over Code vectors of (name type) pairs).
 (defn cl--param-types [(ps Code) (i i64)] (-> Code)
   (if (icmp-eq i (code-count ps)) `()
     `(~(code-nth (code-nth ps i) 1) ~@(cl--param-types ps (iadd i 1)))))
 (defn cl--param-names [(ps Code) (i i64)] (-> Code)
   (if (icmp-eq i (code-count ps)) `()
     `(~(code-nth (code-nth ps i) 0) ~@(cl--param-names ps (iadd i 1)))))
-; let-bindings that load each capture out of the env: name (load (field __self name)) …
+;; let-bindings that load each capture out of the env: name (load (field __self name)) …
 (defn cl--cap-loads [(caps Code) (i i64)] (-> Code)
   (if (icmp-eq i (code-count caps)) `()
     (let [nm (code-nth (code-nth caps i) 0)]

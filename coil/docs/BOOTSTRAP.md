@@ -1,15 +1,14 @@
-# Bootstrapping Coil without the Rust toolchain
+# Bootstrapping Coil
 
-The Coil compiler is self-hosted (`selfhost/src/*.coil`). Historically every build
-rooted at `cargo build` of the Rust reference compiler (`src/*.rs`), which needs
-Rust, `inkwell`, and the LLVM 21 headers. This document describes the **seed
-bootstrap**, which lets a fresh checkout rebuild a fully verified compiler with no
-Rust toolchain — in two flavors:
+The Coil compiler is self-hosted (`selfhost/src/*.coil`) and bootstraps from committed
+seeds, so a fresh checkout rebuilds a fully verified compiler with nothing but a C
+compiler (and, for the LLVM backend, libLLVM) — in three flavors:
 
 | Path | Command | Needs | Compiler it builds |
 |------|---------|-------|--------------------|
 | **LLVM-free** (recommended) | `selfhost/rebootstrap-nollvm.sh` | just `cc` | arm64 backend only |
 | Full | `selfhost/rebootstrap.sh` | `cc` + `libLLVM.dylib` | LLVM + arm64 backends |
+| Linux x86-64 | `selfhost/rebootstrap-linux.sh` | `cc` + libLLVM 21 | LLVM backend, ELF ([LINUX_PORT.md](LINUX_PORT.md)) |
 
 ## LLVM-free: zero external dependencies
 
@@ -36,8 +35,7 @@ Uses the committed seed `selfhost/seed/coil-seed`. This is the complete compiler
 (both backends, plus `emit-ir`/`dump-ir`), so its binary links `libLLVM` even when
 the arm64 backend does the codegen — the compiler *embeds* an LLVM backend
 (`codegen.coil` FFIs into the LLVM-C API). **Requirements:** `libLLVM.dylib`
-(`brew install llvm`) + `cc`. Both paths prefer `./target/debug/coil` if you happen
-to have a Rust build; force a stage0 with `STAGE0=/path/to/coil`.
+(`brew install llvm`) + `cc`. Force a specific stage0 with `STAGE0=/path/to/coil`.
 
 ## How the two builds share one codebase
 
@@ -53,7 +51,7 @@ inject:
   reference to any LLVM symbol → links no libLLVM.
 
 There is no code duplication between them, and the gate-full corpus includes both
-top files so the Rust oracle keeps them from drifting apart.
+top files so the snapshot oracle keeps them from drifting apart.
 
 ## The seeds
 
@@ -80,8 +78,8 @@ tampered seed cannot slip through:
    no `emit-ir`, so gate-full does not apply to it.
 
 This is the standard trusting-trust mitigation: the binary blob is validated against
-source on every use, and you can always re-anchor to Rust with
-`STAGE0=./target/debug/coil selfhost/rebootstrap-nollvm.sh` (or `rebootstrap.sh`).
+source on every use, and you can always re-anchor to a different stage0 with
+`STAGE0=/path/to/coil selfhost/rebootstrap-nollvm.sh` (or `rebootstrap.sh`).
 
 ## Refreshing the seeds
 
@@ -96,8 +94,24 @@ git add selfhost/seed/ && git commit -m 'refresh self-host seeds'
 ```
 
 `refresh-seed.sh` refuses to update a seed unless its fixpoint + gates pass, so a
-broken seed can never be committed. If you ever forget and land a source change a
-seed can't build, the escape hatch is a one-time `cargo build` to re-seed.
+broken seed can never be committed.
+
+⚠ **If you forget, the LLVM-free seed is the one that strands** — it is its own only
+stage0, so a language change it cannot parse means it can never build its own
+replacement (this really happened: `isize`/`usize` landed in the compiler source and
+`rebootstrap-nollvm.sh` died at stage1 with `unknown type 'isize'` while the full
+build stayed green). The escape hatch is to **bridge with the other compiler**, not to
+re-seed from anything external:
+
+```sh
+./coil build selfhost/src/main_a64.coil -o /tmp/nl --backend arm64
+STAGE0=/tmp/nl ./selfhost/refresh-seed.sh nollvm    # re-verifies, then updates the seed
+./selfhost/rebootstrap-nollvm.sh                    # confirm it self-sustains with no override
+```
+
+The committed artifact is the arm64 fixpoint stage2, not the bridged stage1, so the
+bridge washes out (the arm64 backend is deterministic). Whenever you change the
+language the compiler itself is written in, run `refresh-seed.sh` for **both** seeds.
 
 ## Relationship to the other bootstrap scripts
 
@@ -105,5 +119,4 @@ seed can't build, the escape hatch is a one-time `cargo build` to re-seed.
   executables, with UUID canonicalization). Proves the LLVM path self-reproduces.
 - `selfhost/bootstrap-arm64.sh` — native arm64-backend fixpoint. `rebootstrap.sh` is
   this same proof, generalized to start from the seed and to install + gate the
-  result. These remain the canonical from-Rust proofs; `rebootstrap.sh` is the
-  everyday Rust-free path.
+  result, and is the everyday path.

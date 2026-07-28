@@ -2,8 +2,10 @@
 
 > **Working name:** *Coil* (provisional — evokes low-level winding/control and "assembling"). Bikeshed later.
 >
-> **Status:** Implemented (M0–M4 + macros + C interop). This document is the
-> design rationale; the roadmap at the end (§12) tracks what's built. Two notes
+> **Status:** Implemented, and far past what the §12 roadmap describes — the compiler
+> is self-hosted in Coil (`selfhost/src/`) with LLVM, native arm64 and wasm backends.
+> This document is the design *rationale*; for what exists today read
+> [LANGUAGE_GUIDE.md](LANGUAGE_GUIDE.md). Two notes
 > for the reader: (1) **allocation is no longer part of the pointer type.** The
 > original "region/allocator in `Ptr<T,R>`" sketch in §5.1–5.4 was *rejected* —
 > Coil moved to the **Zig model**: pointers are region-less (`(ptr T)`),
@@ -84,10 +86,11 @@ core, plus a macro system powerful enough that "high-level" features are
   lowering      (per-convention strategy; §7)
         │
         ▼
-  LLVM IR  (via inkwell)  ──►  native object file  ──►  cc/ld  ──►  executable
+  LLVM IR / arm64 / wasm  ──►  native object file  ──►  cc/ld  ──►  executable
 ```
 
-- **Backend:** raw LLVM through `inkwell`. Host/implementation language: Rust.
+- **Backends:** raw LLVM (through the LLVM-C API), plus a native arm64 backend and a
+  native wasm backend that need no LLVM. Implementation language: Coil itself.
 - **AOT, no JIT.** Coil emits a native object via LLVM's `TargetMachine` and
   links with the system `cc`. This is the right model for a language about
   total ABI/memory control: no runtime LLVM dependency, real linker, C/asm
@@ -95,7 +98,7 @@ core, plus a macro system powerful enough that "high-level" features are
   assembler/linker resolves. There is no `eval`/JIT — the only way to run a
   program is to compile it.
 - **Optimized output.** Before emitting an object, Coil runs LLVM's new-pass-
-  manager `default<O3>` pipeline over the module (`run_passes` in `src/lib.rs`).
+  manager `default<O3>` pipeline over the module.
   Coil's own codegen is naïve — every `let`/field is an `alloca`, nothing is
   inlined, self-tail-recursion is a real call — and the pipeline is what cleans
   that up (mem2reg, inlining, GVN, loop opts, **tail-call elimination** so the
@@ -628,17 +631,16 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
 4. **Soundness ceiling for allocation:** how much of a linear/`Owned<T>` layer do
    we ship as blessed library vs leave to users?
 5. **Vectors/aggregates by value** across custom conventions: the C path is done
-   (the SysV/AAPCS64 struct classifier in `src/abi.rs` matches clang), but `:shim`
+   (the SysV/AAPCS64 struct classifier matches clang), but `:shim`
    conventions still need explicit split/spill rules in the convention data.
 6. **Debug info / unwinding** for `:shim` (naked) functions — CFI is manual.
-7. **Reader & macro evaluator**: reuse the `mlir-lisp` reader, or fresh?
 
 ---
 
 ## 12. Roadmap (suggested)
 
 - **M0 — Reader + core. ✅ done.** s-expr reader, AST, `defn`/`let`/arith/
-  `if`/calls lowering to LLVM via `inkwell`, JIT runner. (`fib.coil` → 55.)
+  `if`/calls lowering to LLVM. (`fib.coil` → 55.)
 - **M1 — Convention types. ✅ done.** `defcc`; each function's convention sets
   the real LLVM calling convention on the function and every call site
   (`:native c|fast|cold`). Checker rejects arity/unbound/ill-formed conventions.
@@ -727,7 +729,7 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   cross the boundary unchanged (any pointer matches a pointer parameter,
   `void*`-style). Programs do real I/O (`putchar`/`write`/`puts`); `extern.coil`
   prints `12345`. **Variadics** are done — a trailing `...` makes
-  `printf`/`snprintf` callable (`varargs.rs`). Remaining: `:shim`-convention
+  `printf`/`snprintf` callable. Remaining: `:shim`-convention
   externs (calling hand-written asm through a custom register ABI — the call-site
   marshalling already exists from M2).
 - **C types — ✅ done.** Arbitrary-width integers `iN/uN` (signed/unsigned);
@@ -742,7 +744,7 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   GEP); structs nest by value (built in definition order) or self-reference by
   pointer. `structs.coil` → 42.
 - **Struct-by-value C ABI — ✅ done.** Passing/returning a struct by value across
-  the `extern`/`c` boundary uses the real C ABI, not a pointer. `src/abi.rs`
+  the `extern`/`c` boundary uses the real C ABI, not a pointer. The compiler
   classifies each struct for the target and produces the exact LLVM coercion clang
   emits — **System V AMD64** (eightbyte INTEGER/SSE classification + merge →
   register slots; two-eightbyte returns wrapped in `{T0,T1}`; > 16 B → `byval`/
@@ -752,7 +754,7 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   C, *and* by linking against C (libc `div`/`ldiv`, a `<=16B`/`>16B` round-trip
   helper, a C caller of struct-returning Coil fns) and running — natively and, for
   the SysV path on an arm64 host, cross-compiled and run under Rosetta. An
-  unclassifiable shape is a hard error, never a silent pointer. (`tests/struct_abi.rs`.)
+  unclassifiable shape is a hard error, never a silent pointer.
   Remaining: unsigned-typed externs at the boundary, struct/array literals, and
   aggregate-by-value across *`:shim`* (custom-register) conventions.
 - **Raw LLVM IR + SIMD — ✅ done.** One general primitive exposes LLVM's whole
@@ -767,14 +769,10 @@ Lowering: `add` → `ccc` function; `add-fast` → `naked` thunk marshalling
   `<N x T>`); SIMD is then a macro library (`lib/simd.coil`: `vec4f`, `splat4f`,
   `vmul4f`, `vfma4f`, `reduce-add4f`, `dot4f`), lowering to real NEON `fmul.4s`
   (`examples/simd.coil`). Because Coil now hosts arbitrary LLVM IR, a C function
-  from `clang -emit-llvm` pastes into an `(llvm-ir …)` and runs identically
-  (`tests/llvm_ir.rs`). Deferred: passing a `vec` by value across the C ABI, and
+  from `clang -emit-llvm` pastes into an `(llvm-ir …)` and runs identically.
+  Deferred: passing a `vec` by value across the C ABI, and
   overloaded-intrinsic name mangling (write the suffixed name yourself for now).
 - **M5 — Macro stdlib.** `struct`/`enum`/`vtable`/`adapt`/`defer`, a small
   "normal" surface grown entirely in macros on top of the typed core.
 
----
 
-*Next concrete step after this doc: M0/M1 skeleton (Rust + inkwell), or drill
-deeper into any one section (the adapter algorithm and the shim generator are the
-most interesting to specify precisely).*

@@ -18,13 +18,13 @@
 (import "fmt.coil" :use *)   ; the `fmt` format-string macro + the print-* printers
 (import "io.coil"  :use *)   ; stdout
 
-; (print "fmt" args…) — format to stdout, no trailing newline. The writer is bound
-; once (a gensym) so a multi-spec format doesn't re-create the stdout writer per piece.
+;; (print "fmt" args…) — format to stdout, no trailing newline. The writer is bound
+;; once (a gensym) so a multi-spec format doesn't re-create the stdout writer per piece.
 (defn print [(f Code) & (args Code)] (-> Code)
   (let [w (gensym)]
     `(let [~w (stdout)] (fmt ~w ~f ~@args))))
 
-; (println "fmt" args…) — like `print`, plus a trailing newline.
+;; (println "fmt" args…) — like `print`, plus a trailing newline.
 (defn println [(f Code) & (args Code)] (-> Code)
   (let [w (gensym)]
     `(let [~w (stdout)] (do (fmt ~w ~f ~@args) (print-nl ~w)))))

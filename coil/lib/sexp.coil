@@ -36,7 +36,7 @@
 
 (defn r-skip-ws [(r (ptr Reader))] (-> i64) (loop (if (ws? (r-peek r)) (r-adv r) (break))) 0)
 
-; a run of non-delimiter bytes as a (slice u8) view into the source
+;; a run of non-delimiter bytes as a (slice u8) view into the source
 (defn r-token [(r (ptr Reader))] (-> (slice u8))
   (let [start (load (field r pos))]
     (loop (if (delim? (r-peek r)) (break) (r-adv r)))
@@ -79,7 +79,7 @@
                 (sx (load (field r a)) (SSym tok))))))))
 
 ; ---- entry points ----------------------------------------------------------
-; read EVERY top-level form into an ArrayList<(ptr Sexp)>.
+;; read EVERY top-level form into an ArrayList<(ptr Sexp)>.
 (defn read-all [(a (ptr Allocator)) (src (slice u8))] (-> (ptr (ArrayList (ptr Sexp))))
   (let [rstate (alloc-stack Reader)
         (mut forms) (al-new [(ptr Sexp)] a)]
@@ -110,6 +110,6 @@
 (defn sexp-nth [(x (ptr Sexp)) (i i64)] (-> (ptr Sexp))
   (al-get [(ptr Sexp)] (load (sexp-items x)) i))
 
-; symbol equals a literal — the common dispatch test
+;; symbol equals a literal — the common dispatch test
 (defn sexp-sym-is [(x (ptr Sexp)) (lit (slice u8))] (-> bool)
   (and (sexp-sym? x) (str-eq (sexp-sym x) lit)))

@@ -15,8 +15,8 @@
 ;   UARTFR-txff  []        -> i32        ; (read >> 5) & 1
 (module mmio)
 
-; one shift+mask getter per field (recurse by index). The mask `(1 << width) - 1`
-; is emitted as ordinary code (LLVM const-folds it), so no macro-time bit ops.
+;; one shift+mask getter per field (recurse by index). The mask `(1 << width) - 1`
+;; is emitted as ordinary code (LLVM const-folds it), so no macro-time bit ops.
 (defn defmmio--fields [(name Code) (fields Code) (i i64)] (-> Code)
   (if (icmp-eq i (code-count fields)) `()
     (let [f      (code-nth fields i)

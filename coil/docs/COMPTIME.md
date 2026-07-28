@@ -2,9 +2,9 @@
 
 `(comptime E)` runs `E` in the **real language** during compilation and splices
 the resulting literal. The same `defn`s, the same `=`/arithmetic, the same `match`
-— executed by interpretation instead of being lowered to machine code. This is the
-bridge toward "the whole language available at compile time": runtime code becomes
-usable at compile time by *running* it.
+— compiled and executed during the build instead of being lowered into the output.
+This is "the whole language available at compile time": runtime code becomes usable
+at compile time by *running* it.
 
 ```lisp
 (defn fact [(n i64)] (-> i64) (if (icmp-le n 0) 1 (imul n (fact (isub n 1)))))
@@ -12,7 +12,7 @@ usable at compile time by *running* it.
 ```
 
 It also dissolves the "two `=`" question: inside `comptime`, the `Eq` trait's `=`
-runs by interpretation — it is literally the same `=` as runtime.
+is the same impl the runtime uses — literally the same `=`.
 
 ```lisp
 (comptime (if (= 7 7) 100 0))   ; the runtime Eq trait, evaluated at compile time
@@ -20,28 +20,36 @@ runs by interpretation — it is literally the same `=` as runtime.
 
 ## How it works
 
-- The parser produces `ExprKind::Comptime`. The checker type-checks the inner
+- The parser produces one `EComptime` node. The checker type-checks the inner
   expression (so the form has its type) but does **not** evaluate it yet.
-- After every function is checked, `comptime::fold_program` walks the elaborated
-  program and replaces each `Comptime` node with the literal its inner expression
+- After every function is checked, `comptime.coil`'s `fold-expr` walks the elaborated
+  program and replaces each `EComptime` node with the literal its inner expression
   evaluates to. Because it runs post-check, a `comptime` form can call any `defn`,
-  recursively. Mono/codegen never see a `Comptime` node.
-- The evaluator (`src/comptime.rs`) is a tree-walker over the typed `Expr` with a
-  fuel budget (a runaway loop errors instead of hanging the compiler).
+  recursively. Mono/codegen never see an `EComptime` node.
+- The evaluator is the **compiled engine** (`comptime_eval.coil`): it recovers the
+  site's checked type, builds a minimal closure sub-program of everything `E` calls
+  plus a synthetic `(defn coil.ct.thunk [] (-> T) E)` exported as `coil_ct_thunk`,
+  monomorphizes and builds it, runs the entry, and reads the result back — scalars out
+  of the return register, aggregates through a write-through pointer thunk walked by
+  the natural C layout. `build-value` turns that into a literal. There is no
+  interpreter (`docs/INTERP_DELETION.md`).
+- ⚠ Because the thunk is real compiled code, a runaway comptime computation is
+  **unbounded**, and deep self-recursion is not tail-call-optimized on this path, so
+  it crashes rather than reporting. Division by zero **is** explicitly guarded
+  (integer only — a comptime float division to infinity is legal).
 
-## Supported (Stages 1 + 1b)
+## Supported
 
 - scalars: `int`/`bool`/`float` literals, arithmetic + comparison + `inot`, `cast`.
 - control flow: `if`, `let` (immutable **and** mutable), `do`, `match`,
   `loop`/`break`/`continue`.
 - the `=` trait (it lowers to an ordinary impl call) — so one `=` at both phases.
-- calls to monomorphic `defn`s, including recursion.
-- **memory model (1b):** mutable locals, `zeroed`/`alloc`, `load`/`store!`,
-  `field`/`index` places, struct/array/sum aggregates, and passing aggregates
-  **across function calls** (by reference). Modelled with reference-counted cells;
-  aggregate values are references into them, deep-copied where the language copies.
+- calls to any `defn`, including recursion and generics.
+- **memory:** mutable locals, `zeroed`/`alloc`, `load`/`store!`, `field`/`index`
+  places, struct/array/sum aggregates, and passing aggregates **across function
+  calls**. It is real memory in the compiler's process, not a model of it.
 
-**Aggregate results (1c/1d):** a `comptime` form may return any aggregate — a
+**Aggregate results:** a `comptime` form may return any aggregate — a
 **struct** (incl. nested), a **sum**, or an **array**. The value-builder
 synthesizes the elaborated expression that reconstructs it: a struct/array becomes
 `(let [t (alloc-stack T)] (store! (field/index t …) v)… (load t))` (an immutable
@@ -50,15 +58,18 @@ synthesizes the elaborated expression that reconstructs it: a struct/array becom
 index it at runtime.
 
 **Static-asserts can run real code:** `(static-assert (comptime (= (check) 42)) …)`
-folds its condition by interpretation, so an assertion can call any `defn`.
+folds its condition at compile time, so an assertion can call any `defn`.
 
-Not supported *yet* — each raises a clear error rather than miscompiling:
+**The computation is unrestricted** — generic calls, FFI/`extern` (a comptime
+`(strlen c"hello!")` calls libc), function pointers, strings, allocators and
+collections, and `sizeof`/`alignof`/`offsetof` all work.
 
-- generic calls, FFI/`extern`, `llvm-ir`, function pointers, strings.
-- `sizeof`/`alignof`/`offsetof` (those need LLVM target layout, only available in
-  codegen — a `comptime` form can't compute them).
+What is refused — as a clear located error, never a miscompile — is the **result**,
+which has to become a literal:
 
-A fuel budget bounds runaway loops/recursion.
+- a **pointer** (a compile-time address is meaningless in the built program), and
+- an aggregate that is a **generic instance** (`(Option i64)`, `(Pair i64 i64)`):
+  "cannot be materialized". Return a plain struct/sum, or the scalar you need.
 
 **Computed `const`s:** a `const`'s value is any expression. A bare literal inlines
 as before; a scalar/sum computation is evaluated at compile time —
@@ -73,14 +84,15 @@ pointer to it. So a compile-time lookup table is real static data:
 (load (index SQUARES 5))          ; reads 25 straight from the global, at runtime
 ```
 
-(Sums in statics aren't supported yet — a sum const is rebuilt at use sites.)
+⚠ A **sum-typed `const`** is not supported: it does not fall back to rebuilding at use
+sites, it aborts the build with `UNIMPLEMENTED: codegen: unknown static const <name>`.
+Use `(comptime …)` at the use site, or a struct/array const.
 
-## Compile-time reflection (Stage 2)
+## Compile-time reflection
 
 Compile-time code can introspect a type's structure — so reflection isn't
-macro-only. These forms take a *type* and are evaluated by the comptime
-interpreter (folded to a literal, like `sizeof`), usable in `comptime`/`const`/
-`static-assert`/ordinary code:
+macro-only. These forms take a *type* and fold to a literal (like `sizeof`), usable
+in `comptime`/`const`/`static-assert`/ordinary code:
 
 - `(field-count T)` → `i64` (struct fields)
 - `(variant-count T)` → `i64` (sum variants)
@@ -112,9 +124,8 @@ Per-field reflection (the index is a compile-time value — a literal or a
 
 ## Roadmap
 
-- field *types* as comptime `Type` values (recurse into a field's type), and
-  reflecting a generic type parameter (resolved at mono).
-- comptime string operations (compare/concat) — needs `=`/ops over `(slice u8)`.
-- `sizeof`/`alignof`/`offsetof` at comptime (a layout module independent of LLVM).
-- **3** — staged macros: run code generation in the runtime language too (the big
-  rearchitecture that unifies the macro language with the runtime).
+- field *types* as first-class comptime `Type` values (recurse into a field's type),
+  and reflecting a generic type parameter (resolved at mono).
+- materializing a **generic-instance aggregate** as a comptime result.
+- a **bound on runaway comptime** (there is none today), and TCO
+  on the comptime thunk path.

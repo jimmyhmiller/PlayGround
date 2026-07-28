@@ -59,7 +59,7 @@ Anything outside the subset is a **hard error** naming the unsupported line.
 Mach-O backend.)
 
 ## DWARF (always on)
-DWARF v4, mirroring the Rust `-g` reference: CU (language C, not-optimized),
+DWARF v4: CU (language C, not-optimized),
 one `DW_TAG_subprogram` per function at its `defn` line with linkage name,
 per-expression line rows from Expr spans (skip spans from other sources),
 `DW_TAG_formal_parameter`/`DW_TAG_variable` with `DW_OP_fbreg` locations
@@ -79,15 +79,14 @@ dsymutil).
   6-arg variadic snprintf + qsort-callback fnptrs + fnptr tables, 4000-deep
   mutual recursion + ackermann + hashmap stress (200 string keys),
   8-variant sums + Option<Result<struct>> nesting + recursive trees,
-  atomic old-value semantics + static globals. All THREE-WAY verified:
-  Rust reference == self-host LLVM == arm64, byte-for-byte. Teeth re-proven:
-  compiling signed `<` as unsigned fails 8/54.
+  atomic old-value semantics + static globals. Verified byte-for-byte against
+  the LLVM backend. Teeth re-proven: compiling signed `<` as unsigned fails 8/54.
 - `snapshot-run.sh <bin>` — builds the corpus with the **LLVM** backend and
   records stdout+exit per program.
 - `gate-run.sh <bin>` — builds the same corpus with `--backend arm64`, runs,
   diffs stdout+exit byte-for-byte. Teeth: a miscompiled corpus program fails.
-- lldb gate: breakpoint-by-line, step, `frame variable` on scalars/structs —
-  mirrors `tests/debuginfo.rs` assertions.
+- lldb gate (`gate-cli.sh`): breakpoint-by-line, step, `frame variable` on
+  scalars/structs.
 - The finale: the arm64-built self-host compiler must itself pass the existing
   oracle gates (it is a working compiler), and `bench` compile-time comparison
   must show ≥10× vs the LLVM backend on both a small program and
@@ -139,9 +138,9 @@ once with the LLVM backend, iterate with the arm64 backend.
 - [x] Self-host-via-arm64 bootstrap + oracle gates (`bootstrap-arm64.sh`):
       stage2/stage3 pass gate-full; stage2.o == stage3.o byte-identical.
 - [x] :shim conventions natively (trampoline + register-constrained call
-      sites) + frem-via-fmod — `everything.coil` and `shim.coil` compile and
-      match the Rust reference (the self-host LLVM backend cannot build them):
-      corpus gate now **44/44**.
+      sites) + frem-via-fmod — `everything.coil` and `shim.coil` compile and run
+      correctly (the self-host LLVM backend cannot build them): corpus gate now
+      **44/44**.
 - [x] 10× bench report (see Results above: 17.1× on the compiler itself).
 - [ ] (future) direct executable emission + ad-hoc codesign to drop the `cc`
       link and its ~45 ms floor on small programs.

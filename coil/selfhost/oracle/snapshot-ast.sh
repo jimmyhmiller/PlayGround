@@ -12,7 +12,7 @@ REF=$AST/reference
 LIST=$AST/corpus.txt
 EXCL=$AST/EXCLUDED.txt
 
-[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
+[ -x "$COIL" ] || { echo "reference compiler not found: $COIL (build one with selfhost/rebootstrap.sh, or set COIL_REF_BIN)"; exit 1; }
 
 rm -rf "$CORP" "$REF"; mkdir -p "$CORP" "$REF"
 : > "$LIST"; : > "$EXCL"

@@ -39,11 +39,11 @@
       (if (icmp-eq (iadd i 1) n) this
         `(and ~this ~(derive--eq-and T a b (iadd i 1) n))))))
 
-; Emits BOTH the standalone `T-eq` free function AND an `(impl Eq T)` that delegates to
-; it — so a `(derive-eq T)` struct immediately works with `=`, `case`, and as a HashMap
-; key (all of which dispatch through the `Eq` trait), not only the named `T-eq`. The
-; structural comparison is defined ONCE (in `T-eq`); the impl is a one-line delegate.
-; (Equivalent to also writing `(derive Eq T)` — do not write both, or the impl duplicates.)
+;; Emits BOTH the standalone `T-eq` free function AND an `(impl Eq T)` that delegates to
+;; it — so a `(derive-eq T)` struct immediately works with `=`, `case`, and as a HashMap
+;; key (all of which dispatch through the `Eq` trait), not only the named `T-eq`. The
+;; structural comparison is defined ONCE (in `T-eq`); the impl is a one-line delegate.
+;; (Equivalent to also writing `(derive Eq T)` — do not write both, or the impl duplicates.)
 (defn derive-eq [(tname Code)] (-> Code)
   `(do
      (defn ~(code-symbol tname "-eq") [(a ~tname) (b ~tname)] (-> bool)
@@ -75,18 +75,18 @@
 
 ; ---- derive (generate a TRAIT impl) ----------------------------------------
 ; ---- generic targets: (derive Eq (Box T)) ----------------------------------
-; `(Box T)` is a LIST whose head is the type and whose rest are its type params.
-; Deriving over one emits a generic impl carrying the derived trait as a bound on each
-; param — mechanically the hand-written `(impl [(T Eq)] Eq (Box T) …)`, which already
-; worked. Without the params the impl mentioned an unbound `T` and blew up with a
-; leaked mangled name ('coil.core.Eq$Box<T>$=' param 'a': unknown type 'T').
+;; `(Box T)` is a LIST whose head is the type and whose rest are its type params.
+;; Deriving over one emits a generic impl carrying the derived trait as a bound on each
+;; param — mechanically the hand-written `(impl [(T Eq)] Eq (Box T) …)`, which already
+;; worked. Without the params the impl mentioned an unbound `T` and blew up with a
+;; leaked mangled name ('coil.core.Eq$Box<T>$=' param 'a': unknown type 'T').
 (defn derive--tparams [(tname Code) (trait-name Code) (i i64) (n i64)] (-> Code)
   (if (icmp-ge i n) `()
     `((~(code-nth tname i) ~trait-name) ~@(derive--tparams tname trait-name (iadd i 1) n))))
 
-; is this field's type one of the target's type params (the `v : T` in `(Box T)`)?
-; Such a field must compare through the trait — the bound we emit is what guarantees
-; it — not through icmp-eq, which would be nonsense for a T that turns out to be a struct.
+;; is this field's type one of the target's type params (the `v : T` in `(Box T)`)?
+;; Such a field must compare through the trait — the bound we emit is what guarantees
+;; it — not through icmp-eq, which would be nonsense for a T that turns out to be a struct.
 (defn derive--tparam-field? [(tname Code) (fty Code) (i i64) (n i64)] (-> bool)
   (if (icmp-ge i n) false
     (if (code-eq fty (code-nth tname i)) true

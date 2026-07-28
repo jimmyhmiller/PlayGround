@@ -23,14 +23,14 @@
 (defn try [& (body Code)] (-> Code)
   `(block :try ~@body))
 
-; Result: (Ok v) -> v ; (Err e) -> short-circuit the enclosing (try) with (Err e).
+;; Result: (Ok v) -> v ; (Err e) -> short-circuit the enclosing (try) with (Err e).
 (defn try! [(e Code)] (-> Code)
   (let [v (gensym) er (gensym)]
     `(match ~e
        (Ok  [~v] ~v)
        (Err [~er] (return-from :try (Err ~er))))))
 
-; Option: (Some v) -> v ; (None) -> short-circuit the enclosing (try) with (None).
+;; Option: (Some v) -> v ; (None) -> short-circuit the enclosing (try) with (None).
 (defn try? [(e Code)] (-> Code)
   (let [v (gensym)]
     `(match ~e

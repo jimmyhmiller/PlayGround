@@ -36,15 +36,13 @@ reflecting fields (today's `derive-eq`, registered as an impl).
 
 ## Representation (AST)
 
-- `TraitDef { name, self_param, methods: Vec<TraitMethod> }`,
-  `TraitMethod { name, params, ret }` — param/ret types may mention `Self`
-  (represented as the type name `"Self"`).
-- `ImplDef { trait_name, for_type, methods: Vec<Func> }` — each method is lowered
+- `TraitDef { name, self_param, methods }` and `TraitMethod { name, params, ret }` —
+  param/ret types may mention `Self` (represented as the type name `"Self"`).
+- `ImplDef { trait_name, for_type, methods }` — each method is lowered
   to an ordinary `Func` named `<Trait>$<Type>$<method>` (e.g. `Eq$Point$eq`), with
   `Self` substituted to `for_type`. So codegen/mono see plain functions.
-- `Func.bounds: Vec<(String, Vec<String>)>` — type param → required traits.
-  (`type_params` stays `Vec<String>`; bounds are parallel, minimal churn.)
-- `ExprKind::TraitCall { trait_name, method, self_tp, args }` — a *deferred* call
+- `Func.bounds` — type param → required traits, parallel to `type_params`.
+- `ETraitCall { trait_name, method, self_tp, args }` — a *deferred* call
   inside a bounded generic (Self is a type parameter). Produced by the checker,
   resolved away by monomorphization; codegen never sees it.
 - `Program.traits`, `Program.impls`.
@@ -60,18 +58,18 @@ Checking a call `(m args…)` where `m` is a trait method of trait `Tr` (Self at
 `self_index`):
 1. `self_ty` = type of the Self-position argument.
 2. **concrete** `self_ty = C`: look up `impls[(Tr, C)]`; rewrite to a normal call
-   of the mangled impl fn. Missing impl → error “C does not implement Tr”.
+   of the mangled impl fn. Missing impl → error "C does not implement Tr".
 3. **type parameter** `self_ty = P`: it must be that `Tr ∈ bounds[P]`
    (**definition-time bound check** — the body is checked once against the
    declared bound). Then emit `TraitCall{Tr, m, P, args}` (deferred). If `P` is
-   not bounded by `Tr` → error “P is not bounded by Tr”.
-The method’s declared signature (with `Self := self_ty`) types the call either way.
+   not bounded by `Tr` → error "P is not bounded by Tr".
+The method's declared signature (with `Self := self_ty`) types the call either way.
 
 Instantiation-site bound check: when a bounded generic is called with `T = C`
-(solved in `solve_type_args`), verify `impls[(Tr, C)]` exists for each `Tr ∈
-bounds[T]` → else error “C does not implement Tr (required by …)”.
+(when the type arguments are solved), verify `impls[(Tr, C)]` exists for each `Tr ∈
+bounds[T]` → else error "C does not implement Tr (required by …)".
 
-Monomorphization: `resolve_expr` turns `TraitCall{Tr, m, P, args}` with `P := C`
+Monomorphization turns `ETraitCall{Tr, m, P, args}` with `P := C`
 into a normal call of `impls[(Tr, C)].m`. The impl functions are already ordinary
 (possibly generic-instantiated) funcs, so nothing else changes.
 
@@ -83,11 +81,13 @@ into a normal call of `impls[(Tr, C)].m`. The impl functions are already ordinar
   check. By-value aggregate `Self` works (codegen ABI reconciliation).
 - **`derive` (DONE):** `(derive Eq T)` / `(derive Hash T)` are macros
   (`lib/derive.coil`) that reflect T's fields and expand to an `(impl …)`; standard
-  `Eq`/`Hash` traits live in `lib/traits.coil`. Nested-struct fields dispatch
-  through the trait method (so they must derive/impl it too). Tests in
-  `tests/traits.rs`.
-- Later: supertraits, multiple-Self / associated types, generic impls
-  (`impl Eq for (Pair T T)`), and `dyn Trait` (vtables); `derive` for `Ord`/`Show`.
+  `Eq`/`Hash` traits are in the prelude. Nested-struct fields dispatch
+  through the trait method (so they must derive/impl it too).
+- **All of "Later" shipped:** supertraits (`:requires`), associated types (a
+  parameterized trait usable as a bound, with impl-determined params), generic impls
+  (`(impl [T] Eq (Box T))`) with specialization, and `dyn Trait` via `defdyn` +
+  `(make-dyn …)`. See the guide's "Traits & impls" section for the implemented
+  surface.
 
 ## Aggregate `Self` by value: codegen ABI reconciliation
 
@@ -99,7 +99,7 @@ concrete aggregate params). So a deferred call inside a generic flows a struct
 *value* into the impl's `(ptr Point)` parameter.
 
 Rather than re-deriving by-reference ABI per instantiation (a deep mono change),
-this is reconciled at the metal in codegen: `reconcile_args` compares each
+this is reconciled at the metal in codegen: argument reconciliation compares each
 argument's LLVM type to the callee's actual parameter type, and when the callee
 wants a pointer but the argument is an aggregate *value*, spills it to a stack
 slot and passes the address. An immutable-reference parameter receives a copy —
@@ -108,16 +108,3 @@ the aggregate-value → pointer direction needs the fixup. This makes by-value
 aggregate `Self` work uniformly across concrete and generic calls; scalar `Self`
 (e.g. `Ord` over `i64`) was always fine.
 
-## Implementation map
-
-- `ast.rs`: `TraitDef`/`TraitMethod`/`ImplDef`, `Func.bounds`,
-  `ExprKind::TraitCall`, `Program.{traits,impls}`, `trait_method_fn` (mangling).
-- `parse.rs`: `deftrait`/`impl`; `(T Trait…)` bound entries in the type-param vector.
-- `resolve.rs`: qualifies types in trait/impl sigs (Self stays); flat trait namespace.
-- `check.rs`: trait/method/impl tables; lowers impl methods to `Trait$Type$method`
-  funcs; conformance check; trait-call resolution (concrete → direct, type-param →
-  `TraitCall` after the bound check); instantiation-site bound check.
-- `mono.rs`: resolves `TraitCall` to a direct call of the implementing function.
-- `codegen.rs`: never sees `TraitCall` (a guard errors if one slips through);
-  `reconcile_args` spills an aggregate-value argument to a pointer when the callee
-  wants one (the by-value aggregate `Self` ABI fixup).

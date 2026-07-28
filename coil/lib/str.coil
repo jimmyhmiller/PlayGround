@@ -21,22 +21,22 @@
 (defn substr  [(s (slice u8)) (lo :i64) (hi :i64)] (-> (slice u8)) (subslice s lo hi))
 
 ; ---- C-string bridge -------------------------------------------------------
-; FFI hands back NUL-terminated `(ptr i8)` strings; the everyday Coil string is a
-; length-carrying `(slice u8)`. These convert between the two. `cstr-len` scans to
-; the terminator (no libc `strlen` extern, so importing this module never collides
-; with io.coil's `strlen` declaration).
+;; FFI hands back NUL-terminated `(ptr i8)` strings; the everyday Coil string is a
+;; length-carrying `(slice u8)`. These convert between the two. `cstr-len` scans to
+;; the terminator (no libc `strlen` extern, so importing this module never collides
+;; with io.coil's `strlen` declaration).
 (defn cstr-len [(p (ptr i8))] (-> :i64)
   (let [(mut i) 0]
     (loop (if (icmp-eq (cast :i64 (load (index p (load i)))) 0) (break)
             (store! i (iadd (load i) 1))))
     (load i)))
-; A `(slice u8)` VIEW over a C string's bytes (excludes the NUL) — no copy, aliases
-; the C storage.
+;; A `(slice u8)` VIEW over a C string's bytes (excludes the NUL) — no copy, aliases
+;; the C storage.
 (defn cstr->str [(p (ptr i8))] (-> (slice u8))
   (slice-new (cast (ptr u8) p) (cstr-len p)))
-; A freshly-allocated NUL-terminated copy of `s` (what a C API wants). The result
-; owns its `len+1` bytes; free it with the same allocator. Null on OOM (the same
-; descriptive-not-safe contract as `unwrap-ptr`/`box`).
+;; A freshly-allocated NUL-terminated copy of `s` (what a C API wants). The result
+;; owns its `len+1` bytes; free it with the same allocator. Null on OOM (the same
+;; descriptive-not-safe contract as `unwrap-ptr`/`box`).
 (defn str->cstr [(a (ptr Allocator)) (s (slice u8))] (-> (ptr i8))
   (let [n (slice-len s)
         p (unwrap-ptr [i8] (raw-alloc a (iadd n 1) 1))]
@@ -44,14 +44,14 @@
     (store! (index p n) (cast i8 0))
     p))
 
-; Content equality: same length and same bytes.
+;; Content equality: same length and same bytes.
 (defn str-eq [(a (slice u8)) (b (slice u8))] (-> bool)
   (let [la (slice-len a)]
     (if (icmp-ne la (slice-len b))
         false
         (mem-eql [u8] (slice-data a) (slice-data b) la))))
 
-; FNV-1a over the bytes (matches lib/hashmap's bytewise-hash, so a content hash).
+;; FNV-1a over the bytes (matches lib/hashmap's bytewise-hash, so a content hash).
 (defn str-hash [(s (slice u8))] (-> :i64)
   (let [(mut h) -3750763034362895579    ; FNV-1a offset basis
         (mut i) 0
@@ -64,10 +64,10 @@
               (store! i (iadd (load i) 1)))))
     (load h)))
 
-; Lexicographic byte comparison: negative if a<b, 0 if equal, positive if a>b.
-; Compares byte-by-byte over the shared prefix, then breaks the tie by length —
-; the ordering `str-eq`/`str-hash` are the equality/hash for, and what the `Ord`
-; impl below (so `<`/`sort` on strings) is built over.
+;; Lexicographic byte comparison: negative if a<b, 0 if equal, positive if a>b.
+;; Compares byte-by-byte over the shared prefix, then breaks the tie by length —
+;; the ordering `str-eq`/`str-hash` are the equality/hash for, and what the `Ord`
+;; impl below (so `<`/`sort` on strings) is built over.
 (defn str-cmp [(a (slice u8)) (b (slice u8))] (-> :i64)
   (let [la (slice-len a)
         lb (slice-len b)
@@ -90,7 +90,7 @@
         false
         (str-eq (subslice s 0 lp) prefix))))
 
-; First index of `needle` in `hay`, or `(None)` — tail-recursive (TCO'd to a loop).
+;; First index of `needle` in `hay`, or `(None)` — tail-recursive (TCO'd to a loop).
 (defn str-find-from [(hay (slice u8)) (needle (slice u8)) (i :i64)] (-> (Option :i64))
   (if (icmp-gt (iadd i (slice-len needle)) (slice-len hay))
       (None)
@@ -101,13 +101,13 @@
   (str-find-from hay needle 0))
 
 ; ---- trimming, parsing, splitting ------------------------------------------
-; ASCII whitespace test (space, tab, newline, carriage return, vertical tab, form feed).
+;; ASCII whitespace test (space, tab, newline, carriage return, vertical tab, form feed).
 (defn str-ws? [(b :u8)] (-> bool)
   (let [c (cast :i64 b)]
     (any (icmp-eq c \space) (icmp-eq c \tab) (icmp-eq c \newline)
          (icmp-eq c \return) (icmp-eq c 11) (icmp-eq c \formfeed))))
 
-; A VIEW with leading/trailing ASCII whitespace removed (no copy; shares storage).
+;; A VIEW with leading/trailing ASCII whitespace removed (no copy; shares storage).
 (defn str-trim [(s (slice u8))] (-> (slice u8))
   (let [(mut lo) 0
         (mut hi) (slice-len s)]
@@ -117,8 +117,8 @@
               (store! hi (isub (load hi) 1)) (break)))
     (subslice s (load lo) (load hi))))
 
-; Parse a base-10 signed integer, `(Some n)` or `(None)` on any non-digit / empty /
-; lone-sign input. No allocation, no overflow check (wraps like the metal `imul`).
+;; Parse a base-10 signed integer, `(Some n)` or `(None)` on any non-digit / empty /
+;; lone-sign input. No allocation, no overflow check (wraps like the metal `imul`).
 (defn str-parse-int [(s (slice u8))] (-> (Option :i64))
   (let [n (slice-len s)]
     (if (icmp-eq n 0)
@@ -139,10 +139,10 @@
               (Some (if neg (isub 0 (load acc)) (load acc)))
               (None))))))
 
-; Split `s` on every (non-overlapping) occurrence of `sep`, returning an
-; `(ArrayList (slice u8))` of the pieces (each a VIEW into `s`). An empty `sep`
-; yields the whole string as one piece. The caller owns the list — `al-free!` it
-; (the piece slices alias `s`, so `s` must outlive them). Allocator-aware.
+;; Split `s` on every (non-overlapping) occurrence of `sep`, returning an
+;; `(ArrayList (slice u8))` of the pieces (each a VIEW into `s`). An empty `sep`
+;; yields the whole string as one piece. The caller owns the list — `al-free!` it
+;; (the piece slices alias `s`, so `s` must outlive them). Allocator-aware.
 (defn str-split [(a (ptr Allocator)) (s (slice u8)) (sep (slice u8))] (-> (ArrayList (slice u8)))
   (let [(mut out) (al-new [(slice u8)] a)
         sl (slice-len sep)
@@ -160,8 +160,8 @@
                   (store! start (iadd idx sl))))))))
     (load out)))
 
-; Concatenate into freshly-allocated bytes; `(None)` on OOM. The result owns its
-; buffer (allocated from `a`); free it with the same allocator when done.
+;; Concatenate into freshly-allocated bytes; `(None)` on OOM. The result owns its
+;; buffer (allocated from `a`); free it with the same allocator when done.
 (defn str-concat [(a (ptr Allocator)) (x (slice u8)) (y (slice u8))] (-> (Option (slice u8)))
   (let [lx (slice-len x) ly (slice-len y)]
     (match (raw-alloc a (iadd lx ly) 1)
@@ -173,19 +173,19 @@
           (Some (slice-new p (iadd lx ly))))))))
 
 ; ---- string-keyed HashMap: a KeyOps whose hash/eq read the slice's bytes ----
-; The map stores the (slice u8) key value in its slot; these deref that slot to
-; the fat pointer, then hash/compare the pointed-to CONTENT (not the 16 raw bytes
-; of the fat pointer, which would compare addresses).
+;; The map stores the (slice u8) key value in its slot; these deref that slot to
+;; the fat pointer, then hash/compare the pointed-to CONTENT (not the 16 raw bytes
+;; of the fat pointer, which would compare addresses).
 (defn str-key-hash [(slot (ptr i8)) (n :i64)] (-> :i64)
   (str-hash (load (cast (ptr (slice u8)) slot))))
 (defn str-key-eq [(a (ptr i8)) (b (ptr i8)) (n :i64)] (-> bool)
   (str-eq (load (cast (ptr (slice u8)) a)) (load (cast (ptr (slice u8)) b))))
 
-; std-3 — take ownership of a string key IN PLACE: read the (borrowed) slice at
-; `slot`, allocate a private copy of its bytes from `a`, and overwrite the slot with
-; a slice VIEW onto that owned copy. An empty key needs no storage (its data pointer
-; is never dereferenced — str-eq/str-hash short-circuit on length 0), so it is left
-; as-is. OOM aborts (the same descriptive-not-safe contract as the rest of lib/str).
+;; std-3 — take ownership of a string key IN PLACE: read the (borrowed) slice at
+;; `slot`, allocate a private copy of its bytes from `a`, and overwrite the slot with
+;; a slice VIEW onto that owned copy. An empty key needs no storage (its data pointer
+;; is never dereferenced — str-eq/str-hash short-circuit on length 0), so it is left
+;; as-is. OOM aborts (the same descriptive-not-safe contract as the rest of lib/str).
 (defn str-key-copy [(a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
   (let [s (load (cast (ptr (slice u8)) slot))
         n (slice-len s)]
@@ -198,8 +198,8 @@
                   0)))
         0)
     0))
-; Release an owned string key's bytes. Mirrors str-key-copy: an empty key owns no
-; storage, so it is skipped (never frees the borrowed pointer of a length-0 slice).
+;; Release an owned string key's bytes. Mirrors str-key-copy: an empty key owns no
+;; storage, so it is skipped (never frees the borrowed pointer of a length-0 slice).
 (defn str-key-free [(a (ptr Allocator)) (slot (ptr i8))] (-> :i64)
   (let [s (load (cast (ptr (slice u8)) slot))
         n (slice-len s)]
@@ -207,10 +207,10 @@
         (raw-free a (cast (ptr i8) (slice-data s)) n 1)
         0)))
 
-; The default string KeyOps now OWNS its keys (std-3): every inserted key is copied
-; into the map's allocator and freed on remove/clear/free, so a key never aliases
-; caller storage. This is the safe default — reach for `str-keyops-borrowed` only
-; when you can guarantee the key bytes outlive the map (e.g. static literals).
+;; The default string KeyOps now OWNS its keys (std-3): every inserted key is copied
+;; into the map's allocator and freed on remove/clear/free, so a key never aliases
+;; caller storage. This is the safe default — reach for `str-keyops-borrowed` only
+;; when you can guarantee the key bytes outlive the map (e.g. static literals).
 (defn str-keyops [] (-> (ptr KeyOps))
   (let [o (alloc-static KeyOps)]
     (store! (field o hash) (fnptr-of str-key-hash))
@@ -221,12 +221,12 @@
     (store! (field o owns) 1)
     o))
 
-; OPT-IN, UNSAFE: keys are BORROWED — the map stores the (slice u8) view verbatim
-; and never copies or frees the pointed-to bytes. The caller MUST guarantee every
-; key's storage outlives the map and is not mutated for the map's lifetime; two keys
-; built over one reused buffer will alias (the std-3 footgun). Correct for keys that
-; are static literals or otherwise pinned. `copy`/`free`/`owns` are left zero (the
-; alloc-static zero-init), so `ko-owns?` is false and no ownership hook ever runs.
+;; OPT-IN, UNSAFE: keys are BORROWED — the map stores the (slice u8) view verbatim
+;; and never copies or frees the pointed-to bytes. The caller MUST guarantee every
+;; key's storage outlives the map and is not mutated for the map's lifetime; two keys
+;; built over one reused buffer will alias (the std-3 footgun). Correct for keys that
+;; are static literals or otherwise pinned. `copy`/`free`/`owns` are left zero (the
+;; alloc-static zero-init), so `ko-owns?` is false and no ownership hook ever runs.
 (defn str-keyops-borrowed [] (-> (ptr KeyOps))
   (let [o (alloc-static KeyOps)]
     (store! (field o hash) (fnptr-of str-key-hash))
@@ -235,9 +235,9 @@
     o))
 
 ; ---- owned, growable string: a LIBRARY over ArrayList<u8> ------------------
-; `StrBuf` is just an `(ArrayList u8)`; appending pushes bytes, and `sb-str` hands
-; back a `(slice u8)` VIEW over the current contents (no copy, invalidated by a
-; later growth that moves the buffer — same contract as al-slice).
+;; `StrBuf` is just an `(ArrayList u8)`; appending pushes bytes, and `sb-str` hands
+;; back a `(slice u8)` VIEW over the current contents (no copy, invalidated by a
+;; later growth that moves the buffer — same contract as al-slice).
 (defstruct StrBuf [(bytes (ArrayList u8))])
 
 (defn sb-new [(a (ptr Allocator))] (-> StrBuf)
@@ -245,7 +245,7 @@
     (store! (field sb bytes) (al-new [u8] a))
     (load sb)))
 
-; Append a (slice u8); returns the new length.
+;; Append a (slice u8); returns the new length.
 (defn sb-push-str! [(sb (mut StrBuf)) (s (slice u8))] (-> :i64)
   (let [(mut i) 0 n (slice-len s)]
     (loop
@@ -258,17 +258,17 @@
 (defn sb-push-byte! [(sb (mut StrBuf)) (b :u8)] (-> :i64)
   (al-push! (mut (field sb bytes)) b))
 
-; A (slice u8) view over the current contents (shares storage with the StrBuf).
+;; A (slice u8) view over the current contents (shares storage with the StrBuf).
 (defn sb-str [(sb StrBuf)] (-> (slice u8))
   (al-slice (field sb bytes)))
 
 (defn sb-free! [(sb (mut StrBuf))] (-> :i64)
   (al-free! (mut (field sb bytes))))
 
-; Finish building: hand back an OWNING `(slice u8)` shrunk to the exact length, and
-; reset the StrBuf to empty. Unlike `sb-str` (a borrowed view that a later push can
-; invalidate), the returned slice owns a right-sized buffer the caller frees with the
-; same allocator — no use-after-free, no dangling capacity. Over `al-into-slice`.
+;; Finish building: hand back an OWNING `(slice u8)` shrunk to the exact length, and
+;; reset the StrBuf to empty. Unlike `sb-str` (a borrowed view that a later push can
+;; invalidate), the returned slice owns a right-sized buffer the caller frees with the
+;; same allocator — no use-after-free, no dangling capacity. Over `al-into-slice`.
 (defn sb-finish! [(sb (mut StrBuf))] (-> (slice u8))
   (al-into-slice (mut (field sb bytes))))
 

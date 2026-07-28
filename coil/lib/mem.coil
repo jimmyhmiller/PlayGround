@@ -14,23 +14,23 @@
 (extern memset  :cc c [(ptr i8) :i64 isize]     (-> (ptr i8)))  ; void* memset(void*, int, size_t)
 (extern memcmp  :cc c [(ptr i8) (ptr i8) isize] (-> :i64))      ; int memcmp(const void*, const void*, size_t)
 
-; Copy n elements src -> dst (regions must NOT overlap).
+;; Copy n elements src -> dst (regions must NOT overlap).
 (defn mem-copy [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
   (memcpy (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
   0)
 
-; Copy n elements src -> dst, safe when the regions overlap.
+;; Copy n elements src -> dst, safe when the regions overlap.
 (defn mem-move [T] [(dst (ptr T)) (src (ptr T)) (n :i64)] (-> :i64)
   (memmove (cast (ptr i8) dst) (cast (ptr i8) src) (cast isize (imul n (sizeof T))))
   0)
 
-; Zero the first n elements.
+;; Zero the first n elements.
 (defn mem-zero [T] [(dst (ptr T)) (n :i64)] (-> :i64)
   (memset (cast (ptr i8) dst) 0 (cast isize (imul n (sizeof T))))
   0)
 
-; Set each of the first n elements to v (element-wise — works for any T, unlike
-; memset's single-byte pattern). Built on the loop primitive; no imports needed.
+;; Set each of the first n elements to v (element-wise — works for any T, unlike
+;; memset's single-byte pattern). Built on the loop primitive; no imports needed.
 (defn mem-fill [T] [(dst (ptr T)) (v T) (n :i64)] (-> :i64)
   (let [(mut i) 0]
     (loop
@@ -40,6 +40,6 @@
               (store! i (iadd (load i) 1))))))
   0)
 
-; True if the first n elements of a and b are byte-identical.
+;; True if the first n elements of a and b are byte-identical.
 (defn mem-eql [T] [(a (ptr T)) (b (ptr T)) (n :i64)] (-> bool)
   (icmp-eq (memcmp (cast (ptr i8) a) (cast (ptr i8) b) (cast isize (imul n (sizeof T)))) 0))

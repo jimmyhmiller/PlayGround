@@ -20,6 +20,7 @@ inside it, so `coil` and every `(import "…")` below work from any directory.
     coil build file.coil -lm             # link a library (-l<name>)
     coil repl                            # interactive session
     coil fmt   file.coil                 # print formatted source (--write / --check)
+    coil doc   file.coil                 # markdown for the module's `;;`-documented surface
 
 `main`'s `i64` return is the process exit code. There is no JIT. A file that is
 imported must start with `(module NAME)`. `Coil.toml`:
@@ -334,12 +335,24 @@ The whole language runs at compile time — one language, two phases. No separat
 macro dialect.
 
 **`(comptime E)`** evaluates `E` during compilation and splices the literal result:
-`(comptime (fact 5))` compiles to the constant `120` (no call in the output). It runs
-real Coil — arithmetic, `if`/`let`/`loop`, `match`, any monomorphic `defn`
-(recursively), mutable locals, and memory (`alloc`/`load`/`store!`/`field`/`index`).
-It may return a scalar, struct, sum, or array; build a table with a loop and index it
-at runtime. ⚠ Not at comptime: generics, FFI/`extern`, `sizeof`/`alignof` (codegen
-needs LLVM layout). Each raises a clear error, never a miscompile.
+`(comptime (fact 5))` compiles to the constant `120` (no call in the output). `E` is
+compiled and run as native code, so **the whole language is available**: arithmetic,
+`if`/`let`/`loop`, `match`, mutable locals, memory, **generics**, **`sizeof`/`alignof`
+/`offsetof`**, allocators and collections, and even **`extern` FFI** (a comptime
+`(strlen c"hello!")` really calls libc).
+
+The limit is the RESULT, not the computation — it must be materializable as a
+literal: a scalar, a plain struct, a plain sum, an array, or a string. Two things are
+a clear located error, never a miscompile:
+
+- a **pointer** (a comptime address would be meaningless in the built program), and
+- an aggregate that is a **generic instance** — `(comptime (mk))` returning
+  `(Option i64)` or `(Pair i64 i64)` reports "cannot be materialized". Return a plain
+  (non-generic) struct or sum instead, or return the scalar you actually need.
+
+Build a lookup table with a loop and index it at runtime. ⚠ Deep **self-recursion**
+at comptime is not tail-call-optimized on this path — around 10M frames it crashes the
+compiler rather than erroring; write comptime loops with `loop`, which is unaffected.
 
 **Macros are ordinary functions** `[Code…] (-> Code)` — detected by type, no
 `defmacro`. `Code` is a first-class value: quote a form with `` `FORM ``, splice a
@@ -439,6 +452,64 @@ value with the real C ABI. To call a Coil fn from C (e.g. `qsort` comparator) pa
 6-digit display, NOT C `%g`; for exact float formatting call libc `snprintf` with
 `c"%g"`. `coil cimport header.h` auto-generates bindings from a real C header.
 
+## Doc comments (`;;`)
+
+A run of lines starting with `;;` **directly above a definition** is that
+definition's documentation. A single `;` stays an ordinary comment, so documenting
+something is opt-in and an incidental note never becomes API docs.
+
+    ;; Append v; grows (doubling, min 4) if full.
+    ;; Returns the new length.
+    (defn al-push! [T] [(l (mut (ArrayList T))) (v T)] (-> i64) …)
+
+    ; internal note — NOT documentation
+    (defn al-raw [] (-> i64) …)
+
+    coil doc lib/arraylist.coil     ; markdown: name, signature, doc, per definition
+
+`defn`, `defstruct`, `defsum`, `deftrait`, `defcc`, `const` and `extern` are all
+documentable. The doc lives in the source and nowhere else — there is no separate
+doc field to drift.
+
+**`(code-doc NODE)`** returns a node's doc as a `(slice u8)` at comptime (`""` when
+it has none, including any macro-generated node), so doc tooling is a library
+metaprogram rather than a compiler feature: a checker holding the program can read
+every definition's doc, e.g. to enforce that exported functions are documented.
+
+## Tests, assertions, debug checks
+
+`deftest` and `assert` are a library (`assert.coil`), not compiler features.
+`coil test FILE` loads it for you, discovers every `(deftest …)`, and runs each in a
+**forked child** — so a failing assertion aborts only its own test and still prints.
+
+    (module mytests)                  ; ⚠ REQUIRED — `coil test` imports assert.coil
+    (deftest arithmetic               ;   for you, and a file that imports must
+      (assert-eq (+ 2 2) 4)           ;   declare a module
+      (assert (< 1 2))
+      (assert-ne 1 2))
+
+    coil test mytests.coil            ; exit 0 iff all pass
+
+A failure prints the offending expression and its `file:line`, recovered at expansion
+time via `code-src`/`code-line`, then aborts.
+
+**`--debug-checks`** turns on the safety tier, all of it zero-cost when off (each
+check lives behind a macro branched on `(debug-checks?)` at expansion time, so the
+off-path expansion is byte-identical to the unchecked form):
+
+- `slice-get`/`slice-set!`/`subslice` bounds-check (and `subslice` rejects `lo > hi`);
+- `(debug-allocator inner)` (`dbgalloc.coil`) wraps an allocator to detect double-free
+  and poison freed payloads to `0xDE`;
+- a bundled checker warns when a function returns a pointer to a stack local.
+
+⚠ `--debug-checks` auto-loads that checker as a metaprogram, so — exactly like
+`coil test` — the file must declare `(module NAME)`.
+
+`--sanitize=address` runs LLVM's AddressSanitizer over the program object. ⚠ The final
+link uses the system `cc`, which must supply a matching ASan runtime; where it doesn't
+(macOS with Homebrew LLVM and Apple clang) the link fails and `--debug-checks` is the
+portable option.
+
 ## Reserved-name gotchas ⚠
 
 `call` and `block` are builtins/macros — don't name a `defn` `call` or `block`
@@ -450,6 +521,8 @@ as a struct field name. When in doubt, prefix your name (`p-call`, `vm-call`).
 These modules ship inside the compiler — `(import "NAME.coil" :use *)` works from
 anywhere, no path or install step:
 `alloc` (allocators), `arraylist`, `hashmap`, `slice`, `str`, `mem`, `io`, `fmt`,
-`print`, `result` (Option/Result), `control` (case/cond/while/for/…), `match`,
-`try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`. The common
-ones are summarized above; import a module and call its functions directly.
+`print`, `fs` (files), `result` (Option/Result), `control` (case/cond/while/for/…),
+`match`, `try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`,
+`assert` (assert/deftest), `dbgalloc` and `stacklint` (both used by
+`--debug-checks`). The common ones are summarized above; import a module and call
+its functions directly.

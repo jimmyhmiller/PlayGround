@@ -1,217 +1,154 @@
-# Coil — Future Work: the road to a Zig/C competitor
+# Coil — what's left
 
-This document is an honest, comprehensive map of what Coil would need to become a language you'd actually reach for instead of C or Zig. It is deliberately broad: it lists far more than any one person will build soon, organized so the high-leverage work is easy to find. It also argues a thesis — **don't clone Zig; lean into the things Coil can do that Zig and C cannot** — and then enumerates the table-stakes work needed to make those strengths usable.
+An honest map of the gap between "a sharp, self-hosted compiler" and "a language you'd
+reach for instead of C or Zig". Ordered by what blocks adoption, not by how interesting
+the work is.
 
----
+## Where Coil stands
 
-## 1. Where Coil stands today
+The compiler core is done and is not the bottleneck. Coil is self-hosted, self-verifying
+(rebootstrap fixpoint + the `selfhost/oracle` gates over a 96-file corpus), self-hosts on
+macOS arm64 and Linux x86-64, emits wasm, and even runs *inside* wasm where it
+self-compiles to a byte-identical arm64 binary. Diagnostics carry `file:line:col` and a
+caret. DWARF works through lldb. Traits, generics, sums, slices, strings, a module
+system, comptime with the whole language available, whole-program checkers and
+transforms, `coil test`, `coil fmt`, `coil repl`, `Coil.toml` projects, `cimport` — all
+shipped.
 
-The hard compiler core is done and is genuinely competitive:
-
-- **Native AOT, fully optimized.** Emits an object, links with `cc`, runs LLVM's `-O3` pipeline. On matched compute benchmarks it sits at parity with `cc -O3` (`bench/`).
-- **Calling convention is a type.** `defcc` with a `:native` lowering (rides an LLVM CC) or a `:shim` lowering (naked trampoline + register-constrained call sites), emitted per architecture (x86-64, AArch64). Nothing else exposes this.
-- **Allocation is a value, not a keyword.** Region-less pointers (`(ptr T)`); `alloc-stack/static/heap`; Zig-style allocators threaded as vtable values (`lib/alloc.coil`); an IO capability the same way (`lib/io.coil`).
-- **Layout is a type** (the dual of calling convention): `:c`/`:packed`/`(align N)`/`:explicit`/`:bits`, with `sizeof`/`alignof`/`offsetof`/`static-assert`.
-- **Real metaprogramming.** Macros are ordinary Coil `[Code…] -> Code` functions (quasiquote, gensym hygiene) run at compile time by the comptime interpreter — one language, no separate macro dialect — that can emit whole top-level definitions and branch on the target.
-- **A module system** with namespaced functions/types/sums/conventions, file-relative `import` (`:as`/`:use`), `(export …)` visibility, and **proper cross-module macro hygiene** (references resolve in the macro's defining module, including the macro-generated, second-order case).
-- **Raw LLVM IR as a first-class escape hatch.** `(llvm-ir …)` inlines arbitrary LLVM IR with zero overhead; on top of it, SIMD (`(vec T N)` + `lib/simd.coil`) is a *library*. A consequence we proved: a C function from `clang -emit-llvm` pastes straight into Coil and runs identically.
-- **C interop**: `extern` (incl. variadic), and struct-by-value across the real C ABI (SysV AMD64 + AArch64 AAPCS64), verified against clang.
-- **Generics** by monomorphization with inference; **references & mutability** as const-correctness (no borrow checker); arbitrary-width integers; floats; bool; bitwise.
-- 162 tests; a benchmark harness; a kitchen-sink example.
-
-What this means: Coil is a sharp *core*, not yet a *tool*. The gap to "Zig/C competitor" is almost entirely livability, library, safety-in-debug, tooling, and reach — not deep compiler theory.
+What is missing is livability, reach, and the ability for someone who is not the author
+to use it.
 
 ---
 
-## 2. Strategy: the moat — lean into what only Coil can do
+## 1. Nobody else can adopt it yet
 
-Before the table-stakes list, the strategic point. Zig is excellent; out-copying it on its own terms is a losing race. Coil has five capabilities that are unusual or unique, and the roadmap should make *those* first-class, because they're the reason someone would switch.
+### 1.1 No dependency story
 
-1. **Calling-convention-as-type.** Hand-rolled ABIs, syscall conventions, interrupt/exception handlers, naked functions, JIT trampolines, register-pinned hot paths, FFI to anything. This is the killer feature for **kernels, embedded, runtimes, and interop**. No mainstream systems language gives you this in the source language.
-2. **Raw LLVM IR + C embedding.** Coil can host arbitrary LLVM IR and therefore host C (proven). That opens *being a C compiler* (`coil cc`), **mixing C and Coil in one module with cross-language inlining**, and reaching every LLVM instruction/intrinsic without compiler changes. This is a genuine moat versus Zig's `@cImport`.
-3. **Allocation-as-values** (already Zig's best idea) plus **layout-as-types** (the dual). Together: explicit, verified control over where data lives *and* how it's shaped — ideal for wire formats, MMIO, protocols, and zero-copy parsing.
-4. **A real Lisp macro system** that emits definitions and DSLs. Many "language features" become libraries (closures, SIMD, and — on the roadmap — `defer`, iterators, async, even safety checks). The language can grow without the compiler growing.
-5. **Descriptive, not safe — by choice.** Coil deliberately has no borrow checker. The Zig-style answer (runtime safety checks in debug, off in release) fits Coil perfectly and is far less work than a borrow checker.
+`Coil.toml` understands `[package] name/entry`, `[build]`, `[link]`, `[cc]` and `[run]`.
+There is no way to depend on someone else's code: no `[dependencies]`, no fetch, no
+version pinning, no lockfile, no library search path. Everything must be vendored by
+hand or reached with a relative import.
 
-The roadmap below is in two halves: **table stakes** (the unglamorous work that makes any of this usable) and **lean-in** (the differentiators). Ship table stakes first; they unblock everything, including dogfooding the differentiators.
+Needed: a dependency section, a fetch-and-pin mechanism with a lockfile, content
+addressing, and a resolution rule that composes with the existing file-relative import
+semantics and the bundled-stdlib `<bundled>` sentinel.
 
----
+### 1.2 No release or versioning story
 
-## 3. Table stakes — make it livable
+`coil --version` does not exist (it prints usage and exits 1). There is no release
+artifact, no install path, no channel — the compiler is a binary committed to a repo.
+Anyone adopting Coil needs to answer "which Coil?" and today there is no answer.
 
-### 3.1 Diagnostics (the single highest-leverage work)
+### 1.3 Diagnostics stop at the first error
 
-Today a type error says `in 'main': arithmetic on different types (f64 vs i64)` with **no line, column, or source snippet**: the tokenizer tracks no positions. Everything else is more painful until this exists.
+The type checker reports one error and stops. Spans across `import`/`include` are
+`DUMMY`, so a diagnostic about imported code cannot point at it — that needs multi-source
+span ids, which is also the last gap in DWARF for imported functions.
 
-- **Source spans** end to end: byte offsets in the tokenizer → spans on `Sexp` → spans on the AST → spans in errors. Macro-generated nodes carry the expansion's provenance (the macro call site + the template location).
+This blocks more than daily use: `docs/SEMANTIC_METAPROGRAMS.md` needs a
+collect-and-continue mode for metaprogram-authored diagnostics, so one fix pays twice.
+`warn`/`report` already collect — the compiler's own checker is the part that doesn't.
 
-  **DONE** (the core): every `Expr` carries a source span (`struct Expr { kind: ExprKind, span }`; parser attaches real spans, check/mono preserve them through elaboration). **Type-checker errors now render with `file:line:col` + a caret**, pointing at the innermost offending sub-expression (the `synth` recursion attaches each frame's span; innermost wins). Reader + parser errors already did. Remaining: macro-expansion *provenance* (spans across `include`/`import` are `DUMMY` today — needs multi-source span ids), and multi-error reporting/recovery (still stops at the first error).
-- **Rich rendering**: `file:line:col`, the offending source line, a caret/underline, and the existing context-frame "stack trace" (function → argument → macro expansion → import) with a location per frame.
-- **Multi-error reporting** (don't stop at the first) and basic recovery.
-- This also unlocks the LSP (§5) nearly for free.
+### 1.4 No LSP
 
-### 3.2 Debug info (DWARF)
-
-Emit line tables + variable/type info via inkwell's `DIBuilder`, so `lldb`/`gdb`, breakpoints, stepping, and crash backtraces work. Coil already emits native objects; this is the missing metadata. Big multiplier for real debugging.
-
-**Increment 1 DONE** (`coil build/run -g`): a compile unit + a `DISubprogram` per function at its real source line, with the module flags `-O3`-surviving DWARF needs; `-g` steps to `O1` + marks user functions `noinline` so breakpoints reliably resolve and hit; a `.dSYM` is gathered on macOS. lldb sets breakpoints by function, hits them, and shows `file:line` in backtraces (verified, tests/debuginfo.rs). See [DEBUGINFO_DWARF.md](DEBUGINFO_DWARF.md). Remaining: **per-statement line tables** (needs spans on every `Expr` — the same foundation that gives checker diagnostics real locations) and **local-variable / typed-parameter DI** (`DILocalVariable`, typed `DISubroutineType`).
-
-### 3.3 Core control flow & error ergonomics
-
-TCO already turns self-tail-recursion into a loop, so most of this is library/macro work:
-
-- **Loops**: `while`, `for` (over ranges and slices), `loop`/`break`/`continue`, `inline for` (comptime-unrolled). At least as macros; consider blessing `while`/`for` for nicer diagnostics.
-- **`defer` / `errdefer`** for deterministic cleanup (scope guards) — the design already calls this out.
-- **`?` / `try`** over `Option`/`Result` to remove the match-pyramid; consider Zig-style **error sets** as a `defsum` convention.
-- **`switch`** with exhaustiveness, ranges, and payload captures over sums/ints.
-- A few classics: `cond`, `->`/`->>`, `when`/`unless`, `match` guards.
-
-### 3.4 The everyday type tier
-
-- **Slices**: a `(slice T)` fat pointer `{ ptr, len }` — the single biggest ergonomics/safety win. Indexing, iteration, sub-slicing, `len`. Optional bounds checking in debug (§4). String literals become `(slice u8)`/a string type.
-- **A real string type** (length-carrying, UTF-8 aware) — today only C-strings (`(ptr i8)`).
-- **Optionals as a niche**: `?T` with null-pointer/niche optimization (`?*T` is pointer-sized), exhaustive unwrap.
-- **Sentinel-terminated arrays/pointers** (`[*:0]u8`-style) for C interop.
-- **Tuples / anonymous structs**, **enums with explicit values**.
-- **`comptime`-known array lengths** and array/slice literals.
-
-### 3.5 A real standard library
-
-This is the largest *volume* of work and most of it is library code now that generics + allocators + the primitives exist. Stage it:
-
-- **mem**: copy/set/eql/move, alignment helpers, `@memcpy`/`@memset` intrinsics.
-- **Collections (allocator-aware)**: `ArrayList` (dynamic array — the `vector.coil` example is the seed), `HashMap`/`ArrayHashMap`, `StringHashMap`, sets, sorted maps, ring buffers, priority queue, intrusive lists.
-- **Formatting & IO**: a `std.fmt`-style `format`/`print` (positional + named, width/precision), buffered readers/writers, files, `stdin/stdout/stderr` (basic versions exist).
-- **OS**: filesystem, process, env, `args` (exists), time/clock, paths, `mmap`.
-- **Math**: libm bindings or LLVM intrinsics (`sqrt`, trig, `fma`), `min/max/clamp`, checked/saturating/wrapping arithmetic, big integers, PRNG.
-- **Encoding**: UTF-8, JSON, base64, hex (a SIMD JSON parser is a natural showcase — see §6).
-- **Algorithms**: sort, search, partition.
-
-### 3.6 In-language testing
-
-Zig-style `test "name" { … }` blocks compiled and run by `coil test`, with an `assert`/`expect`, per-test isolation, and a summary. Coil currently tests from Rust; in-language tests are needed to dogfood the stdlib and for users.
+`emacs/coil-mode.el` is the entire editor story. Spans exist, the resolver already
+computes definitions and references, and `coil check` is fast on a single file, so the
+hard inputs are in place — this is mostly plumbing, and it is the highest-visibility
+adoption item. It requires 1.3 first: an editor cannot show one error at a time.
 
 ---
 
-## 4. Safety in debug, speed in release (the Zig promise — cheap for Coil)
+## 2. Blocks writing real programs
 
-Coil chose *descriptive, not memory-safe*. The right safety story is therefore **opt-in runtime checks compiled out of release builds**, not a borrow checker. This is the feature that makes Zig feel safe without a GC, and it's mostly codegen + a build-mode flag.
+### 2.1 Standard library breadth
 
-- **Build modes**: `Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall` (map to opt level + which checks are emitted).
-- **Checks** (debug/safe only): slice/array **bounds**, integer **overflow** (LLVM `*.with.overflow` intrinsics → trap), **null/optional** unwrap, **alignment** on casts, division by zero, unreachable, optionally **shift-amount** and enum-tag validity.
-- **A GeneralPurposeAllocator** with leak detection, double-free, and use-after-free poisoning — a debug allocator that turns the allocator-as-value design into a safety tool.
-- **Sanitizer integration**: thread/emit metadata so LLVM ASan/UBSan/TSan can be enabled (`-fsanitize=…` through the link step).
-- **`assert`/`@panic`** with a message + backtrace (needs DWARF, §3.2).
+25 modules, ~3.2k lines total. Missing outright: **time/clock**, **process/env**,
+**sockets**, **random**, general **sort**, **path** manipulation, **buffered** reader/
+writer, **UTF-8** handling beyond bytes, a growable **string builder**, **JSON** (it
+lives in `examples/`).
 
-This bundle is high-leverage and far less work than a borrow checker, and it directly answers "but is it safe?"
+**Concurrency is the biggest hole**: `lib/thread.coil` is 23 lines wrapping
+`pthread_create`/`join`, with no mutex, condvar, channel or thread pool — while
+`metaengine.coil` contains a working portable counting semaphore that should be lifted
+into `lib/`.
 
----
+### 2.2 Compile speed and scale
 
-## 5. Tooling & ecosystem
+Measured: the 31k-line self-host builds in ~18s wall (`emit-obj`, ~14.4s user); a small
+file is ~0.24s. There is no incremental compilation, no per-module object cache, no
+parallel codegen, and monomorphization is whole-program. At 100k lines that is a minute
+per edit.
 
-- **`coil fmt`** — a formatter (cheap given the reader; huge for adoption and diffs).
-- **LSP** — diagnostics (free once spans exist), hover types, go-to-def/find-refs (the module resolver already computes this), completion, rename.
-- **Tree-sitter / TextMate grammar** for editor highlighting.
-- **A REPL-ish `coil eval`** — Coil is AOT-only, but a compile-and-run loop (or a JIT mode via inkwell's execution engine, used only for the REPL) would help learning and scripting.
-- **Docs**: a "learn Coil in 30 minutes" tutorial, a complete language reference, a stdlib reference (doc-comments → generated docs).
+Options, roughly in order of payoff per effort: cache per-module expansion and IR;
+parallel codegen; use the arm64 backend as the fast debug path (it is already ~17× faster
+than LLVM on the compiler itself); then attack incremental mono.
 
----
+### 2.3 Windows
 
-## 6. Lean-in #1 — C interoperability *dominance*
-
-Zig's adoption is driven by `zig cc` and `@cImport`. Coil can match and then exceed this, because it already hosts LLVM IR and can embed C (we proved it).
-
-- **`coil cc`** — drive clang/lld to compile C (and link), bundled like `zig cc`: an instant cross-compiler and drop-in C toolchain.
-- **Mix C and Coil in one module** — compile C to IR, `link_in_module` it (the `(llvm-ir …)` machinery already does this), so the optimizer **inlines across the language boundary**. This is a capability `@cImport` doesn't have.
-- **`cimport`** — parse C headers via libclang and auto-generate `extern` declarations + struct/enum/typedef bindings. The single biggest unlock for using the C ecosystem.
-- **Export C headers** for Coil APIs so C/other languages can call Coil.
-- **A C-source-as-a-module on-ramp**: a debug-info-guided lifter could raise C → more idiomatic Coil incrementally (a research-y but high-value migration story).
+macOS arm64 and Linux x86-64 only. Windows needs PE/COFF and the MS x64 ABI. This is the
+single biggest reach gap for desktop users.
 
 ---
 
-## 7. Lean-in #2 — embedded, freestanding, and bare metal
+## 3. Known defects
 
-Coil's "no runtime, AOT, conventions-as-types, layout-as-types, raw IR" is *tailor-made* for systems where C and assembly dominate. This is a market where the convention/layout features are not a curiosity but the whole point.
+These are real, reproduced, and each has a clear repro:
 
-- **Freestanding targets**: `--target …-none`, no libc, custom `_start`, `panic`/`unreachable` without an OS.
-- **Linker control**: custom linker scripts, `--section`/placement attributes, `--no-std`, static-only links, `-nostartfiles`.
-- **Interrupt/exception handlers** and **naked functions** as first-class (the `:shim`/naked machinery already exists; expose it cleanly + an `interrupt` calling convention).
-- **MMIO**: typed volatile loads/stores (raw IR can already do `volatile`/`atomic`; give it a typed surface), `:explicit`/`:bits` layouts for device registers (already supported), `int↔ptr` for fixed addresses (already supported).
-- **TLS** (thread-local storage), weak symbols, `comptime`-selected memory maps.
-- **More targets**: RISC-V (32/64), ARM32/Thumb, Xtensa, AVR, WASM (`wasm32-freestanding`), and **Windows x64** (PE/COFF + the MS x64 ABI — needed for desktop reach).
+- **Runaway comptime crashes the compiler.** A self-tail-recursive `(comptime …)` is not
+  TCO'd on the comptime-thunk path, so around 10M frames it dies with a bus error
+  instead of erroring. Core `loop` at comptime is fine, and the same function at runtime
+  is fine. The tree-walking interpreter had a fuel budget; nothing replaced it.
+- **A sum-typed `const` aborts the build** with `UNIMPLEMENTED: codegen: unknown static
+  const <name>` rather than being supported or refused cleanly.
+- **A comptime result cannot be a generic-instance aggregate** — `(Option i64)`,
+  `(Pair i64 i64)` report "cannot be materialized". Plain structs, plain sums and arrays
+  work.
+- **`--use` requires the target file to declare `(module …)`**, which surprises through
+  `coil test` and `--debug-checks`: a bare single-file program is refused with an error
+  whose span points at `<cli-use>`, a file the user never wrote.
+- **`--sanitize=address` cannot link** where the system `cc`'s ASan runtime does not match
+  the instrumenting LLVM (macOS with Homebrew LLVM + Apple clang). The instrumentation is
+  correct; the link is not, and the driver hardcodes `cc` with no override.
 
-A concrete, compelling demo: a tiny ARM Cortex-M blink/UART program with the device registers as `:bits` layouts and the vector table as an array of shim-convention handlers — pure Coil, no C, no assembly files.
+## 4. Robustness
 
----
-
-## 8. Lean-in #3 — metaprogramming, comptime, and "features as libraries"
-
-- **`adapt`** (the deferred macro): general convention-to-convention trampolines synthesized from two `defcc` descriptions — the last piece of the calling-convention story, and the foundation for FFI shims and JIT glue.
-- **A comptime story that bridges macros and types — ✅ shipped.** `(comptime E)` evaluates real Coil functions at compile time, and macros are now the same language (`[Code…] -> Code` run by the comptime interpreter), not a separate Lisp. Remaining: comptime *type construction* (reflection returning first-class `Type` values) and comptime values flowing into types (`Array(T, comptime_len)`).
-- **Reflection — ✅ shipped (structural).** Introspect struct fields, sum variants, and trait/method signatures at comptime (`field-count`, `code-field-*`, `code-trait-*`); `lib/derive.coil` (eq/hash/keyops) is a pure library over it. Remaining: field types as first-class `Type` values and generic-type-param reflection.
-- **Interfaces / structural constraints** — bless the allocator/`Writer` vtable pattern, or add comptime structural "does T have method m" checks, so generic code documents its requirements.
-- **Closures, iterators, `defer`, error sets, even bounds-checked slices** can largely be *library* macros over the core — keep the compiler small.
-
----
-
-## 9. Lean-in #4 — concurrency & async (a natural fit for the thesis)
-
-Coil's design explicitly says coroutines and async frames are points in the *(calling-convention × allocation)* space. That makes concurrency a place where Coil's core pays off rather than bolts on.
-
-- **Typed atomics** (`atomicrmw`/`cmpxchg` already reachable via raw IR — give them a typed surface), `volatile`, memory orderings, fences.
-- **Threads**: spawn/join, thread-local storage, the GeneralPurposeAllocator made thread-safe.
-- **Synchronization**: mutex, condvar, once, RW-lock, channels.
-- **Async/coroutines as a library**: stackless coroutines built from a custom calling convention (frame as a heap/arena allocation, resume/suspend as convention-aware calls) — the thesis realized. This is a research-grade but on-brand differentiator.
+Gating is snapshot- and corpus-based. There is no fuzzing in the gates and no
+differential property testing of the arm64 backend against LLVM beyond the fixed corpus.
+A 60-case mutation fuzz (truncations, byte flips, chunk deletions) over `coil check`
+produced no crashes or hangs, which is a good sign but not a guarantee. Worth adding: a
+fuzz target in the gates, and a random-program generator diffing the two backends.
 
 ---
 
-## 10. Backend, ABI, and codegen depth
+## 5. The moat — what to lean into once the above is handled
 
-- **Finish the calling-convention story**: `:shim` function *pointers*, aggregate-by-value across `:shim` conventions, and a safe parallel-move register scheduler in trampolines (currently assumes non-colliding source/dest).
-- **More ABIs**: Windows x64, ARM32 AAPCS, RISC-V, WASM, plus unsigned-typed externs and struct/array literals across the boundary (deferred items).
-- **Per-field endianness** in `:explicit` layouts (sketched in `LAYOUT.md`) — wire formats by value.
-- **Typed inline assembly** surface (beyond the shim internals) and `naked`.
-- **LTO** (already whole-program), **PGO**, section/symbol attributes, `inline`/`noinline`/`cold`/`hot`, function `align`.
-- **A SIMD standard library**: per-arch widths via `target-arch`, the full op set (shuffles, masks, `tbl`/`pshufb`, `clmul`, `compressstore`, reductions), and a `stream … carry` looping construct for data-parallel kernels (a la the `simd-lang` JSON parser) — all macros over `(llvm-ir …)`.
+Coil has capabilities that are unusual or unique, and they are the reason someone would
+switch rather than use Zig:
 
----
+1. **Calling-convention-as-type.** Hand-rolled ABIs, syscall conventions, interrupt
+   handlers, naked functions, JIT trampolines, register-pinned hot paths. The remaining
+   piece is `adapt` — general convention-to-convention trampolines synthesized from two
+   `defcc` descriptions.
+2. **Raw LLVM IR + C embedding.** Coil hosts arbitrary LLVM IR and therefore hosts C.
+   That opens `coil cc`, mixing C and Coil in one module with cross-language inlining,
+   and reaching every LLVM intrinsic without compiler changes — a capability `@cImport`
+   does not have.
+3. **Metaprograms.** Checkers and transforms make a *dialect* a single import. The open
+   work is core-form demotion (an interceptable `store!`), which unlocks write barriers
+   and bounds checks on unmodified Coil, and function-signature reflection.
+4. **Layout-as-types.** Per-field endianness in `:explicit` layouts is the missing piece
+   for wire formats by value.
+5. **Freestanding and embedded.** `--target …-none`, linker scripts, interrupt
+   conventions, and MMIO are a natural fit; an MCU blink/UART demo in pure Coil, with
+   device registers as `:bits` layouts and the vector table as shim-convention handlers,
+   would be a compelling proof.
 
-## 11. Build system, packages, and scale
+## 6. Suggested order
 
-- **`build.coil`** — a build system written in Coil itself (Zig's `build.zig` is a major draw): targets, steps, options, install, cross-compile, run, test.
-- **A package manager** — fetch/pin/version dependencies, a lockfile, content addressing.
-- **Project conventions** — multi-file layout, a manifest, standard `src/`/`tests/`.
-- **Compile speed at scale** — the honest risk (see §12). Options: cache per-module expansion/IR, a fast non-LLVM debug backend (Zig's approach for fast iteration), and incremental relinking.
-
----
-
-## 12. The hard problems (be honest about these)
-
-- **Compile speed with whole-program monomorphization + a tree-walking macro interpreter.** Fine now, a real risk at 100k+ LOC. Mitigations: a custom fast backend for debug builds (bypass LLVM), caching, parallel codegen, and possibly a bytecode comptime VM instead of the AST interpreter. This is the single biggest threat to "competitor" status and deserves early prototyping.
-- **Incremental compilation** is genuinely hard under whole-program mono. A per-module IR cache + on-demand instantiation is the likely path; true incremental may require giving up some whole-program optimization.
-- **Safety without a borrow checker.** The debug-mode-checks plan (§4) covers spatial/temporal *detection*; it does not *prevent* use-after-free at compile time. That's a deliberate, defensible stance (it's C/Zig's stance too) — but it should be stated, not papered over.
-- **Macro hygiene's last edge.** The current system is robust through the second-order case; full Racket-style scope-set hygiene is more than Coil likely needs, but the residual (a reference to a macro-generated def that appears *after* the use site) should be documented and, if it ever bites, addressed with a proper expansion-environment model.
-- **A `comptime` model that unifies with the macro Lisp** — ✅ done (Stage 3): macros are ordinary Coil `[Code…] -> Code` functions run by the comptime interpreter, and the separate macro Lisp was deleted.
-- **Stdlib surface area.** "Batteries included" is hundreds of files. It needs sustained effort and an API-design throughline (allocator-aware, error-set-based, slice-first).
-
----
-
-## 13. A phased critical path
-
-A pragmatic ordering that keeps the tree shippable and dogfoodable at every step:
-
-1. **Phase 1 — Livable.** Source spans + caret diagnostics → DWARF → loops/`defer`/`?` → slices + strings → stdlib core (ArrayList, HashMap, fmt/print, mem) → `test` blocks + `coil test`. *Then dogfood by writing a real program (a JSON parser, a small interpreter, a CLI tool) and fix what hurts.*
-2. **Phase 2 — Safe & allocator-first.** Build modes + debug safety checks + a GeneralPurposeAllocator with leak/UAF detection + sanitizer hooks.
-3. **Phase 3 — C dominance.** `coil cc`, mixed C/Coil modules with cross-language inlining, `cimport`, export-C-headers, Windows x64 ABI.
-4. **Phase 4 — Build & packages.** `build.coil`, a package manager, project conventions; start attacking compile speed.
-5. **Phase 5 — Tooling.** `coil fmt`, LSP, grammar, tutorial + reference.
-6. **Phase 6 — Lean-in depth.** `adapt`, embedded/freestanding + an MCU demo, comptime/reflection, SIMD stdlib + a `stream` construct, concurrency (atomics/threads/channels), async-as-a-library, more targets.
-7. **Phase 7 — Self-host.** Rewrite the compiler in Coil. The ultimate credibility and dogfooding test; the `lang` bootstrap sibling shows the path.
-
-The first dozen items in Phase 1 are what turn Coil from an impressive core into a tool you'd actually use. Everything in §6–§10 is what would make people *choose* it over C or Zig once it's usable.
-
----
-
-## 14. The smallest next step
-
-If only one thing is built next: **source locations in diagnostics** (§3.1). It is the highest leverage per unit effort, it makes building everything else (and dogfooding) far less painful, and it nearly gives the LSP away. After that, **a real `for`/`while` + `defer` + slices**, then **a stdlib `ArrayList`/`HashMap`/`print`**, then **write a real program in Coil** and let the friction set the rest of the agenda.
+1. Multi-error reporting + multi-source spans (1.3) — unblocks the LSP and metaprogram
+   diagnostics.
+2. LSP (1.4) — the highest-visibility adoption win.
+3. Packages + versioning (1.1, 1.2) — largely independent, can run in parallel.
+4. The defects in §3 — each is small and each is a trust problem.
+5. Stdlib breadth (2.1), starting with concurrency primitives and time.
+6. Compile speed (2.2) before anyone has a 100k-line program, not after.

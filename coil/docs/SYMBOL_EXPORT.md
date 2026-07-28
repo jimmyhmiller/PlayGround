@@ -10,8 +10,9 @@ and x86-64 (SysV) via the C-ABI thunk — plus the tooling to ship a library:
   typedefs) for the export set — the inverse of `coil cimport`.
 
 Verified end to end: a C client `#include`s the generated header, links the generated
-`.a`, and calls Coil (incl. struct by value) correctly (`tests/struct_abi.rs`,
-`tests/linkage.rs`). The only deferred item is phase 5 (freestanding entry as an explicit
+`.a`, and calls Coil (incl. struct by value) correctly (gated by `gate-cli.sh`,
+which builds a C client against an exported Coil library on both backends). The only
+deferred item is phase 5 (freestanding entry as an explicit
 export, to internalize the rest of a bare-metal image).
 
 ## What's implemented
@@ -23,7 +24,7 @@ export, to internalize the rest of a bare-metal image).
   and no `main` keeps everything external (back-compat fallback).
 - **C symbol**: the explicit `:as`, else the bare name with `-`→`_`; the exported LLVM
   function is named by that symbol while Coil call sites still resolve internally.
-- **ABI checks at the boundary** (`check.rs`): the function must exist, be non-generic,
+- **ABI checks at the boundary**: the function must exist, be non-generic,
   not use a `:shim` convention, have C-representable parameter and return types, and
   have a symbol unique among exports.
 
@@ -33,7 +34,7 @@ An exported function may now both **return** and **take** a struct by value. The
 internal function stays reference-model (it takes the struct by pointer, `internal`
 linkage); a generated **thunk** under the C symbol receives the struct per the C ABI
 and marshals it to the pointer the internal function expects (`emit_export_thunk` in
-`codegen.rs`). On AArch64 a 16-byte struct arrives as `[2 x i64]` and the thunk scatters
+the backend). On AArch64 a 16-byte struct arrives as `[2 x i64]` and the thunk scatters
 it into a slot; a large struct arrives `byval` and is passed straight through. The
 design below records how it works; the only remaining boundary rejections are types
 with *no* C representation at all (slice, `defsum`, SIMD vec, `Code`, generic `App`).
@@ -55,7 +56,7 @@ can't satisfy both the by-value C ABI and the by-reference internal ABI.
 into the reference model and calls the internal function. Because the internal function
 is `internal`, LLVM inlines it into the thunk, so the thunk *is* the real body at -O3 —
 no call overhead. This is the exact inverse of `emit_c_call` (the outbound Coil→C path),
-reusing the same `abi.rs` classifier, so it is automatically target-correct (x86-64
+reusing the same ABI classifier, so it is automatically target-correct (x86-64
 SysV and AArch64 AAPCS64) and needs no new ABI theory.
 
 **When a thunk is emitted.** Only when the C-ABI signature differs from the
@@ -63,7 +64,7 @@ reference-model one — i.e. the export has ≥1 **aggregate-by-value parameter*
 with only scalar/pointer parameters (whatever the return, including a by-value struct
 return) keep today's direct symbol-rename path; no thunk, no change.
 
-**The thunk body**, walking the export's `CSig` (`sret`, `args: Vec<ArgAbi>`, `ret_direct`):
+**The thunk body**, walking the export's C signature (`sret`, per-argument ABI, `ret_direct`):
 
 - **`sret` return** (large struct): the thunk's first parameter is the hidden result
   pointer. The internal function also returns via `sret` (its return type isn't erased),
@@ -73,7 +74,7 @@ return) keep today's direct symbol-rename path; no thunk, no change.
 - **`ArgAbi::Direct(sa)`** (struct in registers): the thunk receives N register
   parameters (the coerced eightbyte/ HFA slots). Allocate a `struct_slot`, **store**
   each incoming register into its eightbyte offset — the inverse of `emit_c_call`'s
-  "load each coerced slot from memory" loop (codegen.rs ~1157) — then pass the slot
+  "load each coerced slot from memory" loop — then pass the slot
   *pointer* to the internal function (which wants the aggregate as a pointer).
 - **`ArgAbi::Indirect(sa)`** (large struct, `byval`/pointer): the incoming pointer is a
   caller-allocated copy the callee owns and may mutate, so pass it directly as the
@@ -112,7 +113,7 @@ aggregates by reference — onto the C by-value ABI, since one symbol can't carr
 ABIs. The thunk cleanly separates the public C entry from the reference-model body and
 leaves all internal call sites untouched.
 
-**Testing.** Extend `tests/struct_abi.rs` so the C fixture passes a struct **by value**
+**Testing.** The C fixture passes a struct **by value**
 to an exported Coil function (the `dist2(Point)` case that crashed), on both Host
 (AAPCS64) and x86-64 under Rosetta (SysV); plus an IR test that the thunk exists under
 the C symbol with the C-ABI signature while the internal function stays `internal`.
@@ -155,7 +156,7 @@ custom symbol like `start`) keeps *everything* external. That works but is blunt
 
 `extern` lets Coil **import** a C symbol. This feature is the mirror: **export** a Coil
 function *as* a C symbol, with the same ABI rigor Coil already applies to `extern` and
-struct-by-value (`src/abi.rs`, `check_c_abi_types`).
+struct-by-value (the ABI classifier in `codegen.coil` / `codegen_a64.coil`).
 
 ## The core rule (linkage)
 
@@ -214,7 +215,7 @@ top-level form is the primitive.)
 ## ABI constraints (checked at the export boundary)
 
 An exported function is a C ABI boundary, so the checker enforces — reusing the
-existing `check_c_abi_types` / `src/abi.rs` machinery used for `extern` and
+existing C-ABI type-checking machinery used for `extern` and
 struct-by-value — that:
 
 1. **Calling convention is C.** The function must use the `c` convention (or a `defcc`

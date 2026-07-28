@@ -1,5 +1,9 @@
 # Coil — Design Decisions (Jimmy, from the questionnaire)
 
+> **Status: all ten are shipped.** This document is now the record of what was decided
+> and what each change turned out to be, not a work queue. For what is still open, see
+> [`FUTURE_WORK.md`](FUTURE_WORK.md).
+
 These are the chosen directions for the rough-edge findings that were design calls, not
 bugs. Ordered here by a sensible execution sequence, not by decision number. Each is real
 work; do them one at a time, gated by the usual rebootstrap (fixpoint + gate-full +
@@ -217,7 +221,8 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
    diag build-fixtures 06/07 flipped from "error" to a folded literal (regenerated, exit 1→0). Five
    teeth in `gate-cli.sh` (sizeof→8, generic→7, `(const … (sizeof))`→8, c-string-in-comptime→5, and an
    aggregate-comptime no-regression check) — the four capability tests FAIL on the pre-mac-8 seed.
-   STEP 3 IN PROGRESS (the actual deletion). Sub-parts, IN ORDER:
+   STEP 3 ✅ COMPLETE (2026-07-22) — the deletion landed; `docs/INTERP_DELETION.md` is the
+   record. Sub-parts:
    3a) ✅ DONE — aggregate/string comptime ON the compiled engine (native-memory readback). The
        scalar path reads int/bool/f64 out of the return register; an AGGREGATE now uses a
        write-through `(ptr T)` thunk (`comptime_eval.coil::cte-add-entry-agg`) — the compiler's own
@@ -239,11 +244,13 @@ arm64 gate-run + gate-cli + gate-diag) and the finding's own repro.
        (NOTE: a PRE-EXISTING, engine-independent `build-content`/codegen bug mis-lowers a comptime
        struct whose fields are all <8 bytes — the interpreter has it too — is orthogonal to interp-
        delete and untouched here; the readback itself is byte-correct.)
-   3b) OPEN — re-route `run-metas` (the `(meta …)` generator path still uses `eval`) and `finish-macro`'s
-       interpreter fallback off `eval`.
-   3c) OPEN — relocate `CtVal`/`CtCtx` (metaengine/metalower/metahost reuse them) out of `comptime.coil`.
-   THEN the deletion: `comptime.coil`'s evaluator, the `COIL_META` flag, `parity.sh`, guide.coil:426.
-   mac-8 is closed; mac-12 + diag-4 wait on the full deletion (3b+3c+drop).
+   3b) ✅ DONE — `run-metas` moved to synthetic engine entries (byte-identical IR) and
+       `finish-macro`'s fallback to lazy per-qual staging (an engine miss stages on demand;
+       unstageable = hard error).
+   3c) ✅ DONE — `CtVal`/`CtCtx` relocated to `ctval.coil`.
+   THEN the deletion: ✅ done — `comptime.coil`'s evaluator (~650 lines), the `COIL_META` and
+   `COIL_STAGE_MACROS` flags, `parity.sh`, and the guide's two-engines section are gone.
+   mac-8, mac-12 and diag-4 are all closed.
 
 8. **String HashMap keys own by default (std-3).** ✅ DONE. String-keyed maps copy keys into the
    map's allocator on insert and free on remove; borrowing becomes the opt-in/unsafe path.

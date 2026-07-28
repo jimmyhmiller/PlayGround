@@ -37,7 +37,7 @@ difference between "macros are powerful for syntax" and "macros are powerful, pe
 
 ## What's possible — and the timing constraint
 
-Macros expand at the **`expand` phase** (pass 2 of `macros.rs`), *before*
+Macros expand at the **`expand` phase**, *before*
 resolve → check → mono → codegen. At that point:
 
 - type **definitions** (`defstruct`/`defsum`) are present and already scanned in
@@ -64,9 +64,9 @@ In pass 1, alongside the existing `defs: DefNames`, capture the **structure** of
 ```
 TypeShape {
   kind:        Struct | Sum,
-  type_params: Vec<String>,          // generic params, e.g. [T] for (Pair T T)
-  fields:      Vec<(name, type_sexp)>,        // struct: each field's name + written type
-  variants:    Vec<(name, Vec<(name, type_sexp)>)>,  // sum: variant name + its fields
+  type_params: [name…]                // generic params, e.g. [T] for (Pair T T)
+  fields:      [(name, type_sexp)…]   // struct: each field's name + written type
+  variants:    [(name, [(name, type_sexp)…])…]  // sum: variant name + its fields
 }
 ```
 
@@ -118,9 +118,8 @@ follow the same shape — each a library macro over `struct-fields`/`sum-variant
 ## Alternatives considered
 
 - **Full Zig-style comptime** (comptime evaluation of Coil *functions*, comptime
-  values flowing into types, `Array(T, comptime_len)`): the eventual destination
-  (FUTURE_WORK §8), but a much larger project touching the evaluator, the type system,
-  and generics. The reflection bridge is the **subset that delivers derive/KeyOps now**
+  values flowing into types, `Array(T, comptime_len)`): the eventual destination, but a
+  much larger project touching the evaluator, the type system, and generics. The reflection bridge is the **subset that delivers derive/KeyOps now**
   without that machinery. Recommend the bridge first; full comptime later.
 - **A `derive` keyword in the compiler core**: violates the prime directive — the whole
   point is that derive is macro-able. Rejected.
@@ -144,7 +143,7 @@ follow the same shape — each a library macro over `struct-fields`/`sum-variant
    (require the user derive those too), vs. a generic-`==`/protocol dispatch. (Lean:
    call the field type's op; simplest, explicit.)
 4. **Scope** — expand-time *syntactic* reflection now (recommended), with full comptime
-   deferred to FUTURE_WORK §8.
+   deferred.
 5. **Incremental visibility** — should reflection see macro-generated types (via
    `macro_note_defs`), or only source-written ones in v1? (Lean: include
    macro-generated, it's nearly free and matches the existing def rule.)

@@ -10,6 +10,8 @@ before writing Coil.
 
 - `coil build file.coil -o out` / `coil run file.coil` — single file.
 - `coil guide` — print the language guide.
+- `coil doc file.coil` — markdown for that module's `;;`-documented definitions
+  (a `;;` block directly above a definition is its doc; a single `;` is not).
 - The compiler is **self-hosted** (written in Coil, in `selfhost/src/`). Rebuild +
   verify it with `selfhost/rebootstrap.sh` (fixpoint + gates).
 - ⚠ The gate corpora include **every `lib/*.coil`** and the `examples/`, `apps/` and

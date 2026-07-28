@@ -43,6 +43,92 @@
 (import "codegen_wasm.coil" :use *)   ; native wasm64 (memory64) backend, no LLVM
 (import "../../fmt/rules.coil" :as fmtr)      ; the `coil fmt` formatter (qualified to avoid name clashes)
 
+; ============================ `coil doc` ====================================
+; Render a module's documented surface as markdown. A doc is a `;;` comment block
+; directly above a definition (`ct-doc-at`, the same rule `(code-doc NODE)` uses at
+; comptime) — so the docs live in the source, in one place, and nothing can drift.
+
+; Is this the head symbol of a definition worth documenting?
+(defn doc-kind-of [(head (slice u8))] (-> (slice u8))
+  (cond (str-eq head "defn")      "fn"
+        (str-eq head "defstruct") "struct"
+        (str-eq head "defsum")    "sum"
+        (str-eq head "deftrait")  "trait"
+        (str-eq head "defcc")     "convention"
+        (str-eq head "const")     "const"
+        (str-eq head "extern")    "extern"
+        ""))
+
+; The signature to show: for a `defn`, everything up to and including the `(-> …)`
+; return form (the header, without the body); for anything else, the whole form.
+; Both are SOURCE TEXT, so what you read is what was written.
+(defn doc-sig [(a (ptr Allocator)) (src (slice u8)) (form Sexp) (is-fn bool)] (-> (slice u8))
+  (let [items (sx-items form) n (sx-len items) lo (sx-lo form) (mut end) (sx-hi form)]
+    (if (not is-fn) (subslice [u8] src lo (load end))
+      (let [(mut i) 1 (mut found) false]
+        (loop (if (or (load found) (icmp-ge (load i) n)) (break)
+          (do (let [c (sx-at items (load i))]
+                (if (icmp-eq (sx-tag c) 6)          ; a list …
+                    (let [ci (sx-items c)]
+                      (if (and (icmp-ge (sx-len ci) 1)
+                               (and (icmp-eq (sx-tag (sx-at ci 0)) 2) (str-eq (sx-sval (sx-at ci 0)) "->")))
+                          (do (store! end (sx-hi c)) (store! found true))
+                          0))
+                    0))
+              (store! i (iadd (load i) 1)))))
+        (if (load found)
+            (sconcat a (subslice [u8] src lo (load end)) ")")
+            (subslice [u8] src lo (sx-hi form)))))))
+
+(defn doc-cmd [(a (ptr Allocator)) (path (ptr i8))] (-> i64)
+  (let [src (read-src a path) w (stdout)]
+    (match (read-all a src 0)
+      (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error (stderr) dp) 1))
+      (Ok [forms]
+        (do
+          (let [n (sx-len forms) (mut i) 0 (mut shown) 0]
+            ; the module header, if the file declares one
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (let [f (sx-at forms (load i))]
+                    (if (icmp-eq (sx-tag f) 6)
+                      (let [items (sx-items f)]
+                        (if (and (icmp-ge (sx-len items) 2)
+                                 (and (icmp-eq (sx-tag (sx-at items 0)) 2) (str-eq (sx-sval (sx-at items 0)) "module")))
+                            (do (ps w "# ") (ps w (sx-sval (sx-at items 1))) (wb w 10) (wb w 10) 0)
+                            0))
+                      0))
+                  (store! i (iadd (load i) 1)))))
+            (store! i 0)
+            (loop (if (icmp-ge (load i) n) (break)
+              (do (let [f (sx-at forms (load i))]
+                    (if (icmp-eq (sx-tag f) 6)
+                      (let [items (sx-items f)]
+                        (if (icmp-ge (sx-len items) 2)
+                          (let [h (sx-at items 0)]
+                            (if (icmp-eq (sx-tag h) 2)
+                              (let [kind (doc-kind-of (sx-sval h))]
+                                (if (icmp-gt (str-len kind) 0)
+                                  (let [doc (ct-doc-at a src (sx-lo f))]
+                                    (if (icmp-gt (str-len doc) 0)
+                                      (do (store! shown (iadd (load shown) 1))
+                                          (ps w "## ") (ps w (sx-sval (sx-at items 1)))
+                                          (ps w "  *(") (ps w kind) (ps w ")*") (wb w 10) (wb w 10)
+                                          (ps w "```lisp") (wb w 10)
+                                          (ps w (doc-sig a src f (str-eq (sx-sval h) "defn"))) (wb w 10)
+                                          (ps w "```") (wb w 10) (wb w 10)
+                                          (ps w doc) (wb w 10) (wb w 10) 0)
+                                      0))
+                                  0))
+                              0))
+                          0))
+                      0))
+                  (store! i (iadd (load i) 1)))))
+            (if (icmp-eq (load shown) 0)
+                (do (ps (stderr) "note: no `;;` doc comments in ") (ps (stderr) (cstr->slice path))
+                    (ps (stderr) " — a doc is a `;;` block directly above a definition\n") 0)
+                0))
+          0)))))
+
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
   (let [w (stdout)]
     (match (read-all a src 0)
@@ -1902,6 +1988,7 @@ Artifacts
 
 Reference
   guide                                    the full language guide
+  doc   <file.coil>                        markdown for the module's `;;`-documented surface
   --help, -h                               this message
 
 Common flags (build / run / emit-obj)
@@ -1989,6 +2076,13 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (ps w (common-flags-text)) 0)
       (str-eq sub "new")
         (do (ps w "usage: coil new <name>\n\nScaffolds <name>/Coil.toml and <name>/src/main.coil.\n") 0)
+      (str-eq sub "doc")
+        (do (ps w "usage: coil doc <file.coil>\n\n")
+            (ps w "Prints markdown for every definition carrying a `;;` doc comment: its name,\n")
+            (ps w "signature, and the doc. A doc comment is a run of lines starting with `;;`\n")
+            (ps w "DIRECTLY above the definition — a single `;` stays an ordinary comment, so\n")
+            (ps w "documenting something is opt-in. The same rule backs `(code-doc NODE)` at\n")
+            (ps w "comptime, so doc tooling can be written as a library metaprogram.\n") 0)
       (str-eq sub "emit-obj")
         (do (ps w "usage: coil emit-obj <file.coil> [-o <out.o>]\n\nBuilds the object file without linking.\n\n")
             (ps w (common-flags-text)) 0)
@@ -2030,6 +2124,8 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
         (smoke a)
       (if (str-eq sub "guide")
           (do (ps (stdout) (guide-text)) 0)
+      (if (str-eq sub "doc")
+          (doc-cmd a (need-file argc argv sub))
       (if (str-eq sub "__normalize")
           (let [path (need-file argc argv sub) src (read-src a path)]
             (call-ptr normalize-fn a src))
@@ -2108,5 +2204,5 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
             ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
-            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0))))))))))))))))))))))))))))
+            (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

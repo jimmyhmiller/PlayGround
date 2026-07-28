@@ -8,27 +8,27 @@
 ;
 ;   (match-else j (JNum [n] n) (_ 0))   ; the other Json variants -> 0
 
-; all but the last element of a list
+;; all but the last element of a list
 (defn me--butlast [(xs Code) (i i64)] (-> Code)
   (if (icmp-eq i (isub (code-count xs) 1)) `()
     `(~(code-nth xs i) ~@(me--butlast xs (iadd i 1)))))
 
-; the `_` arm's body: (_ b) -> b ; (_ b1 b2 …) -> (do b1 b2 …)
+;; the `_` arm's body: (_ b) -> b ; (_ b1 b2 …) -> (do b1 b2 …)
 (defn me--wild-body [(wild Code)] (-> Code)
   (let [b (code-rest wild)]
     (if (icmp-eq (code-count b) 1) (code-nth b 0) `(do ~@b))))
 
-; is `vname` the variant of one of the explicit arms?
+;; is `vname` the variant of one of the explicit arms?
 (defn me--covered? [(explicit Code) (vname Code) (i i64)] (-> bool)
   (if (icmp-eq i (code-count explicit)) false
     (if (code-eq (code-nth (code-nth explicit i) 0) vname) true
       (me--covered? explicit vname (iadd i 1)))))
 
-; n fresh bind names as a list (the default ignores them)
+;; n fresh bind names as a list (the default ignores them)
 (defn me--genbinds [(n i64)] (-> Code)
   (if (icmp-eq n 0) `() `(~(gensym) ~@(me--genbinds (isub n 1)))))
 
-; an arm `(Vname [binds] default)` for each variant of `sum` not already covered
+;; an arm `(Vname [binds] default)` for each variant of `sum` not already covered
 (defn me--uncovered [(sum Code) (explicit Code) (default Code) (i i64)] (-> Code)
   (if (icmp-eq i (code-variant-count sum)) `()
     (let [vname (code-variant-name sum i)]

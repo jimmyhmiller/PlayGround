@@ -22,7 +22,7 @@ REF=$CHK/reference
 LIST=$CHK/corpus.txt
 RESLIST=selfhost/oracle/resolved/corpus.txt
 
-[ -x "$COIL" ]   || { echo "reference compiler not found: $COIL (run: cargo build)"; exit 1; }
+[ -x "$COIL" ]   || { echo "reference compiler not found: $COIL (build one with selfhost/rebootstrap.sh, or set COIL_REF_BIN)"; exit 1; }
 [ -f "$RESLIST" ] || { echo "no resolver corpus; run snapshot-resolved.sh first"; exit 1; }
 
 rm -rf "$REF"; mkdir -p "$REF"

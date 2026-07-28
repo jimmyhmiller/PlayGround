@@ -998,6 +998,69 @@ else
   echo "  (skip: no runnable $SEED_BIN or /usr/bin/time for the gen-10 perf probe)"
 fi
 
+echo "== doc comments (;;): coil doc + the code-doc comptime op =="
+# A `;;` block DIRECTLY above a definition is its documentation; a single `;` is an
+# ordinary comment and must NOT become docs. Both the `doc` subcommand and the
+# `(code-doc NODE)` code op read the same rule off the source text.
+# FAILS on the seed (no `doc` subcommand, `code-doc` is an undefined function).
+mkdir -p "$T/docs"
+cat > "$T/docs/m.coil" <<'EOF'
+(module shapes)
+
+;; A point in 2D space.
+(defstruct Point [(x i64) (y i64)])
+
+;; Add two numbers together.
+;; Returns their sum.
+(defn add [(a i64) (b i64)] (-> i64) (iadd a b))
+
+; internal helper, deliberately NOT documentation
+(defn helper [] (-> i64) 0)
+EOF
+expect_rc  0 "doc: exits 0 on a documented module"          "$COIL" doc "$T/docs/m.coil"
+expect_out '^# shapes'          "doc: prints the module name"           "$COIL" doc "$T/docs/m.coil"
+expect_out 'Add two numbers together.' "doc: prints a fn doc"           "$COIL" doc "$T/docs/m.coil"
+expect_out 'Returns their sum.'        "doc: joins a multi-line doc"    "$COIL" doc "$T/docs/m.coil"
+expect_out 'A point in 2D space.'      "doc: documents a defstruct too" "$COIL" doc "$T/docs/m.coil"
+# the signature is the HEADER only — the body must not leak into the docs
+expect_out '\(defn add \[\(a i64\) \(b i64\)\] \(-> i64\)\)' "doc: shows the signature without the body" \
+  "$COIL" doc "$T/docs/m.coil"
+# non-vacuous: the documented `add` MUST be listed while the `;`-commented `helper` must not
+_dout=$("$COIL" doc "$T/docs/m.coil" 2>&1)
+if echo "$_dout" | grep -q '## add' && ! echo "$_dout" | grep -q 'helper'; then
+  ok "doc: a single-; comment is NOT a doc (add listed, helper not)"
+else
+  bad "doc: a single-; comment is NOT a doc (add listed, helper not)" "got: $_dout"
+fi
+# (code-doc NODE) sees the same doc from a checker, and "" where there is none
+cat > "$T/docs/op.coil" <<'EOF'
+(module app)
+
+;; Documented on purpose.
+(defn add [(a i64) (b i64)] (-> i64) (iadd a b))
+
+; not a doc
+(defn plain [] (-> i64) 0)
+
+(defn doc-report [(prog Code)] (-> Code)
+  (let [(mut m) 0 nm (code-count prog)]
+    (loop (if (icmp-ge (load m) nm) (break)
+      (do (let [mod (code-nth prog (load m)) nf (code-count mod) (mut i) 1]
+            (if (if (icmp-gt (code-count mod) 1) (code-from-user? (code-nth mod 1)) false)
+              (loop (if (icmp-ge (load i) nf) (break)
+                (do (let [form (code-nth mod (load i))] (warn form (code-doc form)))
+                    (store! i (iadd (load i) 1)))))
+              0))
+          (store! m (iadd (load m) 1)))))
+    `0))
+(checker doc-report)
+
+(defn main [] (-> i64) (add 1 2))
+EOF
+expect_out 'warning: Documented on purpose\.' "code-doc: a checker reads a definition's doc" \
+  "$COIL" run "$T/docs/op.coil"
+expect_rc 3 "code-doc: the program still builds and runs"  "$COIL" run "$T/docs/op.coil"
+
 echo
 [ "$FAIL" = 0 ] && echo "gate-cli: PASS" || echo "gate-cli: FAIL"
 exit $FAIL

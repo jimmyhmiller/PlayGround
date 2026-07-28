@@ -24,7 +24,7 @@
 (defstruct ArrayList [T]
   [(data (ptr T)) (len i64) (cap i64) (alc (ptr Allocator))])
 
-; An empty list that will grow with allocator `a` (no allocation until first push).
+;; An empty list that will grow with allocator `a` (no allocation until first push).
 (defn al-new [T] [(a (ptr Allocator))] (-> (ArrayList T))
   (let [(mut l) (zeroed (ArrayList T))]
     (store! (field l alc) a)
@@ -40,9 +40,9 @@
   (store! (index (load (field l data)) i) v)
   0)
 
-; Grow capacity to at least `newcap`. Tries in-place resize; on failure (e.g. an
-; arena, which never resizes) allocates fresh, copies, frees the old block; a
-; genuine allocation failure aborts.
+;; Grow capacity to at least `newcap`. Tries in-place resize; on failure (e.g. an
+;; arena, which never resizes) allocates fresh, copies, frees the old block; a
+;; genuine allocation failure aborts.
 (defn al-reserve! [T] [(l (mut (ArrayList T))) (newcap i64)] (-> i64)
   (let [oldcap (load (field l cap))
         a      (load (field l alc))]
@@ -73,7 +73,7 @@
                   (store! (field l cap) newcap)
                   0))))))))
 
-; Append v; grows (doubling, min 4) if full. Returns the new length.
+;; Append v; grows (doubling, min 4) if full. Returns the new length.
 (defn al-push! [T] [(l (mut (ArrayList T))) (v T)] (-> i64)
   (let [n (load (field l len))]
     (if (icmp-ge n (load (field l cap)))
@@ -84,7 +84,7 @@
     (store! (field l len) (iadd n 1))
     (iadd n 1)))
 
-; Remove and return the last element as (Some v); (None) if empty.
+;; Remove and return the last element as (Some v); (None) if empty.
 (defn al-pop! [T] [(l (mut (ArrayList T)))] (-> (Option T))
   (let [n (load (field l len))]
     (if (icmp-eq n 0)
@@ -93,12 +93,12 @@
           (store! (field l len) (isub n 1))
           (Some v)))))
 
-; A slice view over the current elements (shares storage; invalidated by a later
-; grow that moves the buffer).
+;; A slice view over the current elements (shares storage; invalidated by a later
+;; grow that moves the buffer).
 (defn al-slice [T] [(l (ArrayList T))] (-> (slice T))
   (slice-new (load (field l data)) (load (field l len))))
 
-; Free the backing buffer and reset to empty (the allocator itself is untouched).
+;; Free the backing buffer and reset to empty (the allocator itself is untouched).
 (defn al-free! [T] [(l (mut (ArrayList T)))] (-> i64)
   (if (icmp-gt (load (field l cap)) 0)
       (raw-free (load (field l alc)) (cast (ptr i8) (load (field l data)))
@@ -109,20 +109,20 @@
   (store! (field l cap) 0)
   0)
 
-; Reset to empty WITHOUT freeing the buffer — length becomes 0 but the capacity is
-; kept for reuse (the elements are logically gone; a later push overwrites them). Use
-; `al-free!` to also release the storage.
+;; Reset to empty WITHOUT freeing the buffer — length becomes 0 but the capacity is
+;; kept for reuse (the elements are logically gone; a later push overwrites them). Use
+;; `al-free!` to also release the storage.
 (defn al-clear! [T] [(l (mut (ArrayList T)))] (-> i64)
   (store! (field l len) 0)
   0)
 
-; Hand over ownership of the elements as a right-sized `(slice T)`, resetting the list
-; to empty. The buffer is shrunk to exactly `len` (via the allocator's resize) so the
-; returned slice owns a freeable, dangling-capacity-free block — free it with
-; `(raw-free a (cast (ptr i8) (slice-data s)) (* (slice-len s) (sizeof T)) (alignof T))`.
-; This is the safe hand-off `al-slice` is NOT: `al-slice` returns a borrowed view that
-; the next `al-push!` can invalidate by moving the buffer, whereas this transfers the
-; storage out of the list entirely. On an empty list the result is an empty slice.
+;; Hand over ownership of the elements as a right-sized `(slice T)`, resetting the list
+;; to empty. The buffer is shrunk to exactly `len` (via the allocator's resize) so the
+;; returned slice owns a freeable, dangling-capacity-free block — free it with
+;; `(raw-free a (cast (ptr i8) (slice-data s)) (* (slice-len s) (sizeof T)) (alignof T))`.
+;; This is the safe hand-off `al-slice` is NOT: `al-slice` returns a borrowed view that
+;; the next `al-push!` can invalidate by moving the buffer, whereas this transfers the
+;; storage out of the list entirely. On an empty list the result is an empty slice.
 (defn al-into-slice [T] [(l (mut (ArrayList T)))] (-> (slice T))
   (let [a    (load (field l alc))
         n    (load (field l len))
@@ -141,10 +141,10 @@
     (store! (field l cap) 0)
     (slice-new final n)))
 
-; `(al-for [x xs] body...)` — iterate the list's elements. A thin alias for the
-; unified iterator protocol `(for x (iter xs))` (gen-1): it expands to
-; `(for-in [x (iter xs)])`, driving the list's `Iterator` impl (a `SliceIter` over
-; its `al-slice` view). Kept as a convenience spelling.
+;; `(al-for [x xs] body...)` — iterate the list's elements. A thin alias for the
+;; unified iterator protocol `(for x (iter xs))` (gen-1): it expands to
+;; `(for-in [x (iter xs)])`, driving the list's `Iterator` impl (a `SliceIter` over
+;; its `al-slice` view). Kept as a convenience spelling.
 (defn al-for [(binding Code) & (body Code)] (-> Code)
   (if (not (icmp-eq (code-count binding) 2))
       (error "al-for: binding must be [x arraylist]")

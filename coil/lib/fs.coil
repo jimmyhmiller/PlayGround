@@ -20,15 +20,15 @@
 (import "slice.coil"     :use *)   ; slice-data/len, al-into-slice's (slice T)
 (import "str.coil"       :use *)   ; str->cstr — a (slice u8) path to a C string
 
-; `int open(const char *path, int flags, ...)` — the mode is a VARIADIC argument
-; (consulted only when the flags include O_CREAT). It MUST be declared variadic: on
-; the Apple ABI variadic args pass on the stack, and a fixed-arity declaration would
-; put `mode` in a register that open never reads — creating files with a garbage mode
-; (then EACCES on the next open). The `...` makes the call pass it correctly.
+;; `int open(const char *path, int flags, ...)` — the mode is a VARIADIC argument
+;; (consulted only when the flags include O_CREAT). It MUST be declared variadic: on
+;; the Apple ABI variadic args pass on the stack, and a fixed-arity declaration would
+;; put `mode` in a register that open never reads — creating files with a garbage mode
+;; (then EACCES on the next open). The `...` makes the call pass it correctly.
 (extern open  :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
 (extern close :cc c [i32]              (-> i32))    ; int close(int fd)
 
-; open() flags — the darwin/macOS values (the build+gate target). Combine with `|`.
+;; open() flags — the darwin/macOS values (the build+gate target). Combine with `|`.
 (const O_RDONLY 0)
 (const O_WRONLY 1)
 (const O_RDWR   2)
@@ -36,19 +36,19 @@
 (const O_CREAT  512)    ; 0x0200
 (const O_TRUNC  1024)   ; 0x0400
 (const O_EXCL   2048)   ; 0x0800
-; a sensible default create mode (rw-r--r--) for the whole-file writer.
+;; a sensible default create mode (rw-r--r--) for the whole-file writer.
 (const FILE_MODE_DEFAULT 420)   ; 0o644
 
-; An open file is its descriptor. A one-field struct (not a bare i64) so the type
-; distinguishes "a file handle" from "some integer" at call sites.
+;; An open file is its descriptor. A one-field struct (not a bare i64) so the type
+;; distinguishes "a file handle" from "some integer" at call sites.
 (defstruct File [(fd :i64)])
 (defn mk-file [(fd :i64)] (-> File)
   (let [(mut f) (zeroed File)] (store! (field f fd) fd) (load f)))
 (defn file-fd [(f (ptr File))] (-> :i64) (load (field f fd)))
 
 ; ---- open / close ----------------------------------------------------------
-; Open `path` (a C string) with `flags` (O_* above) and `mode` (used only when the
-; open creates the file). `(Err (Errno …))` carries the negative return on failure.
+;; Open `path` (a C string) with `flags` (O_* above) and `mode` (used only when the
+;; open creates the file). `(Err (Errno …))` carries the negative return on failure.
 (defn file-open [(path (ptr i8)) (flags :i64) (mode :i64)] (-> (Result File IoError))
   (let [fd (cast :i64 (open path (cast i32 flags) mode))]
     (if (icmp-lt fd 0) (Err (Errno fd)) (Ok (mk-file fd)))))
@@ -58,18 +58,18 @@
     (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
 
 ; ---- streaming: a File as an io Reader / Writer ----------------------------
-; Bridge a File to lib/io.coil's capabilities, so every Reader/Writer combinator
-; (print-str, write-all, read-line, …) works over a file. CAUTION: `fd-reader`/
-; `fd-writer` hand back a SHARED static (one Reader and one Writer per program, like
-; `stdin`/`stdout`) — do not hold live streams for two different files at once; they
-; alias. Read/write one file at a time, or drive the fd directly.
+;; Bridge a File to lib/io.coil's capabilities, so every Reader/Writer combinator
+;; (print-str, write-all, read-line, …) works over a file. CAUTION: `fd-reader`/
+;; `fd-writer` hand back a SHARED static (one Reader and one Writer per program, like
+;; `stdin`/`stdout`) — do not hold live streams for two different files at once; they
+;; alias. Read/write one file at a time, or drive the fd directly.
 (defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
 (defn file-writer [(f (ptr File))] (-> (ptr Writer)) (fd-writer (file-fd f)))
 
 ; ---- whole-file helpers over an allocator ----------------------------------
-; Read the ENTIRE file at `path` into a freshly-allocated `(slice u8)` the caller owns
-; (free it with `a`). Streams in 4 KiB chunks into an ArrayList, then hands over a
-; right-sized buffer via `al-into-slice`. `(Err …)` on an open/read failure.
+;; Read the ENTIRE file at `path` into a freshly-allocated `(slice u8)` the caller owns
+;; (free it with `a`). Streams in 4 KiB chunks into an ArrayList, then hands over a
+;; right-sized buffer via `al-into-slice`. `(Err …)` on an open/read failure.
 (defn read-file [(a (ptr Allocator)) (path (slice u8))] (-> (Result (slice u8) IoError))
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
@@ -100,7 +100,7 @@
                 (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
                 res))))))
 
-; Write `data` to `path`, creating/truncating it (mode 0o644). Returns the byte count.
+;; Write `data` to `path`, creating/truncating it (mode 0o644). Returns the byte count.
 (defn write-file [(a (ptr Allocator)) (path (slice u8)) (data (slice u8))] (-> (Result :i64 IoError))
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
