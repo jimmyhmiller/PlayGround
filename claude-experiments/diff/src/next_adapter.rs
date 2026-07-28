@@ -4255,16 +4255,17 @@ function headItems(meta) {{
 // `generateViewport`), applying ancestor title templates, then render the <head> tags
 // (React 19 hoists them into <head>). Runs at flight-render time so dynamic/async
 // metadata works — no per-request cost beyond the render already happening.
-async function resolveMetadata(route, params) {{
+async function resolveMetadata(route, params, searchParams) {{
   const chain = [...(route.metaChain || []), route.pageMeta];
   const paramsP = Promise.resolve(params);
+  const searchP = Promise.resolve(searchParams || {{}});
   const meta = {{}};
   let template = null; // an ancestor title.template applies to descendant string titles
   for (const ns of chain) {{
     if (!ns) continue;
     let m = null;
     if (typeof ns.generateMetadata === "function") {{
-      m = await ns.generateMetadata({{ params: paramsP, searchParams: Promise.resolve({{}}) }}, Promise.resolve(meta));
+      m = await ns.generateMetadata({{ params: paramsP, searchParams: searchP }}, Promise.resolve(meta));
     }} else if (ns.metadata) {{
       m = ns.metadata;
     }}
@@ -4374,8 +4375,8 @@ function metadataToHead(meta) {{
 // Async Server Component: resolves the route metadata and renders the <head> tags. A
 // build-time title/description fallback (from the ROUTE table) covers a route whose
 // modules export no metadata.
-async function MetadataHead({{ route, params }}) {{
-  const meta = await resolveMetadata(route, params);
+async function MetadataHead({{ route, params, searchParams }}) {{
+  const meta = await resolveMetadata(route, params, searchParams);
   if (meta.title == null && route.title != null) meta.title = route.title;
   if (meta.description == null && route.description != null) meta.description = route.description;
   return createElement(Fragment, null, ...metadataToHead(meta));
@@ -4460,14 +4461,14 @@ function notFoundTree() {{
 // (the pathname) keys each `template.tsx` so React remounts it on navigation (fresh
 // state per URL) while same-position layouts keep their state — matching Next's
 // Layout > Template > ErrorBoundary > Suspense(loading) > children order.
-function composeLevels(page, levels, params, remountKey) {{
+function composeLevels(page, levels, params, remountKey, searchParams) {{
   const paramsPromise = Promise.resolve(params);
   // Same CONTROL boundary the main route composition installs, so a slot/intercept page
   // that redirect()s after its shell flushed navigates instead of rendering nothing.
   let node = createElement(
     CONTROL_BOUNDARY,
     null,
-    createElement(page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }}),
+    createElement(page, {{ params: paramsPromise, searchParams: Promise.resolve(searchParams || {{}}) }}),
   );
   for (let i = levels.length - 1; i >= 0; i -= 1) {{
     const level = levels[i];
@@ -4574,7 +4575,7 @@ async function documentTree(pathname, opts, control) {{
     const hit = matchIntercept(pathname);
     if (hit) {{
       return {{
-        tree: composeLevels(hit.intercept.page, hit.intercept.levels, hit.params, pathname),
+        tree: composeLevels(hit.intercept.page, hit.intercept.levels, hit.params, pathname, (opts && opts.searchParams) || {{}}),
         status: 200,
         params: hit.params,
         intercept: true,
@@ -4596,7 +4597,8 @@ async function documentTree(pathname, opts, control) {{
   // the streamed flight makes the client Router navigate. Awaiting the page here in that
   // case would manufacture a redirect Next does not send (cal.com `/event-types` is
   // exactly this: `loading.tsx` present, Next 200, diffpack was answering 307).
-  const pageProps = {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }};
+  const searchParams = (opts && opts.searchParams) || {{}};
+  const pageProps = {{ params: paramsPromise, searchParams: Promise.resolve(searchParams) }};
   const pageInShell = !route.levels.some((level) => level.loading);
   let node = pageInShell
     ? await resolvePage(route.page, pageProps, control || {{}})
@@ -4626,7 +4628,7 @@ async function documentTree(pathname, opts, control) {{
     if (level.template) node = createElement(level.template, {{ key: pathname }}, node);
     if (i === 0) {{
       // Head items belong inside the root layout (React hoists them to <head>).
-      node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params }})), node);
+      node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params, searchParams }})), node);
       headInjected = true;
     }}
     if (level.layout) {{
@@ -4647,7 +4649,7 @@ async function documentTree(pathname, opts, control) {{
     // one at every level means the nearest surviving layouts stay mounted.
     node = createElement(CONTROL_BOUNDARY, null, node);
   }}
-  if (!headInjected) node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params }})), node);
+  if (!headInjected) node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params, searchParams }})), node);
   // global-error.tsx (owns <html>): wrap the entire composed document — root layout
   // included — in the client error boundary so a throw escaping every nested error.tsx
   // (including one in the root layout) is replaced by global-error's own document.
@@ -4737,7 +4739,26 @@ function flightControlOnError(control, error) {{
 // request (a not-found document that still resolved a catch-all route's params is
 // exactly the kind of drift this prevents).
 function renderOpts(reqCtx) {{
-  return {{ softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound }};
+  return {{ softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound, searchParams: requestSearchParams(reqCtx) }};
+}}
+
+// The `searchParams` prop Next hands a PAGE Server Component (and generateMetadata):
+// the request's query as `{{ key: string | string[] }}`, repeated keys as arrays. Layouts
+// and templates get no searchParams, which is Next's contract, not an omission.
+//
+// `__rsc` is stripped: it is diffpack's own soft-navigation marker on the flight channel,
+// never part of the app's query, and a page must not see the same URL differently
+// depending on whether it was reached by a hard load or a client navigation.
+function requestSearchParams(reqCtx) {{
+  const url = new URL((reqCtx && reqCtx.url) || "http://localhost/", "http://localhost");
+  const search = url.searchParams;
+  search.delete("__rsc");
+  const out = {{}};
+  for (const key of new Set(search.keys())) {{
+    const all = search.getAll(key);
+    out[key] = all.length > 1 ? all : all[0];
+  }}
+  return out;
 }}
 
 function matchParams(pathname, opts) {{
@@ -11076,6 +11097,60 @@ console.log(out.join("|"));
         );
     }
 
+    /// A page Server Component's `searchParams` prop must be the REQUEST'S QUERY. It was
+    /// hard-coded to `Promise.resolve({})` for every render, so any page that branches on
+    /// the query server-side rendered the no-query variant. cal.com's booker is exactly
+    /// that page: `?rescheduleUid=…` is what makes it load the existing booking and show
+    /// the reschedule form, so "can reschedule a booking" got the ordinary Confirm button
+    /// forever. `generateMetadata` takes the same prop and had the same hole.
+    ///
+    /// `__rsc` must be stripped: it is diffpack's own marker on the soft-navigation
+    /// channel, so leaving it in would make a page see a different query depending on
+    /// whether it was reached by a hard load or a client navigation.
+    #[test]
+    fn a_page_server_component_receives_the_requests_search_params() {
+        let dir = scratch("search-params-prop");
+        let app = write_hybrid_app(&dir);
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        // No render path may hand a page an empty query object any more.
+        assert!(
+            !source.contains("searchParams: Promise.resolve({})"),
+            "no render path may hard-code an empty searchParams: {source}",
+        );
+        assert!(
+            source.contains("search.delete(\"__rsc\");"),
+            "the soft-navigation marker is not part of the app's query: {source}",
+        );
+        // Repeated keys arrive as arrays, single keys as strings — Next's shape.
+        assert!(
+            source.contains("out[key] = all.length > 1 ? all : all[0];"),
+            "a repeated query key is an array: {source}",
+        );
+        assert!(
+            source.contains("const pageProps = { params: paramsPromise, searchParams: Promise.resolve(searchParams) };"),
+            "the matched page gets the request's query: {source}",
+        );
+        assert!(
+            source.contains("m = await ns.generateMetadata({ params: paramsP, searchParams: searchP }"),
+            "generateMetadata gets it too: {source}",
+        );
+        // Layouts and templates must NOT get one (Next's contract).
+        assert!(
+            source.contains("createElement(level.layout, { params: paramsPromise }"),
+            "a layout receives params only: {source}",
+        );
+    }
+
     /// A SOFT navigation changes the route, so `useParams()`/`usePathname()`/
     /// `useSearchParams()` must change with it. They used to be provided ONCE, at boot,
     /// from the document's injected globals and never touched again — so after
@@ -11610,7 +11685,9 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         // so the store cannot end up carrying a catch-all's params for a 404 document.
         assert!(
             source.contains("function renderOpts(reqCtx) {")
-                && source.contains("return { softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound };"),
+                && source.contains(
+                    "return { softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound, searchParams: requestSearchParams(reqCtx) };"
+                ),
             "one definition of the render options: {source}",
         );
         assert_eq!(
