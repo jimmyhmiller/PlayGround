@@ -1743,6 +1743,8 @@
         (let [dbl (icmp-eq (ty-float-bytes t) 8)]
           (av-to-d! g lav 0)
           (av-to-d! g rav 1)
+          ; OEQ/ONE compare in the natural operand order; the inequalities below
+          ; re-issue the compare with whichever order lets them use a/ae.
           (x64-ucomis! (mut s) dbl 0 1)
           (cond
             ; OEQ: equal AND ordered  -> sete && setnp
@@ -1757,13 +1759,23 @@
                   (x64-setcc-bool! (mut s) (x64-cc-np) (x-scratch1))
                   (x64-and-rr! (mut s) (x-scratch0) (x-scratch1))
                   0)
-            ; the inequalities: ucomis is defined so that the UNSIGNED
-            ; conditions give the ordered float predicate (a NaN leaves CF=ZF=1,
-            ; which fails all of a/ae/b/be as required).
+            ; The ordered inequalities. An UNORDERED compare (either operand
+            ; NaN) leaves CF=ZF=PF=1, which makes `b` and `be` TRUE — so
+            ; `setb` for OLT would answer true for NaN < 1.0, which is wrong:
+            ; every ordered predicate must be false when unordered. Only `a`
+            ; and `ae` are false in the unordered case, so OLT/OLE are emitted
+            ; with the OPERANDS SWAPPED and tested with a/ae instead:
+            ;     a  <  b   ==   b  >  a   -> ucomis b, a ; seta
+            ;     a  <= b   ==   b >= a    -> ucomis b, a ; setae
+            ; (the compare above put lhs in xmm0 and rhs in xmm1, so the swap
+            ; is just which register goes first in the ucomis.)
             :else
-              (do (x64-setcc-bool! (mut s)
-                                   (cond (icmp-eq op 0) (x64-cc-b)
-                                         (icmp-eq op 1) (x64-cc-be)
+              (do (if (or (icmp-eq op 0) (icmp-eq op 1))
+                      (x64-ucomis! (mut s) dbl 1 0)
+                      (x64-ucomis! (mut s) dbl 0 1))
+                  (x64-setcc-bool! (mut s)
+                                   (cond (icmp-eq op 0) (x64-cc-a)
+                                         (icmp-eq op 1) (x64-cc-ae)
                                          (icmp-eq op 2) (x64-cc-a)
                                          :else (x64-cc-ae))
                                    (x-scratch0))
@@ -3536,10 +3548,12 @@
 ;     push rbx            ; rbx is callee-saved and holds the slot base
 ;     sub  rsp, total     ; patched once slotbytes/outbytes are known
 ;     lea  rbx, [rsp+out] ; slots start above the outgoing-argument area
-; After `push rbp; push rbx` the stack is 16-byte aligned again (the call
-; pushed the return address, so entry was 8 mod 16), and `total` is kept a
-; multiple of 16, so rsp stays aligned at every call site — required by SysV,
-; and the first thing that breaks (in libc, via movaps) when it is wrong.
+; SysV requires rsp ≡ 0 (mod 16) at every CALL. At function entry the call
+; instruction has already pushed the return address, so rsp ≡ 8. `push rbp`
+; brings it to 0 and `push rbx` back to 8 — an ODD number of pushes — so the
+; frame subtraction must be 8 (mod 16), not a multiple of 16, to land back on
+; 0. Getting this wrong does not fault here: it faults deep inside libc, when
+; something like printf executes a movaps against a misaligned stack.
 ;
 ; Incoming stack arguments live at [rbp+16] and up: +0 is the saved rbp, +8 the
 ; return address.
@@ -3748,7 +3762,9 @@
               (x64-resolve-fixups! (mut s))
               (let [slotbytes (imul (idiv (iadd (load (field g frame)) 15) 16) 16)
                     out (load (field g outbytes))
-                    total (iadd slotbytes out)]
+                    ; two pushes precede this, so rsp is 8 (mod 16) here; add the
+                    ; odd 8 to bring it back to 0 for the callees.
+                    total (iadd (iadd slotbytes out) 8)]
                 (when (icmp-gt total 2147483647) (cgx-fail "frame too large"))
                 (x64-patch-sub-ri32! (mut s) p1 total)
                 (x64-patch-lea32! (mut s) (iadd p1 7) out)

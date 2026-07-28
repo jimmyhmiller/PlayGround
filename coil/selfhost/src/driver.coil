@@ -1467,6 +1467,12 @@
                                       (sb-push-str! (mut cmdsb) " ")
                                       (sb-push-str! (mut cmdsb) (al-get [(slice u8)] (load flags) (load k)))
                                       (store! k (iadd (load k) 1))))))
+                        ; The x86-64 backend lowers `frem` to a libm fmod/fmodf call
+                        ; (SSE has no remainder instruction, and the LLVM backend
+                        ; expands frem itself). glibc keeps those in libm, which cc
+                        ; does not link by default — so this build needs -lm. It is
+                        ; harmless when nothing references it.
+                        (when (icmp-eq (load backend) 5) (sb-push-str! (mut cmdsb) " -lm") 0)
                         0))
                   (let [rc
                           (if (wasm-target? (load trip))
