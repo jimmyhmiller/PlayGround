@@ -112,8 +112,23 @@ echo "  gate-cli:       PASS (argv, exit codes, fmt)"
 # interp-meta running IN wasm (single static module, wasm2c-ready). Skips if no node.
 ./selfhost/oracle/gate-wasm.sh /tmp/coil-rb2               || { echo "gate-wasm FAIL — interp-meta-in-wasm self-check regressed"; exit 1; }
 
+# The gates above all ran against rb2, the ARM64-backend build. rl3 is the one that
+# gets installed, so it is gated too — same source, but different machine code, and
+# "derived from verified source" is not the same as "verified".
+./selfhost/oracle/gate-full.sh /tmp/coil-rl3 >/dev/null || { echo "gate-full FAIL on the LLVM build (the installed binary)"; exit 1; }
+./selfhost/oracle/gate-cli.sh  /tmp/coil-rl3 >/dev/null || { echo "gate-cli FAIL on the LLVM build (the installed binary)"; exit 1; }
+echo "  installed binary: PASS (gate-full + gate-cli on the LLVM build)"
+
 DEST="${1:-./coil}"
-cp /tmp/coil-rb2 "$DEST"
+# Install the LLVM-BUILT compiler, not the arm64 one. Both are derived from the same
+# source at the same depth — rb1 builds rb2 with the arm64 backend and rl2 with LLVM,
+# and each then reproduces itself byte-identically — but the arm64 backend does no
+# optimisation, so the compiler it produces runs about 11x slower: 10.2s vs 0.9s to
+# compile the compiler, 11.0s vs 1.7s to lint it. Installing rb2 made every build,
+# every lint and every gate in this repo pay that, which is why a `coil lint` over the
+# tree took minutes. The arm64 build is still produced and still gated above — it is
+# what proves that backend faithful — it is just not what anyone runs.
+cp /tmp/coil-rl3 "$DEST"
 # Re-sign after copy: macOS invalidates a Mach-O's ad-hoc signature on cp, and the
 # kernel SIGKILLs a mis-signed binary. Re-sign so the installed compiler runs.
 codesign -s - --force "$DEST" >/dev/null 2>&1 || true

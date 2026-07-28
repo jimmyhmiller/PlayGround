@@ -1,0 +1,87 @@
+(module whenlint)
+
+; A one-armed `if` is a `when`:
+;
+;   (if c body 0)   ->  (when c body)
+;   (if c 0 body)   ->  (unless c body)
+;
+; Both are EXACT: lib/control.coil defines `when` as `(if ~c (do ~@body) 0)` and
+; `unless` as `(if ~c 0 (do ~@body))`, so the rewrite is the same code spelled without
+; the arm that never mattered. The `0` has to be the literal integer — `code-eq`
+; against `0`, not "looks falsy".
+;
+; This reads like a cosmetic rule and is not. Checkers run on the EXPANDED program,
+; where a macro's output is marked (`code-macro?`), so an `if` that becomes a `when`
+; stops counting as one of the author's nested ifs. Measured over selfhost/src + fmt,
+; applying it drops the forms nesting three or more ifs deep from 321 to 197 without
+; restructuring a single branch.
+;
+; A body that is already a `do` is spliced rather than nested, since `when` wraps its
+; body in one anyway: `(if c (do a b) 0)` becomes `(when c a b)`, not `(when c (do a b))`.
+
+(defn wl-hand-if? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (icmp-eq (code-count f) 4)
+          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+          false)
+      false))
+
+(defn wl-test [(f Code)] (-> Code) (code-nth f 1))
+(defn wl-then [(f Code)] (-> Code) (code-nth f 2))
+(defn wl-else [(f Code)] (-> Code) (code-nth f 3))
+
+(defn wl-zero? [(x Code)] (-> bool)
+  (code-eq x `0))
+
+(defn wl-do? [(x Code)] (-> bool)
+  (if (code-list? x)
+      (if (icmp-gt (code-count x) 0) (code-eq (code-nth x 0) `do) false)
+      false))
+
+; The body as an argument list for `when`/`unless`: a `do` contributes its statements,
+; anything else contributes itself.
+(defn wl-body-args [(x Code)] (-> Code)
+  (if (wl-do? x) (code-rest x) `(~x)))
+
+(defn wl-report [(f Code)] (-> Code)
+  (if (wl-zero? (wl-else f))
+      (suggest f
+               "one-armed if — this is (when)"
+               `(when ~(wl-test f) ~@(wl-body-args (wl-then f))))
+      (suggest f
+               "one-armed if with the empty arm first — this is (unless)"
+               `(unless ~(wl-test f) ~@(wl-body-args (wl-else f))))))
+
+; Both arms `0` means the `if` does nothing at all — that is the identical-branches
+; finding in ifcombine.coil, which knows whether the test is safe to drop. Left alone
+; here so the two rules never propose overlapping edits for one form.
+(defn wl-one-armed? [(f Code)] (-> bool)
+  (if (wl-zero? (wl-then f))
+      (not (wl-zero? (wl-else f)))
+      (wl-zero? (wl-else f))))
+
+(defn wl-walk [(f Code)] (-> Code)
+  (if (code-list? f)
+      (do
+        (if (wl-hand-if? f) (if (wl-one-armed? f) (wl-report f) `0) `0)
+        (wl-kids f 0 (code-count f)))
+      `0))
+
+(defn wl-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (wl-walk (code-nth f i)) (wl-kids f (iadd i 1) n))))
+
+(defn wl-look-at? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+
+(defn wl-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (wl-walk (code-nth m i)) (wl-forms m (iadd i 1) n))))
+
+(defn wl-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n)
+      `0
+      (do
+        (let [m (code-nth ms i)] (if (wl-look-at? m) (wl-forms m 1 (code-count m)) `0))
+        (wl-mods ms (iadd i 1) n))))
+
+(defn lint-one-armed-if [(modules Code)] (-> Code)
+  (wl-mods modules 0 (code-count modules)))

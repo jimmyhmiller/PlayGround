@@ -1,0 +1,158 @@
+(module ifcombine)
+(import "slice.coil" :use *)
+(import "str.coil" :use *)
+
+; Three rewrites that COMBINE nested `if`s rather than re-spelling a chain.
+;
+;   (if a (if b x E) E)   ->  (if (and a b) x E)     one level of nesting goes away
+;   (if a X (if b X y))   ->  (if (or a b) X y)      one level, and the body stops
+;                                                    being written twice
+;   (if T X X)            ->  X                      the test decides nothing
+;
+; The first two are EXACT, not a judgement call: `and`/`or` are not functions in Coil.
+; parser.coil turns `(and x y)` into `(if x y false)` and `(or x y)` into
+; `(if x true y)`, so they short-circuit exactly as the nested `if` being replaced
+; does — same evaluation, same order, same generated code. Both are strictly binary
+; (`need-two`), so the rewrites pair rather than flatten.
+;
+; ORDERING: this rule must run BEFORE the nested-if -> cond rule. A chain whose arms
+; share a body is a `cond` with that body written out twice; collapsing it to an `or`
+; first says what was actually meant. Run the other way round and the chain rule
+; consumes the opportunity — and a `cond` is invisible here, because checkers see the
+; program AFTER expansion, so nothing can recover it afterwards.
+
+; ---- the comment guard, which here is about DELETION, not layout ------------
+; The renderer carries comments across a rewrite, which is right when a fix only
+; closes structural gaps. These fixes are different: they DELETE a duplicated arm.
+; Its comments would be carried out of the deleted copy and re-emitted next to the
+; one that survives — resurrected in a place the author never wrote them, most
+; likely as a duplicate of a comment already there. So a duplicate arm carrying any
+; comment is left to a human, and the finding stays as advice.
+;
+; A `;` inside a string literal reads as a comment here. That is deliberate: a false
+; positive only downgrades a fix to advice, which is the safe direction.
+(defn ifc-commented? [(x Code)] (-> bool)
+  (let [s (code-src x)
+        n (slice-len [u8] s)
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (cast i64 (slice-get [u8] s (load i))) 59)
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn ifc-hand-if? [(f Code)] (-> bool)
+  (if (code-list? f)
+      (if (icmp-eq (code-count f) 4)
+          (if (code-eq (code-nth f 0) `if) (not (code-macro? f)) false)
+          false)
+      false))
+
+(defn ifc-test [(f Code)] (-> Code) (code-nth f 1))
+(defn ifc-then [(f Code)] (-> Code) (code-nth f 2))
+(defn ifc-else [(f Code)] (-> Code) (code-nth f 3))
+
+; ---- purity, for the one rewrite that DROPS a test --------------------------
+; Collapsing `(if T X X)` to `X` stops evaluating T, so it is only sound when T
+; cannot do anything. This is a WHITELIST — comparisons, and the pure operators that
+; feed them — because the unknown case must be "not provably pure", never "assumed
+; pure". A call to an ordinary function is not on it, even an obvious accessor: this
+; rule cannot see the callee's body, and guessing is how a fix tool loses trust.
+(defn ifc-pure-head? [(h Code)] (-> bool)
+  (if (code-sym? h)
+      (let [s (code-sym h)]
+        (or (starts-with s "icmp-")
+            (or (starts-with s "fcmp-")
+                (or (str-eq s "and")
+                    (or (str-eq s "or")
+                        (or (str-eq s "not") (or (str-eq s "cast") (str-eq s "field"))))))))
+      false))
+
+(defn ifc-pure-args? [(x Code) (i i64) (n i64)] (-> bool)
+  (if (icmp-ge i n) true (if (ifc-pure? (code-nth x i)) (ifc-pure-args? x (iadd i 1) n) false)))
+
+(defn ifc-pure? [(x Code)] (-> bool)
+  (if (code-list? x)
+      (if (icmp-eq (code-count x) 0)
+          true
+          (if (ifc-pure-head? (code-nth x 0)) (ifc-pure-args? x 1 (code-count x)) false))
+      true))   ; an atom — a literal or a name — evaluates to itself
+
+; ---- the shapes -------------------------------------------------------------
+; Each rewrite emits the INNER copy of the shared arm and drops the outer one. That
+; keeps every node it emits in source order, which is what the renderer's comment
+; cursor needs: a node behind the cursor carries nothing, so emitting out of order
+; would silently drop the comments in the gaps it skipped.
+
+(defn ifc-and-shape? [(f Code)] (-> bool)
+  (let [th (ifc-then f)]
+    (if (ifc-hand-if? th) (code-eq (ifc-else th) (ifc-else f)) false)))
+
+(defn ifc-or-shape? [(f Code)] (-> bool)
+  (let [el (ifc-else f)]
+    (if (ifc-hand-if? el) (code-eq (ifc-then el) (ifc-then f)) false)))
+
+(defn ifc-same-shape? [(f Code)] (-> bool)
+  (code-eq (ifc-then f) (ifc-else f)))
+
+(defn ifc-report-and [(f Code)] (-> Code)
+  (let [th (ifc-then f)]
+    ; dropped: the OUTER else. The inner one is emitted in its place.
+    (if (ifc-commented? (ifc-else f))
+        (warn f "both branches of the inner if end in the same else — an (and), but the outer else carries a comment; combine by hand")
+        (suggest f
+                 "nested if with a shared else — this is (and)"
+                 `(if (and ~(ifc-test f) ~(ifc-test th)) ~(ifc-then th) ~(ifc-else th))))))
+
+(defn ifc-report-or [(f Code)] (-> Code)
+  (let [el (ifc-else f)]
+    ; dropped: the OUTER then, which sits BETWEEN the two tests in the source, so its
+    ; comments would be pulled into the middle of the (or …) if it had any.
+    (if (ifc-commented? (ifc-then f))
+        (warn f "two tests share a body — an (or), but the first copy carries a comment; combine by hand")
+        (suggest f
+                 "two tests reaching the same body — this is (or)"
+                 `(if (or ~(ifc-test f) ~(ifc-test el)) ~(ifc-then el) ~(ifc-else el))))))
+
+(defn ifc-report-same [(f Code)] (-> Code)
+  (if (not (ifc-pure? (ifc-test f)))
+      (warn f "both branches are identical, so the test decides nothing — but it may have effects, so it is not dropped automatically")
+      (if (or (ifc-commented? (ifc-test f)) (ifc-commented? (ifc-else f)))
+          (warn f "both branches are identical, so the test decides nothing — the dead part carries a comment, so remove it by hand")
+          (suggest f "both branches are identical — the test decides nothing" (ifc-then f)))))
+
+; ---- the walk ---------------------------------------------------------------
+; Reported at the OUTERMOST match and the walk does not descend into it: the inner
+; `if` is half of what is being rewritten, so reporting it too would propose two
+; overlapping edits for one form. `--fix` re-analyses to a fixpoint, so a form that
+; is still combinable after this round is caught on the next one.
+(defn ifc-walk [(f Code)] (-> Code)
+  (if (code-list? f)
+      (if (ifc-hand-if? f)
+          (cond (ifc-same-shape? f) (do (ifc-report-same f) `0)
+                (ifc-and-shape? f)  (do (ifc-report-and f) `0)
+                (ifc-or-shape? f)   (do (ifc-report-or f) `0)
+                :else               (ifc-kids f 0 (code-count f)))
+          (ifc-kids f 0 (code-count f)))
+      `0))
+
+(defn ifc-kids [(f Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (ifc-walk (code-nth f i)) (ifc-kids f (iadd i 1) n))))
+
+(defn ifc-look-at? [(m Code)] (-> bool)
+  (if (icmp-gt (code-count m) 1) (code-from-user? (code-nth m 1)) false))
+
+(defn ifc-forms [(m Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n) `0 (do (ifc-walk (code-nth m i)) (ifc-forms m (iadd i 1) n))))
+
+(defn ifc-mods [(ms Code) (i i64) (n i64)] (-> Code)
+  (if (icmp-ge i n)
+      `0
+      (do
+        (let [m (code-nth ms i)] (if (ifc-look-at? m) (ifc-forms m 1 (code-count m)) `0))
+        (ifc-mods ms (iadd i 1) n))))
+
+(defn lint-combine-ifs [(modules Code)] (-> Code)
+  (ifc-mods modules 0 (code-count modules)))

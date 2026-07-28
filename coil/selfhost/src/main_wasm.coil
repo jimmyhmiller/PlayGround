@@ -105,9 +105,8 @@
           (let [r (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) 0) 0)]
             (store! (cast (ptr i64) cell) r)
             0))
-      (if (ip/interp-has-entry? icx "coil.ct.status")
-          (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)
-          0))))
+      (when (ip/interp-has-entry? icx "coil.ct.status")
+            (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-a64))
