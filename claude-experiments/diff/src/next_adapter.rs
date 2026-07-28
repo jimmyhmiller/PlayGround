@@ -6939,8 +6939,16 @@ fn next_navigation_shim(hooks_context: &Path) -> String {
 import * as React from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext, SelectedSegmentContext, ServerInsertedHTMLContext }} from {hooks_import};
 
-export function useRouter() {{
-  return {{
+// IDENTITY STABILITY. Next's navigation hooks return the SAME object across renders
+// (`useRouter` reads a context, `useSearchParams`/`useParams` memoize on the context
+// value), and real apps depend on it: any `useMemo`/`useEffect` that lists `router`,
+// `searchParams` or `params` in its deps re-runs on EVERY render if the hook hands back
+// a fresh object, and one such effect that setStates unconditionally is an infinite
+// render loop. Returning a freshly built object per call is therefore not a cosmetic
+// difference — it is a correctness difference. Hence: one router singleton (it is
+// stateless — every method reads window globals), a `useMemo` on the raw search string,
+// and shared empty fallbacks instead of fresh `{{}}` / `[]` literals.
+const ROUTER = {{
     push(href) {{
       if (typeof window !== "undefined" && typeof window.__diffpack_navigate === "function") {{
         window.__diffpack_navigate(href, {{ replace: false }});
@@ -6973,7 +6981,10 @@ export function useRouter() {{
         window.__diffpack_prefetch(href);
       }}
     }},
-  }};
+}};
+
+export function useRouter() {{
+  return ROUTER;
 }}
 
 export function usePathname() {{
@@ -7000,7 +7011,8 @@ export class ReadonlyURLSearchParams extends URLSearchParams {{
 }}
 
 export function useSearchParams() {{
-  return new ReadonlyURLSearchParams(React.useContext(SearchParamsContext) || "");
+  const search = React.useContext(SearchParamsContext) || "";
+  return React.useMemo(() => new ReadonlyURLSearchParams(search), [search]);
 }}
 
 // `redirect(href, RedirectType.push)` — the second argument's enum, re-exported by Next
@@ -7011,8 +7023,11 @@ export const RedirectType = {{ push: "push", replace: "replace" }};
 // own value. Same object the hook reads, or the two would not meet.
 export {{ ServerInsertedHTMLContext }};
 
+const EMPTY_PARAMS = {{}};
+const EMPTY_SEGMENTS = [];
+
 export function useParams() {{
-  return React.useContext(PathParamsContext) || {{}};
+  return React.useContext(PathParamsContext) || EMPTY_PARAMS;
 }}
 
 // The active URL segments below the calling layout, provided by the SEGMENT_BOUNDARY island
@@ -7023,7 +7038,7 @@ export function useSelectedLayoutSegments(parallelRouteKey) {{
   if (parallelRouteKey !== undefined) {{
     throw new Error("diffpack next shim: useSelectedLayoutSegments(parallelRouteKey) with a named parallel-route slot is not supported by this adapter");
   }}
-  return React.useContext(SelectedSegmentContext) || [];
+  return React.useContext(SelectedSegmentContext) || EMPTY_SEGMENTS;
 }}
 
 export function useSelectedLayoutSegment(parallelRouteKey) {{
@@ -7562,6 +7577,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The navigation hooks must be IDENTITY-STABLE across renders, exactly like Next's.
+    /// `useRouter()`/`useSearchParams()`/`useParams()` feed `useMemo`/`useEffect`
+    /// dependency arrays all over real apps; a fresh object per call re-runs every such
+    /// effect on every render, and one effect that setStates unconditionally (cal.com's
+    /// `useInitialFormValues` does) becomes an unbounded render loop that no interaction
+    /// can outrun. Executed, not grepped: the shim runs against a React whose `useMemo`
+    /// caches per hook slot the way React's does.
+    #[test]
+    fn navigation_hooks_are_identity_stable_across_renders() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = scratch("nav-hook-identity");
+        let shim = next_navigation_shim(Path::new("./hooks-context.mjs"));
+        // Swap the two real imports for a minimal React + context module: the point of
+        // the test is the hook bodies, and a real React render would drag in react-dom.
+        let body = shim
+            .replace("import * as React from \"react\";", "")
+            .replace(
+                "import { PathParamsContext, PathnameContext, SearchParamsContext, SelectedSegmentContext, ServerInsertedHTMLContext } from \"./hooks-context.mjs\";",
+                "",
+            );
+        assert!(!body.contains("from \"react\""), "the react import was replaced: {body}");
+        assert!(!body.contains("hooks-context"), "the hooks-context import was replaced: {body}");
+        let harness = format!(
+            r##"const PathParamsContext = {{ name: "params" }};
+const PathnameContext = {{ name: "pathname" }};
+const SearchParamsContext = {{ name: "search" }};
+const SelectedSegmentContext = {{ name: "segments" }};
+const ServerInsertedHTMLContext = {{ name: "inserted" }};
+const CTX = new Map([[SearchParamsContext, "?a=1"]]);
+// React's own hook-slot memo: same slot + Object.is-equal deps reuses the value.
+const slots = [];
+let cursor = 0;
+const React = {{
+  useContext(c) {{ return CTX.get(c); }},
+  useMemo(fn, deps) {{
+    const i = cursor++;
+    const prev = slots[i];
+    if (prev && prev.deps.length === deps.length && prev.deps.every((d, j) => Object.is(d, deps[j]))) {{
+      return prev.value;
+    }}
+    const value = fn();
+    slots[i] = {{ deps, value }};
+    return value;
+  }},
+}};
+{body}
+const render = () => {{ cursor = 0; return [useRouter(), useSearchParams(), useParams(), useSelectedLayoutSegments()]; }};
+const first = render();
+const second = render();
+CTX.set(SearchParamsContext, "?a=2");
+const third = render();
+console.log(JSON.stringify({{
+  router: first[0] === second[0],
+  searchParams: first[1] === second[1],
+  params: first[2] === second[2],
+  segments: first[3] === second[3],
+  searchParamsValue: second[1].get("a"),
+  searchParamsRebuiltOnChange: third[1] !== second[1] && third[1].get("a") === "2",
+  readonly: (() => {{ try {{ second[1].set("a", "9"); return false; }} catch {{ return true; }} }})(),
+}}));
+"##
+        );
+        let file = dir.join("nav-identity.mjs");
+        std::fs::write(&file, harness).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "next/navigation hook harness failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(got["router"], serde_json::json!(true), "useRouter is stable: {got}");
+        assert_eq!(got["searchParams"], serde_json::json!(true), "useSearchParams is stable: {got}");
+        assert_eq!(got["params"], serde_json::json!(true), "useParams is stable: {got}");
+        assert_eq!(got["segments"], serde_json::json!(true), "useSelectedLayoutSegments is stable: {got}");
+        assert_eq!(got["searchParamsValue"], serde_json::json!("1"), "the search string is parsed: {got}");
+        assert_eq!(
+            got["searchParamsRebuiltOnChange"],
+            serde_json::json!(true),
+            "a changed query string produces a NEW object (stability must not become staleness): {got}"
+        );
+        assert_eq!(got["readonly"], serde_json::json!(true), "the memoized object still refuses mutation: {got}");
     }
 
     #[test]
@@ -9073,7 +9174,7 @@ mod tests {
         // ReadonlyURLSearchParams` holds in user code and a mutator refuses instead of
         // silently editing a copy the router never reads.
         assert!(
-            nav.contains("return new ReadonlyURLSearchParams("),
+            nav.contains("new ReadonlyURLSearchParams(search)"),
             "useSearchParams returns a ReadonlyURLSearchParams: {nav}"
         );
         assert!(
