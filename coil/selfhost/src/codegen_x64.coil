@@ -3773,3 +3773,262 @@
                         0))
                 0)))))))
   0)
+
+; compile-time constant evaluation for (static-assert ...): a faithful port of
+; codegen.coil's const-eval, with LLVM size/align/offset queries replaced by
+; this backend's own layout tables — which give the same natural-layout answers.
+(defstruct GCEval [(v i64) (uns bool)])
+(defn mk-gcev [(v i64) (u bool)] (-> GCEval)
+  (let [p (alloc-stack GCEval)] (store! (field p v) v) (store! (field p uns) u) (load p)))
+
+(defn gcev-v [(c GCEval)] (-> i64)
+  (let [p (alloc-stack GCEval)] (store! p c) (load (field p v))))
+
+(defn gcev-u [(c GCEval)] (-> bool)
+  (let [p (alloc-stack GCEval)] (store! p c) (load (field p uns))))
+
+(defn g-user-fail [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (print-str w "error: ") (print-str w msg) (write-byte w (cast u8 10)) (cgx64.exit (cast i32 1)) 0))
+
+(defn g-const-bin [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> GCEval)
+  (let [uns (or lu ru)]
+    (mk-gcev (cond (icmp-eq op 0) (iadd l r)
+                   (icmp-eq op 1) (isub l r)
+                   (icmp-eq op 2) (imul l r)
+                   (icmp-eq op 7) (iand l r)
+                   (icmp-eq op 8) (ior l r)
+                   (icmp-eq op 9) (ixor l r)
+                   (icmp-eq op 10) (ishl l r)
+                   (icmp-eq op 11) (if uns (cast i64 (ishr (cast u64 l) (cast u64 r))) (ishr l r))
+                   (icmp-eq op 3)
+                     (if (icmp-eq r 0)
+                         (do (g-user-fail "static-assert: divide/mod by zero") 0)
+                         (if uns (udiv l r) (idiv l r)))
+                   (icmp-eq op 4)
+                     (if (icmp-eq r 0)
+                         (do (g-user-fail "static-assert: divide/mod by zero") 0)
+                         (if uns (urem l r) (irem l r)))
+                   (icmp-eq op 5)
+                     (if (icmp-eq r 0)
+                         (do (g-user-fail "static-assert: divide/mod by zero") 0)
+                         (udiv l r))
+                   (icmp-eq r 0) (do (g-user-fail "static-assert: divide/mod by zero") 0)
+                   :else (urem l r))
+             uns)))
+
+(defn g-const-cmp [(op i64) (l i64) (lu bool) (r i64) (ru bool)] (-> GCEval)
+  (let [b
+          (cond (or lu ru)
+                  (let [lx (cast u64 l)
+                        rx (cast u64 r)]
+                    (cond (icmp-eq op 0) (icmp-lt lx rx)
+                          (icmp-eq op 1) (icmp-le lx rx)
+                          (icmp-eq op 2) (icmp-gt lx rx)
+                          (icmp-eq op 3) (icmp-ge lx rx)
+                          (icmp-eq op 4) (icmp-eq lx rx)
+                          :else (icmp-ne lx rx)))
+                (icmp-eq op 0) (icmp-lt l r)
+                (icmp-eq op 1) (icmp-le l r)
+                (icmp-eq op 2) (icmp-gt l r)
+                (icmp-eq op 3) (icmp-ge l r)
+                (icmp-eq op 4) (icmp-eq l r)
+                :else (icmp-ne l r))]
+    (mk-gcev (when b 1) false)))
+
+(defn g-const-eval [(g (ptr Cga)) (e (ptr Expr))] (-> GCEval)
+  (let [a (load (field g a))]
+    (match-else (load (field e kind))
+                (EInt [v] (mk-gcev v false))
+                (EBool [b] (mk-gcev (when b 1) false))
+                (EIf [c thn els] (if (icmp-ne (gcev-v (g-const-eval g c)) 0) (g-const-eval g thn) (g-const-eval g els)))
+                (ESizeOf [t] (mk-gcev (ty-size g (box-type a t)) false))
+                (EAlignOf [t] (mk-gcev (ty-align g (box-type a t)) false))
+                (EOffsetOf [t fname]
+                           (match-else t
+                                       (TStruct [nm]
+                                                (let [si (g-struct-idx g nm)]
+                                                  (when (icmp-lt si 0) (cgx-fail2 "offset-of on unknown struct: " nm))
+                                                  (mk-gcev (g-field-off g si (g-field-idx g si fname)) false)))
+                                       (_ (do (g-user-fail "static-assert: offset-of on non-struct") (mk-gcev 0 false)))))
+                (ECast [t inner]
+                       (mk-gcev (gcev-v (g-const-eval g inner)) (match-else t (TInt [bits s] (not s)) (_ false))))
+                (EBin [op lhs rhs]
+                      (let [lc (g-const-eval g lhs)
+                            rc (g-const-eval g rhs)]
+                        (g-const-bin op (gcev-v lc) (gcev-u lc) (gcev-v rc) (gcev-u rc))))
+                (ECmp [op lhs rhs]
+                      (let [lc (g-const-eval g lhs)
+                            rc (g-const-eval g rhs)]
+                        (g-const-cmp op (gcev-v lc) (gcev-u lc) (gcev-v rc) (gcev-u rc))))
+                (_ (do
+                     (g-user-fail "static-assert: only int literals, sizeof/alignof/offsetof, casts, arithmetic and comparisons are allowed")
+                     (mk-gcev 0 false))))))
+
+(defn g-eval-asserts! [(g (ptr Cga)) (mp (ptr Program))] (-> i64)
+  (let [asserts (load (field mp asserts))
+        n (al-len [StaticAssert] (load asserts))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [sa (xal-at [StaticAssert] asserts (load i))]
+                  (when (icmp-eq (gcev-v (g-const-eval g (field sa cnd))) 0)
+                        (let [w (stderr)]
+                          (print-str w "error: static assertion failed: ")
+                          (print-str w (load (field sa msg)))
+                          (write-byte w (cast u8 10))
+                          (cgx64.exit (cast i32 1))
+                          0)))
+                (store! i (iadd (load i) 1))))))
+  0)
+
+; ============================ driver =========================================
+; Build the program's ELF object IN MEMORY. Serializing it to a file (the AOT
+; path) is a thin wrapper over this, so the codegen happens exactly once, here.
+(defn cgx64-build-eobj [(a (ptr Allocator))
+                        (mp (ptr Program))
+                        (mainpath (slice u8))
+                        (compdir (slice u8))
+                        (paths (ptr (ArrayList (slice u8))))
+                        (texts (ptr (ArrayList (slice u8))))
+                        (emit-dwarf bool)] (-> EObj)
+  (let [g (alloc-stack Cga)]
+    (store! (field g a) a)
+    (store! (field g structs) (al-new [GStruct] a))
+    (store! (field g sums) (al-new [GSum] a))
+    (store! (field g sigs) (al-new [GSig] a))
+    (store! (field g obj) (eobj-new a))
+    (store! (field g asm) (xasm-new a))
+    (store! (field g strs) (al-new [GStr] a))
+    (store! (field g nglob) 0)
+    (store! (field g loops) (al-new [GLoop] a))
+    (store! (field g env) (gscope-nil a))
+    (store! (field g frame) 0)
+    (store! (field g terminated) false)
+    (store! (field g sretslot) -1)
+    (store! (field g outbytes) 0)
+    (store! (field g fnstart) 0)
+    (store! (field g retty) (TInt 64 true))
+    (store! (field g epilabel) 0)
+    (store! (field g dwtys) (al-new [DwTy] a))
+    (store! (field g dwfns) (al-new [DwFn] a))
+    (store! (field g dwvars) (al-new [DwVar] a))
+    (store! (field g dwevs) (al-new [DwLineEv] a))
+    (store! (field g dwcursrc) -1)
+    (store! (field g dwcurlo) -1)
+    (store! (field g convs) (load (field mp conventions)))
+    ; sections: ordinals are 1-based in push order.
+    (store! (field g text)
+            (eobj-add-sect! (mut (field g obj)) ".text" 16 (sht-progbits)
+                            (ior (shf-alloc) (shf-execinstr))))
+    (store! (field g constsec)
+            (eobj-add-sect! (mut (field g obj)) ".rodata" 8 (sht-progbits) (shf-alloc)))
+    (store! (field g datasec)
+            (eobj-add-sect! (mut (field g obj)) ".data" 8 (sht-progbits)
+                            (ior (shf-alloc) (shf-write))))
+    ; without this the linker gives the whole program an executable stack
+    (eobj-mark-nonexec-stack! (mut (field g obj)))
+    (let [es (load (field mp exports))
+          ne (al-len [ExportC] (load es))
+          (mut ei) 0]
+      (loop (if (icmp-ge (load ei) ne)
+                (break)
+                (do
+                  (when (g-export-needs-thunk (xal-at [ExportC] es (load ei)))
+                        (cgx-fail2 "export-c with a by-value struct parameter isn't supported by the x86-64 backend yet (it needs a C-ABI marshaling thunk); scalar/pointer params and struct returns work: "
+                                   (load (field (xal-at [ExportC] es (load ei)) name))))
+                  (store! ei (iadd (load ei) 1))))))
+    (g-register-types! g mp)
+    (g-eval-asserts! g mp)
+    (g-register-sigs! g mp)
+    (let [fs (load (field mp funcs))
+          n (al-len [Func] (load fs))
+          (mut i) 0]
+      (loop (if (icmp-ge (load i) n)
+                (break)
+                (do
+                  (emit-func! g (xal-at [Func] fs (load i)))
+                  (store! i (iadd (load i) 1))))))
+    ; move the emitted code into .text
+    (xb-bytes! (mut (eobj-sect-buf (mut (field g obj)) (load (field g text))))
+               (al-slice [u8] (load (field (field g asm) buf))))
+    ; ---- DWARF
+    (when emit-dwarf
+          (let [ltmp (eobj-add-sym! (mut (field g obj)) ".Ltext0" (load (field g text)) 0 false)
+                dw
+                  (dw-build! a
+                             mainpath
+                             compdir
+                             paths
+                             texts
+                             (mut (field g dwtys))
+                             (mut (field g dwfns))
+                             (mut (field g dwvars))
+                             (mut (field g dwevs))
+                             (al-len [u8] (load (field (field g asm) buf)))
+                             ltmp)
+                ; debug sections are not SHF_ALLOC: they exist in the file but are
+                ; never loaded into the process image.
+                sline (eobj-add-sect! (mut (field g obj)) ".debug_line" 1 (sht-progbits) 0)
+                sinfo (eobj-add-sect! (mut (field g obj)) ".debug_info" 1 (sht-progbits) 0)
+                sabbr (eobj-add-sect! (mut (field g obj)) ".debug_abbrev" 1 (sht-progbits) 0)
+                sstr (eobj-add-sect! (mut (field g obj)) ".debug_str" 1 (sht-progbits) 0)]
+            (xb-bytes! (mut (eobj-sect-buf (mut (field g obj)) sline)) (al-slice [u8] (load (load (field dw line)))))
+            (xb-bytes! (mut (eobj-sect-buf (mut (field g obj)) sinfo)) (al-slice [u8] (load (load (field dw info)))))
+            (xb-bytes! (mut (eobj-sect-buf (mut (field g obj)) sabbr)) (al-slice [u8] (load (load (field dw abbrev)))))
+            (xb-bytes! (mut (eobj-sect-buf (mut (field g obj)) sstr)) (al-slice [u8] (load (load (field dw strs)))))
+            ; Unlike the Mach-O path (where debug sections carry no relocations
+            ; and ld64's debug map does the translation), ELF debug sections hold
+            ; REAL relocations against .text: an absolute 64-bit address whose
+            ; addend is the text offset the emitter recorded.
+            (let [rl (load (field dw relocs))
+                  nr (al-len [DwReloc] (load rl))
+                  (mut i) 0]
+              (loop (if (icmp-ge (load i) nr)
+                        (break)
+                        (do
+                          (let [r (xal-at [DwReloc] rl (load i))
+                                sect (if (icmp-eq (load (field r sect)) 1) sinfo sline)
+                                buf (eobj-sect-buf (mut (field g obj)) sect)
+                                ; the emitter left the text offset in the slot; it
+                                ; becomes the relocation's addend and the slot is
+                                ; zeroed so the linker writes the final address.
+                                addend (ior (cast i64 (al-get [u8] (load buf) (load (field r off))))
+                                            (ior (ishl (cast i64 (al-get [u8] (load buf) (iadd (load (field r off)) 1))) 8)
+                                                 (ior (ishl (cast i64 (al-get [u8] (load buf) (iadd (load (field r off)) 2))) 16)
+                                                      (ishl (cast i64 (al-get [u8] (load buf) (iadd (load (field r off)) 3))) 24))))]
+                            (eobj-add-reloc! (mut (field g obj))
+                                             sect
+                                             (load (field r off))
+                                             ltmp
+                                             (r-x86-64-64)
+                                             addend))
+                          (store! i (iadd (load i) 1))))))))
+    (load (field g obj))))
+
+; serialize a built object to disk — the AOT path.
+(defn cgx64-build-object [(a (ptr Allocator))
+                          (mp (ptr Program))
+                          (objpath (ptr i8))
+                          (mainpath (slice u8))
+                          (compdir (slice u8))
+                          (paths (ptr (ArrayList (slice u8))))
+                          (texts (ptr (ArrayList (slice u8))))
+                          (emit-dwarf bool)] (-> i64)
+  (let [(mut o) (cgx64-build-eobj a mp mainpath compdir paths texts emit-dwarf)
+        bytes (elf-write (mut o))
+        fd (cgx64.creat objpath 420)]
+    (when (icmp-lt fd 0) (cgx-fail "cannot create object file"))
+    (let [total (al-len [u8] (load bytes))
+          (mut off) 0]
+      (loop (if (icmp-ge (load off) total)
+                (break)
+                (do
+                  (let [wrote
+                          (cgx64.write (cast i32 fd)
+                                       (cast (ptr i8) (index (slice-data (al-slice [u8] (load bytes))) (load off)))
+                                       (cast isize (isub total (load off))))]
+                    (when (icmp-le wrote 0) (cgx-fail "object write failed"))
+                    (store! off (iadd (load off) (cast i64 wrote))))))))
+    (cgx64.close (cast i32 fd))
+    0))
