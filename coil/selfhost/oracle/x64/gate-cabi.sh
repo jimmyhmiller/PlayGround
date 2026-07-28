@@ -165,37 +165,13 @@ run_one() {  # run_one <label> <backend-args...>
 # The x64 backend is what this gate protects.
 run_one "x64 backend   <-> gcc" --backend x64
 
-# The LLVM backend is run as a CONTROL — normally it should agree with gcc too,
-# which is what proves the expected values are right and not merely
-# self-consistent. It currently fails ONE case, and that failure is real but
-# pre-existing and NOT this backend's:
-#
-#   check 4 (c_f2_spill): a {double,double} struct passed after seven doubles.
-#   codegen.coil flattens the struct into two separate `double` parameters
-#   (see `emit-ir`: "double %abi.slot, double %abi.slot2"). SysV says the
-#   STRUCT spills to the stack as a unit once both its eightbytes cannot fit,
-#   but two independent doubles put the first in the last free xmm and only
-#   spill the second — so the callee reads qx=5, qy=0 instead of qx=3, qy=5.
-#   Verified against gcc directly: gcc says 418, the LLVM path says 357, and
-#   the x64 backend says 418.
-#
-# So the control is reported but does not fail the gate. Drop this allowance
-# the moment codegen.coil stops flattening aggregates at the C boundary.
-LLVM_KNOWN_BAD=4
-run_llvm_control() {
-  if "$BIN" build "$WORK/cabi.coil" -o "$WORK/tl" --link-flag "$WORK/cabi.o" >/dev/null 2>&1; then
-    "$WORK/tl" >/dev/null 2>&1; rc=$?
-    if [ "$rc" = 0 ]; then echo "  ok   — LLVM backend <-> gcc (control)"
-    elif [ "$rc" = "$LLVM_KNOWN_BAD" ]; then
-      echo "  known — LLVM backend <-> gcc fails check $rc (pre-existing aggregate-flattening bug, see above)"
-    else
-      echo "  FAIL — LLVM backend <-> gcc failed check $rc, which is NOT the known one"; fail=$((fail+1))
-    fi
-  else
-    echo "  FAIL — LLVM backend <-> gcc: build failed"; fail=$((fail+1))
-  fi
-}
-run_llvm_control
+# The LLVM backend is the CONTROL: it must agree with gcc too, which is what
+# proves the expected values above are right and not merely self-consistent.
+# (It used to fail one case — codegen.coil flattened a by-value {double,double}
+# into two separate `double` parameters instead of demoting it to byval once
+# the SSE registers ran out. c-signature now tracks register consumption across
+# the parameter list, exactly as clang does, so both backends agree here.)
+run_one "LLVM backend  <-> gcc (control)"
 
 echo
 [ "$fail" = 0 ] && { echo "x64 gate-cabi: PASS"; exit 0; } || { echo "x64 gate-cabi: $fail case(s) FAILED"; exit 1; }

@@ -2891,6 +2891,39 @@
   (let [args (load (field sig args))]
     (if (icmp-lt i (al-len [ArgAbiK] (load args))) (al-get [ArgAbiK] (load args) i) (AAScalar))))
 
+; ---- SysV register accounting for by-value aggregates -----------------------
+; An aggregate that classifies ACDirect is only ACTUALLY passed in registers if
+; enough of them are still free at its position in the argument list. SysV says
+; that when either of its eightbytes has no register left, the WHOLE aggregate
+; goes in memory instead — it does not half-spill. Clang implements exactly this
+; (compare `f(F2)` -> `double, double` against
+; `f(double x7..., F2)` -> `ptr byval(%F2)`), and getting it wrong is invisible
+; until a struct lands after enough scalars to exhaust one register file:
+; the callee then reads one eightbyte from the last free register and the other
+; from the stack, i.e. from the wrong place.
+;
+; `slot-is-sse?` reads the class back off the coerced slot type the classifier
+; already computed: float/double/vector slots are SSE eightbytes, integer slots
+; are INTEGER ones.
+(defn slot-is-sse? [(t (ptr i8))] (-> bool)
+  (let [k (LLVMGetTypeKind t)]
+    (or (icmp-eq k 2) (or (icmp-eq k 3) (icmp-eq k 13)))))  ; float / double / vector
+
+; How many INTEGER and SSE registers an ACDirect aggregate would consume.
+(defn abi-slot-regs [(slots (ptr (ArrayList (ptr i8)))) (gpp (ptr i64)) (ssep (ptr i64))] (-> i64)
+  (let [n (al-len [(ptr i8)] (load slots))
+        (mut k) 0]
+    (store! gpp 0)
+    (store! ssep 0)
+    (loop (if (icmp-ge (load k) n)
+              (break)
+              (do
+                (if (slot-is-sse? (al-get [(ptr i8)] (load slots) (load k)))
+                    (store! ssep (iadd (load ssep) 1))
+                    (store! gpp (iadd (load gpp) 1)))
+                (store! k (iadd (load k) 1)))))
+    0))
+
 ; ---- c_signature: the C-ABI realization of a (params -> ret) signature ----
 (defn c-signature [(cg (ptr Cg)) (params (ptr (ArrayList Type))) (ret (ptr Type)) (variadic bool)] (-> (ptr CSig))
   (let [a (load (field cg a))
@@ -2909,8 +2942,17 @@
                 (do (al-push! (mut lp) (LLVMPointerTypeInContext ctx 0)) (store! (field sig sret) sa) 0)
                 (do (store! rty (abi-direct-return-type cg sa)) (store! (field sig ret_direct) sa) 0)))
           (unless (ty-is-void ret) (store! rty (basic-ty cg ret)) 0)))
-    ; param classification
+    ; param classification.
+    ; `ngp`/`nsse` track how many argument registers the parameters BEFORE this
+    ; one have consumed, because on x86-64 an ACDirect aggregate is demoted to
+    ; byval when its eightbytes no longer fit (see abi-slot-regs above). An sret
+    ; pointer occupies the first integer register. AArch64 does not have this
+    ; rule — its ACDirect coercion is a single slot and the classifier already
+    ; accounts for HFA/size — so the demotion is x86-only.
     (let [n (al-len [Type] (load params))
+          x86 (icmp-eq (load (field cg arch)) 0)
+          (mut ngp) (if (icmp-ne (cast i64 (load (field sig sret))) 0) 1 0)
+          (mut nsse) 0
           (mut i) 0]
       (loop (if (icmp-ge (load i) n)
                 (break)
@@ -2922,18 +2964,41 @@
                           (match (load (field sa arg))
                             (ACDirect [slots]
                                       (let [ns (al-len [(ptr i8)] (load slots))
-                                            (mut k) 0]
-                                        (loop (if (icmp-ge (load k) ns)
-                                                  (break)
-                                                  (do
-                                                    (al-push! (mut lp) (al-get [(ptr i8)] (load slots) (load k)))
-                                                    (store! k (iadd (load k) 1)))))
-                                        (al-push! (mut argl) (AADirect sa))))
+                                            needg (alloc-stack i64)
+                                            needs (alloc-stack i64)]
+                                        (abi-slot-regs slots needg needs)
+                                        (if (and x86
+                                                 (or (icmp-gt (iadd (load ngp) (load needg)) 6)
+                                                     (icmp-gt (iadd (load nsse) (load needs)) 8)))
+                                            ; no room for BOTH eightbytes: the whole
+                                            ; aggregate goes in memory, as byval.
+                                            (do
+                                              (al-push! (mut lp) (LLVMPointerTypeInContext ctx 0))
+                                              (al-push! (mut argl) (AAIndirect sa))
+                                              0)
+                                            (let [(mut k) 0]
+                                              (loop (if (icmp-ge (load k) ns)
+                                                        (break)
+                                                        (do
+                                                          (al-push! (mut lp) (al-get [(ptr i8)] (load slots) (load k)))
+                                                          (store! k (iadd (load k) 1)))))
+                                              (store! ngp (iadd (load ngp) (load needg)))
+                                              (store! nsse (iadd (load nsse) (load needs)))
+                                              (al-push! (mut argl) (AADirect sa))
+                                              0))))
                             (ACIndirect [al]
                                         (do
+                                          ; a byval pointer still costs an integer
+                                          ; register when one is available
+                                          (when (icmp-lt (load ngp) 6) (store! ngp (iadd (load ngp) 1)) 0)
                                           (al-push! (mut lp) (LLVMPointerTypeInContext ctx 0))
                                           (al-push! (mut argl) (AAIndirect sa))))))
-                        (do (al-push! (mut lp) (basic-ty cg pty)) (al-push! (mut argl) (AAScalar)))))
+                        (do
+                          (if (type-is-float pty)
+                              (when (icmp-lt (load nsse) 8) (store! nsse (iadd (load nsse) 1)) 0)
+                              (when (icmp-lt (load ngp) 6) (store! ngp (iadd (load ngp) 1)) 0))
+                          (al-push! (mut lp) (basic-ty cg pty))
+                          (al-push! (mut argl) (AAScalar)))))
                   (store! i (iadd (load i) 1))))))
     (let [rt (if (icmp-eq (cast i64 (load rty)) 0) (LLVMVoidTypeInContext ctx) (load rty))
           fnty (LLVMFunctionType rt (carr a (load lp)) (cast i32 (al-len [(ptr i8)] (load lp))) (when variadic 1))]
