@@ -13,7 +13,8 @@ For every app in `corpus.json`:
 
 1. **Materialize** it from a pinned upstream git SHA into `apps/<id>/`. The
    application source is never edited. (A few entries are instead **first-party**
-   fixtures copied from `fixtures/` — see below.)
+   fixtures copied from `fixtures/` — see below; and a **monorepo** entry is
+   materialized whole and built in place — see below.)
 2. **Build it twice** from that one untouched source tree — once with the app's
    own toolchain (`next build` / `vite build`), once with diffpack
    (`diffpack build-app <root> production` / `diffpack build <root> --vite`).
@@ -78,6 +79,9 @@ node integration/e2e/run.mjs                   # build, serve, drive, compare ev
 node integration/e2e/run.mjs next-mdx          # one app (id substring)
 node integration/e2e/run.mjs --no-build        # reuse the previous builds
 node integration/e2e/run.mjs --build-only      # stop before the browser phase
+
+node integration/e2e/fetch.mjs --heavy         # include the heavy apps (gigabytes, ~20 min)
+node integration/e2e/run.mjs --heavy next-calcom
 ```
 
 Requires `node`, `npm`, and `agent-browser`. The diffpack release binary must
@@ -103,6 +107,83 @@ never charged.
 
 Findings are never truncated on disk. The console rendering shows the first few
 per route and always states how many more there are.
+
+## Monorepo apps
+
+Most entries are one directory of a pinned checkout, copied to `apps/<id>/` and
+installed there with npm. Some real applications cannot be expressed that way at
+all. cal.com's `apps/web` imports 20 sibling workspace packages that resolve only
+from the repository root, its package manager is yarn 4 through corepack, and its
+`next.config.ts` throws unless three environment variables are set.
+
+Such an entry declares:
+
+```json
+"monorepo": { "appDir": "apps/web", "packageManager": "corepack yarn", "installAt": "root" }
+```
+
+and is then materialized **whole** and built **in place** in `.cache/<source>`:
+the repository is not copied to `apps/<id>/`. A workspace's install is only valid
+in the tree its package manager installed into, and that tree is gigabytes — a
+per-fetch copy would be neither cheap nor faithful. `lib/apps.mjs` answers three
+questions for every entry, and `fetch.mjs` and `run.mjs` both use those answers:
+where the tree is (`materializedRootOf`), where the two builds run (`appDirOf`),
+and where `node_modules` belongs (`installDirOf` — a workspace hoists to the
+root, so asking `apps/web` whether it is installed would answer "no" about a
+perfectly installed workspace). The app's toolchain is invoked through the
+package manager the entry declares, because `npx --no-install next build` cannot
+find a binary yarn linked into the *root's* `node_modules/.bin`.
+
+The source such an entry points at declares `"sparse": []` — the whole
+repository, not a cone.
+
+## Declared environment
+
+An entry may declare `"env"`, with an `"envNote"` saying why:
+
+```json
+"env": { "NEXTAUTH_SECRET": "diffpack-e2e-not-a-real-secret", … }
+```
+
+Those values are written to the app's `.env` before it is built (at the
+materialized root, which for a monorepo is the repository root — cal.com's config
+loads `../../.env` itself; `"envFile"` overrides the path) and recorded verbatim
+in `DIFFPACK_E2E_PROVENANCE.json` alongside the dependency pins. A build that
+works only because of something ambient in one developer's shell is neither
+reproducible nor auditable, so nothing may be ambient. Because the values are
+recorded in a file meant to be read, they must be obvious dummies:
+`lib/corpus-monorepo.test.mjs` fails on any declared value that does not look
+like one, and a value that cannot be written literally (a quote, a newline) is
+refused rather than escaped into something the app would misread.
+
+cal.com's `DATABASE_URL` points at a database that does not exist, deliberately.
+The reference build is only an oracle if it needs no live service; a build that
+quietly started talking to one would be measuring something else.
+
+## Heavy apps
+
+`"heavy": true` marks an entry whose materialization is measured in gigabytes and
+whose install is measured in tens of minutes — cal.com is a 349 MB checkout, 3.4 GB
+of `node_modules`, and about 20 minutes. It is **excluded from a default
+`fetch.mjs` and a default `run.mjs`**, including when it is named by a filter:
+naming it is not consent to a 20-minute install, `--heavy` is. Both commands
+print what they left out, because a corpus that silently shrinks lies about its
+own coverage. Each heavy entry carries a `"heavyNote"` stating the cost.
+
+## Licenses, and what is never vendored
+
+Every third-party app is **cloned** into the gitignored `.cache/` and built
+there. Nothing from any of them is copied into diffpack's own tree, and diffpack
+redistributes none of it. That distinction is what lets this corpus use whatever
+license an upstream ships, and it is written into each monorepo app's provenance
+rather than left implied.
+
+A pinned SHA's license is a fact about *that tree*, not about the project's
+reputation — cal.com's platform was AGPL-3.0 with a proprietary `/ee` for years,
+and at the SHA pinned here the repository has been relicensed and its `LICENSE`
+is MIT. So for a checkout that includes its `LICENSE`, `fetch.mjs` verifies the
+file against the id the corpus claims and **fails** rather than write a
+provenance file that misdescribes what was cloned.
 
 ## First-party fixtures
 
@@ -156,3 +237,17 @@ what this suite measures — the oracle only has to be a *running* app. Every
 attempt's output is kept in the build log. Everything written for the relaxed
 retry is removed before diffpack sees the app, so an app with no `next.config`
 still reaches diffpack with no `next.config`.
+
+An entry may also *declare* that relaxation with `"relaxChecks": true` and a
+`"relaxChecksNote"` saying why, in which case it is applied on the first attempt
+and recorded in the app's provenance file. Only `next-calcom` declares it — the
+tree has a pre-existing tRPC type collision unrelated to bundling, and a
+ten-minute build spent rediscovering that buys nothing. Nothing about the app's
+runtime behaviour is relaxed, on either side.
+
+That wrapper has to preserve the app's config exactly. Next accepts a config
+object *and* a `(phase, { defaultConfig }) => config` function, and the wrapper
+used to spread the loaded value — which yields `{}` for a function config, so for
+apps like cal.com it did not disable two checks, it silently replaced the whole
+config with two checks and built a different application. `lib/apps.test.mjs`
+evaluates the bytes the wrapper writes, for both shapes and for CommonJS.

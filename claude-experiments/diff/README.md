@@ -134,6 +134,18 @@ acceptance + headless-browser gates (see its `acceptance.mjs` /
 - CSS: global stylesheets, CSS Modules (scoping, `composes`, `:global`),
   `@import` inlining with media wrapping, `url()` asset rewriting, and a native
   Tailwind v4 engine.
+- Tailwind: the native engine compiles the whole sheet in-process — no `node`,
+  no `node_modules` read — and is the default. A sheet it cannot serve (a
+  JavaScript `@plugin` such as `@tailwindcss/typography` or `tailwind-scrollbar`,
+  an at-rule it has no meaning for, or an `@apply` of a plugin-registered
+  utility) is handed WHOLE to the APP's OWN `tailwindcss`, driven through
+  `@tailwindcss/node` — the same entry point `@tailwindcss/postcss`,
+  `@tailwindcss/vite` and `@tailwindcss/cli` use, so the delegated sheet comes
+  from the same code and the same Tailwind version the app's own build uses.
+  Which engine produced a sheet, and why, is reported on every build; a missing
+  `tailwindcss` is a hard error naming the entry and the package. diffpack still
+  splices the entry's `@import`s, rewrites its `url()`s and scans its class
+  candidates either way, so both engines see one input.
 - `--format esm` output supports top-level `await` (single-chunk) and
   `import.meta`; CommonJS output refuses both with module-naming errors.
 - TanStack Start builds natively end to end (13/13 gates, SSR + server
@@ -147,7 +159,8 @@ acceptance + headless-browser gates (see its `acceptance.mjs` /
   hand-written stylesheet does. Same shape as Less/Stylus/PostCSS: the app's
   pinned tool runs, nothing is reimplemented, and a missing compiler is a hard
   error naming the package.
-- Not yet: JS plugin hosting (deliberate — popular plugins are reimplemented
-  natively), multiple HTML entries, content-hashed JS chunk names, shared
+- Not yet: Vite/Rollup JS plugin hosting (deliberate — popular plugins are
+  reimplemented natively; Tailwind plugins are the exception, see above),
+  multiple HTML entries, content-hashed JS chunk names, shared
   vendor chunking, CSS modules in `?url` verbatim copies, a non-root `base`
   for asset URLs, and the Vite Environment API / module runner.

@@ -9,35 +9,21 @@
 // self-contained) SSR and react-server graphs, each carrying its own inlined React.
 
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
 
-/// Read both client-references manifests and build the divergent-id ssrModuleMapping
-/// (Manifest #2) the SSR bundle resolves the flight's client references through.
+/// Read the three client-references manifests and build the divergent-id
+/// ssrModuleMapping (Manifest #2) the SSR bundle resolves the flight's client
+/// references through. The join and its checks live in `./ssr-module-map.mjs` so the
+/// orchestrator, the prerenderer and the fixture checks share one rule.
 export function loadManifests(outputDir) {
-  const clientManifestPath = join(outputDir, "client-references-manifest.json");
-  const ssrManifestPath = join(outputDir, "server-references-manifest.json");
-  const clientRefs = JSON.parse(readFileSync(clientManifestPath, "utf8"));
-  const ssrRefs = JSON.parse(readFileSync(ssrManifestPath, "utf8"));
-  const moduleMap = {};
-  for (const [moduleId, clientEntry] of Object.entries(clientRefs)) {
-    const ssrEntryRef = ssrRefs[moduleId];
-    if (!ssrEntryRef) {
-      throw new Error(
-        `next-render-core: no SSR reference for ${moduleId}; the SSR graph did not bundle this "use client" module`,
-      );
-    }
-    moduleMap[String(clientEntry.id)] = {
-      "*": { id: ssrEntryRef.id, chunks: ssrEntryRef.chunks, name: "*" },
-    };
+  try {
+    return loadServerConsumerManifest(outputDir);
+  } catch (error) {
+    throw new Error(`next-render-core: ${error.message}`, { cause: error });
   }
-  const serverConsumerManifest = {
-    moduleMap,
-    serverModuleMap: null,
-    moduleLoading: { prefix: "", crossOrigin: null },
-  };
-  return { clientRefs, ssrRefs, serverConsumerManifest, clientManifestPath };
 }
 
 function pickRender(mod) {
@@ -123,8 +109,7 @@ export function requireBuiltBundles(outputDir) {
   const need = [
     ["react-server render bundle", join(outputDir, "rsc-render", "server.mjs")],
     ["SSR bundle", join(outputDir, "server", "server.mjs")],
-    ["client-references manifest", join(outputDir, "client-references-manifest.json")],
-    ["ssr-references manifest", join(outputDir, "server-references-manifest.json")],
+    ...MANIFEST_FILES.map(([label, file]) => [label, join(outputDir, file)]),
   ];
   for (const [label, p] of need) {
     if (!existsSync(p)) {

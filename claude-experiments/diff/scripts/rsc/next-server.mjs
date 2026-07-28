@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import os from "node:os";
+import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
 
 // DEV (`diffpack dev`): the diffpack dev server re-emits the SSR bundle in place on a
 // client-island edit, but Node caches an ESM module by URL forever. In dev we
@@ -134,37 +135,26 @@ if (!outputDir) fail("usage: node next-server.mjs <.diffpack-output dir> [port]"
 const publicDir = join(outputDir, "public");
 const rscRenderEntry = join(outputDir, "rsc-render", "server.mjs");
 const ssrEntry = join(outputDir, "server", "server.mjs");
-const clientManifestPath = join(outputDir, "client-references-manifest.json");
-const ssrManifestPath = join(outputDir, "server-references-manifest.json");
 
 for (const [label, p] of [
   ["client public/", publicDir],
   ["react-server render bundle", rscRenderEntry],
   ["SSR bundle", ssrEntry],
-  ["client-references manifest", clientManifestPath],
-  ["ssr-references manifest", ssrManifestPath],
+  ...MANIFEST_FILES.map(([label, file]) => [label, join(outputDir, file)]),
 ]) {
   if (!existsSync(p)) fail(`${label} not found at ${p} — build all three graphs first`);
 }
 
 // --- Manifest #2: the divergent-id ssrModuleMapping ------------------------------
-const clientRefs = JSON.parse(readFileSync(clientManifestPath, "utf8"));
-const ssrRefs = JSON.parse(readFileSync(ssrManifestPath, "utf8"));
-const moduleMap = {};
-for (const [moduleId, clientEntry] of Object.entries(clientRefs)) {
-  const ssrEntryRef = ssrRefs[moduleId];
-  if (!ssrEntryRef) {
-    fail(`no SSR reference for ${moduleId}; the SSR graph did not bundle this "use client" module`);
-  }
-  moduleMap[String(clientEntry.id)] = {
-    "*": { id: ssrEntryRef.id, chunks: ssrEntryRef.chunks, name: "*" },
-  };
+// Joined from the three graphs' manifests by ./ssr-module-map.mjs — the one place
+// that decides which client references are resolvable (see its header).
+let clientManifestPath;
+let serverConsumerManifest;
+try {
+  ({ clientManifestPath, serverConsumerManifest } = loadServerConsumerManifest(outputDir));
+} catch (error) {
+  fail(error.message);
 }
-const serverConsumerManifest = {
-  moduleMap,
-  serverModuleMap: null,
-  moduleLoading: { prefix: "", crossOrigin: null },
-};
 
 // --- The SSR bundle (in-process; its own inlined React) --------------------------
 // Resolve `renderFlightToDocument` from the SSR bundle. In production it is imported

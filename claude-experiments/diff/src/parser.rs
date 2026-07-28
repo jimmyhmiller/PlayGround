@@ -6,7 +6,10 @@ use oxc_ast::ast::{
     CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
     ImportExpression, Program,
 };
-use oxc_ast_visit::{Visit, walk::walk_call_expression};
+use oxc_ast_visit::{
+    Visit,
+    walk::{walk_call_expression, walk_export_named_declaration},
+};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
@@ -76,35 +79,151 @@ pub fn scan_source_type(path: &Path) -> SourceType {
 struct DependencyVisitor {
     dependencies: Vec<String>,
     dynamic_dependencies: BTreeSet<String>,
+    /// Specifiers seen at least once as a `require(...)` lexically inside a `try`
+    /// block, in the same function as that `try`.
+    guarded_requires: BTreeSet<String>,
+    /// Specifiers seen at least once in a position where a resolution failure is
+    /// NOT recoverable: a static `import`/`export … from`, a dynamic `import()`,
+    /// or a bare `require(...)` outside any `try`.
+    unguarded: BTreeSet<String>,
+    /// How many enclosing `try` BLOCKS (not `catch`/`finally`) we are inside,
+    /// counting only within the current function.
+    try_depth: usize,
+    /// Specifiers reached by at least one CommonJS `require(...)` call.
+    require_syntax: BTreeSet<String>,
+    /// Specifiers reached by at least one ESM form: a static `import` /
+    /// `export … from`, or a dynamic `import()`.
+    import_syntax: BTreeSet<String>,
+}
+
+/// Which SYNTAX a module reaches each of its specifiers through.
+///
+/// This is not bookkeeping: it decides which export conditions the specifier
+/// resolves under. `require("x")` resolves under `require`, `import "x"` under
+/// `import`, and a package whose `exports` maps them to different files (the
+/// near-universal dual-package shape `{"import": "./esm/index.mjs", "require":
+/// "./index.js"}`) hands back genuinely different modules. Resolving a
+/// `require` call site under `import` yields a Module namespace object where
+/// the caller expects the CommonJS export — `class extends require("pg-pool")`
+/// then throws `Class extends value [object Module] is not a constructor`.
+#[derive(Debug, Default)]
+pub struct DependencySyntax {
+    pub require: BTreeSet<String>,
+    pub import: BTreeSet<String>,
+}
+
+/// See [`DependencySyntax`]. Reports EVERY specifier under each syntax that
+/// reaches it, including a specifier reached both ways.
+pub fn collect_dependency_syntax(program: &Program<'_>) -> DependencySyntax {
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(program);
+    DependencySyntax {
+        require: visitor.require_syntax,
+        import: visitor.import_syntax,
+    }
+}
+
+impl DependencyVisitor {
+    /// Runs `body` with the try-block depth reset, for a nested function body.
+    ///
+    /// A `try` does not guard code that merely *closes over* it: in
+    /// `try { f = () => require("x") } catch {}` the `require` runs when `f` is
+    /// called, long after the `catch` is out of scope. Resetting at every function
+    /// boundary keeps "guarded" meaning what it says. The common real shape —
+    /// `const dir = () => { try { return require("optional") } catch {} }` — puts
+    /// the `try` inside the function and is unaffected.
+    fn in_new_function(&mut self, body: impl FnOnce(&mut Self)) {
+        let outer = std::mem::take(&mut self.try_depth);
+        body(self);
+        self.try_depth = outer;
+    }
 }
 
 impl<'a> Visit<'a> for DependencyVisitor {
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
         self.dependencies.push(declaration.source.value.to_string());
+        self.unguarded.insert(declaration.source.value.to_string());
+        self.import_syntax.insert(declaration.source.value.to_string());
     }
 
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
         if let Expression::StringLiteral(literal) = &expression.source {
             self.dependencies.push(literal.value.to_string());
             self.dynamic_dependencies.insert(literal.value.to_string());
+            self.import_syntax.insert(literal.value.to_string());
+            // A dynamic import rejects rather than throws, so a `try` around it only
+            // catches when the call is awaited in that same `try`. That is not
+            // decidable here, so `import()` never counts as guarded.
+            self.unguarded.insert(literal.value.to_string());
         }
     }
 
     fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
         self.dependencies.push(declaration.source.value.to_string());
+        self.unguarded.insert(declaration.source.value.to_string());
+        self.import_syntax.insert(declaration.source.value.to_string());
     }
 
     fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
         if let Some(source) = &declaration.source {
             self.dependencies.push(source.value.to_string());
+            self.unguarded.insert(source.value.to_string());
+            self.import_syntax.insert(source.value.to_string());
         }
+        // `export` is a MODIFIER, not a scope: `export const p = import("./a")`
+        // holds a dependency exactly as `const p = import("./a")` does. Handling
+        // only the `from` clause and returning made every `import()` and
+        // `require()` inside an exported declaration invisible to the graph — the
+        // module was never discovered, and the emitted call fell through to the
+        // registry's external path and threw MODULE_NOT_FOUND at the call site.
+        walk_export_named_declaration(self, declaration);
     }
 
     fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
         if let Some(literal) = expression.common_js_require() {
             self.dependencies.push(literal.value.to_string());
+            self.require_syntax.insert(literal.value.to_string());
+            if self.try_depth > 0 {
+                self.guarded_requires.insert(literal.value.to_string());
+            } else {
+                self.unguarded.insert(literal.value.to_string());
+            }
         }
         walk_call_expression(self, expression);
+    }
+
+    fn visit_try_statement(&mut self, statement: &oxc_ast::ast::TryStatement<'a>) {
+        self.try_depth += 1;
+        self.visit_block_statement(&statement.block);
+        self.try_depth -= 1;
+        // The `catch` and `finally` clauses run OUTSIDE the protection of their own
+        // `try`, so a require in either is unguarded (unless some outer `try` still
+        // applies, which the unchanged depth already expresses).
+        if let Some(handler) = &statement.handler {
+            self.visit_catch_clause(handler);
+        }
+        if let Some(finalizer) = &statement.finalizer {
+            self.visit_block_statement(finalizer);
+        }
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_semantic::ScopeFlags,
+    ) {
+        self.in_new_function(|visitor| {
+            oxc_ast_visit::walk::walk_function(visitor, function, flags);
+        });
+    }
+
+    fn visit_arrow_function_expression(
+        &mut self,
+        arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+    ) {
+        self.in_new_function(|visitor| {
+            oxc_ast_visit::walk::walk_arrow_function_expression(visitor, arrow);
+        });
     }
 }
 
@@ -139,9 +258,109 @@ pub fn collect_dynamic_dependencies(program: &Program<'_>) -> BTreeSet<String> {
     visitor.dynamic_dependencies
 }
 
+/// The specifiers this module treats as OPTIONAL: every reference to them is a
+/// `require(...)` inside a `try` block of the same function.
+///
+/// This is the `try { require("bufferutil") } catch {}` idiom — near-universal in
+/// packages with native or platform-specific accelerators (`ws`, `pg`, `sharp`,
+/// `jsdom`). Node's own semantics are the contract: the `require` throws
+/// `MODULE_NOT_FOUND` and the `catch` supplies a fallback. The author has already
+/// written down that a resolution failure here is expected and handled, so failing
+/// the BUILD over it rejects a program that runs correctly.
+///
+/// The condition is deliberately all-or-nothing. One unguarded reference anywhere in
+/// the module means some code path does depend on the specifier resolving, and the
+/// missing module stays a fatal build error.
+pub fn collect_optional_dependencies(program: &Program<'_>) -> BTreeSet<String> {
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(program);
+    visitor
+        .guarded_requires
+        .into_iter()
+        .filter(|specifier| !visitor.unguarded.contains(specifier))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn optional_dependencies(source: &str) -> Vec<String> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        collect_optional_dependencies(&parsed.program).into_iter().collect()
+    }
+
+    #[test]
+    fn a_require_inside_a_try_is_optional_and_one_outside_is_not() {
+        // The `ws` / `pg` / `sharp` shape, plus its negation in the same module.
+        let optional = optional_dependencies(
+            r#"
+                try { module.exports.fast = require("bufferutil"); } catch {}
+                const always = require("./local.js");
+            "#,
+        );
+        assert_eq!(optional, ["bufferutil"]);
+    }
+
+    #[test]
+    fn one_unguarded_reference_disqualifies_a_specifier_entirely() {
+        // A module that also needs the package on an unguarded path really does
+        // depend on it resolving; the guarded copy must not launder that away.
+        assert!(
+            optional_dependencies(
+                r#"
+                    try { require("half-optional"); } catch {}
+                    const needed = require("half-optional");
+                "#,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_try_does_not_guard_a_require_that_merely_closes_over_it() {
+        // `f` runs after the `catch` is long gone, so the throw is uncaught.
+        assert!(
+            optional_dependencies(r#"try { var f = () => require("later"); } catch {}"#).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_require_in_a_catch_or_finally_clause_is_not_guarded_by_its_own_try() {
+        // Both clauses run OUTSIDE the protection of the `try` they belong to.
+        assert!(optional_dependencies(r#"try { x(); } catch { require("in-catch"); }"#).is_empty());
+        assert!(
+            optional_dependencies(r#"try { x(); } finally { require("in-finally"); }"#).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_try_wrapped_dynamic_import_or_static_import_is_never_optional() {
+        // `import()` rejects rather than throws, so a surrounding `try` catches only
+        // when the call is awaited there — not decidable from the specifier alone.
+        // A static `import` is hoisted and cannot be guarded at all.
+        assert!(optional_dependencies(r#"try { import("maybe"); } catch {}"#).is_empty());
+        assert!(
+            optional_dependencies(
+                "import x from \"eager\";\ntry { require(\"eager\"); } catch {}\n"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_try_inside_a_function_still_guards_its_own_require() {
+        // sharp's actual shape: the `try` is in the function body, so resetting the
+        // depth at the function boundary must not lose it.
+        assert_eq!(
+            optional_dependencies(
+                r#"const dir = () => { try { return require("@img/sharp-libvips-dev/include"); } catch {} return ""; };"#,
+            ),
+            ["@img/sharp-libvips-dev/include"]
+        );
+    }
 
     #[test]
     fn extracts_static_reexport_and_literal_dynamic_dependencies() {

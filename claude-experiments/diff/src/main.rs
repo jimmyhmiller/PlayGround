@@ -451,6 +451,20 @@ fn run() -> Result<(), String> {
                         summary.output_dir.display(),
                     );
                 }
+                // `next/font/local`: copy the app's own font files to the hashed URLs the
+                // generated @font-face rules already point at. Driven by the manifest the
+                // adapter wrote while generating that CSS, so the two cannot disagree.
+                let fonts = diffpack::next_font::emit_font_assets(
+                    Path::new(&project_root),
+                    &summary.output_dir,
+                )?;
+                if fonts > 0 {
+                    println!(
+                        "emitted {fonts} next/font/local file(s) under {}/{}",
+                        summary.output_dir.display(),
+                        diffpack::next_font::FONT_ASSET_DIR,
+                    );
+                }
                 // Persist the route -> client chunk mapping so the server build can
                 // generate the TanStack manifest from real emitted chunk URLs.
                 let client_manifest =
@@ -527,11 +541,19 @@ fn run() -> Result<(), String> {
                 // the `ssrModuleMapping` (Manifest #2's `moduleMap` keyed by client id
                 // -> this build's id). Written under a build-distinct file name so the
                 // react-server render build and the SSR build do not clobber each
-                // other's manifest.
+                // other's manifest: both server-like graphs emit into this one output
+                // root and the ssr pass runs last, so a shared name would lose the
+                // react-server graph's set — the set that says which client references
+                // a flight can actually carry.
                 let server_references =
                     bundler.client_references_manifest(&reachable, "server.mjs")?;
-                let server_references_path = output_root
-                    .join(diffpack::rsc::SERVER_REFERENCES_MANIFEST_FILE);
+                let server_references_path = output_root.join(if config.environment
+                    == "react-server"
+                {
+                    diffpack::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE
+                } else {
+                    diffpack::rsc::SERVER_REFERENCES_MANIFEST_FILE
+                });
                 server_references.write(&server_references_path)?;
                 println!(
                     "wrote {} ({} client reference(s) under this build's ids)",
@@ -1381,6 +1403,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
             include_str!("../scripts/rsc/next-server.mjs"),
         )
         .map_err(|error| format!("cannot write production server: {error}"))?;
+        write_ssr_module_map(&out)?;
         // instrumentation.{ts,js}: the app's boot hook (register() runs once at server
         // startup — OpenTelemetry/Sentry-style). Write the generated boot-entry wrapper
         // (which CALLS register at module load) then bundle it NATIVELY (self-invoke our
@@ -1473,6 +1496,16 @@ fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mod
 const NEXT_RENDER_CORE_MJS: &str = include_str!("../scripts/rsc/next-render-core.mjs");
 const NEXT_PRERENDER_MJS: &str = include_str!("../scripts/rsc/next-prerender.mjs");
 
+/// The manifest-join module both the orchestrator (`next-server.mjs`) and the render
+/// seam (`next-render-core.mjs`) import as a SIBLING, so it must be written next to
+/// whichever of them lands in the output dir. Shared, not duplicated, so the rule for
+/// which client references are resolvable is stated in exactly one place.
+pub(crate) fn write_ssr_module_map(output_root: &Path) -> Result<(), String> {
+    let path = output_root.join(diffpack::rsc::SSR_MODULE_MAP_FILE);
+    std::fs::write(&path, include_str!("../scripts/rsc/ssr-module-map.mjs"))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
 /// `diffpack build-app <root> static` — the SSG prerender phase. Builds NO graph:
 /// reuses the three already-emitted bundles + manifests, re-runs native route
 /// classification to write the prerender plan, then spawns the node prerenderer (the
@@ -1481,13 +1514,23 @@ const NEXT_PRERENDER_MJS: &str = include_str!("../scripts/rsc/next-prerender.mjs
 fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> {
     let output_root = project_root.join(".diffpack-output");
 
-    // Hard-error (naming which) if any of the four inputs is missing — mirrors the
+    // Hard-error (naming which) if any of the five inputs is missing — mirrors the
     // orchestrator's fail() checks. The SSG render reuses these verbatim.
     for (label, rel) in [
         ("react-server render bundle", "rsc-render/server.mjs"),
         ("SSR bundle", "server/server.mjs"),
-        ("client-references manifest", "client-references-manifest.json"),
-        ("ssr-references manifest", "server-references-manifest.json"),
+        (
+            "client-references manifest",
+            diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE,
+        ),
+        (
+            "react-server-references manifest",
+            diffpack::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE,
+        ),
+        (
+            "ssr-references manifest",
+            diffpack::rsc::SERVER_REFERENCES_MANIFEST_FILE,
+        ),
     ] {
         let p = output_root.join(rel);
         if !p.exists() {
@@ -1526,6 +1569,7 @@ fn next_prerender(project_root: &Path, output_root: &Path, static_export: bool) 
         .map_err(|error| format!("cannot write {}: {error}", core_path.display()))?;
     std::fs::write(&prerender_path, NEXT_PRERENDER_MJS)
         .map_err(|error| format!("cannot write {}: {error}", prerender_path.display()))?;
+    write_ssr_module_map(output_root)?;
 
     // Spawn the prerenderer (the app's own React runtime; the bundling stays native
     // Rust). Its stdout/stderr stream straight through; a nonzero exit fails the build.

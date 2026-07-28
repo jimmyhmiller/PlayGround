@@ -1728,6 +1728,145 @@ One later red run had a different and reproducible cause, now fixed and pinned:
 `FORCE_COLOR` inherited from the shell made node colour the stdout that ~30
 bundler tests compare byte-for-byte. See item 33.
 
+## The scale question: cal.com
+
+Every app in the corpus is small — 15 to ~425 modules, and all of them are
+example applications. That is a structural blind spot: it cannot find anything
+that only appears at production scale. `cal.com` was run as a feasibility spike
+to see whether a real application could join the corpus.
+
+**It can.** The one genuine unknown — whether a Prisma-backed app needs a live
+database to build — is settled, and the answer is no:
+
+| step | result |
+| --- | --- |
+| clone at pinned SHA `3894f37e` | 349 MB, whole repo (yarn 4 workspaces + turborepo) |
+| `corepack yarn install` at the root | exit 0, **3.4 GB** `node_modules`, Prisma client generated |
+| `next build` in `apps/web` | **exit 0**, compiled in 23.6s, **161 routes**, 488 MB `.next` |
+| database contact during the build | **none** — no `ECONNREFUSED`, `P1001`, or `PrismaClientInitializationError` anywhere in the log |
+
+Four things it needs, none of them blocking:
+
+1. Three env values its `next.config.ts:50/51/94` asserts before anything
+   builds (`NEXTAUTH_SECRET`, `CALENDSO_ENCRYPTION_KEY`, `NEXTAUTH_URL`) —
+   obvious dummies suffice.
+2. Type-checking off: the tree has a pre-existing tRPC type collision unrelated
+   to bundling. The harness already does this on its reference retry.
+3. `next build` in `apps/web` directly — **not** the repo's own `yarn build`.
+   That turbo path fails on `@calcom/prisma`'s post-install, which calls
+   `fs.rm(…, {recursive: true})`, removed in Node 26. Nothing to do with
+   bundling, and stopping at it would give the wrong answer.
+4. Harness support it did not have: whole-repo materialization with a named
+   app subdirectory, a root-level package manager, declared env, and an opt-in
+   `heavy` flag — 3.4 GB and a ~20-minute install must never land in a default
+   corpus run. **Built** — see "The harness can now express it" below.
+
+### What diffpack does with it today
+
+One file in:
+
+```
+error: apps/web/app/layout.tsx: `next/font/local` is not implemented (imported as
+  `localFont`). Next reads the font FILE to derive its family name, its @font-face
+  src and the metrics of the size-adjusted fallback; diffpack does none of that,
+  and emitting a font object anyway would render the page in a font the app never
+  asked for.
+```
+
+Not one of the ~35 example apps uses `next/font/local`, so the corpus could not
+have found this. The refusal itself is the right behaviour — faking a font object
+would have rendered cal.com in a typeface it never asked for, silently — and it
+is the first evidence that the "no silent fallback" rule pays off on an
+application nobody here wrote.
+
+**IMPLEMENTED** (`src/next_font.rs`, `src/font_file.rs`). `next/font/local` is
+now a real build-time macro rather than a refusal, derived from the oracle rather
+than guessed: `corepack yarn next build` on cal.com emits
+
+```css
+@font-face{font-family:calFont;src:url(../media/CalSans_SemiBold-s.p.<hash>.woff2)
+           format("woff2");font-display:block;font-weight:600}
+@font-face{font-family:calFont Fallback;src:local(Arial);ascent-override:98.6%;
+           descent-override:19.72%;line-gap-override:0.0%;size-adjust:101.42%}
+.<hash>__className{font-family:calFont,calFont Fallback;font-weight:600}
+.<hash>__variable{--font-cal:"calFont", "calFont Fallback"}
+```
+
+and diffpack now emits the same four override values (`98.60% / 19.72% / 0.00% /
+101.42%`, Next's `toFixed(2)` before its minifier trims the trailing zero) for the
+same family name — the name of the `const` the call is assigned to, which is what
+Next uses. The metrics are not looked up anywhere: `src/font_file.rs` reads the
+font binary (SFNT, WOFF and WOFF2 — the WOFF2 payload is a Brotli stream), takes
+`hhea.ascender/descender/lineGap` and `head.unitsPerEm` the way fontkit does, and
+averages the advance widths of Next's fixed 43-character sample string through
+`cmap`+`hmtx` to reproduce `azAvgWidth`. On cal.com's own
+`CalSans-SemiBold.woff2` that yields `462.7906976744186`, byte for byte what
+Next's fontkit computes.
+
+Supported: `src` as a string and as an array of `{path, weight, style}`
+descriptors (one `@font-face` each, with
+`pickFontFileForFallbackGeneration`'s choice driving the fallback), `display`,
+`variable`, `weight`, `style`, `fallback`, `preload` (a real
+`<link rel="preload" as="font">`), `declarations`, and `adjustFontFallback`
+(`false` / `'Arial'` / `'Times New Roman'`). The font file itself is emitted as a
+content-hashed build asset under `/_diffpack-font/` (asset-prefix aware) and
+copied by the client emit from a manifest the same pass wrote, so the URL in the
+`@font-face` and the file on disk cannot disagree. Everything still unhandled is
+a hard error naming the module and the reason — a missing `src`, a computed
+`src`, an unreadable font, an unknown `cmap` format — never a substituted face.
+
+cal.com now builds past its first graph; the next blocker is unrelated
+(Node built-ins reached from the browser graph).
+
+### The harness can now express it
+
+`next-calcom` is a corpus entry (`corpus.json`), and the three things that made
+it inexpressible are now first-class:
+
+- **Monorepo entries.** `"monorepo": { "appDir": "apps/web", "packageManager":
+  "corepack yarn", "installAt": "root" }`. The whole repository is materialized
+  and built **in place** in `.cache/<source>` instead of being copied to
+  `apps/<id>/`: `apps/web` resolves 20 sibling workspace packages only from the
+  root, a workspace install is valid only in the tree its package manager
+  installed into, and that tree is gigabytes. `lib/apps.mjs` now answers *where
+  is the tree*, *where do the builds run* and *where does `node_modules` belong*
+  once, for both `fetch.mjs` and `run.mjs` — the last of those matters, because a
+  hoisting workspace would otherwise be reported as "node_modules missing" while
+  being perfectly installed. The ~35 subdir-copy entries resolve to `apps/<id>`
+  for all three, exactly as before, and are pinned that way by a test.
+- **Declared env.** `"env"` + `"envNote"`, written to the app's `.env` (at the
+  materialized root — cal.com's config loads `../../.env` itself) and recorded
+  verbatim in `DIFFPACK_E2E_PROVENANCE.json` next to the dependency pins. A build
+  input that lives in one developer's shell is not auditable. The values must be
+  obvious dummies and a corpus test fails on anything that is not; `DATABASE_URL`
+  points at a database that does not exist, on purpose.
+- **Opt-in heavy apps.** `"heavy": true` keeps it out of a default `fetch.mjs`
+  *and* a default `run.mjs`, including when a filter names it — naming it is not
+  consent to a 20-minute install, `--heavy` is. Both commands print what they
+  left out.
+
+Two things were found while doing it, and neither was the thing being looked for:
+
+1. **The license is not what the reputation says.** cal.com's platform was
+   AGPL-3.0 with a proprietary `/ee` for years; at the pinned SHA the repository
+   has been relicensed (it calls itself Cal.diy) and its `LICENSE` is MIT.
+   Writing "AGPL-3.0" into a provenance file from memory would have been a
+   fabricated audit record. `fetch.mjs` now verifies the checkout's `LICENSE`
+   against the declared id and refuses to materialize the app if they disagree.
+   Nothing from it is vendored either way: it is cloned into the gitignored
+   `.cache/` and built there, and that is written down rather than implied.
+2. **The relaxed-checks retry silently replaced any FUNCTION config.** Next
+   accepts both a config object and a `(phase, { defaultConfig }) => config`
+   function, and the retry wrapped the loaded value with `{ ...base, … }`.
+   Spreading a function yields `{}` — so for cal.com (and for any app whose
+   config is a function) that retry did not disable two checks, it discarded the
+   entire config, rewrites and `transpilePackages` included, and built a
+   *different application* as the "reference". Every difference would then have
+   been charged to diffpack. Fixed, and pinned by tests that evaluate the bytes
+   the wrapper writes for the object, ESM-function and CommonJS-function shapes.
+   With the fix, `next build` on cal.com through the harness's own adapter exits
+   0 in 33s and emits the same 161 routes as the hand-run build.
+
 ## Scoreboard
 
 | | at the start | after the two fix rounds | after the harness round | now |

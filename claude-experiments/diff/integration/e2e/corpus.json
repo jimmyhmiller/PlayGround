@@ -27,6 +27,16 @@
       "license": "MIT",
       "copyright": "Copyright (c) 2019-present VoidZero Inc. and Vite contributors",
       "note": "The create-vite templates are the everyday shape of a Vite app: exactly what `npm create vite` scaffolds."
+    },
+    "calcom": {
+      "repo": "https://github.com/calcom/cal.com",
+      "sha": "3894f37e14eae5082770f35ff1fde72110c0e6b6",
+      "sparse": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "licenseNote": "Read off the pinned tree, not off the project's reputation: cal.com's platform was for years AGPL-3.0 with a proprietary /ee, and at this SHA the repository has been relicensed (it calls itself Cal.diy) and its LICENSE file is MIT. fetch.mjs verifies that file against this field and fails rather than write a provenance that misdescribes the checkout. Either way nothing here is vendored: the repository is CLONED into the gitignored integration/e2e/.cache/ and built in place, diffpack redistributes none of it, and this note exists because a copyleft upstream in a test corpus would be exactly the case where that distinction matters.",
+      "copyright": "Copyright (c) 2020-present Cal.com, Inc.",
+      "note": "Not an example: the product itself. `\"sparse\": []` means the whole repository is checked out, because apps/web only resolves from the workspace root."
     }
   },
   "pins": {
@@ -423,6 +433,40 @@
       "routes": [
         "/"
       ]
+    },
+    {
+      "id": "next-calcom",
+      "kind": "next-app",
+      "source": "calcom",
+      "heavy": true,
+      "heavyNote": "A 349 MB checkout and 3.4 GB of node_modules that take ~20 minutes to install. Excluded from the default fetch and the default run: the other apps have to stay usable.",
+      "monorepo": {
+        "appDir": "apps/web",
+        "packageManager": "corepack yarn",
+        "installAt": "root"
+      },
+      "envFile": ".env",
+      "env": {
+        "NEXTAUTH_SECRET": "diffpack-e2e-not-a-real-secret",
+        "CALENDSO_ENCRYPTION_KEY": "diffpack-e2e-not-a-real-key-000000",
+        "NEXTAUTH_URL": "http://localhost:3000",
+        "NEXT_PUBLIC_WEBAPP_URL": "http://localhost:3000",
+        "NEXT_PUBLIC_WEBSITE_URL": "http://localhost:3000",
+        "DATABASE_URL": "postgresql://diffpack-e2e:diffpack-e2e@127.0.0.1:5432/diffpack_e2e_no_such_database",
+        "DATABASE_DIRECT_URL": "postgresql://diffpack-e2e:diffpack-e2e@127.0.0.1:5432/diffpack_e2e_no_such_database",
+        "CALCOM_TELEMETRY_DISABLED": "1",
+        "NEXT_TELEMETRY_DISABLED": "1"
+      },
+      "envNote": "apps/web/next.config.ts throws unless NEXTAUTH_SECRET, CALENDSO_ENCRYPTION_KEY and NEXTAUTH_URL are set, and loads ../../.env itself, so the file belongs at the repository root. The database URL points at a database that does not exist, on purpose: the reference build is only an oracle if it needs no live service, and a build that quietly started talking to one would be measuring something else.",
+      "relaxChecks": true,
+      "relaxChecksNote": "The tree at this SHA has a pre-existing tRPC type collision that has nothing to do with bundling. Type and lint gates are disabled for the REFERENCE build only (and removed before diffpack sees the app); the oracle only has to be a running app.",
+      "why": "The largest real Next.js application this suite can reach: 985 TS/TSX files in apps/web, 20 sibling workspace packages, a 667-line next.config.ts, yarn 4 workspaces and Prisma. Everything the small examples test one at a time, at once, in a tree nobody here wrote.",
+      "routes": [
+        "/maintenance",
+        "/video/no-meeting-found",
+        "/auth/error"
+      ],
+      "routesNote": "Almost every cal.com route is dynamic (ƒ) and most read the database. These three are server components that render from i18n and UI only, so they are observable with the dead DATABASE_URL above."
     }
   ]
 }

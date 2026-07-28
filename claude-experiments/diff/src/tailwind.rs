@@ -270,6 +270,246 @@ pub fn needs_native_tailwind_compile(css: &str) -> bool {
     is_tailwind_entry(css) || is_tailwind_v3_entry(css)
 }
 
+// ---------------------------------------------------------------------------
+// Native-engine capability check (see `crate::tailwind_delegate`)
+// ---------------------------------------------------------------------------
+
+/// Plain CSS at-rules a Tailwind entry may carry at top level that the compiler
+/// reproduces verbatim: they hold no Tailwind semantics.
+const VERBATIM_AT_RULES: &[&str] = &[
+    "@keyframes",
+    "@media",
+    "@supports",
+    "@font-face",
+    "@property",
+    "@container",
+    "@counter-style",
+    "@font-feature-values",
+    "@page",
+    "@scope",
+    "@starting-style",
+];
+
+/// At-rules the native engine gives a Tailwind meaning to at top level.
+const TAILWIND_AT_RULES: &[&str] = &[
+    "@import",
+    "@layer",
+    "@source",
+    "@config",
+    "@tailwind",
+    "@theme",
+    "@custom-variant",
+    "@utility",
+];
+
+/// Why the native Tailwind engine cannot serve a given entry.
+///
+/// Each variant is a *capability* gap, decided by reading the entry — never by
+/// compiling it and catching a failure. A malformed stylesheet is NOT a gap: it
+/// produces none of these and stays a hard error from the native compiler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeGap {
+    /// `@plugin "<name>"` — a JavaScript Tailwind plugin. Its utilities,
+    /// variants and base rules are arbitrary JS; no CSS-level engine can know
+    /// them.
+    Plugin(String),
+    /// A top-level at-rule with no native meaning (`@variant`, `@reference`, …).
+    AtRule(String),
+    /// `@apply <class>` naming a utility neither a built-in nor an app
+    /// `@utility` provides — in practice, one a `@plugin` registers.
+    Apply { class: String, detail: String },
+}
+
+impl std::fmt::Display for NativeGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NativeGap::Plugin(name) => write!(
+                f,
+                "it loads the JavaScript Tailwind plugin `{name}` (`@plugin`), whose utilities \
+                 and variants exist only inside that plugin"
+            ),
+            NativeGap::AtRule(rule) => write!(
+                f,
+                "it uses the at-rule `{rule}`, which diffpack's Tailwind engine does not implement"
+            ),
+            NativeGap::Apply { class, detail } => write!(
+                f,
+                "`@apply {class}` names a utility no built-in and no `@utility` provides ({detail})"
+            ),
+        }
+    }
+}
+
+/// Reads a Tailwind entry and reports the first thing in it the native engine
+/// cannot serve, or `None` when the native engine owns the whole sheet.
+///
+/// This is the delegation gate for [`crate::tailwind_delegate`]. It is a
+/// *capability* question answered from the CSS: the three gaps in [`NativeGap`]
+/// are enumerated and looked for directly. Anything else — malformed CSS, an
+/// unresolvable theme reference, a scanned class that is simply not a utility —
+/// is not a gap and keeps its existing native behavior (hard error, or the
+/// lenient skip [`compile_with_theme_lenient`] performs).
+///
+/// `app_theme_css` is the same theme source the native compile would use; the
+/// `@apply` probe needs it because whether `text-brand` resolves depends on the
+/// tokens in scope.
+pub fn native_gap(css: &str, app_theme_css: Option<&str>) -> Option<NativeGap> {
+    if let Some(gap) = at_rule_gap(css) {
+        return Some(gap);
+    }
+    apply_gap(css, app_theme_css)
+}
+
+/// Scans the entry's top-level at-rules for `@plugin` or for a rule outside the
+/// native set. Strings, comments and nested (in-block) at-rules are skipped, so
+/// a `@media` body's `@apply` or a `content: "@plugin"` never matches.
+fn at_rule_gap(css: &str) -> Option<NativeGap> {
+    let bytes = css.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = match css[index + 2..].find("*/") {
+                    Some(rel) => index + 2 + rel + 2,
+                    None => bytes.len(),
+                };
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'@' if depth == 0 => {
+                let mut end = index + 1;
+                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-')
+                {
+                    end += 1;
+                }
+                let name = &css[index..end];
+                if name == "@plugin" {
+                    return Some(NativeGap::Plugin(at_rule_argument(&css[end..])));
+                }
+                if !TAILWIND_AT_RULES.contains(&name) && !VERBATIM_AT_RULES.contains(&name) {
+                    return Some(NativeGap::AtRule(name.to_string()));
+                }
+                index = end;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The quoted argument of an at-rule (`@plugin "tailwind-scrollbar" { … }` ->
+/// `tailwind-scrollbar`), or the raw prelude when it carries no quotes.
+fn at_rule_argument(rest: &str) -> String {
+    let prelude = rest.split(['{', ';']).next().unwrap_or(rest).trim();
+    match prelude.find(['"', '\'']) {
+        Some(open) => {
+            let quote = prelude.as_bytes()[open] as char;
+            let inner = &prelude[open + 1..];
+            match inner.find(quote) {
+                Some(close) => inner[..close].to_string(),
+                None => prelude.to_string(),
+            }
+        }
+        None => prelude.to_string(),
+    }
+}
+
+/// Resolves every `@apply` the entry's own rules make, against the same theme,
+/// `@utility` and `@custom-variant` registry the native compile would build, and
+/// reports the first one that has no answer.
+///
+/// Only the *resolution* runs — no candidate is rendered and no stylesheet is
+/// assembled. A parse failure here is not a capability gap: it means the CSS is
+/// malformed, which the native compile reports properly, so it yields `None`.
+fn apply_gap(css: &str, app_theme_css: Option<&str>) -> Option<NativeGap> {
+    let mut theme_src = app_theme_css.unwrap_or(THEME_CSS).to_string();
+    let inline_theme = extract_theme_blocks(css);
+    if !inline_theme.is_empty() {
+        theme_src.push('\n');
+        theme_src.push_str(&inline_theme);
+    }
+    Theme::validate_wildcards(&theme_src).ok()?;
+    let theme = Theme::parse(&theme_src);
+    let mut custom_variants = scan_custom_variants(&theme_src).ok()?;
+    let items = parse_top_level(css).ok()?;
+    let mut custom_utilities = CustomUtilities::default();
+    for item in &items {
+        match item {
+            TopItem::CustomVariant { name, template } => {
+                custom_variants.insert(name.clone(), template.clone());
+            }
+            TopItem::Utility { name, body } => match name.strip_suffix("-*") {
+                Some(prefix) if !prefix.is_empty() && !prefix.contains('*') => {
+                    custom_utilities.functional.insert(prefix.to_string(), body.clone());
+                }
+                Some(_) => return None,
+                None if !name.contains('*') => {
+                    custom_utilities.statics.insert(name.clone(), body.clone());
+                }
+                None => return None,
+            },
+            _ => {}
+        }
+    }
+    let dialect = Dialect::of(css);
+    // Scratch: the probe generates nothing, so the `--tw-*` property registrations
+    // an expansion would contribute are discarded.
+    let mut tw_props = BTreeSet::new();
+    let mut probe = |rule: &StyleRule| -> Option<NativeGap> {
+        let error = expand_rule(rule, &theme, &mut tw_props, &custom_utilities, dialect).err()?;
+        Some(NativeGap::Apply {
+            class: applied_class(&error).unwrap_or_else(|| rule.selector.clone()),
+            detail: error,
+        })
+    };
+    for item in items {
+        match item {
+            TopItem::Layer { names, body } => {
+                if !matches!(
+                    names.split_whitespace().next(),
+                    Some("base" | "components" | "utilities")
+                ) {
+                    continue;
+                }
+                for rule in parse_rules(&body).ok()? {
+                    if let Some(gap) = probe(&rule) {
+                        return Some(gap);
+                    }
+                }
+            }
+            TopItem::Rule { selector, body } => {
+                if let Some(gap) = probe(&StyleRule { selector, body }) {
+                    return Some(gap);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The class named by an `@apply` expansion error (`` `@apply foo`: … ``).
+fn applied_class(error: &str) -> Option<String> {
+    let rest = error.strip_prefix("`@apply ")?;
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
 /// Compiles a Tailwind v4 CSS entry into a plain, self-contained stylesheet.
 ///
 /// `candidate_classes` are the utility class tokens scanned from the app's source
@@ -354,7 +594,14 @@ fn compile_impl(
         if user.defined_classes.contains(class) || is_marker_class(class) {
             continue;
         }
-        match render_utility(class, &theme, &mut tw_props, &user.custom_variants, dialect) {
+        match render_utility(
+            class,
+            &theme,
+            &mut tw_props,
+            &user.custom_variants,
+            &user.custom_utilities,
+            dialect,
+        ) {
             Ok(rule) => groups
                 .entry((rule.order, rule.media_key))
                 .or_default()
@@ -369,7 +616,7 @@ fn compile_impl(
             // surface where silence would ship a broken style.
             Err(Fail::Invalid) => {}
             Err(Fail::Unsupported(error)) => {
-                if utility_root_recognized(class) {
+                if utility_root_recognized(class, &user.custom_utilities) {
                     // strict: keep the full diagnostic (a real engine gap to fix);
                     // lenient: just the class name for a compact skip warning.
                     errors.push(if strict { error } else { class.clone() });
@@ -399,6 +646,8 @@ fn compile_impl(
         }
     }
     collect_theme_vars_str(&user.base_layer, &theme, &mut referenced);
+    collect_theme_vars_str(&user.components_layer, &theme, &mut referenced);
+    collect_theme_vars_str(&user.utilities_layer, &theme, &mut referenced);
     collect_theme_vars_str(&user.postlude, &theme, &mut referenced);
     // The preflight always relies on the default font-family tokens.
     for always in ["--font-sans", "--font-mono", "--default-font-family", "--default-mono-font-family"] {
@@ -461,7 +710,15 @@ fn compile_impl(
     out.push_str(&user.base_layer);
     out.push('}');
 
-    out.push_str("@layer components;");
+    // The components layer: empty (a bare layer declaration that just fixes the
+    // layer's cascade position) unless the app wrote `@layer components { … }`.
+    if user.components_layer.is_empty() {
+        out.push_str("@layer components;");
+    } else {
+        out.push_str("@layer components{");
+        out.push_str(&user.components_layer);
+        out.push('}');
+    }
 
     out.push_str("@layer utilities{");
     for ((_, media_key), mut rules) in groups {
@@ -488,6 +745,9 @@ fn compile_impl(
             out.push('}');
         }
     }
+    // The app's own `@layer utilities` rules follow the generated ones, which is
+    // where they sit relative to its `@import 'tailwindcss'`.
+    out.push_str(&user.utilities_layer);
     out.push('}');
 
     // The app's own plain (unlayered) rules follow the layers, exactly where
@@ -2277,12 +2537,17 @@ struct RenderedRule {
 /// utility family owns, or is one of the exact utility keywords. Only these
 /// candidates hard-error when unsupported; everything else is a non-utility
 /// source token Tailwind's scanner would also ignore.
-fn utility_root_recognized(class: &str) -> bool {
+fn utility_root_recognized(class: &str, custom_utilities: &CustomUtilities) -> bool {
     let segments = split_variants(class);
     let base = segments.last().copied().unwrap_or(class);
     let base = base.strip_prefix('!').unwrap_or(base);
     let base = base.strip_suffix('!').unwrap_or(base);
     let base = base.strip_prefix('-').unwrap_or(base);
+    // A candidate the app's own `@utility` claims is a utility BY DEFINITION —
+    // an engine gap in its body must never be filtered out as a stray token.
+    if custom_utilities.lookup(base).is_some() {
+        return true;
+    }
     const PREFIXES: &[&str] = &[
         "bg-", "text-", "font-", "border-", "rounded-", "ring-", "outline-", "shadow-",
         "inset-", "top-", "right-", "bottom-", "left-", "z-", "translate-", "rotate-",
@@ -2319,11 +2584,37 @@ fn utility_root_recognized(class: &str) -> bool {
 
 /// Renders a full utility class (with any variant chain) into a CSS rule string
 /// plus its output grouping. Errors if the token is not a recognized utility.
+/// Splits Tailwind's important marker off a utility name: `bg-black!` (the v4
+/// spelling) or the legacy `!bg-black` (v3). The marker is part of the CANDIDATE,
+/// not of the utility, so every place that resolves a utility name — a scanned
+/// class, an `@apply` in a rule, an `@apply` inside an `@utility` body — has to
+/// strip it before the lookup and add `!important` to what comes back.
+fn split_important(base: &str) -> (&str, bool) {
+    if let Some(rest) = base.strip_prefix('!') {
+        (rest, true)
+    } else if let Some(rest) = base.strip_suffix('!') {
+        (rest, true)
+    } else {
+        (base, false)
+    }
+}
+
+/// Appends `!important` to a declaration value, unless the value already
+/// carries it (a `@utility` body may write it literally).
+fn with_important(value: &str, important: bool) -> String {
+    if important && !value.contains("!important") {
+        format!("{value}!important")
+    } else {
+        value.to_string()
+    }
+}
+
 fn render_utility(
     class: &str,
     theme: &Theme,
     tw_props: &mut BTreeSet<TwProp>,
     custom_variants: &std::collections::BTreeMap<String, String>,
+    custom_utilities: &CustomUtilities,
     dialect: Dialect,
 ) -> Result<RenderedRule, Fail> {
     // Split on `:` only outside brackets: arbitrary values may contain `:`
@@ -2336,13 +2627,45 @@ fn render_utility(
 
     // The important marker: `!` prefixing the utility (v4) or, legacy, at its
     // end. Appends `!important` to every declaration.
-    let (base, important) = if let Some(rest) = base.strip_prefix('!') {
-        (rest, true)
-    } else if let Some(rest) = base.strip_suffix('!') {
-        (rest, true)
-    } else {
-        (base, false)
-    };
+    let (base, important) = split_important(base);
+
+    // An app-defined `@utility` wins over the built-in of the same name — that
+    // is what registering one means. Its body may nest, so it is emitted as raw
+    // nested CSS (exactly the shape Tailwind emits) rather than flat declarations.
+    if !custom_utilities.is_empty()
+        && let Some(found) = custom_utilities.lookup(base)
+    {
+        let bang = if important { "!important" } else { "" };
+        let expanded = expand_utility_body(
+            found.body, base, found.value, found.modifier, theme, tw_props, dialect, bang,
+        )?;
+        // Every declaration dropped: this candidate's value satisfies none of the
+        // utility's `--value(…)` forms, so Tailwind generates nothing for it.
+        if expanded.is_empty() {
+            return Err(Fail::Invalid);
+        }
+        let escaped = escape_class(class);
+        let mut body = String::new();
+        for (prop, value) in &expanded.decls {
+            body.push_str(&format!("{prop}:{value}{bang};"));
+        }
+        body.push_str(&expanded.nested);
+        let mut css = String::new();
+        for pseudo in std::iter::once(&spec.pseudo).chain(spec.extra_pseudos.iter()) {
+            let core = format!("{}.{escaped}{}{}", spec.prefix, spec.is_clause, pseudo);
+            let selector = match &spec.wrap {
+                Some((pre, post)) => format!("{pre}{core}{post}"),
+                None => core,
+            };
+            css.push_str(&format!("{selector}{{{body}}}"));
+        }
+        return Ok(RenderedRule {
+            css,
+            order: spec.order,
+            media_key: spec.media.join("|"),
+            rank: 100,
+        });
+    }
 
     // The `container` utility is a single rule (`width:100%`) carrying a nested
     // `@media (width >= <bp>) { max-width: <bp> }` block for every theme
@@ -6809,7 +7132,7 @@ fn drop_shadow_layers(value: &str, sized: bool) -> String {
         .join(" ")
 }
 
-/// Splits a value on commas outside parentheses.
+/// Splits a value on commas outside parentheses and brackets.
 fn split_top_level_commas(value: &str) -> Vec<&str> {
     let bytes = value.as_bytes();
     let mut parts = Vec::new();
@@ -6817,8 +7140,8 @@ fn split_top_level_commas(value: &str) -> Vec<&str> {
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
             b',' if depth == 0 => {
                 parts.push(&value[start..i]);
                 start = i + 1;
@@ -7161,10 +7484,18 @@ fn escape_class(class: &str) -> String {
 struct UserCss {
     /// `@custom-variant` definitions: variant name -> `&`-rooted template.
     custom_variants: std::collections::BTreeMap<String, String>,
+    /// `@utility` definitions the app registers.
+    custom_utilities: CustomUtilities,
     /// The `@layer base` body: the app's base rules (with `@apply` expanded) plus
     /// their `dark:` companions as `@media (prefers-color-scheme: dark)` rules
     /// (or the custom `dark` template's selector form when one is defined).
     base_layer: String,
+    /// The `@layer components` body, expanded the same way.
+    components_layer: String,
+    /// The app's own `@layer utilities` body, expanded the same way. Emitted
+    /// AFTER the generated utilities, which is where the app wrote it relative
+    /// to its `@import 'tailwindcss'`.
+    utilities_layer: String,
     /// Plain (unlayered) rules passed through after the layers, in source order.
     postlude: String,
     /// Class names the app's own CSS defines (`.markpad-preview`, …): candidates
@@ -7182,6 +7513,8 @@ fn process_user_css(
     dialect: Dialect,
 ) -> Result<UserCss, String> {
     let mut base_layer = String::new();
+    let mut components_layer = String::new();
+    let mut utilities_layer = String::new();
     let mut postlude = String::new();
     let mut defined_classes = BTreeSet::new();
     let items = parse_top_level(css)?;
@@ -7189,9 +7522,30 @@ fn process_user_css(
     // where it appears. `seed_variants` are the ones the theme source carries (a
     // legacy JS config's `darkMode`); the app's own CSS overrides them.
     let mut custom_variants = seed_variants;
+    // `@utility` definitions likewise apply sheet-wide, and must be registered
+    // before any `@apply` in a `@layer base` rule can reference one.
+    let mut custom_utilities = CustomUtilities::default();
     for item in &items {
-        if let TopItem::CustomVariant { name, template } = item {
-            custom_variants.insert(name.clone(), template.clone());
+        match item {
+            TopItem::CustomVariant { name, template } => {
+                custom_variants.insert(name.clone(), template.clone());
+            }
+            TopItem::Utility { name, body } => {
+                if let Some(prefix) = name.strip_suffix("-*") {
+                    if prefix.is_empty() || prefix.contains('*') {
+                        return Err(format!("malformed functional utility name `@utility {name}`"));
+                    }
+                    custom_utilities.functional.insert(prefix.to_string(), body.clone());
+                } else {
+                    if name.contains('*') {
+                        return Err(format!(
+                            "`@utility {name}`: a `*` is only allowed as the `-*` suffix of a functional utility"
+                        ));
+                    }
+                    custom_utilities.statics.insert(name.clone(), body.clone());
+                }
+            }
+            _ => {}
         }
     }
     // The `dark:` companion of an expanded rule: under a custom `dark` variant
@@ -7218,6 +7572,9 @@ fn process_user_css(
         match item {
             TopItem::Import => {}
             TopItem::CustomVariant { .. } => {}
+            // Registered above; a definition emits nothing on its own — only the
+            // candidates that match it do.
+            TopItem::Utility { .. } => {}
             // `@theme` tokens are merged into the theme in `compile_with_theme` and
             // emitted (when referenced) by the theme layer — nothing to output here.
             TopItem::Theme => {}
@@ -7226,20 +7583,28 @@ fn process_user_css(
                 postlude.push_str(&block);
             }
             TopItem::Layer { names, body } => {
-                if names.split_whitespace().next() != Some("base") {
-                    return Err(format!(
-                        "unsupported at-rule `@layer {names}` in Tailwind CSS entry (native compiler handles `@layer base`)"
-                    ));
-                }
+                // Tailwind v4's cascade layers an app may write into. Each one is
+                // expanded identically and emitted into the matching output layer,
+                // so a rule keeps the priority the app gave it.
+                let out = match names.split_whitespace().next() {
+                    Some("base") => &mut base_layer,
+                    Some("components") => &mut components_layer,
+                    Some("utilities") => &mut utilities_layer,
+                    _ => {
+                        return Err(format!(
+                            "unsupported at-rule `@layer {names}` in Tailwind CSS entry (native compiler handles `@layer base`, `@layer components` and `@layer utilities`)"
+                        ));
+                    }
+                };
                 let rules = parse_rules(&body)?;
                 for rule in rules {
                     collect_selector_classes(&rule.selector, &mut defined_classes);
-                    let (main, dark) = expand_rule(&rule, theme, tw_props, dialect)?;
+                    let (main, dark) = expand_rule(&rule, theme, tw_props, &custom_utilities, dialect)?;
                     if let Some(main) = main {
-                        base_layer.push_str(&main);
+                        out.push_str(&main);
                     }
                     if let Some(dark) = dark {
-                        emit_dark(&mut base_layer, &rule.selector, &dark, &custom_variants);
+                        emit_dark(out, &rule.selector, &dark, &custom_variants);
                     }
                 }
             }
@@ -7252,7 +7617,7 @@ fn process_user_css(
                     selector: selector.clone(),
                     body,
                 };
-                let (main, dark) = expand_rule(&rule, theme, tw_props, dialect)?;
+                let (main, dark) = expand_rule(&rule, theme, tw_props, &custom_utilities, dialect)?;
                 if let Some(main) = main {
                     postlude.push_str(&main);
                 }
@@ -7264,7 +7629,10 @@ fn process_user_css(
     }
     Ok(UserCss {
         custom_variants,
+        custom_utilities,
         base_layer,
+        components_layer,
+        utilities_layer,
         postlude,
         defined_classes,
     })
@@ -7292,10 +7660,566 @@ fn collect_selector_classes(selector: &str, out: &mut BTreeSet<String>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `@utility` — app-defined utilities
+// ---------------------------------------------------------------------------
+
+/// The `@utility` definitions an app's stylesheet registers.
+///
+/// Tailwind v4 has two forms. A STATIC one (`@utility tab-4 { tab-size: 4 }`)
+/// matches one exact class name. A FUNCTIONAL one (`@utility tab-* { … }`) owns a
+/// whole family: the class carries a value after the prefix, and the body's
+/// `--value(…)` calls decide which spellings of that value are accepted.
+#[derive(Default)]
+struct CustomUtilities {
+    /// name -> body, for `@utility <name> { … }`.
+    statics: BTreeMap<String, String>,
+    /// prefix -> body, for `@utility <prefix>-* { … }` (the `-*` is not stored).
+    functional: BTreeMap<String, String>,
+}
+
+/// A candidate matched against the registered `@utility` definitions.
+struct CustomMatch<'a> {
+    body: &'a str,
+    /// The value segment after a functional utility's prefix (`4`, `[3px]`),
+    /// or `None` for a static utility (whose body may not call `--value(…)`).
+    value: Option<&'a str>,
+    /// The `/…` modifier, when the candidate carries one.
+    modifier: Option<&'a str>,
+}
+
+impl CustomUtilities {
+    fn is_empty(&self) -> bool {
+        self.statics.is_empty() && self.functional.is_empty()
+    }
+
+    /// Matches a candidate base (variants and `!` already stripped) against the
+    /// registered definitions. A static name wins over a functional prefix, and
+    /// among functional prefixes the LONGEST match wins (so `@utility stack-y-*`
+    /// beats `@utility stack-*` for `stack-y-4`, exactly as Tailwind resolves it).
+    fn lookup<'a>(&'a self, base: &'a str) -> Option<CustomMatch<'a>> {
+        if let Some(body) = self.statics.get(base) {
+            return Some(CustomMatch { body, value: None, modifier: None });
+        }
+        let (core, modifier) = split_utility_modifier(base);
+        let mut best: Option<(&String, &String)> = None;
+        for (prefix, body) in &self.functional {
+            let Some(rest) = core.strip_prefix(prefix.as_str()) else {
+                continue;
+            };
+            if !rest.starts_with('-') || rest.len() < 2 {
+                continue;
+            }
+            if best.is_none_or(|(previous, _)| prefix.len() > previous.len()) {
+                best = Some((prefix, body));
+            }
+        }
+        let (prefix, body) = best?;
+        Some(CustomMatch {
+            body,
+            value: Some(&core[prefix.len() + 1..]),
+            modifier,
+        })
+    }
+}
+
+/// Splits a candidate base into its value and its `/<modifier>`, ignoring a `/`
+/// inside an arbitrary value (`[url(a/b)]`) or a function call.
+fn split_utility_modifier(base: &str) -> (&str, Option<&str>) {
+    let bytes = base.as_bytes();
+    let mut depth = 0i32;
+    let mut at = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' | b'(' => depth += 1,
+            b']' | b')' => depth -= 1,
+            b'/' if depth == 0 => at = Some(i),
+            _ => {}
+        }
+    }
+    match at {
+        Some(i) => (&base[..i], Some(&base[i + 1..])),
+        None => (base, None),
+    }
+}
+
+/// One statement inside a `@utility` body.
+enum UtilityItem {
+    /// `prop: value`
+    Decl { prop: String, value: String },
+    /// `@apply <classes>`
+    Apply(String),
+    /// A nested rule or at-rule: `&:hover { … }`, `@media (…) { … }`.
+    Block { prelude: String, body: String },
+}
+
+/// Splits a `@utility` body into declarations, `@apply` statements and nested
+/// blocks. Anything else (a `;`-terminated at-rule) is a hard error naming it.
+fn parse_utility_items(body: &str, name: &str) -> Result<Vec<UtilityItem>, String> {
+    let bytes = body.as_bytes();
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        i = skip_ws_and_comments(body, i);
+        if i >= bytes.len() {
+            break;
+        }
+        // Find the end of this statement: a `;` or a `{` at nesting depth 0.
+        let mut j = i;
+        let mut depth = 0i32;
+        let mut stop = None;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b';' if depth == 0 => {
+                    stop = Some((b';', j));
+                    break;
+                }
+                b'{' if depth == 0 => {
+                    stop = Some((b'{', j));
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        match stop {
+            Some((b'{', brace)) => {
+                let prelude = body[i..brace].split_whitespace().collect::<Vec<_>>().join(" ");
+                let (inner, end) = read_braced(body, brace)?;
+                items.push(UtilityItem::Block { prelude, body: inner });
+                i = end;
+            }
+            other => {
+                let end = match other {
+                    Some((_, semi)) => semi,
+                    None => bytes.len(),
+                };
+                let statement = body[i..end].trim();
+                i = if end < bytes.len() { end + 1 } else { end };
+                if statement.is_empty() {
+                    continue;
+                }
+                if let Some(classes) = statement.strip_prefix("@apply") {
+                    items.push(UtilityItem::Apply(classes.trim().to_string()));
+                    continue;
+                }
+                if statement.starts_with('@') {
+                    return Err(format!(
+                        "`@utility {name}`: unsupported statement {statement:?} (only declarations, `@apply`, and nested rules are)"
+                    ));
+                }
+                let Some((prop, value)) = statement.split_once(':') else {
+                    return Err(format!(
+                        "`@utility {name}`: {statement:?} is neither a declaration (`prop: value`) nor a nested rule"
+                    ));
+                };
+                items.push(UtilityItem::Decl {
+                    prop: prop.trim().to_string(),
+                    value: value.trim().to_string(),
+                });
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// A `@utility` body with its value functions resolved.
+struct ExpandedUtilityBody {
+    /// Top-level declarations, in source order.
+    decls: Vec<(String, String)>,
+    /// Nested rules/at-rules, already serialized (CSS nesting, `&`-rooted —
+    /// which is exactly what Tailwind emits for these).
+    nested: String,
+}
+
+impl ExpandedUtilityBody {
+    fn is_empty(&self) -> bool {
+        self.decls.is_empty() && self.nested.is_empty()
+    }
+}
+
+/// Expands one `@utility` body against a candidate's value and modifier.
+///
+/// Tailwind's rule for functional utilities: a declaration whose `--value(…)` or
+/// `--modifier(…)` call resolves to nothing is DROPPED, and a utility whose whole
+/// body drops does not match the candidate at all. That is how the two-line form
+///
+/// ```css
+/// @utility stack-y-* { margin-top: --spacing(--value(integer));
+///                      margin-top: --value([length]); }
+/// ```
+///
+/// accepts both `stack-y-4` and `stack-y-[3px]` while generating nothing for
+/// `stack-y-px`.
+#[allow(clippy::too_many_arguments)]
+fn expand_utility_body(
+    body: &str,
+    name: &str,
+    value: Option<&str>,
+    modifier: Option<&str>,
+    theme: &Theme,
+    tw_props: &mut BTreeSet<TwProp>,
+    dialect: Dialect,
+    bang: &str,
+) -> Result<ExpandedUtilityBody, Fail> {
+    let items = parse_utility_items(body, name).map_err(Fail::Unsupported)?;
+    let mut decls: Vec<(String, String)> = Vec::new();
+    let mut nested = String::new();
+    for item in items {
+        match item {
+            UtilityItem::Decl { prop, value: text } => {
+                let Some(resolved) =
+                    substitute_value_functions(&text, name, value, modifier, theme)?
+                else {
+                    continue;
+                };
+                decls.push((prop, resolved));
+            }
+            UtilityItem::Apply(classes) => {
+                for class in classes.split_whitespace() {
+                    let (applied, important) = split_important(class);
+                    let utility = generate_utility(applied, class, theme, tw_props, dialect)?;
+                    for (prop, value) in utility.decls {
+                        decls.push((prop, with_important(&value, important)));
+                    }
+                }
+            }
+            UtilityItem::Block { prelude, body: inner } => {
+                let Some(prelude) =
+                    substitute_value_functions(&prelude, name, value, modifier, theme)?
+                else {
+                    continue;
+                };
+                let expanded = expand_utility_body(
+                    &inner, name, value, modifier, theme, tw_props, dialect, bang,
+                )?;
+                if expanded.is_empty() {
+                    continue;
+                }
+                nested.push_str(&prelude);
+                nested.push('{');
+                for (prop, value) in &expanded.decls {
+                    nested.push_str(&format!("{prop}:{value}{bang};"));
+                }
+                nested.push_str(&expanded.nested);
+                nested.push('}');
+            }
+        }
+    }
+    Ok(ExpandedUtilityBody { decls, nested })
+}
+
+/// Substitutes Tailwind's CSS value functions (`--value()`, `--modifier()`,
+/// `--spacing()`) in a `@utility` body fragment.
+///
+/// `Ok(None)` means a `--value()`/`--modifier()` call matched nothing, so the
+/// enclosing declaration is dropped (Tailwind's own rule). `Err` is an engine gap
+/// — a function or data type this compiler does not implement — and is never
+/// silently swallowed.
+fn substitute_value_functions(
+    text: &str,
+    name: &str,
+    value: Option<&str>,
+    modifier: Option<&str>,
+    theme: &Theme,
+) -> Result<Option<String>, Fail> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // A Tailwind value function is a `--ident(` at an identifier boundary;
+        // `var(--spacing)` is a plain custom-property reference and is left alone.
+        let boundary = i == 0
+            || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'-' || bytes[i - 1] == b'_');
+        if !(boundary && text[i..].starts_with("--")) {
+            out.push(text[i..].chars().next().expect("index is a char boundary"));
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let mut j = i + 2;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_') {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b'(' {
+            out.push_str(&text[i..j]);
+            i = j;
+            continue;
+        }
+        let function = &text[i..j];
+        let (args, end) = read_parenthesized(text, j).map_err(Fail::Unsupported)?;
+        match function {
+            "--value" | "--modifier" => {
+                let subject = if function == "--value" { value } else { modifier };
+                let Some(resolved) = resolve_value_call(&args, subject, name, function, theme)?
+                else {
+                    return Ok(None);
+                };
+                out.push_str(&resolved);
+            }
+            "--spacing" => {
+                let Some(inner) = substitute_value_functions(&args, name, value, modifier, theme)?
+                else {
+                    return Ok(None);
+                };
+                if !theme.contains("--spacing") {
+                    return Err(Fail::Unsupported(format!(
+                        "`@utility {name}`: `--spacing({inner})` needs a `--spacing` theme variable, and this theme defines none"
+                    )));
+                }
+                out.push_str(&format!("calc(var(--spacing) * {})", inner.trim()));
+            }
+            other => {
+                return Err(Fail::Unsupported(format!(
+                    "`@utility {name}`: the Tailwind CSS function `{other}()` is not implemented by diffpack's Tailwind compiler"
+                )));
+            }
+        }
+        i = end;
+    }
+    Ok(Some(out))
+}
+
+/// Reads a `( … )` group starting at the `(` at `open`. Returns the inner text
+/// and the index just past the closing `)`.
+fn read_parenthesized(text: &str, open: usize) -> Result<(String, usize), String> {
+    let bytes = text.as_bytes();
+    debug_assert_eq!(bytes[open], b'(');
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((text[open + 1..i].to_string(), i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(format!("unbalanced parentheses in {text:?}"))
+}
+
+/// Resolves one `--value(a, b, …)` / `--modifier(a, b, …)` call: the first
+/// argument the candidate's value satisfies wins; if none does, the call resolves
+/// to nothing (`Ok(None)`) and its declaration is dropped.
+fn resolve_value_call(
+    args: &str,
+    subject: Option<&str>,
+    name: &str,
+    function: &str,
+    theme: &Theme,
+) -> Result<Option<String>, Fail> {
+    let Some(subject) = subject else {
+        // A static `@utility` has no value, and a candidate with no `/…` has no
+        // modifier: nothing can satisfy the call.
+        return Ok(None);
+    };
+    for arg in split_top_level_commas(args) {
+        if let Some(resolved) = resolve_value_arg(arg.trim(), subject, name, function, theme)? {
+            return Ok(Some(resolved));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolves a single `--value(…)` argument against the candidate's value.
+///
+/// Three argument shapes, matching Tailwind:
+/// * `--namespace-*` (optionally quoted) — a theme lookup: `stack-y-2` resolves
+///   against `--namespace-2` and yields `var(--namespace-2)`.
+/// * `[<type>]` — an ARBITRARY value: the candidate must be bracketed, and its
+///   contents must be of `<type>` (`[*]` accepts anything).
+/// * a bare data-type keyword (`integer`, `number`, …) — a BARE value of that type.
+fn resolve_value_arg(
+    arg: &str,
+    subject: &str,
+    name: &str,
+    function: &str,
+    theme: &Theme,
+) -> Result<Option<String>, Fail> {
+    let arg = unquote(arg);
+    if let Some(namespace) = arg.strip_suffix("-*")
+        && namespace.starts_with("--")
+    {
+        if subject.starts_with('[') {
+            return Ok(None);
+        }
+        let token = format!("{namespace}-{subject}");
+        return Ok(theme.contains(&token).then(|| format!("var({token})")));
+    }
+    if let Some(ty) = arg.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        let Some(inner) = arbitrary_value(subject) else {
+            return Ok(None);
+        };
+        // `[length:var(--x)]` — an explicit data-type hint inside the candidate.
+        let inner = match inner.split_once(':') {
+            Some((hint, rest)) if is_value_data_type(hint) => {
+                if hint != ty && ty != "*" {
+                    return Ok(None);
+                }
+                rest.trim().to_string()
+            }
+            _ => inner,
+        };
+        return Ok(value_matches_data_type(&inner, ty, name, function)?.then_some(inner));
+    }
+    if subject.starts_with('[') {
+        return Ok(None);
+    }
+    Ok(value_matches_data_type(subject, arg, name, function)?.then(|| subject.to_string()))
+}
+
+/// Strips one matching pair of surrounding quotes.
+fn unquote(text: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
+}
+
+/// The Tailwind data-type names this compiler understands (used to recognize an
+/// explicit `[length:…]` hint inside a candidate's arbitrary value).
+fn is_value_data_type(name: &str) -> bool {
+    matches!(
+        name,
+        "*" | "any"
+            | "integer"
+            | "number"
+            | "percentage"
+            | "ratio"
+            | "length"
+            | "angle"
+            | "time"
+            | "color"
+            | "url"
+            | "string"
+    )
+}
+
+/// Whether a CSS value satisfies a Tailwind `--value(…)` data type. An unknown
+/// type name is an engine gap (hard error), never a silent non-match.
+fn value_matches_data_type(
+    value: &str,
+    ty: &str,
+    name: &str,
+    function: &str,
+) -> Result<bool, Fail> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(false);
+    }
+    // Any math/variable expression is accepted for the numeric-ish types: its
+    // result type cannot be decided statically, and Tailwind accepts it too.
+    let computed = ["calc(", "var(", "min(", "max(", "clamp("]
+        .iter()
+        .any(|prefix| value.starts_with(prefix));
+    Ok(match ty {
+        "*" | "any" => true,
+        "integer" => is_signed_integer(value),
+        "number" => is_css_number(value),
+        "percentage" => computed || value.strip_suffix('%').is_some_and(is_css_number),
+        "ratio" => value
+            .split_once('/')
+            .is_some_and(|(a, b)| is_css_number(a.trim()) && is_css_number(b.trim())),
+        "length" => computed || is_css_dimension(value, LENGTH_UNITS),
+        "angle" => computed || is_css_dimension(value, ANGLE_UNITS),
+        "time" => computed || is_css_dimension(value, TIME_UNITS),
+        "color" => is_css_color(value),
+        "url" => value.starts_with("url("),
+        "string" => value.starts_with('"') || value.starts_with('\''),
+        other => {
+            return Err(Fail::Unsupported(format!(
+                "`@utility {name}`: `{function}({other})` names a Tailwind data type that diffpack's Tailwind compiler does not implement"
+            )));
+        }
+    })
+}
+
+const LENGTH_UNITS: &[&str] = &[
+    "px", "rem", "em", "ex", "ch", "rex", "rch", "ic", "ric", "lh", "rlh", "vw", "vh", "vi", "vb",
+    "vmin", "vmax", "svw", "svh", "svi", "svb", "svmin", "svmax", "lvw", "lvh", "lvi", "lvb",
+    "lvmin", "lvmax", "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax", "cqw", "cqh", "cqi", "cqb",
+    "cqmin", "cqmax", "cm", "mm", "q", "in", "pt", "pc",
+];
+const ANGLE_UNITS: &[&str] = &["deg", "grad", "rad", "turn"];
+const TIME_UNITS: &[&str] = &["s", "ms"];
+
+/// Splits a leading CSS number off a value, returning `(number, remainder)`.
+fn split_number(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        i += 1;
+    }
+    let mut digits = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+        digits = true;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            digits = true;
+        }
+    }
+    if !digits {
+        return None;
+    }
+    Some((&value[..i], &value[i..]))
+}
+
+fn is_signed_integer(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    is_bare_integer(digits)
+}
+
+fn is_css_number(value: &str) -> bool {
+    split_number(value).is_some_and(|(_, rest)| rest.is_empty())
+}
+
+fn is_css_dimension(value: &str, units: &[&str]) -> bool {
+    let Some((number, unit)) = split_number(value) else {
+        return false;
+    };
+    // A bare `0` is a valid length/angle/time; any other bare number is not.
+    if unit.is_empty() {
+        return number.trim_start_matches(['+', '-']).parse::<f64>() == Ok(0.0);
+    }
+    let unit = unit.to_ascii_lowercase();
+    units.contains(&unit.as_str())
+}
+
+fn is_css_color(value: &str) -> bool {
+    if let Some(hex) = value.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    for function in [
+        "rgb(", "rgba(", "hsl(", "hsla(", "hwb(", "lab(", "lch(", "oklab(", "oklch(", "color(",
+        "color-mix(", "var(", "light-dark(",
+    ] {
+        if value.starts_with(function) {
+            return true;
+        }
+    }
+    // A bare keyword (`red`, `currentColor`, `transparent`, …).
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
 enum TopItem {
     Import,
     Layer { names: String, body: String },
     Rule { selector: String, body: String },
+    /// `@utility <name> { … }` / `@utility <prefix>-* { … }` — an app-defined
+    /// utility, registered before any candidate is rendered.
+    Utility { name: String, body: String },
     /// `@custom-variant <name> (<template>);` — a user-defined variant whose
     /// template (with `&` for the candidate selector) replaces the built-in
     /// meaning of `<name>:` for both utilities and `@apply` expansion.
@@ -7409,6 +8333,15 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             i = end;
             continue;
         }
+        if css[i..].starts_with("@source") {
+            // `@source "<glob>";` / `@source not "<glob>";` — extra files the
+            // candidate scan covers. The scan happens before this compile (the
+            // candidate set is an INPUT here), so the directive itself is a
+            // consumed no-op; `bundler::tailwind_source_globs` reads them.
+            let end = css[i..].find(';').map(|rel| i + rel + 1).unwrap_or(bytes.len());
+            i = end;
+            continue;
+        }
         if css[i..].starts_with("@config") {
             // `@config '<path>';` — a legacy (v3) JS config the bundler evaluates
             // (via node/jiti) into `@theme`/`@keyframes` tokens that are merged into
@@ -7455,10 +8388,26 @@ fn parse_top_level(css: &str) -> Result<Vec<TopItem>, String> {
             i = end + 1;
             continue;
         }
-        if ["@keyframes", "@media", "@supports", "@font-face"]
-            .iter()
-            .any(|at| css[i..].starts_with(at))
-        {
+        if css[i..].starts_with("@utility") {
+            let brace = css[i..]
+                .find('{')
+                .ok_or_else(|| "malformed @utility (no `{`)".to_string())?;
+            let name = css[i + "@utility".len()..i + brace].trim().to_string();
+            let (body, end) = read_braced(css, i + brace)?;
+            if name.is_empty() {
+                return Err("malformed @utility (no name)".to_string());
+            }
+            items.push(TopItem::Utility { name, body });
+            i = end;
+            continue;
+        }
+        // Plain CSS at-rules with a block: reproduced verbatim. These carry no
+        // Tailwind semantics, so the compiler passes them straight through to
+        // the emitted stylesheet.
+        if VERBATIM_AT_RULES.iter().any(|at| {
+            css[i..].starts_with(at)
+                && css.as_bytes().get(i + at.len()).is_none_or(|b| !is_ident_byte(*b))
+        }) {
             let brace = css[i..]
                 .find('{')
                 .ok_or_else(|| "malformed at-rule block (no `{`)".to_string())?;
@@ -7530,6 +8479,7 @@ fn expand_rule(
     rule: &StyleRule,
     theme: &Theme,
     tw_props: &mut BTreeSet<TwProp>,
+    utils: &CustomUtilities,
     dialect: Dialect,
 ) -> Result<(Option<String>, Option<String>), String> {
     let mut main_decls: Vec<String> = Vec::new();
@@ -7544,6 +8494,9 @@ fn expand_rule(
             for class in classes.split_whitespace() {
                 let mut segments: Vec<&str> = class.split(':').collect();
                 let apply_base = segments.pop().unwrap_or(class);
+                // `@apply bg-black!` carries the same important marker a class
+                // attribute would; it belongs to the candidate, not the utility.
+                let (apply_base, important) = split_important(apply_base);
                 let mut dark = false;
                 for variant in &segments {
                     match *variant {
@@ -7555,10 +8508,32 @@ fn expand_rule(
                         }
                     }
                 }
-                let utility = generate_utility(apply_base, class, theme, tw_props, dialect)
-                    .map_err(|fail| fail.into_apply_error(class))?;
-                for (prop, value) in utility.decls {
-                    let decl = format!("{prop}:{value}");
+                // An app-defined `@utility` overrides the built-in of the same
+                // name, in `@apply` exactly as in a class attribute.
+                let decls = match utils.lookup(apply_base) {
+                    Some(found) => {
+                        let expanded = expand_utility_body(
+                            found.body, apply_base, found.value, found.modifier, theme, tw_props,
+                            dialect, "",
+                        )
+                        .map_err(|fail| fail.into_apply_error(class))?;
+                        if !expanded.nested.is_empty() {
+                            return Err(format!(
+                                "`@apply {class}`: that `@utility` has nested rules, which cannot be flattened into `{}`",
+                                rule.selector
+                            ));
+                        }
+                        if expanded.decls.is_empty() {
+                            return Err(Fail::Invalid.into_apply_error(class));
+                        }
+                        expanded.decls
+                    }
+                    None => generate_utility(apply_base, class, theme, tw_props, dialect)
+                        .map_err(|fail| fail.into_apply_error(class))?
+                        .decls,
+                };
+                for (prop, value) in decls {
+                    let decl = format!("{prop}:{}", with_important(&value, important));
                     if dark {
                         dark_decls.push(decl);
                     } else {
@@ -8372,6 +9347,42 @@ mod tests {
         assert!(out.contains(".bg-black\\!{background-color:var(--color-black)!important}"));
     }
 
+    /// The important marker belongs to the CANDIDATE, so `@apply` carries it too
+    /// — in a plain rule, in a `@layer base` rule, and inside an `@utility` body.
+    /// It was only ever stripped on the scanned-class path, so `@apply bg-black!`
+    /// (the v4 spelling, which real apps use) reported the utility as invalid.
+    #[test]
+    fn the_important_marker_is_stripped_on_the_apply_path_too() {
+        let out = compile(
+            "@import 'tailwindcss';\n\
+             @utility boxed {\n  @apply border-0!;\n}\n\
+             @layer base {\n  .layered { @apply bg-black!; }\n}\n\
+             .suffix { @apply bg-black!; }\n\
+             .prefix { @apply !bg-black; }\n\
+             .plain { @apply bg-black; }\n",
+            &candidates(&["boxed"]),
+        )
+        .unwrap();
+        assert!(
+            out.contains(".suffix{background-color:var(--color-black)!important}"),
+            "{out}"
+        );
+        assert!(
+            out.contains(".prefix{background-color:var(--color-black)!important}"),
+            "{out}"
+        );
+        // Unmarked `@apply` is untouched: the marker is not applied wholesale.
+        assert!(out.contains(".plain{background-color:var(--color-black)}"), "{out}");
+        assert!(
+            out.contains(".layered{background-color:var(--color-black)!important}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("border-style:var(--tw-border-style)!important"),
+            "an `@apply x!` inside an `@utility` body marks its declarations: {out}"
+        );
+    }
+
     #[test]
     fn shadow_bare_none_and_arbitrary_wrap_colors() {
         let out = compile(
@@ -9112,5 +10123,267 @@ mod tests {
         .unwrap();
         assert!(out.contains(":where([data-theme=dark] *)"), "{out}");
         assert!(!out.contains(":is(.dark *)"), "{out}");
+    }
+
+    #[test]
+    fn a_functional_utility_generates_one_rule_per_value_form_it_accepts() {
+        // Tailwind v4's `@utility <prefix>-*`: the candidate's value is resolved by
+        // the `--value(…)` calls in the body, a declaration whose call resolves to
+        // nothing is DROPPED, and a candidate that drops every declaration
+        // generates no rule at all. The two-`margin-top` shape below is the
+        // idiomatic way to accept both a spacing step and an arbitrary length.
+        let css = "@import 'tailwindcss';\n\
+                   @utility stack-y-* {\n\
+                     & > :not([hidden]) ~ :not([hidden]) {\n\
+                       margin-top: --spacing(--value(integer));\n\
+                       margin-top: --value([length]);\n\
+                     }\n\
+                   }\n";
+        let out = compile(
+            css,
+            &candidates(&["stack-y-4", "stack-y-[3px]", "stack-y-px", "sm:stack-y-0"]),
+        )
+        .unwrap();
+
+        // A bare integer takes the `--spacing()` branch.
+        assert!(
+            out.contains(
+                ".stack-y-4{& > :not([hidden]) ~ :not([hidden]){margin-top:calc(var(--spacing) * 4);}}"
+            ),
+            "{out}"
+        );
+        // An arbitrary length takes the other branch, and only that one.
+        assert!(
+            out.contains(
+                ".stack-y-\\[3px\\]{& > :not([hidden]) ~ :not([hidden]){margin-top:3px;}}"
+            ),
+            "{out}"
+        );
+        // `px` is neither an integer nor a bracketed length: nothing is generated,
+        // exactly as Tailwind's own output for this definition.
+        assert!(!out.contains("stack-y-px"), "{out}");
+        // Variants compose with a custom utility like any other.
+        assert!(out.contains("@media (width >= 40rem){.sm\\:stack-y-0{"), "{out}");
+        // The `--spacing` theme token it references is pulled into the theme layer.
+        assert!(out.contains("--spacing:"), "{out}");
+    }
+
+    #[test]
+    fn a_static_utility_and_a_theme_namespace_value_resolve_through_at_utility() {
+        let css = "@import 'tailwindcss';\n\
+                   @theme { --leading-cozy: 1.4; }\n\
+                   @utility no-scrollbar { scrollbar-width: none; }\n\
+                   @utility lead-* { line-height: --value(--leading-*); }\n\
+                   .uses-apply { @apply no-scrollbar; }\n";
+        let out = compile(
+            css,
+            &candidates(&["no-scrollbar", "lead-cozy", "lead-nonexistent", "hover:no-scrollbar"]),
+        )
+        .unwrap();
+
+        assert!(out.contains(".no-scrollbar{scrollbar-width:none;}"), "{out}");
+        assert!(out.contains(".hover\\:no-scrollbar:hover{scrollbar-width:none;}"), "{out}");
+        // `--value('--leading-*')` is a theme lookup: it emits the token reference.
+        assert!(out.contains(".lead-cozy{line-height:var(--leading-cozy);}"), "{out}");
+        assert!(out.contains("--leading-cozy:1.4"), "{out}");
+        // A value that names no token generates nothing (Tailwind's behaviour).
+        assert!(!out.contains("lead-nonexistent"), "{out}");
+        // `@apply` of an app-defined utility flattens into the applying rule.
+        assert!(out.contains(".uses-apply{scrollbar-width:none}"), "{out}");
+    }
+
+    #[test]
+    fn an_unimplemented_value_function_or_data_type_is_a_hard_error() {
+        // Never a silent non-match: a construct the engine does not implement must
+        // name itself, or an app ships with the style quietly missing.
+        let unknown_fn = compile(
+            "@import 'tailwindcss';\n@utility tint-* { color: --alpha(--value(color) / 50%); }\n",
+            &candidates(&["tint-red"]),
+        )
+        .unwrap_err();
+        assert!(unknown_fn.contains("--alpha()"), "{unknown_fn}");
+
+        let unknown_type = compile(
+            "@import 'tailwindcss';\n@utility grid-area-* { grid-area: --value(position); }\n",
+            &candidates(&["grid-area-main"]),
+        )
+        .unwrap_err();
+        assert!(unknown_type.contains("position"), "{unknown_type}");
+    }
+
+    #[test]
+    fn a_longer_functional_prefix_wins_and_an_app_utility_overrides_the_builtin() {
+        let css = "@import 'tailwindcss';\n\
+                   @utility stack-* { padding: --spacing(--value(integer)); }\n\
+                   @utility stack-y-* { margin: --spacing(--value(integer)); }\n\
+                   @utility p-* { outline-width: --value(integer); }\n";
+        let out = compile(css, &candidates(&["stack-y-2", "stack-2", "p-3"])).unwrap();
+        assert!(out.contains(".stack-y-2{margin:calc(var(--spacing) * 2);}"), "{out}");
+        assert!(out.contains(".stack-2{padding:calc(var(--spacing) * 2);}"), "{out}");
+        // The app's own `p-*` replaces Tailwind's padding utility entirely.
+        assert!(out.contains(".p-3{outline-width:3;}"), "{out}");
+        assert!(!out.contains(".p-3{padding"), "{out}");
+    }
+
+    #[test]
+    fn value_data_types_classify_css_values() {
+        let check = |value: &str, ty: &str| {
+            match value_matches_data_type(value, ty, "t", "--value") {
+                Ok(matched) => matched,
+                Err(Fail::Unsupported(error)) => panic!("{error}"),
+                Err(Fail::Invalid) => panic!("unexpected Invalid for {value:?} as {ty}"),
+            }
+        };
+        assert!(check("4", "integer"));
+        assert!(check("-4", "integer"));
+        assert!(!check("4.5", "integer"));
+        assert!(check("4.5", "number"));
+        assert!(check("3px", "length"));
+        assert!(check("0", "length"));
+        assert!(!check("3", "length"));
+        assert!(check("calc(100% - 3px)", "length"));
+        assert!(check("50%", "percentage"));
+        assert!(check("16/9", "ratio"));
+        assert!(check("45deg", "angle"));
+        assert!(check("150ms", "time"));
+        assert!(check("#abc", "color"));
+        assert!(check("oklch(0.5 0.1 20)", "color"));
+        assert!(check("currentColor", "color"));
+        assert!(!check("3px", "color"));
+        assert!(check("anything at all", "*"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Native-engine capability check / delegation gate
+    // -----------------------------------------------------------------------
+
+    /// The whole performance story: an app using only what diffpack implements
+    /// must stay on the native path, with no `node` spawn. Every shape the native
+    /// engine owns has to answer "no gap".
+    #[test]
+    fn a_sheet_the_native_engine_owns_reports_no_gap() {
+        let css = "@import 'tailwindcss';\n\
+                   @theme inline { --color-brand: #123456; }\n\
+                   @custom-variant dark (&:where(.dark, .dark *));\n\
+                   @utility tab-4 { tab-size: 4; }\n\
+                   @source '../src';\n\
+                   @layer base { html, body { @apply bg-brand text-white; } }\n\
+                   @layer components { .card { @apply rounded-lg p-4 tab-4; } }\n\
+                   @keyframes spin { to { transform: rotate(360deg); } }\n\
+                   @media (min-width: 40rem) { .x { color: red; } }\n\
+                   .plain { color: blue; }\n";
+        assert_eq!(native_gap(css, None), None);
+    }
+
+    /// The four Tailwind-bearing corpus apps must never start spawning node: their
+    /// entries are the byte-identity guard for the native fast path.
+    #[test]
+    fn every_tailwind_corpus_entry_stays_native() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let entries = [
+            "integration/e2e/apps/tanstack-start-basic/src/styles/app.css",
+            "integration/e2e/apps/tanstack-start-tailwind-v4/src/styles/app.css",
+            "integration/e2e/apps/next-blog-starter/src/app/globals.css",
+            "integration/e2e/apps/next-radix-ui/styles/globals.css",
+        ];
+        let mut checked = 0;
+        for relative in entries {
+            let path = repo.join(relative);
+            let Ok(css) = std::fs::read_to_string(&path) else {
+                // The corpus apps are fetched on demand; skip what is not present.
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                native_gap(&css, None),
+                None,
+                "{relative} must compile natively (no node spawn, byte-identical sheet)"
+            );
+        }
+        assert!(checked > 0, "no corpus Tailwind entry was found to check");
+    }
+
+    #[test]
+    fn a_javascript_plugin_is_a_native_gap() {
+        let gap = native_gap(
+            "@import 'tailwindcss';\n@plugin 'tailwind-scrollbar' {\n  nocompatible: true;\n}\n",
+            None,
+        );
+        assert_eq!(gap, Some(NativeGap::Plugin("tailwind-scrollbar".to_string())));
+        assert!(gap.unwrap().to_string().contains("tailwind-scrollbar"));
+    }
+
+    #[test]
+    fn an_at_rule_the_native_engine_has_no_meaning_for_is_a_gap() {
+        // `@variant name (…)` at top level is Tailwind's newer spelling of
+        // `@custom-variant`; the native engine only implements the latter.
+        assert_eq!(
+            native_gap(
+                "@import 'tailwindcss';\n@variant pwa (@media (display-mode: standalone));\n",
+                None
+            ),
+            Some(NativeGap::AtRule("@variant".to_string()))
+        );
+    }
+
+    /// The at-rule scan is a real CSS scan, not a substring search: an at-rule
+    /// inside a block, a string or a comment is not a top-level directive.
+    #[test]
+    fn at_rules_that_are_not_top_level_directives_are_not_gaps() {
+        let css = "@import 'tailwindcss';\n\
+                   /* @plugin 'daisyui'; */\n\
+                   .a::after { content: '@plugin \\\"x\\\"'; }\n\
+                   @media (min-width: 40rem) { .b { @apply flex; } }\n";
+        assert_eq!(native_gap(css, None), None);
+    }
+
+    #[test]
+    fn applying_a_utility_only_a_plugin_registers_is_a_gap() {
+        // `scrollbar-thumb-rounded-md` comes from `tailwind-scrollbar`; nothing in
+        // the theme or in an `@utility` can answer it.
+        let css = "@import 'tailwindcss';\n\
+                   @layer components { .scroll-bar { @apply scrollbar-thumb-rounded-md; } }\n";
+        match native_gap(css, None) {
+            Some(NativeGap::Apply { class, .. }) => {
+                assert_eq!(class, "scrollbar-thumb-rounded-md");
+            }
+            other => panic!("expected an @apply gap, got {other:?}"),
+        }
+    }
+
+    /// An `@apply` an app `@utility` answers is served natively — the check must
+    /// not delegate a sheet the engine can compile.
+    #[test]
+    fn applying_an_app_defined_utility_is_not_a_gap() {
+        let css = "@import 'tailwindcss';\n\
+                   @utility scroll-thin { scrollbar-width: thin; }\n\
+                   .scroll-bar { @apply scroll-thin; }\n";
+        assert_eq!(native_gap(css, None), None);
+    }
+
+    /// A variant the native engine cannot expand in `@apply` is a capability gap
+    /// like any other: Tailwind itself supports it, so the app's own compiler can.
+    #[test]
+    fn an_unexpandable_apply_variant_is_a_gap() {
+        let css = "@import 'tailwindcss';\n.b { @apply hover:bg-black; }\n";
+        assert!(matches!(native_gap(css, None), Some(NativeGap::Apply { .. })));
+    }
+
+    /// Broken CSS is NOT a capability gap. Delegating it would turn diffpack's own
+    /// diagnostic into a foreign one; it stays a native hard error.
+    #[test]
+    fn malformed_css_is_not_a_gap() {
+        assert_eq!(native_gap("@import 'tailwindcss';\n.a { color: red;\n", None), None);
+        assert_eq!(native_gap("@import 'tailwindcss';\n@utility { color: red; }\n", None), None);
+    }
+
+    /// `@apply` resolution is answered against the theme actually in scope: a token
+    /// the app's installed Tailwind defines makes the utility native.
+    #[test]
+    fn the_apply_probe_uses_the_supplied_theme() {
+        let css = "@import 'tailwindcss';\n.b { @apply bg-brandish; }\n";
+        assert!(matches!(native_gap(css, None), Some(NativeGap::Apply { .. })));
+        let theme = format!("{THEME_CSS}\n@theme {{ --color-brandish: #abcdef; }}\n");
+        assert_eq!(native_gap(css, Some(&theme)), None);
     }
 }

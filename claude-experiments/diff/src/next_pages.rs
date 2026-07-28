@@ -628,7 +628,17 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
     }
 
     let node_env = if dev { "\"development\"" } else { "\"production\"" };
-    let defines = vec![("process.env.NODE_ENV".to_string(), node_env.to_string())];
+    let defines = vec![
+        ("process.env.NODE_ENV".to_string(), node_env.to_string()),
+        (
+            "process.env.NEXT_RUNTIME".to_string(),
+            crate::next_adapter::next_runtime_define(target).to_string(),
+        ),
+        (
+            "process.browser".to_string(),
+            crate::next_adapter::process_browser_define(target).to_string(),
+        ),
+    ];
 
     Ok(Some(AppConfig {
         environment: environment.to_string(),

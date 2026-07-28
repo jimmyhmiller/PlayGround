@@ -16,7 +16,16 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { adapters, cleanBuildOutput, basePathOf, diffpackBin, sleep } from "./lib/apps.mjs";
+import {
+  adapters,
+  appDirOf,
+  cleanBuildOutput,
+  basePathOf,
+  diffpackBin,
+  installDirOf,
+  selectApps,
+  sleep,
+} from "./lib/apps.mjs";
 import { Browser, closeAll } from "./lib/browser.mjs";
 import {
   DETERMINISM_INIT,
@@ -45,9 +54,23 @@ const buildOnly = flag("--build-only");
 const jobs = Number.parseInt(option("--jobs", "3"), 10);
 const maxClicks = Number.parseInt(option("--clicks", "3"), 10);
 
-const apps = corpus.apps.filter((a) => !filters.length || filters.some((f) => a.id.includes(f)));
+// Heavy apps (a gigabyte-scale monorepo checkout) are opt-in on BOTH sides: a
+// default `run.mjs` must stay runnable, and an app the default `fetch.mjs` never
+// materialized could only be reported as "node_modules missing" anyway. What is
+// left out is always printed — a corpus that silently shrinks lies about its
+// own coverage.
+const { selected: apps, excludedHeavy } = selectApps(corpus.apps, { filters, heavy: flag("--heavy") });
+if (excludedHeavy.length) {
+  console.log(
+    `note: skipping ${excludedHeavy.length} heavy app(s) — ${excludedHeavy
+      .map((a) => a.id)
+      .join(", ")}. Pass --heavy to include them (after fetching them with --heavy).`
+  );
+}
 if (!apps.length) {
-  console.error("no apps matched");
+  console.error(
+    excludedHeavy.length ? "no apps matched (the matches are heavy: pass --heavy)" : "no apps matched"
+  );
   process.exit(2);
 }
 if (!existsSync(diffpackBin)) {
@@ -59,7 +82,6 @@ mkdirSync(resultsDir, { recursive: true });
 const initScriptPath = join(resultsDir, "determinism-init.js");
 writeFileSync(initScriptPath, DETERMINISM_INIT);
 
-const appDirOf = (app) => join(here, "apps", app.id);
 const outDirOf = (app) => join(resultsDir, app.id);
 
 // --- phase 1: build both sides -------------------------------------------
@@ -71,8 +93,10 @@ const buildOne = async (app) => {
   mkdirSync(out, { recursive: true });
   const adapter = adapters[app.kind];
   if (!adapter) return { skipped: `unknown kind ${app.kind}` };
-  if (!existsSync(join(appDir, "node_modules"))) {
-    return { skipped: "node_modules missing (run fetch.mjs)" };
+  // A workspace app hoists its modules to the repository root, so "installed" is
+  // a question about the INSTALL directory, not about the app directory.
+  if (!existsSync(join(installDirOf(app), "node_modules"))) {
+    return { skipped: `node_modules missing in ${installDirOf(app)} (run fetch.mjs${app.heavy ? " --heavy" : ""})` };
   }
   cleanBuildOutput(appDir);
 

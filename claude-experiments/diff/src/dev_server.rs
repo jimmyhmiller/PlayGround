@@ -2620,6 +2620,11 @@ mod next {
         fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
             format!("cannot write {}: {error}", next_server_script.display())
         })?;
+        // The orchestrator imports this as a sibling (the one place that joins the
+        // three references manifests into the divergent-id ssrModuleMapping).
+        let ssr_module_map = output_root.join(crate::rsc::SSR_MODULE_MAP_FILE);
+        fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
+            .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
         let node_port = free_port()?;
         let mut node = spawn_next_node(&next_server_script, &output_root, node_port)?;
         wait_for_node(node_port).inspect_err(|_| {
@@ -2792,6 +2797,9 @@ mod next {
         if !images.is_empty() {
             crate::next_adapter::emit_image_variants(project_root, &summary.output_dir, &images)?;
         }
+        // next/font/local: copy the app's font files to the hashed URLs the generated
+        // @font-face rules point at, so dev serves the same face the build does.
+        crate::next_font::emit_font_assets(project_root, &summary.output_dir)?;
         // The route -> client-chunk manifest the server build's start-manifest reads.
         let client_manifest = client
             .bundler
@@ -2852,12 +2860,17 @@ mod next {
                 format!("cannot preserve react-server CSS to {}: {error}", dest.display())
             })?;
         }
-        // This build's OWN client-references manifest (its ids) — written under the
-        // `.rsc` root so it never clobbers the ssr build's manifest at `<out>`.
+        // This build's OWN client-references manifest (its ids) — written beside the
+        // ssr build's at `<out>` under the react-server-distinct file name, so the two
+        // server-like graphs cannot clobber each other and the render seam reads the
+        // SAME pair of files in dev as it does after a production build. It is also
+        // the set that decides which client references a flight can carry, which the
+        // seam validates the ssr manifest against.
         let server_references = env
             .bundler
             .client_references_manifest(&reachable, "server.mjs")?;
-        server_references.write(&rsc_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
+        server_references
+            .write(&output_root.join(crate::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE))?;
         // Copy the fresh bundle to rsc-render (the orchestrator's per-request child).
         replace_dir(&rsc_root.join("server"), &output_root.join("rsc-render"))?;
         Ok(summary)

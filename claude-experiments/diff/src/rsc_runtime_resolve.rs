@@ -27,6 +27,25 @@
 //! unresolved — a fatal build diagnostic, not a silent gap. `bundler` renders that one
 //! specially (see `unresolved_import_message`) so the message says the RSC runtime is
 //! diffpack's requirement rather than the app's missing dependency.
+//!
+//! # React itself
+//!
+//! [`react_aliases`] answers the same question for `react` and `react-dom`, with one
+//! difference that inverts the precedence: an App Router app's own `react` dependency
+//! is NOT what `next build` compiles the app router against. Next aliases `react$`,
+//! `react-dom$` and their entry points onto the copies IT vendors, in every layer —
+//! browser, SSR and react-server alike (`createVendoredReactAliases` in
+//! `next/dist/build/create-compiler-aliases.js`) — because the App Router is written
+//! against React internals that only the exact React it ships provides.
+//!
+//! That is not a detail a bundler can skip. React 18.2's `react-server` export
+//! condition resolves to `react.shared-subset.js`, whose entire body is
+//! `throw Error("This entry point is not yet supported outside of experimental
+//! channels")` — the App Router's flight render is IMPOSSIBLE against a stable React
+//! 18, and an app on `react@18.2.0` (cal.com, for one) builds and renders under
+//! `next build` only because Next never uses that copy. Resolving `react` from the
+//! app there produces a bundle that dies at the first render, so honoring the app's
+//! own dependency would be honoring the wrong contract.
 
 use std::path::{Path, PathBuf};
 
@@ -71,6 +90,105 @@ pub fn aliases(root: &Path, conditions: &[String], client: bool) -> Vec<(String,
         }
     }
     aliases
+}
+
+/// The React packages a Next App Router build takes from the copy `next` vendors
+/// rather than from the app's own `node_modules`. See the module docs.
+const VENDORED_REACT_PACKAGES: [&str; 2] = ["react", "react-dom"];
+
+/// `(specifier, absolute file)` aliases pinning `react` and `react-dom` — every entry
+/// point they export — to the copies `next` vendors, resolved through those copies'
+/// own `exports` maps under this environment's `conditions`.
+///
+/// The alias set is READ from the vendored `package.json`'s `exports` keys rather than
+/// listed here, so it is whatever the installed Next actually ships and cannot drift
+/// from it as React's entry points change.
+///
+/// Empty when the installed `next` vendors no React (nothing better to alias to, so
+/// the app's own copy is used exactly as before) or when there is no `next` at all.
+///
+/// Longest specifier first: [`crate::bundler`]'s alias table also rewrites PREFIX
+/// matches, so `react/jsx-runtime` must be found as an exact alias before the bare
+/// `react` entry can claim it as a prefix.
+pub fn react_aliases(root: &Path, conditions: &[String], client: bool) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    for package in VENDORED_REACT_PACKAGES {
+        let Some(vendored) = vendored_package_dir(root, package) else {
+            continue;
+        };
+        let resolver = Resolver::new(vendored_resolve_options(&vendored, conditions, client));
+        for specifier in exported_specifiers(package, &vendored) {
+            let Ok(resolution) = resolver.resolve(root, &specifier) else {
+                continue;
+            };
+            let file = resolution.full_path().to_string_lossy().into_owned();
+            // The BY-PATH spelling of the same entry point, pinned to the same file.
+            //
+            // Next rewrites React's internal `require("react")` to
+            // `require("next/dist/compiled/react")` inside the copies it vendors, and a
+            // path INTO a package does not go through that package's `exports` map (a
+            // subpath only does when the package is named as a package). So the
+            // vendored `react-dom.react-server` would otherwise pull the CLIENT React
+            // via its `main`, and the RSC render dies on React's own check: `The
+            // "react" package in this environment is not configured correctly. The
+            // "react-server" condition must be enabled`. Aliasing both spellings to one
+            // file is what keeps exactly ONE React per environment in the graph.
+            aliases.push((vendored_specifier(package, &specifier), file.clone()));
+            aliases.push((specifier, file));
+        }
+    }
+    // Longest first: the alias table also rewrites PREFIX matches, so every exact
+    // entry must be seen before a shorter one could claim it as a prefix.
+    aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()).then(left.cmp(right)));
+    aliases
+}
+
+/// `react/jsx-runtime` -> `next/dist/compiled/react/jsx-runtime`: the same entry point
+/// spelled as the path Next's own vendored code requires it by.
+fn vendored_specifier(package: &str, specifier: &str) -> String {
+    let subpath = specifier.strip_prefix(package).unwrap_or("");
+    format!("next/dist/compiled/{package}{subpath}")
+}
+
+/// Every specifier the vendored package's `exports` map publishes: `"."` is the bare
+/// package name, `"./x"` is `<package>/x`. `./package.json` is skipped — it is
+/// metadata, and aliasing it would point a `require("react/package.json")` at the
+/// VENDORED manifest, misreporting the app's React version.
+///
+/// A package with no `exports` map publishes only its main entry.
+fn exported_specifiers(package: &str, vendored: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(vendored.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(exports) = manifest.get("exports").and_then(serde_json::Value::as_object) else {
+        return vec![package.to_string()];
+    };
+    exports
+        .keys()
+        .filter(|key| key.as_str() != "./package.json")
+        .filter_map(|key| match key.as_str() {
+            "." => Some(package.to_string()),
+            subpath => subpath
+                .strip_prefix("./")
+                .map(|subpath| format!("{package}/{subpath}")),
+        })
+        .collect()
+}
+
+/// The `next/dist/compiled/<package>` directory for `root`, when the installed `next`
+/// ships one.
+fn vendored_package_dir(root: &Path, package: &str) -> Option<PathBuf> {
+    node_modules_ancestors(root).find_map(|node_modules| {
+        let next = node_modules.join("next");
+        if !next.join("package.json").is_file() {
+            return None;
+        }
+        let candidate = next.join("dist").join("compiled").join(package);
+        candidate.join("package.json").is_file().then_some(candidate)
+    })
 }
 
 /// True when `react-server-dom-webpack` is installed for `root` (its own `node_modules`
@@ -248,6 +366,129 @@ mod tests {
             aliases(root, &["node".into()], false).is_empty(),
             "the app's own react-server-dom-webpack must win over Next's vendored copy",
         );
+    }
+
+    /// A stand-in for `next/dist/compiled/react{,-dom}`: the same `exports` shape
+    /// Next ships, where the `react-server` condition selects a DIFFERENT file from
+    /// the default. Only the condition dispatch is modelled — that is the whole
+    /// question this alias answers.
+    fn write_vendored_react(root: &Path) {
+        std::fs::create_dir_all(root.join("node_modules/next")).unwrap();
+        std::fs::write(
+            root.join("node_modules/next/package.json"),
+            r#"{"name":"next","version":"16.0.0"}"#,
+        )
+        .unwrap();
+        for (package, files) in [
+            ("react", vec!["index.js", "react.react-server.js", "jsx-runtime.js", "jsx-runtime.react-server.js"]),
+            ("react-dom", vec!["index.js", "react-dom.react-server.js"]),
+        ] {
+            let dir = root.join("node_modules/next/dist/compiled").join(package);
+            std::fs::create_dir_all(&dir).unwrap();
+            for file in &files {
+                std::fs::write(dir.join(file), "module.exports = {};\n").unwrap();
+            }
+            let manifest = if package == "react" {
+                r#"{"name":"react-builtin","main":"index.js","exports":{
+                    ".":{"react-server":"./react.react-server.js","default":"./index.js"},
+                    "./package.json":"./package.json",
+                    "./jsx-runtime":{"react-server":"./jsx-runtime.react-server.js","default":"./jsx-runtime.js"}}}"#
+            } else {
+                r#"{"name":"react-dom-builtin","main":"index.js","exports":{
+                    ".":{"react-server":"./react-dom.react-server.js","default":"./index.js"},
+                    "./package.json":"./package.json"}}"#
+            };
+            std::fs::write(dir.join("package.json"), manifest).unwrap();
+        }
+    }
+
+    /// React comes from the copy Next vendors, per layer — and the app's own
+    /// `react` never wins, because an App Router app on React 18 has no working
+    /// `react-server` entry at all.
+    #[test]
+    fn react_resolves_to_the_copy_next_vendors_under_each_layers_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_vendored_react(root);
+        // The app installs its own React, as every real app does. It must NOT win.
+        let own = root.join("node_modules/react");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("package.json"), r#"{"name":"react","main":"index.js"}"#).unwrap();
+        std::fs::write(own.join("index.js"), "module.exports = {};\n").unwrap();
+
+        let react_server = names(&react_aliases(
+            root,
+            &["react-server".into(), "node".into(), "production".into()],
+            false,
+        ));
+        assert!(
+            react_server.contains(&("react".into(), "react.react-server.js".into())),
+            "{react_server:?}",
+        );
+        assert!(
+            react_server.contains(&(
+                "react/jsx-runtime".into(),
+                "jsx-runtime.react-server.js".into()
+            )),
+            "the JSX runtime must follow the same condition as React itself: {react_server:?}",
+        );
+
+        let browser = names(&react_aliases(
+            root,
+            &["module".into(), "browser".into(), "production".into()],
+            true,
+        ));
+        assert!(
+            browser.contains(&("react".into(), "index.js".into())),
+            "{browser:?}",
+        );
+    }
+
+    /// Next rewrites React's internal `require("react")` to
+    /// `require("next/dist/compiled/react")` inside the copies it vendors, and a
+    /// path INTO a package does not go through that package's `exports`. Both
+    /// spellings must therefore land on the SAME file, or the react-server
+    /// `react-dom` pulls the client React and React's own configuration check
+    /// throws.
+    #[test]
+    fn the_by_path_spelling_of_a_vendored_entry_points_at_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_vendored_react(root);
+        let aliases = react_aliases(root, &["react-server".into(), "node".into()], false);
+        let find = |specifier: &str| {
+            aliases
+                .iter()
+                .find(|(from, _)| from == specifier)
+                .map(|(_, to)| to.clone())
+                .unwrap_or_else(|| panic!("no alias for {specifier} in {aliases:?}"))
+        };
+        assert_eq!(find("react"), find("next/dist/compiled/react"));
+        assert_eq!(
+            find("react-dom"),
+            find("next/dist/compiled/react-dom"),
+        );
+        // The alias table also rewrites PREFIX matches, so every longer specifier
+        // must come first or the bare entry claims it.
+        let lengths: Vec<usize> = aliases.iter().map(|(from, _)| from.len()).collect();
+        assert!(
+            lengths.windows(2).all(|pair| pair[0] >= pair[1]),
+            "aliases must be longest-first: {aliases:?}",
+        );
+    }
+
+    /// An app whose `next` vendors no React aliases nothing: there is nothing
+    /// better to point at, so the app's own copy is used exactly as before.
+    #[test]
+    fn a_next_without_a_vendored_react_aliases_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/next")).unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/next/package.json"),
+            r#"{"name":"next","version":"16.0.0"}"#,
+        )
+        .unwrap();
+        assert!(react_aliases(dir.path(), &["node".into()], false).is_empty());
     }
 
     #[test]

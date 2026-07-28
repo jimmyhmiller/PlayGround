@@ -144,26 +144,42 @@ pub(crate) fn report_mdx_config(eval: Option<&serde_json::Value>) {
 /// present in this app's `node_modules`: a missing one stays a hard error rather than
 /// resolving to nothing. Built-ins Next does NOT polyfill (`fs`, `net`, `child_process`,
 /// …) are deliberately absent and keep failing loudly.
+///
+/// The table mirrors the `isClient` `resolve.fallback` block of
+/// `next/dist/build/webpack-config`, entry for entry. It applies to EVERY client
+/// compilation — app router and pages router alike — because webpack's fallback is a
+/// property of the client compiler, not of a router.
 pub fn next_browser_polyfill_aliases(root: &Path) -> Vec<(String, String)> {
     // specifier -> Next's vendored package directory, mirroring next/dist/build/webpack-config.
     const POLYFILLS: &[(&str, &str)] = &[
         ("assert", "assert"),
         ("buffer", "buffer"),
+        ("constants", "constants-browserify"),
         ("crypto", "crypto-browserify"),
+        ("domain", "domain-browser"),
         ("events", "events"),
+        ("http", "stream-http"),
+        ("https", "https-browserify"),
+        ("os", "os-browserify"),
         ("path", "path-browserify"),
         ("process", "process"),
         ("punycode", "punycode"),
         ("querystring", "querystring-es3"),
         ("stream", "stream-browserify"),
         ("string_decoder", "string_decoder"),
+        // Next maps `sys` onto the same vendored `util` (`sys` is Node's deprecated
+        // alias for it).
+        ("sys", "util"),
         ("timers", "timers-browserify"),
+        ("tty", "tty-browserify"),
         ("url", "native-url"),
         ("util", "util"),
         ("vm", "vm-browserify"),
         ("zlib", "browserify-zlib"),
     ];
-    let compiled = root.join("node_modules").join("next").join("dist").join("compiled");
+    let Some(compiled) = next_compiled_dir(root) else {
+        return Vec::new();
+    };
     let mut aliases = Vec::new();
     for (specifier, vendored) in POLYFILLS {
         let dir = compiled.join(vendored);
@@ -171,10 +187,88 @@ pub fn next_browser_polyfill_aliases(root: &Path) -> Vec<(String, String)> {
             continue;
         }
         aliases.push(((*specifier).to_string(), dir.to_string_lossy().into_owned()));
-        // `node:`-prefixed form resolves to the same polyfill.
+        // `node:`-prefixed form resolves to the same polyfill. webpack's fallback keys
+        // are unprefixed, but `node:path` and `path` name the same module, and real
+        // Next apps write both.
         aliases.push((format!("node:{specifier}"), dir.to_string_lossy().into_owned()));
     }
     aliases
+}
+
+/// The compile-time value of `process.env.NEXT_RUNTIME` for a build target, as a JS
+/// literal ready for [`crate::vite_define`].
+///
+/// Next defines this in every compilation (`next/dist/build/define-env`:
+/// `isEdgeServer ? 'edge' : isNodeServer ? 'nodejs' : ''`) and library code inside
+/// `next/dist` branches on it to pick a Node-only implementation. `next/dist/shared/lib/
+/// bloom-filter.js` is the canonical case:
+///
+/// ```js
+/// if (process.env.NEXT_RUNTIME === 'nodejs') {
+///   const gzipSize = require('next/dist/compiled/gzip-size').sync(filterData);
+/// }
+/// ```
+///
+/// Leaving the define out does not merely miss an optimization: the test stays
+/// undecidable, [`crate::dead_branch`] cannot delete the branch, and
+/// [`crate::parser`]'s unfiltered walk records the `require` as a real graph edge — so a
+/// CLIENT bundle acquires `gzip-size` and, through it, `fs`/`stream`/`zlib`. `fs` has no
+/// Next polyfill by design, so the build then fails on a module webpack never put in the
+/// client graph at all. The define is what makes the branch dead, and deleting the
+/// branch is what keeps the edge out.
+///
+/// The empty string is the correct client value, not a placeholder: `''` is falsy and
+/// unequal to every runtime name, which is exactly how browser code is meant to read it.
+/// The compile-time value of `process.browser` for a build target, as a JS literal.
+///
+/// Next defines it in every compilation (`next/dist/build/define-env.js`:
+/// `'process.browser': isClient`), and it is the switch a large amount of
+/// isomorphic library code branches on to reach for Node:
+///
+/// ```js
+/// if (!process.browser && typeof window === 'undefined') {
+///   var fs = require('fs');
+/// }
+/// ```
+///
+/// That is `next-i18next`'s `createConfig`, and it is the same mechanism as
+/// [`next_runtime_define`]: without the define the test is undecidable,
+/// [`crate::dead_branch`] cannot delete the branch, and [`crate::parser`]'s
+/// unfiltered walk records the `require("fs")` as a real client-graph edge. `fs`
+/// has no Next browser polyfill by design, so the build then fails on a module
+/// webpack never put in the client graph at all.
+pub(crate) fn process_browser_define(target: Target) -> &'static str {
+    match target {
+        Target::Client => "true",
+        Target::Server | Target::ReactServer => "false",
+    }
+}
+
+pub(crate) fn next_runtime_define(target: Target) -> &'static str {
+    match target {
+        // Both server graphs run under Node. diffpack has no separate edge *build*
+        // target; a `runtime = "edge"` route handler is served from the server graph in
+        // a WinterCG context, so `nodejs` remains the honest answer for the compilation.
+        Target::Server | Target::ReactServer => "\"nodejs\"",
+        Target::Client => "\"\"",
+    }
+}
+
+/// `next/dist/compiled` for the `next` that would be RESOLVED from `root`.
+///
+/// Not `root/node_modules/next`: in a workspace monorepo (cal.com, and every
+/// yarn/pnpm/npm workspace) the app lives at `apps/web` while `next` is hoisted to the
+/// repository root's `node_modules`. Looking only at the app's own directory finds
+/// nothing there, which used to mean "Next polyfills no built-ins" — a silent
+/// difference in graph shape between a standalone app and the identical app inside a
+/// workspace. Walk `node_modules` ancestors nearest-first, exactly as Node resolution
+/// does.
+fn next_compiled_dir(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .map(|dir| dir.join("node_modules").join("next"))
+        .find(|next| next.join("package.json").is_file())
+        .map(|next| next.join("dist").join("compiled"))
+        .filter(|compiled| compiled.is_dir())
 }
 
 /// The app's `next.config.<ext>` (see [`NEXT_CONFIG_EXTS`]), or None. A `next.config` is
@@ -2189,7 +2283,6 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // `main.rs` preserves to `public/rsc.css`.
     let scan = scan_project(&root)?;
     let mut islands = scan.islands.clone();
-    let font_css = crate::next_font::generate_css(&root, &scan.fonts)?;
 
     // Evaluate `next.config.*` ONCE for this pass (redirects/rewrites/headers + images +
     // the basePath/assetPrefix/trailingSlash/i18n routing surface). The result feeds the
@@ -2212,6 +2305,15 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     let shims_dir = adapter_dir.join("shims");
     std::fs::create_dir_all(&shims_dir)
         .map_err(|error| format!("cannot create {}: {error}", shims_dir.display()))?;
+
+    // The font CSS is generated HERE rather than beside the project walk because a
+    // `next/font/local` face carries a real URL (`<assetPrefix>/_diffpack-font/...`),
+    // which only exists once `next.config`'s asset base is known. The same pass records
+    // the source files behind those URLs in the adapter directory, and the client emit
+    // copies exactly that list — so the emitted @font-face and the emitted file cannot
+    // point at different things.
+    let fonts = crate::next_font::generate(&root, &scan.fonts, &asset_base)?;
+    crate::next_font::write_font_manifest(&adapter_dir, &fonts.assets)?;
 
     // `next/*` shims resolved as aliases (specifier -> shim file). Only the subset
     // this adapter faithfully implements; `next/font`, `next/headers` server APIs,
@@ -2331,7 +2433,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &adapter_dir.join("rsc-entry.tsx"),
         &rsc_entry_module(
             &discovered,
-            &font_css,
+            &fonts,
             &error_boundary_canon,
             &segment_boundary_canon,
             &request_context_canon,
@@ -2450,14 +2552,41 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         target == Target::Client,
     ));
 
+    // React itself, from the copy `next` vendors — in EVERY layer, which is what
+    // `next build` does. Unlike the flight runtime above, the app's own dependency
+    // does not win: an App Router app is compiled against the React Next ships, and
+    // an app on React 18 has no working `react-server` entry at all (React 18.2's
+    // resolves to a module whose whole body throws). See `rsc_runtime_resolve`.
+    aliases.extend(crate::rsc_runtime_resolve::react_aliases(
+        &root,
+        &conditions,
+        target == Target::Client,
+    ));
+
+    // A CLIENT bundle may import the Node built-ins Next polyfills (`url`, `path`,
+    // `process`, ...): Next's client webpack config maps them onto the copies it
+    // vendors, so such an import is valid Next code that `next build` accepts. This is
+    // the same `resolve.fallback` the pages adapter applies — it belongs to the client
+    // compiler, not to a router. Server/react-server bundles keep the real built-ins.
+    if target == Target::Client {
+        aliases.extend(next_browser_polyfill_aliases(&root));
+    }
+
     // React's dev/prod dispatch define. Production bundles the production React
     // (small, no dev warnings); DEV bundles the development React whose renderer
     // exposes the Fast Refresh hook the island HMR path needs.
     let node_env = if dev { "\"development\"" } else { "\"production\"" };
-    let defines = vec![(
-        "process.env.NODE_ENV".to_string(),
-        node_env.to_string(),
-    )];
+    let defines = vec![
+        ("process.env.NODE_ENV".to_string(), node_env.to_string()),
+        (
+            "process.env.NEXT_RUNTIME".to_string(),
+            next_runtime_define(target).to_string(),
+        ),
+        (
+            "process.browser".to_string(),
+            process_browser_define(target).to_string(),
+        ),
+    ];
 
     // Evaluate `next.config` once (on the react-server pass) into the routing-rules
     // manifest the orchestrator applies (redirects/rewrites/headers). Best-effort: a
@@ -3020,7 +3149,7 @@ fn hooks_context_module() -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn rsc_entry_module(
     disc: &Discovered,
-    font_css: &str,
+    fonts: &crate::next_font::FontOutput,
     error_boundary: &Path,
     segment_boundary: &Path,
     request_context: &Path,
@@ -3231,14 +3360,25 @@ fn rsc_entry_module(
         js_str(&format!("{asset_base}{RSC_CSS_URL}")),
     );
     let css_push = "  if (RSC_CSS_HREF) items.push(createElement(\"link\", { rel: \"stylesheet\", href: RSC_CSS_HREF, precedence: \"low\" }));\n".to_string();
-    let (font_const, font_push) = if font_css.trim().is_empty() {
+    let (font_const, mut font_push) = if fonts.css.trim().is_empty() {
         (String::new(), String::new())
     } else {
         (
-            format!("const FONT_CSS = {};\n", js_str(font_css)),
+            format!("const FONT_CSS = {};\n", js_str(&fonts.css)),
             "  items.push(createElement(\"style\", { href: \"diffpack-next-font\", precedence: \"high\", dangerouslySetInnerHTML: { __html: FONT_CSS } }));\n".to_string(),
         )
     };
+    // `next/font/local` with `preload: true` (the default) gets the same
+    // `<link rel="preload" as="font" crossorigin>` Next emits, so the face is requested
+    // alongside the document instead of after the CSS parses. Google faces are reached
+    // through an `@import`, which cannot be preloaded this way, so they get none.
+    for href in &fonts.preloads {
+        font_push.push_str(&format!(
+            "  items.push(createElement(\"link\", {{ rel: \"preload\", href: {}, as: \"font\", type: {}, crossOrigin: \"\" }}));\n",
+            js_str(href),
+            js_str(font_mime(href)),
+        ));
+    }
     // Static metadata IMAGE conventions (app/icon.png, app/favicon.ico, ...): head
     // elements built once at BUILD time and pushed for every route (the files are
     // copied to public/ by the client build). Zero per-request cost.
@@ -6166,6 +6306,18 @@ export function __diffpackUseCache(fn, id) {{
     )
 }
 
+/// The `type` a `<link rel="preload" as="font">` carries, from the emitted file's
+/// extension. Next writes the same MIME strings.
+fn font_mime(href: &str) -> &'static str {
+    match href.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6373,7 +6525,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
         assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
@@ -6390,7 +6542,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         // Each route carries a metadata namespace chain resolved at render time.
         assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
         assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
@@ -6513,7 +6665,7 @@ mod tests {
         let boundary = root.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = root.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = root.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
         assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
         assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
@@ -6643,7 +6795,7 @@ mod tests {
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
         assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
         assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
@@ -6774,6 +6926,62 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("page.tsx"), "export default function P() { return <p>hi</p>; }\n").unwrap();
+    }
+
+    /// Writes a minimal `next` install with the vendored polyfill packages the
+    /// client fallback maps onto, under `<at>/node_modules/next`.
+    fn write_vendored_next(at: &Path) {
+        let next = at.join("node_modules").join("next");
+        std::fs::create_dir_all(&next).unwrap();
+        std::fs::write(next.join("package.json"), "{\"name\":\"next\"}\n").unwrap();
+        for vendored in ["path-browserify", "process", "browserify-zlib"] {
+            std::fs::create_dir_all(next.join("dist").join("compiled").join(vendored)).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_client_polyfill_table_finds_next_hoisted_to_a_workspace_root() {
+        // Every yarn/pnpm/npm workspace puts the app at `apps/web` and hoists `next`
+        // to the repository root. Looking only at `<app>/node_modules/next` finds
+        // nothing there, and the app silently loses the whole `resolve.fallback`
+        // table that the identical STANDALONE app gets — so `import "node:path"`,
+        // which `next build` accepts, becomes a fatal browser diagnostic.
+        let workspace = scratch("hoisted-next-polyfills");
+        write_vendored_next(&workspace);
+        let app = workspace.join("apps").join("web");
+        std::fs::create_dir_all(&app).unwrap();
+
+        let aliases = next_browser_polyfill_aliases(&app);
+        let mapped = |specifier: &str| {
+            aliases
+                .iter()
+                .find(|(from, _)| from == specifier)
+                .map(|(_, to)| to.clone())
+        };
+        let expected = workspace
+            .join("node_modules/next/dist/compiled/path-browserify")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(mapped("path").as_deref(), Some(expected.as_str()));
+        // Both spellings of the same built-in reach the same polyfill.
+        assert_eq!(mapped("node:path").as_deref(), Some(expected.as_str()));
+        assert!(mapped("process").is_some(), "{aliases:?}");
+        assert!(mapped("zlib").is_some(), "{aliases:?}");
+        // Built-ins Next does NOT polyfill stay unmapped and keep failing loudly.
+        assert!(mapped("fs").is_none(), "{aliases:?}");
+        assert!(mapped("child_process").is_none(), "{aliases:?}");
+    }
+
+    #[test]
+    fn next_runtime_is_defined_per_target_the_way_next_defines_it() {
+        // `next/dist/build/define-env`: edge -> 'edge', node server -> 'nodejs',
+        // client -> ''. Library code inside `next/dist` branches on this to pick a
+        // Node-only implementation (`bloom-filter.js` requires `gzip-size`, and with
+        // it fs/stream/zlib, under `=== 'nodejs'`). Leaving it undefined keeps the
+        // branch alive and drags that subtree into the CLIENT graph.
+        assert_eq!(next_runtime_define(Target::Client), "\"\"");
+        assert_eq!(next_runtime_define(Target::Server), "\"nodejs\"");
+        assert_eq!(next_runtime_define(Target::ReactServer), "\"nodejs\"");
     }
 
     #[test]
@@ -7733,7 +7941,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
         // With an asset base the stylesheet href carries the prefix — and it is still
         // only linked when the react-server build emitted a stylesheet beside the entry.
-        let src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "/docs");
+        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "/docs");
         assert!(
             src.contains(
                 r#"const RSC_CSS_HREF = existsSync(new URL("./server.css", import.meta.url)) ? "/docs/rsc.css" : null;"#
@@ -7748,7 +7956,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
             "the head <link> is conditional on the emitted stylesheet: {src}",
         );
         // Empty asset base keeps the bare `/rsc.css`.
-        let plain = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let plain = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         assert!(plain.contains(r#"? "/rsc.css" : null;"#), "no prefix -> bare /rsc.css: {plain}");
     }
 
@@ -7768,7 +7976,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let src = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         for line in src.lines() {
             if !line.contains(RSC_CSS_URL) {
                 continue;
@@ -7889,15 +8097,18 @@ const STUB_MANIFEST = {
 };
 "##;
         let driver = format!("\nImage({props});\nconsole.log(JSON.stringify(RENDERED));\n");
-        // One scratch dir per props set — these tests run in parallel and `scratch`
-        // wipes the directory it hands back, so a shared name races.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(props, &mut hasher);
-        let file = scratch(&format!(
-            "image-shim-render-{:016x}",
-            std::hash::Hasher::finish(&hasher)
-        ))
-        .join("shim.mjs");
+        // One scratch dir per CALL. `scratch` wipes the directory it hands back and
+        // these tests run in parallel, so any name two calls can share is a race —
+        // and naming the directory after the props hash was exactly such a name:
+        // `image_shim_renders_next_srcset_sizes_and_dimensions` and
+        // `image_shim_matches_next_img_style_assembly` pass byte-identical props, so
+        // they collided and one `remove_dir_all` raced the other's `write` (an
+        // intermittent `InvalidInput` from `fs::write`). A monotonic counter is
+        // unique by construction, whatever the props say.
+        static RENDER_SEQUENCE: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let sequence = RENDER_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file = scratch(&format!("image-shim-render-{sequence}")).join("shim.mjs");
         std::fs::write(&file, format!("{prelude}{src}{driver}")).unwrap();
         let out = std::process::Command::new("node").arg(&file).output().unwrap();
         assert!(
@@ -8336,7 +8547,7 @@ export default function Page(){ return null; }
         let seg_boundary = app.join("segment-boundary.tsx");
         let reqctx = app.join("request-context.ts");
         std::fs::write(&reqctx, request_context_module()).unwrap();
-        let rsc = rsc_entry_module(&disc, "", &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
         assert!(rsc.contains("template:"), "levels carry a template id");
         assert!(rsc.contains("const GLOBAL_ERROR ="), "GLOBAL_ERROR const emitted");
         assert!(rsc.contains("key: pathname"), "template is keyed by pathname for remount");

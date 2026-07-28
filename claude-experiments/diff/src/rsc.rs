@@ -1127,6 +1127,136 @@ pub const CLIENT_REFERENCES_MANIFEST_FILE: &str = "client-references-manifest.js
 /// divergent-id `ssrModuleMapping` (Manifest #2's `moduleMap`).
 pub const SERVER_REFERENCES_MANIFEST_FILE: &str = "server-references-manifest.json";
 
+/// The REACT-SERVER graph's own client-references manifest file. A production
+/// `build-app` run emits the react-server graph and the SSR-of-flight graph into the
+/// SAME output root and runs the ssr pass LAST, so under one shared file name the
+/// react-server graph's manifest is silently overwritten and its contents lost.
+///
+/// That content is the one thing no other manifest records: the AUTHORITATIVE set of
+/// `"use client"` modules a flight stream can carry. A client reference reaches the
+/// wire only if the react-server graph resolved to that module, so this set — not the
+/// browser graph's — is what the SSR consumer manifest must cover. The two sets are
+/// legitimately different whenever a package's `exports` map sends the `browser` and
+/// `node` conditions to different files: the browser graph then holds a `"use client"`
+/// module the server graphs never see, and demanding an SSR twin for it would reject a
+/// correct build.
+pub const REACT_SERVER_REFERENCES_MANIFEST_FILE: &str = "react-server-references-manifest.json";
+
+/// The node module that JOINS the three references manifests above into the
+/// divergent-id `ssrModuleMapping`. Imported as a sibling by both the orchestrator
+/// (`next-server.mjs`) and the render seam (`next-render-core.mjs`), so it is written
+/// next to whichever of them lands in an output dir.
+pub const SSR_MODULE_MAP_FILE: &str = "ssr-module-map.mjs";
+
+#[cfg(test)]
+mod ssr_module_map_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Write the three manifests plus the shipped join module into `dir`, then run
+    /// `script` against it under node. Returns `(stdout, stderr, ok)`.
+    ///
+    /// The module under test is the REAL file the binary embeds and writes next to
+    /// every build's output, not a copy — the join rule has four consumers and this
+    /// is the one place it is stated.
+    fn run_join(
+        client: &str,
+        flight: &str,
+        ssr: &str,
+        script: &str,
+    ) -> (String, String, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(CLIENT_REFERENCES_MANIFEST_FILE), client).unwrap();
+        fs::write(root.join(REACT_SERVER_REFERENCES_MANIFEST_FILE), flight).unwrap();
+        fs::write(root.join(SERVER_REFERENCES_MANIFEST_FILE), ssr).unwrap();
+        fs::write(
+            root.join(SSR_MODULE_MAP_FILE),
+            include_str!("../scripts/rsc/ssr-module-map.mjs"),
+        )
+        .unwrap();
+        let runner = root.join("run.mjs");
+        fs::write(
+            &runner,
+            format!(
+                "import {{ loadServerConsumerManifest }} from \"./{SSR_MODULE_MAP_FILE}\";\n\
+                 const outputDir = new URL(\".\", import.meta.url).pathname;\n{script}\n"
+            ),
+        )
+        .unwrap();
+        let output = Command::new("node").arg(&runner).output().unwrap();
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.success(),
+        )
+    }
+
+    fn entry(id: usize) -> String {
+        format!("{{\"id\":{id},\"chunks\":[],\"name\":\"*\"}}")
+    }
+
+    /// A `"use client"` module the BROWSER graph has and no server graph does is a
+    /// correct build, not a broken one: a package whose `exports` sends `browser`
+    /// and `node` to different files (`@sentry/nextjs`) contributes exactly this.
+    /// Demanding an SSR twin for it rejected cal.com's whole prerender phase.
+    ///
+    /// It still gets a `moduleMap` entry — one that throws by name the instant
+    /// anything resolves it — so "unreachable" can never quietly become "missing".
+    #[test]
+    fn a_browser_only_use_client_module_does_not_fail_the_join_but_cannot_be_resolved() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let client = format!(
+            "{{\"/app/shared.js\":{},\"/pkg/browser-only.js\":{}}}",
+            entry(1),
+            entry(2)
+        );
+        let flight = format!("{{\"/app/shared.js\":{}}}", entry(7));
+        let ssr = format!("{{\"/app/shared.js\":{}}}", entry(9));
+        let (stdout, stderr, ok) = run_join(
+            &client,
+            &flight,
+            &ssr,
+            "const { moduleMap } = loadServerConsumerManifest(outputDir);\n\
+             console.log(JSON.stringify(moduleMap[\"1\"]));\n\
+             try { moduleMap[\"2\"][\"*\"]; console.log(\"NO THROW\"); }\n\
+             catch (error) { console.log(\"threw:\" + error.message); }\n",
+        );
+        assert!(ok, "the join must succeed: {stderr}");
+        assert!(
+            stdout.contains("\"id\":9"),
+            "the shared module maps to the SSR graph's id: {stdout}"
+        );
+        assert!(
+            stdout.contains("threw:") && stdout.contains("/pkg/browser-only.js"),
+            "resolving the browser-only module must throw, naming it: {stdout}"
+        );
+    }
+
+    /// The check that DOES matter: a module the react-server graph can put on the
+    /// wire but the SSR graph never bundled. That flight cannot be rendered to
+    /// HTML, so it is a hard error naming the module and which graph lacks it.
+    #[test]
+    fn a_flight_reachable_module_missing_from_the_ssr_graph_is_a_hard_error() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let client = format!("{{\"/app/island.js\":{}}}", entry(1));
+        let flight = format!("{{\"/app/island.js\":{}}}", entry(7));
+        let (_, stderr, ok) = run_join(
+            &client,
+            &flight,
+            "{}",
+            "loadServerConsumerManifest(outputDir);\n",
+        );
+        assert!(!ok, "a flight-reachable module with no SSR twin must throw");
+        assert!(stderr.contains("/app/island.js"), "{stderr}");
+        assert!(stderr.contains("SSR graph"), "{stderr}");
+    }
+}
+
 /// One `"use client"` module's entry in the client-references manifest
 /// (`bundlerConfig[moduleId]`). The shape `react-server-dom-webpack`'s
 /// `resolveClientReferenceMetadata` reads: `{ id, chunks, name }`.

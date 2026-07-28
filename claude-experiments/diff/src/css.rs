@@ -257,6 +257,451 @@ fn canonical_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+// ---------------------------------------------------------------------------
+// Tailwind entry `@import` inlining.
+// ---------------------------------------------------------------------------
+
+/// A Tailwind v4 entry with its `@import` graph spliced in.
+///
+/// A Tailwind entry is not an ordinary stylesheet that happens to be
+/// concatenated with its imports: it is the INPUT to a compiler. `@theme`,
+/// `@plugin`, `@source`, `@custom-variant` and `@utility` in an imported file
+/// configure the same compile as the ones written in the entry, and an
+/// `@apply` in one file may name a utility another file defines. So the whole
+/// graph has to be one text before the Tailwind compiler ever sees it —
+/// treating the imports as separate stylesheet modules loses every directive
+/// they carry.
+#[derive(Debug, Default)]
+pub struct InlinedTailwindEntry {
+    /// The entry text with every inlinable `@import` replaced by its target's
+    /// (recursively inlined) content.
+    pub css: String,
+    /// Every physical file spliced in, so an edit to any of them re-derives the
+    /// entry module.
+    pub inlined_files: Vec<PathBuf>,
+    /// Remote/absolute `@import`s, reproduced verbatim for the emit step to
+    /// hoist (they cannot be inlined).
+    pub external_imports: Vec<String>,
+    /// Assets referenced by a `url(...)` in the entry or any inlined file, each
+    /// resolved against the file that WROTE it.
+    pub assets: Vec<CssAsset>,
+}
+
+/// Splices a Tailwind v4 entry's `@import` graph into one compilable text.
+///
+/// `@import "tailwindcss"` (and any `tailwindcss/...` subpath) is left in place:
+/// it names the framework itself, which the native compiler expands, not a file
+/// to inline. Remote imports are hoisted out. Everything else — a relative path
+/// or a package specifier resolved with the `style` condition, exactly as
+/// Tailwind's own CSS resolver does — is read and spliced in at its position,
+/// recursively, each file's `url(...)`s rewritten against ITS own directory.
+pub fn inline_tailwind_entry(file: &Path, text: &str) -> Result<InlinedTailwindEntry, String> {
+    let mut inlined_files = Vec::new();
+    let mut external_imports = Vec::new();
+    let mut assets = Vec::new();
+    let mut visited = BTreeSet::new();
+    visited.insert(canonical_path(file));
+    let css = splice_tailwind_imports(
+        file,
+        text,
+        &mut visited,
+        &mut inlined_files,
+        &mut external_imports,
+        &mut assets,
+        0,
+    )?;
+    Ok(InlinedTailwindEntry {
+        css,
+        inlined_files,
+        external_imports,
+        assets,
+    })
+}
+
+/// How deep an `@import` chain may nest before it is reported as a cycle. CSS
+/// import graphs are shallow; this only exists so a symlink loop that defeats
+/// the `visited` dedup reports instead of recursing forever.
+const MAX_CSS_IMPORT_DEPTH: usize = 64;
+
+fn splice_tailwind_imports(
+    file: &Path,
+    text: &str,
+    visited: &mut BTreeSet<PathBuf>,
+    inlined_files: &mut Vec<PathBuf>,
+    externals: &mut Vec<String>,
+    assets: &mut Vec<CssAsset>,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > MAX_CSS_IMPORT_DEPTH {
+        return Err(format!(
+            "@import nesting deeper than {MAX_CSS_IMPORT_DEPTH} levels reached at {} \
+             (an import cycle?)",
+            file.display()
+        ));
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    // This file's own text since the last splice point. Flushed through
+    // `rewrite_urls` (which resolves against THIS file) before any inlined
+    // content is appended, so a nested file's relative `url(...)` is never
+    // resolved against its importer's directory.
+    let mut own: Vec<u8> = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => {
+                let end = skip_string(bytes, index);
+                own.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'/' if at_comment(bytes, index) => {
+                let end = skip_comment(bytes, index);
+                own.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'{' => {
+                brace_depth += 1;
+                own.push(b'{');
+                index += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                own.push(b'}');
+                index += 1;
+            }
+            b'@' if brace_depth == 0
+                && starts_with_ci(bytes, index + 1, "import")
+                && bytes
+                    .get(index + 1 + "import".len())
+                    .is_none_or(|byte| !is_ident_byte(*byte)) =>
+            {
+                let statement_end = find_statement_end(bytes, index);
+                let statement = text[index..statement_end].trim_end_matches(';').trim();
+                let body = statement["@import".len()..].trim();
+                match parse_import_statement(file, statement, body)? {
+                    ParsedImport::External(external) => externals.push(external),
+                    ParsedImport::Graph(import) if is_framework_import(&import.specifier) => {
+                        own.extend_from_slice(statement.as_bytes());
+                        own.extend_from_slice(b";\n");
+                    }
+                    ParsedImport::Graph(import) => {
+                        let target = resolve_css_import(file, &import.specifier)?;
+                        let canonical = canonical_path(&target);
+                        if visited.insert(canonical) {
+                            let nested_text = fs::read_to_string(&target).map_err(|error| {
+                                format!(
+                                    "cannot read @import {:?} (from {}): {}: {error}",
+                                    import.specifier,
+                                    file.display(),
+                                    target.display()
+                                )
+                            })?;
+                            inlined_files.push(target.clone());
+                            let nested = splice_tailwind_imports(
+                                &target,
+                                &nested_text,
+                                visited,
+                                inlined_files,
+                                externals,
+                                assets,
+                                depth + 1,
+                            )?;
+                            out.push_str(&flush_own(&mut own, file, assets)?);
+                            match &import.media {
+                                Some(media) => {
+                                    out.push_str(&format!("@media {media} {{\n{nested}\n}}\n"));
+                                }
+                                None => {
+                                    out.push_str(&nested);
+                                    if !out.ends_with('\n') {
+                                        out.push('\n');
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                index = statement_end;
+                // Swallow one trailing newline so a consumed statement does not
+                // leave a stack of blank lines behind.
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            _ => {
+                own.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    out.push_str(&flush_own(&mut own, file, assets)?);
+    Ok(out)
+}
+
+/// Drains the buffered text a single file contributed, rewriting its `url(...)`
+/// references against THAT file's directory.
+fn flush_own(own: &mut Vec<u8>, file: &Path, assets: &mut Vec<CssAsset>) -> Result<String, String> {
+    let text = String::from_utf8(std::mem::take(own)).map_err(|error| {
+        format!("CSS for {} is not valid UTF-8: {error}", file.display())
+    })?;
+    let text = absolutize_source_directives(&text, file)?;
+    rewrite_urls(&text, file, assets)
+}
+
+/// Rewrites every `@source "<path>"` / `@source not "<path>"` in one file's own
+/// text to an absolute path.
+///
+/// `@source` names extra files Tailwind scans for class candidates, resolved
+/// against the stylesheet that DECLARES it. Splicing that text into the entry
+/// would silently re-anchor it to the entry's directory, so the anchor is
+/// baked in here instead, exactly as `url(...)` rewriting bakes in each file's
+/// own asset references.
+fn absolutize_source_directives(css: &str, file: &Path) -> Result<String, String> {
+    if !css.contains("@source") {
+        return Ok(css.to_string());
+    }
+    let directory = file.parent().unwrap_or_else(|| Path::new("."));
+    let bytes = css.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => {
+                let end = skip_string(bytes, index);
+                out.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'/' if at_comment(bytes, index) => {
+                let end = skip_comment(bytes, index);
+                out.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'@' if starts_with_ci(bytes, index + 1, "source")
+                && bytes
+                    .get(index + 1 + "source".len())
+                    .is_none_or(|byte| !is_ident_byte(*byte)) =>
+            {
+                let statement_end = find_statement_end(bytes, index);
+                let statement = css[index..statement_end].trim_end_matches(';').trim();
+                let body = statement["@source".len()..].trim();
+                let (negated, target) = match body.strip_prefix("not") {
+                    Some(rest) if rest.starts_with(char::is_whitespace) => (true, rest.trim()),
+                    _ => (false, body),
+                };
+                if target.starts_with("inline(") {
+                    return Err(format!(
+                        "`@source {}inline(...)` in {} is not implemented by diffpack's \
+                         Tailwind compiler (it safelists literal candidates); \
+                         write the classes in a scanned source file instead",
+                        if negated { "not " } else { "" },
+                        file.display()
+                    ));
+                }
+                let quote = target.as_bytes().first().copied();
+                let path = match quote {
+                    Some(b'"') | Some(b'\'') => {
+                        let end = skip_string(target.as_bytes(), 0);
+                        if end < 2 || end > target.len() {
+                            return Err(format!(
+                                "unterminated @source target in {} ({statement:?})",
+                                file.display()
+                            ));
+                        }
+                        &target[1..end - 1]
+                    }
+                    _ => {
+                        return Err(format!(
+                            "@source in {} must name a quoted path ({statement:?})",
+                            file.display()
+                        ));
+                    }
+                };
+                let absolute = if path.starts_with('/') {
+                    path.to_string()
+                } else {
+                    // Normalized LEXICALLY, not through the filesystem: the tail
+                    // is a glob (`**/*.tsx`), so no prefix of it need exist yet.
+                    lexically_normalize(&directory.join(path))
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let rewritten = format!(
+                    "@source {}\"{}\";",
+                    if negated { "not " } else { "" },
+                    absolute
+                );
+                out.extend_from_slice(rewritten.as_bytes());
+                index = statement_end;
+            }
+            _ => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out)
+        .map_err(|error| format!("CSS for {} is not valid UTF-8: {error}", file.display()))
+}
+
+/// Resolves `.` and `..` components textually. Used where the path's tail is a
+/// glob pattern, so `Path::canonicalize` (which requires every component to
+/// exist) cannot be used.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether an `@import` target names the Tailwind framework itself rather than a
+/// stylesheet to inline. `@import 'tailwindcss'` is a compiler invocation, and
+/// its subpaths (`tailwindcss/theme.css`, `tailwindcss/preflight.css`,
+/// `tailwindcss/utilities.css`) name the layers that invocation assembles — the
+/// native compiler produces all of them, so the directives stay in the text for
+/// it to interpret.
+fn is_framework_import(specifier: &str) -> bool {
+    specifier == "tailwindcss" || specifier.starts_with("tailwindcss/")
+}
+
+/// Resolves one `@import` target of a Tailwind entry to a file on disk.
+///
+/// A relative target resolves against the importing file (with `.css` appended
+/// when the literal path is not a file). A bare target resolves through
+/// `node_modules` like Node does, but reading the package with the **`style`**
+/// condition and `style` main field — the CSS-side resolution Tailwind itself
+/// performs, which is how `@import "some-pkg"` reaches the stylesheet a package
+/// publishes under `exports: { ".": { "style": "./dist/x.css" } }`.
+fn resolve_css_import(file: &Path, specifier: &str) -> Result<PathBuf, String> {
+    let directory = file.parent().unwrap_or_else(|| Path::new("."));
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        let literal = directory.join(specifier);
+        if literal.is_file() {
+            return Ok(literal);
+        }
+        let with_extension = directory.join(format!("{specifier}.css"));
+        if with_extension.is_file() {
+            return Ok(with_extension);
+        }
+        return Err(format!(
+            "cannot resolve @import {specifier:?} from {}: no file at {}",
+            file.display(),
+            literal.display()
+        ));
+    }
+    let (package, subpath) = split_package_specifier(specifier);
+    for ancestor in directory.ancestors() {
+        let root = ancestor.join("node_modules").join(&package);
+        if !root.is_dir() {
+            continue;
+        }
+        if let Some(resolved) = resolve_in_package(&root, subpath) {
+            return Ok(resolved);
+        }
+        return Err(format!(
+            "cannot resolve @import {specifier:?} from {}: the package at {} publishes no \
+             stylesheet for that specifier (looked at its `exports` with the `style` \
+             condition, its `style` field, and `index.css`)",
+            file.display(),
+            root.display()
+        ));
+    }
+    Err(format!(
+        "cannot resolve @import {specifier:?} from {}: no `node_modules/{package}` in any \
+         parent directory",
+        file.display()
+    ))
+}
+
+/// Splits a bare specifier into its package name and the remaining subpath
+/// (`""` when the specifier names the package itself). Scoped packages keep
+/// both segments.
+fn split_package_specifier(specifier: &str) -> (String, &str) {
+    let segments = if specifier.starts_with('@') { 2 } else { 1 };
+    let mut boundary = 0usize;
+    for _ in 0..segments {
+        match specifier[boundary..].find('/') {
+            Some(offset) => boundary += offset + 1,
+            None => return (specifier.to_string(), ""),
+        }
+    }
+    (
+        specifier[..boundary - 1].to_string(),
+        &specifier[boundary..],
+    )
+}
+
+/// Locates the stylesheet a package publishes for `subpath` (`""` = the package
+/// root), preferring its `exports` map read with the `style` condition.
+fn resolve_in_package(root: &Path, subpath: &str) -> Option<PathBuf> {
+    let manifest = fs::read_to_string(root.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let key = if subpath.is_empty() {
+        ".".to_string()
+    } else {
+        format!("./{subpath}")
+    };
+    if let Some(manifest) = &manifest
+        && let Some(exports) = manifest.get("exports")
+    {
+        let entry = if subpath.is_empty() && !exports.is_object() {
+            Some(exports)
+        } else {
+            exports.get(&key)
+        };
+        if let Some(entry) = entry
+            && let Some(relative) = pick_style_condition(entry)
+        {
+            let candidate = root.join(relative.trim_start_matches("./"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if subpath.is_empty() {
+        for field in ["style", "main"] {
+            if let Some(manifest) = &manifest
+                && let Some(relative) = manifest.get(field).and_then(serde_json::Value::as_str)
+                && relative.ends_with(".css")
+            {
+                let candidate = root.join(relative.trim_start_matches("./"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        let index = root.join("index.css");
+        return index.is_file().then_some(index);
+    }
+    [root.join(subpath), root.join(format!("{subpath}.css"))]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// Resolves one `exports` entry under the CSS condition set: `style` first (the
+/// condition a stylesheet consumer requests), then `default`. An array entry
+/// takes its first resolvable element.
+fn pick_style_condition(entry: &serde_json::Value) -> Option<String> {
+    match entry {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(values) => values.iter().find_map(pick_style_condition),
+        serde_json::Value::Object(map) => ["style", "default"]
+            .iter()
+            .find_map(|condition| map.get(*condition).and_then(pick_style_condition)),
+        _ => None,
+    }
+}
+
 /// The deterministic scope suffix for one CSS Module: derived from the file's
 /// name and content, so it is stable across rebuilds of unchanged content and
 /// changes when the content does.

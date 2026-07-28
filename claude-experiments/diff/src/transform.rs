@@ -189,6 +189,18 @@ pub struct DependencyDemand {
     pub all: bool,
     pub names: Vec<String>,
     pub dynamic: bool,
+    /// Every reference to this specifier is a `require(...)` inside a `try` block —
+    /// see [`crate::parser::collect_optional_dependencies`]. A resolution failure is
+    /// then the program's own designed path, not a broken build.
+    pub optional: bool,
+    /// At least one reference to this specifier is a CommonJS `require(...)` call,
+    /// so it must resolve under the `require` export condition. See
+    /// [`crate::parser::DependencySyntax`].
+    pub require_syntax: bool,
+    /// At least one reference to this specifier is an ESM form (a static
+    /// `import` / `export … from`, or a dynamic `import()`), so it must resolve
+    /// under the `import` export condition.
+    pub import_syntax: bool,
 }
 
 /// Which runtime a module's JSX is lowered with.
@@ -281,6 +293,54 @@ impl JsxConfig {
             }
         }
     }
+}
+
+/// How a module's `@decorator`s are lowered: the resolved `experimentalDecorators` /
+/// `emitDecoratorMetadata` / `strictNullChecks` contract for one file, read off the
+/// tsconfig that owns it.
+///
+/// A decorator is SYNTAX no JavaScript engine accepts — Node and every browser
+/// reject `@dec class C {}` at parse time — so unlike JSX there is no "leave it to
+/// the runtime" option: either the emit lowers it or the emit is unloadable. Which
+/// lowering is correct is not a bundler preference either. TypeScript's legacy
+/// decorators (`experimentalDecorators: true`) and the TC39 Stage 3 decorators call
+/// the decorator with different arguments and assign its return value differently,
+/// so a file's own tsconfig is the only thing that can say which semantics its
+/// authors wrote against.
+///
+/// `Default` (all false) is TypeScript's own default for a project that says
+/// nothing: Stage 3 semantics.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct DecoratorConfig {
+    /// tsconfig `experimentalDecorators`: TypeScript's pre-standard decorators.
+    pub legacy: bool,
+    /// tsconfig `emitDecoratorMetadata`. TypeScript ignores it unless
+    /// `experimentalDecorators` is on, and so does the transform.
+    pub emit_metadata: bool,
+    /// tsconfig `strictNullChecks` (which `strict` turns on). Only read when
+    /// metadata is emitted: it decides whether `T | null` records `T`'s constructor
+    /// or `Object` in a `design:type`.
+    pub strict_null_checks: bool,
+}
+
+impl DecoratorConfig {
+    /// Installs this config on oxc's transform options.
+    fn apply(&self, options: &mut TransformOptions) {
+        options.decorator.legacy = self.legacy;
+        options.decorator.emit_decorator_metadata = self.emit_metadata;
+        options.decorator.strict_null_checks = self.strict_null_checks;
+    }
+}
+
+/// The compilation contract one module inherits from the tsconfig/jsconfig that
+/// owns it (layered, for JSX, with the build's own settings). Both halves answer
+/// the same question — how must THIS file's syntax be lowered — and both are read
+/// from the same config, so they travel together rather than as separate arguments
+/// that a caller could resolve from two different configs.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ProjectConfig {
+    pub jsx: JsxConfig,
+    pub decorators: DecoratorConfig,
 }
 
 /// The environment a module is being compiled for. TanStack Start ships
@@ -411,7 +471,10 @@ pub fn transform_module_with_options(
         target,
         refresh,
         jsx,
-        jsx_config,
+        &ProjectConfig {
+            jsx: jsx_config.clone(),
+            decorators: DecoratorConfig::default(),
+        },
         SourceLanguage::FromPath,
     )
 }
@@ -460,7 +523,7 @@ pub fn transform_module_in_language(
     target: Target,
     refresh: bool,
     jsx: JsxExtensions,
-    jsx_config: &JsxConfig,
+    project_config: &ProjectConfig,
     language: SourceLanguage,
 ) -> TransformResult {
     if path
@@ -720,10 +783,35 @@ pub fn transform_module_in_language(
         .build(&program);
     diagnostics.extend(transform_diagnostics(semantic.diagnostics));
     let mut transform_options = TransformOptions::default();
+    // Where the runtime helpers a lowering CALLS come from. oxc imports them rather
+    // than inlining (`__decorate` for a legacy decorator, today's only case), and its
+    // default names `@oxc-project/runtime` — a package no Next or Vite app installs,
+    // so a decorator would lower into an unresolvable import. diffpack serves them
+    // from its own binary instead; see [`crate::runtime_helpers`].
+    transform_options.helper_loader.module_name =
+        std::borrow::Cow::Borrowed(crate::runtime_helpers::HELPER_PACKAGE);
     // How this file's JSX is lowered. A file-level `@jsxImportSource`/`@jsx`/
     // `@jsxFrag`/`@jsxRuntime` pragma still wins: oxc rescans the program's leading
     // comments and overrides these options before building the JSX pass.
-    jsx_config.apply(&mut transform_options);
+    project_config.jsx.apply(&mut transform_options);
+    // How this file's `@decorator`s are lowered, from the tsconfig that owns it.
+    project_config.decorators.apply(&mut transform_options);
+    if !project_config.decorators.legacy && let Some(name) = first_decorator_name(&program) {
+        // Stage 3 decorators. oxc lowers only TypeScript's legacy ones, so leaving
+        // this alone would emit `@dec` into the bundle — syntax no engine parses,
+        // failing at load with an opaque `SyntaxError: Invalid or unexpected token`
+        // pointing at a minified line. Refuse HERE, naming the file and the decorator.
+        diagnostics.push(TransformDiagnostic::error(format!(
+            "{}: `@{name}` is a Stage 3 (TC39) decorator, which this build cannot lower — \
+             the emitted bundle would carry `@{name}` verbatim and no JavaScript engine \
+             parses that. Only TypeScript's legacy decorators are lowered: set \
+             \"experimentalDecorators\": true in the tsconfig.json/jsconfig.json that owns \
+             this file (which is also what makes a decorator receive TypeScript's \
+             `(target, key, descriptor)` arguments rather than the Stage 3 \
+             `(value, context)` pair, so the two are not interchangeable).",
+            path.display(),
+        )));
+    }
     if refresh {
         // Native React Fast Refresh: oxc injects `$RefreshSig$()`/`$RefreshReg$`
         // per component (the `react-refresh/babel` equivalent), so a hot update
@@ -814,6 +902,41 @@ pub fn transform_module_in_language(
         uses_dirname,
         workers,
     }
+}
+
+/// The name of the FIRST `@decorator` anywhere in `program` (class, method,
+/// property, accessor or parameter), for the refusal message. `None` when the module
+/// has none, which is the overwhelmingly common case and the only thing the caller
+/// needs to know to stay silent.
+fn first_decorator_name(program: &Program<'_>) -> Option<String> {
+    #[derive(Default)]
+    struct FindDecorator {
+        found: Option<String>,
+    }
+    impl<'a> Visit<'a> for FindDecorator {
+        fn visit_decorator(&mut self, decorator: &oxc_ast::ast::Decorator<'a>) {
+            if self.found.is_none() {
+                self.found = Some(decorator_expression_name(&decorator.expression));
+            }
+        }
+    }
+    /// A readable source-shaped name for the decorator: `@Memoize`, `@Memoize(...)`
+    /// and `@cache.Memoize` all report the identifier an author would recognize.
+    fn decorator_expression_name(expression: &Expression<'_>) -> String {
+        match expression {
+            Expression::Identifier(identifier) => identifier.name.to_string(),
+            Expression::CallExpression(call) => decorator_expression_name(&call.callee),
+            Expression::StaticMemberExpression(member) => format!(
+                "{}.{}",
+                decorator_expression_name(&member.object),
+                member.property.name,
+            ),
+            _ => "decorator".to_string(),
+        }
+    }
+    let mut finder = FindDecorator::default();
+    finder.visit_program(program);
+    finder.found
 }
 
 /// Finds the two constructs whose validity depends on the output format: a
@@ -1147,6 +1270,8 @@ fn lower_module_ast<'a>(
 ) {
     let dependencies = collect_dependencies(program);
     let dynamic_dependencies = collect_dynamic_dependencies(program);
+    let optional_dependencies = crate::parser::collect_optional_dependencies(program);
+    let dependency_syntax = crate::parser::collect_dependency_syntax(program);
     let mut dependency_demands = dependencies
         .iter()
         .map(|specifier| {
@@ -1157,6 +1282,9 @@ fn lower_module_ast<'a>(
                     all: true,
                     names: Vec::new(),
                     dynamic: dynamic_dependencies.contains(specifier),
+                    optional: optional_dependencies.contains(specifier),
+                    require_syntax: dependency_syntax.require.contains(specifier),
+                    import_syntax: dependency_syntax.import.contains(specifier),
                 },
             )
         })
@@ -1192,6 +1320,9 @@ fn lower_module_ast<'a>(
                     let source = declaration.source.value.to_string();
                     let demand = dependency_demands.entry(source.clone()).or_default();
                     demand.specifier = source.clone();
+                    // This statement IS the ESM syntax, so the flag holds whether or
+                    // not the specifier scan reached it.
+                    demand.import_syntax = true;
                     if demand_downgraded.insert(source) {
                         demand.all = false;
                         demand.names.clear();
@@ -1264,6 +1395,7 @@ fn lower_module_ast<'a>(
                         let key = source.value.to_string();
                         let demand = dependency_demands.entry(key.clone()).or_default();
                         demand.specifier = key.clone();
+                        demand.import_syntax = true;
                         if demand_downgraded.insert(key) {
                             demand.all = false;
                         }
@@ -1328,6 +1460,7 @@ fn lower_module_ast<'a>(
                         .entry(declaration.source.value.to_string())
                         .or_default();
                     demand.specifier = declaration.source.value.to_string();
+                    demand.import_syntax = true;
                     demand.all = true;
                 }
                 _ => {}
@@ -2397,7 +2530,7 @@ mod tests {
             Target::Client,
             false,
             JsxExtensions::default(),
-            &JsxConfig::default(),
+            &ProjectConfig::default(),
             SourceLanguage::TypeScript,
         );
         assert!(typescript.diagnostics.is_empty(), "{:?}", typescript.diagnostics);
@@ -2413,7 +2546,7 @@ mod tests {
             Target::Client,
             false,
             JsxExtensions::default(),
-            &JsxConfig::default(),
+            &ProjectConfig::default(),
             SourceLanguage::FromPath,
         );
         assert!(

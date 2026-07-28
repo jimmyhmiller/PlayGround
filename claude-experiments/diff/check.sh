@@ -103,7 +103,7 @@ deps_ready() { [ -d "$1/node_modules" ]; }
 # gated on, so nothing would have noticed them rotting. All node/bash only — no
 # browser, no fixture node_modules, no corpus.
 if [ "$have_node" = "1" ]; then
-  step "e2e harness self-tests (hydration probe + basePath static server + finding scoring)" \
+  step "e2e harness self-tests (hydration probe + basePath static server + finding scoring + corpus shape)" \
     node --test "integration/e2e/lib/*.test.mjs" || true
 else
   skip_step "e2e harness self-tests" "node not found"

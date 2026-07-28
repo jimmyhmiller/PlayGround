@@ -13,11 +13,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { freePort, startStaticServer, needsWebpackFlag } from "./apps.mjs";
+import { freePort, startStaticServer, needsWebpackFlag, withRelaxedChecks } from "./apps.mjs";
 
 const fixture = () => {
   const root = mkdtempSync(join(tmpdir(), "diffpack-static-server-"));
@@ -124,4 +126,80 @@ test("a missing asset 404s instead of silently becoming the index document", asy
     assert.equal(route.status, 200);
     assert.match(await route.text(), /home/);
   });
+});
+
+// The relaxed-checks retry rewrites the app's `next.config` to disable its type
+// and lint gates. Next accepts TWO config shapes — an object, and a
+// `(phase, { defaultConfig }) => config` FUNCTION — and the wrapper used to be
+// `{ ...base, ignoreBuildErrors }`. Spreading a function yields `{}`: for every
+// app whose config is a function (cal.com's `apps/web/next.config.ts` is one, and
+// so is any app using `phase-development-server`), that retry did not relax two
+// checks on the app's config, it silently REPLACED the config with two checks —
+// no rewrites, no redirects, no `transpilePackages` — and the "reference" build
+// it produced was a different application from the one diffpack was asked to
+// build. Every difference would then have been charged to diffpack.
+//
+// These tests evaluate the bytes actually written, in a child process, while the
+// wrapper is in place.
+const evaluateConfig = (dir, file, { cjs = false } = {}) => {
+  const url = JSON.stringify(pathToFileURL(join(dir, file)).href);
+  const probe = cjs
+    ? `const cfg = require(${JSON.stringify(join(dir, file))});` +
+      `const resolved = typeof cfg === "function" ? cfg("phase-production-build", {}) : cfg;` +
+      `console.log(JSON.stringify({ isFunction: typeof cfg === "function", resolved }));`
+    : `import(${url}).then((m) => { const cfg = m.default;` +
+      `const resolved = typeof cfg === "function" ? cfg("phase-production-build", {}) : cfg;` +
+      `console.log(JSON.stringify({ isFunction: typeof cfg === "function", resolved })); });`;
+  const r = spawnSync(process.execPath, cjs ? ["-e", probe] : ["--input-type=module", "-e", probe], {
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, `probe failed: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+};
+
+test("relaxing checks on a FUNCTION config keeps the app's config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "diffpack-relax-fn-"));
+  writeFileSync(
+    join(dir, "next.config.mjs"),
+    `export default (phase) => ({ basePath: "/kept", transpilePackages: ["@calcom/ui"], phase });\n`
+  );
+  const seen = withRelaxedChecks(dir, () => evaluateConfig(dir, "next.config.mjs"));
+
+  assert.equal(seen.isFunction, true, "a function config must stay a function: Next calls it with the phase");
+  assert.equal(seen.resolved.basePath, "/kept", "the app's own config was dropped");
+  assert.deepEqual(seen.resolved.transpilePackages, ["@calcom/ui"]);
+  assert.equal(seen.resolved.phase, "phase-production-build", "the phase argument must still reach the app");
+  assert.equal(seen.resolved.typescript.ignoreBuildErrors, true);
+  assert.equal(seen.resolved.eslint.ignoreDuringBuilds, true);
+
+  // …and the app is handed back exactly as published.
+  assert.equal(existsSync(join(dir, "next.config.__e2e_base__.mjs")), false);
+  assert.match(readFileSync(join(dir, "next.config.mjs"), "utf8"), /^export default \(phase\) =>/);
+});
+
+test("relaxing checks on an OBJECT config still keeps the app's config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "diffpack-relax-obj-"));
+  writeFileSync(join(dir, "next.config.mjs"), `export default { basePath: "/kept", reactStrictMode: true };\n`);
+  const seen = withRelaxedChecks(dir, () => evaluateConfig(dir, "next.config.mjs"));
+  assert.equal(seen.isFunction, false);
+  assert.equal(seen.resolved.basePath, "/kept");
+  assert.equal(seen.resolved.reactStrictMode, true);
+  assert.equal(seen.resolved.typescript.ignoreBuildErrors, true);
+});
+
+test("relaxing checks on a CommonJS function config keeps the app's config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "diffpack-relax-cjs-"));
+  writeFileSync(join(dir, "next.config.js"), `module.exports = (phase) => ({ basePath: "/kept", phase });\n`);
+  const seen = withRelaxedChecks(dir, () => evaluateConfig(dir, "next.config.js", { cjs: true }));
+  assert.equal(seen.isFunction, true);
+  assert.equal(seen.resolved.basePath, "/kept");
+  assert.equal(seen.resolved.typescript.ignoreBuildErrors, true);
+});
+
+test("an app with no config at all is unchanged afterwards", () => {
+  const dir = mkdtempSync(join(tmpdir(), "diffpack-relax-none-"));
+  const seen = withRelaxedChecks(dir, () => evaluateConfig(dir, "next.config.mjs"));
+  assert.equal(seen.resolved.typescript.ignoreBuildErrors, true);
+  // diffpack must see the app as published: no config appears out of nowhere.
+  assert.equal(existsSync(join(dir, "next.config.mjs")), false);
 });
