@@ -94,6 +94,11 @@ struct DependencyVisitor {
     /// Specifiers reached by at least one ESM form: a static `import` /
     /// `export … from`, or a dynamic `import()`.
     import_syntax: BTreeSet<String>,
+    /// Specifiers reached by at least one reference that requires the target to be
+    /// ALREADY EVALUATED when this module's body runs: a static `import`, an
+    /// `export … from`, or a CommonJS `require(...)`. See
+    /// [`collect_eager_dependencies`].
+    eager_dependencies: BTreeSet<String>,
 }
 
 /// Which SYNTAX a module reaches each of its specifiers through.
@@ -144,6 +149,7 @@ impl<'a> Visit<'a> for DependencyVisitor {
         self.dependencies.push(declaration.source.value.to_string());
         self.unguarded.insert(declaration.source.value.to_string());
         self.import_syntax.insert(declaration.source.value.to_string());
+        self.eager_dependencies.insert(declaration.source.value.to_string());
     }
 
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
@@ -162,6 +168,7 @@ impl<'a> Visit<'a> for DependencyVisitor {
         self.dependencies.push(declaration.source.value.to_string());
         self.unguarded.insert(declaration.source.value.to_string());
         self.import_syntax.insert(declaration.source.value.to_string());
+        self.eager_dependencies.insert(declaration.source.value.to_string());
     }
 
     fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
@@ -169,6 +176,7 @@ impl<'a> Visit<'a> for DependencyVisitor {
             self.dependencies.push(source.value.to_string());
             self.unguarded.insert(source.value.to_string());
             self.import_syntax.insert(source.value.to_string());
+            self.eager_dependencies.insert(source.value.to_string());
         }
         // `export` is a MODIFIER, not a scope: `export const p = import("./a")`
         // holds a dependency exactly as `const p = import("./a")` does. Handling
@@ -183,6 +191,10 @@ impl<'a> Visit<'a> for DependencyVisitor {
         if let Some(literal) = expression.common_js_require() {
             self.dependencies.push(literal.value.to_string());
             self.require_syntax.insert(literal.value.to_string());
+            // `require(...)` returns the module's exports SYNCHRONOUSLY, so the target
+            // must already be in the registry when the call runs — it can never be
+            // deferred into a lazily-loaded chunk.
+            self.eager_dependencies.insert(literal.value.to_string());
             if self.try_depth > 0 {
                 self.guarded_requires.insert(literal.value.to_string());
             } else {
@@ -258,6 +270,30 @@ pub fn collect_dynamic_dependencies(program: &Program<'_>) -> BTreeSet<String> {
     visitor.dynamic_dependencies
 }
 
+/// The specifiers this module reaches through a reference that needs the target
+/// ALREADY EVALUATED at the point this module's body runs: a static `import`, an
+/// `export … from`, or a CommonJS `require(...)`.
+///
+/// The complement of [`collect_dynamic_dependencies`] is NOT this set, because the two
+/// overlap: one module can reach one specifier both ways. The near-universal shape is a
+/// barrel that re-exports a component AND lazily imports the same file —
+///
+/// ```js
+/// export { default as Foo } from "./Foo";
+/// export const FooLazy = dynamic(() => import("./Foo"));
+/// ```
+///
+/// Reading only the `import()` there says "./Foo is a code-split boundary" and moves it
+/// into its own chunk, which is exactly wrong: the `export … from` on the line above
+/// resolves synchronously against the registry, and the chunk holding the target has not
+/// been loaded. The result is `Module is not loaded: <id>` at first render. An edge is a
+/// deferrable chunk boundary only when EVERY reference to it is an `import()`.
+pub fn collect_eager_dependencies(program: &Program<'_>) -> BTreeSet<String> {
+    let mut visitor = DependencyVisitor::default();
+    visitor.visit_program(program);
+    visitor.eager_dependencies
+}
+
 /// The specifiers this module treats as OPTIONAL: every reference to them is a
 /// `require(...)` inside a `try` block of the same function.
 ///
@@ -290,6 +326,115 @@ mod tests {
         let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         collect_optional_dependencies(&parsed.program).into_iter().collect()
+    }
+
+    fn dependencies_of(source: &str) -> Vec<String> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        collect_dependencies(&parsed.program)
+    }
+
+    fn syntax_of(source: &str) -> (Vec<String>, Vec<String>) {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let syntax = collect_dependency_syntax(&parsed.program);
+        (
+            syntax.require.into_iter().collect(),
+            syntax.import.into_iter().collect(),
+        )
+    }
+
+    /// `export` is a modifier, not a scope. Handling only the `from` clause and
+    /// returning made every dependency inside an exported declaration invisible —
+    /// `cal.com`'s `export const AppSetupPageMap = { alby: import("...") }` was
+    /// never discovered, and the emitted `import()` threw MODULE_NOT_FOUND.
+    #[test]
+    fn a_dependency_inside_an_exported_declaration_is_collected() {
+        assert_eq!(
+            dependencies_of(r#"export const map = { a: import("./a") };"#),
+            ["./a"]
+        );
+        assert_eq!(
+            dependencies_of(r#"export const dep = require("./cjs");"#),
+            ["./cjs"]
+        );
+        assert_eq!(
+            dependencies_of(r#"export function load() { return import("./lazy"); }"#),
+            ["./lazy"]
+        );
+        // The `from` clause still counts, and both are reported when a statement
+        // has one and an exported declaration is present elsewhere.
+        assert_eq!(
+            dependencies_of("export { a } from \"./re\";\nexport const b = require(\"./cjs\");"),
+            ["./re", "./cjs"]
+        );
+    }
+
+    /// A dynamic `import()` inside an exported declaration is still DYNAMIC, so it
+    /// keeps rooting its own chunk rather than being pulled into the main one.
+    #[test]
+    fn an_exported_declarations_dynamic_import_is_still_dynamic() {
+        let allocator = Allocator::default();
+        let source = r#"export const map = { a: import("./a") };"#;
+        let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
+        let dynamic = collect_dynamic_dependencies(&parsed.program);
+        assert!(dynamic.contains("./a"), "{dynamic:?}");
+    }
+
+    #[test]
+    fn each_specifier_records_the_syntax_that_reaches_it() {
+        let (require, import) = syntax_of(
+            r#"
+                import "./esm";
+                export * from "./star";
+                const cjs = require("./cjs");
+                export const lazy = import("./dyn");
+            "#,
+        );
+        assert_eq!(require, ["./cjs"]);
+        assert_eq!(import, ["./dyn", "./esm", "./star"]);
+    }
+
+    #[test]
+    fn a_specifier_reached_both_ways_is_reported_under_both() {
+        let (require, import) = syntax_of(
+            r#"
+                const eager = require("dual");
+                export const lazy = import("dual");
+            "#,
+        );
+        assert_eq!(require, ["dual"]);
+        assert_eq!(import, ["dual"]);
+    }
+
+    /// The lazy-component barrel: one specifier reached by BOTH an `export … from`
+    /// and an `import()`. The static reference makes the target eager — the graph must
+    /// see that, or the module is moved into a chunk that has not been fetched when the
+    /// barrel's synchronous lookup runs.
+    #[test]
+    fn a_specifier_reached_both_statically_and_dynamically_is_eager() {
+        let eager = eager_dependencies(
+            r#"
+                export { default as Foo } from "./Foo";
+                export const FooLazy = dynamic(() => import("./Foo"));
+                export const Bar = dynamic(() => import("./Bar"));
+                const cjs = require("./cjs");
+            "#,
+        );
+        assert!(eager.contains("./Foo"), "a static re-export is eager: {eager:?}");
+        assert!(eager.contains("./cjs"), "a require is eager: {eager:?}");
+        assert!(
+            !eager.contains("./Bar"),
+            "an import()-ONLY specifier stays deferrable: {eager:?}"
+        );
+    }
+
+    fn eager_dependencies(source: &str) -> BTreeSet<String> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, scan_source_type(Path::new("m.js"))).parse();
+        collect_eager_dependencies(&parsed.program)
     }
 
     #[test]

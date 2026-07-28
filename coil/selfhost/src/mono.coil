@@ -100,9 +100,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load ns) (load i)) name)
-                    (do (store! r (Some (al-get [Type] (load ts) (load i)))) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] (load ns) (load i)) name)
+                      (store! r (Some (al-get [Type] (load ts) (load i))))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -165,9 +165,9 @@
               (break)
               (do
                 (let [ip (al-elem [ImplDef] is (load i))]
-                  (if (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) base))
-                      (do (store! r ip) (break))
-                      0))
+                  (when (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) base))
+                        (store! r ip)
+                        (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; Several impls can share a key, so "first one with this key" is not good enough here
@@ -192,7 +192,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
+                (when (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) nm) (store! r (load i)) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn find-sum-named [(lst (ptr (ArrayList SumDef))) (nm (slice u8))] (-> i64)
@@ -202,7 +202,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
+                (when (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) nm) (store! r (load i)) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn find-func-named [(lst (ptr (ArrayList Func))) (nm (slice u8))] (-> i64)
@@ -212,7 +212,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Func] lst (load i)) name)) nm) (do (store! r (load i)) 0) 0)
+                (when (str-eq (load (field (al-elem [Func] lst (load i)) name)) nm) (store! r (load i)) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn gstruct-has [(m (ptr MonoCtx)) (nm (slice u8))] (-> bool)
@@ -242,22 +242,21 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] ns (load i)) func)
-                    (do (store! r (Some (al-get [(slice u8)] ss (load i)))) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] ns (load i)) func)
+                      (store! r (Some (al-get [(slice u8)] ss (load i))))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
 ; ---- queues — dedup via the queued set ----------------
 (defn io-record! [(m (ptr MonoCtx)) (mng (slice u8)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
-  (if (hm-contains? [(slice u8) i64] (load (field m io-index)) mng)
-      0
-      ; index the new record gets = current length (its slot after the push), so
-      ; io-index maps mng -> its position in io-origin, exactly the old parallel index.
-      (let [idx (al-len [PendInst] (load (field m io-origin)))]
-        (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args))
-        (hm-put! [(slice u8) i64] (mut (field m io-index)) mng idx)
-        0)))
+  (unless (hm-contains? [(slice u8) i64] (load (field m io-index)) mng)
+          ; index the new record gets = current length (its slot after the push), so
+          ; io-index maps mng -> its position in io-origin, exactly the old parallel index.
+          (let [idx (al-len [PendInst] (load (field m io-origin)))]
+            (al-push! (mut (field m io-origin)) (mk-pend (load (field m a)) nm args))
+            (hm-put! [(slice u8) i64] (mut (field m io-index)) mng idx)
+            0)))
 (defn io-find [(m (ptr MonoCtx)) (mng (slice u8))] (-> i64)
   (match (hm-get [(slice u8) i64] (load (field m io-index)) mng)
     (Some [i] i)
@@ -299,7 +298,7 @@
               (break)
               (do
                 (let [d (ty-depth (al-elem [Type] lst (load i)))]
-                  (if (icmp-gt d (load mx)) (do (store! mx d) 0) 0))
+                  (when (icmp-gt d (load mx)) (store! mx d) 0))
                 (store! i (iadd (load i) 1)))))
     (load mx)))
 
@@ -345,31 +344,25 @@
   (let [a (load (field m a))
         mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (if (hm-contains? [(slice u8) i64] (load (field m queued-structs)) mng)
-        0
-        (do
-          (hm-put! [(slice u8) i64] (mut (field m queued-structs)) mng 0)
-          (al-push! (mut (field m pending-structs)) (mk-pend a nm args))
-          0))))
+    (unless (hm-contains? [(slice u8) i64] (load (field m queued-structs)) mng)
+            (hm-put! [(slice u8) i64] (mut (field m queued-structs)) mng 0)
+            (al-push! (mut (field m pending-structs)) (mk-pend a nm args))
+            0)))
 (defn queue-sum [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a))
         mng (mangle a nm args)]
     (io-record! m mng nm args)
-    (if (hm-contains? [(slice u8) i64] (load (field m queued-sums)) mng)
-        0
-        (do
-          (hm-put! [(slice u8) i64] (mut (field m queued-sums)) mng 0)
-          (al-push! (mut (field m pending-sums)) (mk-pend a nm args))
-          0))))
+    (unless (hm-contains? [(slice u8) i64] (load (field m queued-sums)) mng)
+            (hm-put! [(slice u8) i64] (mut (field m queued-sums)) mng 0)
+            (al-push! (mut (field m pending-sums)) (mk-pend a nm args))
+            0)))
 (defn queue-func [(m (ptr MonoCtx)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (let [a (load (field m a))
         mng (mangle a nm args)]
-    (if (hm-contains? [(slice u8) i64] (load (field m queued-funcs)) mng)
-        0
-        (do
-          (hm-put! [(slice u8) i64] (mut (field m queued-funcs)) mng 0)
-          (al-push! (mut (field m pending-funcs)) (mk-pend a nm args))
-          0))))
+    (unless (hm-contains? [(slice u8) i64] (load (field m queued-funcs)) mng)
+            (hm-put! [(slice u8) i64] (mut (field m queued-funcs)) mng 0)
+            (al-push! (mut (field m pending-funcs)) (mk-pend a nm args))
+            0)))
 
 ; "<prefix> expects N type arguments, got M" — the shared arity-error shape.
 (defn arity-err [(a (ptr Allocator)) (prefix (slice u8)) (n i64) (m i64)] (-> (slice u8))
@@ -606,30 +599,28 @@
              (Some [sum-name]
                    (if (gsum-has m sum-name)
                        (do
-                         (if (icmp-eq (al-len [Type] (load type_args)) 0)
-                             (return-from :try
-                                          (Err [ExprKind Diag]
-                                               (derr (sconcat a
-                                                              (sconcat a
-                                                                       (sconcat3 a
-                                                                                 "variant '"
-                                                                                 func
-                                                                                 "' of generic sum '")
-                                                                       (sconcat3 a
-                                                                                 sum-name
-                                                                                 "' needs type arguments: ("
-                                                                                 func))
-                                                              " [<types>] ...)"))))
-                             0)
+                         (when (icmp-eq (al-len [Type] (load type_args)) 0)
+                               (break :try
+                                      (Err [ExprKind Diag]
+                                           (derr (sconcat a
+                                                          (sconcat a
+                                                                   (sconcat3 a
+                                                                             "variant '"
+                                                                             func
+                                                                             "' of generic sum '")
+                                                                   (sconcat3 a
+                                                                             sum-name
+                                                                             "' needs type arguments: ("
+                                                                             func))
+                                                          " [<types>] ...)")))))
                          (let [rtargs (try! (resolve-ty-list m type_args map))]
-                           (if (not (icmp-eq (al-len [Type] (load rtargs)) (gsum-arity m sum-name)))
-                               (return-from :try
-                                            (Err [ExprKind Diag]
-                                                 (derr (arity-err a
-                                                                  (sconcat3 a "sum '" sum-name "'")
-                                                                  (gsum-arity m sum-name)
-                                                                  (al-len [Type] (load rtargs))))))
-                               0)
+                           (when (not (icmp-eq (al-len [Type] (load rtargs)) (gsum-arity m sum-name)))
+                                 (break :try
+                                        (Err [ExprKind Diag]
+                                             (derr (arity-err a
+                                                              (sconcat3 a "sum '" sum-name "'")
+                                                              (gsum-arity m sum-name)
+                                                              (al-len [Type] (load rtargs)))))))
                            (let [mng (mangle a sum-name rtargs)]
                              (queue-sum m sum-name rtargs)
                              (Ok (EConstruct mng func nargs)))))
@@ -637,25 +628,23 @@
              (None []
                    (if (gfunc-has m func)
                        (do
-                         (if (icmp-eq (al-len [Type] (load type_args)) 0)
-                             (return-from :try
-                                          (Err [ExprKind Diag]
-                                               (derr (sconcat a
-                                                              (sconcat3 a
-                                                                        "generic function '"
-                                                                        func
-                                                                        "' needs explicit type arguments: (")
-                                                              (sconcat a func " [<types>] ...)")))))
-                             0)
+                         (when (icmp-eq (al-len [Type] (load type_args)) 0)
+                               (break :try
+                                      (Err [ExprKind Diag]
+                                           (derr (sconcat a
+                                                          (sconcat3 a
+                                                                    "generic function '"
+                                                                    func
+                                                                    "' needs explicit type arguments: (")
+                                                          (sconcat a func " [<types>] ...)"))))))
                          (let [rtargs (try! (resolve-ty-list m type_args map))]
-                           (if (not (icmp-eq (al-len [Type] (load rtargs)) (gfunc-arity m func)))
-                               (return-from :try
-                                            (Err [ExprKind Diag]
-                                                 (derr (arity-err a
-                                                                  (sconcat3 a "generic function '" func "'")
-                                                                  (gfunc-arity m func)
-                                                                  (al-len [Type] (load rtargs))))))
-                               0)
+                           (when (not (icmp-eq (al-len [Type] (load rtargs)) (gfunc-arity m func)))
+                                 (break :try
+                                        (Err [ExprKind Diag]
+                                             (derr (arity-err a
+                                                              (sconcat3 a "generic function '" func "'")
+                                                              (gfunc-arity m func)
+                                                              (al-len [Type] (load rtargs)))))))
                            (let [mng (mangle a func rtargs)]
                              (queue-func m func rtargs)
                              (Ok (ECall mng (box-items-type a) nargs)))))
@@ -783,56 +772,53 @@
                                            (load base)
                                            (impl-mangle-key a (field ipsel self_type) (load (field ipsel type_params))))
                                      (mut targs) (box-items-type a)]
-                                 (if (if (icmp-ne (cast i64 ip) 0)
-                                         (icmp-gt (al-len [(slice u8)] (load (load (field ip type_params)))) 0)
-                                         false)
-                                     ; Bind the impl's type params from the receiver with the SAME
-                                     ; matcher that selected the impl (`unify-trait-extras`). Mono used
-                                     ; to run its own `match-impl-pattern` here — a second matcher, free
-                                     ; to disagree with the selecting one and then reject a receiver the
-                                     ; selector had just accepted. (It also compared types by mono's
-                                     ; `type-key`, which renders a TRef without its mutability flag and
-                                     ; so equates `(mut T)` with `(ref T)`; unify-trait-extras checks it.)
-                                     (let [binds (subst-new a)
-                                           mtyp (alloc-stack Type)]
-                                       (store! mtyp (load mty))
-                                       (if (not (unify-trait-extras a
-                                                                    (field ip self_type)
-                                                                    mtyp
-                                                                    (load (field ip type_params))
-                                                                    binds))
-                                           (return-from :try
-                                                        (Err [ExprKind Diag]
-                                                             (derr (sconcat3 a
-                                                                             "trait call '"
-                                                                             method
-                                                                             "': receiver doesn't match the impl's implementing type"))))
-                                           0)
-                                       (let [ps (load (field ip type_params))
-                                             np (al-len [(slice u8)] (load ps))
-                                             (mut k) 0
-                                             (mut ta) (al-new [Type] a)]
-                                         (loop (if (icmp-ge (load k) np)
-                                                   (break)
-                                                   (let [pn (al-get [(slice u8)] (load ps) (load k))
-                                                         bp (subst-get binds pn)]
-                                                     (if (icmp-eq (cast i64 bp) 0)
-                                                         (return-from :try
-                                                                      (Err [ExprKind Diag]
-                                                                           (derr (sconcat a
-                                                                                          (sconcat3 a
-                                                                                                    "trait call '"
-                                                                                                    method
-                                                                                                    "': impl type parameter '")
-                                                                                          (sconcat a
-                                                                                                   pn
-                                                                                                   "' not determined by the receiver")))))
-                                                         0)
-                                                     (al-push! (mut ta) (load bp))
-                                                     (store! k (iadd (load k) 1)))))
-                                         (store! targs (box-al [Type] a (load ta)))
-                                         0))
-                                     0)
+                                 (when (if (icmp-ne (cast i64 ip) 0)
+                                           (icmp-gt (al-len [(slice u8)] (load (load (field ip type_params)))) 0)
+                                           false)
+                                       ; Bind the impl's type params from the receiver with the SAME
+                                       ; matcher that selected the impl (`unify-trait-extras`). Mono used
+                                       ; to run its own `match-impl-pattern` here — a second matcher, free
+                                       ; to disagree with the selecting one and then reject a receiver the
+                                       ; selector had just accepted. (It also compared types by mono's
+                                       ; `type-key`, which renders a TRef without its mutability flag and
+                                       ; so equates `(mut T)` with `(ref T)`; unify-trait-extras checks it.)
+                                       (let [binds (subst-new a)
+                                             mtyp (alloc-stack Type)]
+                                         (store! mtyp (load mty))
+                                         (when (not (unify-trait-extras a
+                                                                        (field ip self_type)
+                                                                        mtyp
+                                                                        (load (field ip type_params))
+                                                                        binds))
+                                               (break :try
+                                                      (Err [ExprKind Diag]
+                                                           (derr (sconcat3 a
+                                                                           "trait call '"
+                                                                           method
+                                                                           "': receiver doesn't match the impl's implementing type")))))
+                                         (let [ps (load (field ip type_params))
+                                               np (al-len [(slice u8)] (load ps))
+                                               (mut k) 0
+                                               (mut ta) (al-new [Type] a)]
+                                           (loop (if (icmp-ge (load k) np)
+                                                     (break)
+                                                     (let [pn (al-get [(slice u8)] (load ps) (load k))
+                                                           bp (subst-get binds pn)]
+                                                       (when (icmp-eq (cast i64 bp) 0)
+                                                             (break :try
+                                                                    (Err [ExprKind Diag]
+                                                                         (derr (sconcat a
+                                                                                        (sconcat3 a
+                                                                                                  "trait call '"
+                                                                                                  method
+                                                                                                  "': impl type parameter '")
+                                                                                        (sconcat a
+                                                                                                 pn
+                                                                                                 "' not determined by the receiver"))))))
+                                                       (al-push! (mut ta) (load bp))
+                                                       (store! k (iadd (load k) 1)))))
+                                           (store! targs (box-al [Type] a (load ta)))
+                                           0)))
                                  (let [basefn (trait-method-fn a trait_name mkey method)
                                        rargs (try! (resolve-expr-list m args map))]
                                    (if (icmp-gt (al-len [Type] (load (load targs))) 0)
@@ -950,7 +936,7 @@
               (break)
               (do
                 (let [sp (al-elem [StructDef] fs (load i))]
-                  (if (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp)) 0))
+                  (when (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp))))
                 (store! i (iadd (load i) 1)))))
     (box-al [StructDef] a (load out))))
 (defn collect-generic-sums [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList SumDef)))
@@ -962,7 +948,7 @@
               (break)
               (do
                 (let [sp (al-elem [SumDef] ss (load i))]
-                  (if (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp)) 0))
+                  (when (icmp-gt (al-len [(slice u8)] (load (field sp type_params))) 0) (al-push! (mut out) (load sp))))
                 (store! i (iadd (load i) 1)))))
     (box-al [SumDef] a (load out))))
 (defn collect-generic-funcs [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList Func)))
@@ -974,7 +960,7 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (icmp-gt (al-len [(slice u8)] (load (field fp type_params))) 0) (al-push! (mut out) (load fp)) 0))
+                  (when (icmp-gt (al-len [(slice u8)] (load (field fp type_params))) 0) (al-push! (mut out) (load fp))))
                 (store! i (iadd (load i) 1)))))
     (box-al [Func] a (load out))))
 ; build variant_to_sum (error if a variant name is in two sums).
@@ -1019,19 +1005,18 @@
               (break)
               (do
                 (let [sp (al-elem [StructDef] ss (load i))]
-                  (if (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
-                      (match (resolve-fields m (load (field sp fields)) map)
-                        (Err [d] (do (store! err d) (store! failed true) (break)))
-                        (Ok [nfs]
-                            (let [nd (alloc-stack StructDef)]
-                              (store! (field nd name) (load (field sp name)))
-                              (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
-                              (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
-                              (store! (field nd layout) (load (field sp layout)))
-                              (store! (field nd fields) nfs)
-                              (upsert-struct m (load nd))
-                              0)))
-                      0))
+                  (when (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
+                        (match (resolve-fields m (load (field sp fields)) map)
+                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                          (Ok [nfs]
+                              (let [nd (alloc-stack StructDef)]
+                                (store! (field nd name) (load (field sp name)))
+                                (store! (field nd type_params) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
+                                (store! (field nd bounds) (box-al [Bound] a (al-new [Bound] a)))
+                                (store! (field nd layout) (load (field sp layout)))
+                                (store! (field nd fields) nfs)
+                                (upsert-struct m (load nd))
+                                0)))))
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 (defn seed-concrete-sums [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result i64 Diag))
@@ -1045,11 +1030,10 @@
               (break)
               (do
                 (let [sp (al-elem [SumDef] ss (load i))]
-                  (if (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
-                      (match (resolve-sum m sp map (load (field sp name)))
-                        (Err [d] (do (store! err d) (store! failed true) (break)))
-                        (Ok [ns] (upsert-sum m ns)))
-                      0))
+                  (when (icmp-eq (al-len [(slice u8)] (load (field sp type_params))) 0)
+                        (match (resolve-sum m sp map (load (field sp name)))
+                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                          (Ok [ns] (upsert-sum m ns)))))
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 (defn seed-concrete-funcs [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result i64 Diag))
@@ -1063,11 +1047,10 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (icmp-eq (al-len [(slice u8)] (load (field fp type_params))) 0)
-                      (match (resolve-func m fp map (load (field fp name)))
-                        (Err [d] (do (store! err d) (store! failed true) (break)))
-                        (Ok [nf] (upsert-func m nf)))
-                      0))
+                  (when (icmp-eq (al-len [(slice u8)] (load (field fp type_params))) 0)
+                        (match (resolve-func m fp map (load (field fp name)))
+                          (Err [d] (do (store! err d) (store! failed true) (break)))
+                          (Ok [nf] (upsert-func m nf)))))
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 (defn mono-asserts [(m (ptr MonoCtx)) (p (ptr Program)) (map (ptr Subst))] (-> (Result (ptr (ArrayList StaticAssert))
@@ -1209,7 +1192,7 @@
                       (let [pp (al-elem [Param] ps (load i))
                             pt (alloc-stack Type)]
                         (store! pt (load (field pp ty)))
-                        (if (icmp-eq (type-tag pt) 13) (do (store! found true) 0) 0))
+                        (when (icmp-eq (type-tag pt) 13) (store! found true) 0))
                       (store! i (iadd (load i) 1)))))
           (load found)))))
 (defn drop-code-funcs [(a (ptr Allocator)) (p (ptr Program))] (-> i64)
@@ -1221,7 +1204,7 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (func-has-code fp) 0 (al-push! (mut out) (load fp))))
+                  (unless (func-has-code fp) (al-push! (mut out) (load fp))))
                 (store! i (iadd (load i) 1)))))
     (store! (field p funcs) (box-al [Func] a (load out)))
     0))

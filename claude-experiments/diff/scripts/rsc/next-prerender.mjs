@@ -24,6 +24,11 @@ import {
   requireBuiltBundles,
 } from "./next-render-core.mjs";
 
+// A prerender failure FAILS THE BUILD naming the route, so its stack trace is read
+// by a human every time it fires. The emitted server chunks carry maps; Node only
+// consumes them with source-map support on. See `next-server.mjs`.
+process.setSourceMapsEnabled(true);
+
 function die(message) {
   console.error(`next-prerender: ${message}`);
   process.exit(1);
@@ -54,7 +59,11 @@ const runReactServer = makeRunReactServer(rscRenderEntry);
 // concurrently across them: cold start is paid POOL_SIZE times total, not per page.
 const POOL_SIZE = Math.max(2, Math.min(16, (os.cpus().length || 4) - 1));
 function spawnPrerenderWorker() {
-  const child = spawn(process.execPath, [rscRenderEntry, "serve"], { stdio: ["pipe", "pipe", "inherit"] });
+  // See `next-render-core.mjs`: the worker's entry is an emitted chunk, so its
+  // source maps are enabled by flag rather than by a call inside it.
+  const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, "serve"], {
+    stdio: ["pipe", "pipe", "inherit"],
+  });
   const pending = new Map();
   let seq = 0;
   let buffer = "";
@@ -107,22 +116,36 @@ function bufToString(buf) {
   return Buffer.from(buf).toString("utf8");
 }
 
-async function writeRoute(urlPath, fileStem, workerCall) {
+async function writeRoute(urlPath, fileStem, workerCall, forceStatic) {
   // Render exactly as the orchestrator does for this pathname under an EMPTY request
-  // context (a prerender has no request), via a warm pool worker. Any render error
-  // FAILS the build naming the pathname (no silent swallow).
-  const result = await workerCall({ op: "render", pathname: urlPath, manifestPath: clientManifestPath, reqCtx: {} });
+  // context (a prerender has no request), via a warm pool worker.
+  //
+  // `prerender: true` tells the next/headers shims there is NO request, so a
+  // cookies()/headers()/draftMode() read raises the dynamic bailout instead of handing back
+  // a fabricated empty value that would bake into a static file. Under
+  // `dynamic = "force-static"` the flag is OFF, because Next's documented behaviour there is
+  // precisely to return empty values.
+  //
+  // Any OTHER render error FAILS the build naming the pathname (no silent swallow).
+  const result = await workerCall({
+    op: "render",
+    pathname: urlPath,
+    manifestPath: clientManifestPath,
+    reqCtx: { prerender: !forceStatic },
+  });
   if (result.error) {
     const msg = String(result.error);
-    if (msg.includes("DIFFPACK_DYNAMIC_BAILOUT")) {
-      die(
-        `route ${urlPath} read request state (cookies/headers) but was classified static — ` +
-          `mark it Dynamic (it needs per-request rendering).\n${msg}`,
-      );
-    }
+    // The shim can also raise this with NO store at all (a render path that never opened
+    // one). Same conclusion: the route needs a request, so it is served per-request.
+    if (msg.includes("DIFFPACK_DYNAMIC_BAILOUT")) return { demoted: msg };
     die(`prerender of ${urlPath} failed:\n${msg}`);
   }
-  const { flight, params, redirect, notFound, tags } = result;
+  const { flight, params, redirect, notFound, tags, dynamicBailout } = result;
+  // Reading request state during a prerender is not a build failure — it is Next's own
+  // static→dynamic DEMOTION. The route is recorded Dynamic (with this reason) and rendered
+  // per-request, exactly as `next build` reports "couldn't be rendered statically because it
+  // used `headers`". Nothing is written for it, so a stale/empty page can never be served.
+  if (dynamicBailout) return { demoted: String(dynamicBailout) };
   if (redirect) die(`route ${urlPath} issued a server-side redirect during prerender — it is not statically prerenderable (mark it Dynamic)`);
   if (notFound) die(`route ${urlPath} rendered notFound() during prerender — it is not statically prerenderable (mark it Dynamic)`);
 
@@ -164,7 +187,12 @@ async function main() {
       continue;
     }
     if (route.kind === "static" || route.kind === "forceStatic" || route.kind === "isr") {
-      jobs.push({ urlPath: route.path, fileStem: route.file || "index", revalidate: route.revalidate ?? null });
+      jobs.push({
+        urlPath: route.path,
+        fileStem: route.file || "index",
+        revalidate: route.revalidate ?? null,
+        forceStatic: route.kind === "forceStatic",
+      });
       continue;
     }
     if (route.kind === "ssg") {
@@ -181,7 +209,7 @@ async function main() {
       }
       for (const combo of combos) {
         const { urlPath, fileStem } = buildConcrete(route.segments, combo);
-        jobs.push({ urlPath, fileStem, revalidate: route.revalidate ?? null });
+        jobs.push({ urlPath, fileStem, revalidate: route.revalidate ?? null, forceStatic: false });
       }
       continue;
     }
@@ -194,6 +222,9 @@ async function main() {
   const poolSize = Math.min(POOL_SIZE, Math.max(1, jobs.length));
   const pool = Array.from({ length: poolSize }, spawnPrerenderWorker);
   const results = new Array(jobs.length);
+  // Routes the plan classified prerenderable that turned out to read request state while
+  // rendering. Indexed like `results` so the parallel drain never races on a shared push.
+  const demoted = new Array(jobs.length);
   let cursor = 0;
   let done = 0;
   async function drain(worker) {
@@ -201,8 +232,12 @@ async function main() {
       const i = cursor++;
       if (i >= jobs.length) break;
       const job = jobs[i];
-      const { tags } = await writeRoute(job.urlPath, job.fileStem, worker.call);
-      results[i] = { path: job.urlPath, file: job.fileStem, revalidate: job.revalidate, tags };
+      const outcome = await writeRoute(job.urlPath, job.fileStem, worker.call, job.forceStatic);
+      if (outcome.demoted) {
+        demoted[i] = { path: job.urlPath, reason: outcome.demoted };
+      } else {
+        results[i] = { path: job.urlPath, file: job.fileStem, revalidate: job.revalidate, tags: outcome.tags };
+      }
       done += 1;
       if (done % 250 === 0 || done === jobs.length) {
         console.log(`prerendered ${done}/${jobs.length} page(s) across ${poolSize} worker(s)`);
@@ -212,6 +247,14 @@ async function main() {
   await Promise.all(pool.map((w) => drain(w)));
   for (const w of pool) w.close();
   for (const r of results) if (r) written.push(r);
+  // Report every demotion by name + reason (never a silent reclassification), then fold it
+  // into the SAME dynamic list a statically-classified dynamic route lands in, so
+  // `--static-export` and the orchestrator see one uniform answer.
+  for (const d of demoted) {
+    if (!d) continue;
+    console.log(`next-prerender: ${d.path} could not be prerendered — ${d.reason}`);
+    dynamic.push({ path: d.path, reason: d.reason });
+  }
 
   const writtenPaths = written.map((w) => w.path);
 
@@ -242,7 +285,8 @@ async function main() {
   };
   writeFileSync(join(staticDir, "prerender-manifest.json"), JSON.stringify(manifest, null, 2));
   console.log(
-    `next-prerender: wrote ${written.length} static page(s); skipped ${dynamic.length} dynamic route(s) -> ${join(staticDir, "prerender-manifest.json")}`,
+    `next-prerender: wrote ${written.length} static page(s); skipped ${dynamic.length} dynamic route(s) ` +
+      `(${demoted.filter(Boolean).length} demoted at render time) -> ${join(staticDir, "prerender-manifest.json")}`,
   );
 }
 

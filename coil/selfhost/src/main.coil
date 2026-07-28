@@ -90,16 +90,15 @@
     (LLVMInitializeAArch64AsmParser)
     (LLVMInitializeX86AsmParser)
     ; see codegen-module: the status and errout are load-bearing, not decoration.
-    (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
-        (let [w (stderr)]
-          (ps w "error: unsupported --target '")
-          (ps w (cstr->slice triple))
-          (ps w "': ")
-          (ps w (cstr->slice (load errout)))
-          (wb w 10)
-          (exit 1)
-          0)
-        0)
+    (when (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
+          (let [w (stderr)]
+            (ps w "error: unsupported --target '")
+            (ps w (cstr->slice triple))
+            (ps w "': ")
+            (ps w (cstr->slice (load errout)))
+            (wb w 10)
+            (exit 1)
+            0))
     (let [tm
             (LLVMCreateTargetMachine (load targetout)
                                      triple
@@ -114,14 +113,12 @@
           ; object takes this path — the metaprogram dylib passes sanitize=false, so
           ; the compiler never dlopen's an ASan-instrumented object.
           rp (LLVMRunPasses m (opt-pipeline sanitize optlvl) tm pbo)]
-      (if (not (icmp-eq (cast i64 rp) 0))
-          (do
+      (when (not (icmp-eq (cast i64 rp) 0))
             (ps (stderr) "codegen: LLVMRunPasses failed: ")
             (ps (stderr) (cstr->slice (LLVMGetErrorMessage rp)))
             (wb (stderr) 10)
             (abort)
             0)
-          0)
       (let [emiterr (alloc-stack (ptr i8))
             rc (LLVMTargetMachineEmitToFile tm m obj-cstr 1 emiterr)]
         ; A non-writable object destination (e.g. a read-only dir, or `-o /dev/null`
@@ -129,18 +126,17 @@
         ; `Operation not permitted`, naming neither the path nor a remedy. Report a clear
         ; located error and exit 1 — a usage mistake, not a compiler panic. `-o /dev/null`
         ; itself is intercepted earlier and routed to `check` (diag-12).
-        (if (icmp-ne rc 0)
-            (let [w (stderr)]
-              (ps w "error: could not write object file '")
-              (ps w (cstr->slice obj-cstr))
-              (ps w "': ")
-              (ps w (cstr->slice (load emiterr)))
-              (wb w 10)
-              (ps w
-                  "  the output path is not writable — give `-o` a writable path, or use `coil check <file>` to typecheck without emitting an object\n")
-              (exit 1)
-              0)
-            0))
+        (when (icmp-ne rc 0)
+              (let [w (stderr)]
+                (ps w "error: could not write object file '")
+                (ps w (cstr->slice obj-cstr))
+                (ps w "': ")
+                (ps w (cstr->slice (load emiterr)))
+                (wb w 10)
+                (ps w
+                    "  the output path is not writable — give `-o` a writable path, or use `coil check <file>` to typecheck without emitting an object\n")
+                (exit 1)
+                0)))
       0)))
 
 ; Returns 1 if the pipeline succeeded (object emitted), 0 if a diagnostic was
@@ -209,7 +205,7 @@
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (set-meta-build-obj! (fnptr-of meta-build-obj-llvm))
-  (if (host-arm64?) (set-meta-build-mobj! (fnptr-of meta-build-mobj-llvm)) 0)
+  (when (host-arm64?) (set-meta-build-mobj! (fnptr-of meta-build-mobj-llvm)))
   (register-comptime-fold!)  ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
   (driver-main argc
                argv

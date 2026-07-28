@@ -16,6 +16,7 @@
 (import "loader.coil" :use *)
 (import "parser.coil" :use *)
 (import "reader.coil" :use *)
+(import "hashmap.coil" :use *)  ; the per-module def-name index (defs-has?)
 
 (defstruct Defs
   [(callables (ArrayList (slice u8)))
@@ -23,7 +24,21 @@
    (traits (ArrayList (slice u8)))
    (convs (ArrayList (slice u8)))
    (externs (ArrayList (slice u8)))])
-(defstruct DefEntry [(module (slice u8)) (defs Defs)])
+; A module's definitions, plus an INDEX over them. `resolve-name` asks "does module M
+; define NAME, as kind K?" once for every identifier in the program, and answering it
+; by scanning M's name lists with `str-eq` is O(references × definitions) — quadratic in
+; program size, and on the compiler's own source the single largest cost in the whole
+; frontend, over half of a run. `mono` had the same defect and was hash-indexed in
+; gen-10; this is that treatment for `resolve`.
+;
+; One map per module, name -> a BITMASK of the kinds that define it, so a name that is
+; both a type and a callable costs one slot and one probe instead of one map per kind.
+; It is built ONCE, after `build-deftable` has finished filling every module, and lives
+; inside the `DefEntry` — so unlike an index keyed on a list's address it cannot outlive
+; or be mismatched against the lists it indexes. `built` is 0 until then and every
+; lookup falls back to the scan, which keeps the index a pure optimisation: delete the
+; build call and the compiler still resolves identically, only slower.
+(defstruct DefEntry [(module (slice u8)) (defs Defs) (idx (HashMap (slice u8) i64)) (built i64)])
 (defstruct ParsedForm [(prog (ptr Program)) (module (Option (slice u8)))])
 
 ; One-field wrapper structs: an `(ArrayList X)` BY VALUE inside a heap struct, so it
@@ -84,7 +99,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get s (load i))) 46) (do (store! f true) (break)) 0)
+                (when (icmp-eq (cast i64 (slice-get s (load i))) 46) (store! f true) (break))
                 (store! i (iadd (load i) 1)))))
     (load f)))
 
@@ -95,7 +110,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get s (load i))) 47) (do (store! r (load i)) (break)) 0)
+                (when (icmp-eq (cast i64 (slice-get s (load i))) 47) (store! r (load i)) (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -110,10 +125,10 @@
     (loop (if (icmp-ge (load i) (isub n 1))
               (break)
               (do
-                (if (and (icmp-eq (cast i64 (slice-get s (load i))) 58)
-                         (icmp-eq (cast i64 (slice-get s (iadd (load i) 1))) 58))
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (and (icmp-eq (cast i64 (slice-get s (load i))) 58)
+                           (icmp-eq (cast i64 (slice-get s (iadd (load i) 1))) 58))
+                      (store! r (load i))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -139,7 +154,7 @@
                                   (break)
                                   (do
                                     (let [ch (cast i64 (slice-get s (load j)))]
-                                      (if (and (icmp-ge ch 48) (icmp-le ch 57)) 0 (do (store! ok false) (break))))
+                                      (unless (and (icmp-ge ch 48) (icmp-le ch 57)) (store! ok false) (break)))
                                     (store! j (iadd (load j) 1)))))
                         (load ok))
                       false))))))
@@ -223,6 +238,47 @@
         (icmp-eq kind 3) (field d convs)
         :else (field d externs)))
 
+; The bit each `defs-set` kind occupies in an indexed name's mask. Same numbering as
+; `defs-set` above, and the two must be read together.
+(defn defs-kind-bit [(kind i64)] (-> i64)
+  (cond (icmp-eq kind 0) 1
+        (icmp-eq kind 1) 2
+        (icmp-eq kind 2) 4
+        (icmp-eq kind 3) 8
+        :else 16))
+
+(defn defs-index-kind! [(e (ptr DefEntry)) (lst (ptr (ArrayList (slice u8)))) (bit i64)] (-> i64)
+  (let [n (al-len [(slice u8)] (load lst))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (let [k (al-get [(slice u8)] (load lst) (load i))
+                    cur (match (hm-get [(slice u8) i64] (load (field e idx)) k)
+                          (Some [v] v)
+                          (None [] 0))]
+                (hm-put! [(slice u8) i64] (mut (field e idx)) k (ior cur bit))
+                (store! i (iadd (load i) 1))))))
+  0)
+
+(defn defs-index-build! [(a (ptr Allocator)) (e (ptr DefEntry))] (-> i64)
+  (store! (field e idx) (hm-new [(slice u8) i64] a (str-keyops)))
+  (defs-index-kind! e (field (field e defs) callables) 1)
+  (defs-index-kind! e (field (field e defs) types) 2)
+  (defs-index-kind! e (field (field e defs) traits) 4)
+  (defs-index-kind! e (field (field e defs) convs) 8)
+  (defs-index-kind! e (field (field e defs) externs) 16)
+  (store! (field e built) 1)
+  0)
+
+; Does module `e` define `name` as kind `kind`? The indexed answer when the index has
+; been built, the original scan when it has not — identical results either way.
+(defn defs-has? [(e (ptr DefEntry)) (kind i64) (name (slice u8))] (-> bool)
+  (if (icmp-eq (load (field e built)) 0)
+      (set-contains (defs-set (field e defs) kind) name)
+      (match (hm-get [(slice u8) i64] (load (field e idx)) name)
+        (None [] false)
+        (Some [mask] (icmp-ne (iand mask (defs-kind-bit kind)) 0)))))
+
 (defn set-contains [(setp (ptr (ArrayList (slice u8)))) (name (slice u8))] (-> bool)
   (let [n (al-len [(slice u8)] (load setp))
         (mut i) 0
@@ -230,7 +286,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load setp) (load i)) name) (do (store! f true) (break)) 0)
+                (when (str-eq (al-get [(slice u8)] (load setp) (load i)) name) (store! f true) (break))
                 (store! i (iadd (load i) 1)))))
     (load f)))
 
@@ -241,9 +297,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [DefEntry] table (load i)) module)) m)
-                    (do (store! r (al-elem [DefEntry] table (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [DefEntry] table (load i)) module)) m)
+                      (store! r (al-elem [DefEntry] table (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -254,9 +310,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [ImpEntry] impb (load i)) name)) m)
-                    (do (store! r (al-elem [ImpEntry] impb (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [ImpEntry] impb (load i)) name)) m)
+                      (store! r (al-elem [ImpEntry] impb (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -268,9 +324,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [ExpEntry] expb (load i)) name)) m)
-                    (do (store! found (al-elem [ExpEntry] expb (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [ExpEntry] expb (load i)) name)) m)
+                      (store! found (al-elem [ExpEntry] expb (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-eq (cast i64 (load found)) 0) true (set-contains (field (load found) names) name))))
 
@@ -284,9 +340,7 @@
               (do
                 (let [ep (alloc-stack Alias)]
                   (store! ep (al-get [Alias] (load als) (load i)))
-                  (if (str-eq (load (field ep alias)) alias)
-                      (do (store! r (Some (load (field ep target)))) (break))
-                      0))
+                  (when (str-eq (load (field ep alias)) alias) (store! r (Some (load (field ep target)))) (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -314,20 +368,16 @@
                   (store! up (al-get [Use] (load uses) (load i)))
                   (let [target (load (field up target))
                         used (match (load (field up spec)) (UAll [] true) (UNames [names] (set-contains names name)))]
-                    (if (and used (exports-check exp target name))
-                        (let [td (table-find table target)]
-                          (if (and (icmp-ne (cast i64 td) 0) (set-contains (defs-set (field td defs) kind) name))
-                              (if (icmp-eq (load cnt) 0)
-                                  (do
-                                    (store! r (Some (sconcat3 a target "." name)))
-                                    (store! m1 target)
-                                    (store! cnt 1)
-                                    0)
-                                  (if (str-eq (load m1) target)
-                                      0
-                                      (do (store! m2 target) (store! cnt 2) 0)))
-                              0))
-                        0)))
+                    (when (and used (exports-check exp target name))
+                          (let [td (table-find table target)]
+                            (when (and (icmp-ne (cast i64 td) 0) (defs-has? td kind name))
+                                  (if (icmp-eq (load cnt) 0)
+                                      (do
+                                        (store! r (Some (sconcat3 a target "." name)))
+                                        (store! m1 target)
+                                        (store! cnt 1)
+                                        0)
+                                      (unless (str-eq (load m1) target) (store! m2 target) (store! cnt 2) 0)))))))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load cnt) 2)
         (Err [(Option (slice u8)) Diag] (derr (use-ambig-msg a (load (field c m)) name (load m1) (load m2))))
@@ -353,7 +403,7 @@
                 (None [] (Ok [(slice u8) Diag] name)))
               (Ok [(slice u8) Diag] name)))
         (let [tf (table-find table m)]
-          (if (and (icmp-ne (cast i64 tf) 0) (set-contains (defs-set (field tf defs) kind) name))
+          (if (and (icmp-ne (cast i64 tf) 0) (defs-has? tf kind name))
               (Ok [(slice u8) Diag] (sconcat3 a m "." name))
               (match (if (icmp-ne (cast i64 imp) 0)
                          (resolve-use c imp name kind)
@@ -366,7 +416,7 @@
                             (if (not (str-eq m "coil.core"))
                                 (let [ct (table-find table "coil.core")]
                                   (if (and (and (icmp-ne (cast i64 ct) 0)
-                                                (set-contains (defs-set (field ct defs) kind) name))
+                                                (defs-has? ct kind name))
                                            (exports-check exp "coil.core" name))
                                       (Ok [(slice u8) Diag] (sconcat3 a "coil.core" "." name))
                                       (Ok [(slice u8) Diag] name)))
@@ -576,9 +626,9 @@
           (loop (if (icmp-ge (load i) nx)
                     (break)
                     (do
-                      (if (not (type-eq (al-elem [Type] xs (load i)) (al-elem [Type] ys (load i))))
-                          (do (store! ok false) (break))
-                          0)
+                      (when (not (type-eq (al-elem [Type] xs (load i)) (al-elem [Type] ys (load i))))
+                            (store! ok false)
+                            (break))
                       (store! i (iadd (load i) 1)))))
           (load ok)))))
 (defn type-eq [(x (ptr Type)) (y (ptr Type))] (-> bool)
@@ -620,7 +670,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (do (store! out (sconcat a (load out) " ")) 0) 0)
+                (when (icmp-gt (load i) 0) (store! out (sconcat a (load out) " ")) 0)
                 (let [tp (alloc-stack Type)]
                   (store! tp (al-get [Type] (load v) (load i)))
                   (store! out (sconcat a (load out) (ty-str a tp))))
@@ -641,7 +691,7 @@
     (loop (if (icmp-gt (iadd (load i) mn) n)
               (break)
               (do
-                (if (str-eq (subslice [u8] s (load i) (iadd (load i) mn)) mk) (do (store! r (load i)) (break)) 0)
+                (when (str-eq (subslice [u8] s (load i) (iadd (load i) mn)) mk) (store! r (load i)) (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn last-dollar [(s (slice u8))] (-> i64)
@@ -651,7 +701,7 @@
     (loop (if (icmp-lt (load i) 0)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get s (load i))) 36) (do (store! r (load i)) (break)) 0)
+                (when (icmp-eq (cast i64 (slice-get s (load i))) 36) (store! r (load i)) (break))
                 (store! i (isub (load i) 1)))))
     (load r)))
 (defn assoc-render [(a (ptr Allocator)) (s (slice u8))] (-> (slice u8))
@@ -870,20 +920,19 @@
                         ; A `Trait::method` qualified call (gen-6) is validated in the checker
                         ; (synth-call splits it and pins the trait), so it is not an undefined
                         ; reference here even though the whole head is not a def-table name.
-                        (if (and (load (field c strict))
-                                 (and (icmp-lt (find-coloncolon nf) 0)
-                                      (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf)))))
-                            ; `ep` IS the call node — its span was right here and simply unused,
-                            ; so the language's most common error lost its location the moment a
-                            ; file declared a module (i.e. in every real multi-file project). The
-                            ; message itself now also carries the did-you-mean suggestion (diag-6).
-                            (return-from :try
-                                         (Err (dwspan (derr (undef-msg a c nf))
-                                                      (load (field ep source))
-                                                      (load (field ep lo))
-                                                      (load (field ep hi))
-                                                      (load (field ep ctxt)))))
-                            0))
+                        (when (and (load (field c strict))
+                                   (and (icmp-lt (find-coloncolon nf) 0)
+                                        (and (not (has-dot nf)) (not (set-contains (load (field c bareok)) nf)))))
+                              (break ; `ep` IS the call node — its span was right here and simply unused,
+                                     ; so the language's most common error lost its location the moment a
+                                     ; file declared a module (i.e. in every real multi-file project). The
+                                     ; message itself now also carries the did-you-mean suggestion (diag-6).
+                                     :try
+                                     (Err (dwspan (derr (undef-msg a c nf))
+                                                  (load (field ep source))
+                                                  (load (field ep lo))
+                                                  (load (field ep hi))
+                                                  (load (field ep ctxt)))))))
                       (try! (qualify-type-list c type_args tps))
                       (try! (qualify-expr-list c args tps))
                       0))
@@ -1082,9 +1131,9 @@
         m (load (field c m))
         tps (load (field fp type_params))]
     (try (do
-           (if (not (str-eq (load (field fp name)) "main"))
-               (do (store! (field fp name) (sconcat3 a m "." (load (field fp name)))) 0)
-               0)
+           (when (not (str-eq (load (field fp name)) "main"))
+                 (store! (field fp name) (sconcat3 a m "." (load (field fp name))))
+                 0)
            (store! (field fp cc) (try! (resolve c (load (field fp cc)) 3)))
            (try! (qualify-bound-list c (load (field fp bounds))))
            (try! (qualify-param-types c (load (field fp params)) tps))
@@ -1144,9 +1193,9 @@
 (defn qualify-one-conv [(c (ptr Ctx)) (cp (ptr Convention))] (-> (Result i64 Diag))
   (let [a (load (field c a))
         m (load (field c m))]
-    (if (not (str-eq (load (field cp name)) "c"))
-        (do (store! (field cp name) (sconcat3 a m "." (load (field cp name)))) 0)
-        0)
+    (when (not (str-eq (load (field cp name)) "c"))
+          (store! (field cp name) (sconcat3 a m "." (load (field cp name))))
+          0)
     (Ok [i64 Diag] 0)))
 (defn qualify-one-extern [(c (ptr Ctx)) (ep (ptr Extern)) (empty (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [a (load (field c a))
@@ -1209,17 +1258,16 @@
                      (break)
                      (do
                        (let [pn (al-get [(slice u8)] (load xs) (load xi))]
-                         (if (has-dot (try! (resolve c pn 2)))
-                             (return-from :try
-                                          (Err (derr (sconcat a
-                                                              (sconcat3 a
-                                                                        "deftrait: type parameter '"
-                                                                        pn
-                                                                        "' names a trait — if you meant a supertrait, write ':requires [")
-                                                              (sconcat a
-                                                                       pn
-                                                                       "]'; if you meant an associated-type parameter, rename it")))))
-                             0)
+                         (when (has-dot (try! (resolve c pn 2)))
+                               (break :try
+                                      (Err (derr (sconcat a
+                                                          (sconcat3 a
+                                                                    "deftrait: type parameter '"
+                                                                    pn
+                                                                    "' names a trait — if you meant a supertrait, write ':requires [")
+                                                          (sconcat a
+                                                                   pn
+                                                                   "]'; if you meant an associated-type parameter, rename it"))))))
                          (al-push! (mut tl) pn))
                        (store! xi (iadd (load xi) 1))))))
          ; qualify the `:requires` supertrait names exactly as trait bounds are qualified —
@@ -1270,13 +1318,12 @@
            ; param are not supported).
            (match-else (load (field ip self_type))
                        (TStruct [nm]
-                                (if (set-contains (load (field ip type_params)) nm)
-                                    (return-from :try
-                                                 (Err (derr (sconcat3 a
-                                                                      "cannot impl on a bare type parameter '"
-                                                                      nm
-                                                                      "'; the implementing type must be a concrete type or type constructor"))))
-                                    0))
+                                (when (set-contains (load (field ip type_params)) nm)
+                                      (break :try
+                                             (Err (derr (sconcat3 a
+                                                                  "cannot impl on a bare type parameter '"
+                                                                  nm
+                                                                  "'; the implementing type must be a concrete type or type constructor"))))))
                        (_ 0))
            ; Qualify the implementing type (the impl's own type params stay
            ; unqualified — scalars and `slice` are structurally exempt), then
@@ -1555,9 +1602,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (conv-name (al-get [Convention] (load (field o conventions)) (load i))) name)
-                    (do (store! f true) (break))
-                    0)
+                (when (str-eq (conv-name (al-get [Convention] (load (field o conventions)) (load i))) name)
+                      (store! f true)
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load f)))
 (defn merge-convs [(o (mut Out)) (p (ptr Program))] (-> i64)
@@ -1568,7 +1615,7 @@
               (break)
               (do
                 (let [cv (al-get [Convention] (load src) (load i))]
-                  (if (conv-in-out (mut o) (conv-name cv)) 0 (al-push! (mut (field o conventions)) cv)))
+                  (unless (conv-in-out (mut o) (conv-name cv)) (al-push! (mut (field o conventions)) cv)))
                 (store! i (iadd (load i) 1))))))
   0)
 (defn merge-externs [(o (mut Out)) (p (ptr Program)) (a (ptr Allocator))] (-> (Result i64 Diag))
@@ -1590,14 +1637,15 @@
                     (loop (if (icmp-ge (load j) on)
                               (break)
                               (do
-                                (if (str-eq (load (field (out-extern (mut o) (load j)) name)) nm)
-                                    (do (store! idx (load j)) (break))
-                                    0)
+                                (when (str-eq (load (field (out-extern (mut o) (load j)) name)) nm)
+                                      (store! idx (load j))
+                                      (break))
                                 (store! j (iadd (load j) 1)))))
                     (if (icmp-ge (load idx) 0)
-                        (if (extern-eq (out-extern (mut o) (load idx)) esp)
-                            0
-                            (do (store! err (derr (extern-conflict-msg a nm))) (store! failed true) (break)))
+                        (unless (extern-eq (out-extern (mut o) (load idx)) esp)
+                                (store! err (derr (extern-conflict-msg a nm)))
+                                (store! failed true)
+                                (break))
                         (al-push! (mut (field o externs)) ev))))
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
@@ -1620,9 +1668,9 @@
                     (loop (if (icmp-ge (load j) on)
                               (break)
                               (do
-                                (if (str-eq (load (field (out-const (mut o) (load j)) name)) nm)
-                                    (do (store! dup true) (break))
-                                    0)
+                                (when (str-eq (load (field (out-const (mut o) (load j)) name)) nm)
+                                      (store! dup true)
+                                      (break))
                                 (store! j (iadd (load j) 1)))))
                     (if (load dup)
                         (do (store! err (derr (const-dup-msg a nm))) (store! failed true) (break))
@@ -1662,6 +1710,9 @@
               n (al-len [DefEntry] (load (field tb items)))]
           (store! (field e module) m)
           (store! (field e defs) (mk-empty-defs a))
+          ; no index yet — `defs-has?` scans until build-deftable builds one
+          (store! (field e built) 0)
+          (store! (field e idx) (hm-new [(slice u8) i64] a (str-keyops)))
           (al-push! (mut (field tb items)) (load e))
           (al-elem [DefEntry] (field tb items) n)))))
 (defn add-module-defs [(a (ptr Allocator)) (tb (ptr TBox)) (m (slice u8)) (prog (ptr Program))] (-> i64)
@@ -1674,7 +1725,7 @@
                 (break)
                 (do
                   (let [nm (func-name (al-get [Func] (load fs) (load i)))]
-                    (if (not (str-eq nm "main")) (al-push! (mut (field (field de defs) callables)) nm) 0))
+                    (when (not (str-eq nm "main")) (al-push! (mut (field (field de defs) callables)) nm)))
                   (store! i (iadd (load i) 1))))))
     ; structs -> types
     (let [fs (load (field prog structs))
@@ -1722,7 +1773,7 @@
                 (break)
                 (do
                   (let [nm (conv-name (al-get [Convention] (load fs) (load i)))]
-                    (if (not (str-eq nm "c")) (al-push! (mut (field (field de defs) convs)) nm) 0))
+                    (when (not (str-eq nm "c")) (al-push! (mut (field (field de defs) convs)) nm)))
                   (store! i (iadd (load i) 1))))))
     ; externs -> externs + callables
     (let [fs (load (field prog externs))
@@ -1749,6 +1800,14 @@
                     (Some [m] (add-module-defs a tb m (load (field pf prog))))
                     (None [] 0)))
                 (store! i (iadd (load i) 1)))))
+    ; every module is filled now, so the indexes can be built and can no longer go
+    ; stale — nothing adds a definition after this point.
+    (let [ne (al-len [DefEntry] (load (field tb items)))
+          (mut k) 0]
+      (loop (if (icmp-ge (load k) ne)
+                (break)
+                (do (defs-index-build! a (al-elem [DefEntry] (field tb items) (load k)))
+                    (store! k (iadd (load k) 1))))))
     (field tb items)))
 (defn build-bareok [(a (ptr Allocator)) (parsed (ptr (ArrayList ParsedForm)))] (-> (ptr (ArrayList (slice u8))))
   (let [sb (unwrap-ptr [SBox] (create [SBox] a))
@@ -1842,9 +1901,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
-                    (do (store! r (al-get [(slice u8)] (load tgts) (load i))) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
+                      (store! r (al-get [(slice u8)] (load tgts) (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; Scan one `:use [names]` entry: the first name already seen from a DIFFERENT module is the
@@ -1923,9 +1982,9 @@
               (break)
               (do
                 (let [nm (al-get [(slice u8)] (load nms) (load k))]
-                  (if (not (exports-check expb tgt nm))
-                      (do (store! r (Some (derr (use-unexported-msg a importer nm tgt)))) (break))
-                      0))
+                  (when (not (exports-check expb tgt nm))
+                        (store! r (Some (derr (use-unexported-msg a importer nm tgt))))
+                        (break)))
                 (store! k (iadd (load k) 1)))))
     (load r)))
 ; One importer: every `:use [names]` entry must name only exports of its target module.
@@ -1994,11 +2053,10 @@
       (Err [d] (do (store! dupd d) (store! dupfail true) 0))
       (Ok [_] 0))
     ; diag-10: a `:use [name]` naming a non-exported symbol is a located error, not silence.
-    (if (load dupfail)
-        0
-        (match (check-use-exports a impb expb)
-          (Err [d] (do (store! dupd d) (store! dupfail true) 0))
-          (Ok [_] 0)))
+    (unless (load dupfail)
+            (match (check-use-exports a impb expb)
+              (Err [d] (do (store! dupd d) (store! dupfail true) 0))
+              (Ok [_] 0)))
     (store! (field pb items) (al-new [ParsedForm] a))
     (type-res-reset)  ; fresh type-reference resolution registry for this pass
     (src-mod-reset)  ; fresh source→module map
@@ -2016,7 +2074,7 @@
                     (al-push! (mut sl) (load (field tfp form)))
                     (store! single (load sl))
                     (match (parse-program a single)
-                      (Err [d] (if tolerant 0 (do (store! perr d) (store! pfailed true) (break))))
+                      (Err [d] (unless tolerant (store! perr d) (store! pfailed true) (break)))
                       (Ok [prog]
                           (let [pp (unwrap-ptr [Program] (create [Program] a))
                                 pf (alloc-stack ParsedForm)]
@@ -2058,11 +2116,10 @@
                                         (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
                                         (Ok [_] 0))))
                               (None [] 0))
-                            (if (load qfailed)
-                                0
-                                (match (merge-into (mut o) prog a)
-                                  (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
-                                  (Ok [_] 0))))
+                            (unless (load qfailed)
+                                    (match (merge-into (mut o) prog a)
+                                      (Err [d] (do (store! qerr d) (store! qfailed true) (break)))
+                                      (Ok [_] 0))))
                           (store! qi (iadd (load qi) 1)))))
               (if (load qfailed) (Err (load qerr)) (Ok (out->program o a))))))))
 

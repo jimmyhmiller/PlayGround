@@ -61,7 +61,7 @@
 (defn b-align! [(b (mut (ArrayList u8))) (align i64)] (-> i64)
   (let [len (al-len [u8] (load b))
         rem (urem len align)]
-    (if (icmp-eq rem 0) 0 (b-zeros! (mut b) (isub align rem)))))
+    (unless (icmp-eq rem 0) (b-zeros! (mut b) (isub align rem)))))
 (defn b-patch-u32! [(b (mut (ArrayList u8))) (off i64) (v i64)] (-> i64)
   (al-set! (mut b) off (cast u8 (iand v 255)))
   (al-set! (mut b) (iadd off 1) (cast u8 (iand (ishr v 8) 255)))
@@ -132,9 +132,7 @@
                   (store! fp f)
                   (let [off (load (field fp off))
                         tgt (al-get [i64] (load (field s labels)) (load (field fp label)))]
-                    (if (icmp-lt tgt 0)
-                        (do (print-str (stderr) "a64: unbound label in fixup resolution\n") (abort) 0)
-                        0)
+                    (when (icmp-lt tgt 0) (print-str (stderr) "a64: unbound label in fixup resolution\n") (abort) 0)
                     (let [delta (idiv (isub tgt off) 4)
                           w (b-read-u32 (mut (field s buf)) off)
                           k (load (field fp kind))]
@@ -174,9 +172,9 @@
         c2 (iand (ishr v 32) 65535)
         c3 (iand (ishr v 48) 65535)]
     (a64-w! (mut s) (a64-movz rd c0 0))
-    (if (icmp-ne c1 0) (a64-w! (mut s) (a64-movk rd c1 1)) 0)
-    (if (icmp-ne c2 0) (a64-w! (mut s) (a64-movk rd c2 2)) 0)
-    (if (icmp-ne c3 0) (a64-w! (mut s) (a64-movk rd c3 3)) 0)
+    (when (icmp-ne c1 0) (a64-w! (mut s) (a64-movk rd c1 1)))
+    (when (icmp-ne c2 0) (a64-w! (mut s) (a64-movk rd c2 2)))
+    (when (icmp-ne c3 0) (a64-w! (mut s) (a64-movk rd c3 3)))
     0))
 
 ; ---- add/sub ----

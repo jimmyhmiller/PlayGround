@@ -122,9 +122,8 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [CgStruct] (field cg structs) (load i)) name)) nm)
-                    (store! r (load i))
-                    0)
+                (when (str-eq (load (field (al-elem [CgStruct] (field cg structs) (load i)) name)) nm)
+                      (store! r (load i)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-sum-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
@@ -134,7 +133,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [CgSum] (field cg sums) (load i)) name)) nm) (store! r (load i)) 0)
+                (when (str-eq (load (field (al-elem [CgSum] (field cg sums) (load i)) name)) nm) (store! r (load i)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-func [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))  ; 0 if absent
@@ -145,7 +144,7 @@
               (break)
               (do
                 (let [fp (al-elem [CgFunc] (field cg funcs) (load i))]
-                  (if (str-eq (load (field fp name)) nm) (do (store! r (load (field fp val))) 0) 0))
+                  (when (str-eq (load (field fp name)) nm) (store! r (load (field fp val))) 0))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-ret [(cg (ptr Cg)) (nm (slice u8))] (-> (Option Type))
@@ -156,7 +155,7 @@
               (break)
               (do
                 (let [fp (al-elem [CgRet] (field cg rets) (load i))]
-                  (if (str-eq (load (field fp name)) nm) (do (store! r (Some [Type] (load (field fp ty)))) 0) 0))
+                  (when (str-eq (load (field fp name)) nm) (store! r (Some [Type] (load (field fp ty)))) 0))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-sig-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
@@ -166,7 +165,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [CgSig] (field cg sigs) (load i)) name)) nm) (store! r (load i)) 0)
+                (when (str-eq (load (field (al-elem [CgSig] (field cg sigs) (load i)) name)) nm) (store! r (load i)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-static-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
@@ -176,9 +175,8 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [CgStatic] (field cg statics) (load i)) name)) nm)
-                    (store! r (load i))
-                    0)
+                (when (str-eq (load (field (al-elem [CgStatic] (field cg statics) (load i)) name)) nm)
+                      (store! r (load i)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -313,7 +311,7 @@
                                       (iadd (load acc)
                                             (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
                               (store! j (iadd (load j) 1)))))
-                  (if (icmp-gt (load acc) (load maxb)) (store! maxb (load acc)) 0))
+                  (when (icmp-gt (load acc) (load maxb)) (store! maxb (load acc))))
                 (store! i (iadd (load i) 1)))))
     (udiv (load maxb) 8)))
 ; sum_words from a SumDef (used during type registration, before CgSum exists).
@@ -337,7 +335,7 @@
                                       (iadd (load acc)
                                             (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
                               (store! j (iadd (load j) 1)))))
-                  (if (icmp-gt (load acc) (load maxb)) (store! maxb (load acc)) 0))
+                  (when (icmp-gt (load acc) (load maxb)) (store! maxb (load acc))))
                 (store! i (iadd (load i) 1)))))
     (udiv (load maxb) 8)))
 
@@ -356,9 +354,8 @@
                                (loop (if (icmp-ge (load i) n)
                                          (break)
                                          (do
-                                           (if (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname)
-                                               (store! idx (load i))
-                                               0)
+                                           (when (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname)
+                                                 (store! idx (load i)))
                                            (store! i (iadd (load i) 1)))))
                                (if (icmp-lt (load idx) 0)
                                    (do (unimplemented "codegen/offsetof: no such field") 0)
@@ -426,12 +423,12 @@
                 (icmp-eq op 3) (icmp-ge l r)
                 (icmp-eq op 4) (icmp-eq l r)
                 :else (icmp-ne l r))]
-    (mk-ceval (if b 1 0) false)))
+    (mk-ceval (when b 1) false)))
 (defn const-eval-t [(cg (ptr Cg)) (e (ptr Expr))] (-> CEval)
   (let [a (load (field cg a))]
     (match-else (load (field e kind))
                 (EInt [v] (mk-ceval v false))
-                (EBool [b] (mk-ceval (if b 1 0) false))
+                (EBool [b] (mk-ceval (when b 1) false))
                 (EIf [c thn els]
                      (if (icmp-ne (cev-v (const-eval-t cg c)) 0) (const-eval-t cg thn) (const-eval-t cg els)))
                 (ESizeOf [t] (mk-ceval (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (box-type a t))) false))
@@ -513,7 +510,7 @@
               (break)
               (do (al-push! (mut tys) (basic-ty cg (al-elem [Type] params (load i)))) (store! i (iadd (load i) 1)))))
     (let [rt (if (ty-is-void ret) (LLVMVoidTypeInContext (cg-ctx cg)) (basic-ty cg ret))]
-      (LLVMFunctionType rt (carr (load (field cg a)) (load tys)) (cast i32 n) (if variadic 1 0)))))
+      (LLVMFunctionType rt (carr (load (field cg a)) (load tys)) (cast i32 n) (when variadic 1)))))
 (defn cg-fn-type [(cg (ptr Cg)) (params (ptr (ArrayList Type))) (ret (ptr Type))] (-> (ptr i8))
   (cg-fn-type-v cg params ret false))
 
@@ -527,9 +524,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (conv-name (al-get [Convention] (load cs) (load i))) name)
-                    (do (store! r (al-elem [Convention] cs (load i))) (break))
-                    0)
+                (when (str-eq (conv-name (al-get [Convention] (load cs) (load i))) name)
+                      (store! r (al-elem [Convention] cs (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; native-cc code (0=c 1=fast 2=cold) -> LLVM CallingConv.h id (stable: c=0 fast=8 cold=9).
@@ -564,9 +561,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [CgShim] (field cg shims) (load i)) name)) name)
-                    (do (store! r (al-elem [CgShim] (field cg shims) (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [CgShim] (field cg shims) (load i)) name)) name)
+                      (store! r (al-elem [CgShim] (field cg shims) (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -618,46 +615,45 @@
           (and (load ok) (icmp-le (load v) 30))))))
 (defn x86-gpr? [(r (slice u8))] (-> bool)
   (let [(mut ok) false]
-    (if (str-eq r "rax") (do (store! ok true) 0) 0)
-    (if (str-eq r "rbx") (do (store! ok true) 0) 0)
-    (if (str-eq r "rcx") (do (store! ok true) 0) 0)
-    (if (str-eq r "rdx") (do (store! ok true) 0) 0)
-    (if (str-eq r "rsi") (do (store! ok true) 0) 0)
-    (if (str-eq r "rdi") (do (store! ok true) 0) 0)
-    (if (str-eq r "rbp") (do (store! ok true) 0) 0)
-    (if (str-eq r "rsp") (do (store! ok true) 0) 0)
-    (if (str-eq r "r8") (do (store! ok true) 0) 0)
-    (if (str-eq r "r9") (do (store! ok true) 0) 0)
-    (if (str-eq r "r10") (do (store! ok true) 0) 0)
-    (if (str-eq r "r11") (do (store! ok true) 0) 0)
-    (if (str-eq r "r12") (do (store! ok true) 0) 0)
-    (if (str-eq r "r13") (do (store! ok true) 0) 0)
-    (if (str-eq r "r14") (do (store! ok true) 0) 0)
-    (if (str-eq r "r15") (do (store! ok true) 0) 0)
+    (when (str-eq r "rax") (store! ok true) 0)
+    (when (str-eq r "rbx") (store! ok true) 0)
+    (when (str-eq r "rcx") (store! ok true) 0)
+    (when (str-eq r "rdx") (store! ok true) 0)
+    (when (str-eq r "rsi") (store! ok true) 0)
+    (when (str-eq r "rdi") (store! ok true) 0)
+    (when (str-eq r "rbp") (store! ok true) 0)
+    (when (str-eq r "rsp") (store! ok true) 0)
+    (when (str-eq r "r8") (store! ok true) 0)
+    (when (str-eq r "r9") (store! ok true) 0)
+    (when (str-eq r "r10") (store! ok true) 0)
+    (when (str-eq r "r11") (store! ok true) 0)
+    (when (str-eq r "r12") (store! ok true) 0)
+    (when (str-eq r "r13") (store! ok true) 0)
+    (when (str-eq r "r14") (store! ok true) 0)
+    (when (str-eq r "r15") (store! ok true) 0)
     (load ok)))
 (defn aarch64-gpr? [(r (slice u8))] (-> bool)
   (let [(mut ok) (aarch64-xreg? r)]
-    (if (str-eq r "sp") (do (store! ok true) 0) 0)
-    (if (str-eq r "lr") (do (store! ok true) 0) 0)
-    (if (str-eq r "fp") (do (store! ok true) 0) 0)
-    (if (str-eq r "xzr") (do (store! ok true) 0) 0)
+    (when (str-eq r "sp") (store! ok true) 0)
+    (when (str-eq r "lr") (store! ok true) 0)
+    (when (str-eq r "fp") (store! ok true) 0)
+    (when (str-eq r "xzr") (store! ok true) 0)
     (load ok)))
 (defn cg-is-valid-gpr [(cg (ptr Cg)) (reg (slice u8))] (-> bool)
   (if (icmp-eq (load (field cg arch)) 0) (x86-gpr? reg) (aarch64-gpr? reg)))
 ; reject a shim convention naming a register that isn't a GPR on the target arch:
 ; a spanless `error: <msg>` + exit 1, via cg-fail. The message names the arch.
 (defn cg-check-gpr [(cg (ptr Cg)) (reg (slice u8)) (what (slice u8))] (-> i64)
-  (if (cg-is-valid-gpr cg reg)
-      0
-      (let [a (load (field cg a))
-            arch (if (icmp-eq (load (field cg arch)) 0) "x86_64" "aarch64")]
-        (cg-fail (sconcat3 a
-                           (sconcat3 a
-                                     (sconcat3 a "codegen: shim convention names " what " register '")
-                                     reg
-                                     "', which is not a general-purpose register on the target architecture (")
-                           arch
-                           "). Declare the convention per-arch (see examples/per-arch.coil).")))))
+  (unless (cg-is-valid-gpr cg reg)
+          (let [a (load (field cg a))
+                arch (if (icmp-eq (load (field cg arch)) 0) "x86_64" "aarch64")]
+            (cg-fail (sconcat3 a
+                               (sconcat3 a
+                                         (sconcat3 a "codegen: shim convention names " what " register '")
+                                         reg
+                                         "', which is not a general-purpose register on the target architecture (")
+                               arch
+                               "). Declare the convention per-arch (see examples/per-arch.coil).")))))
 (defn cg-check-shim-regs [(cg (ptr Cg)) (shim (ptr CgShim)) (n i64)] (-> i64)
   (let [prs (load (field shim param_regs))
         (mut i) 0]
@@ -682,7 +678,7 @@
         (loop (if (or (icmp-ge (load i) n) (load r))
                   (break)
                   (do
-                    (if (str-eq (al-get [(slice u8)] (load prs) (load i)) name) (do (store! r true) 0) 0)
+                    (when (str-eq (al-get [(slice u8)] (load prs) (load i)) name) (store! r true) 0)
                     (store! i (iadd (load i) 1)))))
         (load r))))
 
@@ -706,13 +702,11 @@
     (sb-push-str! (mut sb) impl-name)
     (sb-push-str! (mut sb) "\n")
     (sb-push-str! (mut sb) "addq $$8, %rsp\n")
-    (if (not (str-eq (load (field shim ret_reg)) (cg-c-ret-reg cg)))
-        (do
+    (when (not (str-eq (load (field shim ret_reg)) (cg-c-ret-reg cg)))
           (sb-push-str! (mut sb) "movq %rax, %")
           (sb-push-str! (mut sb) (load (field shim ret_reg)))
           (sb-push-str! (mut sb) "\n")
           0)
-        0)
     (sb-push-str! (mut sb) "ret\n")
     (sb-str (load sb))))
 (defn cg-aarch64-trampoline [(cg (ptr Cg)) (shim (ptr CgShim)) (n i64) (impl-name (slice u8))] (-> (slice u8))
@@ -733,13 +727,11 @@
     (sb-push-str! (mut sb) "bl ")
     (sb-push-str! (mut sb) impl-name)
     (sb-push-str! (mut sb) "\n")
-    (if (not (str-eq (load (field shim ret_reg)) (cg-c-ret-reg cg)))
-        (do
+    (when (not (str-eq (load (field shim ret_reg)) (cg-c-ret-reg cg)))
           (sb-push-str! (mut sb) "mov ")
           (sb-push-str! (mut sb) (load (field shim ret_reg)))
           (sb-push-str! (mut sb) ", x0\n")
           0)
-        0)
     (sb-push-str! (mut sb) "ldr x30, [sp], #16\n")
     (sb-push-str! (mut sb) "ret\n")
     (sb-str (load sb))))
@@ -795,16 +787,18 @@
                 (break)
                 (do
                   (let [c (al-get [(slice u8)] (load cl) (load j))]
-                    (if (not (cg-reg-in-used prs n ret-reg c))
-                        (do (sb-push-str! (mut sb) ",~{") (sb-push-str! (mut sb) c) (sb-push-str! (mut sb) "}") 0)
-                        0))
+                    (when (not (cg-reg-in-used prs n ret-reg c))
+                          (sb-push-str! (mut sb) ",~{")
+                          (sb-push-str! (mut sb) c)
+                          (sb-push-str! (mut sb) "}")
+                          0))
                   (store! j (iadd (load j) 1))))))
     ; the `bl` clobbers the link register on AArch64; spell it `lr` so LLVM forces
     ; the caller to save/restore it.
-    (if (and (icmp-eq (load (field cg arch)) 1)
-             (and (not (cg-reg-in-used prs n ret-reg "lr")) (not (cg-reg-in-used prs n ret-reg "x30"))))
-        (do (sb-push-str! (mut sb) ",~{lr}") 0)
-        0)
+    (when (and (icmp-eq (load (field cg arch)) 1)
+               (and (not (cg-reg-in-used prs n ret-reg "lr")) (not (cg-reg-in-used prs n ret-reg "x30"))))
+          (sb-push-str! (mut sb) ",~{lr}")
+          0)
     (sb-push-str! (mut sb) ",~{memory}")
     (sb-str (load sb))))
 (defn cg-emit-shim-call [(cg (ptr Cg)) (name (slice u8)) (shim (ptr CgShim)) (argvals (ptr (ArrayList (ptr i8))))] (-> (ptr i8))
@@ -848,7 +842,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Variant] vs (load i)) name)) variant) (store! r (load i)) 0)
+                (when (str-eq (load (field (al-elem [Variant] vs (load i)) name)) variant) (store! r (load i)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -892,16 +886,14 @@
               (do
                 (let [v (al-get [(ptr i8)] vals (load i))
                       (mut av) v]
-                  (if (icmp-lt (load i) np)
-                      (let [pt (load (index ptbuf (load i)))
-                            vk (LLVMGetTypeKind (LLVMTypeOf v))]
-                        (if (and (icmp-eq (LLVMGetTypeKind pt) 12) (or (icmp-eq vk 10) (icmp-eq vk 11)))
-                            (let [slot (cg-entry-alloca cg (LLVMTypeOf v) (cg-bl cg "arg.spill"))]
-                              (LLVMBuildStore (cg-bld cg) v slot)
-                              (store! av slot)
-                              0)
-                            0))
-                      0)
+                  (when (icmp-lt (load i) np)
+                        (let [pt (load (index ptbuf (load i)))
+                              vk (LLVMGetTypeKind (LLVMTypeOf v))]
+                          (when (and (icmp-eq (LLVMGetTypeKind pt) 12) (or (icmp-eq vk 10) (icmp-eq vk 11)))
+                                (let [slot (cg-entry-alloca cg (LLVMTypeOf v) (cg-bl cg "arg.spill"))]
+                                  (LLVMBuildStore (cg-bld cg) v slot)
+                                  (store! av slot)
+                                  0))))
                   (al-push! (mut out) (load av)))
                 (store! i (iadd (load i) 1)))))
     (load out)))
@@ -913,7 +905,7 @@
         ctx (cg-ctx cg)]
     (match (load (field e kind))
       (EInt [v] (mk-tv (LLVMConstInt (cg-i64t cg) v 1) (TInt 64 true)))
-      (EBool [bv] (mk-tv (LLVMConstInt (LLVMInt1TypeInContext ctx) (if bv 1 0) 0) (TBool)))
+      (EBool [bv] (mk-tv (LLVMConstInt (LLVMInt1TypeInContext ctx) (when bv 1) 0) (TBool)))
       (EFloat [bits]
               (mk-tv (LLVMConstReal (LLVMDoubleTypeInContext ctx)
                                     (let [p (alloc-stack i64)] (store! p bits) (load (cast (ptr f64) p))))
@@ -1102,9 +1094,9 @@
                     (do
                       (let [mn (al-get [(slice u8)] (load methods) (load i))
                             fv (cg-func cg mn)]
-                        (if (icmp-eq (cast i64 fv) 0)
-                            (do (unimplemented (sconcat a "codegen: dyn vtable references unknown fn " mn)) 0)
-                            0)
+                        (when (icmp-eq (cast i64 fv) 0)
+                              (unimplemented (sconcat a "codegen: dyn vtable references unknown fn " mn))
+                              0)
                         (al-push! (mut fields) fv))
                       (store! i (iadd (load i) 1)))))
           (let [g (LLVMAddGlobal (load (field cg module)) vty (slice->cstr a (sconcat a "vtable." ds)))]
@@ -1173,7 +1165,7 @@
                                           (cast i32 (al-len [(ptr i8)] (load meta)))
                                           (cg-bl cg "dyn.call"))
                         id (native-cc-parse cc)]
-                    (if (icmp-ge id 0) (do (LLVMSetInstructionCallConv cs (cast i32 id)) 0) 0)
+                    (when (icmp-ge id 0) (LLVMSetInstructionCallConv cs (cast i32 id)) 0)
                     (mk-tv cs (load ret))))))))))
 
 ; emit a `do`/let body: last value, default (i64 0); stop at a terminator.
@@ -1259,7 +1251,7 @@
           (loop (if (icmp-ge (load i) nf)
                     (break)
                     (do
-                      (if (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname) (store! idx (load i)) 0)
+                      (when (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname) (store! idx (load i)))
                       (store! i (iadd (load i) 1)))))
           (if (icmp-lt (load idx) 0)
               (cg-bug "codegen: no such field")
@@ -1479,13 +1471,11 @@
                                           (store! j (iadd (load j) 1)))))
                               (let [bv (emit-expr cg (field ap body) (load child))
                                     endbb (cg-cur-block cg)]
-                                (if (icmp-eq (cast i64 (LLVMGetBasicBlockTerminator endbb)) 0)
-                                    (do
+                                (when (icmp-eq (cast i64 (LLVMGetBasicBlockTerminator endbb)) 0)
                                       (store! result-ty (tv-ty bv))
                                       (LLVMBuildBr b merge)
                                       (al-push! (mut inc-vals) (tv-val bv))
-                                      (al-push! (mut inc-bbs) endbb))
-                                    0)))
+                                      (al-push! (mut inc-bbs) endbb))))
                             (store! k3 (iadd (load k3) 1)))))
                 (cg-pos cg merge)
                 (if (icmp-eq (al-len [(ptr i8)] (load inc-vals)) 0)
@@ -1504,12 +1494,13 @@
   (match-else (load t)
               (TStruct [nm]
                        (let [si (cg-struct-idx cg nm)]
-                         (if (icmp-lt si 0)
-                             0
-                             (match-else (load (field (al-elem [CgStruct] (field cg structs) si) layout))
-                                         (LAligned [n] n)
-                                         (LExplicit [offs sz al] (if (icmp-gt al 0) al 0))
-                                         (_ 0)))))
+                         (unless (icmp-lt si 0)
+                                 (match (load (field (al-elem [CgStruct] (field cg structs) si) layout))
+                                        (LAligned [n] n)
+                                        (LExplicit [offs sz al] (when (icmp-gt al 0) al))
+                                        (LC [] 0)
+                                        (LPacked [] 0)
+                                        (LBits [$g6718 $g6719] 0)))))
               (_ 0)))
 (defn emit-alloc [(cg (ptr Cg)) (storage i64) (t (ptr Type))] (-> Tv)
   (let [a (load (field cg a))
@@ -1518,14 +1509,14 @@
         fa (cg-force-align cg t)]
     (if (icmp-eq storage 0)
         (let [p (LLVMBuildAlloca b bt (cg-bl cg "stack.slot"))]
-          (if (icmp-gt fa 0) (do (LLVMSetAlignment p (cast i32 fa)) 0) 0)
+          (when (icmp-gt fa 0) (LLVMSetAlignment p (cast i32 fa)) 0)
           (mk-tv p (TPtr (box-type a (load t)))))
         (if (icmp-eq storage 2)
             (mk-tv (LLVMBuildMalloc b bt (cg-bl cg "heap.box")) (TPtr (box-type a (load t))))
             (let [n (cg-next-global cg)
                   g (LLVMAddGlobal (load (field cg module)) bt (cg-gname cg "g." n))]
               (LLVMSetInitializer g (LLVMConstNull bt))
-              (if (icmp-gt fa 0) (do (LLVMSetAlignment g (cast i32 fa)) 0) 0)
+              (when (icmp-gt fa 0) (LLVMSetAlignment g (cast i32 fa)) 0)
               (mk-tv g (TPtr (box-type a (load t)))))))))
 
 ; ======================== emit_if / loop / break / continue ==================
@@ -1591,7 +1582,7 @@
       (loop (if (or (icmp-ge (load i) n) (cg-terminated cg))
                 (break)
                 (do (emit-expr cg (al-elem [Expr] body (load i)) scp) (store! i (iadd (load i) 1))))))
-    (if (not (cg-terminated cg)) (do (LLVMBuildBr b body-bb) 0) 0)
+    (when (not (cg-terminated cg)) (LLVMBuildBr b body-bb) 0)
     (let [popped
             (match (al-pop! [CgLoop] (mut (field cg loops)))
               (Some [x] x)
@@ -1627,7 +1618,7 @@
                         (break)
                         (do
                           (match (load (field (al-elem [CgLoop] (field cg loops) (load i)) label))
-                            (Some [ll] (if (str-eq ll l) (store! r (load i)) 0))
+                            (Some [ll] (when (str-eq ll l) (store! r (load i))))
                             (None [] 0))
                           (store! i (iadd (load i) 1)))))
               (if (icmp-lt (load r) 0) (do (unimplemented "codegen: break/continue to unknown loop label") -1) (load r))))
@@ -1678,7 +1669,7 @@
     (loop (if (icmp-ge (load i) nf)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname) (store! idx (load i)) 0)
+                (when (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname) (store! idx (load i)))
                 (store! i (iadd (load i) 1)))))
     (store! (field r pv) (tv-val pv))
     (store! (field r width)
@@ -1851,7 +1842,7 @@
           (loop (if (icmp-ge (load k) nargs)
                     (break)
                     (do
-                      (if (icmp-gt (load k) 0) (sb-push-str! (mut params) ", ") 0)
+                      (when (icmp-gt (load k) 0) (sb-push-str! (mut params) ", "))
                       (let [argstr
                               (cstr->slice (LLVMPrintTypeToString (basic-ty cg
                                                                             (box-type a
@@ -1967,23 +1958,20 @@
                                        (do
                                          (emit-expr cg (al-elem [Expr] body (load i)) scp)
                                          (store! i (iadd (load i) 1)))))
-                             (if (not (cg-terminated cg))
-                                 (emit-tail cg (al-elem [Expr] body (isub n 1)) function sig ret scp)
-                                 0)))))
+                             (when (not (cg-terminated cg))
+                                   (emit-tail cg (al-elem [Expr] body (isub n 1)) function sig ret scp))))))
                 (ELet [binds body]
                       (let [child (emit-binds cg binds scp)
                             n (al-len [Expr] (load body))]
-                        (if (icmp-eq n 0)
-                            0
-                            (let [(mut i) 0]
-                              (loop (if (or (icmp-ge (load i) (isub n 1)) (cg-terminated cg))
-                                        (break)
-                                        (do
-                                          (emit-expr cg (al-elem [Expr] body (load i)) child)
-                                          (store! i (iadd (load i) 1)))))
-                              (if (not (cg-terminated cg))
-                                  (emit-tail cg (al-elem [Expr] body (isub n 1)) function sig ret child)
-                                  0)))))
+                        (unless (icmp-eq n 0)
+                                (let [(mut i) 0]
+                                  (loop (if (or (icmp-ge (load i) (isub n 1)) (cg-terminated cg))
+                                            (break)
+                                            (do
+                                              (emit-expr cg (al-elem [Expr] body (load i)) child)
+                                              (store! i (iadd (load i) 1)))))
+                                  (when (not (cg-terminated cg))
+                                        (emit-tail cg (al-elem [Expr] body (isub n 1)) function sig ret child))))))
                 (EIf [cnd thn els]
                      (let [cv (emit-expr cg cnd scp)
                            c (tv-val cv)
@@ -2022,9 +2010,9 @@
                                           (or (icmp-eq (cast i64 rk) 10) (icmp-eq (cast i64 rk) 11)))]
                                (LLVMSetTailCallKind cs (if x86-agg 1 2)))
                              (if (ty-is-void ret) (do (LLVMBuildRetVoid b) 0) (do (LLVMBuildRet b cs) 0)))
-                           (let [v (emit-expr cg e scp)] (if (not (cg-terminated cg)) (emit-c-return cg sig ret v) 0))))
+                           (let [v (emit-expr cg e scp)] (when (not (cg-terminated cg)) (emit-c-return cg sig ret v)))))
                 (EMatch [scrut arms] (emit-tail-match cg scrut arms function sig ret scp))
-                (_ (let [v (emit-expr cg e scp)] (if (not (cg-terminated cg)) (emit-c-return cg sig ret v) 0))))))
+                (_ (let [v (emit-expr cg e scp)] (when (not (cg-terminated cg)) (emit-c-return cg sig ret v)))))))
 (defn emit-tail-match [(cg (ptr Cg))
                        (scrut (ptr Expr))
                        (arms (ptr (ArrayList Arm)))
@@ -2100,7 +2088,7 @@
         b (cg-bld cg)
         entry (cg-append cg function (cg-bl cg "entry"))
         sig (cg-csig cg (load (field f name)))
-        base (if (and (icmp-ne (cast i64 sig) 0) (icmp-ne (cast i64 (load (field sig sret))) 0)) 1 0)]
+        base (when (and (icmp-ne (cast i64 sig) 0) (icmp-ne (cast i64 (load (field sig sret))) 0)) 1)]
     (cg-pos cg entry)
     (let [params (load (field f params))
           np (al-len [Param] (load params))
@@ -2160,14 +2148,13 @@
       (let [body (load (field f body))
             nb (al-len [Expr] (load body))]
         (if (icmp-eq nb 0)
-            (if (not (cg-terminated cg)) (emit-c-return cg sig (field f ret) (mk-tv (cg-zero-i64 cg) (TInt 64 true))) 0)
+            (when (not (cg-terminated cg)) (emit-c-return cg sig (field f ret) (mk-tv (cg-zero-i64 cg) (TInt 64 true))))
             (let [(mut j) 0]
               (loop (if (or (icmp-ge (load j) (isub nb 1)) (cg-terminated cg))
                         (break)
                         (do (emit-expr cg (al-elem [Expr] body (load j)) (load scp)) (store! j (iadd (load j) 1)))))
-              (if (not (cg-terminated cg))
-                  (emit-tail cg (al-elem [Expr] body (isub nb 1)) function sig (field f ret) (load scp))
-                  0))))))
+              (when (not (cg-terminated cg))
+                    (emit-tail cg (al-elem [Expr] body (isub nb 1)) function sig (field f ret) (load scp))))))))
   0)
 
 ; ======================== the module driver (compile_for_dbg, dbg=None) ======
@@ -2192,16 +2179,15 @@
       ; both left `targetout` garbage and segfaulted LLVMCreateTargetMachine on it, so a
       ; bogus --target crashed the compiler instead of naming the triple. LLVM already
       ; wrote a perfectly good explanation into errout — print it.
-      (if (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
-          (let [w (stderr)]
-            (ps w "error: unsupported --target '")
-            (ps w (cstr->slice triple))
-            (ps w "': ")
-            (ps w (cstr->slice (load errout)))
-            (wb w 10)
-            (exit 1)
-            0)
-          0)
+      (when (icmp-ne (LLVMGetTargetFromTriple triple targetout errout) 0)
+            (let [w (stderr)]
+              (ps w "error: unsupported --target '")
+              (ps w (cstr->slice triple))
+              (ps w "': ")
+              (ps w (cstr->slice (load errout)))
+              (wb w 10)
+              (exit 1)
+              0))
       (let [tm (LLVMCreateTargetMachine (load targetout) triple c"generic" (llvm-cpu-features triple) 2 2 0)
             td (LLVMCreateTargetDataLayout tm)
             dl (LLVMCopyStringRepOfTargetData td)
@@ -2343,30 +2329,29 @@
                                            (al-push! (mut sizes) fsz)
                                            (match sz
                                              (Some [s]
-                                                   (if (icmp-gt end s)
-                                                       (cg-fail (sconcat3 a
-                                                                          "defstruct '"
-                                                                          (load (field sd name))
-                                                                          (sconcat3 a
-                                                                                    "': field '"
-                                                                                    (load (field (al-elem [Field]
-                                                                                                          fs
-                                                                                                          (load i))
-                                                                                                 name))
-                                                                                    (sconcat3 a
-                                                                                              "' at :at "
-                                                                                              (i64->str a off)
-                                                                                              (sconcat3 a
-                                                                                                        " occupies "
-                                                                                                        (i64->str a fsz)
-                                                                                                        (sconcat3 a
-                                                                                                                  " byte(s), past the declared :size "
-                                                                                                                  (i64->str a
-                                                                                                                            s)
-                                                                                                                  ""))))))
-                                                       0))
+                                                   (when (icmp-gt end s)
+                                                         (cg-fail (sconcat3 a
+                                                                            "defstruct '"
+                                                                            (load (field sd name))
+                                                                            (sconcat3 a
+                                                                                      "': field '"
+                                                                                      (load (field (al-elem [Field]
+                                                                                                            fs
+                                                                                                            (load i))
+                                                                                                   name))
+                                                                                      (sconcat3 a
+                                                                                                "' at :at "
+                                                                                                (i64->str a off)
+                                                                                                (sconcat3 a
+                                                                                                          " occupies "
+                                                                                                          (i64->str a fsz)
+                                                                                                          (sconcat3 a
+                                                                                                                    " byte(s), past the declared :size "
+                                                                                                                    (i64->str a
+                                                                                                                              s)
+                                                                                                                    ""))))))))
                                              (None [] 0))
-                                           (if (icmp-gt end (load computed)) (store! computed end) 0))
+                                           (when (icmp-gt end (load computed)) (store! computed end)))
                                          (store! i (iadd (load i) 1)))))
                              ; Overlap at UNEQUAL :at is an error (equal :at is an intentional union);
                              ; name both colliding fields.
@@ -2382,32 +2367,31 @@
                                                                oq (al-get [i64] (load offs) (load q))
                                                                ep (iadd op (al-get [i64] (load sizes) (load p)))
                                                                eq (iadd oq (al-get [i64] (load sizes) (load q)))]
-                                                           (if (and (icmp-ne op oq)
-                                                                    (and (icmp-lt op eq) (icmp-lt oq ep)))
-                                                               (cg-fail (sconcat3 a
-                                                                                  "defstruct '"
-                                                                                  (load (field sd name))
-                                                                                  (sconcat3 a
-                                                                                            "': fields '"
-                                                                                            (load (field (al-elem [Field]
-                                                                                                                  fs
-                                                                                                                  (load p))
-                                                                                                         name))
-                                                                                            (sconcat3 a
-                                                                                                      "' (:at "
-                                                                                                      (i64->str a op)
-                                                                                                      (sconcat3 a
-                                                                                                                ") and '"
-                                                                                                                (load (field (al-elem [Field]
-                                                                                                                                      fs
-                                                                                                                                      (load q))
-                                                                                                                             name))
-                                                                                                                (sconcat3 a
-                                                                                                                          "' (:at "
-                                                                                                                          (i64->str a
-                                                                                                                                    oq)
-                                                                                                                          ") overlap at unequal offsets (equal :at = union)"))))))
-                                                               0))
+                                                           (when (and (icmp-ne op oq)
+                                                                      (and (icmp-lt op eq) (icmp-lt oq ep)))
+                                                                 (cg-fail (sconcat3 a
+                                                                                    "defstruct '"
+                                                                                    (load (field sd name))
+                                                                                    (sconcat3 a
+                                                                                              "': fields '"
+                                                                                              (load (field (al-elem [Field]
+                                                                                                                    fs
+                                                                                                                    (load p))
+                                                                                                           name))
+                                                                                              (sconcat3 a
+                                                                                                        "' (:at "
+                                                                                                        (i64->str a op)
+                                                                                                        (sconcat3 a
+                                                                                                                  ") and '"
+                                                                                                                  (load (field (al-elem [Field]
+                                                                                                                                        fs
+                                                                                                                                        (load q))
+                                                                                                                               name))
+                                                                                                                  (sconcat3 a
+                                                                                                                            "' (:at "
+                                                                                                                            (i64->str a
+                                                                                                                                      oq)
+                                                                                                                            ") overlap at unequal offsets (equal :at = union)"))))))))
                                                          (store! q (iadd (load q) 1))))))
                                            (store! p (iadd (load p) 1))))))
                              (let [size
@@ -2470,15 +2454,14 @@
                   ; Result channel here, so print the rendered line and exit(1) — the
                   ; observable behavior (stderr text + exit code, no object/link) is
                   ; byte-identical to the front-end returning the Err.
-                  (if (icmp-eq (const-eval cg (field ap cnd)) 0)
-                      (let [w (stderr)
-                            msg (sconcat (load (field cg a)) "static assertion failed: " (load (field ap msg)))]
-                        (ps w "error: ")
-                        (ps w msg)
-                        (wb w 10)
-                        (exit 1)
-                        0)
-                      0))
+                  (when (icmp-eq (const-eval cg (field ap cnd)) 0)
+                        (let [w (stderr)
+                              msg (sconcat (load (field cg a)) "static assertion failed: " (load (field ap msg)))]
+                          (ps w "error: ")
+                          (ps w msg)
+                          (wb w 10)
+                          (exit 1)
+                          0)))
                 (store! i (iadd (load i) 1)))))
     0))
 
@@ -2513,7 +2496,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (cg-abi-struct? cg (al-elem [Type] l (load i))) (do (store! r true) 0) 0)
+                (when (cg-abi-struct? cg (al-elem [Type] l (load i))) (store! r true) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-abi-struct? [(cg (ptr Cg)) (t (ptr Type))] (-> bool)
@@ -2551,9 +2534,7 @@
 ; wasm feature we opt into is `+tail-call` (Wasm 3.0 tail calls — LLVM lowers `musttail`
 ; to `return_call`). Everything else takes LLVM's defaults (empty features).
 (defn llvm-cpu-features [(triple (ptr i8))] (-> (ptr i8))
-  (if (icmp-eq (cast i64 triple) 0)
-      c""
-      c""))  ; TODO(wasm 3.0): +tail-call once memory64 lands + verified
+  c"")  ; TODO(wasm 3.0): +tail-call once memory64 lands + verified
 
 ; smallest power-of-two-byte int width (bits) covering `bytes` data bytes.
 (defn abi-int-bits-for-bytes [(bytes i64)] (-> i64)
@@ -2586,7 +2567,7 @@
                         (let [(mut ok) true]
                           (match (load found)
                             (None [] (do (store! found (Some (load ty))) 0))
-                            (Some [prev] (if (type-eq (box-type a prev) ty) 0 (do (store! ok false) 0))))
+                            (Some [prev] (unless (type-eq (box-type a prev) ty) (store! ok false) 0)))
                           (store! count (iadd (load count) 1))
                           (and (load ok) (icmp-le (load count) 4))))
                 (TArray [elem n]
@@ -2595,7 +2576,7 @@
                           (loop (if (or (icmp-ge (load i) n) (not (load ok)))
                                     (break)
                                     (do
-                                      (if (not (abi-hfa-walk-ty cg elem found count)) (do (store! ok false) 0) 0)
+                                      (when (not (abi-hfa-walk-ty cg elem found count)) (store! ok false) 0)
                                       (store! i (iadd (load i) 1)))))
                           (load ok)))
                 (TStruct [nm]
@@ -2609,9 +2590,9 @@
     (loop (if (or (icmp-ge (load i) n) (not (load ok)))
               (break)
               (do
-                (if (not (abi-hfa-walk-ty cg (field (al-elem [Field] fields (load i)) ty) found count))
-                    (do (store! ok false) 0)
-                    0)
+                (when (not (abi-hfa-walk-ty cg (field (al-elem [Field] fields (load i)) ty) found count))
+                      (store! ok false)
+                      0)
                 (store! i (iadd (load i) 1)))))
     (load ok)))
 ; returns the HFA member count (0 if not an HFA); writes the FP element type to out-fty.
@@ -2620,14 +2601,11 @@
         count (alloc-stack i64)]
     (store! found (None [Type]))
     (store! count 0)
-    (if (not (abi-hfa-walk-fields cg fields found count))
-        0
-        (match (load found)
-          (None [] 0)
-          (Some [t]
-                (if (and (icmp-ge (load count) 1) (icmp-le (load count) 4))
-                    (do (store! out-fty t) (load count))
-                    0))))))
+    (unless (not (abi-hfa-walk-fields cg fields found count))
+            (match (load found)
+              (None [] 0)
+              (Some [t]
+                    (when (and (icmp-ge (load count) 1) (icmp-le (load count) 4)) (store! out-fty t) (load count)))))))
 
 ; a one-element slot list (the AArch64 coercion is always a single slot).
 (defn abi-slots1 [(cg (ptr Cg)) (t (ptr i8))] (-> (ptr (ArrayList (ptr i8))))
@@ -2642,7 +2620,7 @@
 (defn abi-merge [(x i64) (y i64)] (-> i64)
   (if (or (icmp-eq x 1) (icmp-eq y 1))
       1
-      (if (or (icmp-eq x 2) (icmp-eq y 2)) 2 0)))
+      (when (or (icmp-eq x 2) (icmp-eq y 2)) 2)))
 (defn abi-align-up [(x i64) (al i64)] (-> i64)
   (if (icmp-eq al 0) x (imul (udiv (iadd x (isub al 1)) al) al)))
 ; Flatten CgStruct `si`'s fields into scalar leaves at absolute byte offsets,
@@ -2752,7 +2730,7 @@
               (break)
               (do
                 (let [lf (al-elem [AbiLeaf] leaves (load i))]
-                  (if (and (load (field lf is_f32)) (icmp-eq (load (field lf offset)) off)) (do (store! r true) 0) 0))
+                  (when (and (load (field lf is_f32)) (icmp-eq (load (field lf offset)) off)) (store! r true) 0))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn abi-classify-sysv [(cg (ptr Cg)) (si i64) (sty (ptr i8)) (size i64) (align i32)] (-> (ptr StructAbi))
@@ -2782,7 +2760,7 @@
                           (let [lf (al-elem [AbiLeaf] leaves (load li))
                                 lo (load (field lf offset))
                                 hi (iadd (load (field lf offset)) (load (field lf size)))]
-                            (if (icmp-gt hi nbytes) (do (unimplemented "SysV ABI: scalar runs past struct size") 0) 0)
+                            (when (icmp-gt hi nbytes) (unimplemented "SysV ABI: scalar runs past struct size") 0)
                             (let [(mut b) lo]
                               (loop (if (icmp-ge (load b) hi)
                                         (break)
@@ -2898,7 +2876,7 @@
               (break)
               (do
                 (let [ep (al-elem [CSigEntry] (field cg csigs) (load i))]
-                  (if (str-eq (load (field ep name)) nm) (do (store! r (load (field ep sig))) 0) 0))
+                  (when (str-eq (load (field ep name)) nm) (store! r (load (field ep sig))) 0))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-has-csig [(cg (ptr Cg)) (nm (slice u8))] (-> bool)
@@ -2930,9 +2908,7 @@
             (if (abi-ret-indirect? sa)
                 (do (al-push! (mut lp) (LLVMPointerTypeInContext ctx 0)) (store! (field sig sret) sa) 0)
                 (do (store! rty (abi-direct-return-type cg sa)) (store! (field sig ret_direct) sa) 0)))
-          (if (ty-is-void ret)
-              0
-              (do (store! rty (basic-ty cg ret)) 0))))
+          (unless (ty-is-void ret) (store! rty (basic-ty cg ret)) 0)))
     ; param classification
     (let [n (al-len [Type] (load params))
           (mut i) 0]
@@ -2960,7 +2936,7 @@
                         (do (al-push! (mut lp) (basic-ty cg pty)) (al-push! (mut argl) (AAScalar)))))
                   (store! i (iadd (load i) 1))))))
     (let [rt (if (icmp-eq (cast i64 (load rty)) 0) (LLVMVoidTypeInContext ctx) (load rty))
-          fnty (LLVMFunctionType rt (carr a (load lp)) (cast i32 (al-len [(ptr i8)] (load lp))) (if variadic 1 0))]
+          fnty (LLVMFunctionType rt (carr a (load lp)) (cast i32 (al-len [(ptr i8)] (load lp))) (when variadic 1))]
       (store! (field sig args) (box-al [ArgAbiK] a (load argl)))
       (store! (field sig fn_ty) fnty)
       sig)))
@@ -2983,12 +2959,10 @@
 (defn cg-apply-csig-attrs [(cg (ptr Cg)) (sig (ptr CSig)) (target (ptr i8)) (is-call bool)] (-> i64)
   (let [(mut idx) 0
         sret-sa (load (field sig sret))]
-    (if (icmp-ne (cast i64 sret-sa) 0)
-        (do
+    (when (icmp-ne (cast i64 sret-sa) 0)
           (cg-attr-at cg target is-call (load idx) (cg-type-attr cg "sret" (load (field sret-sa llvm_ty))))
           (cg-attr-at cg target is-call (load idx) (cg-enum-attr cg "align" (cast i64 (load (field sret-sa align)))))
           (store! idx (iadd (load idx) 1)))
-        0)
     (let [args (load (field sig args))
           n (al-len [ArgAbiK] (load args))
           (mut i) 0]
@@ -3003,8 +2977,7 @@
                                           (_ 0)))
                     (AAIndirect [sa]
                                 (do
-                                  (if (icmp-eq (load (field cg arch)) 0)
-                                      (do
+                                  (when (icmp-eq (load (field cg arch)) 0)
                                         (cg-attr-at cg
                                                     target
                                                     is-call
@@ -3015,7 +2988,6 @@
                                                     is-call
                                                     (load idx)
                                                     (cg-enum-attr cg "align" (cast i64 (load (field sa align))))))
-                                      0)
                                   (store! idx (iadd (load idx) 1))))
                     (AAScalar [] (store! idx (iadd (load idx) 1))))
                   (store! i (iadd (load i) 1))))))
@@ -3082,11 +3054,11 @@
                 (TVec [el n] (cg-fail (sconcat a who ": a vec cannot cross the C ABI by value; pass a pointer to it")))
                 (TStruct [nm]
                          (let [si (cg-struct-idx cg nm)]
-                           (if (icmp-lt si 0)
-                               0
-                               (match-else (load (field (al-elem [CgStruct] (field cg structs) si) layout))
-                                           (LBits [b o] 0)
-                                           (_ (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields))
+                           (unless (icmp-lt si 0)
+                                   (match (load (field (al-elem [CgStruct] (field cg structs) si) layout))
+                                          (LBits [b o] 0)
+                                          (LC []
+                                              (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields))
                                                     n (al-len [Field] (load fs))
                                                     (mut i) 0]
                                                 (loop (if (icmp-ge (load i) n)
@@ -3096,7 +3068,43 @@
                                                                             (field (al-elem [Field] fs (load i)) ty)
                                                                             who)
                                                             (store! i (iadd (load i) 1)))))
-                                                0))))))
+                                                0))
+                                          (LPacked []
+                                                   (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields))
+                                                         n (al-len [Field] (load fs))
+                                                         (mut i) 0]
+                                                     (loop (if (icmp-ge (load i) n)
+                                                               (break)
+                                                               (do
+                                                                 (cg-reject-view cg
+                                                                                 (field (al-elem [Field] fs (load i)) ty)
+                                                                                 who)
+                                                                 (store! i (iadd (load i) 1)))))
+                                                     0))
+                                          (LAligned [$g3488]
+                                                    (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields))
+                                                          n (al-len [Field] (load fs))
+                                                          (mut i) 0]
+                                                      (loop (if (icmp-ge (load i) n)
+                                                                (break)
+                                                                (do
+                                                                  (cg-reject-view cg
+                                                                                  (field (al-elem [Field] fs (load i)) ty)
+                                                                                  who)
+                                                                  (store! i (iadd (load i) 1)))))
+                                                      0))
+                                          (LExplicit [$g3489 $g3490 $g3491]
+                                                     (let [fs (load (field (al-elem [CgStruct] (field cg structs) si) fields))
+                                                           n (al-len [Field] (load fs))
+                                                           (mut i) 0]
+                                                       (loop (if (icmp-ge (load i) n)
+                                                                 (break)
+                                                                 (do
+                                                                   (cg-reject-view cg
+                                                                                   (field (al-elem [Field] fs (load i)) ty)
+                                                                                   who)
+                                                                   (store! i (iadd (load i) 1)))))
+                                                       0))))))
                 (TArray [el n] (cg-reject-view cg el who))
                 (_ 0))))
 (defn cg-check-c-abi-types [(cg (ptr Cg)) (params (ptr (ArrayList Type))) (ret (ptr Type)) (who (slice u8))] (-> i64)
@@ -3144,9 +3152,8 @@
         (mut sret-slot) (cast (ptr i8) 0)
         nargs (al-len [Tv] argtv)
         nfixed (al-len [ArgAbiK] (load (field sig args)))]
-    (if (icmp-ne (cast i64 sret-sa) 0)
-        (let [s (cg-struct-slot cg sret-sa "abi.sret")] (store! sret-slot s) (al-push! (mut meta) s))
-        0)
+    (when (icmp-ne (cast i64 sret-sa) 0)
+          (let [s (cg-struct-slot cg sret-sa "abi.sret")] (store! sret-slot s) (al-push! (mut meta) s)))
     (let [(mut i) 0]
       (loop (if (icmp-ge (load i) nfixed)
                 (break)
@@ -3244,7 +3251,7 @@
               (break)
               (do
                 (let [nm (load (field (al-elem [Extern] es (load i)) name))]
-                  (if (str-eq (last-component nm) csym) (do (store! r nm) (break)) 0))
+                  (when (str-eq (last-component nm) csym) (store! r nm) (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-extern-redecl-check [(cg (ptr Cg))
@@ -3255,20 +3262,19 @@
                               (csym (slice u8))] (-> i64)
   (let [a (load (field cg a))
         have (LLVMGlobalGetValueType existing)]
-    (if (icmp-eq (cast i64 have) (cast i64 fnty))
-        0
-        (cg-fail (sconcat3 a
-                           (sconcat3 a "C symbol '" csym "' is declared twice with different signatures: ")
-                           (sconcat3 a
-                                     (if (icmp-gt (slice-len prior) 0)
-                                         (sconcat3 a "'" prior "'")
-                                         "an earlier declaration")
-                                     " is "
-                                     (cstr->slice (LLVMPrintTypeToString have)))
-                           (sconcat3 a
-                                     (sconcat3 a ", '" ename "' is ")
-                                     (cstr->slice (LLVMPrintTypeToString fnty))
-                                     ". One C symbol, one signature: fix the types to match, or use a different symbol"))))))
+    (unless (icmp-eq (cast i64 have) (cast i64 fnty))
+            (cg-fail (sconcat3 a
+                               (sconcat3 a "C symbol '" csym "' is declared twice with different signatures: ")
+                               (sconcat3 a
+                                         (if (icmp-gt (slice-len prior) 0)
+                                             (sconcat3 a "'" prior "'")
+                                             "an earlier declaration")
+                                         " is "
+                                         (cstr->slice (LLVMPrintTypeToString have)))
+                               (sconcat3 a
+                                         (sconcat3 a ", '" ename "' is ")
+                                         (cstr->slice (LLVMPrintTypeToString fnty))
+                                         ". One C symbol, one signature: fix the types to match, or use a different symbol"))))))
 
 ; 1a: declare externs.
 (defn cg-declare-externs [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
@@ -3287,7 +3293,7 @@
                       ; the extern's convention -> its native LLVM calling-convention id
                       ; (externs are always native; a :shim extern is rejected in check).
                       conv (cg-prog-conv p (load (field ep cc)))
-                      cc-id (if (icmp-ne (cast i64 conv) 0) (conv-native-id conv) 0)]
+                      cc-id (when (icmp-ne (cast i64 conv) 0) (conv-native-id conv))]
                   ; Eager C-ABI view check for EVERY extern
                   ; before — and regardless of — the struct-by-value branch below. A bare
                   ; `(slice u8)`/`(vec …)` param isn't a struct, so the struct branch
@@ -3313,7 +3319,7 @@
                                     (cg-apply-csig-attrs cg sig nf false)
                                     (LLVMSetFunctionCallConv nf (cast i32 cc-id))
                                     nf))]
-                        (if (not (cg-has-csig cg ename)) (cg-add-csig cg ename sig) 0)
+                        (when (not (cg-has-csig cg ename)) (cg-add-csig cg ename sig))
                         (cg-add-func cg ename fv)
                         (cg-record-callable cg ename (load (field ep cc)) params ret))
                       (let [existing (LLVMGetNamedFunction (load (field cg module)) (slice->cstr a csym))
@@ -3345,7 +3351,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Func] fs (load i)) name)) "main") (do (store! r true) 0) 0)
+                (when (str-eq (load (field (al-elem [Func] fs (load i)) name)) "main") (store! r true) 0)
                 (store! i (iadd (load i) 1)))))
     (or (load r) (icmp-gt (al-len [ExportC] (load (field p exports))) 0))))
 ; find the ExportC for a function name (null if not exported).
@@ -3357,9 +3363,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [ExportC] es (load i)) name)) name)
-                    (do (store! r (al-elem [ExportC] es (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [ExportC] es (load i)) name)) name)
+                      (store! r (al-elem [ExportC] es (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; an export takes a struct BY VALUE (a TStruct param) -> it needs a C-ABI thunk (the
@@ -3372,7 +3378,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (type-tag (al-elem [Type] ps (load i))) 6) (do (store! r true) (break)) 0)
+                (when (icmp-eq (type-tag (al-elem [Type] ps (load i))) 6) (store! r true) (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cg-declare-funcs [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
@@ -3424,7 +3430,7 @@
                         (LLVMAddAttributeAtIndex tramp (cast i32 -1) (cg-enum-attr cg "noinline" 0))
                         (cg-add-func cg fname tramp)
                         (cg-add-shim cg fname impl-fn (load (field conv params)) ret-reg (load (field conv clobber))))
-                      (let [cc-id (if (icmp-ne (cast i64 conv) 0) (conv-native-id conv) 0)]
+                      (let [cc-id (when (icmp-ne (cast i64 conv) 0) (conv-native-id conv))]
                         (if (or (cg-abi-struct? cg (box-type a ret)) (ty-list-has-struct cg fparams))
                             (let [sig (c-signature cg fparams (box-type a ret) false)
                                   fv
@@ -3434,12 +3440,12 @@
                               (LLVMSetFunctionCallConv fv (cast i32 cc-id))
                               (cg-apply-csig-attrs cg sig fv false)
                               (cg-add-csig cg fname sig)
-                              (if (not external) (do (LLVMSetLinkage fv 8) 0) 0)
+                              (when (not external) (LLVMSetLinkage fv 8) 0)
                               (cg-add-func cg fname fv))
                             (let [fnty (cg-fn-type cg fparams (box-type a ret))
                                   fv (LLVMAddFunction (load (field cg module)) (slice->cstr a llvm-name) fnty)]
                               (LLVMSetFunctionCallConv fv (cast i32 cc-id))
-                              (if (not external) (do (LLVMSetLinkage fv 8) 0) 0)
+                              (when (not external) (LLVMSetLinkage fv 8) 0)
                               (cg-add-func cg fname fv))))))
                 (store! i (iadd (load i) 1)))))
     0))
@@ -3463,9 +3469,7 @@
       (let [(mut meta) (al-new [(ptr i8)] a)
             sret-sa (load (field sig sret))
             (mut idx) 0]
-        (if (icmp-ne (cast i64 sret-sa) 0)
-            (do (al-push! (mut meta) (LLVMGetParam thunk 0)) (store! idx 1))
-            0)
+        (when (icmp-ne (cast i64 sret-sa) 0) (al-push! (mut meta) (LLVMGetParam thunk 0)) (store! idx 1))
         (let [args (load (field sig args))
               n (al-len [ArgAbiK] (load args))
               (mut i) 0]
@@ -3518,12 +3522,10 @@
                                   (cast i32 (al-len [(ptr i8)] (load meta)))
                                   (cg-call-name cg (LLVMGlobalGetValueType internal) "thunk.call"))]
             (LLVMSetInstructionCallConv cs (LLVMGetFunctionCallConv internal))
-            (if (cg-has-csig cg internal-name) (cg-apply-csig-attrs cg (cg-csig cg internal-name) cs true) 0)
-            (if (icmp-ne (cast i64 sret-sa) 0)
+            (when (cg-has-csig cg internal-name) (cg-apply-csig-attrs cg (cg-csig cg internal-name) cs true))
+            (if (or (icmp-ne (cast i64 sret-sa) 0) (ty-is-void ret))
                 (do (LLVMBuildRetVoid b) 0)
-                (if (ty-is-void ret)
-                    (do (LLVMBuildRetVoid b) 0)
-                    (do (LLVMBuildRet b cs) 0))))))
+                (do (LLVMBuildRet b cs) 0)))))
       0)))
 (defn cg-emit-thunks [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
   (let [a (load (field cg a))
@@ -3534,15 +3536,14 @@
               (break)
               (do
                 (let [ep (al-elem [ExportC] es (load i))]
-                  (if (cg-export-needs-thunk ep)
-                      (let [sym (match (load (field ep symbol)) (Some [s] s) (None [] ""))
-                            internal (cg-func cg (load (field ep name)))
-                            ret
-                              (match (cg-ret cg (load (field ep name)))
-                                (Some [t] (box-type a t))
-                                (None [] (box-type a (TVoid))))]
-                        (cg-emit-export-thunk cg sym (load (field ep name)) internal (load (field ep params)) ret))
-                      0))
+                  (when (cg-export-needs-thunk ep)
+                        (let [sym (match (load (field ep symbol)) (Some [s] s) (None [] ""))
+                              internal (cg-func cg (load (field ep name)))
+                              ret
+                                (match (cg-ret cg (load (field ep name)))
+                                  (Some [t] (box-type a t))
+                                  (None [] (box-type a (TVoid))))]
+                          (cg-emit-export-thunk cg sym (load (field ep name)) internal (load (field ep params)) ret))))
                 (store! i (iadd (load i) 1)))))
     0))
 (defn cg-param-types [(cg (ptr Cg)) (params (ptr (ArrayList Param)))] (-> (ptr (ArrayList Type)))

@@ -156,9 +156,7 @@
     (load d)))
 ; Record the loader's first error and mark the run failed (idempotent: keep the first).
 (defn ls-set-err! [(s (mut LS)) (d Diag)] (-> i64)
-  (if (load (field s loaderr_set))
-      0
-      (do (store! (field s loaderr) d) (store! (field s loaderr_set) true) 0)))
+  (unless (load (field s loaderr_set)) (store! (field s loaderr) d) (store! (field s loaderr_set) true) 0))
 (defn ls-err? [(s (mut LS))] (-> bool)
   (load (field s loaderr_set)))
 
@@ -191,7 +189,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)) 0)
+                (when (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-lt (load idx) 0) "." (subslice p 0 (load idx)))))
 
@@ -202,7 +200,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)) 0)
+                (when (icmp-eq (cast i64 (slice-get p (load i))) 47) (store! idx (load i)))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-lt (load idx) 0) p (subslice p (iadd (load idx) 1) n))))
 
@@ -348,7 +346,7 @@
                 (let [f (alloc-stack Sexp)]
                   (store! f (al-get [Sexp] (load forms) (load i)))
                   (match (l-list-head f)
-                    (Some [h] (if (str-eq h "module") (do (store! res (Some (module-name f))) (break)) 0))
+                    (Some [h] (when (str-eq h "module") (store! res (Some (module-name f))) (break)))
                     (None [] 0)))
                 (store! i (iadd (load i) 1)))))
     (load res)))
@@ -384,9 +382,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (imp-elem (mut s) (load i)) name)) name)
-                    (do (store! idx (load i)) (break))
-                    0)
+                (when (str-eq (load (field (imp-elem (mut s) (load i)) name)) name) (store! idx (load i)) (break))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load idx) 0)
         (imp-elem (mut s) (load idx))
@@ -406,9 +402,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (exp-elem (mut s) (load i)) name)) name)
-                    (do (store! idx (load i)) (break))
-                    0)
+                (when (str-eq (load (field (exp-elem (mut s) (load i)) name)) name) (store! idx (load i)) (break))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load idx) 0)
         (exp-elem (mut s) (load idx))
@@ -426,11 +420,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load (field e names)) (load i)) name)
-                    (do (store! found true) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] (load (field e names)) (load i)) name) (store! found true) (break))
                 (store! i (iadd (load i) 1)))))
-    (if (load found) 0 (al-push! (mut (field e names)) name))))
+    (unless (load found) (al-push! (mut (field e names)) name))))
 
 (defn mi-add-alias! [(e (ptr ImpEntry)) (alias (slice u8)) (target (slice u8))] (-> i64)
   (let [n (al-len [Alias] (load (field (field e imp) aliases)))
@@ -440,12 +432,12 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (let [ep (alloc-stack Alias)]
-                              (store! ep (al-get [Alias] (load (field (field e imp) aliases)) (load i)))
-                              (load (field ep alias)))
-                            alias)
-                    (do (store! idx (load i)) (break))
-                    0)
+                (when (str-eq (let [ep (alloc-stack Alias)]
+                                (store! ep (al-get [Alias] (load (field (field e imp) aliases)) (load i)))
+                                (load (field ep alias)))
+                              alias)
+                      (store! idx (load i))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load idx) 0)
         (al-set! [Alias] (mut (field (field e imp) aliases)) (load idx) v)
@@ -467,9 +459,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load (field s loaded)) (load i)) name)
-                    (do (store! found true) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] (load (field s loaded)) (load i)) name) (store! found true) (break))
                 (store! i (iadd (load i) 1)))))
     (if (load found) false (do (al-push! (mut (field s loaded)) name) true))))
 
@@ -597,49 +587,46 @@
     (let [rr (resolve-source a (mut s) form base path)
           rp (alloc-stack Resolved)]
       (store! rp rr)
-      (if (ls-err? (mut s))
-          0
-          (let [text (load (field rp text))
-                incdir (load (field rp incdir))
-                inc-id (load (field s srccount))
-                _ignore (store! (field s srccount) (iadd inc-id 1))
-                _reg (register-source! (mut s) (load (field rp disp)) text)]
-            (match (read-all a text inc-id)
-              ; `d` is already anchored in the imported file (read-all stamped inc-id),
-              ; so hand it to the driver verbatim — it points at the unclosed form. A
-              ; generic abort here would drop the one span that locates the mistake.
-              (Err [d] (do (ls-set-err! (mut s) d) 0))
-              (Ok [inc-forms]
-                  (let [modname
-                          (match (declared-module inc-forms)
-                            (Some [m] m)
-                            ; the one fact the user needs is WHICH file, and it was the one
-                            ; fact omitted — while the process killed itself with SIGABRT, so
-                            ; build tools saw a crashed compiler rather than a failed compile.
-                            ; `rp disp` is the imported file's path and `form` is the import
-                            ; that pulled it in: the same pair behind the excellent
-                            ; "import 'X': not found" error a few hundred lines up.
-                            (None []
-                                  (do
-                                    (ls-set-err! (mut s)
-                                                 (diag-at-form form
-                                                               (sconcat3 a
-                                                                         "import '"
-                                                                         (load (field rp disp))
-                                                                         "': file has no (module …) declaration — add (module <name>) as its first form")))
-                                    "")))
-                        importer (match cur (Some [m] m) (None [] ""))
-                        imp (imp-entry (mut s) importer)
-                        alias-name (match (load alias) (Some [al] al) (None [] modname))]
-                    (mi-add-alias! imp alias-name modname)
-                    (match (load use-spec)
-                      (Some [spec] (mi-add-use! imp modname spec))
-                      (None [] 0))
-                    (if (load reexport) (mi-add-reexport! imp modname) 0)
-                    (if (loaded-insert! (mut s) modname)
-                        (process-forms (mut s) inc-forms incdir (None [(slice u8)]))
-                        0)
-                    0))))))))
+      (unless (ls-err? (mut s))
+              (let [text (load (field rp text))
+                    incdir (load (field rp incdir))
+                    inc-id (load (field s srccount))
+                    _ignore (store! (field s srccount) (iadd inc-id 1))
+                    _reg (register-source! (mut s) (load (field rp disp)) text)]
+                (match (read-all a text inc-id)
+                  ; `d` is already anchored in the imported file (read-all stamped inc-id),
+                  ; so hand it to the driver verbatim — it points at the unclosed form. A
+                  ; generic abort here would drop the one span that locates the mistake.
+                  (Err [d] (do (ls-set-err! (mut s) d) 0))
+                  (Ok [inc-forms]
+                      (let [modname
+                              (match (declared-module inc-forms)
+                                (Some [m] m)
+                                ; the one fact the user needs is WHICH file, and it was the one
+                                ; fact omitted — while the process killed itself with SIGABRT, so
+                                ; build tools saw a crashed compiler rather than a failed compile.
+                                ; `rp disp` is the imported file's path and `form` is the import
+                                ; that pulled it in: the same pair behind the excellent
+                                ; "import 'X': not found" error a few hundred lines up.
+                                (None []
+                                      (do
+                                        (ls-set-err! (mut s)
+                                                     (diag-at-form form
+                                                                   (sconcat3 a
+                                                                             "import '"
+                                                                             (load (field rp disp))
+                                                                             "': file has no (module …) declaration — add (module <name>) as its first form")))
+                                        "")))
+                            importer (match cur (Some [m] m) (None [] ""))
+                            imp (imp-entry (mut s) importer)
+                            alias-name (match (load alias) (Some [al] al) (None [] modname))]
+                        (mi-add-alias! imp alias-name modname)
+                        (match (load use-spec)
+                          (Some [spec] (mi-add-use! imp modname spec))
+                          (None [] 0))
+                        (when (load reexport) (mi-add-reexport! imp modname))
+                        (when (loaded-insert! (mut s) modname) (process-forms (mut s) inc-forms incdir (None [(slice u8)])))
+                        0))))))))
 
 ; Join the string elements of a `:flags ["-I…" "-D…"]` option into one clang
 ; flags string (each space-prefixed), or "" if absent. Forwarded to clang so
@@ -686,32 +673,30 @@
 (defn parse-probe-entry [(a (ptr Allocator)) (plist (ptr (ArrayList ci/Probe))) (entry (ptr Sexp))] (-> i64)
   (let [it (l-as-list entry)
         n (al-len [Sexp] (load it))]
-    (if (icmp-lt n 2)
-        0
-        (let [e0 (alloc-stack Sexp)]
-          (store! e0 (al-get [Sexp] (load it) 0))
-          (match (l-sym-name e0)
-            (None [] 0)
-            (Some [name]
-                  (let [e1 (alloc-stack Sexp)]
-                    (store! e1 (al-get [Sexp] (load it) 1))
-                    (match-else (load (field e1 kind))
-                                (KStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
-                                (KCStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
-                                (KKw [k]
-                                     (if (and (str-eq k "bits") (icmp-ge n 4))
-                                         (let [e2 (alloc-stack Sexp)
-                                               e3 (alloc-stack Sexp)]
-                                           (store! e2 (al-get [Sexp] (load it) 2))
-                                           (store! e3 (al-get [Sexp] (load it) 3))
-                                           (match (l-as-str e2)
-                                             (None [] 0)
-                                             (Some [sn]
-                                                   (match (l-as-str e3)
-                                                     (None [] 0)
-                                                     (Some [fnm] (ci/probe-push! a plist name 1 "" sn fnm))))))
-                                         0))
-                                (_ 0)))))))))
+    (unless (icmp-lt n 2)
+            (let [e0 (alloc-stack Sexp)]
+              (store! e0 (al-get [Sexp] (load it) 0))
+              (match (l-sym-name e0)
+                (None [] 0)
+                (Some [name]
+                      (let [e1 (alloc-stack Sexp)]
+                        (store! e1 (al-get [Sexp] (load it) 1))
+                        (match-else (load (field e1 kind))
+                                    (KStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                                    (KCStr [ex] (ci/probe-push! a plist name 0 ex "" ""))
+                                    (KKw [k]
+                                         (when (and (str-eq k "bits") (icmp-ge n 4))
+                                               (let [e2 (alloc-stack Sexp)
+                                                     e3 (alloc-stack Sexp)]
+                                                 (store! e2 (al-get [Sexp] (load it) 2))
+                                                 (store! e3 (al-get [Sexp] (load it) 3))
+                                                 (match (l-as-str e2)
+                                                   (None [] 0)
+                                                   (Some [sn]
+                                                         (match (l-as-str e3)
+                                                           (None [] 0)
+                                                           (Some [fnm] (ci/probe-push! a plist name 1 "" sn fnm))))))))
+                                    (_ 0)))))))))
 
 ; is a bare keyword `:kw` present anywhere in the form's tail?
 (defn has-kw? [(items (ptr (ArrayList Sexp))) (nit i64) (kw (slice u8))] (-> bool)
@@ -722,7 +707,7 @@
               (do
                 (let [k (alloc-stack Sexp)]
                   (store! k (al-get [Sexp] (load items) (load j)))
-                  (match-else (load (field k kind)) (KKw [n] (if (str-eq n kw) (do (store! r true) 0) 0)) (_ 0)))
+                  (match-else (load (field k kind)) (KKw [n] (when (str-eq n kw) (store! r true) 0)) (_ 0)))
                 (store! j (iadd (load j) 1)))))
     (load r)))
 
@@ -807,9 +792,8 @@
                                                   (store! gf (al-get [Sexp] (load gforms) (load k)))
                                                   (match (l-list-head gf)
                                                     (Some [gh]
-                                                          (if (str-eq gh "module")
-                                                              0
-                                                              (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
+                                                          (unless (str-eq gh "module")
+                                                                  (al-push! (mut (field s out)) (mk-tagged (load gf) cur))))
                                                     (None [] (al-push! (mut (field s out)) (mk-tagged (load gf) cur)))))
                                                 (store! k (iadd (load k) 1)))))
                                     0)))))))))))))
@@ -860,7 +844,7 @@
               (loop (if (or (load r) (icmp-ge (load i) n))
                         (break)
                         (do
-                          (if (form-has-include-str (al-elem [Sexp] items (load i))) (do (store! r true) 0) 0)
+                          (when (form-has-include-str (al-elem [Sexp] items (load i))) (store! r true) 0)
                           (store! i (iadd (load i) 1)))))
               (load r))
             false))))

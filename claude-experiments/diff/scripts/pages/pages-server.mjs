@@ -14,6 +14,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// The emitted SSR chunks carry a `.map` each; Node only consumes them with
+// source-map support on. See `next-server.mjs` for why this is unconditional.
+process.setSourceMapsEnabled(true);
+
 function fail(message) {
   console.error(`pages-server: ${message}`);
   process.exit(1);

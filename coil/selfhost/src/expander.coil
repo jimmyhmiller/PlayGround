@@ -21,6 +21,7 @@
 (import "reader.coil" :use *)
 (import "resolve.coil" :use *)
 (import "metaengine.coil" :use *)
+(import "hashmap.coil" :use *)  ; the macro-name index (macros-has?)
 
 (defn defn-name-of [(f (ptr Sexp))] (-> (Option (slice u8)))
   (if (icmp-ne (sx-tag (load f)) 6)
@@ -41,6 +42,53 @@
   (match (defn-name-of f)
     (None [] false)
     (Some [n] (set-contains comptime (qualify-name a n module)))))
+; ── the macro-name index ─────────────────────────────────────────────────────
+; `resolve-macro` asks "is this head a macro?" for EVERY list head in the program, and
+; answered it by scanning every macro name in the program with `str-eq` — O(heads ×
+; macros), the same quadratic shape `resolve` had for definition names. Index the set.
+;
+; Two guards keep it honest. It records the list's ADDRESS and LENGTH and rebuilds if
+; either differs, which covers a second list being asked about mid-run. And it is
+; INVALIDATED at the top of every `run-expand`, which covers the one a pointer test
+; cannot see: the allocator handing a fresh list the address of a dead one. A stale hit
+; here would treat an ordinary call as a macro, so neither guard is optional.
+(defstruct MacIdx
+  [(src (ptr (ArrayList (slice u8)))) (len i64) (built i64) (m (HashMap (slice u8) i64))])
+(defn mac-idx [] (-> (ptr MacIdx))
+  (alloc-static MacIdx))
+(defn macros-index-reset! [] (-> i64)
+  (let [ix (mac-idx)]
+    (store! (field ix built) 0)
+    (store! (field ix src) (cast (ptr (ArrayList (slice u8))) 0))
+    (store! (field ix len) -1)
+    0))
+(defn macros-index-build! [(ix (ptr MacIdx)) (lst (ptr (ArrayList (slice u8))))] (-> i64)
+  (let [a (malloc-allocator)
+        n (al-len [(slice u8)] (load lst))
+        (mut i) 0]
+    (store! (field ix m) (hm-new [(slice u8) i64] a (str-keyops)))
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (hm-put! [(slice u8) i64] (mut (field ix m)) (al-get [(slice u8)] (load lst) (load i)) (load i))
+                (store! i (iadd (load i) 1)))))
+    (store! (field ix src) lst)
+    (store! (field ix len) n)
+    (store! (field ix built) 1)
+    0))
+(defn macros-has? [(macros (ptr (ArrayList (slice u8)))) (q (slice u8))] (-> bool)
+  (let [ix (mac-idx)]
+    (if (icmp-eq (cast i64 macros) 0)
+        false
+        (do
+          (when (or (icmp-eq (load (field ix built)) 0)
+                    (or (icmp-ne (cast i64 (load (field ix src))) (cast i64 macros))
+                        (icmp-ne (load (field ix len)) (al-len [(slice u8)] (load macros)))))
+                (macros-index-build! ix macros))
+          (match (hm-get [(slice u8) i64] (load (field ix m)) q)
+            (Some [_] true)
+            (None [] false))))))
+
 (defn macro-use-match [(impe (ptr ImpEntry))
                        (macros (ptr (ArrayList (slice u8))))
                        (expb (ptr (ArrayList ExpEntry)))
@@ -58,9 +106,9 @@
                   (let [target (load (field up target))
                         used (match (load (field up spec)) (UAll [] true) (UNames [names] (set-contains names head)))
                         q (sconcat3 a target "." head)]
-                    (if (and used (and (exports-check expb target head) (set-contains macros q)))
-                        (do (store! r (Some q)) (break))
-                        0)))
+                    (when (and used (and (exports-check expb target head) (macros-has? macros q)))
+                          (store! r (Some q))
+                          (break))))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn macro-reexport-match [(core (ptr ImpEntry))
@@ -77,7 +125,7 @@
               (do
                 (let [target (al-get [(slice u8)] (load res) (load i))
                       q (sconcat3 a target "." head)]
-                  (if (and (exports-check expb target head) (set-contains macros q)) (do (store! r (Some q)) (break)) 0))
+                  (when (and (exports-check expb target head) (macros-has? macros q)) (store! r (Some q)) (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn resolve-macro [(head (slice u8))
@@ -101,14 +149,14 @@
                           (None [] (None [(slice u8)]))
                           (Some [target]
                                 (let [q (sconcat3 a target "." rest)]
-                                  (if (and (set-contains macros q) (exports-check expb target rest))
+                                  (if (and (macros-has? macros q) (exports-check expb target rest))
                                       (Some q)
                                       (None [(slice u8)]))))))))))
         (if (has-dot head)
-            (if (set-contains macros head) (Some head) (None [(slice u8)]))
+            (if (macros-has? macros head) (Some head) (None [(slice u8)]))
             ; bare
             (let [own (qualify-name a head module)]
-              (if (set-contains macros own)
+              (if (macros-has? macros own)
                   (Some own)
                   (let [mname (match module (Some [m] m) (None [] ""))
                         impe (imports-find impb mname)
@@ -127,25 +175,22 @@
 ; at the call site. Non-dummy nodes (template literals, ~unquote-spliced caller
 ; code) keep their own span. Faithful.
 (defn stamp-expansion [(s (ptr Sexp)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
-  (if (icmp-lt (sx-lo (load s)) 0)
-      (do
+  (when (icmp-lt (sx-lo (load s)) 0)
         (store! (field s source) source)
         (store! (field s lo) lo)
         (store! (field s hi) hi)
         (store! (field s ctxt) ctxt)
         0)
-      0)
   (let [tg (sx-tag (load s))]
-    (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-        (let [items (sx-items (load s))
-              n (sx-len items)
-              (mut i) 0]
-          (loop (if (icmp-ge (load i) n)
-                    (break)
-                    (do
-                      (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt)
-                      (store! i (iadd (load i) 1))))))
-        0))
+    (when (or (icmp-eq tg 6) (icmp-eq tg 7))
+          (let [items (sx-items (load s))
+                n (sx-len items)
+                (mut i) 0]
+            (loop (if (icmp-ge (load i) n)
+                      (break)
+                      (do
+                        (stamp-expansion (al-elem [Sexp] items (load i)) source lo hi ctxt)
+                        (store! i (iadd (load i) 1))))))))
   0)
 ; ── macro binder hygiene ─────────────────────────────────────────────────────
 ; A macro template that introduces a `let` binder with a plain (non-gensym) name
@@ -176,7 +221,7 @@
               (break)
               (do
                 (let [e (al-elem [HygEnt] (field env items) (load i))]
-                  (if (str-eq (load (field e name)) name) (do (store! r (Some (load (field e gen)))) (break)) 0))
+                  (when (str-eq (load (field e name)) name) (store! r (Some (load (field e gen)))) (break)))
                 (store! i (isub (load i) 1)))))
     (load r)))
 (defn hyg-fresh [(a (ptr Allocator))] (-> (slice u8))
@@ -192,11 +237,10 @@
                           (icmp-le (sx-hi (load sp)) (load (field env chi)))))))))
 ; rename a symbol node in place iff it is template-introduced and its name is a live binder
 (defn hyg-sym! [(sp (ptr Sexp)) (env (ptr HygBox))] (-> i64)
-  (if (hyg-renameable sp env)
-      (match (hyg-lookup env (sx-sval (load sp)))
-        (Some [g] (do (store! (field sp kind) (KSym g)) 0))
-        (None [] 0))
-      0))
+  (when (hyg-renameable sp env)
+        (match (hyg-lookup env (sx-sval (load sp)))
+          (Some [g] (do (store! (field sp kind) (KSym g)) 0))
+          (None [] 0))))
 (defn hyg-is-let [(items (ptr (ArrayList Sexp)))] (-> bool)
   (cond (icmp-lt (sx-len items) 2) false
         (icmp-ne (sx-tag (sx-at items 0)) 2) false
@@ -228,17 +272,15 @@
               (do
                 (hyg-walk! (al-elem [Sexp] binds (iadd (imul (load k) 2) 1)) env a)
                 (let [bsym (hyg-binder-sym (al-elem [Sexp] binds (imul (load k) 2)))]
-                  (if (icmp-eq (cast i64 bsym) 0)
-                      0
-                      (if (hyg-renameable bsym env)
-                          (let [g (hyg-fresh a)
-                                e (alloc-stack HygEnt)]
-                            (store! (field e name) (sx-sval (load bsym)))
-                            (store! (field e gen) g)
-                            (store! (field bsym kind) (KSym g))
-                            (al-push! (mut (field env items)) (load e))
-                            0)
-                          0)))
+                  (unless (icmp-eq (cast i64 bsym) 0)
+                          (when (hyg-renameable bsym env)
+                                (let [g (hyg-fresh a)
+                                      e (alloc-stack HygEnt)]
+                                  (store! (field e name) (sx-sval (load bsym)))
+                                  (store! (field e gen) g)
+                                  (store! (field bsym kind) (KSym g))
+                                  (al-push! (mut (field env items)) (load e))
+                                  0))))
                 (store! k (iadd (load k) 1)))))
     (let [n (sx-len items)
           (mut j) 2]
@@ -259,26 +301,24 @@
   (let [tg (sx-tag (load sp))]
     (if (icmp-eq tg 2)
         (hyg-sym! sp env)
-        (if (or (icmp-eq tg 6) (icmp-eq tg 7))
-            (let [items (sx-items (load sp))]
-              (if (hyg-is-let items)
-                  (hyg-let! items env a)
-                  (hyg-walk-items! items env a)))
-            0))))
+        (when (or (icmp-eq tg 6) (icmp-eq tg 7))
+              (let [items (sx-items (load sp))]
+                (if (hyg-is-let items)
+                    (hyg-let! items env a)
+                    (hyg-walk-items! items env a)))))))
 ; Alpha-rename template-introduced `let` binders in a freshly expanded macro output
 ; `op`. `dsrc` is the macro's def source; `csrc/clo/chi` are the macro CALL's span
 ; (its spliced args live inside it). A dsrc < 0 (macro def not found) is a no-op.
 (defn hygienize-expansion! [(op (ptr Sexp)) (dsrc i64) (csrc i64) (clo i64) (chi i64) (a (ptr Allocator))] (-> i64)
-  (if (icmp-lt dsrc 0)
-      0
-      (let [env (unwrap-ptr [HygBox] (create [HygBox] a))]
-        (store! (field env items) (al-new [HygEnt] a))
-        (store! (field env dsrc) dsrc)
-        (store! (field env csrc) csrc)
-        (store! (field env clo) clo)
-        (store! (field env chi) chi)
-        (hyg-walk! op env a)
-        0)))
+  (unless (icmp-lt dsrc 0)
+          (let [env (unwrap-ptr [HygBox] (create [HygBox] a))]
+            (store! (field env items) (al-new [HygEnt] a))
+            (store! (field env dsrc) dsrc)
+            (store! (field env csrc) csrc)
+            (store! (field env clo) clo)
+            (store! (field env chi) chi)
+            (hyg-walk! op env a)
+            0)))
 ; Find a function by name in `p` (for a macro's def-site span). Null if absent.
 (defn find-func-ptr [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
   (let [fs (load (field p funcs))
@@ -288,9 +328,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (func-name (al-get [Func] (load fs) (load i))) name)
-                    (do (store! r (al-elem [Func] fs (load i))) (break))
-                    0)
+                (when (str-eq (func-name (al-get [Func] (load fs) (load i))) name)
+                      (store! r (al-elem [Func] fs (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn mk-expansion [(name (slice u8))
@@ -335,11 +375,11 @@
                     (loop (if (icmp-ge (load k) nb)
                               (break)
                               (do
-                                (if (str-eq (load (field (al-elem [StructDef] base (load k)) name)) gname)
-                                    (do (store! found true) (break))
-                                    0)
+                                (when (str-eq (load (field (al-elem [StructDef] base (load k)) name)) gname)
+                                      (store! found true)
+                                      (break))
                                 (store! k (iadd (load k) 1)))))
-                    (if (load found) 0 (do (al-push! (mut out) (load g)) 0)))
+                    (unless (load found) (al-push! (mut out) (load g)) 0))
                   (store! j (iadd (load j) 1))))))
     (box-al [StructDef] a (load out))))
 (defn merge-sums-gen [(sub (ptr Program)) (gen (ptr (ArrayList SumDef))) (a (ptr Allocator))] (-> (ptr (ArrayList SumDef)))
@@ -362,11 +402,11 @@
                     (loop (if (icmp-ge (load k) nb)
                               (break)
                               (do
-                                (if (str-eq (load (field (al-elem [SumDef] base (load k)) name)) gname)
-                                    (do (store! found true) (break))
-                                    0)
+                                (when (str-eq (load (field (al-elem [SumDef] base (load k)) name)) gname)
+                                      (store! found true)
+                                      (break))
                                 (store! k (iadd (load k) 1)))))
-                    (if (load found) 0 (do (al-push! (mut out) (load g)) 0)))
+                    (unless (load found) (al-push! (mut out) (load g)) 0))
                   (store! j (iadd (load j) 1))))))
     (box-al [SumDef] a (load out))))
 (defn all-variant-names [(sums (ptr (ArrayList SumDef))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
@@ -393,9 +433,8 @@
     (loop (if (icmp-lt (load i) 0)
               (break)
               (do
-                (if (and (icmp-lt (load at) 0) (icmp-eq (cast i64 (slice-get name (load i))) 46))
-                    (store! at (load i))
-                    0)
+                (when (and (icmp-lt (load at) 0) (icmp-eq (cast i64 (slice-get name (load i))) 46))
+                      (store! at (load i)))
                 (store! i (isub (load i) 1)))))
     (if (icmp-lt (load at) 0) (None [(slice u8)]) (Some (subslice name 0 (load at))))))
 ; Anything escaping a macro invocation WITHOUT a span of its own gets the macro call
@@ -617,7 +656,7 @@
                                             def-src (if have-def (load (field dfp source)) -1)
                                             def-lo (if have-def (load (field dfp lo)) -1)
                                             def-hi (if have-def (load (field dfp hi)) -1)
-                                            def-ctxt (if have-def (load (field dfp ctxt)) 0)
+                                            def-ctxt (when have-def (load (field dfp ctxt)))
                                             exp
                                               (mk-expansion q
                                                             (sx-source (load (load cur)))
@@ -704,24 +743,22 @@
   (if (icmp-ne (sx-tag (load form)) 6)
       (None [Diag])
       (let [it (sx-items (load form))]
-        (if (icmp-lt (sx-len it) 1)
+        (if (or (icmp-lt (sx-len it) 1) (icmp-ne (sx-tag (sx-at it 0)) 2))
             (None [Diag])
-            (if (icmp-ne (sx-tag (sx-at it 0)) 2)
-                (None [Diag])
-                (let [head (sx-sval (sx-at it 0))]
-                  (if (not (or (str-eq head "defstruct") (str-eq head "defsum")))
-                      (None [Diag])
-                      (let [single (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a))
-                            (mut sl) (al-new [Sexp] a)]
-                        (al-push! (mut sl) (load form))
-                        (store! single (load sl))
-                        (match (parse-program a single)
-                          (Err [d] (Some d))
-                          (Ok [p]
-                              (let [pp (box-program a p)]
-                                (qualify-structdefs! pp module gs a)
-                                (qualify-sumdefs! pp module gu a)
-                                (None [Diag]))))))))))))
+            (let [head (sx-sval (sx-at it 0))]
+              (if (not (or (str-eq head "defstruct") (str-eq head "defsum")))
+                  (None [Diag])
+                  (let [single (unwrap-ptr [(ArrayList Sexp)] (create [(ArrayList Sexp)] a))
+                        (mut sl) (al-new [Sexp] a)]
+                    (al-push! (mut sl) (load form))
+                    (store! single (load sl))
+                    (match (parse-program a single)
+                      (Err [d] (Some d))
+                      (Ok [p]
+                          (let [pp (box-program a p)]
+                            (qualify-structdefs! pp module gs a)
+                            (qualify-sumdefs! pp module gu a)
+                            (None [Diag])))))))))))
 (defn box-program [(a (ptr Allocator)) (p Program)] (-> (ptr Program))
   (let [pp (unwrap-ptr [Program] (create [Program] a))] (store! pp p) pp))
 (defstruct SBoxStruct [(items (ArrayList StructDef))])
@@ -736,9 +773,9 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (and (type-is-code (field fp ret)) (all-params-code (load (field fp params))))
-                      (do (al-push! (mut out) (load (field fp name))) 0)
-                      0))
+                  (when (and (type-is-code (field fp ret)) (all-params-code (load (field fp params))))
+                        (al-push! (mut out) (load (field fp name)))
+                        0))
                 (store! i (iadd (load i) 1)))))
     (box-al [(slice u8)] a (load out))))
 (defn all-params-code [(ps (ptr (ArrayList Param)))] (-> bool)
@@ -748,7 +785,7 @@
     (loop (if (or (not (load r)) (icmp-ge (load i) n))
               (break)
               (do
-                (if (type-is-code (field (al-elem [Param] ps (load i)) ty)) 0 (do (store! r false) 0))
+                (unless (type-is-code (field (al-elem [Param] ps (load i)) ty)) (store! r false) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn all-defn-names [(out-forms (ptr (ArrayList TaggedForm))) (a (ptr Allocator))] (-> (ptr SBox))
@@ -817,7 +854,7 @@
                 def-src (if have-def (load (field dfp source)) -1)
                 def-lo (if have-def (load (field dfp lo)) -1)
                 def-hi (if have-def (load (field dfp hi)) -1)
-                def-ctxt (if have-def (load (field dfp ctxt)) 0)
+                def-ctxt (when have-def (load (field dfp ctxt)))
                 exp
                   (mk-expansion q
                                 (sx-source (load node))
@@ -871,9 +908,7 @@
                                      (break)
                                      (do
                                        (let [r (try! (tower-rewrite tc (mut s) (al-elem [Sexp] items (load i))))]
-                                         (if (icmp-ne (load (field tc hit)) 0)
-                                             (do (store! kid (load i)) (store! nc r) 0)
-                                             0))
+                                         (when (icmp-ne (load (field tc hit)) 0) (store! kid (load i)) (store! nc r) 0))
                                        (store! i (iadd (load i) 1)))))
                            (if (icmp-ge (load kid) 0)
                                ; a child was rewritten: rebuild this list around it
@@ -968,56 +1003,54 @@
       false
       (let [it (sx-items (load f))
             n (sx-len it)]
-        (if (icmp-lt n 4)
+        (if (or (icmp-lt n 4)
+                (not (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "defn"))))
             false
-            (if (not (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "defn")))
-                false
-                (let [pi
-                        (if (icmp-eq (sx-tag (sx-at it 2)) 7)
-                            2
-                            (if (and (icmp-gt n 4) (icmp-eq (sx-tag (sx-at it 3)) 7)) 3 -1))]
-                  (if (icmp-lt pi 0)
-                      false
-                      (if (icmp-ne pi 2)
-                          false  ; generic metaprograms don't exist; [T] first = not one
-                          (let [params (sx-items (sx-at it 2))
-                                np (sx-len params)
-                                reti 3]
-                            (if (icmp-ge reti n)
-                                false
-                                (let [r (sx-at it reti)
-                                      retok
-                                        (and (icmp-eq (sx-tag r) 6)
-                                             (and (icmp-eq (sx-len (sx-items r)) 2)
-                                                  (and (icmp-eq (sx-tag (sx-at (sx-items r) 0)) 2)
-                                                       (and (str-eq (sx-sval (sx-at (sx-items r) 0)) "->")
-                                                            (and (icmp-eq (sx-tag (sx-at (sx-items r) 1)) 2)
-                                                                 (str-eq (sx-sval (sx-at (sx-items r) 1)) "Code"))))))]
-                                  (if (not retok)
-                                      false
-                                      (let [(mut i) 0
-                                            (mut ok) true]
-                                        (loop (if (or (not (load ok)) (icmp-ge (load i) np))
-                                                  (break)
-                                                  (do
-                                                    (let [p (sx-at params (load i))]
-                                                      (if (and (icmp-eq (sx-tag p) 2) (str-eq (sx-sval p) "&"))
-                                                          0
-                                                          (if (and (icmp-eq (sx-tag p) 6)
-                                                                   (and (icmp-eq (sx-len (sx-items p)) 2)
-                                                                        (and (icmp-eq (sx-tag (sx-at (sx-items p) 1)) 2)
-                                                                             (str-eq (sx-sval (sx-at (sx-items p) 1))
-                                                                                     "Code"))))
-                                                              0
-                                                              (do (store! ok false) 0))))
-                                                    (store! i (iadd (load i) 1)))))
-                                        (load ok))))))))))))))
+            (let [pi
+                    (if (icmp-eq (sx-tag (sx-at it 2)) 7)
+                        2
+                        (if (and (icmp-gt n 4) (icmp-eq (sx-tag (sx-at it 3)) 7)) 3 -1))]
+              (if (or (icmp-lt pi 0)
+                      (icmp-ne pi 2))
+                  false
+                  ; generic metaprograms don't exist; [T] first = not one
+                  (let [params (sx-items (sx-at it 2))
+                        np (sx-len params)
+                        reti 3]
+                    (if (icmp-ge reti n)
+                        false
+                        (let [r (sx-at it reti)
+                              retok
+                                (and (icmp-eq (sx-tag r) 6)
+                                     (and (icmp-eq (sx-len (sx-items r)) 2)
+                                          (and (icmp-eq (sx-tag (sx-at (sx-items r) 0)) 2)
+                                               (and (str-eq (sx-sval (sx-at (sx-items r) 0)) "->")
+                                                    (and (icmp-eq (sx-tag (sx-at (sx-items r) 1)) 2)
+                                                         (str-eq (sx-sval (sx-at (sx-items r) 1)) "Code"))))))]
+                          (if (not retok)
+                              false
+                              (let [(mut i) 0
+                                    (mut ok) true]
+                                (loop (if (or (not (load ok)) (icmp-ge (load i) np))
+                                          (break)
+                                          (do
+                                            (let [p (sx-at params (load i))]
+                                              (unless (or (and (icmp-eq (sx-tag p) 2) (str-eq (sx-sval p) "&"))
+                                                          (and (icmp-eq (sx-tag p) 6)
+                                                               (and (icmp-eq (sx-len (sx-items p)) 2)
+                                                                    (and (icmp-eq (sx-tag (sx-at (sx-items p) 1)) 2)
+                                                                         (str-eq (sx-sval (sx-at (sx-items p) 1))
+                                                                                 "Code")))))
+                                                      (store! ok false)
+                                                      0))
+                                            (store! i (iadd (load i) 1)))))
+                                (load ok))))))))))))
 ; recover ONE skipped defn (batched inside it); shared by both triggers
 (defn tower-recover-form! [(tc (ptr TowerCx)) (s (mut LS)) (tf (ptr TaggedForm))] (-> (Result i64 Diag))
   (try (do
          (store! (field tc module) (load (field tf module)))
          (let [nf (try! (tower-parse-rewrite tc (mut s) (field tf form)))]
-           (if (icmp-ne (load (field tc hit)) 0) (do (store! (field tf form) nf) 0) 0)
+           (when (icmp-ne (load (field tc hit)) 0) (store! (field tf form) nf) 0)
            (Ok [i64 Diag] (load (field tc hit)))))))
 ; trigger (a): a skipped defn whose RAW signature is Code-shaped IS a metaprogram
 ; — recover it eagerly (nothing else will ever name it in a diagnostic).
@@ -1039,11 +1072,12 @@
                            (None [] 0)
                            (Some [nm]
                                  (let [q (qualify-name a nm (load (field tf module)))]
-                                   (if (icmp-ne (cast i64 (prog-fn-find macroctx q)) 0)
-                                       0
-                                       (if (not (raw-code-sig? (field tf form)))
-                                           0
-                                           (do (try! (tower-recover-form! tc (mut s) tf)) 0)))))))
+                                   (unless (or (icmp-ne (cast i64 (prog-fn-find macroctx q)) 0)
+                                               (not (raw-code-sig? (field tf form))))
+                                           (match (tower-recover-form! tc (mut s) tf)
+                                                  (Ok [$g1254] $g1254)
+                                                  (Err [$g1255] (break :try (Err $g1255))))
+                                           0)))))
                        (store! i (iadd (load i) 1)))))
            (Ok [i64 Diag] (load (field tc hit)))))))
 ; trigger (b): the sub-check failed with a call to a name that matches a SKIPPED
@@ -1098,16 +1132,17 @@
                                    (match (defn-name-of (field tf form))
                                      (None [] 0)
                                      (Some [nm]
-                                           (if (not (str-eq nm h))
-                                               0
-                                               (if (icmp-ne (cast i64
-                                                                  (prog-fn-find macroctx
-                                                                                (qualify-name a
-                                                                                              nm
-                                                                                              (load (field tf module)))))
-                                                            0)
-                                                   0
-                                                   (do (try! (tower-recover-form! tc (mut s) tf)) 0))))))
+                                           (unless (or (not (str-eq nm h))
+                                                       (icmp-ne (cast i64
+                                                                      (prog-fn-find macroctx
+                                                                                    (qualify-name a
+                                                                                                  nm
+                                                                                                  (load (field tf module)))))
+                                                                0))
+                                                   (match (tower-recover-form! tc (mut s) tf)
+                                                          (Ok [$g1256] $g1256)
+                                                          (Err [$g1257] (break :try (Err $g1257))))
+                                                   0))))
                                  (store! j (iadd (load j) 1)))))
                      (Ok [i64 Diag] (load (field tc hit))))))))))
 (defn mk-tower-cx [(s (mut LS))
@@ -1154,7 +1189,7 @@
                        (let [tf (al-elem [TaggedForm] sub-forms (load i))]
                          (store! (field tc module) (load (field tf module)))
                          (let [nf (try! (tower-rewrite tc (mut s) (field tf form)))]
-                           (if (icmp-ne (load (field tc hit)) 0) (do (store! (field tf form) nf) 0) 0)))
+                           (when (icmp-ne (load (field tc hit)) 0) (store! (field tf form) nf) 0)))
                        (store! i (iadd (load i) 1)))))
            (Ok [i64 Diag] (load (field tc hit)))))))
 
@@ -1281,9 +1316,7 @@
             ; per-round refresh keeps the convergence property (a qual unstageable in
             ; round N often stages in round N+1, after the tower expanded a call in
             ; one of its callees).
-            (if (meta-compiled?)
-                (stage-box-set! (mut s) sub-forms a)
-                0)
+            (when (meta-compiled?) (stage-box-set! (mut s) sub-forms a))
             (if (icmp-eq (al-len [(slice u8)] (load quals)) 0)
                 (Ok [i64 Diag] 0)
                 ; PARSE-level tower: a defn the tolerant resolve SKIPPED may contain a
@@ -1321,7 +1354,7 @@
                                     (Some [d] (Err [i64 Diag] d))
                                     (None []
                                           (do
-                                            (if (icmp-gt round 0) (tower-sync-out! (mut s) sub-forms) 0)
+                                            (when (icmp-gt round 0) (tower-sync-out! (mut s) sub-forms))
                                             (run-expand (mut s) quals wanted checked a)))))
                               (Err [d]
                                    ; the tower: if the check rejected the sub-program AT a
@@ -1386,24 +1419,51 @@
               (do
                 (let [tf (al-elem [TaggedForm] forms (load i))
                       fmod (load (field tf module))]
-                  (if (and (load started) (not (opt-mod-eq (load curmod) fmod)))
-                      (do
+                  (when (and (load started) (not (opt-mod-eq (load curmod) fmod)))
                         (al-push! (mut mods) (mk-sexp (KList (box-al [Sexp] a (load cur))) -1 -1))
                         (store! cur (al-new [Sexp] a))
                         (store! started false)
                         0)
-                      0)
-                  (if (not (load started))
-                      (do
+                  (when (not (load started))
                         (store! curmod fmod)
                         (store! started true)
                         (al-push! (mut cur) (sx-sym (opt-mod-name fmod)))
                         0)
-                      0)
                   (al-push! (mut cur) (load (field tf form))))
                 (store! i (iadd (load i) 1)))))
-    (if (load started) (al-push! (mut mods) (mk-sexp (KList (box-al [Sexp] a (load cur))) -1 -1)) 0)
+    (when (load started) (al-push! (mut mods) (mk-sexp (KList (box-al [Sexp] a (load cur))) -1 -1)))
     (mk-sexp (KList (box-al [Sexp] a (load mods))) -1 -1)))
+; Every source file that DEFINES a checker, by id. A checker is registered under its
+; qualified name (`ifcombine.lint-combine-ifs`), so the module that owns it is the part
+; before the last dot; any form tagged with that module names the file it came from.
+; `cop-record-fix` uses the set to refuse a fix that would rewrite the rules the run is
+; being driven by — see the note there for why that corrupts a file rather than merely
+; being odd.
+(defn checker-owns? [(checkers (ptr (ArrayList (slice u8)))) (m (slice u8))] (-> bool)
+  (let [nc (al-len [(slice u8)] (load checkers))
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) nc)
+              (break)
+              (if (starts-with (al-get [(slice u8)] (load checkers) (load i)) (sconcat (malloc-allocator) m "."))
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn mark-rule-sources [(checkers (ptr (ArrayList (slice u8)))) (forms (ptr (ArrayList TaggedForm)))] (-> i64)
+  (rule-src-reset)
+  (let [nf (al-len [TaggedForm] (load forms))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) nf)
+              (break)
+              (do
+                (let [tf (al-elem [TaggedForm] forms (load i))]
+                  (match (load (field tf module))
+                    (None [] 0)
+                    (Some [m] (when (checker-owns? checkers m) (rule-src-add (sx-source (load (field tf form))))))))
+                (store! i (iadd (load i) 1))))))
+  0)
+
 (defn run-checkers [(checkers (ptr (ArrayList (slice u8))))
                     (checked (ptr Program))
                     (forms (ptr (ArrayList TaggedForm)))
@@ -1418,7 +1478,8 @@
         (None [Diag])
         ; hand the checker the program as a LIST OF MODULES: ((name form…) …) — it owns
         ; the loop and decides which modules to look at.
-        (let [proglist (build-modules a forms)
+        (let [_rs (mark-rule-sources checkers forms)
+              proglist (build-modules a forms)
               (mut margs) (al-new [Sexp] a)]
           (al-push! (mut margs) proglist)
           (let [(mut j) 0
@@ -1518,10 +1579,10 @@
           (loop (if (or (not (load ok)) (icmp-ge (load i) nx))
                     (break)
                     (do
-                      (if (not (sexp-eq (load (field (al-elem [TaggedForm] xs (load i)) form))
-                                        (load (field (al-elem [TaggedForm] ys (load i)) form))))
-                          (do (store! ok false) 0)
-                          0)
+                      (when (not (sexp-eq (load (field (al-elem [TaggedForm] xs (load i)) form))
+                                          (load (field (al-elem [TaggedForm] ys (load i)) form))))
+                            (store! ok false)
+                            0)
                       (store! i (iadd (load i) 1)))))
           (load ok)))))
 ; ── TRANSFORMS: whole-program rewrites that run to a fixpoint ────────────────
@@ -1801,20 +1862,19 @@
                   (loop (if (icmp-ge (load j) nout)
                             (break)
                             (do
-                              (if (str-eq (load (field (al-elem [ModRep] out (load j)) name)) nm)
-                                  (do (store! seen true) 0)
-                                  0)
+                              (when (str-eq (load (field (al-elem [ModRep] out (load j)) name)) nm)
+                                    (store! seen true)
+                                    0)
                               (store! j (iadd (load j) 1)))))
-                  (if (load seen)
-                      0
-                      (let [mr (alloc-stack ModRep)
-                            fp (field tf form)]
-                        (store! (field mr name) nm)
-                        (store! (field mr source) (sx-source (load fp)))
-                        (store! (field mr lo) (sx-lo (load fp)))
-                        (store! (field mr hi) (sx-hi (load fp)))
-                        (al-push! (mut out) (load mr))
-                        0)))
+                  (unless (load seen)
+                          (let [mr (alloc-stack ModRep)
+                                fp (field tf form)]
+                            (store! (field mr name) nm)
+                            (store! (field mr source) (sx-source (load fp)))
+                            (store! (field mr lo) (sx-lo (load fp)))
+                            (store! (field mr hi) (sx-hi (load fp)))
+                            (al-push! (mut out) (load mr))
+                            0)))
                 (store! i (iadd (load i) 1)))))
     (box-al [ModRep] a (load out))))
 (defn mod-rep-find [(reps (ptr (ArrayList ModRep))) (nm (slice u8))] (-> (ptr ModRep))
@@ -1824,9 +1884,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [ModRep] reps (load i)) name)) nm)
-                    (do (store! r (al-elem [ModRep] reps (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [ModRep] reps (load i)) name)) nm)
+                      (store! r (al-elem [ModRep] reps (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; module-name symbol -> Option tag ("" = the no-module top level -> None)
@@ -1855,13 +1915,12 @@
                                 tf (alloc-stack TaggedForm)]
                             ; freshly-built forms carry dummy spans — stamp them with the
                             ; module's representative source so `(code-from-user? …)` works
-                            (if (and (icmp-lt (sx-lo (load fp)) 0) (icmp-ne (cast i64 rep) 0))
-                                (stamp-expansion fp
-                                                 (load (field rep source))
-                                                 (load (field rep lo))
-                                                 (load (field rep hi))
-                                                 0)
-                                0)
+                            (when (and (icmp-lt (sx-lo (load fp)) 0) (icmp-ne (cast i64 rep) 0))
+                                  (stamp-expansion fp
+                                                   (load (field rep source))
+                                                   (load (field rep lo))
+                                                   (load (field rep hi))
+                                                   0))
                             (store! (field tf form) (load fp))
                             (store! (field tf module) tag)
                             (al-push! [TaggedForm] out (load tf)))
@@ -1951,7 +2010,7 @@
   (let [w (stderr)
         a (load (field s a))
         lst (warn-list)
-        n (if (diag-quiet?) 0 (al-len [Diag] (load lst)))
+        n (unless (diag-quiet?) (al-len [Diag] (load lst)))
         (mut i) 0]
     (loop (if (icmp-ge (load i) n)
               (break)
@@ -1966,6 +2025,7 @@
                   (comptime (ptr (ArrayList (slice u8))))
                   (checked (ptr Program))
                   (a (ptr Allocator))] (-> (Result i64 Diag))
+  (macros-index-reset!)   ; a new run may not inherit the last one's index
   (let [out-forms (box-al [TaggedForm] a (load (field s out)))
         nforms (al-len [TaggedForm] (load out-forms))
         impb (unwrap-ptr [(ArrayList ImpEntry)] (create [(ArrayList ImpEntry)] a))
@@ -2168,7 +2228,7 @@
                         (break)
                         (do
                           (store! wsum
-                                  (iadd (iadd (load wsum) (if (icmp-gt (load i) 0) 1 0))
+                                  (iadd (iadd (load wsum) (when (icmp-gt (load i) 0) 1))
                                         (sx-width a (sx-at items (load i)))))
                           (store! i (iadd (load i) 1)))))
               (load wsum))
@@ -2191,7 +2251,7 @@
                       (loop (if (icmp-ge (load i) n)
                                 (break)
                                 (do
-                                  (if (icmp-gt (load i) 0) (wb w 32) 0)
+                                  (when (icmp-gt (load i) 0) (wb w 32))
                                   (sx-emit w a (sx-at items (load i)) 0)
                                   (store! i (iadd (load i) 1))))))
                     (wb w close)
@@ -2254,8 +2314,10 @@
                                       (let [tf (al-elem [TaggedForm] out (load i))
                                             fp (field tf form)]
                                         ; the file's OWN top-level forms are source 0
-                                        (if (icmp-eq (sx-source (load fp)) 0)
-                                            (do (sx-emit w a (load fp) 0) (wb w 10) (wb w 10) 0)
-                                            0))
+                                        (when (icmp-eq (sx-source (load fp)) 0)
+                                              (sx-emit w a (load fp) 0)
+                                              (wb w 10)
+                                              (wb w 10)
+                                              0))
                                       (store! i (iadd (load i) 1)))))
                           0))))))))))

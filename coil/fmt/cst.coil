@@ -57,11 +57,11 @@
 ; a byte that ends an atom run: whitespace, any delimiter, comment, string, or a
 ; reader-macro glyph, or EOF.
 (defn is-atom-delim [(c i64)] (-> bool)
-  (if (icmp-eq c -1) true
-    (if (is-ws c) true
+  (if (or (icmp-eq c -1) (is-ws c))
+      true
       (or (icmp-eq c 40) (or (icmp-eq c 41) (or (icmp-eq c 91) (or (icmp-eq c 93)
           (or (icmp-eq c 59) (or (icmp-eq c 34) (or (icmp-eq c 39)
-          (or (icmp-eq c 96) (icmp-eq c 126)))))))))) ))
+          (or (icmp-eq c 96) (icmp-eq c 126)))))))))))
 
 ; ---- whitespace ------------------------------------------------------------
 ; skip spaces/tabs/newlines (NOT comments — those are nodes); return newline count.
@@ -70,7 +70,7 @@
     (loop
       (let [c (r-peek r)]
         (if (is-ws c)
-            (do (if (icmp-eq c 10) (store! nl (iadd (load nl) 1)) 0) (r-adv r))
+            (do (when (icmp-eq c 10) (store! nl (iadd (load nl) 1))) (r-adv r))
             (break))))
     (load nl)))
 
@@ -100,8 +100,8 @@
       (if (icmp-eq c -1) (break)
         (do (r-adv r)
             (if (icmp-eq c 92)                       ; backslash: skip escaped char
-                (if (icmp-ne (r-peek r) -1) (r-adv r) 0)
-              (if (icmp-eq c 34) (break) 0))))))       ; closing quote
+                (when (icmp-ne (r-peek r) -1) (r-adv r))
+              (when (icmp-eq c 34) (break)))))))       ; closing quote
   (subslice (load (field r src)) start (load (field r pos))))
 
 ; a run of non-delimiter bytes; folds the c"..." case (a lone `c` before a quote).
@@ -124,13 +124,10 @@
 (defn read-char-lit [(r (ptr Rdr))] (-> (slice u8))
   (let [start (load (field r pos))]
     (r-adv r)                                     ; consume backslash
-    (if (icmp-ne (r-peek r) -1)
-        (let [first (r-peek r)]
-          (r-adv r)                               ; consume the char after backslash
-          (if (cl-alpha first)
-              (do (loop (if (cl-alnum (r-peek r)) (r-adv r) (break))) 0)
-              0))
-        0)
+    (when (icmp-ne (r-peek r) -1)
+          (let [first (r-peek r)]
+            (r-adv r)                               ; consume the char after backslash
+            (when (cl-alpha first) (loop (if (cl-alnum (r-peek r)) (r-adv r) (break))) 0)))
     (subslice (load (field r src)) start (load (field r pos)))))
 
 ; ---- node reader -----------------------------------------------------------
@@ -212,7 +209,7 @@
 (defn node-open [(n (ptr Node))] (-> i64)
   (match (node-kind n) (NList [o _] o) (NAtom [_] 40) (NComment [_] 40) (NPrefix [_ _] 40)))
 (defn node-count [(n (ptr Node))] (-> i64)
-  (if (node-list? n) (al-len [(ptr Node)] (load (node-items n))) 0))
+  (when (node-list? n) (al-len [(ptr Node)] (load (node-items n)))))
 (defn node-nth [(n (ptr Node)) (i i64)] (-> (ptr Node))
   (al-get [(ptr Node)] (load (node-items n)) i))
 

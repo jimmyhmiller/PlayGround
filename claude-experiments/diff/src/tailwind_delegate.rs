@@ -52,6 +52,7 @@ pub fn compile(
     candidates: &BTreeSet<String>,
     gap: &crate::tailwind::NativeGap,
 ) -> Result<DelegatedSheet, String> {
+    let _stage = crate::build_profile::stage("css/tailwind-delegate");
     let context = format!(
         "Tailwind {}: {gap}, so the sheet is compiled with the app's own tailwindcss",
         entry.display()

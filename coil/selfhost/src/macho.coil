@@ -141,13 +141,11 @@
                 (break)
                 (do
                   (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (if (and (icmp-ne (load (field sp sect)) 0) (not (load (field sp ext))))
-                        (do
+                    (when (and (icmp-ne (load (field sp sect)) 0) (not (load (field sp ext))))
                           (al-set! (mut perm) (load i) (al-len [i64] (load order)))
                           (al-push! (mut order) (load i))
                           (store! nlocal (iadd (load nlocal) 1))
-                          0)
-                        0))
+                          0))
                   (store! i (iadd (load i) 1))))))
     ; pass 2: external defined
     (let [(mut i) 0]
@@ -155,13 +153,11 @@
                 (break)
                 (do
                   (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (if (and (icmp-ne (load (field sp sect)) 0) (load (field sp ext)))
-                        (do
+                    (when (and (icmp-ne (load (field sp sect)) 0) (load (field sp ext)))
                           (al-set! (mut perm) (load i) (al-len [i64] (load order)))
                           (al-push! (mut order) (load i))
                           (store! nextdef (iadd (load nextdef) 1))
-                          0)
-                        0))
+                          0))
                   (store! i (iadd (load i) 1))))))
     ; pass 3: undefined
     (let [(mut i) 0]
@@ -169,13 +165,11 @@
                 (break)
                 (do
                   (let [sp (al-at [MSym] (field o syms) (load i))]
-                    (if (icmp-eq (load (field sp sect)) 0)
-                        (do
+                    (when (icmp-eq (load (field sp sect)) 0)
                           (al-set! (mut perm) (load i) (al-len [i64] (load order)))
                           (al-push! (mut order) (load i))
                           (store! nundef (iadd (load nundef) 1))
-                          0)
-                        0))
+                          0))
                   (store! i (iadd (load i) 1))))))
     ; ---- addresses: sections are laid out consecutively from vmaddr 0.
     (let [(mut addrs) (al-new [i64] a)
@@ -217,12 +211,11 @@
                           (loop (if (icmp-ge (load ri) nrel)
                                     (break)
                                     (do
-                                      (if (icmp-eq (load (field (al-at [MReloc] (field o relocs) (load ri)) sect))
-                                                   (iadd (load si) 1))
-                                          (store! cnt (iadd (load cnt) 1))
-                                          0)
+                                      (when (icmp-eq (load (field (al-at [MReloc] (field o relocs) (load ri)) sect))
+                                                     (iadd (load si) 1))
+                                            (store! cnt (iadd (load cnt) 1)))
                                       (store! ri (iadd (load ri) 1)))))
-                          (al-push! (mut reloffs) (if (icmp-gt (load cnt) 0) (load fo) 0))
+                          (al-push! (mut reloffs) (when (icmp-gt (load cnt) 0) (load fo)))
                           (al-push! (mut nrelocs) (load cnt))
                           (store! fo (iadd (load fo) (imul 8 (load cnt)))))
                         (store! si (iadd (load si) 1))))))
@@ -263,11 +256,10 @@
               (b-u64! (mut out) (if (icmp-gt nsect 0) (al-get [i64] (load foffs) 0) hdrend))  ; fileoff
               ; filesize = end of the last section's contents - fileoff (relocs excluded)
               (b-u64! (mut out)
-                      (if (icmp-gt nsect 0)
-                          (isub (iadd (al-get [i64] (load foffs) (isub nsect 1))
-                                      (al-len [u8] (load (field (al-at [MSect] (field o sects) (isub nsect 1)) buf))))
-                                (al-get [i64] (load foffs) 0))
-                          0))
+                      (when (icmp-gt nsect 0)
+                            (isub (iadd (al-get [i64] (load foffs) (isub nsect 1))
+                                        (al-len [u8] (load (field (al-at [MSect] (field o sects) (isub nsect 1)) buf))))
+                                  (al-get [i64] (load foffs) 0))))
               (b-u32! (mut out) 7)  ; maxprot rwx
               (b-u32! (mut out) 7)  ; initprot rwx
               (b-u32! (mut out) nsect)
@@ -346,8 +338,7 @@
                                         (break)
                                         (do
                                           (let [rp (al-at [MReloc] (field o relocs) (load ri))]
-                                            (if (icmp-eq (load (field rp sect)) (iadd (load si) 1))
-                                                (do
+                                            (when (icmp-eq (load (field rp sect)) (iadd (load si) 1))
                                                   (b-u32! (mut out) (load (field rp off)))
                                                   ; sym < 0 is a SECTION relocation (r_extern = 0):
                                                   ; symbolnum is the target SECTION ordinal (-sym), not
@@ -360,12 +351,11 @@
                                                               (al-get [i64] (load perm) (load (field rp sym))))]
                                                     (b-u32! (mut out)
                                                             (ior (iand snum 16777215)
-                                                                 (ior (ishl (if (load (field rp pcrel)) 1 0) 24)
+                                                                 (ior (ishl (when (load (field rp pcrel)) 1) 24)
                                                                       (ior (ishl (load (field rp len)) 25)
-                                                                           (ior (ishl (if secreloc 0 1) 27)  ; r_extern
+                                                                           (ior (ishl (unless secreloc 1) 27)  ; r_extern
                                                                                 (ishl (load (field rp rtype)) 28)))))))
-                                                  0)
-                                                0))
+                                                  0))
                                           (store! ri (iadd (load ri) 1))))))
                             (store! si (iadd (load si) 1))))))
               ; ================= nlist symbol table =================
@@ -385,7 +375,7 @@
                                     (b-u64! (mut out) 0)
                                     0)
                                   (do
-                                    (b-u8! (mut out) (ior 14 (if (load (field sp ext)) 1 0)))  ; N_SECT (|N_EXT)
+                                    (b-u8! (mut out) (ior 14 (when (load (field sp ext)) 1)))  ; N_SECT (|N_EXT)
                                     (b-u8! (mut out) (load (field sp sect)))
                                     (b-u16! (mut out) 0)
                                     (b-u64! (mut out)

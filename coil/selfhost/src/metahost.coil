@@ -153,7 +153,7 @@
 (defn mh-arg-pop! [] (-> i64)
   (let [p (arg-pool)
         d (load (field p depth))]
-    (if (icmp-gt d 0) (store! (field p depth) (isub d 1)) 0)
+    (when (icmp-gt d 0) (store! (field p depth) (isub d 1)))
     0))
 (defn mh-arg-push [(b (ptr i8)) (v CtVal)] (-> (ptr i8))
   (do (al-push! [CtVal] (cast (ptr (ArrayList CtVal)) b) v) b))
@@ -176,7 +176,7 @@
 (defn mh-op-i [(op i64) (b (ptr i8))] (-> i64)
   (match-else (mh-run op b)
               (CInt [n] n)
-              (CBool [x] (if x 1 0))
+              (CBool [x] (when x 1))
               (_ (do (mh-bug "code-op result is not an int/bool") 0))))
 (defn mh-op-h [(op i64) (b (ptr i8))] (-> (ptr i8))
   ; Some ops are TYPED Code but the interpreter returns a scalar (report/warn
@@ -231,22 +231,18 @@
 ; rewrite, via the CtCtx the interpreter would have consulted.
 (defn mh-qualify-head! [(items (ptr (ArrayList Sexp)))] (-> i64)
   (let [cx (mh-cx)]
-    (if (icmp-eq (al-len [Sexp] (load items)) 0)
-        0
-        (match (load (field cx qmodule))
-          (None [] 0)
-          (Some [m]
-                (if (icmp-eq (cast i64 (load (field cx module_fns))) 0)
-                    0
-                    (let [hp (al-elem [Sexp] items 0)]
-                      (if (icmp-ne (sx-tag (load hp)) 2)
-                          0
-                          (let [name (sx-sval (load hp))]
-                            (if (or (has-dot name) (icmp-ge (find-slash name) 0))
-                                0
-                                (match (resolve-in-module cx name m)
-                                  (None [] 0)
-                                  (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
+    (unless (icmp-eq (al-len [Sexp] (load items)) 0)
+            (match (load (field cx qmodule))
+              (None [] 0)
+              (Some [m]
+                    (unless (icmp-eq (cast i64 (load (field cx module_fns))) 0)
+                            (let [hp (al-elem [Sexp] items 0)]
+                              (unless (icmp-ne (sx-tag (load hp)) 2)
+                                      (let [name (sx-sval (load hp))]
+                                        (unless (or (has-dot name) (icmp-ge (find-slash name) 0))
+                                                (match (resolve-in-module cx name m)
+                                                  (None [] 0)
+                                                  (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
 (defn mh-qq-list [(b (ptr i8))] (-> (ptr i8))
   (mh-box-sexp (sx-mklist (cast (ptr (ArrayList Sexp)) b))))
 (defn mh-qq-listq [(b (ptr i8))] (-> (ptr i8))

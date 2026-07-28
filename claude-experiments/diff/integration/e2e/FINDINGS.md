@@ -628,6 +628,171 @@ JSX must fail with that message, and a Next pages project whose `.js` page
 imports a `.js` component must build *with the component in the bundle*), plus
 unit tests in `src/parser.rs`, `src/transform.rs` and `src/hmr.rs`.
 
+### 38. Every source map was fabricated: generated line *k* was claimed to be original line *k*
+
+`Bundler::source_map` asserted that generated line *k* of a module's region in a
+chunk came from **original line *k*** of that module's file. That is a guess, and
+it was wrong for essentially every TS/JSX file, because
+`transform_module_in_language` ended in `Codegen::new().build(&program)` and threw
+the codegen source map away — so no real position data survived the transform.
+Every column was `0` and `names` was always empty, so a minified stack frame
+recovered neither a column nor an identifier. `compose_source_map` inherited the
+same fiction: its minified→readable half was real, its readable→original half was
+the line-identity guess.
+
+The two-line repro, decoded with a hand-written VLQ decoder:
+
+```sh
+printf '// line 1 comment\ninterface Props { label: string }\ntype Unused = number\n\nexport function widget(props: Props) {\n  const marker = "MARKER_ALPHA"\n  return props.label + marker\n}\n' > src/widget.ts
+diffpack bundle src/main.ts out.js --sourcemap
+```
+
+| generated | before | after | truth |
+| --- | --- | --- | --- |
+| `function widget(props) {` | `widget.ts 1:0` | `widget.ts 5:0` | `widget.ts:5` |
+| `const marker = "MARKER_ALPHA"` | `widget.ts 2:0` | `widget.ts 6:2` | `widget.ts:6` |
+| `"MARKER_ALPHA"` | no token | `widget.ts 6:17` | col 17 |
+| `widget(` in `main.ts` | `main.ts 2:0` | `main.ts 2:12` `#widget` | col 12 |
+
+Off by four in that fixture; unbounded in general (erased type-only statements,
+JSX expanded across lines, enums, decorators, the CJS wrapper, the export footer).
+A wrong map is worse than no map — the debugger jumps confidently into unrelated
+source — so this was treated as a correctness bug, not polish.
+
+**Fixed.** `src/source_map.rs` (new) holds the honesty primitives: a per-module
+`ModuleSourceMap` produced by the Oxc printer, and the `LineTrack`/`ColumnEdit`
+bookkeeping that carries it through every text rewrite between a module's lowered
+code and the bytes of the chunk it lands in. The composition chain is
+printer span → `ModuleSourceMap` → `derive_flat_code` → `shake_module_code` →
+`render_flat` → `render_runtime` → `Bundler::source_map` →
+`compose_source_map`. Each step either accounts for the text it changed exactly or
+drops the tokens it can no longer vouch for.
+
+The obstacle: `lower_module_ast` drives an incremental printer, and Oxc only
+builds its `SourcemapBuilder` inside `Codegen::build`. So the lowering now prints
+each AST fragment into its own `Codegen` and concatenates (byte-identical at top
+level), takes the map from one `Codegen::build` over the same program, and moves
+its tokens onto the lowered text via the recorded placements — after checking,
+byte for byte, that the reference print really is the concatenation of the same
+per-statement prints. A mismatch yields *no map* plus a named non-fatal
+diagnostic, never a plausible wrong one. That check fired zero times across
+cal.com's 13,298 modules.
+
+Two things the first pass got wrong, found by an adversarial verifier and fixed:
+
+* **Omitting a token does not mark a region unmapped.** Node's `findEntry` and
+  DevTools both resolve a position to the last mapping at or before it, ignoring
+  line boundaries — so the bundler's own runtime, module preamble, export getters
+  and registry silently inherited the preceding author-code mapping. A cal.com
+  server stack frame really did read `at Object.Color (…/main.tsx:2:59)` for a
+  throw inside `__require`. Both map builders now emit explicit **one-field
+  (unmapped) segments**. The same frame now reads `at Object.T [as require]
+  (/private/tmp/smhard/min.js:1:4132)` — the raw generated position, which is the
+  truth. cal.com: 761/763 chunks bled before, 0/763 after; 763/763 maps now carry
+  unmapped markers (was 0 in 9.9M tokens). Cost: +1.8% map bytes.
+* **`/*#__NO_SIDE_EFFECTS__*/` on an exported declaration shifted the statement
+  one generated line**, because `FragmentPlacement` modelled the reference-vs-
+  lowering difference as a fixed column delta. `align_fragment` now measures it
+  from the two printed texts and carries a `limit` past which nothing is placed.
+
+Verified fresh, all with an independent decoder (no libraries):
+
+* cal.com `build-app . production --sourcemap`, 763 maps, **11,825,602 segments**:
+  2,014,793 explicit unmapped markers, 2,561,374 name tokens with **0** whose name
+  differs from the identifier at the claimed source position, **0** source lines
+  out of bounds, **0** source columns out of bounds.
+* Generated-side agreement on the one non-minified output
+  (`instrumentation.mjs`, 116,910 identifier pairs): 112,274 identical, 3,704 the
+  bundler's own `__import(ns,"x")` rewrite, 932 keyword pairs (a statement whose
+  `export ` was dropped maps to the source statement's start), **0 genuine
+  disagreements**.
+* Ground-truth literal probes on minified output: 64/64 exact on the ssr chunks,
+  72/73 on the client chunks; the one outlier is a constant the *minifier* inlined,
+  where the token names the inline site rather than the declaration.
+* Real stack frames through TS + JSX + minification + code splitting, resolved by
+  Node's own `--enable-source-maps`: `at p (diffpack:///src/lib.tsx:16:13)`
+  (minified) and `at boomAlpha (diffpack:///src/lib.tsx:16:9)` (readable), both
+  landing on the correct line and on a real token of `new Error(…)`.
+
+Deliberately **not** claimed, so it does not become folklore:
+
+* Bundler-authored text carries no origin and is now explicitly unmapped: the CJS
+  preamble, `let __diffpack_import_N`, hoisted `require.esm(…)` lines, export
+  getters, `__seal(exports)`, the per-statement blank separator, the registry
+  runtime, the browser prelude, the export footer. 17% of cal.com's segments are
+  unmapped markers.
+* A source position of `(0, 0)` is dropped unconditionally — a synthesized node
+  carries a zero span and the printer cannot tell it from a real node at the
+  file's first byte.
+* Rewritten sources are **labelled, not disguised**:
+  `?diffpack-generated=vite-replace` (737 on cal.com), `=rsc-directive` (116),
+  `=use-server` (33), `=next-font` (5), plus `=mdx` and `=route-split`. Each
+  inlines the rewritten text as `sourcesContent`, so the debugger shows the
+  rewritten module, not the file on disk.
+* **CSS has no source map at all** (queued as its own item). `module.css` is a
+  bare `String` by the time it reaches `emit_css`: the Sass/Less/Stylus compile,
+  PostCSS (`map: false`), the CSS-modules rename, nested-selector flattening,
+  `@import` inlining, `url()` hashing and the native Tailwind compile all return
+  text and nothing else. Writing a map there would mean inventing positions.
+  cal.com: 8 stylesheets, 0 maps; Turbopack emits 8 and 8.
+* Vite's `build.sourcemap` is still not read (`diffpack build` emits maps only
+  under `--sourcemap`), because its `'inline'` and `'hidden'` modes are emit
+  shapes diffpack has no representation for and half-reading the field would
+  silently treat them as plain external maps.
+
+`build-app` with no flag now follows the app's own framework config per graph —
+for a Next app that is `next build`'s policy exactly: server and react-server maps
+always, browser maps only under `productionBrowserSourceMaps`. Verified both ways:
+`next-hello-world` (no such config) emits 0 client maps and 3 server maps;
+cal.com, which sets `productionBrowserSourceMaps: true`, emits browser maps, as
+its `next build` does. `--sourcemap` / `--no-sourcemap` force it; asking for both
+is a hard error rather than a silent precedence rule.
+
+Coverage and integrity on cal.com, measured against a fresh `corepack yarn next
+build` of the same tree:
+
+| | diffpack | Turbopack (Next 16.2.3) |
+| --- | --- | --- |
+| JS files emitted | 781 | 3,576 |
+| of those, compiled by the bundler | 763 | — |
+| `.map` files | **763 (100% of compiled output)** | 3,450 |
+| JS carrying a `sourceMappingURL` | 763 | 3,272 (91.5%) |
+| dangling URLs / `map.file` mismatches / orphan maps | 0 / 0 / 0 | 0 / — / 179 |
+| CSS + CSS maps | 8 + 0 | 8 + 8 |
+
+The 763-vs-3,450 gap is **chunk granularity, not coverage**: Turbopack emits ~4.6×
+as many chunks for the same app. The 18 diffpack JS files without a map are the
+app's own `public/` files copied byte-for-byte (`embed.js`, `preview.js`,
+`service-worker.js`, and the prerenderer's `static/` mirror of them) and the
+`include_str!` runtime scaffolding + orchestrator (`server/index.mjs`,
+`_ssr/*.mjs`, `next-server.mjs`, `next-prerender.mjs`, `next-render-core.mjs`,
+`ssr-module-map.mjs`) — files where the shipped bytes *are* the source. Two maps
+are legally source-less and consist entirely of unmapped markers:
+`rsc-render/server.chunk-52.mjs` (a JSON module — its whole output is a
+synthesized `module.exports = {…}`) and `server.chunk-69.mjs` (a pure re-export
+module that is nothing but CJS glue). A chunk whose modules *do* carry tokens and
+composes to nothing is still a hard error naming the chunk.
+
+Cost, best of 3 cold `build-app . production` on cal.com (985 files), maps on:
+
+| | wall | peak RSS |
+| --- | --- | --- |
+| `--no-sourcemap` | 11,161 ms (was 11,801) | 792 MiB (was 796) |
+| `--sourcemap` | **19,643 ms (was 13,245)** | **1,206 MiB (was 983)** |
+
+That is the honest price of the fix: with maps on, the cal.com build is **48%
+slower and needs 23% more memory** than it did when the maps were fiction. It is
+still ahead of the reference — the same tree's `corepack yarn next build`
+reported `Compiled successfully in 24.3s` on this machine, and that build's maps
+are of the same kind. Builds with maps off are unchanged.
+
+Locked by `bundler::tests::every_line_a_module_does_not_account_for_carries_an_explicit_unmapped_marker`,
+`bundler::tests::every_emitted_chunk_points_at_a_map_that_exists_and_names_itself`,
+`transform::tests::an_annotated_export_maps_to_the_lines_it_really_occupies`,
+`transform::tests::a_statement_whose_prints_diverge_at_the_end_still_maps_what_agrees`,
+`transform::tests::a_module_map_never_claims_the_first_byte_for_synthesized_code`,
+and the `SourceMapChoice` policy tests in `src/source_map.rs`.
+
 ## Behavioural defects — apps that build, then render differently
 
 These only became visible once the detection fix let 14 more apps reach the

@@ -172,9 +172,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [IStruct] (field cx structs) (load i)) name)) nm)
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (str-eq (load (field (ial-at [IStruct] (field cx structs) (load i)) name)) nm)
+                      (store! r (load i))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn isum-idx [(cx (ptr Interp)) (nm (slice u8))] (-> i64)
@@ -184,9 +184,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [ISum] (field cx sums) (load i)) name)) nm)
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (str-eq (load (field (ial-at [ISum] (field cx sums) (load i)) name)) nm)
+                      (store! r (load i))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -244,7 +244,7 @@
                   (signedp (ptr bool))
                   (backbytesp (ptr i64))] (-> i64)
   (let [si (istruct-idx cx nm)]
-    (if (icmp-lt si 0) (idie2 "bit access on unknown struct: " nm) 0)
+    (when (icmp-lt si 0) (idie2 "bit access on unknown struct: " nm))
     (let [e (ial-at [IStruct] (field cx structs) si)]
       (match-else (load (field e layout))
                   (LBits [backing offs]
@@ -268,9 +268,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [Field] fs (load i)) name)) fname) (do (store! r (load i)) (break)) 0)
+                (when (str-eq (load (field (ial-at [Field] fs (load i)) name)) fname) (store! r (load i)) (break))
                 (store! i (iadd (load i) 1)))))
-    (if (icmp-lt (load r) 0) (idie2 "no such field: " fname) 0)
+    (when (icmp-lt (load r) 0) (idie2 "no such field: " fname))
     (load r)))
 
 ; conservative byte size for SUM PAYLOAD sizing only — a faithful port of
@@ -326,7 +326,7 @@
                                       (iadd (load tot)
                                             (igalign8 (itype-bytes cx (field (ial-at [Field] fs (load fi)) ty)))))
                               (store! fi (iadd (load fi) 1)))))
-                  (if (icmp-gt (load tot) (load best)) (store! best (load tot)) 0))
+                  (when (icmp-gt (load tot) (load best)) (store! best (load tot))))
                 (store! vi (iadd (load vi) 1)))))
     (idiv (iadd (load best) 7) 8)))
 
@@ -341,7 +341,7 @@
                 (let [ft (field (ial-at [Field] fs (load i)) ty)
                       al (ialign-of cx ft)]
                   (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (if (icmp-eq (load i) fi) (store! res (load off)) 0)
+                  (when (icmp-eq (load i) fi) (store! res (load off)))
                   (store! off (iadd (load off) (isize-of cx ft))))
                 (store! i (iadd (load i) 1)))))
     (load res)))
@@ -355,11 +355,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [Variant] vs (load i)) name)) vname)
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (str-eq (load (field (ial-at [Variant] vs (load i)) name)) vname) (store! r (load i)) (break))
                 (store! i (iadd (load i) 1)))))
-    (if (icmp-lt (load r) 0) (idie2 "no such variant: " vname) 0)
+    (when (icmp-lt (load r) 0) (idie2 "no such variant: " vname))
     (load r)))
 
 ; natural (C) struct layout: pack fields at their alignments (mirrors g-natural-layout!).
@@ -375,7 +373,7 @@
               (do
                 (let [ft (field (ial-at [Field] fs (load i)) ty)
                       al (ialign-of cx ft)]
-                  (if (icmp-gt al (load maxal)) (store! maxal al) 0)
+                  (when (icmp-gt al (load maxal)) (store! maxal al))
                   (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
                   (al-push! (mut (field e offsets)) (load off))
                   (store! off (iadd (load off) (isize-of cx ft))))
@@ -405,7 +403,7 @@
                                            (let [end
                                                    (iadd (al-get [i64] (load offs) (load i))
                                                          (isize-of cx (field (ial-at [Field] fs (load i)) ty)))]
-                                             (if (icmp-gt end (load mx)) (store! mx end) 0))
+                                             (when (icmp-gt end (load mx)) (store! mx end)))
                                            (store! i (iadd (load i) 1)))))
                                (let [sz
                                        (match-else usize
@@ -437,7 +435,7 @@
                 (LAligned [al]
                           (do
                             (inatural-layout! cx si)
-                            (if (icmp-gt al (load (field e align))) (store! (field e align) al) 0)
+                            (when (icmp-gt al (load (field e align))) (store! (field e align) al))
                             (let [a2 (load (field e align))
                                   sz (load (field e size))]
                               (store! (field e size) (imul (idiv (iadd sz (isub a2 1)) a2) a2)))
@@ -464,7 +462,7 @@
     (loop (if (icmp-ge (load i) nf)
               (break)
               (do
-                (if (not (ity-ready cx (field (ial-at [Field] fs (load i)) ty))) (store! ok false) 0)
+                (when (not (ity-ready cx (field (ial-at [Field] fs (load i)) ty))) (store! ok false))
                 (store! i (iadd (load i) 1)))))
     (load ok)))
 
@@ -520,16 +518,15 @@
                   (loop (if (icmp-ge (load si) n)
                             (break)
                             (do
-                              (if (icmp-eq (load (field (ial-at [IStruct] (field cx structs) (load si)) done)) 0)
-                                  (if (istruct-fields-ready cx (load si))
-                                      (do
-                                        (icompute-one-struct! cx (load si))
-                                        (store! (field (ial-at [IStruct] (field cx structs) (load si)) done) 1)
-                                        0)
-                                      (store! alldone false))
-                                  0)
+                              (when (icmp-eq (load (field (ial-at [IStruct] (field cx structs) (load si)) done)) 0)
+                                    (if (istruct-fields-ready cx (load si))
+                                        (do
+                                          (icompute-one-struct! cx (load si))
+                                          (store! (field (ial-at [IStruct] (field cx structs) (load si)) done) 1)
+                                          0)
+                                        (store! alldone false)))
                               (store! si (iadd (load si) 1)))))
-                  (if (load alldone) (break) 0))
+                  (when (load alldone) (break)))
                 (store! pass (iadd (load pass) 1))))))
   0)
 
@@ -564,12 +561,12 @@
 ; packed (signed | bits<<1) for integer BIN canonicalization.
 (defn tsignbits [(tp (ptr Type))] (-> i64)
   (match-else (load tp)
-              (TInt [bits sg] (ior (if sg 1 0) (ishl bits 1)))
+              (TInt [bits sg] (ior (when sg 1) (ishl bits 1)))
               (TBool [] (ishl 1 1))
               (_ (ishl 64 1))))
 (defn tsigned [(tp (ptr Type))] (-> i64)
   (match-else (load tp)
-              (TInt [bits sg] (if sg 1 0))
+              (TInt [bits sg] (when sg 1))
               (TBool [] 0)
               (_ 1)))
 (defn tsize [(cx (ptr Interp)) (t Type)] (-> i64)
@@ -604,9 +601,8 @@
               (do
                 (let [ins (ial-at [Instr] (field fb code) (load i))
                       op (load (field ins op))]
-                  (if (or (icmp-eq op 11) (icmp-eq op 12))
-                      (store! (field ins a) (al-get [i64] (load (field fb labels)) (load (field ins a))))
-                      0))
+                  (when (or (icmp-eq op 11) (icmp-eq op 12))
+                        (store! (field ins a) (al-get [i64] (load (field fb labels)) (load (field ins a))))))
                 (store! i (iadd (load i) 1))))))
   0)
 
@@ -618,9 +614,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [BFunc] (field cx bfuncs) (load i)) name)) nm)
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (str-eq (load (field (ial-at [BFunc] (field cx bfuncs) (load i)) name)) nm)
+                      (store! r (load i))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -632,9 +628,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (ial-at [Extern] es (load i)) name)) nm)
-                    (do (store! r (load i)) (break))
-                    0)
+                (when (str-eq (load (field (ial-at [Extern] es (load i)) name)) nm) (store! r (load i)) (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 
@@ -644,7 +638,7 @@
     (match label
       (None []
             (do
-              (if (icmp-eq n 0) (idie "break/continue outside a loop") 0)
+              (when (icmp-eq n 0) (idie "break/continue outside a loop"))
               (isub n 1)))
       (Some [want]
             (let [(mut i) (isub n 1)
@@ -655,11 +649,9 @@
                           (match (load (field (ial-at [CLoop] (field fb loops) (load i)) label))
                             (None [] 0)
                             (Some [have]
-                                  (if (and (icmp-lt (load r) 0) (str-eq have want))
-                                      (do (store! r (load i)) 0)
-                                      0)))
+                                  (when (and (icmp-lt (load r) 0) (str-eq have want)) (store! r (load i)) 0)))
                           (store! i (isub (load i) 1)))))
-              (if (icmp-lt (load r) 0) (idie2 "no such loop label: " want) 0)
+              (when (icmp-lt (load r) 0) (idie2 "no such loop label: " want))
               (load r))))))
 
 ; A Coil function pointer is encoded as (fnptr-base + fidx): a large, nonzero,
@@ -691,7 +683,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get nm (load i))) 46) (store! dot (load i)) 0)
+                (when (icmp-eq (cast i64 (slice-get nm (load i))) 46) (store! dot (load i)))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load dot) 0) (subslice nm (iadd (load dot) 1) n) nm)))
 
@@ -741,7 +733,7 @@
                   ; a by-value aggregate C return (<=8 bytes, e.g. div's div_t in
                   ; x0) comes back as a packed word; box it into a frame slot so it
                   ; behaves as an aggregate value (an address) like any other.
-                  (if (ty-is-agg rtp) (femit fb 43 (isize-of cx rtp) (ialign-of cx rtp) 0) 0)
+                  (when (ty-is-agg rtp) (femit fb 43 (isize-of cx rtp) (ialign-of cx rtp) 0))
                   rt))
               (do (idie2 "call to unknown function: " func) (TInt 64 true)))))))
 
@@ -751,15 +743,13 @@
   (let [n (al-len [Expr] (load body))
         (mut i) 0
         (mut last) (TInt 64 true)]
-    (if (icmp-eq n 0) (do (femit fb 1 0 0 0) 0) 0)  ; empty body -> push 0
+    (when (icmp-eq n 0) (femit fb 1 0 0 0) 0)  ; empty body -> push 0
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (load (field fb term)) (break) 0)
+                (when (load (field fb term)) (break))
                 (store! last (compile-expr fb (ial-at [Expr] body (load i))))
-                (if (and (icmp-lt (load i) (isub n 1)) (not (load (field fb term))))
-                    (femit fb 4 0 0 0)
-                    0)  ; POP intermediate result
+                (when (and (icmp-lt (load i) (isub n 1)) (not (load (field fb term)))) (femit fb 4 0 0 0))  ; POP intermediate result
                 (store! i (iadd (load i) 1)))))
     (load last)))
 
@@ -770,9 +760,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (load (field fb term)) (break) 0)
+                (when (load (field fb term)) (break))
                 (compile-expr fb (ial-at [Expr] body (load i)))
-                (if (load (field fb term)) 0 (femit fb 4 0 0 0))  ; POP
+                (unless (load (field fb term)) (femit fb 4 0 0 0))  ; POP
                 (store! i (iadd (load i) 1))))))
   0)
 
@@ -791,7 +781,7 @@
                       (let [tp (alloc-stack Type)
                             l (fb-local! fb)]
                         (store! tp t)
-                        (femit fb 21 l (isize-of cx tp) (if (ty-is-agg tp) 1 0))  ; MUTCELL
+                        (femit fb 21 l (isize-of cx tp) (when (ty-is-agg tp) 1))  ; MUTCELL
                         (store! (field fb env)
                                 (cs-cons a (load (field b name)) l (TPtr (box-type a t)) (load (field fb env)))))
                       ; immutable: bind name -> a plain local holding the value
@@ -811,7 +801,7 @@
     (match-else (load (field e kind))
                 (EInt [v] (do (femit fb 1 v 0 0) (TInt 64 true)))
                 (EFloat [bits] (do (femit fb 1 bits 0 0) (TFloat 64)))
-                (EBool [b] (do (femit fb 1 (if b 1 0) 0 0) (TBool)))
+                (EBool [b] (do (femit fb 1 (when b 1) 0 0) (TBool)))
                 (EVar [name]
                       (let [node (cs-find (load (field fb env)) name)]
                         (if (icmp-eq (cast i64 node) 0)
@@ -846,7 +836,7 @@
                          (femit fb 12 lelse 0 0)  ; JZ lelse
                          (let [tt (compile-expr fb thn)
                                thnterm (load (field fb term))]
-                           (if thnterm 0 (femit fb 11 lend 0 0))  ; JMP lend
+                           (unless thnterm (femit fb 11 lend 0 0))  ; JMP lend
                            (store! (field fb term) false)
                            (fbind-label fb lelse)
                            (let [et (compile-expr fb els)
@@ -868,7 +858,7 @@
                          (al-push! (mut (field fb loops)) (load gl))
                          (fbind-label fb contlabel)
                          (compile-stmts fb body)
-                         (if (load (field fb term)) 0 (femit fb 11 contlabel 0 0))  ; JMP contlabel (loop)
+                         (unless (load (field fb term)) (femit fb 11 contlabel 0 0))  ; JMP contlabel (loop)
                          (let [nn (al-len [CLoop] (load (field fb loops)))
                                fin (ial-at [CLoop] (field fb loops) (isub nn 1))
                                had (load (field fin has_res))
@@ -908,7 +898,7 @@
                            (store! pt (ty-pointee2 tp))
                            (if (ty-is-agg pt)
                                (femit fb 32 (isize-of cx pt) (ialign-of cx pt) 0)  ; LOADAGG (fresh copy)
-                               (femit fb 6 (isize-of cx pt) (if (signed-of pt) 1 0) 0))  ; LOAD scalar
+                               (femit fb 6 (isize-of cx pt) (when (signed-of pt) 1) 0))  ; LOAD scalar
                            (load pt))))
                 (EStore [p val]
                         (do
@@ -926,14 +916,14 @@
                                      (TInt [dbits dsigned]
                                            (do
                                              (if (ty-is-float2 st)
-                                                 (femit fb 18 dbits (if dsigned 1 0) (fbytes-of st))  ; F2I
-                                                 (femit fb 16 dbits (if dsigned 1 0) 0))  ; ICANON
+                                                 (femit fb 18 dbits (when dsigned 1) (fbytes-of st))  ; F2I
+                                                 (femit fb 16 dbits (when dsigned 1) 0))  ; ICANON
                                              t))
                                      (TFloat [dbits]
                                              (do
                                                (if (ty-is-float2 st)
                                                    (femit fb 19 (idiv dbits 8) (fbytes-of st) 0)  ; F2F
-                                                   (femit fb 17 (idiv dbits 8) (if (signed-of st) 1 0) 0))  ; I2F
+                                                   (femit fb 17 (idiv dbits 8) (when (signed-of st) 1) 0))  ; I2F
                                                t))
                                      (_ t))))  ; ptr / fnptr / bool targets: identity 8-byte value
                 (EAlloc [storage t]
@@ -973,7 +963,7 @@
                            (let [tp (alloc-stack Type)]
                              (store! tp (compile-expr fb inner))
                              (let [l (fb-local! fb)]
-                               (femit fb 21 l (isize-of cx tp) (if (ty-is-agg tp) 1 0))
+                               (femit fb 21 l (isize-of cx tp) (when (ty-is-agg tp) 1))
                                (femit fb 2 l 0 0)
                                (TPtr (box-type a (load tp))))))
                 (EField [p fname]
@@ -984,7 +974,7 @@
                             (match-else (load pt)
                                         (TStruct [nm]
                                                  (let [si (istruct-idx cx nm)]
-                                                   (if (icmp-lt si 0) (idie2 "field access on non-struct: " nm) 0)
+                                                   (when (icmp-lt si 0) (idie2 "field access on non-struct: " nm))
                                                    (let [fi (ifield-idx cx si fname)
                                                          off (ifield-off cx si fi)
                                                          fty
@@ -995,7 +985,7 @@
                                                                                              fields))
                                                                                 fi)
                                                                         ty))]
-                                                     (if (icmp-ne off 0) (femit fb 34 off 0 0) 0)  ; FIELDPTR: addr += off
+                                                     (when (icmp-ne off 0) (femit fb 34 off 0 0))  ; FIELDPTR: addr += off
                                                      (TPtr (box-type a fty)))))
                                         (_ (do (idie "field access through non-struct pointer") (TInt 64 true)))))))
                 (EIndex [p idx]
@@ -1012,7 +1002,7 @@
                             (TPtr (box-type a (load ep))))))
                 (EConstruct [sum variant args]
                             (let [su (isum-idx cx sum)]
-                              (if (icmp-lt su 0) (idie2 "construct of unknown sum: " sum) 0)
+                              (when (icmp-lt su 0) (idie2 "construct of unknown sum: " sum))
                               (let [vidx (ivariant-idx cx su variant)
                                     sumtp (alloc-stack Type)]
                                 (store! sumtp (TStruct sum))
@@ -1036,7 +1026,7 @@
                                             (do
                                               (let [foff (iadd 8 (inatural-off cx vfields (load i)))]
                                                 (femit fb 2 l 0 0)  ; base = slot
-                                                (if (icmp-ne foff 0) (femit fb 34 foff 0 0) 0)  ; addr = slot+foff
+                                                (when (icmp-ne foff 0) (femit fb 34 foff 0 0))  ; addr = slot+foff
                                                 (let [ft (alloc-stack Type)]
                                                   (store! ft (compile-expr fb (ial-at [Expr] args (load i))))
                                                   (if (ty-is-agg ft)
@@ -1051,7 +1041,7 @@
                           (store! st (compile-expr fb scrut))
                           (let [sumname (match-else (load st) (TStruct [nm] nm) (_ ""))
                                 su (isum-idx cx sumname)]
-                            (if (icmp-lt su 0) (idie2 "match on non-sum: " sumname) 0)
+                            (when (icmp-lt su 0) (idie2 "match on non-sum: " sumname))
                             (let [vs (load (field (ial-at [ISum] (field cx sums) su) variants))
                                   narms (al-len [Arm] (load arms))
                                   sloc (fb-local! fb)
@@ -1092,10 +1082,10 @@
                                                               ftp (alloc-stack Type)]
                                                           (store! ftp fty)
                                                           (femit fb 2 sloc 0 0)
-                                                          (if (icmp-ne foff 0) (femit fb 34 foff 0 0) 0)  ; addr = sloc+foff
-                                                          (if (ty-is-agg ftp)
-                                                              0  ; aggregate: keep the address
-                                                              (femit fb 6 (isize-of cx ftp) (if (signed-of ftp) 1 0) 0))  ; scalar: load
+                                                          (when (icmp-ne foff 0) (femit fb 34 foff 0 0))  ; addr = sloc+foff
+                                                          (unless (ty-is-agg ftp)
+                                                                  ; aggregate: keep the address
+                                                                  (femit fb 6 (isize-of cx ftp) (when (signed-of ftp) 1) 0))  ; scalar: load
                                                           (femit fb 3 bl 0 0)
                                                           (store! (field fb env)
                                                                   (cs-cons a
@@ -1106,14 +1096,13 @@
                                                         (store! j (iadd (load j) 1)))))
                                             (let [bt (compile-expr fb (field arm body))]
                                               (store! (field fb env) sv)
-                                              (if (load (field fb term))
-                                                  0
-                                                  (do
-                                                    (femit fb 3 resl 0 0)  ; SETLOCAL resl = body value
-                                                    (store! anylive true)
-                                                    (store! allterm false)
-                                                    (store! rty bt)
-                                                    (femit fb 11 lend 0 0)))  ; JMP lend
+                                              (unless (load (field fb term))
+                                                      (femit fb 3 resl 0 0)
+                                                      ; SETLOCAL resl = body value
+                                                      (store! anylive true)
+                                                      (store! allterm false)
+                                                      (store! rty bt)
+                                                      (femit fb 11 lend 0 0))  ; JMP lend
                                               (fbind-label fb lnext)))
                                           (store! i (iadd (load i) 1)))))
                               (femit fb 36 0 0 0)  ; no arm matched -> trap
@@ -1145,7 +1134,7 @@
                            (match-else t
                                        (TStruct [nm]
                                                 (let [si (istruct-idx cx nm)]
-                                                  (if (icmp-lt si 0) (idie2 "offset-of on non-struct: " nm) 0)
+                                                  (when (icmp-lt si 0) (idie2 "offset-of on non-struct: " nm))
                                                   (femit fb 1 (ifield-off cx si (ifield-idx cx si fname)) 0 0)
                                                   (TInt 64 true)))
                                        (_ (do (idie "offset-of on non-struct type") (TInt 64 true)))))
@@ -1181,7 +1170,7 @@
                                                            37
                                                            (load low)
                                                            (load width)
-                                                           (ior (if (load sg) 1 0) (ishl (load bb) 1)))
+                                                           (ior (when (load sg) 1) (ishl (load bb) 1)))
                                                     (if (icmp-eq (load width) 1) (TBool) (TInt (load width) (load sg)))))
                                          (_ (do (idie "bit-get through non-struct pointer") (TInt 64 true)))))))
                 (EBitSet [p fname val]
@@ -1214,7 +1203,7 @@
                                       (do
                                         (let [mnm (al-get [(slice u8)] (load methods) (load i))
                                               mfi (find-func cx mnm)]
-                                          (if (icmp-lt mfi 0) (idie2 "make-dyn: unknown method " mnm) 0)
+                                          (when (icmp-lt mfi 0) (idie2 "make-dyn: unknown method " mnm))
                                           (ensure-compiled cx mfi)
                                           (store! (cast (ptr i64) (iadd vt (imul (load i) 8))) (iadd (fnptr-base) mfi)))
                                         (store! i (iadd (load i) 1)))))
@@ -1239,7 +1228,7 @@
                                 (femit fb 2 r 0 0)
                                 (femit fb 34 8 0 0)
                                 (femit fb 6 8 0 0)  ; vtable addr
-                                (if (icmp-ne (imul mi 8) 0) (femit fb 34 (imul mi 8) 0 0) 0)
+                                (when (icmp-ne (imul mi 8) 0) (femit fb 34 (imul mi 8) 0 0))
                                 (femit fb 6 8 0 0)  ; fnptr (encoded)
                                 (femit fb 2 r 0 0)
                                 (femit fb 6 8 0 0)  ; data ptr (first arg)
@@ -1256,11 +1245,9 @@
 ; force a hard error.
 (defn ensure-compiled [(cx (ptr Interp)) (fi i64)] (-> i64)
   (let [bf (ial-at [BFunc] (field cx bfuncs) fi)]
-    (if (icmp-eq (load (field bf state)) 0)
-        (do
+    (when (icmp-eq (load (field bf state)) 0)
           (store! (field bf state) 1)
-          (compile-func cx (ial-at [Func] (load (field (load (field cx mp)) funcs)) fi) fi))
-        0)))
+          (compile-func cx (ial-at [Func] (load (field (load (field cx mp)) funcs)) fi) fi))))
 
 ; compile one mono'd function into cx.bfuncs[fidx] (name/nparams/retty were set
 ; by pre-registration so calls resolve regardless of compile order).
@@ -1335,7 +1322,7 @@
         off (imul (idiv (iadd (load offc) (isub al 1)) al) al)
         addr (iadd base off)]
     (store! offc (iadd off size))
-    (if (icmp-gt (load offc) 1048576) (idie "frame overflow: stack allocation exceeded 1 MiB frame buffer") 0)
+    (when (icmp-gt (load offc) 1048576) (idie "frame overflow: stack allocation exceeded 1 MiB frame buffer"))
     addr))
 
 ; ============================ float bit-casts ================================
@@ -1372,7 +1359,7 @@
 (defn uge [(a i64) (b i64)] (-> bool)
   (icmp-ge (ixor a (ishl 1 63)) (ixor b (ishl 1 63))))
 (defn b01 [(x bool)] (-> i64)
-  (if x 1 0))
+  (when x 1))
 
 (defn do-bin [(op i64) (mode i64) (c i64) (l i64) (r i64)] (-> i64)
   (if (icmp-eq mode 0)
@@ -1465,9 +1452,8 @@
         tmp (cast i64 (interp.malloc (cast isize (if (icmp-lt size 1) 1 size))))
         argbuf (alloc-stack (array i64 2))
         (mut i) 1]
-    (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
-        (idie "qsort: comparator is not a Coil function pointer")
-        0)
+    (when (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
+          (idie "qsort: comparator is not a Coil function pointer"))
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
@@ -1586,9 +1572,8 @@
           (str-eq nm "pthread_create")
             (let [fi (isub (load (index buf 2)) (fnptr-base))
                   wargs (alloc-stack (array i64 1))]
-              (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
-                  (idie "pthread_create: start routine is not a Coil function pointer")
-                  0)
+              (when (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
+                    (idie "pthread_create: start routine is not a Coil function pointer"))
               (store! (index (cast (ptr i64) wargs) 0) (load (index buf 3)))
               (vm-exec cx fi (cast (ptr i64) wargs) 1 0)
               (mem-store (load (index buf 0)) 1 8)
@@ -1620,7 +1605,7 @@
 (defn istr->i64 [(s (slice u8))] (-> i64)
   (let [n (slice-len s)
         neg (and (icmp-gt n 0) (icmp-eq (cast i64 (slice-get s 0)) 45))
-        (mut i) (if neg 1 0)
+        (mut i) (when neg 1)
         (mut v) 0]
     (loop (if (icmp-ge (load i) n)
               (break)
@@ -1639,22 +1624,22 @@
         (mut i) 0
         (mut start) -1]
     (loop (if (icmp-ge (load i) n)
-              (do (if (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) n)) 0) (break))
+              (do (when (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) n))) (break))
               (do
                 (let [c (cast i64 (slice-get line (load i)))]
                   (if (or (or (icmp-eq c 32) (icmp-eq c 9)) (icmp-eq c 44))
                       (do
-                        (if (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) (load i))) 0)
+                        (when (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) (load i))))
                         (store! start -1)
                         0)
                       (if (or (or (or (icmp-eq c 123) (icmp-eq c 125)) (or (icmp-eq c 40) (icmp-eq c 41)))
                               (or (icmp-eq c 60) (icmp-eq c 62)))
                           (do
-                            (if (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) (load i))) 0)
+                            (when (icmp-ge (load start) 0) (al-push! (mut toks) (subslice line (load start) (load i))))
                             (al-push! (mut toks) (subslice line (load i) (iadd (load i) 1)))
                             (store! start -1)
                             0)
-                          (do (if (icmp-lt (load start) 0) (store! start (load i)) 0) 0))))
+                          (do (when (icmp-lt (load start) 0) (store! start (load i))) 0))))
                 (store! i (iadd (load i) 1)))))
     (box-al [(slice u8)] a (load toks))))
 
@@ -1705,7 +1690,7 @@
               (TSlice [elem] (if (icmp-eq idx 0) (do (store! offp 0) (TPtr elem)) (do (store! offp 8) (TInt 64 true))))
               (TStruct [nm]
                        (let [si (istruct-idx cx nm)]
-                         (if (icmp-lt si 0) (do (idie2 "llvm-ir: extract from unknown struct " nm) 0) 0)
+                         (when (icmp-lt si 0) (idie2 "llvm-ir: extract from unknown struct " nm) 0)
                          (store! offp (ifield-off cx si idx))
                          (load (field (ial-at [Field]
                                               (load (field (ial-at [IStruct] (field cx structs) si) fields))
@@ -1740,9 +1725,9 @@
     (loop (if (icmp-lt (load i) 0)
               (break)
               (do
-                (if (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
-                    (do (store! r (al-get [i64] (load vals) (load i))) (break))
-                    0)
+                (when (str-eq (al-get [(slice u8)] (load names) (load i)) nm)
+                      (store! r (al-get [i64] (load vals) (load i)))
+                      (break))
                 (store! i (isub (load i) 1)))))
     (load r)))
 (defn ir-env-put! [(names (ptr (ArrayList (slice u8)))) (vals (ptr (ArrayList i64))) (nm (slice u8)) (v i64)] (-> i64)
@@ -1794,313 +1779,309 @@
   (let [a (load (field cx a))
         toks (ir-tokens2 a line)
         ntk (al-len [(slice u8)] (load toks))]
-    (if (icmp-eq ntk 0)
-        0
-        (let [t0 (irtok toks 0)]
-          (cond (str-eq t0 "declare") 0
-                (str-eq t0 "ret")
-                  (let [tokp (alloc-stack i64)
-                        rtp (alloc-stack Type)]
-                    (store! tokp 1)
-                    (store! rtp (ir-parse-type2 cx result argtys toks tokp))
-                    (store! retvalp (ir-value2 cx names vals args (irtok toks (load tokp)) rtp fm moff))
-                    (store! donep true)
-                    0)
-                (str-eq t0 "store")  ; store atomic TYPE VAL, ptr PTR seq_cst, align N   (sequential model)
-                  (if (and (icmp-ge ntk 7) (str-eq (irtok toks 1) "atomic"))
+    (unless (icmp-eq ntk 0)
+            (let [t0 (irtok toks 0)]
+              (cond (str-eq t0 "declare") 0
+                    (str-eq t0 "ret")
                       (let [tokp (alloc-stack i64)
-                            vtp (alloc-stack Type)]
-                        (store! tokp 2)
-                        (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                        (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
-                              ptp (alloc-stack Type)]
-                          (store! ptp (TPtr (box-type a (TInt 8 true))))
-                          (let [p (ir-value2 cx names vals args (irtok toks (iadd (load tokp) 2)) ptp fm moff)]
-                            (mem-store p v (isize-of cx vtp))
-                            0)))
-                      (do (idie2 "llvm-ir: unsupported store line: " line) 0))
-                (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
-                  (let [op (irtok toks 2)]
-                    (cond (str-eq op "extractvalue")
-                            (let [tokp (alloc-stack i64)
-                                  aggtp (alloc-stack Type)]
-                              (store! tokp 3)
-                              (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
-                              (let [aggv (ir-value2 cx names vals args (irtok toks (load tokp)) aggtp fm moff)
-                                    idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
-                                    offp (alloc-stack i64)
-                                    etp (alloc-stack Type)]
-                                (store! etp (ir-agg-elem2 cx aggtp idx offp))
-                                (if (ty-is-agg etp)
-                                    (let [ns (frame-alloc fm moff (isize-of cx etp) (ialign-of cx etp))]
-                                      (memcopy ns (iadd aggv (load offp)) (isize-of cx etp))
-                                      (ir-env-put! names vals t0 ns))
-                                    (ir-env-put! names
-                                                 vals
-                                                 t0
-                                                 (mem-load (iadd aggv (load offp))
-                                                           (isize-of cx etp)
-                                                           (signed-of etp))))
-                                0))
-                          (str-eq op "insertvalue")
-                            (let [tokp (alloc-stack i64)
-                                  aggtp (alloc-stack Type)]
-                              (store! tokp 3)
-                              (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
-                              (let [aggtk (irtok toks (load tokp))]
-                                (store! tokp (iadd (load tokp) 1))
-                                (let [aggv (ir-value2 cx names vals args aggtk aggtp fm moff)
-                                      eltp (alloc-stack Type)]
-                                  (store! eltp (ir-parse-type2 cx result argtys toks tokp))
-                                  (let [elv (ir-value2 cx names vals args (irtok toks (load tokp)) eltp fm moff)
-                                        idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
-                                        dslot (frame-alloc fm moff (isize-of cx aggtp) (ialign-of cx aggtp))
-                                        offp (alloc-stack i64)]
-                                    (memcopy dslot aggv (isize-of cx aggtp))
-                                    (ir-agg-elem2 cx aggtp idx offp)
-                                    (ir-store-at cx (iadd dslot (load offp)) elv eltp)
-                                    (ir-env-put! names vals t0 dslot)
-                                    0))))
-                          (str-eq op "atomicrmw")  ; %old = atomicrmw SUB ptr PTR, TYPE VAL seq_cst
-                            (let [sub (irtok toks 3)
+                            rtp (alloc-stack Type)]
+                        (store! tokp 1)
+                        (store! rtp (ir-parse-type2 cx result argtys toks tokp))
+                        (store! retvalp (ir-value2 cx names vals args (irtok toks (load tokp)) rtp fm moff))
+                        (store! donep true)
+                        0)
+                    (str-eq t0 "store")  ; store atomic TYPE VAL, ptr PTR seq_cst, align N   (sequential model)
+                      (if (and (icmp-ge ntk 7) (str-eq (irtok toks 1) "atomic"))
+                          (let [tokp (alloc-stack i64)
+                                vtp (alloc-stack Type)]
+                            (store! tokp 2)
+                            (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                            (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
                                   ptp (alloc-stack Type)]
                               (store! ptp (TPtr (box-type a (TInt 8 true))))
-                              (let [p (ir-value2 cx names vals args (irtok toks 5) ptp fm moff)
-                                    tokp (alloc-stack i64)
-                                    vtp (alloc-stack Type)]
-                                (store! tokp 6)
-                                (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
-                                      sz (isize-of cx vtp)
-                                      old (mem-load p sz false)]
-                                  (cond (str-eq sub "add") (mem-store p (iadd old v) sz)
-                                        (str-eq sub "sub") (mem-store p (isub old v) sz)
-                                        (str-eq sub "xchg") (mem-store p v sz)
-                                        :else (idie2 "llvm-ir: unsupported atomicrmw op: " sub))
-                                  (ir-env-put! names vals t0 old)
-                                  0)))
-                          (str-eq op "cmpxchg")  ; %r = cmpxchg ptr PTR, TYPE EXP, TYPE NEW seq_cst seq_cst -> {old,success}
-                            (let [ptp (alloc-stack Type)]
-                              (store! ptp (TPtr (box-type a (TInt 8 true))))
-                              (let [p (ir-value2 cx names vals args (irtok toks 4) ptp fm moff)
-                                    tokp (alloc-stack i64)
-                                    etp (alloc-stack Type)]
-                                (store! tokp 5)
-                                (store! etp (ir-parse-type2 cx result argtys toks tokp))
-                                (let [exp
-                                        (ir-value2 cx
-                                                   names
-                                                   vals
-                                                   args
-                                                   (irtok toks (load tokp))
-                                                   etp
-                                                   fm
-                                                   moff)]
-                                  (store! tokp (iadd (load tokp) 1))
-                                  (let [ntp (alloc-stack Type)]
-                                    (store! ntp (ir-parse-type2 cx result argtys toks tokp))
-                                    (let [nv
+                              (let [p (ir-value2 cx names vals args (irtok toks (iadd (load tokp) 2)) ptp fm moff)]
+                                (mem-store p v (isize-of cx vtp))
+                                0)))
+                          (do (idie2 "llvm-ir: unsupported store line: " line) 0))
+                    (and (icmp-ge ntk 3) (icmp-eq (cast i64 (slice-get t0 0)) 37))
+                      (let [op (irtok toks 2)]
+                        (cond (str-eq op "extractvalue")
+                                (let [tokp (alloc-stack i64)
+                                      aggtp (alloc-stack Type)]
+                                  (store! tokp 3)
+                                  (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [aggv (ir-value2 cx names vals args (irtok toks (load tokp)) aggtp fm moff)
+                                        idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
+                                        offp (alloc-stack i64)
+                                        etp (alloc-stack Type)]
+                                    (store! etp (ir-agg-elem2 cx aggtp idx offp))
+                                    (if (ty-is-agg etp)
+                                        (let [ns (frame-alloc fm moff (isize-of cx etp) (ialign-of cx etp))]
+                                          (memcopy ns (iadd aggv (load offp)) (isize-of cx etp))
+                                          (ir-env-put! names vals t0 ns))
+                                        (ir-env-put! names
+                                                     vals
+                                                     t0
+                                                     (mem-load (iadd aggv (load offp))
+                                                               (isize-of cx etp)
+                                                               (signed-of etp))))
+                                    0))
+                              (str-eq op "insertvalue")
+                                (let [tokp (alloc-stack i64)
+                                      aggtp (alloc-stack Type)]
+                                  (store! tokp 3)
+                                  (store! aggtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [aggtk (irtok toks (load tokp))]
+                                    (store! tokp (iadd (load tokp) 1))
+                                    (let [aggv (ir-value2 cx names vals args aggtk aggtp fm moff)
+                                          eltp (alloc-stack Type)]
+                                      (store! eltp (ir-parse-type2 cx result argtys toks tokp))
+                                      (let [elv (ir-value2 cx names vals args (irtok toks (load tokp)) eltp fm moff)
+                                            idx (istr->i64 (irtok toks (iadd (load tokp) 1)))
+                                            dslot (frame-alloc fm moff (isize-of cx aggtp) (ialign-of cx aggtp))
+                                            offp (alloc-stack i64)]
+                                        (memcopy dslot aggv (isize-of cx aggtp))
+                                        (ir-agg-elem2 cx aggtp idx offp)
+                                        (ir-store-at cx (iadd dslot (load offp)) elv eltp)
+                                        (ir-env-put! names vals t0 dslot)
+                                        0))))
+                              (str-eq op "atomicrmw")  ; %old = atomicrmw SUB ptr PTR, TYPE VAL seq_cst
+                                (let [sub (irtok toks 3)
+                                      ptp (alloc-stack Type)]
+                                  (store! ptp (TPtr (box-type a (TInt 8 true))))
+                                  (let [p (ir-value2 cx names vals args (irtok toks 5) ptp fm moff)
+                                        tokp (alloc-stack i64)
+                                        vtp (alloc-stack Type)]
+                                    (store! tokp 6)
+                                    (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                    (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)
+                                          sz (isize-of cx vtp)
+                                          old (mem-load p sz false)]
+                                      (cond (str-eq sub "add") (mem-store p (iadd old v) sz)
+                                            (str-eq sub "sub") (mem-store p (isub old v) sz)
+                                            (str-eq sub "xchg") (mem-store p v sz)
+                                            :else (idie2 "llvm-ir: unsupported atomicrmw op: " sub))
+                                      (ir-env-put! names vals t0 old)
+                                      0)))
+                              (str-eq op "cmpxchg")  ; %r = cmpxchg ptr PTR, TYPE EXP, TYPE NEW seq_cst seq_cst -> {old,success}
+                                (let [ptp (alloc-stack Type)]
+                                  (store! ptp (TPtr (box-type a (TInt 8 true))))
+                                  (let [p (ir-value2 cx names vals args (irtok toks 4) ptp fm moff)
+                                        tokp (alloc-stack i64)
+                                        etp (alloc-stack Type)]
+                                    (store! tokp 5)
+                                    (store! etp (ir-parse-type2 cx result argtys toks tokp))
+                                    (let [exp
                                             (ir-value2 cx
                                                        names
                                                        vals
                                                        args
                                                        (irtok toks (load tokp))
-                                                       ntp
-                                                       fm
-                                                       moff)
-                                          old (mem-load p 8 false)
-                                          ok (icmp-eq old exp)
-                                          slot (frame-alloc fm moff 16 8)]
-                                      (if ok (mem-store p nv 8) 0)
-                                      (mem-store slot old 8)
-                                      (mem-store (iadd slot 8) (if ok 1 0) 8)
-                                      (ir-env-put! names vals t0 slot)
-                                      0)))))
-                          (str-eq op "load")  ; %v = load atomic TYPE, ptr PTR seq_cst, align N
-                            (if (str-eq (irtok toks 3) "atomic")
-                                (let [tokp (alloc-stack i64)
-                                      vtp (alloc-stack Type)]
-                                  (store! tokp 4)
-                                  (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                                  (let [ptp (alloc-stack Type)]
-                                    (store! ptp (TPtr (box-type a (TInt 8 true))))
-                                    (let [p
-                                            (ir-value2 cx
-                                                       names
-                                                       vals
-                                                       args
-                                                       (irtok toks (iadd (load tokp) 1))
-                                                       ptp
+                                                       etp
                                                        fm
                                                        moff)]
-                                      (ir-env-put! names
-                                                   vals
-                                                   t0
-                                                   (mem-load p (isize-of cx vtp) (signed-of vtp)))
-                                      0)))
-                                (do (idie2 "llvm-ir: unsupported load line: " line) 0))
-                          (str-eq op "insertelement")  ; %v = insertelement <N x T> AGG, ET EV, i32 K
-                            (let [tokp (alloc-stack i64)
-                                  vtp (alloc-stack Type)]
-                              (store! tokp 3)
-                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                              (let [aggtk (irtok toks (load tokp))]
-                                (store! tokp (iadd (load tokp) 1))
-                                (let [aggv (ir-value2 cx names vals args aggtk vtp fm moff)
-                                      etp (alloc-stack Type)]
-                                  (store! etp (ir-parse-type2 cx result argtys toks tokp))
-                                  (let [ev
+                                      (store! tokp (iadd (load tokp) 1))
+                                      (let [ntp (alloc-stack Type)]
+                                        (store! ntp (ir-parse-type2 cx result argtys toks tokp))
+                                        (let [nv
+                                                (ir-value2 cx
+                                                           names
+                                                           vals
+                                                           args
+                                                           (irtok toks (load tokp))
+                                                           ntp
+                                                           fm
+                                                           moff)
+                                              old (mem-load p 8 false)
+                                              ok (icmp-eq old exp)
+                                              slot (frame-alloc fm moff 16 8)]
+                                          (when ok (mem-store p nv 8))
+                                          (mem-store slot old 8)
+                                          (mem-store (iadd slot 8) (when ok 1) 8)
+                                          (ir-env-put! names vals t0 slot)
+                                          0)))))
+                              (str-eq op "load")  ; %v = load atomic TYPE, ptr PTR seq_cst, align N
+                                (if (str-eq (irtok toks 3) "atomic")
+                                    (let [tokp (alloc-stack i64)
+                                          vtp (alloc-stack Type)]
+                                      (store! tokp 4)
+                                      (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                      (let [ptp (alloc-stack Type)]
+                                        (store! ptp (TPtr (box-type a (TInt 8 true))))
+                                        (let [p
+                                                (ir-value2 cx
+                                                           names
+                                                           vals
+                                                           args
+                                                           (irtok toks (iadd (load tokp) 1))
+                                                           ptp
+                                                           fm
+                                                           moff)]
+                                          (ir-env-put! names
+                                                       vals
+                                                       t0
+                                                       (mem-load p (isize-of cx vtp) (signed-of vtp)))
+                                          0)))
+                                    (do (idie2 "llvm-ir: unsupported load line: " line) 0))
+                              (str-eq op "insertelement")  ; %v = insertelement <N x T> AGG, ET EV, i32 K
+                                (let [tokp (alloc-stack i64)
+                                      vtp (alloc-stack Type)]
+                                  (store! tokp 3)
+                                  (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [aggtk (irtok toks (load tokp))]
+                                    (store! tokp (iadd (load tokp) 1))
+                                    (let [aggv (ir-value2 cx names vals args aggtk vtp fm moff)
+                                          etp (alloc-stack Type)]
+                                      (store! etp (ir-parse-type2 cx result argtys toks tokp))
+                                      (let [ev
+                                              (ir-value2 cx
+                                                         names
+                                                         vals
+                                                         args
+                                                         (irtok toks (load tokp))
+                                                         etp
+                                                         fm
+                                                         moff)
+                                            k (istr->i64 (irtok toks (iadd (load tokp) 2)))
+                                            lb (isize-of cx etp)
+                                            dslot
+                                              (frame-alloc fm
+                                                           moff
+                                                           (isize-of cx vtp)
+                                                           (ialign-of cx vtp))]
+                                        (memcopy dslot aggv (isize-of cx vtp))
+                                        (mem-store (iadd dslot (imul k lb)) ev lb)
+                                        (ir-env-put! names vals t0 dslot)
+                                        0))))
+                              (str-eq op "shufflevector")  ; splat: %r = shufflevector VTY V, VTY undef, <N x i32> zeroinitializer
+                                (let [tokp (alloc-stack i64)
+                                      vtp (alloc-stack Type)]
+                                  (store! tokp 3)
+                                  (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [v
                                           (ir-value2 cx
                                                      names
                                                      vals
                                                      args
                                                      (irtok toks (load tokp))
-                                                     etp
+                                                     vtp
+                                                     fm
+                                                     moff)]
+                                    (store! tokp (iadd (load tokp) 1))
+                                    (ir-parse-type2 cx result argtys toks tokp)  ; 2nd operand type
+                                    (store! tokp (iadd (load tokp) 1))  ; undef
+                                    (ir-parse-type2 cx result argtys toks tokp)  ; mask type
+                                    (unless (str-eq (irtok toks (load tokp)) "zeroinitializer")
+                                            (idie2 "llvm-ir: only splat shuffles supported: " line))
+                                    (match-else (load vtp)
+                                                (TVec [elem lanes]
+                                                      (let [lb (isize-of cx elem)
+                                                            dslot
+                                                              (frame-alloc fm
+                                                                           moff
+                                                                           (isize-of cx vtp)
+                                                                           (ialign-of cx vtp))
+                                                            lane0 (mem-load v lb false)
+                                                            (mut k) 0]
+                                                        (loop (if (icmp-ge (load k) lanes)
+                                                                  (break)
+                                                                  (do
+                                                                    (mem-store (iadd dslot
+                                                                                     (imul (load k)
+                                                                                           lb))
+                                                                               lane0
+                                                                               lb)
+                                                                    (store! k (iadd (load k) 1)))))
+                                                        (ir-env-put! names vals t0 dslot)
+                                                        0))
+                                                (_ (do
+                                                     (idie "llvm-ir: shufflevector on non-vector")
+                                                     0)))))
+                              (or (or (str-eq op "fadd") (str-eq op "fsub"))
+                                  (str-eq op "fmul"))
+                                (let [tokp (alloc-stack i64)
+                                      opn
+                                        (unless (str-eq op "fadd") (if (str-eq op "fsub") 1 2))
+                                      vtp (alloc-stack Type)]
+                                  (store! tokp 3)
+                                  (store! vtp (ir-parse-type2 cx result argtys toks tokp))
+                                  (let [av
+                                          (ir-value2 cx
+                                                     names
+                                                     vals
+                                                     args
+                                                     (irtok toks (load tokp))
+                                                     vtp
                                                      fm
                                                      moff)
-                                        k (istr->i64 (irtok toks (iadd (load tokp) 2)))
-                                        lb (isize-of cx etp)
-                                        dslot
-                                          (frame-alloc fm
-                                                       moff
-                                                       (isize-of cx vtp)
-                                                       (ialign-of cx vtp))]
-                                    (memcopy dslot aggv (isize-of cx vtp))
-                                    (mem-store (iadd dslot (imul k lb)) ev lb)
-                                    (ir-env-put! names vals t0 dslot)
-                                    0))))
-                          (str-eq op "shufflevector")  ; splat: %r = shufflevector VTY V, VTY undef, <N x i32> zeroinitializer
-                            (let [tokp (alloc-stack i64)
-                                  vtp (alloc-stack Type)]
-                              (store! tokp 3)
-                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                              (let [v
-                                      (ir-value2 cx
-                                                 names
-                                                 vals
-                                                 args
-                                                 (irtok toks (load tokp))
-                                                 vtp
-                                                 fm
-                                                 moff)]
-                                (store! tokp (iadd (load tokp) 1))
-                                (ir-parse-type2 cx result argtys toks tokp)  ; 2nd operand type
-                                (store! tokp (iadd (load tokp) 1))  ; undef
-                                (ir-parse-type2 cx result argtys toks tokp)  ; mask type
-                                (if (str-eq (irtok toks (load tokp)) "zeroinitializer")
-                                    0
-                                    (idie2 "llvm-ir: only splat shuffles supported: " line))
-                                (match-else (load vtp)
-                                            (TVec [elem lanes]
-                                                  (let [lb (isize-of cx elem)
-                                                        dslot
-                                                          (frame-alloc fm
-                                                                       moff
-                                                                       (isize-of cx vtp)
-                                                                       (ialign-of cx vtp))
-                                                        lane0 (mem-load v lb false)
-                                                        (mut k) 0]
-                                                    (loop (if (icmp-ge (load k) lanes)
-                                                              (break)
-                                                              (do
-                                                                (mem-store (iadd dslot
-                                                                                 (imul (load k)
-                                                                                       lb))
-                                                                           lane0
-                                                                           lb)
-                                                                (store! k (iadd (load k) 1)))))
-                                                    (ir-env-put! names vals t0 dslot)
-                                                    0))
-                                            (_ (do
-                                                 (idie "llvm-ir: shufflevector on non-vector")
-                                                 0)))))
-                          (or (or (str-eq op "fadd") (str-eq op "fsub"))
-                              (str-eq op "fmul"))
-                            (let [tokp (alloc-stack i64)
-                                  opn
-                                    (if (str-eq op "fadd")
-                                        0
-                                        (if (str-eq op "fsub") 1 2))
-                                  vtp (alloc-stack Type)]
-                              (store! tokp 3)
-                              (store! vtp (ir-parse-type2 cx result argtys toks tokp))
-                              (let [av
-                                      (ir-value2 cx
-                                                 names
-                                                 vals
-                                                 args
-                                                 (irtok toks (load tokp))
-                                                 vtp
-                                                 fm
-                                                 moff)
-                                    bv
-                                      (ir-value2 cx
-                                                 names
-                                                 vals
-                                                 args
-                                                 (irtok toks (iadd (load tokp) 1))
-                                                 vtp
-                                                 fm
-                                                 moff)]
-                                (match-else (load vtp)
-                                            (TVec [elem lanes]
-                                                  (let [lb (isize-of cx elem)
-                                                        dslot
-                                                          (frame-alloc fm
-                                                                       moff
-                                                                       (isize-of cx vtp)
-                                                                       (ialign-of cx
-                                                                                  vtp))]
-                                                    (ir-vec-fbin opn
-                                                                 dslot
-                                                                 av
-                                                                 bv
-                                                                 lanes
-                                                                 lb)
-                                                    (ir-env-put! names vals t0 dslot)
-                                                    0))
-                                            (TFloat [bits]
-                                                    (let [rv
-                                                            (if (icmp-eq bits 32)
-                                                                (f32->bits (if (icmp-eq opn
-                                                                                        0)
-                                                                               (fadd (bits->f32 av)
-                                                                                     (bits->f32 bv))
-                                                                               (if (icmp-eq opn
-                                                                                            1)
-                                                                                   (fsub (bits->f32 av)
+                                        bv
+                                          (ir-value2 cx
+                                                     names
+                                                     vals
+                                                     args
+                                                     (irtok toks (iadd (load tokp) 1))
+                                                     vtp
+                                                     fm
+                                                     moff)]
+                                    (match-else (load vtp)
+                                                (TVec [elem lanes]
+                                                      (let [lb (isize-of cx elem)
+                                                            dslot
+                                                              (frame-alloc fm
+                                                                           moff
+                                                                           (isize-of cx vtp)
+                                                                           (ialign-of cx
+                                                                                      vtp))]
+                                                        (ir-vec-fbin opn
+                                                                     dslot
+                                                                     av
+                                                                     bv
+                                                                     lanes
+                                                                     lb)
+                                                        (ir-env-put! names vals t0 dslot)
+                                                        0))
+                                                (TFloat [bits]
+                                                        (let [rv
+                                                                (if (icmp-eq bits 32)
+                                                                    (f32->bits (if (icmp-eq opn
+                                                                                            0)
+                                                                                   (fadd (bits->f32 av)
                                                                                          (bits->f32 bv))
-                                                                                   (fmul (bits->f32 av)
-                                                                                         (bits->f32 bv)))))
-                                                                (f64->bits (if (icmp-eq opn
-                                                                                        0)
-                                                                               (fadd (bits->f64 av)
-                                                                                     (bits->f64 bv))
-                                                                               (if (icmp-eq opn
-                                                                                            1)
-                                                                                   (fsub (bits->f64 av)
+                                                                                   (if (icmp-eq opn
+                                                                                                1)
+                                                                                       (fsub (bits->f32 av)
+                                                                                             (bits->f32 bv))
+                                                                                       (fmul (bits->f32 av)
+                                                                                             (bits->f32 bv)))))
+                                                                    (f64->bits (if (icmp-eq opn
+                                                                                            0)
+                                                                                   (fadd (bits->f64 av)
                                                                                          (bits->f64 bv))
-                                                                                   (fmul (bits->f64 av)
-                                                                                         (bits->f64 bv))))))]
-                                                      (ir-env-put! names vals t0 rv)
-                                                      0))
-                                            (_ (do
-                                                 (idie "llvm-ir: float op on unsupported type")
-                                                 0)))))
-                          (str-eq op "call")
-                            (ir-call! cx
-                                      names
-                                      vals
-                                      args
-                                      argtys
-                                      result
-                                      toks
-                                      t0
-                                      line
-                                      fm
-                                      moff)
-                          :else (do (idie2 "llvm-ir: unsupported op: " op) 0)))
-                :else (do (idie2 "llvm-ir: unsupported line: " line) 0))))))
+                                                                                   (if (icmp-eq opn
+                                                                                                1)
+                                                                                       (fsub (bits->f64 av)
+                                                                                             (bits->f64 bv))
+                                                                                       (fmul (bits->f64 av)
+                                                                                             (bits->f64 bv))))))]
+                                                          (ir-env-put! names vals t0 rv)
+                                                          0))
+                                                (_ (do
+                                                     (idie "llvm-ir: float op on unsupported type")
+                                                     0)))))
+                              (str-eq op "call")
+                                (ir-call! cx
+                                          names
+                                          vals
+                                          args
+                                          argtys
+                                          result
+                                          toks
+                                          t0
+                                          line
+                                          fm
+                                          moff)
+                              :else (do (idie2 "llvm-ir: unsupported op: " op) 0)))
+                    :else (do (idie2 "llvm-ir: unsupported line: " line) 0))))))
 
 ; intrinsic calls: @llvm.fma.v4f32 and @llvm.vector.reduce.fadd.v4f32
 (defn ir-call! [(cx (ptr Interp))
@@ -2163,7 +2144,7 @@
               (let [vtp (alloc-stack Type)]
                 (store! tokp (iadd (load tokp) 2))  ; skip name + "("
                 (ir-parse-type2 cx result argtys toks tokp)  ; float
-                (if (str-eq (irtok toks (load tokp)) "0.0") 0 (idie2 "llvm-ir: reduce.fadd start must be 0.0: " line))
+                (unless (str-eq (irtok toks (load tokp)) "0.0") (idie2 "llvm-ir: reduce.fadd start must be 0.0: " line))
                 (store! tokp (iadd (load tokp) 1))
                 (store! vtp (ir-parse-type2 cx result argtys toks tokp))
                 (let [v (ir-value2 cx names vals args (irtok toks (load tokp)) vtp fm moff)]
@@ -2210,13 +2191,12 @@
                             (store! eol (iadd (load eol) 1))))
                   (let [line (subslice body (load pos) (load eol))]
                     (store! pos (iadd (load eol) 1))
-                    (if (icmp-eq (slice-len line) 0)
-                        0
-                        (if (load donep)
-                            (idie2 "llvm-ir: code after ret: " line)
-                            (ir-line! cx names vals args argtys result retvalp donep line fm moff)))))
+                    (unless (icmp-eq (slice-len line) 0)
+                            (if (load donep)
+                                (idie2 "llvm-ir: code after ret: " line)
+                                (ir-line! cx names vals args argtys result retvalp donep line fm moff)))))
                 0)))
-    (if (load donep) 0 (idie "llvm-ir: body did not ret"))
+    (unless (load donep) (idie "llvm-ir: body did not ret"))
     (load retvalp)))
 
 ; ============================ the VM ========================================
@@ -2246,7 +2226,7 @@
         (mut retval) 0]
     (store! retp (load (field bf retty)))
     (let [retagg (ty-is-agg retp)
-          retsz (if (ty-is-agg retp) (isize-of cx retp) 0)]
+          retsz (when (ty-is-agg retp) (isize-of cx retp))]
       (store! spc 0)
       (store! memoffc 0)
       (let [(mut i) 0]
@@ -2286,9 +2266,9 @@
                           l (vpop ops spc)]
                       (vpush ops spc (do-cmp a b c l r)))
                       10
-                    (let [v (vpop ops spc)] (vpush ops spc (if (icmp-ne a 0) (if (icmp-eq v 0) 1 0) (ixor v -1)))) 11
+                    (let [v (vpop ops spc)] (vpush ops spc (if (icmp-ne a 0) (when (icmp-eq v 0) 1) (ixor v -1)))) 11
                     (store! pc a) 12
-                    (let [v (vpop ops spc)] (if (icmp-eq v 0) (store! pc a) 0)) 13
+                    (let [v (vpop ops spc)] (when (icmp-eq v 0) (store! pc a))) 13
                     (let [(mut k) (isub b 1)]
                       (loop (if (icmp-lt (load k) 0)
                                 (break)
@@ -2297,7 +2277,7 @@
                                   (store! k (isub (load k) 1)))))
                       (let [crp (alloc-stack Type)]
                         (store! crp (load (field (ial-at [BFunc] (field cx bfuncs) a) retty)))
-                        (let [rb (if (ty-is-agg crp) (frame-alloc framemem memoffc (isize-of cx crp) 16) 0)]
+                        (let [rb (when (ty-is-agg crp) (frame-alloc framemem memoffc (isize-of cx crp) 16))]
                           (vpush ops spc (vm-exec cx a (cast (ptr i64) argbuf) b rb)))))
                       14
                     (let [(mut k) (isub b 1)]
@@ -2379,7 +2359,7 @@
                       43
                     (let [val (vpop ops spc)
                           slot (frame-alloc framemem memoffc a b)]
-                      (if (icmp-gt a 8) (idie "extern by-value struct return >8 bytes not supported by interp") 0)
+                      (when (icmp-gt a 8) (idie "extern by-value struct return >8 bytes not supported by interp"))
                       (memzero slot a)
                       (mem-store slot val a)
                       (vpush ops spc slot))  ; box extern agg return
@@ -2392,12 +2372,12 @@
                                   (store! k (isub (load k) 1)))))
                       (let [fpv (vpop ops spc)
                             fi (isub fpv (fnptr-base))]
-                        (if (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
-                            (do (idie "call-ptr: not a Coil function pointer (real C addresses unsupported)") 0)
-                            0)
+                        (when (or (icmp-lt fi 0) (icmp-ge fi (al-len [BFunc] (load (field cx bfuncs)))))
+                              (idie "call-ptr: not a Coil function pointer (real C addresses unsupported)")
+                              0)
                         (let [crp (alloc-stack Type)]
                           (store! crp (load (field (ial-at [BFunc] (field cx bfuncs) fi) retty)))
-                          (let [rb (if (ty-is-agg crp) (frame-alloc framemem memoffc (isize-of cx crp) 16) 0)]
+                          (let [rb (when (ty-is-agg crp) (frame-alloc framemem memoffc (isize-of cx crp) 16))]
                             (vpush ops spc (vm-exec cx fi (cast (ptr i64) argbuf) a rb))))))  ; CALLPTR
                       (do (idie "VM: bad opcode") 0))))))
     (interp.free (cast (ptr i8) locals))

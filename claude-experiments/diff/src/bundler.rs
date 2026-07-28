@@ -3,10 +3,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use oxc_resolver::{ResolveError, ResolveOptions, Resolver, SideEffects, TsconfigDiscovery};
 use oxc_sourcemap::SourceMapBuilder;
+
+use crate::source_map::{LineTrack, MapOrigin, MapToken, ModuleSourceMap};
+#[allow(unused_imports)]
+use crate::source_map::ColumnEdit;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -85,6 +89,11 @@ struct ModuleState {
     uses_dirname: bool,
     /// Module-worker entries: `(placeholder_key, resolved_entry_path)`.
     workers: Vec<(String, PathBuf)>,
+    /// The module's REAL source map over `code`, as the Oxc printer emitted it.
+    /// `None` unless the build asked for source maps, and `None` for a module
+    /// whose code was synthesized rather than printed from an AST — those regions
+    /// stay honestly UNMAPPED. See [`crate::source_map`].
+    map: Option<ModuleSourceMap>,
 }
 
 struct LoadedModule {
@@ -107,6 +116,8 @@ struct LoadedModule {
     uses_import_meta: bool,
     uses_cjs_globals: bool,
     uses_dirname: bool,
+    /// The module's REAL source map over `code`; see [`ModuleState::map`].
+    map: Option<ModuleSourceMap>,
     /// Module-worker entries this module creates: `(placeholder_key,
     /// resolved_entry_path)`. Emitted as self-contained bundles under
     /// `assets/`; the key ties the code placeholder to the emitted file.
@@ -191,6 +202,9 @@ struct ResolutionCache {
     /// rewrite files in. Consulted before the relative-path fast path, which would
     /// otherwise answer with the file the field replaces.
     browser_field: Arc<BrowserFieldMap>,
+    /// Package names a SERVER graph must not bundle — Next's
+    /// `serverExternalPackages`. See [`ResolutionCache::is_external_package`].
+    external_packages: Arc<Vec<String>>,
 }
 
 /// The module id every `"browser": { "…": false }` entry resolves to. A single
@@ -379,8 +393,10 @@ impl ResolutionCache {
         jsx_extensions: crate::parser::JsxExtensions,
         jsx: crate::transform::JsxConfig,
         honors_browser_field: bool,
+        external_packages: Vec<String>,
     ) -> Self {
         Self {
+            external_packages: Arc::new(external_packages),
             browser_field: Arc::new(BrowserFieldMap::new(honors_browser_field)),
             directories: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             aliases: Arc::new(aliases),
@@ -397,6 +413,27 @@ impl ResolutionCache {
             jsx_extensions,
             jsx: Arc::new(jsx),
         }
+    }
+
+    /// Whether `specifier` names a package the build was told to leave OUT of a server
+    /// bundle (Next's `serverExternalPackages`, and its older
+    /// `experimental.serverComponentsExternalPackages` spelling).
+    ///
+    /// A package lands on that list when bundling it is wrong or impossible: it loads
+    /// native addons, `require`s something optional that may not be installed, or reads
+    /// files relative to its own location. cal.com lists eight, among them `rest-facade`
+    /// — whose `require('superagent-proxy')` sits behind an `if (options.proxy)` and
+    /// resolves to a package that is deliberately not installed. Bundling it turns a
+    /// branch the app never takes into a fatal build error.
+    ///
+    /// Subpaths count: listing `jose` also externalizes `jose/errors`, matching Next.
+    fn is_external_package(&self, specifier: &str) -> bool {
+        self.external_packages.iter().any(|package| {
+            specifier == package
+                || (specifier.len() > package.len()
+                    && specifier.starts_with(package.as_str())
+                    && specifier.as_bytes()[package.len()] == b'/')
+        })
     }
 
     /// The source of a build-generated virtual module for this id, if one is
@@ -1119,6 +1156,30 @@ pub struct DirectReachability {
     reachable_count: usize,
 }
 
+/// The whole-graph derivation every emit performs before it renders a single chunk:
+/// which modules survive export-level dead-module elimination, the dense order that
+/// fixes every runtime id, and the chunk partition each module lands in.
+///
+/// Deriving it walks the entire graph — on cal.com's 18 MB client graph,
+/// `live_modules` is ~12 ms and `chunk_plan` ~25 ms — and every byte a later HMR
+/// micro-chunk emits has to agree with it. Both facts point the same way: derive it
+/// once, in the emit that produced the bundle the browser and the dev server's Node
+/// processes are actually running, and reuse it verbatim. See [`Bundler::emit_plan`].
+struct EmitPlan {
+    /// Live modules in emit order. A module's index here IS its runtime id.
+    reachable_dense: Vec<DenseModuleId>,
+    /// The same set, for membership tests.
+    allowed: HashSet<DenseModuleId>,
+    /// dense id -> runtime id, or `None` for a module that is not live.
+    runtime_ids: Vec<Option<usize>>,
+    /// dense id -> the chunk file whose bytes carry that module's factory. A module
+    /// absent here lives in the entry chunk.
+    chunk_of: HashMap<DenseModuleId, String>,
+    /// dense id -> `"./chunk.js"` for each dynamic-import root, which is how a
+    /// render rewrites `import()` targets.
+    chunk_names: HashMap<DenseModuleId, String>,
+}
+
 pub struct Bundler {
     entry: DenseModuleId,
     ids: Vec<SharedModuleId>,
@@ -1135,10 +1196,21 @@ pub struct Bundler {
     /// across incremental re-emits within one bundler, so a leaf edit re-renders
     /// only the chunk that changed and reuses every other chunk's bytes.
     render_cache: Mutex<RenderCache>,
+    /// The whole-graph plan each entry chunk's most recent emit derived, keyed by
+    /// entry chunk file name (interior-mutable so emit stays `&self`, like
+    /// `render_cache`). Read by the dev server's HMR micro-chunk path, which must
+    /// agree with the emitted bundle rather than with a freshly re-derived one.
+    /// See [`EmitPlan`].
+    emit_plans: Mutex<HashMap<String, Arc<EmitPlan>>>,
     /// The build configuration this bundler was constructed with, kept so a
     /// module-worker entry can be bundled with the SAME config as a nested,
     /// self-contained build at emit time.
     config: BuildConfig,
+    /// The directory every emitted source-map `sources` label is relative to,
+    /// resolved once per build (see [`Self::map_source_root`]). It must be the same
+    /// answer for every chunk — a `sources` URL is a module's identity across the
+    /// whole build — so it is computed once and cached, never per map.
+    map_root: OnceLock<Option<PathBuf>>,
 }
 
 impl Bundler {
@@ -1201,6 +1273,7 @@ impl Bundler {
                 // Same condition as `resolve_options`' `alias_fields`: only a
                 // browser build applies the `browser` field.
                 config.target == Target::Client,
+                config.server_external_packages.clone(),
             ),
             frontend_pool: ThreadPoolBuilder::new()
                 .num_threads(frontend_threads)
@@ -1212,6 +1285,8 @@ impl Bundler {
             hmr: config.hmr,
             config: config.clone(),
             render_cache: Mutex::new(RenderCache::default()),
+            emit_plans: Mutex::new(HashMap::new()),
+            map_root: OnceLock::new(),
         };
         bundler.entry = bundler.intern(entry_id.clone());
 
@@ -1598,6 +1673,21 @@ impl Bundler {
         output: &Path,
         options: EmitOptions,
     ) -> Result<EmitStats, String> {
+        // A truthful source map can only come from the per-module maps the
+        // TRANSFORM produced, and those are produced only when the bundler was
+        // built with `BuildConfig::source_maps`. Emitting maps from a bundler that
+        // was not is impossible to do honestly, so it is refused here — loudly and
+        // with the fix named — instead of falling back to positions nobody
+        // measured.
+        if options.source_map && !self.config.source_maps {
+            return Err(format!(
+                "cannot write source maps for {}: this bundler was built without \
+                 `BuildConfig::source_maps`, so no module carries the Oxc printer's real \
+                 positions. Set `source_maps: true` in the BuildConfig used to discover the \
+                 graph (the CLI does this when `--sourcemap` is passed).",
+                output.display()
+            ));
+        }
         let parent = output
             .parent()
             .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
@@ -1612,14 +1702,20 @@ impl Bundler {
         // emit, so a reachable-but-unused `sideEffects:false` module (and its
         // now-orphaned `node:` requires) never reaches the output. Deterministic,
         // so incremental and full builds emit byte-identical bytes.
+        let live_stage = crate::build_profile::stage("emit/live-modules");
         let reachable = self.live_modules(reachable);
+        drop(live_stage);
         let reachable_dense = reachable
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
             .collect::<Vec<_>>();
         let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        let assets_stage = crate::build_profile::stage("emit/assets");
         self.emit_assets(&allowed, parent, &mut stats.written)?;
+        drop(assets_stage);
+        let css_stage = crate::build_profile::stage("emit/css");
         self.emit_css(&allowed, output, &mut stats.written)?;
+        drop(css_stage);
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, &dense_id) in reachable_dense.iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
@@ -1637,7 +1733,17 @@ impl Bundler {
         // membership, file names and load order all come from here, so the files
         // on disk and the `import()` references rewritten into them agree by
         // construction.
+        let plan_stage = crate::build_profile::stage("emit/chunk-plan");
         let plans = self.chunk_plan(&allowed, entry_name)?;
+        drop(plan_stage);
+        // Publish what this emit derived. A later HMR micro-chunk for this entry
+        // reuses it verbatim rather than re-deriving from a graph that has since
+        // moved on, which is both ~37 ms cheaper per micro-chunk and the only way
+        // its runtime ids can match the bundle these bytes are about to become.
+        self.record_emit_plan(
+            entry_name,
+            Arc::new(self.build_emit_plan(reachable_dense.clone(), allowed.clone(), &plans)),
+        )?;
         let chunk_names = Self::chunk_names(&plans);
         // The scope-hoisted flat render concatenates a chunk's modules into one
         // scope, which is only sound when the chunk carries every module its
@@ -1766,10 +1872,11 @@ impl Bundler {
         };
         // Honest-format guards: refuse (naming the module and the way out)
         // rather than emit output Node rejects at parse. `import.meta` is a
-        // syntax error anywhere in a CommonJS file; a top-level `await` is only
-        // representable when the module's statements stay at the top level of an
-        // ESM chunk (i.e. the single-chunk scope-hoisted output, and never under
-        // the dev registry runtime).
+        // syntax error anywhere in a CommonJS file, and a top-level `await` has
+        // no CommonJS spelling either — a CJS module body is synchronous, so
+        // there is nothing to lower it to. In ESM output (production AND dev/HMR)
+        // it is representable: the module renders as an `async` factory and the
+        // registry's `__pending` table makes every importer wait on it.
         for &dense in &reachable_dense {
             let Some(module) = self.modules[dense].as_ref() else {
                 continue;
@@ -1781,29 +1888,22 @@ impl Bundler {
                     self.ids[dense]
                 ));
             }
-            if module.uses_top_level_await {
-                if !options.format.is_esm() {
-                    return Err(format!(
-                        "top-level await in {} cannot be represented in CommonJS output; \
-                         bundle with `--format esm`",
-                        self.ids[dense]
-                    ));
-                }
-                if options.hmr {
-                    return Err(format!(
-                        "top-level await in {} is not supported in a dev (HMR) build: a hot \
-                         update re-runs a module factory synchronously and would apply the \
-                         update before the module's own `await` had settled",
-                        self.ids[dense]
-                    ));
-                }
+            if module.uses_top_level_await && !options.format.is_esm() {
+                return Err(format!(
+                    "top-level await in {} cannot be represented in CommonJS output; \
+                     bundle with `--format esm`",
+                    self.ids[dense]
+                ));
             }
         }
         // Which modules must render as `async` factories. Empty (and free) unless
         // some reachable module actually top-level-`await`s; when one does, the
         // property propagates up every static import edge, exactly as an ES
         // module's "async evaluation" does.
+        let async_stage = crate::build_profile::stage("emit/async-closure");
         let async_modules = self.async_module_closure(&reachable_dense, &runtime_ids)?;
+        drop(async_stage);
+        let split_stage = crate::build_profile::stage("emit/render-split-chunks");
         for plan in &plans {
             let chunk_path = parent.join(&plan.file_name);
             let prerequisites = plan
@@ -1832,6 +1932,8 @@ impl Bundler {
             let rendered = substitute_workers(rendered);
             self.write_rendered(rendered, &chunk_path, options, &mut stats.written)?;
         }
+        drop(split_stage);
+        let main_stage = crate::build_profile::stage("emit/render-main-chunk");
         let rendered = self.render_chunk_cached(
             &main_modules,
             &[self.entry],
@@ -1852,6 +1954,7 @@ impl Bundler {
         )?;
         let rendered = substitute_workers(rendered);
         self.write_rendered(rendered, output, options, &mut stats.written)?;
+        drop(main_stage);
         self.evict_render_cache(&live_keys);
         Ok(stats)
     }
@@ -2014,6 +2117,12 @@ impl Bundler {
             format,
             hmr,
         )?;
+        // The readable mappings are what BOTH output shapes' maps are built from
+        // (a minified chunk's map is composed from them), so this is the one place
+        // to prove they describe the bytes that were actually rendered.
+        if source_map {
+            self.validate_chunk_mappings(&bundle.code, &bundle.mappings, chunk_name)?;
+        }
         // Whitespace/syntax minification of the FINISHED chunk. The chunk's `code`
         // is already clean, valid JS (markers were consumed during render; it
         // passes `node --check` and runs in-browser), so a final per-chunk Oxc
@@ -2147,6 +2256,7 @@ impl Bundler {
                     for (specifier, target, demand) in &module.dependencies {
                         specifier.hash(&mut hasher);
                         demand.dynamic.hash(&mut hasher);
+                        demand.eager.hash(&mut hasher);
                         demand.all.hash(&mut hasher);
                         demand.names.hash(&mut hasher);
                         target.hash(&mut hasher);
@@ -2188,7 +2298,7 @@ impl Bundler {
                 self.modules[*source]
                     .iter()
                     .flat_map(|module| module.dependencies.iter())
-                    .filter(|(_, _, demand)| demand.dynamic)
+                    .filter(|(_, _, demand)| demand.deferred())
                     .map(|(_, target, _)| *target)
             })
             .filter(|target| !main_set.contains(target))
@@ -2326,7 +2436,7 @@ impl Bundler {
                     continue;
                 };
                 for (_, target, demand) in &module.dependencies {
-                    if demand.dynamic || !allowed.contains(target) {
+                    if demand.deferred() || !allowed.contains(target) {
                         continue;
                     }
                     // A target in the main chunk needs no prerequisite: the main
@@ -2495,10 +2605,85 @@ impl Bundler {
         Ok(crate::rsc::ClientReferencesManifest { entries })
     }
 
+    /// The whole-graph derivation an emit performs before it renders any chunk,
+    /// memoized per entry chunk. See [`EmitPlan`].
+    ///
+    /// The first call derives it; every later call for the same entry reuses it,
+    /// including across incremental rebuilds. That reuse is not just an
+    /// optimization, it is the correctness condition for a hot update: a
+    /// micro-chunk has to bind against the runtime the browser and the dev server's
+    /// Node processes have ALREADY LOADED, and that runtime came from the last full
+    /// emit. Re-deriving reads the CURRENT graph, and an edit that changes which
+    /// exports are live changes the surviving module set — which renumbers every
+    /// runtime id after it, so the micro-chunk would register its factories under
+    /// ids the loaded runtime does not know.
+    ///
+    /// A change that really does re-partition the graph (a module added or removed
+    /// from the reachable set) cannot be hot-patched at all: the dev server detects
+    /// it as `graph_changed`, does a full rebuild, and re-emits — and that emit
+    /// replaces this plan through [`Self::record_emit_plan`].
+    fn emit_plan(&self, reachable: &BTreeSet<ModuleId>, entry_file: &str) -> Result<Arc<EmitPlan>, String> {
+        if let Some(plan) = self
+            .emit_plans
+            .lock()
+            .map_err(|_| "emit plan cache poisoned".to_string())?
+            .get(entry_file)
+        {
+            return Ok(Arc::clone(plan));
+        }
+        let live = self.live_modules(reachable);
+        let reachable_dense = live
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        let plans = self.chunk_plan(&allowed, entry_file)?;
+        let plan = Arc::new(self.build_emit_plan(reachable_dense, allowed, &plans));
+        self.record_emit_plan(entry_file, Arc::clone(&plan))?;
+        Ok(plan)
+    }
+
+    /// Assemble an [`EmitPlan`] from the pieces an emit already computed, so the
+    /// stored plan is literally the one that rendered the bundle now on disk.
+    fn build_emit_plan(
+        &self,
+        reachable_dense: Vec<DenseModuleId>,
+        allowed: HashSet<DenseModuleId>,
+        plans: &[ChunkPlan],
+    ) -> EmitPlan {
+        let mut runtime_ids = vec![None; self.ids.len()];
+        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
+            runtime_ids[dense] = Some(runtime_id);
+        }
+        let mut chunk_of: HashMap<DenseModuleId, String> = HashMap::new();
+        for plan in plans {
+            for &member in &plan.members {
+                chunk_of.insert(member, plan.file_name.clone());
+            }
+        }
+        EmitPlan {
+            chunk_names: Self::chunk_names(plans),
+            reachable_dense,
+            allowed,
+            runtime_ids,
+            chunk_of,
+        }
+    }
+
+    /// Publish the plan an emit just used as the one every later HMR micro-chunk
+    /// for that entry must agree with.
+    fn record_emit_plan(&self, entry_file: &str, plan: Arc<EmitPlan>) -> Result<(), String> {
+        self.emit_plans
+            .lock()
+            .map_err(|_| "emit plan cache poisoned".to_string())?
+            .insert(entry_file.to_string(), plan);
+        Ok(())
+    }
+
     /// DEV-ONLY: for each changed module id, its stable runtime id and the chunk
     /// file that (re-)registers its factory, so the dev server can push a targeted
-    /// HMR update. Reproduces [`Self::emit_with_options`]'s runtime-id and chunk
-    /// assignment exactly, so the ids/chunks match the bytes just emitted. A module
+    /// HMR update. Reads [`Self::emit_with_options`]'s own runtime-id and chunk
+    /// assignment, so the ids/chunks match the bytes actually emitted. A module
     /// not in the live set (e.g. tree-shaken away) is skipped.
     pub fn hmr_locate(
         &self,
@@ -2506,38 +2691,23 @@ impl Bundler {
         changed: &BTreeSet<ModuleId>,
         entry_file: &str,
     ) -> Result<Vec<HmrLocation>, String> {
-        let reachable = self.live_modules(reachable);
-        let reachable_dense = reachable
-            .iter()
-            .filter_map(|id| self.indices.get(id.as_str()).copied())
-            .collect::<Vec<_>>();
-        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
-        let mut runtime_ids = vec![None; self.ids.len()];
-        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
-            runtime_ids[dense] = Some(runtime_id);
-        }
         // The same partition emit used, so the chunk a module is reported in is
-        // the chunk whose bytes actually carry its factory. Membership is now
+        // the chunk whose bytes actually carry its factory. Membership is
         // disjoint, so this is a plain lookup rather than a preference order: a
         // module is in exactly one plan chunk, or in the entry chunk.
-        let plans = self.chunk_plan(&allowed, entry_file)?;
-        let mut chunk_of: HashMap<DenseModuleId, &str> = HashMap::new();
-        for plan in &plans {
-            for &member in &plan.members {
-                chunk_of.insert(member, plan.file_name.as_str());
-            }
-        }
+        let plan = self.emit_plan(reachable, entry_file)?;
         let mut located = Vec::new();
         for module_id in changed {
             let Some(&dense) = self.indices.get(module_id.as_str()) else {
                 continue;
             };
-            let Some(runtime_id) = runtime_ids[dense] else {
+            let Some(runtime_id) = plan.runtime_ids[dense] else {
                 continue;
             };
-            let chunk_file = chunk_of
+            let chunk_file = plan
+                .chunk_of
                 .get(&dense)
-                .map_or_else(|| entry_file.to_string(), |file| (*file).to_string());
+                .map_or_else(|| entry_file.to_string(), Clone::clone);
             located.push(HmrLocation {
                 module_id: module_id.to_string(),
                 runtime_id,
@@ -2557,56 +2727,99 @@ impl Bundler {
     /// ids already loaded from the entry chunk. `roots` is empty, so the chunk ends in
     /// `return __runtime;` and only REGISTERS (never re-evaluates) — the browser then
     /// drives the swap through `hmrApply`. Returns `None` if no changed module is live.
-    pub fn render_hmr_chunk(
+    ///
+    /// The chunk is WRITTEN here rather than returned as text, because it needs the
+    /// same source-map sidecar every other emitted chunk gets: this is the code the
+    /// developer is editing right now, so a hot update that lands in the browser
+    /// with no map — which is what happened before — is the most user-visible way
+    /// for a stack trace to become unreadable. `path` names the chunk file; the map
+    /// goes beside it under the shared [`Self::source_map_sidecar`] naming.
+    ///
+    /// `format` MUST be the format the graph's own emit used
+    /// ([`ModuleFormat::BrowserEsm`] for the client, [`ModuleFormat::Esm`] for a Node
+    /// server graph). It is not cosmetic: a module that references `__dirname` /
+    /// `__filename` renders with BROWSER stubs (`"/index.js"`, `"/"`) under
+    /// `BrowserEsm` and binds the Node ESM entry's real values under `Esm`, so
+    /// rendering a server micro-chunk as browser output would silently swap a server
+    /// module's file paths for stubs the moment it was hot-updated.
+    pub fn write_hmr_chunk(
         &self,
         reachable: &BTreeSet<ModuleId>,
         changed: &BTreeSet<ModuleId>,
         entry_file: &str,
         options: EmitOptions,
-    ) -> Result<Option<String>, String> {
-        let reachable = self.live_modules(reachable);
-        let reachable_dense = reachable
-            .iter()
-            .filter_map(|id| self.indices.get(id.as_str()).copied())
-            .collect::<Vec<_>>();
-        let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
-        let mut runtime_ids = vec![None; self.ids.len()];
-        for (runtime_id, &dense) in reachable_dense.iter().enumerate() {
-            runtime_ids[dense] = Some(runtime_id);
+        format: ModuleFormat,
+        path: &Path,
+    ) -> Result<bool, String> {
+        let Some(rendered) =
+            self.render_hmr_chunk(reachable, changed, entry_file, options, format)?
+        else {
+            return Ok(false);
+        };
+        let sidecar = if options.source_map {
+            Some(self.source_map_sidecar(&rendered, path)?)
+        } else {
+            None
+        };
+        let mut code = rendered.code;
+        if let Some((map_path, contents, comment)) = sidecar {
+            // Written BEFORE the chunk: the browser fetches the map only after it has
+            // the chunk, so this order can never expose a `sourceMappingURL` whose
+            // target is not on disk yet.
+            std::fs::write(&map_path, contents.as_bytes()).map_err(|error| {
+                format!("cannot write hmr source map {}: {error}", map_path.display())
+            })?;
+            code.push_str(&comment);
         }
+        std::fs::write(path, code.as_bytes())
+            .map_err(|error| format!("cannot write hmr chunk {}: {error}", path.display()))?;
+        Ok(true)
+    }
+
+    /// Render the HMR micro-chunk. See [`Self::write_hmr_chunk`], which is what the
+    /// dev server calls — this returns the un-written bundle (code + its real
+    /// per-module mappings) so the caller can attach the map sidecar.
+    fn render_hmr_chunk(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        changed: &BTreeSet<ModuleId>,
+        entry_file: &str,
+        options: EmitOptions,
+        format: ModuleFormat,
+    ) -> Result<Option<RenderedBundle>, String> {
+        let plan = self.emit_plan(reachable, entry_file)?;
+        let reachable_dense = &plan.reachable_dense;
+        let runtime_ids = &plan.runtime_ids;
         // Only live modules can be rendered; a changed-but-tree-shaken module is
         // dropped (the caller's `hmr_locate` likewise skips it).
         let changed_dense = changed
             .iter()
             .filter_map(|id| self.indices.get(id.as_str()).copied())
-            .filter(|dense| allowed.contains(dense))
+            .filter(|dense| plan.allowed.contains(dense))
             .collect::<Vec<_>>();
         if changed_dense.is_empty() {
             return Ok(None);
         }
-        // Reconstruct the exact render context the live emit used (same ids/demands/
-        // chunk names), so the micro-chunk is byte-compatible with the loaded runtime.
-        let global_demands = self.export_demands(&reachable_dense);
-        let plans = self.chunk_plan(&allowed, entry_file)?;
-        let chunk_names = Self::chunk_names(&plans);
-        // Derived from the FULL reachable graph, exactly as the live emit did, so a
-        // re-rendered module keeps the same factory shape (`async` or not) and the
-        // same awaited import sites as the runtime already loaded expects.
-        let async_modules = self.async_module_closure(&reachable_dense, &runtime_ids)?;
+        // Export demand and the async-factory closure are re-derived from the CURRENT
+        // graph rather than taken from the plan: both are content-derived, and the
+        // module being hot-updated is exactly the module whose content just changed.
+        // They are also cheap (~2 ms each on cal.com) next to the plan's ~37 ms.
+        let global_demands = self.export_demands(reachable_dense);
+        let async_modules = self.async_module_closure(reachable_dense, runtime_ids)?;
         let bundle = self.render_best(
             &changed_dense,
             &[], // no roots -> the tail is `return __runtime;` (register-only)
-            &chunk_names,
-            &runtime_ids,
+            &plan.chunk_names,
+            runtime_ids,
             &global_demands,
             &[],   // no prerequisite chunk loads
             false, // not the main chunk (no runtime bootstrap)
             false, // registry format, never scope-hoisted flat
             &async_modules,
-            ModuleFormat::BrowserEsm,
+            format,
             options.hmr,
         )?;
-        Ok(Some(bundle.code))
+        Ok(Some(bundle))
     }
 
     /// Copies every content-hashed asset referenced by a reachable module into
@@ -2663,6 +2876,7 @@ impl Bundler {
                 // Variant names are content-hashed via `public_name`, so an
                 // already-written variant needs no re-encode.
                 if let Some(widths) = &asset.image_variants {
+                    let _stage = crate::build_profile::stage("emit/assets-image-variants");
                     let decoded = image::open(&asset.source).map_err(|error| {
                         format!("cannot decode image {}: {error}", asset.source.display())
                     })?;
@@ -2712,8 +2926,13 @@ impl Bundler {
         out_root: &Path,
     ) -> Result<String, String> {
         let scan_root = tailwind_scan_root(css_path, css);
+        let candidates_stage = crate::build_profile::stage("css/tailwind-candidate-scan");
         let candidates = self.tailwind_candidates(&scan_root, out_root, css)?;
+        drop(candidates_stage);
+        let theme_stage = crate::build_profile::stage("css/tailwind-app-theme");
         let app_theme = app_tailwind_theme_full(&scan_root, css, css_path);
+        drop(theme_stage);
+        let _compile_stage = crate::build_profile::stage("css/tailwind-compile");
         match crate::tailwind::native_gap(css, app_theme.as_deref()) {
             Some(gap) => {
                 let sheet = crate::tailwind_delegate::compile(css_path, css, &candidates, &gap)?;
@@ -2770,19 +2989,36 @@ impl Bundler {
             .flat_map(|pattern| expand_braces(pattern))
             .map(|pattern| path_segments(Path::new(&pattern)))
             .collect();
+        let read_stage = crate::build_profile::stage("css/tailwind-read-sources");
         let mut sources = Vec::new();
         collect_scan_sources(scan_root, &mut sources, &skip);
         for pattern in &included {
             collect_glob_sources(pattern, &mut sources, &skip);
         }
+        drop(read_stage);
+        let scan_stage = crate::build_profile::stage("css/tailwind-scan-candidates");
         let mut candidates = BTreeSet::new();
         crate::tailwind::scan_class_candidates_multi(&sources, &mut candidates);
+        drop(scan_stage);
         Ok(candidates)
     }
 
     /// Extracts the stylesheet: concatenates every reachable global CSS module's
     /// text in module execution order and writes it beside the bundle as
     /// `<output_stem>.css`. Nothing is written when no CSS is imported.
+    ///
+    /// NO source map is emitted for the stylesheet, and this is deliberate rather
+    /// than an oversight. `module.css` is a bare `String` by the time it reaches
+    /// here: every stage that produced it — the Sass/Less/Stylus compile, the
+    /// PostCSS pass (run with `map: false`), the CSS-modules class rename, the
+    /// nested-selector flattening, `@import` inlining, `url()` rewriting to hashed
+    /// asset names, and the native Tailwind compile (whose utilities are
+    /// SYNTHESIZED from scanned class candidates and have no author position at
+    /// all) — returns text and nothing else. Writing a map here would mean
+    /// inventing positions for text whose provenance this bundler does not have,
+    /// which is precisely what [`crate::source_map`] exists to prevent. Emitting a
+    /// real one means consuming each delegated tool's own map and composing the
+    /// chain, the CSS-side equivalent of the JS work in `crate::source_map`.
     fn emit_css(
         &self,
         allowed: &HashSet<DenseModuleId>,
@@ -2840,6 +3076,48 @@ impl Bundler {
         Ok(())
     }
 
+    /// The map file a chunk's map goes in, its contents, and the trailing comment
+    /// that points the debugger at it.
+    ///
+    /// Every writer of an emitted chunk goes through here — the production emit
+    /// and the dev HMR micro-chunk alike — so the sidecar's NAME and the URL in
+    /// the chunk are derived from one place and cannot drift into a
+    /// `sourceMappingURL` with no file behind it (which costs the browser a failed
+    /// fetch on every load and tells the developer nothing).
+    fn source_map_sidecar(
+        &self,
+        rendered: &RenderedBundle,
+        output: &Path,
+    ) -> Result<(PathBuf, String, String), String> {
+        let map_path = path_with_suffix(output, ".map");
+        let map_name = map_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("source-map path is not UTF-8: {}", map_path.display()))?
+            .to_owned();
+        let output_name = output
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("output path is not UTF-8: {}", output.display()))?;
+        // A minified chunk carries a pre-composed map (`map_json`, minified ->
+        // original); a readable chunk builds its map from the `ModuleMapping`
+        // list (readable-generated -> original) at write time. Both resolve a
+        // position in the emitted bytes to the correct original source.
+        // The `sourceMappingURL` comment is part of the emitted file, so the map
+        // has to cover the lines it adds too — otherwise those last lines carry no
+        // segment and a consumer resolves them back into the final module's code.
+        let comment = format!("\n//# sourceMappingURL={map_name}\n");
+        let contents = match &rendered.map_json {
+            Some(json) => json.clone(),
+            None => {
+                let mut emitted = rendered.code.clone();
+                emitted.push_str(&comment);
+                self.source_map(&rendered.mappings, output_name, &emitted)
+            }
+        };
+        Ok((map_path, contents, comment))
+    }
+
     fn write_rendered(
         &self,
         rendered: RenderedBundle,
@@ -2847,29 +3125,16 @@ impl Bundler {
         options: EmitOptions,
         written: &mut BTreeSet<PathBuf>,
     ) -> Result<(), String> {
+        let sidecar = if options.source_map {
+            Some(self.source_map_sidecar(&rendered, output)?)
+        } else {
+            None
+        };
         let mut code = rendered.code;
-        if options.source_map {
-            let map_path = path_with_suffix(output, ".map");
-            let map_name = map_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("source-map path is not UTF-8: {}", map_path.display()))?
-                .to_owned();
-            let output_name = output
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| format!("output path is not UTF-8: {}", output.display()))?;
-            // A minified chunk carries a pre-composed map (`map_json`, minified ->
-            // original); a readable chunk builds its map from the `ModuleMapping`
-            // list (readable-generated -> original) at write time. Both resolve a
-            // position in the emitted bytes to the correct original source.
-            let map_contents = match &rendered.map_json {
-                Some(json) => json.clone(),
-                None => self.source_map(&rendered.mappings, output_name),
-            };
-            write_if_changed(&map_path, map_contents.as_bytes())?;
+        if let Some((map_path, contents, comment)) = sidecar {
+            write_if_changed(&map_path, contents.as_bytes())?;
             written.insert(map_path);
-            code.push_str(&format!("\n//# sourceMappingURL={map_name}\n"));
+            code.push_str(&comment);
         }
         // Skip the write when the on-disk bytes already match, so an unchanged,
         // cache-reused chunk is not needlessly rewritten (atomic per-file, only
@@ -2895,7 +3160,7 @@ impl Bundler {
                     module
                         .dependencies
                         .iter()
-                        .filter(|(_, _, demand)| !demand.dynamic)
+                        .filter(|(_, _, demand)| !demand.deferred())
                         .map(|(_, target, _)| *target),
                 );
             }
@@ -3027,6 +3292,7 @@ impl Bundler {
             resolution_cache: &'bundler ResolutionCache,
             target: Target,
             hmr: bool,
+            source_maps: bool,
             indices: &'bundler HashMap<SharedModuleId, DenseModuleId>,
             modules: &'bundler Vec<Option<ModuleState>>,
             state: std::sync::Mutex<(HashSet<SharedModuleId>, LoadResults)>,
@@ -3050,6 +3316,7 @@ impl Bundler {
                     Path::new(path.as_ref()),
                     shared.target,
                     shared.hmr,
+                    shared.source_maps,
                 );
                 let mut next = Vec::new();
                 {
@@ -3084,6 +3351,7 @@ impl Bundler {
             resolution_cache: &self.resolution_cache,
             target: self.target,
             hmr: self.hmr,
+            source_maps: self.config.source_maps,
             indices: &self.indices,
             modules: &self.modules,
             state: std::sync::Mutex::new((initial.iter().cloned().collect(), Vec::new())),
@@ -3144,6 +3412,7 @@ impl Bundler {
                     uses_cjs_globals: loaded.uses_cjs_globals,
                     uses_dirname: loaded.uses_dirname,
                     workers: loaded.workers,
+                    map: loaded.map,
                 });
             }
         }
@@ -3204,6 +3473,7 @@ impl Bundler {
                 uses_cjs_globals: false,
                 uses_dirname: false,
                 workers: Vec::new(),
+                map: None,
             });
         }
         // A loader (query, stylesheet, or asset) may claim this id before it is
@@ -3272,6 +3542,7 @@ impl Bundler {
                 uses_cjs_globals: false,
                 uses_dirname: false,
                 workers,
+                map: None,
             });
         }
         let read_started = frontend_profile::start();
@@ -3317,6 +3588,16 @@ impl Bundler {
             self.resolution_cache.jsx_extensions,
             &project_config,
             language,
+            self.config.source_maps,
+        );
+        // The text the map's positions were measured against is `source`, which
+        // is the file on disk ONLY when neither a component compiler nor Vite's
+        // replacements rewrote it. When one did, the map says so, so nothing can
+        // read its positions as offsets into the file.
+        mark_rewritten_source(
+            &mut transformed,
+            component_code.is_some(),
+            matches!(source, Cow::Owned(_)),
         );
         diagnostics.extend(source_diagnostics(path, &transformed.diagnostics));
 
@@ -3326,20 +3607,39 @@ impl Bundler {
         // untouched. Runs on the lowered factory body, where `module`/`exports` and
         // the runtime-installed `module.hot` are in scope.
         if self.hmr {
-            transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, self.target);
-            if self.target == Target::Client
-                && crate::hmr::is_refresh_boundary(
+            let before_refresh = std::mem::take(&mut transformed.code);
+            let hot_rewritten = before_refresh.contains("import.meta.hot");
+            transformed.code = crate::hmr::rewrite_import_meta_hot(&before_refresh, self.target);
+            let mut preamble_lines = 0_u32;
+            if self.target == Target::Client {
+                let module_key = path.to_string_lossy();
+                // Namespace the Fast Refresh family ids by module BEFORE anything
+                // reads them (see `fast_refresh_preamble`). Every instrumented
+                // module needs this, boundary or not: the collisions that wedge the
+                // browser come from the registrations, not from the accept wiring.
+                if crate::hmr::needs_fast_refresh_preamble(&transformed.code) {
+                    let preamble = crate::hmr::fast_refresh_preamble(&module_key);
+                    preamble_lines =
+                        preamble.bytes().filter(|byte| *byte == b'\n').count() as u32;
+                    transformed.code.insert_str(0, &preamble);
+                }
+                if crate::hmr::is_refresh_boundary(
                     path,
                     &transformed.liveness.exports,
                     &source,
                     self.resolution_cache.jsx_extensions,
-                )
-            {
-                let module_key = path.to_string_lossy();
-                transformed
-                    .code
-                    .push_str(&crate::hmr::fast_refresh_footer(&module_key));
+                ) {
+                    transformed
+                        .code
+                        .push_str(&crate::hmr::fast_refresh_footer(&module_key));
+                }
             }
+            rebase_map_for_refresh(
+                &mut transformed.map,
+                &before_refresh,
+                preamble_lines,
+                hot_rewritten,
+            );
         }
 
         // A component's `<style>` `@import`s are graph edges of the component
@@ -3383,8 +3683,9 @@ impl Bundler {
             uses_top_level_await: transformed.uses_top_level_await,
             uses_import_meta: transformed.uses_import_meta,
             uses_cjs_globals: transformed.uses_cjs_globals,
-        uses_dirname: transformed.uses_dirname,
+            uses_dirname: transformed.uses_dirname,
             workers: resolve_worker_entries(&self.resolver, path, &transformed.workers)?,
+            map: transformed.map,
         })
     }
 
@@ -3486,7 +3787,7 @@ impl Bundler {
         while let Some(source) = pending.pop() {
             let module = self.modules[source].as_ref()?;
             for (_, target, demand) in &module.dependencies {
-                if !demand.dynamic
+                if !demand.deferred()
                     && reachable_set.contains(target)
                     && (demand.all || !demand.names.is_empty())
                     && included.insert(*target)
@@ -3533,14 +3834,23 @@ impl Bundler {
         let shaken = self.frontend_pool.install(|| {
             order
                 .par_iter()
-                .map(|&dense_index| -> Option<String> {
+                .map(|&dense_index| -> Option<(String, Option<LineTrack>)> {
                     let module = self.modules[dense_index].as_ref()?;
                     let flat = module.flat_module.as_ref()?;
-                    let mut module_code = shake_module_code(
+                    // Track lines only when this module actually has a real map to
+                    // carry; otherwise the bookkeeping would be pure cost.
+                    let wanted = module.map.is_some() && flat.map_lines.is_some();
+                    let (mut module_code, shake_lines) = shake_module_code(
                         &flat.code,
                         &demands[dense_index],
                         &module.pruned_imports,
+                        wanted,
                     );
+                    // shaken lines -> flat lines -> the module map's lines.
+                    let mut track = match (shake_lines, flat.map_lines.as_ref()) {
+                        (Some(shake), Some(flat_lines)) => Some(shake.compose(flat_lines)),
+                        _ => None,
+                    };
                     for (specifier, target, demand) in &module.dependencies {
                         if !demand.dynamic {
                             continue;
@@ -3558,29 +3868,51 @@ impl Bundler {
                         } else {
                             format!("Promise.resolve().then(()=>require({}))", quote(chunk))
                         };
-                        if module_code.contains(&import) {
-                            module_code = module_code.replace(&import, &replacement);
+                        // The specifier rewrite is an in-place edit of a real line
+                        // of user code, so it is recorded column-exactly: a token
+                        // inside the old specifier is dropped, one after it moves
+                        // by the difference in width.
+                        let (needle, present) = if module_code.contains(&import) {
+                            (import, true)
                         } else if module_code.contains(&lowered_import) {
-                            module_code = module_code.replace(&lowered_import, &replacement);
+                            (lowered_import, true)
                         } else {
+                            (String::new(), false)
+                        };
+                        if !present {
                             return None;
                         }
+                        module_code = match track.as_mut() {
+                            Some(track) => {
+                                let mut edits = LineTrack::identity(module_code.lines().count());
+                                let rewritten = crate::source_map::replace_tracked(
+                                    &module_code,
+                                    &needle,
+                                    &replacement,
+                                    &mut edits,
+                                )
+                                .unwrap_or_else(|| module_code.clone());
+                                *track = edits.compose(track);
+                                rewritten
+                            }
+                            None => module_code.replace(&needle, &replacement),
+                        };
                     }
-                    Some(module_code)
+                    Some((module_code, track))
                 })
                 .collect::<Vec<_>>()
         });
         let mut code = String::new();
         let mut mappings = Vec::with_capacity(order.len());
         let mut generated_line = 0_u32;
-        for (&dense_index, module_code) in order.iter().zip(&shaken) {
-            let module_code = module_code.as_ref()?;
+        for (&dense_index, shaken) in order.iter().zip(&shaken) {
+            let (module_code, track) = shaken.as_ref()?;
             if !module_code.is_empty() {
                 let generated_lines = module_code.lines().count() as u32;
                 mappings.push(ModuleMapping {
                     dense_index,
                     generated_line,
-                    generated_lines,
+                    tokens: self.project_module_tokens(dense_index, track.as_ref(), generated_line),
                 });
                 generated_line += generated_lines;
                 code.push_str(module_code);
@@ -3613,6 +3945,9 @@ impl Bundler {
             code.insert_str(0, BROWSER_GLOBALS_PRELUDE);
             for mapping in &mut mappings {
                 mapping.generated_line += 1;
+                for token in &mut mapping.tokens {
+                    token.generated_line += 1;
+                }
             }
         }
         Some(RenderedBundle {
@@ -3620,6 +3955,31 @@ impl Bundler {
             mappings,
             map_json: None,
         })
+    }
+
+    /// Moves one module's REAL map tokens onto the chunk's generated lines.
+    /// `track` says which line of the module map's text each line of the module's
+    /// emitted region came from (and what was rewritten inside it); everything it
+    /// could not account for contributes nothing, so those positions stay
+    /// UNMAPPED rather than being given a plausible origin.
+    fn project_module_tokens(
+        &self,
+        dense_index: DenseModuleId,
+        track: Option<&LineTrack>,
+        generated_line: u32,
+    ) -> Vec<MapToken> {
+        let Some(track) = track else {
+            return Vec::new();
+        };
+        let Some(map) = self.modules[dense_index]
+            .as_ref()
+            .and_then(|module| module.map.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut tokens = Vec::new();
+        track.project(map, generated_line, &mut tokens);
+        tokens
     }
 
     fn static_execution_order(
@@ -3642,7 +4002,7 @@ impl Bundler {
             states.insert(source, 1);
             let module = bundler.modules[source].as_ref()?;
             for (_, target, demand) in &module.dependencies {
-                if !demand.dynamic && allowed.contains(target) {
+                if !demand.deferred() && allowed.contains(target) {
                     visit(bundler, *target, allowed, states, order)?;
                 }
             }
@@ -3794,6 +4154,11 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                 // The rewrite preserves each marker and adds no line, so the shake
                 // (and the source map it feeds) sees exactly the same structure.
                 let is_async_module = async_modules.is_async(dense_index);
+                // Track lines only when this module has a real map to carry.
+                let mut track = module
+                    .map
+                    .as_ref()
+                    .map(|_| LineTrack::identity(module.code.lines().count()));
                 let mut lowered = Cow::Borrowed(module.code.as_str());
                 // `export * from "./x"` where `./x` was dropped by dead-module
                 // elimination. Its import STATEMENT is pruned above (the marker
@@ -3811,18 +4176,38 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                 for specifier in &dropped_targets {
                     let call = format!("__reExport(exports,require.esm({}));", quote(specifier));
                     if lowered.contains(&call) {
-                        lowered = Cow::Owned(lowered.replace(&call, ""));
+                        let rewritten = lowered.replace(&call, "");
+                        // Both rewrites here only touch bundler-synthesized request
+                        // lines and never move a line. Any line they DID change is
+                        // dropped from the map rather than assumed to still describe
+                        // the same text.
+                        if let Some(track) = track.as_mut() {
+                            track.invalidate_changed_lines(&lowered, &rewritten);
+                        }
+                        lowered = Cow::Owned(rewritten);
                     }
                 }
                 if is_async_module {
                     for (specifier, target, _) in &module.dependencies {
                         if runtime_ids[*target].is_some() && async_modules.is_async(*target) {
-                            lowered = Cow::Owned(await_async_imports(&lowered, specifier));
+                            let rewritten = await_async_imports(&lowered, specifier);
+                            if let Some(track) = track.as_mut() {
+                                track.invalidate_changed_lines(&lowered, &rewritten);
+                            }
+                            lowered = Cow::Owned(rewritten);
                         }
                     }
                 }
-                let code =
-                    shake_module_code(&lowered, &export_demands[dense_index], &pruned_imports);
+                let (code, shake_lines) = shake_module_code(
+                    &lowered,
+                    &export_demands[dense_index],
+                    &pruned_imports,
+                    track.is_some(),
+                );
+                let track = match (shake_lines, track) {
+                    (Some(shake), Some(track)) => Some(shake.compose(&track)),
+                    _ => None,
+                };
                 // `__dirname`/`__filename` in a BROWSER bundle. A Node bundle gets
                 // them from the emitted file's own location (see the ESM prelude);
                 // a browser has no such location, so — exactly as webpack does for
@@ -3875,6 +4260,7 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                     map_fragment,
                     chunk_fragment,
                     code.lines().count(),
+                    track,
                 ))
             })
             .collect::<Vec<_>>();
@@ -3942,11 +4328,18 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         let mut chunks = String::new();
         let mut mappings = Vec::with_capacity(fragments.len());
         let mut module_lines = 0_u32;
-        for (dense_index, module, map, chunk, generated_lines) in fragments {
+        for (dense_index, module, map, chunk, generated_lines, track) in fragments {
+            // `const __newModules={` shares its line with the first fragment, and
+            // each fragment opens with its factory header (`<id>:function(...){`)
+            // and puts the module's own first line on the next one — so
+            // `3 + header_lines + module_lines` is already the line the module's
+            // CODE starts on, which is where its tokens belong.
+            let region_line = 3 + header_lines + module_lines;
+            let _ = generated_lines;
             mappings.push(ModuleMapping {
                 dense_index,
-                generated_line: 3 + header_lines + module_lines,
-                generated_lines: generated_lines as u32,
+                generated_line: region_line,
+                tokens: self.project_module_tokens(dense_index, track.as_ref(), region_line),
             });
             module_lines += module.matches('\n').count() as u32;
             modules.push_str(&module);
@@ -3982,10 +4375,22 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         // With an async module in the build, a dynamically imported target may be
         // one; `import()` already yields a promise, so `require.dynamic` resolves
         // through `__requireAsync` and the awaited namespace is fully initialised.
+        // `__chunkQuery` (defined in the runtime prelude below) is the query the
+        // ENTRY chunk's own module URL carries, propagated to every chunk it
+        // dynamically imports. It is empty for a normal load; it matters when a
+        // host deliberately re-imports the entry under a fresh URL to get a FRESH
+        // module graph — which the react-server `serve` worker does
+        // (`import(entry + "?v=" + mtime)` after dropping the runtime globals). The
+        // registry lives on `globalThis`, so without propagating the query the new
+        // entry instance builds a new registry while every already-imported chunk
+        // stays in Node's ESM cache and never re-runs its `__register`, and the
+        // first `import()` of one of those chunks resolves instantly to a module
+        // that registered into the DISCARDED runtime — `__require` then throws
+        // "Module is not loaded: <id>".
         let require_dynamic_esm = if async_modules.any {
-            r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(()=>__requireAsync(chunk[1]));return __requireAsync(chunk[1]);};"#
+            r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]+__chunkQuery).then(()=>__requireAsync(chunk[1]));return __requireAsync(chunk[1]);};"#
         } else {
-            r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]).then(()=>__require(chunk[1]));return __require(chunk[1]);};"#
+            r#"require.dynamic=specifier=>{const chunk=__chunks[id][specifier];if(chunk===undefined)return require(specifier);if(chunk[0]!==null)return import(chunk[0]+__chunkQuery).then(()=>__require(chunk[1]));return __require(chunk[1]);};"#
         };
         let (require_dynamic, require_native) = match format {
             ModuleFormat::Esm => (
@@ -4004,21 +4409,50 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         // register-only guard; the ESM (Node) main chunk also starts a control
         // endpoint so the dev server hot-reloads the server in-process.
         let require_dynamic = if hmr && format.is_esm() {
-            crate::hmr::REQUIRE_DYNAMIC_ESM_HMR
+            if async_modules.any {
+                crate::hmr::REQUIRE_DYNAMIC_ESM_HMR_ASYNC
+            } else {
+                crate::hmr::REQUIRE_DYNAMIC_ESM_HMR
+            }
         } else {
             require_dynamic
         };
         let hot_install = if hmr { "module.hot=__makeHot(id);" } else { "" };
         // The entry-id declaration + HMR methods are emitted only in HMR builds
-        // (never in production `build-app` output).
+        // (never in production `build-app` output). `__hmrPending` is how the
+        // update paths in `RUNTIME_METHODS` reach the ASYNC-module bookkeeping:
+        // in a build with a top-level `await` it reads the real `__pending`
+        // table, and in one without it is a constant `undefined`, so a hot
+        // update stays exactly as synchronous as it was.
         let hmr_methods = if hmr {
-            format!("const __entryId={entry_runtime_id};{}", crate::hmr::RUNTIME_METHODS)
+            let pending_lookup = if async_modules.any {
+                "function __hmrPending(id){return __pending[id];}"
+            } else {
+                "function __hmrPending(){return undefined;}"
+            };
+            format!(
+                "const __entryId={entry_runtime_id};{pending_lookup}{}",
+                crate::hmr::RUNTIME_METHODS
+            )
         } else {
             String::new()
         };
         let runtime_return = if hmr {
+            // A chunk whose root is async returns `__runtime.requireAsync(...)`
+            // (see `require_entry`), so an HMR build with an async module must
+            // publish it alongside the update methods.
+            let require_async_export = if async_modules.any {
+                "requireAsync:__requireAsync,"
+            } else {
+                ""
+            };
+            // `register` is WRAPPED in an HMR build so newly loaded chunks invalidate
+            // the reverse-import index the update walk reads (see `RUNTIME_METHODS`).
+            // Every registration goes through this exported entry point — the main
+            // chunk's own bootstrap and every split chunk's tail alike — so the index
+            // can never be consulted stale.
             format!(
-                "const __exports={{register:__register,require:__require,replace:__replace,hmrApply:__hmrApply,serverInvalidate:__hmrServerInvalidate,bumpVersion:__bumpVersion,prune:__hmrPrune}};globalThis[{}]=__exports;return __exports;",
+                "const __exports={{register:(m,p,c)=>{{__hmrInvalidateImporterIndex();__register(m,p,c);}},require:__require,{require_async_export}replace:__replace,hmrApply:__hmrApply,serverInvalidate:__hmrServerInvalidate,bumpVersion:__bumpVersion,prune:__hmrPrune}};globalThis[{}]=__exports;return __exports;",
                 quote(crate::hmr::RUNTIME_GLOBAL)
             )
         } else if async_modules.any {
@@ -4115,11 +4549,21 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         } else {
             "require"
         };
+        // See `require_dynamic_esm`: the entry chunk's own query, re-attached to
+        // every chunk URL so one runtime instance only ever loads chunk instances
+        // that register into it. Empty (and therefore inert) unless the host
+        // imported the entry with a query. CommonJS output has no `import.meta`
+        // and no such protocol, so it declares nothing.
+        let chunk_query = if format.is_esm() {
+            "const __chunkQuery=(()=>{const __q=import.meta.url.indexOf(\"?\");return __q<0?\"\":import.meta.url.slice(__q);})();\n"
+        } else {
+            ""
+        };
         let tail = if is_main {
             format!(
                 r#"const __runtime=globalThis[{runtime_key}]??=(()=>{{
 const __modules=Object.create(null),__maps=Object.create(null),__chunks=Object.create(null),__cache=Object.create(null);
-const __exportStates=new WeakMap(),__esmNamespaces=new WeakSet(),__cjsNamespaces=new WeakMap(),__cjsInterops=new WeakMap(),__cjsOrigins=new WeakMap(),__idNamespaces=Object.create(null);
+{chunk_query}const __exportStates=new WeakMap(),__esmNamespaces=new WeakSet(),__cjsNamespaces=new WeakMap(),__cjsInterops=new WeakMap(),__cjsOrigins=new WeakMap(),__idNamespaces=Object.create(null);
 function __esmNamespace(){{const namespace=Object.create(null);Object.defineProperty(namespace,Symbol.toStringTag,{{value:"Module"}});__esmNamespaces.add(namespace);return namespace;}}
 function __seal(namespace){{const movable=Reflect.ownKeys(namespace).filter(key=>typeof key==="string"&&Object.getOwnPropertyDescriptor(namespace,key).configurable);const sorted=[...movable].sort();if(movable.some((key,index)=>key!==sorted[index])){{const descriptors={{}};for(const key of movable){{descriptors[key]=Object.getOwnPropertyDescriptor(namespace,key);delete namespace[key];}}for(const key of sorted)Object.defineProperty(namespace,key,descriptors[key]);}}for(const key of Reflect.ownKeys(namespace)){{const descriptor=Object.getOwnPropertyDescriptor(namespace,key);if(descriptor?.configurable)Object.defineProperty(namespace,key,{{configurable:false}});}}Object.preventExtensions(namespace);}}
 function __exportState(target){{let state=__exportStates.get(target);if(!state){{state={{explicit:new Set(),stars:new Map(),ambiguous:new Set()}};__exportStates.set(target,state);}}return state;}}
@@ -4129,13 +4573,30 @@ function __holdsProperties(value){{return value!==null&&value!==undefined&&(type
 function __origin(exports,specifier){{if(__holdsProperties(exports)&&!__cjsOrigins.has(exports))__cjsOrigins.set(exports,specifier);return exports;}}
 function __isESM(value){{if(!value||(typeof value!=="object"&&typeof value!=="function"))return false;if(__esmNamespaces.has(value)||__cjsInterops.has(value))return true;return Object.getPrototypeOf(value)===null&&value[Symbol.toStringTag]==="Module";}}
 function __syncCJS(namespace,value){{if(__holdsProperties(value))for(const key of Object.keys(value))if(key!=="default"&&!Object.prototype.hasOwnProperty.call(namespace,key))__export(namespace,key,()=>value[key]);return namespace;}}
+function __transpiledESM(value){{
+  if(!__holdsProperties(value)||!Object.prototype.hasOwnProperty.call(value,"default"))return false;
+  try{{return !!value.__esModule;}}catch{{return false;}}
+}}
 function __toESM(value){{
   if(__isESM(value))return value;
   const cached=__cjsNamespaces.get(value);
   if(cached)return __syncCJS(cached,value);
   const namespace=Object.create(null);
   Object.defineProperty(namespace,"__esModule",{{value:true}});
-  __export(namespace,"default",()=>value);
+  // The `__esModule` interop. A CommonJS module that BOTH stamps `__esModule` and owns
+  // a `default` property was compiled down from ESM (TypeScript / Babel / SWC output —
+  // which is most of npm), so its `default` IS the module's default export and
+  // `import X from` must bind that function, not the exports object wrapping it. Every
+  // other bundler does this (esbuild's `__toESM`, Rollup/Vite's `interopDefault`,
+  // webpack's `_interop_require_default`), and it is the whole reason the marker
+  // exists; without it `import CredentialsProvider from "next-auth/providers/
+  // credentials"` binds `{{__esModule:true,default:fn}}` and calling it throws
+  // "is not a function" — which is exactly how cal.com's next-auth config died.
+  //
+  // Without a `default` property the marker says nothing about what a default import
+  // should be, so the Node rule stands: the default export is `module.exports`.
+  if(__transpiledESM(value))__export(namespace,"default",()=>value.default);
+  else __export(namespace,"default",()=>value);
   __syncCJS(namespace,value);
   __cjsInterops.set(namespace,{{exports:value}});
   if(__holdsProperties(value))__cjsNamespaces.set(value,namespace);
@@ -4263,63 +4724,191 @@ const __newChunks={{{chunks}}};
         }
     }
 
-    /// The source map for a READABLE (un-minified) chunk: each [`ModuleMapping`]
-    /// covers a contiguous run of generated lines that came from one module, and
-    /// every generated line is mapped (at column 0) to the corresponding original
-    /// source line. Sources are emitted as project-relative `diffpack://` labels
-    /// (never an absolute path leak or a `..` traversal) with the real source text
-    /// inlined as `sourcesContent`.
-    fn source_map(&self, mappings: &[ModuleMapping], output_name: &str) -> String {
-        let root =
-            self.map_source_root(mappings.iter().map(|mapping| mapping.dense_index));
-        let labels = mappings
+    /// The source map for a READABLE (un-minified) chunk.
+    ///
+    /// Every token comes from the Oxc printer: the position it actually wrote in
+    /// the module's lowered text, moved onto the chunk's line by the render, and
+    /// the span of the AST node it printed. Nothing is inferred from a line
+    /// number.
+    ///
+    /// A generated line with no token — the runtime wrapper, the export footer,
+    /// the browser prelude, the CJS `exports=module.exports=...` preamble, the
+    /// factory headers, the registry literals, and any line a render rewrite could
+    /// not account for — is explicitly marked UNMAPPED, with a one-field segment
+    /// at its column 0. That marker is the whole mechanism, not a formality:
+    /// OMITTING a token does not make a position unmapped. Every consumer (Node's
+    /// `--enable-source-maps`, which is how `diffpack start` runs the server, and
+    /// DevTools) resolves a position to the last mapping at or before it in the
+    /// WHOLE file, ignoring line boundaries, so a line with no segments silently
+    /// inherits the previous line's origin — which is how a frame inside the
+    /// bundler's own `__require` came out named after an author identifier in an
+    /// author file. A one-field segment is the format's way of saying "from here
+    /// on, nothing", and it is what stops the bleed.
+    ///
+    /// Sources are project-relative `diffpack://` labels (never an absolute path
+    /// leak or a `..` traversal) whose inlined `sourcesContent` is the exact text
+    /// the positions were measured against, so a rewritten source is labelled as
+    /// one and cannot be read as the file on disk.
+    fn source_map(&self, mappings: &[ModuleMapping], output_name: &str, code: &str) -> String {
+        let root = self.map_source_root();
+        // Labels are owned here so they outlive the borrowing builder.
+        let labels: HashMap<DenseModuleId, String> = mappings
             .iter()
-            .map(|mapping| self.source_label(mapping.dense_index, &root))
-            .collect::<Vec<_>>();
+            .map(|mapping| {
+                let origin = self.modules[mapping.dense_index]
+                    .as_ref()
+                    .and_then(|module| module.map.as_ref())
+                    .map_or(MapOrigin::File, ModuleSourceMap::origin);
+                (
+                    mapping.dense_index,
+                    self.source_label(mapping.dense_index, root, origin),
+                )
+            })
+            .collect();
+        // Every token in the chunk, in generated order, each remembering which
+        // module it belongs to — so the walk below can visit the chunk's lines in
+        // order and see, for each one, whether anything maps it.
+        let mut ordered: Vec<(&MapToken, DenseModuleId)> = mappings
+            .iter()
+            .flat_map(|mapping| {
+                mapping
+                    .tokens
+                    .iter()
+                    .map(move |token| (token, mapping.dense_index))
+            })
+            .collect();
+        ordered.sort_by_key(|(token, _)| (token.generated_line, token.generated_column));
         let mut builder = SourceMapBuilder::default();
         builder.set_file(output_name);
-        for (mapping, label) in mappings.iter().zip(&labels) {
-            let module = self.modules[mapping.dense_index]
-                .as_ref()
-                .expect("rendered module must exist");
-            let source_id = builder.add_source_and_content(label.as_str(), module.source.as_ref());
-            let source_lines = module.source.lines().count().max(1) as u32;
-            for line in 0..mapping.generated_lines {
+        // A module joins `sources` the first time one of its tokens is emitted, so
+        // the map lists only the sources the emitted bytes really came from.
+        let mut source_ids: HashMap<DenseModuleId, u32> = HashMap::new();
+        let mut index = 0_usize;
+        for line in 0..line_count(code) {
+            let start = index;
+            while index < ordered.len() && ordered[index].0.generated_line == line {
+                index += 1;
+            }
+            // Whether this line ends up with any real mapping. Tokens can survive
+            // to here and still resolve into no module (a module dropped after its
+            // tokens were projected), and a line left with nothing on it is a line
+            // that inherits the previous line's origin — so the marker is decided
+            // on what was actually emitted, not on whether tokens were present.
+            let mut mapped = false;
+            for (token, dense) in &ordered[start..index] {
+                let Some(module) = self.modules[*dense].as_ref() else {
+                    continue;
+                };
+                let Some(map) = module.map.as_ref() else {
+                    continue;
+                };
+                let Some(label) = labels.get(dense) else {
+                    continue;
+                };
+                mapped = true;
+                let source_id = match source_ids.get(dense) {
+                    Some(id) => *id,
+                    None => {
+                        let id = builder
+                            .add_source_and_content(label.as_str(), map.source_text(&module.source));
+                        source_ids.insert(*dense, id);
+                        id
+                    }
+                };
+                let name = token
+                    .name
+                    .and_then(|index| map.names().get(index as usize))
+                    .filter(|name| is_identifier(name))
+                    .map(|name| builder.add_name(name.as_str()));
                 builder.add_token(
-                    mapping.generated_line + line,
-                    0,
-                    line.min(source_lines - 1),
-                    0,
+                    token.generated_line,
+                    token.generated_column,
+                    token.source_line,
+                    token.source_column,
                     Some(source_id),
-                    None,
+                    name,
                 );
+            }
+            if !mapped {
+                // Nothing on this line came from a module: say so, rather than let
+                // it inherit the last mapping before it. Nothing was emitted for
+                // the line, so the marker is still the line's first segment.
+                builder.add_token(line, 0, 0, 0, None, None);
             }
         }
         builder.into_sourcemap().to_json_string()
     }
 
+    /// Refuses a chunk whose readable mappings do not describe its bytes.
+    ///
+    /// Every token here claims "this exact generated position came from that exact
+    /// source position". A position that is not IN the emitted text — a line past
+    /// the end of the chunk, a column past the end of its line — cannot have come
+    /// from anywhere, so it is proof that some stage's bookkeeping drifted from the
+    /// text it was tracking. That is exactly the failure this whole path exists to
+    /// prevent, and it is silent in the emitted map (a consumer just resolves the
+    /// wrong thing), so it is checked here and fails the build naming the chunk
+    /// rather than shipping.
+    ///
+    /// Checked on the READABLE bytes, which is the one place both output shapes
+    /// pass through: a minified chunk's map is composed from these same tokens.
+    fn validate_chunk_mappings(
+        &self,
+        code: &str,
+        mappings: &[ModuleMapping],
+        chunk_name: &str,
+    ) -> Result<(), String> {
+        let lines: Vec<u32> = code.lines().map(crate::source_map::utf16_len).collect();
+        for mapping in mappings {
+            for token in &mapping.tokens {
+                let module = self.ids[mapping.dense_index].as_ref();
+                let Some(&width) = lines.get(token.generated_line as usize) else {
+                    return Err(format!(
+                        "source map for chunk `{chunk_name}` puts a token from `{module}` on \
+                         generated line {}, but the chunk has only {} lines",
+                        token.generated_line,
+                        lines.len()
+                    ));
+                };
+                if token.generated_column > width {
+                    return Err(format!(
+                        "source map for chunk `{chunk_name}` puts a token from `{module}` at \
+                         generated {}:{}, but that line is {width} columns wide",
+                        token.generated_line, token.generated_column
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Composes the two maps a minified chunk can honestly produce into one that
-    /// resolves a MINIFIED position back to the correct ORIGINAL source file+line:
+    /// resolves a MINIFIED position back to the correct ORIGINAL source position:
     ///
-    /// - `readable_mappings` — readable-generated line -> owning original module
-    ///   (the [`ModuleMapping`] runs [`Self::render_flat`]/[`Self::render_runtime`]
-    ///   already computed for the readable bytes; each module maps its generated
-    ///   lines to original source lines at column 0);
-    /// - `minified_map` — minified position -> readable-generated position (emitted
-    ///   by Oxc codegen when it re-prints the readable chunk minified).
+    /// - `readable_mappings` — the REAL readable-generated -> original tokens the
+    ///   render produced for each module region (see [`ModuleMapping::tokens`]);
+    /// - `minified_map` — minified position -> readable-generated position,
+    ///   emitted by Oxc codegen when it re-prints the readable chunk minified.
     ///
-    /// For each token in the minified map, its readable-generated line is resolved
-    /// (binary search over the sorted, non-overlapping readable ranges) to the
-    /// owning module and that module's original source line. A minified position
-    /// whose readable line falls in a synthetic bundler region (runtime wrapper,
-    /// export footer, browser prelude) with no owning module is left UNMAPPED — a
-    /// valid, honest gap — never given a fabricated wrong origin. Per-token
-    /// column/identifier fidelity is not claimed (the readable map is line-granular
-    /// at column 0), so the composed map stays honestly coarse rather than precise-
-    /// but-wrong.
+    /// For each token of the minified map, its readable position is resolved
+    /// against the readable tokens: the last readable token at or before it on the
+    /// SAME line is the construct the minifier was printing, and that token's
+    /// original file/line/column (and name) is what the minified position came
+    /// from.
     ///
-    /// A chunk whose minified map resolves into no original module at all is a hard
-    /// error naming the chunk, never a silently empty map.
+    /// A minified position with no readable token before it on its line resolved
+    /// into no module at all — a synthetic bundler region, or text a render rewrite
+    /// could not account for — and is written out as an explicit UNMAPPED
+    /// (one-field) segment, never given a fabricated origin and never merely
+    /// omitted. Omitting it would not mark it unmapped: a consumer resolves a
+    /// position to the last mapping at or before it in the whole file, so a skipped
+    /// token silently inherits the mapping of whatever author code the minifier
+    /// printed before it. Minified output is one long line of interleaved author
+    /// code and bundler runtime, so this is the only thing keeping a frame inside
+    /// `__require` from being reported as a line of somebody's component.
+    ///
+    /// A chunk whose minified map resolves into no original module at all is a
+    /// hard error naming the chunk, never a silently empty map.
     fn compose_source_map(
         &self,
         readable_mappings: &[ModuleMapping],
@@ -4327,149 +4916,326 @@ const __newChunks={{{chunks}}};
         output_name: &str,
         chunk_name: &str,
     ) -> Result<String, String> {
-        struct ReadableRange {
-            start: u32,
-            end: u32,
-            dense: DenseModuleId,
-            source_lines: u32,
-            label_index: usize,
-        }
-        let root =
-            self.map_source_root(readable_mappings.iter().map(|mapping| mapping.dense_index));
-        let labels = readable_mappings
+        let root = self.map_source_root();
+        // Labels are owned here so they outlive the borrowing builder.
+        let labels: HashMap<DenseModuleId, String> = readable_mappings
             .iter()
-            .map(|mapping| self.source_label(mapping.dense_index, &root))
-            .collect::<Vec<_>>();
-        // The readable ranges are emitted in increasing `generated_line` order and
-        // never overlap, so a binary search resolves a readable line to its module.
-        let mut ranges = readable_mappings
-            .iter()
-            .enumerate()
-            .map(|(label_index, mapping)| {
-                let source_lines = self.modules[mapping.dense_index]
+            .map(|mapping| {
+                let origin = self.modules[mapping.dense_index]
                     .as_ref()
-                    .map_or(1, |module| module.source.lines().count().max(1) as u32);
-                ReadableRange {
-                    start: mapping.generated_line,
-                    end: mapping.generated_line + mapping.generated_lines,
-                    dense: mapping.dense_index,
-                    source_lines,
-                    label_index,
-                }
+                    .and_then(|module| module.map.as_ref())
+                    .map_or(MapOrigin::File, ModuleSourceMap::origin);
+                (
+                    mapping.dense_index,
+                    self.source_label(mapping.dense_index, root, origin),
+                )
             })
-            .collect::<Vec<_>>();
-        ranges.sort_by_key(|range| range.start);
+            .collect();
+        // Every readable token in the chunk, sorted by generated position, each
+        // remembering which module it belongs to.
+        let mut readable: Vec<(MapToken, DenseModuleId)> = readable_mappings
+            .iter()
+            .flat_map(|mapping| {
+                mapping
+                    .tokens
+                    .iter()
+                    .map(move |token| (*token, mapping.dense_index))
+            })
+            .collect();
+        readable.sort_by_key(|(token, _)| (token.generated_line, token.generated_column));
 
         let mut builder = SourceMapBuilder::default();
         builder.set_file(output_name);
-        // A module gets a source id (and is added to `sources`) lazily, the first
-        // time a minified token actually resolves into it, so `sources` lists only
-        // the original modules the emitted bytes really came from.
         let mut source_ids: HashMap<DenseModuleId, u32> = HashMap::new();
+        // Byte offsets of each line of a module's source, built lazily the first
+        // time a name has to be checked against the source text.
+        let mut source_lines: HashMap<DenseModuleId, Vec<usize>> = HashMap::new();
         let mut mapped_any = false;
-        for token in minified_map.get_tokens() {
-            let readable_line = token.get_src_line();
-            let candidate = ranges.partition_point(|range| range.start <= readable_line);
+        // Marks the minified position this token occupies as having no origin at
+        // all. Emitted in generated order alongside the real tokens, so the map
+        // stays sorted.
+        macro_rules! unmapped {
+            ($minified:expr) => {{
+                builder.add_token($minified.get_dst_line(), $minified.get_dst_col(), 0, 0, None, None);
+                continue;
+            }};
+        }
+        for minified in minified_map.get_tokens() {
+            let position = (minified.get_src_line(), minified.get_src_col());
+            let candidate = readable
+                .partition_point(|(token, _)| (token.generated_line, token.generated_column) <= position);
             if candidate == 0 {
-                continue;
+                unmapped!(minified);
             }
-            let range = &ranges[candidate - 1];
-            if readable_line >= range.end {
-                continue;
+            let (token, dense) = &readable[candidate - 1];
+            // A readable token only speaks for positions on its OWN line; past the
+            // end of that line the minifier is printing something this chunk's
+            // readable map says nothing about.
+            if token.generated_line != minified.get_src_line() {
+                unmapped!(minified);
             }
-            let original_line = (readable_line - range.start).min(range.source_lines - 1);
-            let source_id = match source_ids.get(&range.dense) {
+            let Some(module) = self.modules[*dense].as_ref() else {
+                unmapped!(minified);
+            };
+            let Some(map) = module.map.as_ref() else {
+                unmapped!(minified);
+            };
+            let Some(label) = labels.get(dense) else {
+                unmapped!(minified);
+            };
+            let source_id = match source_ids.get(dense) {
                 Some(id) => *id,
                 None => {
-                    let module = self.modules[range.dense]
-                        .as_ref()
-                        .expect("a mapped readable module must exist");
-                    let id = builder.add_source_and_content(
-                        labels[range.label_index].as_str(),
-                        module.source.as_ref(),
-                    );
-                    source_ids.insert(range.dense, id);
+                    let id = builder
+                        .add_source_and_content(label.as_str(), map.source_text(&module.source));
+                    source_ids.insert(*dense, id);
                     id
                 }
             };
+            // `names` means "the identifier this position had in the ORIGINAL
+            // source". The readable token's name is that by construction — Oxc
+            // records it from the source text under the node's span — so it wins.
+            //
+            // The minified map's name is only the identifier as it stood in the
+            // READABLE chunk. That is the original name whenever the lowering left
+            // it alone (the common case, and what makes a mangled stack trace
+            // readable), but where the lowering renamed it the readable name is a
+            // diffpack internal (`__import`, `__diffpack_import_7`) that never
+            // appeared in the user's file. So it is a fallback, not the first
+            // choice: preferring it would put a name in the map that the source at
+            // the mapped position does not have.
+            let name = match token
+                .name
+                .and_then(|index| map.names().get(index as usize))
+                .filter(|name| is_identifier(name))
+            {
+                Some(name) => Some(name.as_str()),
+                None => minified
+                    .get_name_id()
+                    .and_then(|index| minified_map.get_name(index))
+                    // ...and only when the ORIGINAL source really has that
+                    // identifier at the position being mapped. A `__import` /
+                    // `__diffpack_import_3` the lowering introduced would
+                    // otherwise be published as the source's own name for a
+                    // position where the source says `useEffect`.
+                    .filter(|candidate| {
+                        let text = map.source_text(&module.source);
+                        let lines = source_lines
+                            .entry(*dense)
+                            .or_insert_with(|| line_starts(text));
+                        identifier_at(text, lines, token.source_line, token.source_column)
+                            == Some(*candidate)
+                    }),
+            }
+            .map(|name| builder.add_name(name));
             builder.add_token(
-                token.get_dst_line(),
-                token.get_dst_col(),
-                original_line,
-                0,
+                minified.get_dst_line(),
+                minified.get_dst_col(),
+                token.source_line,
+                token.source_column,
                 Some(source_id),
-                None,
+                name,
             );
             mapped_any = true;
         }
-        if !mapped_any {
+        if !mapped_any && readable_mappings.iter().any(|mapping| !mapping.tokens.is_empty()) {
+            // Modules in this chunk DID carry real positions and none of them
+            // survived composition — that is a bug in the composition, not an
+            // honestly unmappable chunk, so it is refused rather than written out
+            // as a map that quietly says nothing.
             return Err(format!(
                 "source-map composition produced no honest mapping for minified chunk \
-                 `{chunk_name}`: the minified->readable map resolved into no original module"
+                 `{chunk_name}`: its modules carry real printer positions, but the \
+                 minified->readable map resolved into none of them"
             ));
         }
+        // A chunk whose modules are ALL bundler-synthesized (a CSS-module shim, an
+        // asset stub, a virtual entry) has no original source to point at. Its map
+        // is legitimately empty: every position in it came from code diffpack
+        // wrote, and saying nothing is the truthful answer.
         Ok(builder.into_sourcemap().to_json_string())
     }
 
-    /// The common ancestor directory of the on-disk modules in a source map, used
-    /// to emit project-relative source labels. Virtual/non-absolute module ids are
-    /// ignored here (they fall back to their bare name in [`Self::source_label`]).
-    fn map_source_root(&self, denses: impl Iterator<Item = DenseModuleId>) -> PathBuf {
-        let mut common: Option<PathBuf> = None;
-        for dense in denses {
-            let path = PathBuf::from(ResourceId::parse(self.ids[dense].as_ref()).path);
-            if !path.is_absolute() {
-                continue;
+    /// The directory every emitted `sources` label is relative to: the PROJECT
+    /// root, computed once for the whole build.
+    ///
+    /// It has to be one directory for the whole build, not per map. A per-chunk
+    /// common ancestor collapses to the module's own directory whenever a chunk
+    /// holds one module — and then the label is a bare file name, so cal.com
+    /// emitted `diffpack:///Setup.tsx` for nine genuinely different `Setup.tsx`
+    /// files and `diffpack:///add.ts` for thirty different `add.ts` files. A source
+    /// URL is an IDENTITY: DevTools' source tree and every error reporter dedupe on
+    /// it, so two files sharing one URL means one file's content is shown for the
+    /// other's frames.
+    ///
+    /// The root is the OUTERMOST ancestor of the entry that holds a `package.json`
+    /// — the workspace root of a monorepo, so a sibling package keeps its
+    /// `packages/ui/...` path instead of being pushed outside. Two directories can
+    /// never be the root: the filesystem root and the user's home (or any ancestor
+    /// of it), because a label relative to either is an absolute path in all but
+    /// name and publishes the user's directory layout. With neither a package root
+    /// nor a usable common ancestor available, the answer is `None` — no shared
+    /// root exists, and every module is labelled by
+    /// [`Self::external_source_label`] instead of by a path that would leak.
+    fn map_source_root(&self) -> Option<&Path> {
+        self.map_root
+            .get_or_init(|| {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let usable = |directory: &Path| {
+                    directory.parent().is_some()
+                        && home
+                            .as_deref()
+                            .is_none_or(|home| !home.starts_with(directory))
+                };
+                let entry = PathBuf::from(ResourceId::parse(self.ids[self.entry].as_ref()).path);
+                let mut outermost: Option<PathBuf> = None;
+                let mut cursor = entry.parent();
+                while let Some(directory) = cursor {
+                    if usable(directory) && directory.join("package.json").is_file() {
+                        outermost = Some(directory.to_path_buf());
+                    }
+                    cursor = directory.parent();
+                }
+                if outermost.is_some() {
+                    return outermost;
+                }
+                // No package root anywhere above the entry (a bare script, a test
+                // fixture): the common ancestor of every module in the build is
+                // still a real shared directory, and using it keeps each module's
+                // path inside the build.
+                let mut common: Option<PathBuf> = None;
+                for id in &self.ids {
+                    let path = PathBuf::from(ResourceId::parse(id.as_ref()).path);
+                    if !path.is_absolute() {
+                        continue;
+                    }
+                    let directory = path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone());
+                    common = Some(match common {
+                        None => directory,
+                        Some(existing) => common_ancestor(&existing, &directory),
+                    });
+                }
+                common.filter(|directory| usable(directory))
+            })
+            .as_deref()
+    }
+
+    /// A label for a module that is NOT under the build's source root: a package
+    /// in a store outside the project, a symlinked workspace package, a file on
+    /// another volume, or any module at all when the build has no shared root.
+    ///
+    /// Its absolute path must never reach the emitted map — that names the machine
+    /// and the user, and production maps are served to browsers — but its bare file
+    /// name is not enough either, because two different `index.js` files would
+    /// become one source. So the label keeps the part of the path that identifies
+    /// the file WITHIN its own package (from the nearest directory holding a
+    /// `package.json`, that directory included) and disambiguates it with a short
+    /// digest of the full path, which is stable across chunks and across rebuilds
+    /// and reveals nothing about where the file lives.
+    fn external_source_label(path: &Path) -> String {
+        let mut anchor = None;
+        let mut cursor = path.parent();
+        while let Some(directory) = cursor {
+            if directory.join("package.json").is_file() {
+                anchor = directory.parent();
+                break;
             }
-            let directory = path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| path.clone());
-            common = Some(match common {
-                None => directory,
-                Some(existing) => common_ancestor(&existing, &directory),
-            });
+            cursor = directory.parent();
         }
-        common.unwrap_or_else(|| PathBuf::from("/"))
+        let within = anchor
+            .and_then(|anchor| path.strip_prefix(anchor).ok())
+            .or_else(|| path.file_name().map(Path::new))
+            .unwrap_or(path);
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        let digest = hasher.finish();
+        let tail = within
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        format!("external/{digest:016x}/{tail}")
     }
 
     /// A stable, non-leaking `sources` label for a module. Emitted map paths must
     /// be project-relative: never an absolute filesystem path (a privacy leak) and
     /// never a `..` traversal. The module's on-disk path is made relative to `root`
-    /// (the common ancestor of the mapped modules) and served under a `diffpack://`
-    /// scheme so DevTools shows the real project-relative source without exposing
-    /// where the project lives on disk. A module not under `root` (a virtual/plugin
-    /// module, or one on another volume) falls back to its bare file name, which is
-    /// likewise absolute-free and traversal-free. Any query/fragment is preserved
-    /// so distinct graph keys (`app.css` vs `app.css?url`) stay distinct sources.
-    fn source_label(&self, dense: DenseModuleId, root: &Path) -> String {
+    /// (see [`Self::map_source_root`]) and served under a `diffpack://` scheme so
+    /// DevTools shows the real project-relative source without exposing where the
+    /// project lives on disk. A module outside `root` is labelled by
+    /// [`Self::external_source_label`], which is likewise absolute-free and
+    /// traversal-free but still unique. A virtual/plugin module has no on-disk path
+    /// at all and keeps its own id. Any query/fragment is preserved so distinct
+    /// graph keys (`app.css` vs `app.css?url`) stay distinct sources.
+    fn source_label(&self, dense: DenseModuleId, root: Option<&Path>, origin: MapOrigin) -> String {
         let resource = ResourceId::parse(self.ids[dense].as_ref());
         let path = PathBuf::from(&resource.path);
-        let relative = path
-            .strip_prefix(root)
-            .ok()
-            .filter(|relative| {
-                relative.components().all(|component| {
-                    !matches!(
-                        component,
-                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                    )
-                })
-            })
-            .map(Path::to_path_buf)
-            .or_else(|| path.file_name().map(PathBuf::from))
-            .unwrap_or(path);
-        let mut label = relative
-            .components()
-            .filter_map(|component| component.as_os_str().to_str())
-            .collect::<Vec<_>>()
-            .join("/");
+        let mut label = if path.is_absolute() {
+            let relative = root
+                .and_then(|root| path.strip_prefix(root).ok())
+                .filter(|relative| {
+                    relative.components().all(|component| {
+                        !matches!(
+                            component,
+                            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                        )
+                    })
+                });
+            match relative {
+                Some(relative) => relative
+                    .components()
+                    .filter_map(|component| component.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                None => Self::external_source_label(&path),
+            }
+        } else {
+            // A virtual module id (`tanstack-start-manifest:v`, a plugin's own
+            // namespace): not a path at all, so there is nothing to make relative
+            // and nothing on disk to leak.
+            resource.path.replace('\\', "/")
+        };
         if label.is_empty() {
             label = "module".to_string();
         }
+        fn append(label: &mut String, separator: &mut char, key: &str, value: &str) {
+            label.push(*separator);
+            *separator = '&';
+            label.push_str(key);
+            if !value.is_empty() {
+                label.push('=');
+                label.push_str(value);
+            }
+        }
+        let mut separator = '?';
         if let Some(query) = &resource.query {
-            label.push('?');
-            label.push_str(query);
+            append(&mut label, &mut separator, query, "");
+        }
+        // A source diffpack GENERATED from this file (an MDX compile, an RSC
+        // directive rewrite, a route split, the `next/font` macro, a component
+        // compiler, a Vite replacement) is labelled as such. The positions in the
+        // map index that generated text — which is what the map inlines as this
+        // source's content — so labelling it with the bare filename would invite
+        // a reader to line the numbers up against the file on disk.
+        //
+        // The GRAPH is part of that identity. The same file rewritten for the
+        // browser and for the server is two different texts: `import.meta.env` and
+        // the `define` substitutions resolve differently, and the dead branches
+        // that fall out of them differ with them. cal.com ships one such file
+        // (next-i18next's `createConfig.js`, 8,270 bytes on the client and 13,430
+        // on the server), and under one shared URL a consumer that dedupes by
+        // source URL shows one graph's text for the other graph's frames.
+        if let MapOrigin::Generated(stage) = origin {
+            append(&mut label, &mut separator, "diffpack-generated", stage);
+            append(
+                &mut label,
+                &mut separator,
+                "diffpack-graph",
+                self.target.label(),
+            );
         }
         if let Some(fragment) = &resource.fragment {
             label.push('#');
@@ -4594,7 +5360,7 @@ const __newChunks={{{chunks}}};
             // dropping, so its side effects run (this covers bare side-effect
             // imports and re-exports of side-effectful modules alike).
             for (_, target, demand) in &module.dependencies {
-                if !demand.dynamic
+                if !demand.deferred()
                     && self.modules[*target].as_ref().is_some_and(|state| !state.droppable)
                 {
                     mark_live(*target, &reachable, &mut live, &mut queue);
@@ -4611,7 +5377,7 @@ const __newChunks={{{chunks}}};
                 // module without captured export structure keeps every static
                 // dependency it names — conservative, never over-shaking.
                 for (specifier, target, demand) in &module.dependencies {
-                    if !demand.dynamic {
+                    if !demand.deferred() {
                         let _ = specifier;
                         add_used(
                             *target,
@@ -5014,11 +5780,19 @@ fn await_async_imports(code: &str, specifier: &str) -> String {
 /// is a fixpoint over identifier occurrences in retained text; scanning raw
 /// text is conservative in the safe direction (a name inside a string keeps
 /// its declaration alive).
+/// Additionally reports which line of `code` each
+/// surviving line came from when `track_lines` is set. The shake only ever drops
+/// whole lines or strips a bundler MARKER prefix off one, so the surviving lines
+/// carry their map positions unchanged except for that prefix, which is recorded
+/// as a column edit. Marker lines are pure bundler glue and never carry a token,
+/// but the edit is recorded anyway so the accounting is complete rather than
+/// merely believed.
 fn shake_module_code(
     code: &str,
     demand: &ExportDemand,
     pruned_imports: &HashSet<String>,
-) -> String {
+    track_lines: bool,
+) -> (String, Option<LineTrack>) {
     enum Segment<'a> {
         /// An unconditional line (impure statement, runtime call, ...).
         Keep(&'a str),
@@ -5031,14 +5805,20 @@ fn shake_module_code(
     }
 
     let mut segments: Vec<Segment> = Vec::new();
+    // The line of `code` each segment line came from, and how many columns were
+    // stripped off its front, parallel to the text the segment carries.
     let mut open_declaration: Option<(Vec<&str>, Vec<&str>)> = None;
-    for line in code.lines() {
+    let mut origins: Vec<Vec<(usize, u32)>> = Vec::new();
+    let mut open_origins: Vec<(usize, u32)> = Vec::new();
+    for (line_index, line) in code.lines().enumerate() {
         if let Some((_, lines)) = open_declaration.as_mut() {
             if line == "/*__diffpack_decl_end__*/" {
                 let (names, lines) = open_declaration.take().expect("declaration is open");
                 segments.push(Segment::Declaration { names, lines });
+                origins.push(std::mem::take(&mut open_origins));
             } else {
                 lines.push(line);
+                open_origins.push((line_index, 0));
             }
             continue;
         }
@@ -5054,7 +5834,11 @@ fn shake_module_code(
             && let Ok(specifier) = serde_json::from_str::<String>(specifier)
         {
             if !pruned_imports.contains(&specifier) {
+                let stripped = crate::source_map::utf16_len(
+                    &line[..line.len() - import_code.len()],
+                );
                 segments.push(Segment::Import { line: import_code });
+                origins.push(vec![(line_index, stripped)]);
             }
             continue;
         }
@@ -5062,17 +5846,22 @@ fn shake_module_code(
             && let Some((name, statement)) = marked.split_once("__*/")
         {
             if demand.includes(name) {
+                let stripped =
+                    crate::source_map::utf16_len(&line[..line.len() - statement.len()]);
                 segments.push(Segment::Export { statement });
+                origins.push(vec![(line_index, stripped)]);
             }
             continue;
         }
         segments.push(Segment::Keep(line));
+        origins.push(vec![(line_index, 0)]);
     }
     // An unterminated block would mean the transform emitted markers this parse
     // does not understand; keep its lines rather than silently dropping code.
     if let Some((_, lines)) = open_declaration.take() {
-        for line in lines {
+        for (line, origin) in lines.into_iter().zip(open_origins) {
             segments.push(Segment::Keep(line));
+            origins.push(vec![origin]);
         }
     }
 
@@ -5134,9 +5923,26 @@ fn shake_module_code(
     }
 
     let mut output = String::with_capacity(code.len());
+    let mut track = track_lines.then(LineTrack::default);
     for (index, segment) in segments.iter().enumerate() {
         if !live[index] {
             continue;
+        }
+        if let Some(track) = track.as_mut() {
+            for &(line, stripped) in &origins[index] {
+                let mut origin = crate::source_map::LineOrigin {
+                    source_line: Some(line as u32),
+                    edits: Vec::new(),
+                };
+                if stripped > 0 {
+                    origin.edits.push(crate::source_map::ColumnEdit {
+                        column: 0,
+                        removed: stripped,
+                        inserted: 0,
+                    });
+                }
+                track.push(origin);
+            }
         }
         match segment {
             Segment::Keep(line) => {
@@ -5159,7 +5965,7 @@ fn shake_module_code(
             }
         }
     }
-    output
+    (output, track)
 }
 
 /// Iterator over the maximal identifier-character runs (`[A-Za-z0-9_$]+`) in
@@ -5528,6 +6334,7 @@ fn load_uncached(
     path: &Path,
     target: Target,
     hmr: bool,
+    source_maps: bool,
 ) -> Result<LoadedModule, String> {
     let id = path.to_string_lossy();
     // A build-generated virtual module (its source is not on disk) claims this id
@@ -5564,6 +6371,7 @@ fn load_uncached(
             uses_cjs_globals: false,
             uses_dirname: false,
             workers: Vec::new(),
+            map: None,
         });
     }
     // A loader (query, stylesheet, or asset) may claim this id before it is ever
@@ -5624,6 +6432,7 @@ fn load_uncached(
             uses_cjs_globals: false,
             uses_dirname: false,
             workers,
+            map: None,
         });
     }
     let read_started = frontend_profile::start();
@@ -5658,22 +6467,46 @@ fn load_uncached(
         resolution_cache.jsx_extensions,
         &project_config,
         language,
+        source_maps,
+    );
+    // See the `&self` twin: a rewritten source is labelled as one.
+    mark_rewritten_source(
+        &mut transformed,
+        component_code.is_some(),
+        matches!(source, Cow::Owned(_)),
     );
     // DEV-ONLY Fast Refresh / `import.meta.hot` instrumentation (client only).
     if hmr {
-        transformed.code = crate::hmr::rewrite_import_meta_hot(&transformed.code, target);
-        if target == Target::Client
-            && crate::hmr::is_refresh_boundary(
+        let before_refresh = std::mem::take(&mut transformed.code);
+        let hot_rewritten = before_refresh.contains("import.meta.hot");
+        transformed.code = crate::hmr::rewrite_import_meta_hot(&before_refresh, target);
+        let mut preamble_lines = 0_u32;
+        if target == Target::Client {
+            let module_key = path.to_string_lossy();
+            // See the `&self` twin above: the module-scoped `$RefreshReg$` goes on
+            // EVERY instrumented client module, not only the accept boundaries.
+            if crate::hmr::needs_fast_refresh_preamble(&transformed.code) {
+                let preamble = crate::hmr::fast_refresh_preamble(&module_key);
+                preamble_lines = preamble.bytes().filter(|byte| *byte == b'\n').count() as u32;
+                transformed.code.insert_str(0, &preamble);
+            }
+            if crate::hmr::is_refresh_boundary(
                 path,
                 &transformed.liveness.exports,
                 &source,
                 resolution_cache.jsx_extensions,
-            )
-        {
-            transformed
-                .code
-                .push_str(&crate::hmr::fast_refresh_footer(&path.to_string_lossy()));
+            ) {
+                transformed
+                    .code
+                    .push_str(&crate::hmr::fast_refresh_footer(&module_key));
+            }
         }
+        rebase_map_for_refresh(
+            &mut transformed.map,
+            &before_refresh,
+            preamble_lines,
+            hot_rewritten,
+        );
     }
     let code_hash = content_hash(transformed.code.as_bytes());
     let mut diagnostics = source_diagnostics(path, &transformed.diagnostics);
@@ -5710,7 +6543,64 @@ fn load_uncached(
         uses_cjs_globals: transformed.uses_cjs_globals,
         uses_dirname: transformed.uses_dirname,
         workers: resolve_worker_entries(resolver, path, &transformed.workers)?,
+        map: transformed.map,
     })
+}
+
+/// Keeps a module's map honest about WHICH TEXT its positions were measured
+/// against. The transform is handed `source`, which is the file on disk only
+/// when neither a component compiler (`.vue`/`.svelte`) nor Vite's
+/// `import.meta`/`define`/dead-branch replacements rewrote it first. When one
+/// did, the map is labelled as generated, so its `sources` entry names the
+/// rewrite and its inlined content is the text the positions really index —
+/// never a silent claim on the file.
+fn mark_rewritten_source(
+    transformed: &mut crate::transform::TransformResult,
+    precompiled: bool,
+    vite_rewritten: bool,
+) {
+    let Some(map) = transformed.map.as_mut() else {
+        return;
+    };
+    if precompiled {
+        map.mark_generated("component");
+    } else if vite_rewritten {
+        map.mark_generated("vite-replace");
+    }
+}
+
+/// Re-bases a module's map across the DEV-ONLY Fast Refresh instrumentation,
+/// which edits the lowered code after the printer produced its map.
+///
+/// `import.meta.hot` -> `module.hot` is an in-place rewrite (recorded as a column
+/// edit, so a token inside it is dropped and one after it moves by the exact
+/// amount the line shrank); the per-module preamble is one whole line inserted at
+/// the top (every following line shifts by one); the self-accept footer starts
+/// with a newline and is appended, so it changes no existing line at all.
+fn rebase_map_for_refresh(
+    map: &mut Option<ModuleSourceMap>,
+    before: &str,
+    preamble_lines: u32,
+    hot_rewritten: bool,
+) {
+    let Some(current) = map.as_mut() else {
+        return;
+    };
+    let lines = before.lines().count();
+    let mut track = LineTrack::synthetic(preamble_lines as usize);
+    track.extend(LineTrack::identity(lines));
+    if hot_rewritten {
+        // Recomputed rather than threaded through, so the columns come from the
+        // same text the map describes.
+        let mut edits = LineTrack::identity(lines);
+        let _ = crate::source_map::replace_tracked(before, "import.meta.hot", "module.hot", &mut edits);
+        let mut combined = LineTrack::synthetic(preamble_lines as usize);
+        for index in 0..lines {
+            combined.push(edits.line(index).cloned().expect("line in range"));
+        }
+        track = combined;
+    }
+    current.rebase(&track, preamble_lines as usize + lines);
 }
 
 /// Attributes a module's oxc diagnostics to its path, keeping each one's
@@ -6277,6 +7167,8 @@ fn css_import_demand(specifier: String) -> DependencyDemand {
         // conditions an ESM import does (which is also what PostCSS and Vite do).
         require_syntax: false,
         import_syntax: true,
+        // A stylesheet `@import` is evaluated in place, like a static import.
+        eager: true,
     }
 }
 
@@ -6714,9 +7606,14 @@ fn synthesize_asset_url(
     // branch so a small raster is never inlined away (the object shape needs a
     // real emitted file + variants). Undecodable rasters (or non-png/jpeg formats
     // the `image` crate here can't decode) fall through to the bare-URL path.
-    if image_shape == ImageImportShape::NextObject
-        && let Some(module) =
-            synthesize_next_image_object(&source_path, &bytes, &public_name, base)?
+    if let ImageImportShape::NextObject { responsive_variants } = image_shape
+        && let Some(module) = synthesize_next_image_object(
+            &source_path,
+            &bytes,
+            &public_name,
+            base,
+            responsive_variants,
+        )?
     {
         return Ok(module);
     }
@@ -6794,6 +7691,7 @@ fn synthesize_next_image_object(
     bytes: &[u8],
     public_name: &str,
     base: &str,
+    responsive_variants: bool,
 ) -> Result<Option<SpecialModule>, String> {
     let ext = source_path
         .extension()
@@ -6816,18 +7714,28 @@ fn synthesize_next_image_object(
     }
     let out_ext = if ext.as_deref() == Some("jpg") { "jpeg" } else { ext.as_deref().unwrap_or("png") };
     let blur = generate_blur_data_url(&decoded, out_ext)?;
-    let widths = crate::next_adapter::variant_widths(width);
     let src_url = format!("{base}assets/{public_name}");
-    let variants_js = widths
-        .iter()
-        .map(|&w| {
-            let url = format!("{base}assets/{}", asset_variant_public_name(public_name, w));
-            format!("{}: {}", quote(&w.to_string()), quote(&url))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    // With optimization off the object OMITS `variants` entirely (not an empty map —
+    // `{}` is truthy, and the shim's "no variants = render raw" test reads it as a
+    // value). Next's own static import behaves the same way under `images.unoptimized`:
+    // the `<img>` gets the full-resolution `src` and no `srcset`.
+    let widths = responsive_variants.then(|| crate::next_adapter::variant_widths(width));
+    let variants_field = match &widths {
+        Some(widths) => {
+            let variants_js = widths
+                .iter()
+                .map(|&w| {
+                    let url = format!("{base}assets/{}", asset_variant_public_name(public_name, w));
+                    format!("{}: {}", quote(&w.to_string()), quote(&url))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(", variants: {{ {variants_js} }}")
+        }
+        None => String::new(),
+    };
     let synthetic = format!(
-        "export default {{ src: {}, width: {width}, height: {height}, blurDataURL: {}, variants: {{ {variants_js} }} }};\n",
+        "export default {{ src: {}, width: {width}, height: {height}, blurDataURL: {}{variants_field} }};\n",
         quote(&src_url),
         quote(&blur),
     );
@@ -6840,7 +7748,7 @@ fn synthesize_next_image_object(
             source: source_path.to_path_buf(),
             public_name: public_name.to_string(),
             tailwind_source: None,
-            image_variants: Some(widths),
+            image_variants: widths,
         }],
         css: None,
         css_source_files: Vec::new(),
@@ -7824,6 +8732,9 @@ fn resolve_dependencies(
                 // import, both of which are ESM.
                 require_syntax: false,
                 import_syntax: true,
+                // A loader/injected import is a STATIC import: it is not an
+                // `import()` call site, so the target can never be deferred.
+                eager: true,
             })
         };
         // Which export conditions answer this specifier. A `require(...)` and an
@@ -7845,6 +8756,17 @@ fn resolve_dependencies(
         // runtime that can: the emitted `require` hits the throw-on-use stub and
         // the page dies, while the build exits 0. That is the same
         // silent-broken-artifact class as an unresolved import, so it is fatal.
+        // `serverExternalPackages`: the build was told this package stays a runtime
+        // `require` from `node_modules`. It is therefore not a graph module at all —
+        // never resolved, never bundled, never diagnosed. A CLIENT build ignores the
+        // list: a browser has no `node_modules` to require from, so externalizing there
+        // would emit a chunk that dies on the throw-on-use stub.
+        if target != Target::Client && resolution_cache.is_external_package(specifier) {
+            if !externals.iter().any(|existing| existing == specifier) {
+                externals.push(specifier.clone());
+            }
+            continue;
+        }
         if is_external_specifier(specifier) {
             // An alias may deliberately map a built-in onto a browser polyfill —
             // Next does exactly this for `url`, `querystring`, `buffer`, ... using the
@@ -8209,7 +9131,14 @@ struct RenderedBundle {
 struct ModuleMapping {
     dense_index: DenseModuleId,
     generated_line: u32,
-    generated_lines: u32,
+    /// The module's REAL map tokens, already moved onto the chunk's generated
+    /// lines: `generated_line`/`generated_column` are positions in the CHUNK,
+    /// `source_line`/`source_column` positions in the module's source, and
+    /// `name` an index into that module's map names. Empty when the build did
+    /// not ask for source maps, and empty for the parts of a region whose text
+    /// the render rewrote in a way it could not account for — those stay
+    /// UNMAPPED. See [`crate::source_map`].
+    tokens: Vec<MapToken>,
 }
 
 /// A per-chunk render cache, keyed by a stable [`Bundler::chunk_render_key`]: the
@@ -8369,6 +9298,71 @@ fn minify_chunk_code_inner(
     Ok((printed.code, map))
 }
 
+/// Whether `name` is a JavaScript identifier. A source map's `names` entry means
+/// "the identifier this position had in the original source"; Oxc records the raw
+/// source text under the printed node's span, which is that identifier for an
+/// identifier node and arbitrary source text for anything else (a whole
+/// `import("./x")` expression, say). Publishing the latter would put text in
+/// `names` that is not a name — and, for a source that embeds one, an absolute
+/// path. So only real identifiers are published.
+fn is_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && characters.all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+}
+
+/// How many lines `text` has, in the numbering a source map uses: the last line
+/// counts even when the text does not end with a newline, and a trailing newline
+/// does not invent an extra one. Generated line indices run over exactly this
+/// range, so it is what bounds the unmapped markers a chunk map emits.
+fn line_count(text: &str) -> u32 {
+    text.lines().count() as u32
+}
+
+/// Byte offset of the start of each line of `text`.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(
+        text.match_indices('\n')
+            .map(|(index, _)| index + 1),
+    );
+    starts
+}
+
+/// The JavaScript identifier that STARTS at `line`:`column` of `text`, where the
+/// column is in UTF-16 code units (the source-map unit). `None` when the position
+/// is out of range or does not begin an identifier — which is the answer that
+/// keeps a name out of the map rather than publishing one the source does not have.
+fn identifier_at<'a>(text: &'a str, starts: &[usize], line: u32, column: u32) -> Option<&'a str> {
+    let start = *starts.get(line as usize)?;
+    let end = starts
+        .get(line as usize + 1)
+        .map_or(text.len(), |next| next - 1);
+    let line_text = text.get(start..end)?;
+    let mut offset = 0;
+    let mut units = 0_u32;
+    for character in line_text.chars() {
+        if units == column {
+            break;
+        }
+        units += character.len_utf16() as u32;
+        offset += character.len_utf8();
+    }
+    if units != column {
+        return None;
+    }
+    let rest = &line_text[offset..];
+    let is_start = |character: char| character.is_ascii_alphabetic() || character == '_' || character == '$';
+    let is_part = |character: char| character.is_ascii_alphanumeric() || character == '_' || character == '$';
+    if !rest.starts_with(is_start) {
+        return None;
+    }
+    let length = rest.find(|character: char| !is_part(character)).unwrap_or(rest.len());
+    Some(&rest[..length])
+}
+
 /// The longest shared leading directory of two absolute paths. Used to derive a
 /// project root for project-relative source-map labels.
 fn common_ancestor(left: &Path, right: &Path) -> PathBuf {
@@ -8469,8 +9463,16 @@ pub enum ImageImportShape {
     /// Bare public URL string (Vite parity). The default.
     #[default]
     Url,
-    /// Next's static-import object shape with responsive variants + blur.
-    NextObject,
+    /// Next's static-import object shape with blur, and — when
+    /// `responsive_variants` is set — a build-emitted responsive ladder.
+    ///
+    /// `responsive_variants` is false when the app's next.config turned Next's image
+    /// optimizer off (`images.unoptimized`) or replaced it with its own loader: the
+    /// object then carries `src`/`width`/`height`/`blurDataURL` but NO `variants`, so
+    /// the `next/image` shim renders a plain `<img src>` with no `srcset` — exactly
+    /// what `next build` produces, and with no ladder encoded for URLs that can never
+    /// be requested.
+    NextObject { responsive_variants: bool },
 }
 
 /// CSS preprocessor + PostCSS wiring for a build. `.less`/`.styl` sources are
@@ -8554,6 +9556,13 @@ pub struct BuildConfig {
     /// rewrite `import.meta.hot`. Set only by the dev server; `build-app` leaves it
     /// `false` so production output is unaffected. See [`crate::hmr`].
     pub hmr: bool,
+    /// Produce a REAL per-module source map during the transform. Costs one extra
+    /// print per module (the Oxc printer only emits a map for a whole `Program`,
+    /// so the map comes from a second, reference print), so it is paid only when
+    /// the emit will actually write `.map` files. Correctness is never
+    /// conditional on this: when it is off no map is written at all, rather than
+    /// a cheaper, guessed one. See [`crate::source_map`].
+    pub source_maps: bool,
     /// SCSS compile options: Vite's `css.preprocessorOptions.scss.additionalData`
     /// (when a string) and the project root for root-relative `@use "/src/..."`
     /// targets. Default (empty) compiles `.scss` files with no injected prelude.
@@ -8576,6 +9585,18 @@ pub struct BuildConfig {
     /// because a tsconfig is the file's own compilation contract). Default (all
     /// `None`) is the automatic runtime against `react`.
     pub jsx: crate::transform::JsxConfig,
+    /// Package names a SERVER graph must NOT bundle: they stay ordinary runtime
+    /// `require`s resolved from `node_modules` at serve time. This is Next's
+    /// `serverExternalPackages` (formerly
+    /// `experimental.serverComponentsExternalPackages`), and honoring it is not an
+    /// optimization — apps put a package here precisely BECAUSE bundling it fails.
+    /// cal.com externalizes `rest-facade`, whose `require('superagent-proxy')` sits
+    /// behind a runtime `if` and names a package that is not installed; bundling it
+    /// turns an untaken branch into a fatal unresolved-import error.
+    ///
+    /// Empty (the default) bundles everything, and a CLIENT build ignores the list —
+    /// the browser has no `node_modules` to require from at runtime.
+    pub server_external_packages: Vec<String>,
 }
 
 impl Default for BuildConfig {
@@ -8595,11 +9616,13 @@ impl Default for BuildConfig {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            source_maps: false,
             scss: crate::sass::ScssOptions::default(),
             image_import_shape: ImageImportShape::Url,
             css_preprocess: CssPreprocess::default(),
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx: crate::transform::JsxConfig::default(),
+            server_external_packages: Vec::new(),
         }
     }
 }
@@ -8833,6 +9856,180 @@ mod tests {
         );
     }
 
+    /// A dual-published package: `exports` sends `import` and `require` to two
+    /// different files, exactly as `pg-pool` (and most of npm) does.
+    fn write_dual_package(directory: &Path, name: &str, esm_body: &str, cjs_body: &str) {
+        let package = directory.join("node_modules").join(name);
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","exports":{{".":{{"import":"./esm.mjs","require":"./cjs.js"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(package.join("esm.mjs"), esm_body).unwrap();
+        fs::write(package.join("cjs.js"), cjs_body).unwrap();
+    }
+
+    /// A `require(...)` call site must resolve under the `require` export
+    /// condition. Resolving it under `import` hands back a Module namespace where
+    /// the caller expects the CommonJS export, and `class extends <namespace>`
+    /// throws `Class extends value [object Module] is not a constructor` — which
+    /// is exactly how `pg`'s `require('pg-pool')` died.
+    #[test]
+    fn a_require_call_site_resolves_under_the_require_condition() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        write_dual_package(
+            directory.path(),
+            "dual",
+            "export default class Esm {}\n",
+            "class Cjs {}\nmodule.exports = Cjs;\n",
+        );
+        fs::write(
+            directory.path().join("entry.js"),
+            "const Base = require(\"dual\");\nclass Sub extends Base {}\nconsole.log(new Sub().constructor.name === \"Sub\" ? Base.name : \"wrong\");\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_and_run(directory.path()), "Cjs\n");
+    }
+
+    /// The other half of the same rule: an `import` of the identical specifier
+    /// still resolves under `import`.
+    #[test]
+    fn an_import_of_the_same_package_still_resolves_under_the_import_condition() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        write_dual_package(
+            directory.path(),
+            "dual",
+            "export const which = \"esm\";\n",
+            "exports.which = \"cjs\";\n",
+        );
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { which } from \"dual\";\nconsole.log(which);\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_and_run(directory.path()), "esm\n");
+    }
+
+    /// One module, one specifier, both syntaxes, two different files. Node loads
+    /// two module instances here and the runtime map holds one target per
+    /// specifier, so the build refuses rather than silently giving one call site
+    /// the other's module.
+    #[test]
+    fn one_specifier_reached_both_ways_that_resolves_two_ways_is_a_hard_error() {
+        let directory = tempdir().unwrap();
+        write_dual_package(
+            directory.path(),
+            "dual",
+            "export const which = \"esm\";\n",
+            "exports.which = \"cjs\";\n",
+        );
+        fs::write(
+            directory.path().join("entry.js"),
+            "const eager = require(\"dual\");\nexport const lazy = import(\"dual\");\nconsole.log(eager, lazy);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (_, update) = Bundler::discover(&entry).unwrap();
+        let fatal = update
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(diagnostic.kind, DiagnosticKind::SpecifierResolvesTwoWays { .. })
+            })
+            .expect("reaching one specifier both ways must be reported");
+        assert!(fatal.is_fatal());
+        assert!(fatal.message.contains("entry.js"), "{}", fatal.message);
+        assert!(fatal.message.contains("esm.mjs"), "{}", fatal.message);
+        assert!(fatal.message.contains("cjs.js"), "{}", fatal.message);
+    }
+
+    /// A package whose `exports` sends both conditions to the SAME file is not a
+    /// conflict, so reaching it both ways is fine.
+    #[test]
+    fn one_specifier_reached_both_ways_that_resolves_the_same_way_is_not_an_error() {
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("node_modules/single");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"single","exports":{".":{"import":"./index.js","require":"./index.js"}}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "exports.which = \"one\";\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "const eager = require(\"single\");\nexport const lazy = import(\"single\");\nconsole.log(eager, lazy);\n",
+        )
+        .unwrap();
+        let (_, update) = Bundler::discover(&directory.path().join("entry.js")).unwrap();
+        assert!(
+            !update.diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic.kind,
+                DiagnosticKind::SpecifierResolvesTwoWays { .. }
+            )),
+            "{:?}",
+            update.diagnostics
+        );
+    }
+
+    /// `export const p = import("./a")` holds a real dependency. The dependency
+    /// scan used to stop at the `from` clause of an `export … from` and never
+    /// look inside an exported declaration, so this module was bundled with no
+    /// edge at all and the emitted `import()` threw MODULE_NOT_FOUND.
+    #[test]
+    fn a_dynamic_import_inside_an_exported_declaration_is_bundled_and_runs() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const value = \"lazy-value\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("map.js"),
+            "export const Map = { a: import(\"./lazy.js\") };\nexport const run = async () => (await Map.a).value;\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { run } from \"./map.js\";\nrun().then((v) => console.log(v));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        assert_eq!(reachable.len(), 3, "the dynamic target must be in the graph");
+        assert_eq!(bundle_and_run(directory.path()), "lazy-value\n");
+    }
+
+    /// A `require(...)` inside an exported declaration is the same hole.
+    #[test]
+    fn a_require_inside_an_exported_declaration_is_bundled_and_runs() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("dep.js"), "exports.value = \"dep-value\";\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "export const dep = require(\"./dep.js\");\nconsole.log(dep.value);\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_and_run(directory.path()), "dep-value\n");
+    }
+
     /// Bundles `entry.js` out of an already-populated directory and runs the
     /// result under Node, returning its stdout. The interop tests below are all
     /// "what does the emitted program actually print", which is the only level
@@ -8900,6 +10097,164 @@ mod tests {
         let message = lines[3];
         assert!(message.contains("./marked.cjs"), "{message}");
         assert!(message.contains("missingName"), "{message}");
+    }
+
+    /// The `__esModule` interop. A CommonJS module that stamps the marker AND owns a
+    /// `default` was compiled down from ESM (TypeScript / Babel / SWC output, which is
+    /// most of npm), so `import X from` it must bind THAT default — not the exports
+    /// object wrapping it. Binding the wrapper is silent until the value is used as
+    /// what it claims to be: `next-auth/providers/credentials` is exactly this shape,
+    /// and cal.com's next-auth config died on `o(...) is not a function` because the
+    /// provider factory came back as `{ __esModule: true, default: fn }`.
+    #[test]
+    fn a_default_import_of_a_transpiled_commonjs_module_binds_its_default_export() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("provider.cjs"),
+            "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+             exports.default = Credentials;\n\
+             exports.named = \"named-val\";\n\
+             function Credentials(options) { return { id: \"credentials\", options }; }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            r#"
+                import Credentials from "./provider.cjs";
+                import { named } from "./provider.cjs";
+                import * as ns from "./provider.cjs";
+                console.log("typeof:" + typeof Credentials);
+                console.log("call:" + Credentials({ a: 1 }).id);
+                console.log("named:" + named);
+                console.log("ns-default-is-the-same:" + (ns.default === Credentials));
+            "#,
+        )
+        .unwrap();
+        let stdout = bundle_and_run(directory.path());
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            [
+                "typeof:function",
+                "call:credentials",
+                "named:named-val",
+                "ns-default-is-the-same:true",
+            ],
+            "{stdout}"
+        );
+    }
+
+    /// The negation of the rule above, so it stays a rule and not a guess: a CommonJS
+    /// module with NO `__esModule` marker keeps Node's semantics — a default import
+    /// binds `module.exports`, even when the object happens to carry a `default` key.
+    #[test]
+    fn a_default_import_of_an_unmarked_commonjs_module_still_binds_module_exports() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("plain.cjs"),
+            "module.exports = { default: \"inner\", other: \"o\" };\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import plain from \"./plain.cjs\";\nconsole.log(\"default:\" + JSON.stringify(plain));\n",
+        )
+        .unwrap();
+        assert_eq!(
+            bundle_and_run(directory.path()),
+            "default:{\"default\":\"inner\",\"other\":\"o\"}\n",
+        );
+    }
+
+    /// `serverExternalPackages` (next.config): a listed package is NOT bundled into a
+    /// server graph — it stays a runtime `require` from `node_modules`. Apps use the
+    /// list precisely because bundling the package fails, so a build that ignores it
+    /// turns working configuration into a fatal error: cal.com externalizes
+    /// `rest-facade`, whose `require('superagent-proxy')` sits behind a runtime `if`
+    /// and names a package that is deliberately not installed.
+    #[test]
+    fn a_server_external_package_is_not_bundled_and_its_own_imports_are_not_resolved() {
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("node_modules/rest-facade");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"rest-facade","main":"index.js"}"#).unwrap();
+        // The shape that makes the list necessary: an import of a package that is not
+        // installed, reached only on a branch the app never takes.
+        fs::write(
+            package.join("index.js"),
+            "exports.Client = function (o) { if (o.proxy) require('superagent-proxy'); };\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { Client } from \"rest-facade\";\nexport const c = Client;\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+
+        // Bundled (the default), the uninstalled transitive import is a fatal diagnostic.
+        let (_, update) = Bundler::discover(&entry).unwrap();
+        assert!(
+            update.diagnostics.iter().any(|d| d.is_fatal()
+                && matches!(d.kind, DiagnosticKind::UnresolvedImport { .. })
+                && d.message.contains("superagent-proxy")),
+            "without the list the uninstalled dependency is fatal: {:?}",
+            update.diagnostics,
+        );
+
+        // Listed as a server external, the package is never resolved at all — so
+        // nothing inside it can fail the build, and it is not a graph module.
+        let config = BuildConfig {
+            target: Target::Server,
+            server_external_packages: vec!["rest-facade".to_string()],
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(
+            update.diagnostics.iter().all(|d| !d.is_fatal()),
+            "an externalized package cannot fail the build: {:?}",
+            update.diagnostics,
+        );
+        assert!(
+            !bundler.ids.iter().any(|id| id.contains("rest-facade")),
+            "the external must not be a graph module: {:?}",
+            bundler.ids,
+        );
+    }
+
+    /// A CLIENT graph must ignore the list: a browser has no `node_modules` to require
+    /// from at runtime, so externalizing there would emit a chunk that dies on the
+    /// throw-on-use stub with a zero build exit code.
+    #[test]
+    fn a_server_external_package_is_still_bundled_for_the_browser() {
+        let directory = tempdir().unwrap();
+        let package = directory.path().join("node_modules/jose");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"jose","main":"index.js"}"#).unwrap();
+        fs::write(package.join("index.js"), "exports.sign = () => \"signed\";\n").unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { sign } from \"jose\";\nexport const s = sign;\n",
+        )
+        .unwrap();
+        let config = BuildConfig {
+            target: Target::Client,
+            server_external_packages: vec!["jose".to_string()],
+            ..BuildConfig::default()
+        };
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&directory.path().join("entry.js"), &config).unwrap();
+        assert!(update.diagnostics.iter().all(|d| !d.is_fatal()), "{:?}", update.diagnostics);
+        assert!(
+            bundler.ids.iter().any(|id| id.contains("jose")),
+            "the browser graph still bundles it: {:?}",
+            bundler.ids,
+        );
     }
 
     /// The interop namespace copies `module.exports`' keys at wrap time, which
@@ -9360,6 +10715,7 @@ mod tests {
             main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::Client,
+            server_external_packages: Vec::new(),
             import_meta_env: None,
             import_meta_glob: None,
             defines: Vec::new(),
@@ -9372,6 +10728,7 @@ mod tests {
             },
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx: crate::transform::JsxConfig::default(),
+            source_maps: false,
         }
     }
 
@@ -11863,31 +13220,848 @@ mod tests {
         );
     }
 
+    /// The build config every source-map test uses: the per-module maps the
+    /// printer produces are only built when the build asks for them.
+    fn source_map_config() -> BuildConfig {
+        BuildConfig {
+            source_maps: true,
+            ..BuildConfig::default()
+        }
+    }
+
+    /// A TypeScript module whose interesting identifiers sit BELOW erased,
+    /// type-only statements — the exact shape a line-identity map gets wrong,
+    /// because every erased line shifts the real code up by one.
+    ///
+    /// Returns `(source, marker_line, marker_column, call_line, call_column)`,
+    /// all 0-based, for the `MARKER_ALPHA` literal and the `greet` call.
+    fn typed_module_with_erased_lines() -> (&'static str, u32, u32, u32, u32) {
+        // line 0: comment      line 1: interface   line 2: type alias  line 3: blank
+        // line 4: export fn    line 5: const       line 6: return      line 7: }
+        let source = concat!(
+            "// a leading comment\n",
+            "interface Props { label: string }\n",
+            "type Unused = number\n",
+            "\n",
+            "export function greet(props: Props) {\n",
+            "  const marker = \"MARKER_ALPHA\"\n",
+            "  return props.label + marker + globalThis.who\n",
+            "}\n",
+        );
+        (source, 5, 17, 4, 16)
+    }
+
+    /// Finds the 0-based (line, column) of `needle` in `text`, in UTF-16 columns.
+    fn position_of(text: &str, needle: &str) -> (u32, u32) {
+        let byte = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` must be present in:\n{text}"));
+        let prefix = &text[..byte];
+        let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
+        (
+            prefix.matches('\n').count() as u32,
+            crate::source_map::utf16_len(&text[line_start..byte]),
+        )
+    }
+
+    /// A READABLE chunk's map must resolve a known identifier to the EXACT
+    /// original line AND column it came from — not to the generated line's index,
+    /// which is what a line-identity guess produces and what every erased
+    /// TypeScript line above the identifier makes wrong.
+    #[test]
+    fn a_readable_chunk_map_resolves_a_known_identifier_to_its_exact_original_line_and_column() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.ts");
+        let a = directory.path().join("a.ts");
+        let (source, marker_line, marker_column, greet_line, greet_column) =
+            typed_module_with_erased_lines();
+        fs::write(&a, source).unwrap();
+        fs::write(
+            &entry,
+            "import { greet } from './a.ts';\nconsole.log(greet({ label: \"x\" }));\n",
+        )
+        .unwrap();
+
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("out.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let code = fs::read_to_string(&output).unwrap();
+        let map_json = fs::read_to_string(directory.path().join("out.js.map")).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let table = map.generate_lookup_table();
+
+        // The string literal in the EMITTED chunk resolves to the literal in a.ts:
+        // line 5, column 17 — four lines below where a line-identity map would put
+        // it, because the comment, the interface and the type alias all vanished.
+        let (line, column) = position_of(&code, "\"MARKER_ALPHA\"");
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the literal's position must be mapped");
+        assert_eq!(
+            (
+                token.get_source_id().and_then(|id| map.get_source(id)),
+                token.get_src_line(),
+                token.get_src_col(),
+            ),
+            (Some("diffpack:///a.ts"), marker_line, marker_column),
+            "the emitted literal must resolve to a.ts {}:{marker_column}, got {:?}",
+            marker_line + 1,
+            (token.get_src_line(), token.get_src_col()),
+        );
+
+        // ...and so does the function NAME, at its own exact column.
+        let (line, column) = position_of(&code, "greet(props)");
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the declaration's position must be mapped");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (greet_line, greet_column),
+            "the emitted `greet` declaration must resolve to a.ts {}:{greet_column}",
+            greet_line + 1,
+        );
+
+        // Every mapped column must be a REAL column: a map that had given up and
+        // pinned everything to column 0 would pass a line-only check.
+        assert!(
+            map.get_tokens().any(|token| token.get_src_col() > 0),
+            "the map must carry real columns, not column 0 for everything"
+        );
+
+        // A bundler-synthesized line owns no original position and must be
+        // EXPLICITLY unmapped rather than be attributed to whatever module is
+        // nearby. Explicitly matters: omitting a token does not mark a line
+        // unmapped, because a consumer resolves a position to the last mapping at
+        // or before it anywhere in the file, so a line with nothing on it inherits
+        // the previous line's origin.
+        let (line, _) = position_of(&code, "console.log");
+        let separator = line - 1;
+        let marker = map
+            .get_tokens()
+            .find(|token| token.get_dst_line() == separator)
+            .expect("the blank separator line must carry an explicit unmapped marker");
+        assert_eq!(
+            (marker.get_dst_col(), marker.get_source_id()),
+            (0, None),
+            "the marker must be a source-less segment at the start of the line, got {marker:?}"
+        );
+        assert!(
+            map.lookup_token(&table, separator, 0)
+                .is_none_or(|token| token.get_source_id().is_none()),
+            "resolving the blank separator line must not name any original source"
+        );
+    }
+
+    /// Every generated line of a readable chunk that no module accounts for must
+    /// say so, with its own unmapped segment.
+    ///
+    /// This is the whole honesty mechanism, and leaving the token out does NOT
+    /// achieve it: Node's `--enable-source-maps` (which is how `diffpack start`
+    /// runs a server) and DevTools both binary-search the flattened mapping list
+    /// and return the last entry at or before the queried position, IGNORING line
+    /// boundaries. So a bundler-authored line with no segments resolves to
+    /// whatever author code was mapped before it — which is how a frame inside the
+    /// bundler's own `__require` came out attributed to a component, at a line and
+    /// column that exist, in a file that has no such code.
+    #[test]
+    fn every_line_a_module_does_not_account_for_carries_an_explicit_unmapped_marker() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.ts");
+        let a = directory.path().join("a.ts");
+        let (source, ..) = typed_module_with_erased_lines();
+        fs::write(&a, source).unwrap();
+        // A CommonJS dependency forces the full registry runtime into the chunk,
+        // so the chunk really does interleave author code with bundler-authored
+        // text — which is the situation the markers exist for.
+        fs::write(
+            directory.path().join("legacy.cjs"),
+            "module.exports = { legacy: 1 };\n",
+        )
+        .unwrap();
+        fs::write(
+            &entry,
+            "import { greet } from \"./a\";\nimport legacy from \"./legacy.cjs\";\n\
+             console.log(greet({ label: \"x\" }), legacy);\n",
+        )
+        .unwrap();
+
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("out.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let code = fs::read_to_string(&output).unwrap();
+        let map_json = fs::read_to_string(directory.path().join("out.js.map")).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let mut mapped_lines: HashSet<u32> = HashSet::new();
+        let mut marked_lines: HashSet<u32> = HashSet::new();
+        for token in map.get_tokens() {
+            match token.get_source_id() {
+                Some(_) => mapped_lines.insert(token.get_dst_line()),
+                None => marked_lines.insert(token.get_dst_line()),
+            };
+        }
+        let total = line_count(&code);
+        let unaccounted: Vec<u32> = (0..total)
+            .filter(|line| !mapped_lines.contains(line) && !marked_lines.contains(line))
+            .collect();
+        assert!(
+            unaccounted.is_empty(),
+            "generated lines {unaccounted:?} of a {total}-line chunk carry neither a mapping \
+             nor an unmapped marker, so a consumer resolves them to the last mapping before \
+             them:\n{code}"
+        );
+        assert!(
+            !marked_lines.is_empty() && !mapped_lines.is_empty(),
+            "the chunk must have both kinds of line — runtime/glue and module code — for this \
+             to be testing anything (mapped: {}, marked: {})",
+            mapped_lines.len(),
+            marked_lines.len()
+        );
+        // The runtime's own `__require` is bundler-authored: resolving a position
+        // in it must name no source at all.
+        let table = map.generate_lookup_table();
+        let (throw_line, throw_column) = position_of(&code, "Module is not loaded");
+        assert!(
+            map.lookup_token(&table, throw_line, throw_column)
+                .is_none_or(|token| token.get_source_id().is_none()),
+            "a position inside the bundler's own runtime must resolve to no original source"
+        );
+    }
+
+    /// A `sources` label is a module's IDENTITY — DevTools' source tree and every
+    /// error reporter dedupe on it — so it must carry the module's directory and
+    /// stay the same in every chunk it appears in.
+    ///
+    /// The failure this locks out: a root computed per MAP collapses to the
+    /// module's own directory whenever a chunk holds one module, and the label
+    /// becomes a bare file name. On cal.com that turned nine different
+    /// `pages/setup/index.tsx` files into one `diffpack:///Setup.tsx`, and thirty
+    /// different `add.ts` files into one `diffpack:///add.ts`.
+    #[test]
+    fn same_named_modules_in_different_chunks_keep_distinct_directory_qualified_labels() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("package.json"), r#"{"name":"labels"}"#).unwrap();
+        for area in ["alpha", "beta"] {
+            fs::create_dir_all(root.join("src").join(area)).unwrap();
+            fs::write(
+                root.join("src").join(area).join("Setup.ts"),
+                format!("export const AREA = \"{area}\";\n"),
+            )
+            .unwrap();
+        }
+        let entry = root.join("src").join("entry.ts");
+        // Dynamic imports put each `Setup.ts` in its own chunk, which is exactly
+        // when a per-chunk root degenerates to a bare file name.
+        fs::write(
+            &entry,
+            "const both = [import(\"./alpha/Setup\"), import(\"./beta/Setup\")];\n\
+             Promise.all(both).then((loaded) => console.log(loaded.length));\n",
+        )
+        .unwrap();
+
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = root.join("out").join("bundle.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let mut labels: Vec<String> = Vec::new();
+        for file in fs::read_dir(root.join("out")).unwrap() {
+            let path = file.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("map") {
+                continue;
+            }
+            let json = fs::read_to_string(&path).unwrap();
+            let map = SourceMap::from_json_string(&json).unwrap();
+            labels.extend(map.get_sources().map(str::to_owned));
+        }
+        assert!(
+            labels.contains(&"diffpack:///src/alpha/Setup.ts".to_string())
+                && labels.contains(&"diffpack:///src/beta/Setup.ts".to_string()),
+            "each module must be named by its path from the project root, got {labels:?}"
+        );
+    }
+
+    /// A module OUTSIDE the project root (a package in a store elsewhere, a
+    /// symlinked workspace, another volume) must never publish its absolute path:
+    /// that names the machine and the user, and production maps are served to
+    /// browsers. It must still be told apart from any other file, so the label
+    /// keeps the path within its own package and disambiguates it.
+    #[test]
+    fn a_module_outside_the_project_root_is_labelled_without_leaking_its_absolute_path() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let project = root.join("project");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("package.json"), r#"{"name":"project"}"#).unwrap();
+        let outside = root.join("elsewhere").join("pkg");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("package.json"), r#"{"name":"faraway"}"#).unwrap();
+        fs::write(
+            outside.join("index.js"),
+            "export const FAR = \"far\";\nexport function far(x) { return x + FAR; }\n",
+        )
+        .unwrap();
+        let entry = project.join("src").join("entry.js");
+        fs::write(
+            &entry,
+            "import { far } from \"../../elsewhere/pkg/index.js\";\nconsole.log(far(1));\n",
+        )
+        .unwrap();
+
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = project.join("out.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let map_json = fs::read_to_string(project.join("out.js.map")).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let sources = map.get_sources().collect::<Vec<_>>();
+        let leaked = root.to_string_lossy().to_string();
+        assert!(
+            sources.iter().all(|source| !source.contains(&leaked)
+                && !source.contains("..")
+                && source.starts_with("diffpack:///")),
+            "no label may carry an absolute path or a traversal, got {sources:?} (root {leaked})"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.contains("external/") && source.ends_with("pkg/index.js")),
+            "the outside module must still be identifiable, got {sources:?}"
+        );
+        assert!(
+            sources.contains(&"diffpack:///src/entry.js"),
+            "a module INSIDE the project keeps its project-relative path, got {sources:?}"
+        );
+    }
+
+    /// A module whose source diffpack REWROTE before parsing must not be
+    /// presented as the file on disk: the map's positions index the rewritten
+    /// text, so the label says so and the inlined content is that text.
+    #[test]
+    fn a_rewritten_source_is_labelled_and_carries_the_text_its_positions_index() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.ts");
+        // A Vite `define` rewrites the SOURCE before it is parsed, so every span
+        // below the substitution is measured against text that is not on disk.
+        fs::write(
+            &entry,
+            "const flag = __BUILD_FLAG__\nconsole.log(flag, globalThis.who)\n",
+        )
+        .unwrap();
+
+        let config = BuildConfig {
+            source_maps: true,
+            defines: vec![("__BUILD_FLAG__".to_string(), "\"enabled\"".to_string())],
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("out.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let map_json = fs::read_to_string(directory.path().join("out.js.map")).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let sources = map.get_sources().collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec!["diffpack:///entry.ts?diffpack-generated=vite-replace&diffpack-graph=server"],
+            "a rewritten source must be labelled as generated (and by which graph generated \
+             it, since the same file rewrites differently per graph), not as the file on disk"
+        );
+        let content = map.get_source_content(0).expect("content must be inlined");
+        assert!(
+            content.contains("\"enabled\"") && !content.contains("__BUILD_FLAG__"),
+            "sourcesContent must be the REWRITTEN text the positions were measured \
+             against, got: {content}"
+        );
+    }
+
+    /// DEV: the Fast Refresh instrumentation edits a module's lowered code AFTER
+    /// the printer measured it — a whole line inserted at the top, and
+    /// `import.meta.hot` rewritten in place. The map must move with it, or every
+    /// position in a dev build is one line off.
+    #[test]
+    fn the_fast_refresh_instrumentation_moves_the_map_with_the_code_it_edits() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.tsx");
+        // A component (so the Fast Refresh preamble is injected) that also reads
+        // `import.meta.hot` (so the in-place rewrite runs too).
+        let source = concat!(
+            "// a comment\n",
+            "type Props = { label: string }\n",
+            "export function Widget(props: Props) {\n",
+            "  const marker = \"MARKER_ALPHA\"\n",
+            "  return marker + props.label\n",
+            "}\n",
+            "if (import.meta.hot) { import.meta.hot.accept() }\n",
+            "console.log(Widget({ label: globalThis.who }))\n",
+        );
+        fs::write(&entry, source).unwrap();
+
+        let config = BuildConfig {
+            source_maps: true,
+            hmr: true,
+            target: Target::Client,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let output = directory.path().join("out.js");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    source_map: true,
+                    hmr: true,
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let code = fs::read_to_string(&output).unwrap();
+        assert!(
+            code.contains("$RefreshReg$"),
+            "the module must have been instrumented, or this test proves nothing"
+        );
+        let map_json = fs::read_to_string(directory.path().join("out.js.map")).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let table = map.generate_lookup_table();
+
+        let (expected_line, expected_column) = position_of(source, "\"MARKER_ALPHA\"");
+        let (line, column) = position_of(&code, "\"MARKER_ALPHA\"");
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the literal must still be mapped after instrumentation");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (expected_line, expected_column),
+            "the instrumented module's map must still point at the original literal",
+        );
+    }
+
+    /// Emitting a map from a bundler that was never asked to build the per-module
+    /// maps is refused, loudly. There is no cheaper, guessed map to fall back to.
+    #[test]
+    fn emitting_a_source_map_without_the_per_module_maps_is_a_hard_error() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        fs::write(&entry, "console.log(globalThis.who);\n").unwrap();
+        let (bundler, _) = Bundler::discover_direct(&entry).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        let error = bundler
+            .emit_with_options(
+                &reachable,
+                &directory.path().join("out.js"),
+                EmitOptions {
+                    source_map: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .expect_err("a map with no measured positions must be refused");
+        assert!(
+            error.contains("source_maps"),
+            "the refusal must name the setting that fixes it, got: {error}"
+        );
+    }
+
+    /// A multi-chunk app whose modules are split across chunks by dynamic import,
+    /// so the coverage assertions below run over MORE than the entry chunk.
+    fn code_split_source_map_project(directory: &Path) -> PathBuf {
+        let entry = directory.join("entry.ts");
+        fs::write(
+            &entry,
+            "import { shared } from \"./shared\";\n\
+             export async function boot(): Promise<string> {\n\
+             \x20 const lazy = await import(\"./lazy\");\n\
+             \x20 return shared() + lazy.lazily();\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("shared.ts"),
+            "interface Erased { gone: boolean }\n\
+             type AlsoErased = string;\n\
+             export function shared(): string {\n\
+             \x20 return \"SHARED_MARKER\";\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("lazy.ts"),
+            "import { shared } from \"./shared\";\n\
+             type Gone = number;\n\
+             export function lazily(): string {\n\
+             \x20 return \"LAZY_MARKER\" + shared();\n\
+             }\n",
+        )
+        .unwrap();
+        entry
+    }
+
+    /// Every JS file an emit writes either carries NO `sourceMappingURL` at all or
+    /// carries one whose file was really written, and whose `file` field names the
+    /// chunk it belongs to.
+    ///
+    /// A dangling `sourceMappingURL` is not a cosmetic defect: the browser fetches
+    /// it on every load of the chunk and logs a failure, and a `file` field naming
+    /// some other chunk sends a map consumer to the wrong bytes. Both are the kind
+    /// of drift that appears the moment a second writer (here: the dev HMR
+    /// micro-chunk) names its sidecar itself, which is why the naming lives in one
+    /// place — [`Bundler::source_map_sidecar`].
+    #[test]
+    fn every_emitted_chunk_points_at_a_map_that_exists_and_names_itself() {
+        for minify in [false, true] {
+            let directory = tempdir().unwrap();
+            let entry = code_split_source_map_project(directory.path());
+            let (bundler, update) =
+                Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+            assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+            let reachable = bundler.reachable_modules_direct();
+            let out_root = directory.path().join("out");
+            bundler
+                .emit_public(
+                    &reachable,
+                    &out_root,
+                    EmitOptions {
+                        source_map: true,
+                        minify,
+                        ..EmitOptions::default()
+                    },
+                )
+                .unwrap();
+
+            let public = out_root.join("public");
+            let mut checked = 0;
+            for entry in fs::read_dir(&public).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_str().unwrap().to_string();
+                if !name.ends_with(".js") {
+                    continue;
+                }
+                checked += 1;
+                let code = fs::read_to_string(&path).unwrap();
+                let reference = code
+                    .rsplit("//# sourceMappingURL=")
+                    .next()
+                    .filter(|_| code.contains("//# sourceMappingURL="))
+                    .map(|tail| tail.trim().to_string())
+                    .unwrap_or_else(|| {
+                        panic!("{name} was emitted with source maps on but names no map")
+                    });
+                let map_path = public.join(&reference);
+                assert!(
+                    map_path.is_file(),
+                    "{name} points at {reference}, which was never written — a browser \
+                     fetches that on every load and gets a 404"
+                );
+                let map: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+                assert_eq!(
+                    map.get("file").and_then(|value| value.as_str()),
+                    Some(name.as_str()),
+                    "{reference} claims to describe a different chunk"
+                );
+            }
+            assert!(
+                checked > 1,
+                "the fixture must emit MORE than one chunk (minify={minify}), or this \
+                 proves nothing about chunks past the entry"
+            );
+        }
+    }
+
+    /// The dev HMR micro-chunk — the code the developer is editing RIGHT NOW — ships
+    /// with its own map, and that map resolves back to the edited file.
+    ///
+    /// This is the most user-visible source map diffpack writes: it is the one a
+    /// stack trace lands in seconds after a save. It previously shipped with none at
+    /// all, so the hot-updated module was the one region of a dev session with no
+    /// mapping.
+    #[test]
+    fn the_hmr_micro_chunk_ships_a_map_that_resolves_to_the_edited_source() {
+        use oxc_sourcemap::SourceMap;
+
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.ts");
+        let edited = directory.path().join("edited.ts");
+        fs::write(&entry, "import { hot } from \"./edited\";\nconsole.log(hot());\n").unwrap();
+        // Type-only lines above the marker, so a line-identity guess would be wrong.
+        let source = "interface Erased { gone: boolean }\n\
+                      type AlsoErased = string;\n\
+                      \n\
+                      export function hot(): string {\n\
+                      \x20 return \"HOT_MARKER\";\n\
+                      }\n";
+        fs::write(&edited, source).unwrap();
+
+        let config = BuildConfig {
+            source_maps: true,
+            hmr: true,
+            target: Target::Client,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let changed: BTreeSet<ModuleId> = reachable
+            .iter()
+            .filter(|id| id.contains("edited.ts"))
+            .cloned()
+            .collect();
+        assert_eq!(changed.len(), 1, "the edited module must be in the graph");
+
+        let chunk = directory.path().join("client.hmr.js");
+        let wrote = bundler
+            .write_hmr_chunk(
+                &reachable,
+                &changed,
+                "client.js",
+                EmitOptions {
+                    source_map: true,
+                    hmr: true,
+                    format: ModuleFormat::BrowserEsm,
+                    ..EmitOptions::default()
+                },
+                ModuleFormat::BrowserEsm,
+                &chunk,
+            )
+            .unwrap();
+        assert!(wrote, "the edited module is live, so a micro-chunk must render");
+
+        let code = fs::read_to_string(&chunk).unwrap();
+        assert!(
+            code.trim_end().ends_with("//# sourceMappingURL=client.hmr.js.map"),
+            "the micro-chunk must name its map, or the browser never loads it"
+        );
+        let map_path = directory.path().join("client.hmr.js.map");
+        let map_json = fs::read_to_string(&map_path).unwrap();
+        let map = SourceMap::from_json_string(&map_json).unwrap();
+        let table = map.generate_lookup_table();
+
+        let (expected_line, expected_column) = position_of(source, "\"HOT_MARKER\"");
+        let (line, column) = position_of(&code, "\"HOT_MARKER\"");
+        let token = map
+            .lookup_token(&table, line, column)
+            .expect("the marker must be mapped in the micro-chunk");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (expected_line, expected_column),
+            "the micro-chunk's map must resolve to the edited file's real position, \
+             not to the generated line number"
+        );
+    }
+
+    /// With source maps OFF, the micro-chunk carries no dangling reference: no map
+    /// file, and no `sourceMappingURL` for the browser to chase.
+    #[test]
+    fn the_hmr_micro_chunk_names_no_map_when_source_maps_are_off() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        let edited = directory.path().join("edited.js");
+        fs::write(&entry, "import { hot } from \"./edited\";\nconsole.log(hot());\n").unwrap();
+        fs::write(&edited, "export function hot() {\n  return \"HOT\";\n}\n").unwrap();
+        let config = BuildConfig {
+            hmr: true,
+            target: Target::Client,
+            ..BuildConfig::default()
+        };
+        let (bundler, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        let changed: BTreeSet<ModuleId> = reachable
+            .iter()
+            .filter(|id| id.contains("edited.js"))
+            .cloned()
+            .collect();
+        let chunk = directory.path().join("client.hmr.js");
+        assert!(
+            bundler
+                .write_hmr_chunk(
+                    &reachable,
+                    &changed,
+                    "client.js",
+                    EmitOptions {
+                        source_map: false,
+                        hmr: true,
+                        format: ModuleFormat::BrowserEsm,
+                        ..EmitOptions::default()
+                    },
+                    ModuleFormat::BrowserEsm,
+                    &chunk,
+                )
+                .unwrap()
+        );
+        assert!(!fs::read_to_string(&chunk).unwrap().contains("sourceMappingURL"));
+        assert!(!directory.path().join("client.hmr.js.map").exists());
+    }
+
+    /// A hot-updated module must land in the SAME environment its graph was emitted
+    /// for. `__dirname`/`__filename` are the sharp edge: browser output substitutes
+    /// the stubs `"/index.js"` and `"/"` (a browser has no CommonJS locations), while
+    /// Node ESM output binds the entry's real values. Rendering a SERVER micro-chunk as
+    /// browser output therefore swaps a server module's file paths for stubs the
+    /// instant it is hot-updated — a fault that is invisible until an edit, and then
+    /// only on a module that reads a file. `write_hmr_chunk` takes the format
+    /// explicitly for this reason; this pins both sides of the choice.
+    #[test]
+    fn the_hmr_micro_chunk_renders_dirname_for_the_format_its_graph_was_emitted_for() {
+        let directory = tempdir().unwrap();
+        let entry = directory.path().join("entry.js");
+        let edited = directory.path().join("edited.js");
+        fs::write(&entry, "import { where } from \"./edited\";\nconsole.log(where());\n").unwrap();
+        fs::write(&edited, "export function where() {\n  return __dirname;\n}\n").unwrap();
+        let config = BuildConfig {
+            hmr: true,
+            ..BuildConfig::default()
+        };
+        let (bundler, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        let changed: BTreeSet<ModuleId> = reachable
+            .iter()
+            .filter(|id| id.contains("edited.js"))
+            .cloned()
+            .collect();
+        let options = EmitOptions {
+            hmr: true,
+            ..EmitOptions::default()
+        };
+
+        let browser = directory.path().join("client.hmr.js");
+        assert!(
+            bundler
+                .write_hmr_chunk(
+                    &reachable,
+                    &changed,
+                    "client.js",
+                    options,
+                    ModuleFormat::BrowserEsm,
+                    &browser,
+                )
+                .unwrap()
+        );
+        assert!(
+            fs::read_to_string(&browser).unwrap().contains("__dirname=\"/\""),
+            "a browser micro-chunk must carry the browser CommonJS-location stubs",
+        );
+
+        let node = directory.path().join("server.hmr.mjs");
+        assert!(
+            bundler
+                .write_hmr_chunk(
+                    &reachable,
+                    &changed,
+                    "server.mjs",
+                    options,
+                    ModuleFormat::Esm,
+                    &node,
+                )
+                .unwrap()
+        );
+        assert!(
+            !fs::read_to_string(&node).unwrap().contains("__dirname=\"/\""),
+            "a Node micro-chunk must NOT stub __dirname; it binds the entry's real value",
+        );
+    }
+
     #[test]
     fn a_minified_chunk_emits_a_composed_source_map_resolving_to_the_original_source() {
         use oxc_sourcemap::SourceMap;
 
         let directory = tempdir().unwrap();
-        let entry = directory.path().join("entry.js");
-        let a = directory.path().join("a.js");
-        // `a.js` must still contribute generated bytes AFTER compression, or there
+        let entry = directory.path().join("entry.ts");
+        let a = directory.path().join("a.ts");
+        // `a.ts` must still contribute generated bytes AFTER compression, or there
         // is no cross-module position left to sample. A single `const` would be
         // inlined into its one use and the module would vanish entirely (correctly
-        // — that is what esbuild does too), so `a.js` exports a function called
-        // from two places, which the minifier keeps as a real binding.
+        // — that is what esbuild does too), so `a.ts` exports a function called
+        // from two places, which the minifier keeps as a real binding. Its
+        // interesting lines sit below erased TypeScript, so a line-identity map
+        // resolves them four lines too high.
+        let (source, marker_line, marker_column, greet_line, greet_column) =
+            typed_module_with_erased_lines();
+        fs::write(&a, source).unwrap();
         fs::write(
             &entry,
-            "import { greet } from './a.js';\nconsole.log(greet(globalThis.who));\nconsole.log(greet(globalThis.other));\n",
-        )
-        .unwrap();
-        fs::write(
-            &a,
-            "export function greet(name) { return \"hello from a\" + name; }\n",
+            "import { greet } from './a.ts';\nconsole.log(greet({ label: globalThis.who }));\nconsole.log(greet({ label: globalThis.other }));\n",
         )
         .unwrap();
 
-        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
-        assert!(update.diagnostics.is_empty());
+        let (bundler, update) =
+            Bundler::discover_direct_with_config(&entry, &source_map_config()).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
         let reachable = bundler.reachable_modules_direct();
 
         let output = directory.path().join("out.js");
@@ -11911,7 +14085,7 @@ mod tests {
         );
         // It is genuinely minified (no source comments/newlines-per-statement).
         assert!(
-            !code.contains("hello from a\";\n"),
+            !code.contains("MARKER_ALPHA\";\n"),
             "the chunk must be minified, got: {code}"
         );
 
@@ -11922,8 +14096,8 @@ mod tests {
         let map = SourceMap::from_json_string(&map_json).unwrap();
         let sources = map.get_sources().collect::<Vec<_>>();
         assert!(
-            sources.iter().any(|source| source.ends_with("a.js"))
-                && sources.iter().any(|source| source.ends_with("entry.js")),
+            sources.iter().any(|source| source.ends_with("a.ts"))
+                && sources.iter().any(|source| source.ends_with("entry.ts")),
             "sources must list the real original modules, got {sources:?}"
         );
         assert!(
@@ -11934,31 +14108,70 @@ mod tests {
         );
         let a_index = sources
             .iter()
-            .position(|source| source.ends_with("a.js"))
-            .expect("a.js must be a source");
+            .position(|source| source.ends_with("a.ts"))
+            .expect("a.ts must be a source");
         let a_content = map.get_source_content(a_index as u32);
         assert!(
-            a_content.is_some_and(|content| content.contains("hello from a")),
-            "sourcesContent must carry the real a.js source, got {a_content:?}"
+            a_content.is_some_and(|content| content.contains("MARKER_ALPHA")),
+            "sourcesContent must carry the real a.ts source, got {a_content:?}"
         );
 
-        // A sampled MINIFIED position (the string literal that came from a.js)
-        // decodes, through the composed map, back to a.js — the correct original.
-        let needle = "hello from a";
-        let byte = code
-            .find(needle)
-            .expect("the string literal survives minification");
-        let prefix = &code[..byte];
-        let line = prefix.matches('\n').count() as u32;
-        let column = (byte - prefix.rfind('\n').map_or(0, |newline| newline + 1)) as u32;
         let table = map.generate_lookup_table();
+        // A sampled MINIFIED position — the string literal that came from a.ts —
+        // decodes back to a.ts at an EXACT line and column. The minifier inlined
+        // the `marker` constant into its use, so the honest answer is the USE
+        // site, not the declaration: line 7, column 23 of a.ts. Under the
+        // line-identity map every position on the minified chunk's single line
+        // resolved to line 1 of whichever module owned readable line 0.
+        let (inlined_line, inlined_column) = position_of(source, "marker + globalThis");
+        assert_ne!(
+            (inlined_line, inlined_column),
+            (marker_line, marker_column),
+            "the use site and the declaration must be distinguishable"
+        );
+        let (line, column) = position_of(&code, "MARKER_ALPHA");
         let token = map
-            .lookup_token(&table, line, column)
+            .lookup_token(&table, line, column.saturating_sub(1))
             .expect("the sampled minified position must be mapped");
-        let resolved = token.get_source_id().and_then(|id| map.get_source(id));
-        assert!(
-            resolved.is_some_and(|source| source.ends_with("a.js")),
-            "the minified position for `{needle}` must resolve to a.js, got {resolved:?}"
+        assert_eq!(
+            (
+                token.get_source_id().and_then(|id| map.get_source(id)),
+                token.get_src_line(),
+                token.get_src_col(),
+            ),
+            (Some("diffpack:///a.ts"), inlined_line, inlined_column),
+            "the minified literal must resolve to the `marker` use at a.ts {}:{inlined_column}, got {:?}",
+            inlined_line + 1,
+            (token.get_src_line(), token.get_src_col()),
+        );
+        let _ = (marker_line, marker_column);
+
+        // The MANGLED function binding resolves to the original declaration AND
+        // recovers its original NAME — the whole point of `names` in a production
+        // map, and something no line-granular map can provide.
+        let mangled = code
+            .split_once("function ")
+            .map(|(_, rest)| {
+                rest.chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .collect::<String>()
+            })
+            .expect("the minified chunk declares the hoisted function");
+        assert_ne!(mangled, "greet", "the minifier must have renamed it");
+        let (line, column) = position_of(&code, &format!("function {mangled}"));
+        let token = map
+            .lookup_token(&table, line, column + "function ".len() as u32)
+            .expect("the mangled binding must be mapped");
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (greet_line, greet_column),
+            "the mangled binding must resolve to a.ts {}:{greet_column}",
+            greet_line + 1,
+        );
+        assert_eq!(
+            token.get_name_id().and_then(|id| map.get_name(id)),
+            Some("greet"),
+            "the composed map must recover the original identifier for a mangled name"
         );
     }
 
@@ -12432,6 +14645,500 @@ mod tests {
             "the importer awaits its async dependency: {code}"
         );
         assert_eq!(run_node(&esm_out), "got:TLA-VALUE:lazy-value\n");
+    }
+
+    /// The same graph under the DEV (HMR) runtime, which used to reject it outright
+    /// ("top-level await ... is not supported in a dev (HMR) build"). That refusal is
+    /// what stopped `diffpack dev` on cal.com: its SSR graph reaches
+    /// `i18next-fs-backend`, whose `readFile.js` does `await import('node:fs')` at
+    /// module scope, so the whole dev server died before serving a request.
+    ///
+    /// The async machinery and the HMR machinery are independent and must compose:
+    /// the HMR runtime has to publish `requireAsync` (a chunk whose root is async
+    /// returns `__runtime.requireAsync(...)`), and its version-aware
+    /// `require.dynamic` has to resolve through it. Node EXECUTING the bundle —
+    /// including the dynamically imported, separately-chunked async module — is the
+    /// assertion.
+    #[test]
+    fn top_level_await_runs_under_the_dev_hmr_runtime() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("value.js"),
+            "export const value = await Promise.resolve('tla-value');\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("middle.js"),
+            "import { value } from './value.js';\nexport const shouted = value.toUpperCase();\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const lazy = await Promise.resolve('lazy-value');\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { shouted } from './middle.js';\n\
+             const { lazy } = await import('./lazy.js');\n\
+             console.log('got:' + shouted + ':' + lazy);\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+
+        let esm_out = directory.path().join("dist/out.mjs");
+        let stats = bundler
+            .emit_with_options(
+                &reachable,
+                &esm_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    hmr: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            stats.written.len() >= 2,
+            "the dynamic import must split off a chunk: {:?}",
+            stats.written
+        );
+        for path in &stats.written {
+            node_check(path);
+        }
+        let code = fs::read_to_string(&esm_out).unwrap();
+        assert!(
+            code.contains("requireAsync:__requireAsync,"),
+            "the HMR runtime must publish requireAsync for an async chunk root: {code}"
+        );
+        assert!(
+            code.contains("__requireAsync(chunk[1])"),
+            "the version-aware dynamic require must resolve through the async path: {code}"
+        );
+        assert_eq!(run_node(&esm_out), "got:TLA-VALUE:lazy-value\n");
+    }
+
+    /// A hot update whose re-run reaches an ASYNC module must not report success (or
+    /// publish a fresh SSR handler) until that module's top-level `await` has SETTLED.
+    ///
+    /// This is the exact hazard the old blanket refusal cited. `__require` returns a
+    /// module's exports object synchronously in both cases — the object exists before
+    /// the factory's first `await` — so a naive re-run looks like it worked while the
+    /// module body is still suspended, and the dev server hands the next SSR request a
+    /// half-initialised entry.
+    ///
+    /// The awaited work here is a TIMER, not a resolved promise, so no amount of
+    /// microtask draining can accidentally make the assertion pass: only a real `await`
+    /// of the module's pending initialisation does.
+    #[test]
+    fn a_hot_update_waits_for_an_async_modules_top_level_await() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let value_js = directory.path().join("value.js");
+        fs::write(
+            &value_js,
+            "export const value = await new Promise(r => setTimeout(() => r('v1'), 20));\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { value } from './value.js';\n\
+             (globalThis.__log ??= []).push(value);\n\
+             export const label = value;\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let options = EmitOptions {
+            format: ModuleFormat::Esm,
+            hmr: true,
+            ..EmitOptions::default()
+        };
+        let esm_out = directory.path().join("dist/out.mjs");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_with_options(&reachable, &esm_out, options)
+            .unwrap();
+
+        // The edit, exactly as the dev server applies one: re-discover, locate the
+        // changed module's runtime id, and render the tiny register-only HMR chunk
+        // carrying only its new factory.
+        fs::write(
+            &value_js,
+            "export const value = await new Promise(r => setTimeout(() => r('v2'), 20));\n",
+        )
+        .unwrap();
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let changed = BTreeSet::from([ModuleId::from(
+            value_js.canonicalize().unwrap().to_string_lossy().as_ref(),
+        )]);
+        let located = bundler
+            .hmr_locate(&reachable, &changed, "out.mjs")
+            .unwrap();
+        assert_eq!(located.len(), 1, "the edited module must be located");
+        let runtime_id = located[0].runtime_id;
+        let hmr_path = directory.path().join("dist/hmr-1.mjs");
+        assert!(
+            bundler
+                .write_hmr_chunk(&reachable, &changed, "out.mjs", options, ModuleFormat::Esm, &hmr_path)
+                .unwrap(),
+            "the edited module is live, so it renders"
+        );
+        node_check(&hmr_path);
+
+        // Drive the update the way the Node control endpoint does: register the new
+        // factory, then `serverInvalidate`, which re-runs the entry in-process and
+        // republishes the SSR handler.
+        let harness = directory.path().join("dist/harness.mjs");
+        fs::write(
+            &harness,
+            format!(
+                "import './out.mjs';\n\
+                 await import('./hmr-1.mjs?__diffpack_hmr=1');\n\
+                 const rt = globalThis.__diffpack_hmr_runtime;\n\
+                 await rt.serverInvalidate([{runtime_id}], []);\n\
+                 console.log(JSON.stringify({{\n\
+                 log: globalThis.__log,\n\
+                 published: globalThis.__diffpack_ssr_entry.label,\n\
+                 }}));\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            run_node(&harness),
+            "{\"log\":[\"v1\",\"v2\"],\"published\":\"v2\"}\n",
+            "the hot update must observe the re-run module's SETTLED top-level await"
+        );
+    }
+
+    /// Every dev-client module's Fast Refresh registrations must be NAMESPACED by
+    /// that module, so two modules that happen to define a same-named component are
+    /// never mistaken for two versions of one component.
+    ///
+    /// oxc's refresh transform emits `$RefreshReg$(_c, "Widget")` — the local name
+    /// only — and react-refresh keys families in ONE global map, so an unscoped id
+    /// makes the second registration read as a hot update of the first. On cal.com
+    /// that put hundreds of phantom updates in the queue before a single edit; the
+    /// first real edit then swapped unrelated component types into the live tree and
+    /// React's `scheduleRefresh` -> `flushSyncWork` loop never terminated, wedging the
+    /// browser tab. This bundles two same-named components, RUNS the emitted dev
+    /// bundle against a recording refresh runtime, and asserts the ids it registers
+    /// are distinct and carry their own module's path.
+    #[test]
+    fn a_dev_client_bundle_scopes_every_fast_refresh_registration_to_its_module() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_jsx_runtime_package(root, "react");
+        fs::write(
+            root.join("list.jsx"),
+            "export function Widget() { return <div>list</div>; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("table.jsx"),
+            "export function Widget() { return <div>table</div>; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.jsx"),
+            "import { Widget as FromList } from './list.jsx';\n\
+             import { Widget as FromTable } from './table.jsx';\n\
+             (globalThis.__used ??= []).push(FromList, FromTable);\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.jsx");
+
+        // The dev build: the bundler's own `hmr` flag is what turns the per-module
+        // refresh instrumentation on (`build-app` never sets it).
+        let dev_config = BuildConfig {
+            hmr: true,
+            target: Target::Client,
+            ..BuildConfig::default()
+        };
+        let (bundler, update) = Bundler::discover_direct_with_config(&entry, &dev_config).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let dev_out = root.join("dev/out.mjs");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &dev_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    hmr: true,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+
+        let dev_code = fs::read_to_string(&dev_out).unwrap();
+        assert!(
+            dev_code.contains("$RefreshReg$"),
+            "the dev build must instrument its components: {dev_code}"
+        );
+        let harness = root.join("dev/harness.mjs");
+        fs::write(
+            &harness,
+            "globalThis.window = globalThis;\n\
+             const ids = [];\n\
+             globalThis.$RefreshRuntime$ = {\n\
+             register: (type, id) => ids.push(id),\n\
+             createSignatureFunctionForTransform: () => (type) => type,\n\
+             registerExportsForReactRefresh: () => {},\n\
+             validateRefreshBoundaryAndEnqueueUpdate: () => undefined,\n\
+             };\n\
+             await import('./out.mjs');\n\
+             console.log(JSON.stringify(ids));\n",
+        )
+        .unwrap();
+        let registered: Vec<String> = serde_json::from_str(run_node(&harness).trim()).unwrap();
+        assert_eq!(
+            registered.len(),
+            2,
+            "both modules must register their component: {registered:?}"
+        );
+        assert_ne!(
+            registered[0], registered[1],
+            "same-named components in different modules must not share a family: {registered:?}"
+        );
+        for (module, id) in [("list.jsx", &registered[0]), ("table.jsx", &registered[1])] {
+            assert!(
+                id.contains(module) && id.ends_with(" Widget"),
+                "the family id must be its own module plus the export name: {id}"
+            );
+        }
+
+        // Production is untouched: no refresh instrumentation is emitted at all, so
+        // none of this can reach a `build-app` bundle.
+        let (production, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let production_out = root.join("dist/out.mjs");
+        production
+            .emit_with_options(
+                &production.reachable_modules_direct(),
+                &production_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        let code = fs::read_to_string(&production_out).unwrap();
+        assert!(
+            !code.contains("$RefreshReg$") && !code.contains("$RefreshRuntime$"),
+            "a production bundle must carry no Fast Refresh instrumentation: {code}"
+        );
+    }
+
+    /// An imported binding must be initialized before ANY of the module's body runs,
+    /// even a statement written ABOVE the import.
+    ///
+    /// `import` declarations are hoisted by the language: the spec instantiates and
+    /// evaluates every requested module before the importer's body executes, so source
+    /// position says nothing about when a binding becomes available. Babel's JSX-pragma
+    /// output relies on it — `var __jsx = React.createElement;` is emitted above
+    /// `import React from "react"` (next-i18next's `appWithTranslation.js` ships exactly
+    /// that) — and lowering each import in place made the binding read `undefined`,
+    /// failing with `TypeError: Cannot convert undefined or null to object` inside a
+    /// render, on code that is perfectly valid ESM.
+    #[test]
+    fn an_import_binding_is_initialized_before_a_statement_written_above_it() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("dep.js"),
+            "export default { make: () => 'made' };\nexport const named = 'named';\n",
+        )
+        .unwrap();
+        // Babel's JSX-pragma shape verbatim: a body statement above the import.
+        fs::write(
+            directory.path().join("entry.js"),
+            "const make = Dep.make;\n\
+             import Dep, { named } from './dep.js';\n\
+             console.log(make() + ':' + named);\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_and_run(directory.path()), "made:named\n");
+    }
+
+    /// The same rule for a bare side-effect `import`: the requested module runs before
+    /// the importer's body, not at the import statement's source position.
+    #[test]
+    fn a_side_effect_import_runs_before_the_body_that_precedes_it() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("effect.js"),
+            "globalThis.__order = (globalThis.__order || '') + 'effect';\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "globalThis.__order = (globalThis.__order || '') + 'body';\n\
+             import './effect.js';\n\
+             console.log(globalThis.__order);\n",
+        )
+        .unwrap();
+        assert_eq!(bundle_and_run(directory.path()), "effectbody\n");
+    }
+
+    /// A specifier one module reaches BOTH statically and dynamically is not a
+    /// code-split boundary, and moving it into a lazily-fetched chunk breaks the
+    /// static reference.
+    ///
+    /// The shape is the ordinary lazy-component barrel:
+    ///
+    /// ```js
+    /// export { default as Foo } from "./Foo";
+    /// export const FooLazy = dynamic(() => import("./Foo"));
+    /// ```
+    ///
+    /// Reading only the `import()` said "./Foo is a chunk root", so the module moved
+    /// out of the entry's static closure — and then the `export … from` on the line
+    /// above, which lowers to a synchronous registry lookup, threw
+    /// `Module is not loaded: <id>` the first time the barrel evaluated.
+    ///
+    /// Node EXECUTING the bundle is the assertion; the chunk-count check pins that the
+    /// build really is code-split (so the test cannot pass by not splitting at all).
+    #[test]
+    fn a_specifier_reached_both_statically_and_dynamically_is_not_split_off() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("shared.js"),
+            "export const label = 'shared-label';\nexport default 'shared-default';\n",
+        )
+        .unwrap();
+        // An unrelated module reached ONLY dynamically, so the build genuinely splits.
+        fs::write(
+            directory.path().join("only-lazy.js"),
+            "export const only = 'only-lazy';\n",
+        )
+        .unwrap();
+        // The barrel: a static re-export AND a dynamic import of the SAME specifier.
+        fs::write(
+            directory.path().join("barrel.js"),
+            "export { label } from './shared.js';\n\
+             export const lazyShared = () => import('./shared.js');\n\
+             export const lazyOther = () => import('./only-lazy.js');\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { label, lazyShared, lazyOther } from './barrel.js';\n\
+             Promise.all([lazyShared(), lazyOther()]).then(([a, b]) =>\n\
+             console.log(label + ':' + a.label + ':' + b.only));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+
+        let esm_out = directory.path().join("dist/out.mjs");
+        let stats = bundler
+            .emit_with_options(
+                &reachable,
+                &esm_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            stats.written.len() >= 2,
+            "the dynamic-only import must still split off a chunk: {:?}",
+            stats.written
+        );
+        for path in &stats.written {
+            node_check(path);
+        }
+        // The both-ways module belongs to the entry chunk; only the dynamic-ONLY one
+        // may live in a split chunk.
+        for path in &stats.written {
+            if path == &esm_out {
+                continue;
+            }
+            let chunk = fs::read_to_string(path).unwrap();
+            assert!(
+                !chunk.contains("shared-label"),
+                "a statically-referenced module must not be moved into a lazy chunk: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            run_node(&esm_out),
+            "shared-label:shared-label:only-lazy\n"
+        );
+    }
+
+    /// The same hole through a `require(...)`: a synchronous read of a module that is
+    /// also `import()`ed elsewhere. `require` returns the exports immediately, so the
+    /// target can never sit behind a chunk fetch.
+    #[test]
+    fn a_specifier_reached_by_require_and_by_dynamic_import_is_not_split_off() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("shared.js"),
+            "exports.label = 'req-shared';\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("only-lazy.js"),
+            "export const only = 'only-lazy';\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "export const eager = require('./shared.js').label;\n\
+             export const lazy = () => import('./shared.js');\n\
+             Promise.all([lazy(), import('./only-lazy.js')]).then(([a, b]) =>\n\
+             console.log(eager + ':' + b.only));\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let esm_out = directory.path().join("dist/out.mjs");
+        let stats = bundler
+            .emit_with_options(
+                &reachable,
+                &esm_out,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        for path in &stats.written {
+            node_check(path);
+        }
+        assert_eq!(run_node(&esm_out), "req-shared:only-lazy\n");
     }
 
     /// `export * from "./x"` where `./x` is tree-shaken away must not leave a
@@ -12931,6 +15638,75 @@ mod tests {
         );
     }
 
+    /// A host that wants a FRESH module graph re-imports the entry under a new URL
+    /// after dropping the runtime globals — the react-server `serve` worker's
+    /// protocol. The registry lives on `globalThis`, so the new entry instance
+    /// builds a new registry; every chunk it dynamically imports must therefore be
+    /// a new instance too, or the chunk stays in Node's ESM cache, never re-runs
+    /// its `__register`, and `__require` throws "Module is not loaded: <id>".
+    #[test]
+    fn a_fresh_entry_instance_gets_fresh_chunk_instances() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("lazy.js"),
+            "export const lazy = 'lazy-value';\n",
+        )
+        .unwrap();
+        // The dynamic import fires during the entry's own evaluation, which is what
+        // gets the chunk into the ESM cache before the re-import happens.
+        fs::write(
+            directory.path().join("server.ts"),
+            "export const loaded = import('./lazy.js').then((m) => m.lazy);\n\
+             export async function read(){ return await loaded; }\n",
+        )
+        .unwrap();
+
+        let entry = directory.path().join("server.ts");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_server(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+        assert!(
+            output_root.join("server/server.chunk-1.mjs").is_file(),
+            "the dynamic import must land in its own chunk for this test to mean anything"
+        );
+
+        let driver = directory.path().join("driver.mjs");
+        fs::write(
+            &driver,
+            "import { pathToFileURL } from 'node:url';\n\
+             const url = pathToFileURL(process.argv[2]).href;\n\
+             const first = await import(url);\n\
+             console.log('first:' + await (first.default || first).read());\n\
+             for (const key of Object.keys(globalThis)) {\n\
+               if (key.indexOf('__diffpack_runtime:') === 0) delete globalThis[key];\n\
+             }\n\
+             const second = await import(url + '?v=2');\n\
+             console.log('second:' + await (second.default || second).read());\n",
+        )
+        .unwrap();
+        let executed = node_command()
+            .arg(&driver)
+            .arg(output_root.join("server/server.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            executed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout),
+            "first:lazy-value\nsecond:lazy-value\n"
+        );
+    }
+
     /// Polls `127.0.0.1:port` until it accepts a connection (or the attempts run
     /// out), then makes one `HTTP/1.0` GET and returns the full raw response.
     fn http_get_when_ready(port: u16, path: &str) -> String {
@@ -13067,6 +15843,7 @@ mod tests {
             main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target: Target::Server,
+            server_external_packages: Vec::new(),
             import_meta_env: None,
             import_meta_glob: None,
             defines: Vec::new(),
@@ -13076,6 +15853,7 @@ mod tests {
             css_preprocess: CssPreprocess::default(),
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx: crate::transform::JsxConfig::default(),
+                    source_maps: false,
         };
         (directory, entry, config)
     }
@@ -13143,6 +15921,7 @@ mod tests {
             main_fields: Vec::new(),
             virtual_modules: Vec::new(),
             target,
+            server_external_packages: Vec::new(),
             import_meta_env: None,
             import_meta_glob: None,
             defines: Vec::new(),
@@ -13152,6 +15931,7 @@ mod tests {
             css_preprocess: CssPreprocess::default(),
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx: crate::transform::JsxConfig::default(),
+                    source_maps: false,
         };
 
         // Client: `createServerOnlyFn(() => serverThing)` is neutralized to a
@@ -13231,6 +16011,7 @@ mod tests {
                 source.to_string(),
             )],
             target: Target::Server,
+            server_external_packages: Vec::new(),
             import_meta_env: None,
             import_meta_glob: None,
             defines: Vec::new(),
@@ -13240,6 +16021,7 @@ mod tests {
             css_preprocess: CssPreprocess::default(),
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx: crate::transform::JsxConfig::default(),
+                    source_maps: false,
         };
         let (bundler, update) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
         // The previously-unresolvable specifier now resolves and loads: no gap.
@@ -13351,6 +16133,88 @@ mod tests {
         );
         assert!(bundle.contains("USED"), "the used export must ship: {bundle}");
         node_check(&output);
+    }
+
+    /// A module reached ONLY through a CommonJS `require()` must survive dead-module
+    /// elimination.
+    ///
+    /// `sideEffects: false` authorizes dropping a module nothing demands, and demand was
+    /// collected from `import` declarations alone — so a `require()`d module carried no
+    /// demand whatsoever and was deleted. The `require` CALL survived, found nothing in
+    /// the registry, and fell through to the external path: `MODULE_NOT_FOUND` under
+    /// Node, and in the browser `Cannot require "…": it is not a Node built-in and was
+    /// not included in the bundle`. That is exactly what killed hydration on every
+    /// cal.com page, through
+    /// `const { i18n } = require("@calcom/i18n/next-i18next.config")` in a
+    /// `"sideEffects": false` workspace package.
+    ///
+    /// `require()` yields the whole `module.exports`, so the demand it places is the
+    /// full namespace — there is no named subset to narrow it to.
+    #[test]
+    fn dce_keeps_a_module_reached_only_through_a_commonjs_require() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_package(
+            root,
+            "config-pkg",
+            "false",
+            &[
+                ("index.js", "module.exports = { unrelated: true };\n"),
+                (
+                    "settings.js",
+                    "module.exports = { locales: ['en', 'fr'] };\n",
+                ),
+            ],
+        );
+        fs::write(root.join("package.json"), r#"{ "name": "app" }"#).unwrap();
+        // The require sits in a module that ALSO has ESM structure, so the liveness
+        // record is non-empty and the conservative "no captured structure" path (which
+        // keeps every dependency) cannot be what saves it.
+        fs::write(
+            root.join("lib.js"),
+            "const settings = require('config-pkg/settings.js');\n\
+             export const locales = settings.locales;\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.js");
+        fs::write(
+            &entry,
+            "import { locales } from './lib.js';\nconsole.log('locales:' + locales.join(','));\n",
+        )
+        .unwrap();
+
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        let live = bundler.live_modules(&reachable);
+        assert!(
+            live.iter().any(|id| id.ends_with("config-pkg/settings.js")),
+            "a require()d module must stay live even under sideEffects:false: {live:?}"
+        );
+        // The unrelated entry point of the same package is still droppable — the fix
+        // must not degrade into "keep the whole package".
+        assert!(
+            !live.iter().any(|id| id.ends_with("config-pkg/index.js")),
+            "only what is actually required is kept: {live:?}"
+        );
+
+        // Executing is the real assertion: the emitted `require` must find its target
+        // in the registry rather than falling through to the host.
+        let output = root.join("dist/bundle.mjs");
+        bundler
+            .emit_with_options(
+                &reachable,
+                &output,
+                EmitOptions {
+                    format: ModuleFormat::Esm,
+                    ..EmitOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(run_node(&output), "locales:en,fr\n");
     }
 
     #[test]
@@ -13680,7 +16544,13 @@ mod tests {
         image::DynamicImage::new_rgb8(300, 200).save(&path).unwrap();
 
         // NextObject: the module plans responsive variants to emit (object shape).
-        let obj = synthesize_asset_url(path.clone(), "/", 0, ImageImportShape::NextObject).unwrap();
+        let obj = synthesize_asset_url(
+            path.clone(),
+            "/",
+            0,
+            ImageImportShape::NextObject { responsive_variants: true },
+        )
+        .unwrap();
         assert_eq!(obj.assets.len(), 1, "one emitted original");
         let variants = obj.assets[0]
             .image_variants
@@ -13688,6 +16558,32 @@ mod tests {
             .expect("NextObject plans responsive variants");
         assert_eq!(variants, &crate::next_adapter::variant_widths(300));
         assert!(variants.len() >= 2, "several responsive widths: {variants:?}");
+        assert!(obj.code.contains("variants"), "the object carries its ladder: {}", obj.code);
+
+        // NextObject with optimization off (next.config `images.unoptimized` / a custom
+        // loader): the SAME object shape — Next's static import always carries
+        // src/width/height/blurDataURL — but no ladder is planned and the `variants`
+        // key is OMITTED, which is what makes the shim render a raw <img src>. An empty
+        // `{}` would be truthy and would silently keep the srcset path alive.
+        let unopt = synthesize_asset_url(
+            path.clone(),
+            "/",
+            0,
+            ImageImportShape::NextObject { responsive_variants: false },
+        )
+        .unwrap();
+        assert_eq!(unopt.assets.len(), 1, "the original is still emitted");
+        assert!(
+            unopt.assets[0].image_variants.is_none(),
+            "no variant file is planned when optimization is off",
+        );
+        assert!(unopt.code.contains("blurDataURL"), "blur is still generated: {}", unopt.code);
+        assert!(unopt.code.contains("width"), "intrinsic size is still carried: {}", unopt.code);
+        assert!(
+            !unopt.code.contains("variants"),
+            "the `variants` key is omitted, not emptied: {}",
+            unopt.code,
+        );
 
         // Url (Vite/TanStack/generic): bare URL string, NO variants planned. This
         // locks the no-regression guarantee for every non-Next build path.

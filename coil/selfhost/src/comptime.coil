@@ -138,11 +138,11 @@
             (isub masked (ishl 1 bits))
             masked))))
 (defn icmp-ord [(x i64) (y i64)] (-> i64)
-  (if (icmp-lt x y) -1 (if (icmp-gt x y) 1 0)))
+  (if (icmp-lt x y) -1 (when (icmp-gt x y) 1)))
 (defn fcmp-ord [(x f64) (y f64)] (-> i64)
   (cond (fcmp-lt x y) -1 (fcmp-eq x y) 0 (fcmp-gt x y) 1 :else -1))
 (defn bool-ord [(x bool) (y bool)] (-> i64)
-  (if (and (not x) y) -1 (if (and x (not y)) 1 0)))
+  (if (and (not x) y) -1 (when (and x (not y)) 1)))
 (defn cmp-apply [(op i64) (ord i64)] (-> bool)
   (cond (icmp-eq op 0) (icmp-eq ord -1)
         (icmp-eq op 1) (icmp-ne ord 1)
@@ -208,12 +208,12 @@
                     (store! (index tmp (load cnt)) (cast u8 (iadd (urem (load m) 10) 48)))
                     (store! cnt (iadd (load cnt) 1))
                     (store! m (udiv (load m) 10)))))
-        (let [extra (if neg 1 0)
+        (let [extra (when neg 1)
               total (iadd (load cnt) extra)
               out (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a total 1)))
-              (mut j) (if neg 1 0)
+              (mut j) (when neg 1)
               (mut k) (load cnt)]
-          (if neg (do (store! (index out 0) (cast u8 45)) 0) 0)
+          (when neg (store! (index out 0) (cast u8 45)) 0)
           (loop (if (icmp-eq (load k) 0)
                     (break)
                     (do
@@ -229,9 +229,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) name)
-                    (do (store! r (al-elem [StructDef] lst (load i))) 0)
-                    0)
+                (when (str-eq (load (field (al-elem [StructDef] lst (load i)) name)) name)
+                      (store! r (al-elem [StructDef] lst (load i)))
+                      0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn is-u8 [(t Type)] (-> bool)
@@ -279,9 +279,8 @@
     (loop (if (icmp-ge (load i) ntp)
               (break)
               (do
-                (if (icmp-lt (load i) nta)
-                    (subst-insert! s (al-get [(slice u8)] (load tps) (load i)) (al-elem [Type] targs (load i)))
-                    0)
+                (when (icmp-lt (load i) nta)
+                      (subst-insert! s (al-get [(slice u8)] (load tps) (load i)) (al-elem [Type] targs (load i))))
                 (store! i (iadd (load i) 1)))))
     s))
 (defn zeroed-struct-cells-subst [(flds (ptr (ArrayList Field))) (subst (ptr (ArrayList SubstEntry))) (cx (ptr CtCtx))] (-> (Result (ptr (ArrayList (ptr CtVal)))
@@ -367,9 +366,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Arm] arms (load i)) variant)) variant)
-                    (do (store! r (al-elem [Arm] arms (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [Arm] arms (load i)) variant)) variant)
+                      (store! r (al-elem [Arm] arms (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defsum ArgsOut
@@ -395,19 +394,17 @@
   (alloc-static WarnBox))
 (defn warn-list [] (-> (ptr (ArrayList Diag)))
   (let [b (warn-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst) (unwrap-ptr [(ArrayList Diag)] (create [(ArrayList Diag)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [Diag] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn warn-push [(d Diag)] (-> i64)
   (al-push! (warn-list) d)
   0)
 (defn diag-errs [] (-> i64)
-  (let [b (warn-box)] (if (icmp-eq (load (field b init)) 0) 0 (load (field b errs)))))
+  (let [b (warn-box)] (unless (icmp-eq (load (field b init)) 0) (load (field b errs)))))
 (defn diag-err-bump [] (-> i64)
   (let [_ (warn-list)
         b (warn-box)]
@@ -460,20 +457,18 @@
     (loop (if (icmp-ge (load k) off)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (store! line (iadd (load line) 1)) 0)
+                (when (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (store! line (iadd (load line) 1)))
                 (store! k (iadd (load k) 1)))))
     (load line)))
 (defn code-line-of [(node Sexp)] (-> i64)
   (let [b (src-box)
         lst (load (field b lst))]
-    (if (icmp-eq (cast i64 lst) 0)
-        0
-        (let [sid (sx-source node)]
-          (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
-              0
-              (let [sp (alloc-stack Source)]
-                (store! sp (al-get [Source] (load lst) sid))
-                (ct-line-at (load (field sp text)) (sx-lo node))))))))
+    (unless (icmp-eq (cast i64 lst) 0)
+            (let [sid (sx-source node)]
+              (unless (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+                      (let [sp (alloc-stack Source)]
+                        (store! sp (al-get [Source] (load lst) sid))
+                        (ct-line-at (load (field sp text)) (sx-lo node))))))))
 ; `(code-col NODE)` — the 1-based source COLUMN of a node's span (chars since the last
 ; newline before `lo`). Mirrors code-line; together they give `file:line:col` for a node.
 (defn ct-col-at [(src (slice u8)) (off0 i64)] (-> i64)
@@ -492,14 +487,12 @@
 (defn code-col-of [(node Sexp)] (-> i64)
   (let [b (src-box)
         lst (load (field b lst))]
-    (if (icmp-eq (cast i64 lst) 0)
-        0
-        (let [sid (sx-source node)]
-          (if (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
-              0
-              (let [sp (alloc-stack Source)]
-                (store! sp (al-get [Source] (load lst) sid))
-                (ct-col-at (load (field sp text)) (sx-lo node))))))))
+    (unless (icmp-eq (cast i64 lst) 0)
+            (let [sid (sx-source node)]
+              (unless (or (icmp-lt sid 0) (icmp-ge sid (al-len [Source] (load lst))))
+                      (let [sp (alloc-stack Source)]
+                        (store! sp (al-get [Source] (load lst) sid))
+                        (ct-col-at (load (field sp text)) (sx-lo node))))))))
 ; `(code-src NODE)` — the raw SOURCE TEXT of a node's span (lo..hi), so a macro can
 ; show the user exactly what they wrote.
 ; Empty when the node has no known source or a dummy span.
@@ -531,11 +524,9 @@
 ; Offset of the first byte of the line containing `off` (0 if on line 1).
 (defn ct-line-start [(src (slice u8)) (off i64)] (-> i64)
   (let [(mut k) off]
-    (loop (if (icmp-le (load k) 0)
+    (loop (if (or (icmp-le (load k) 0) (icmp-eq (cast i64 (slice-get [u8] src (isub (load k) 1))) 10))
               (break)
-              (if (icmp-eq (cast i64 (slice-get [u8] src (isub (load k) 1))) 10)
-                  (break)
-                  (store! k (isub (load k) 1)))))
+              (store! k (isub (load k) 1))))
     (load k)))
 
 ; If the line starting at `ls` is a `;;` doc line, return the offset just past its
@@ -548,27 +539,26 @@
               (break)
               (let [c (cast i64 (slice-get [u8] src (load k)))]
                 (if (or (icmp-eq c 32) (icmp-eq c 9)) (store! k (iadd (load k) 1)) (break)))))
-    (if (icmp-ge (iadd (load k) 1) n)
+    (if (or (icmp-ge (iadd (load k) 1) n)
+            (not (and (icmp-eq (cast i64 (slice-get [u8] src (load k))) 59)
+                      (icmp-eq (cast i64 (slice-get [u8] src (iadd (load k) 1))) 59))))
         -1
-        (if (not (and (icmp-eq (cast i64 (slice-get [u8] src (load k))) 59)
-                      (icmp-eq (cast i64 (slice-get [u8] src (iadd (load k) 1))) 59)))
-            -1
-            (let [(mut b) (iadd (load k) 2)]
-              ; a third `;` is still a doc line (`;;;` banners); skip the run
-              (loop (if (icmp-ge (load b) n)
-                        (break)
-                        (if (icmp-eq (cast i64 (slice-get [u8] src (load b))) 59) (store! b (iadd (load b) 1)) (break))))
-              (if (and (icmp-lt (load b) n) (icmp-eq (cast i64 (slice-get [u8] src (load b))) 32))
-                  (iadd (load b) 1)
-                  (load b)))))))
+        (let [(mut b) (iadd (load k) 2)]
+          ; a third `;` is still a doc line (`;;;` banners); skip the run
+          (loop (if (icmp-ge (load b) n)
+                    (break)
+                    (if (icmp-eq (cast i64 (slice-get [u8] src (load b))) 59) (store! b (iadd (load b) 1)) (break))))
+          (if (and (icmp-lt (load b) n) (icmp-eq (cast i64 (slice-get [u8] src (load b))) 32))
+              (iadd (load b) 1)
+              (load b))))))
 
 ; End offset (exclusive) of the line starting at `ls`, not counting its newline.
 (defn ct-line-end [(src (slice u8)) (ls i64)] (-> i64)
   (let [n (slice-len [u8] src)
         (mut k) ls]
-    (loop (if (icmp-ge (load k) n)
+    (loop (if (or (icmp-ge (load k) n) (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10))
               (break)
-              (if (icmp-eq (cast i64 (slice-get [u8] src (load k))) 10) (break) (store! k (iadd (load k) 1)))))
+              (store! k (iadd (load k) 1))))
     (load k)))
 
 ; The doc comment attached to `off`: the contiguous `;;` block ending on the line
@@ -600,7 +590,7 @@
                             (do
                               (store! i (isub (load i) 1))
                               (sb-push-str! (mut out) (al-get [(slice u8)] lines (load i)))
-                              (if (icmp-gt (load i) 0) (sb-push-byte! (mut out) (cast u8 10)) 0))))
+                              (when (icmp-gt (load i) 0) (sb-push-byte! (mut out) (cast u8 10))))))
                   (sb-str (load out)))))))))
 
 ; `(code-doc NODE)` — the `;;` doc comment written above NODE, or "" if it has none
@@ -633,14 +623,12 @@
   (alloc-static SugBox))
 (defn sug-list [] (-> (ptr (ArrayList Suggestion)))
   (let [b (sug-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList Suggestion)] (create [(ArrayList Suggestion)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn sug-push [(s Suggestion)] (-> i64)
   (al-push! (sug-list) s)
@@ -653,9 +641,7 @@
 ; per-round state, so a round starts from empty rather than re-reporting the last one.
 (defn sug-reset [] (-> i64)
   (let [b (sug-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        0
-        (do (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator))) 0))))
+    (unless (icmp-eq (load (field b init)) 0) (store! (load (field b lst)) (al-new [Suggestion] (malloc-allocator))) 0)))
 ; `coil lint --fix` re-analyses the program once per round; printing every round's
 ; diagnostics would repeat the same list N times and bury the one that matters. The
 ; rounds run quiet and the final pass reports.
@@ -663,48 +649,43 @@
 (defn diag-quiet-cell [] (-> (ptr DiagQuietCell))
   (alloc-static DiagQuietCell))
 (defn set-diag-quiet [(on bool)] (-> i64)
-  (store! (field (diag-quiet-cell) on) (if on 1 0))
+  (store! (field (diag-quiet-cell) on) (when on 1))
   0)
 (defn diag-quiet? [] (-> bool)
   (icmp-ne (load (field (diag-quiet-cell) on)) 0))
 (defn diag-reset [] (-> i64)
   (let [b (warn-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        0
-        (do (store! (load (field b lst)) (al-new [Diag] (malloc-allocator))) (store! (field b errs) 0) 0))))
+    (unless (icmp-eq (load (field b init)) 0)
+            (store! (load (field b lst)) (al-new [Diag] (malloc-allocator)))
+            (store! (field b errs) 0)
+            0)))
 
 ; The text of the source file a node came from, or "" — the raw material both the
 ; column lookup and the verbatim printer below work over.
 (defn sug-file-text [(source i64)] (-> (slice u8))
   (let [b (src-box)
         lst (load (field b lst))]
-    (if (icmp-eq (cast i64 lst) 0)
+    (if (or (icmp-eq (cast i64 lst) 0) (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst)))))
         ""
-        (if (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst))))
-            ""
-            (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp text)))))))
+        (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp text))))))
 
 ; The path of the source file a node came from, or "" — what `coil lint --fix`
 ; writes back to.
 (defn sug-file-name [(source i64)] (-> (slice u8))
   (let [b (src-box)
         lst (load (field b lst))]
-    (if (icmp-eq (cast i64 lst) 0)
+    (if (or (icmp-eq (cast i64 lst) 0) (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst)))))
         ""
-        (if (or (icmp-lt source 0) (icmp-ge source (al-len [Source] (load lst))))
-            ""
-            (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp name)))))))
+        (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) source)) (load (field sp name))))))
 
 ; 0-based column of byte `off` in `txt` — how far it sits past the last newline.
 (defn sug-col-at [(txt (slice u8)) (off i64)] (-> i64)
   (let [n (slice-len [u8] txt)
         (mut i) (if (icmp-gt off n) n off)
         (mut c) 0]
-    (loop (if (icmp-le (load i) 0)
+    (loop (if (or (icmp-le (load i) 0) (icmp-eq (cast i64 (slice-get [u8] txt (isub (load i) 1))) 10))
               (break)
-              (if (icmp-eq (cast i64 (slice-get [u8] txt (isub (load i) 1))) 10)
-                  (break)
-                  (do (store! c (iadd (load c) 1)) (store! i (isub (load i) 1))))))
+              (do (store! c (iadd (load c) 1)) (store! i (isub (load i) 1)))))
     (load c)))
 
 ; ---- rendering a replacement back to source text ----------------------------
@@ -756,7 +737,7 @@
                               (break)
                               (do
                                 (store! w
-                                        (iadd (iadd (load w) (if (icmp-gt (load i) 0) 1 0))
+                                        (iadd (iadd (load w) (when (icmp-gt (load i) 0) 1))
                                               (sug-width a (sx-at items (load i)))))
                                 (store! i (iadd (load i) 1)))))
                     (load w))
@@ -781,19 +762,18 @@
               (let [c (cast i64 (slice-get [u8] s (load i)))]
                 (al-push! (mut buf) (cast u8 c))
                 (store! i (iadd (load i) 1))
-                (if (icmp-eq c 10)
-                    (if (icmp-gt delta 0)
-                        (sug-spaces! (mut buf) delta)
-                        (let [drop (isub 0 delta)
-                              (mut k) 0]
-                          (loop (if (icmp-ge (load k) drop)
-                                    (break)
-                                    (if (and (icmp-lt (load i) n)
-                                             (icmp-eq (cast i64 (slice-get [u8] s (load i))) 32))
-                                        (do (store! i (iadd (load i) 1)) (store! k (iadd (load k) 1)))
-                                        (break))))
-                          0))
-                    0))))
+                (when (icmp-eq c 10)
+                      (if (icmp-gt delta 0)
+                          (sug-spaces! (mut buf) delta)
+                          (let [drop (isub 0 delta)
+                                (mut k) 0]
+                            (loop (if (icmp-ge (load k) drop)
+                                      (break)
+                                      (if (and (icmp-lt (load i) n)
+                                               (icmp-eq (cast i64 (slice-get [u8] s (load i))) 32))
+                                          (do (store! i (iadd (load i) 1)) (store! k (iadd (load k) 1)))
+                                          (break))))
+                            0))))))
     0))
 
 (defn sug-atom! [(a (ptr Allocator)) (buf (mut (ArrayList u8))) (x Sexp)] (-> i64)
@@ -845,11 +825,9 @@
   (let [s (al-slice [u8] buf)
         n (slice-len [u8] s)
         (mut i) n]
-    (loop (if (icmp-le (load i) 0)
+    (loop (if (or (icmp-le (load i) 0) (icmp-eq (cast i64 (slice-get [u8] s (isub (load i) 1))) 10))
               (break)
-              (if (icmp-eq (cast i64 (slice-get [u8] s (isub (load i) 1))) 10)
-                  (break)
-                  (store! i (isub (load i) 1)))))
+              (store! i (isub (load i) 1))))
     (if (icmp-eq (load i) 0) (iadd start n) (isub n (load i)))))
 
 ; ---- carrying the author's comments across a rewrite ------------------------
@@ -865,7 +843,7 @@
 ; over are written out first. Every fix that reuses the author's nodes emits them in
 ; source order, so the cursor only moves forward; a node that would move it backwards
 ; carries nothing rather than duplicating text that was already written.
-(defstruct SugGap [(on i64) (source i64) (at i64) (brk i64)])
+(defstruct SugGap [(on i64) (source i64) (at i64) (end i64) (brk i64)])
 (defn sug-gap-cell [] (-> (ptr SugGap))
   (alloc-static SugGap))
 (defn sug-gap-begin [(source i64) (lo i64) (hi i64)] (-> i64)
@@ -876,11 +854,12 @@
     (store! (field g on) 1)
     (store! (field g source) source)
     (store! (field g at) lo)
+    (store! (field g end) hi)
     ; A comment ends its line, so a replacement carrying one CANNOT be laid out flat.
     ; The width pass runs before the carry and would never find out on its own, so the
     ; whole rendering is put in broken layout up front — the same thing verbatim text
     ; containing a newline already does by reporting an unfittable width.
-    (store! (field g brk) (if (icmp-gt (sug-comment-marks span) 0) 1 0))
+    (store! (field g brk) (when (icmp-gt (sug-comment-marks span) 0) 1))
     0))
 (defn sug-gap-end [] (-> i64)
   (store! (field (sug-gap-cell) on) 0)
@@ -905,7 +884,7 @@
                   (store! i (iadd (load i) 1))
                   (let [start (load i)
                         (mut e) (load i)]
-                    (if lead (sug-newline! (mut buf) col) 0)
+                    (when lead (sug-newline! (mut buf) col))
                     ; a comment runs to end of line
                     (loop (if (or (icmp-ge (load e) n) (icmp-eq (cast i64 (slice-get [u8] s (load e))) 10))
                               (break)
@@ -920,7 +899,7 @@
                                       (store! t (isub (load t) 1))
                                       (break)))))
                       (append-bytes! (mut buf) (subslice [u8] s start (load t))))
-                    (if lead 0 (sug-newline! (mut buf) col))
+                    (unless lead (sug-newline! (mut buf) col))
                     (store! i (load e))))))
     0))
 
@@ -936,7 +915,16 @@
               at (load (field g at))
               src (sug-file-text (load (field g source)))
               n (slice-len [u8] src)]
-          (if (or (icmp-lt lo at) (or (icmp-gt lo n) (icmp-gt at n))) "" (subslice [u8] src at lo))))))
+          ; The node must lie INSIDE the span being replaced. A replacement also
+          ; contains nodes from the RULE's own quasiquote — the `if`/`cond` head it
+          ; writes — and when a rule is applied to the very file it is written in,
+          ; those share a source id with the target while sitting somewhere else
+          ; entirely. Without this test the cursor would "catch up" to one of them and
+          ; dump every comment in between into the middle of the replacement.
+          (if (or (icmp-lt lo at)
+                  (or (icmp-gt (sx-hi x) (load (field g end))) (or (icmp-gt lo n) (icmp-gt at n))))
+              ""
+              (subslice [u8] src at lo))))))
 
 (defn sug-gap-commented? [(x Sexp)] (-> bool)
   (icmp-gt (sug-comment-marks (sug-gap-before x)) 0))
@@ -946,9 +934,14 @@
 (defn sug-carry-at! [(buf (mut (ArrayList u8))) (x Sexp) (col i64)] (-> i64)
   (let [g (sug-gap-cell)]
     (sug-put-comments! (mut buf) (sug-gap-before x) col false)
-    (if (and (icmp-ne (load (field g on)) 0) (icmp-eq (sx-source x) (load (field g source))))
-        (if (icmp-gt (sx-hi x) (load (field g at))) (store! (field g at) (sx-hi x)) 0)
-        0)
+    ; Only a node from INSIDE the replaced span may move the cursor. One borrowed from
+    ; elsewhere in the same file — the rule's own quasiquoted head — would otherwise
+    ; shove it past the end of the span and silence every carry after it.
+    (when (and (and (icmp-ne (load (field g on)) 0)
+                    (and (icmp-eq (sx-source x) (load (field g source)))
+                         (icmp-le (sx-hi x) (load (field g end)))))
+               (icmp-gt (sx-hi x) (load (field g at))))
+          (store! (field g at) (sx-hi x)))
     0))
 
 ; Comments inside the replaced span but after the last node the replacement reused
@@ -956,14 +949,11 @@
 ; form, on their own line — the one place left that is still inside the edit.
 (defn sug-carry-tail! [(buf (mut (ArrayList u8))) (hi i64) (col i64)] (-> i64)
   (let [g (sug-gap-cell)]
-    (if (icmp-eq (load (field g on)) 0)
-        0
-        (let [at (load (field g at))
-              src (sug-file-text (load (field g source)))
-              n (slice-len [u8] src)]
-          (if (or (icmp-ge at hi) (icmp-gt hi n))
-              0
-              (sug-put-comments! (mut buf) (subslice [u8] src at hi) col true))))))
+    (unless (icmp-eq (load (field g on)) 0)
+            (let [at (load (field g at))
+                  src (sug-file-text (load (field g source)))
+                  n (slice-len [u8] src)]
+              (unless (or (icmp-ge at hi) (icmp-gt hi n)) (sug-put-comments! (mut buf) (subslice [u8] src at hi) col true))))))
 
 ; Render `x` into `buf` as source text. `start` is the column `buf`'s first byte
 ; occupies, which is all the renderer needs to know about the text around it.
@@ -997,7 +987,7 @@
                             (loop (if (icmp-ge (load i) n)
                                       (break)
                                       (do
-                                        (if (icmp-gt (load i) 0) (al-push! (mut buf) (cast u8 32)) 0)
+                                        (when (icmp-gt (load i) 0) (al-push! (mut buf) (cast u8 32)))
                                         (sug-emit! a (mut buf) (sx-at items (load i)) start)
                                         (store! i (iadd (load i) 1))))))
                           ; breaks: the head (or a vector's first element) stays on this
@@ -1024,23 +1014,22 @@
                                             (loop (if (or (icmp-ge (load k) step) (icmp-ge (iadd (load i) (load k)) n))
                                                       (break)
                                                       (let [it (sx-at items (iadd (load i) (load k)))]
-                                                        (if (icmp-gt (load k) 0)
-                                                            (if (sug-gap-commented? it)
-                                                                ; fmt/rules.coil: a comment BETWEEN a clause
-                                                                ; test and its body forces the hang — two
-                                                                ; spaces, the comment, then the body alone on
-                                                                ; the next line. Nothing may share that line.
-                                                                (do
-                                                                  (al-push! (mut buf) (cast u8 32))
-                                                                  (al-push! (mut buf) (cast u8 32))
-                                                                  (sug-carry-at! (mut buf) it (iadd ind 2)))
-                                                                (if (icmp-le (iadd (iadd (sug-cur-col (load buf) start)
-                                                                                         1)
-                                                                                   (sug-width a it))
-                                                                             (sug-width-budget))
+                                                        (when (icmp-gt (load k) 0)
+                                                              (if (sug-gap-commented? it)
+                                                                  ; fmt/rules.coil: a comment BETWEEN a clause
+                                                                  ; test and its body forces the hang — two
+                                                                  ; spaces, the comment, then the body alone on
+                                                                  ; the next line. Nothing may share that line.
+                                                                  (do
                                                                     (al-push! (mut buf) (cast u8 32))
-                                                                    (sug-newline! (mut buf) (iadd ind 2))))
-                                                            0)
+                                                                    (al-push! (mut buf) (cast u8 32))
+                                                                    (sug-carry-at! (mut buf) it (iadd ind 2)))
+                                                                  (if (icmp-le (iadd (iadd (sug-cur-col (load buf) start)
+                                                                                           1)
+                                                                                     (sug-width a it))
+                                                                               (sug-width-budget))
+                                                                      (al-push! (mut buf) (cast u8 32))
+                                                                      (sug-newline! (mut buf) (iadd ind 2)))))
                                                         (sug-emit! a (mut buf) it start)
                                                         (store! k (iadd (load k) 1))))))
                                           (store! i (iadd (load i) step))))))))
@@ -1068,11 +1057,11 @@
                 (if (load instr)
                     (if (icmp-eq c 92)
                         (store! i (iadd (load i) 2))  ; escape: skip the escaped byte
-                        (do (if (icmp-eq c 34) (store! instr false) 0) (store! i (iadd (load i) 1))))
+                        (do (when (icmp-eq c 34) (store! instr false)) (store! i (iadd (load i) 1))))
                     (do
                       (if (icmp-eq c 34)
                           (store! instr true)
-                          (if (icmp-eq c 59) (store! count (iadd (load count) 1)) 0))
+                          (when (icmp-eq c 59) (store! count (iadd (load count) 1))))
                       (store! i (iadd (load i) 1)))))))
     (load count)))
 
@@ -1083,25 +1072,63 @@
         false
         (icmp-gt (sug-comment-marks (subslice [u8] src lo hi)) (sug-comment-marks repl)))))
 
+; ── the files that supply the RULES are not targets ──────────────────────────
+; A rule loaded with `--use` is an INPUT to the analysis, and `--fix` re-analyses
+; after every round. If a rule matches its own source, the first round rewrites the
+; file the rule was compiled from; the Code literals its replacements are built out of
+; (the `if`/`and` heads in its own quasiquotes) still carry spans into the text as it
+; was BEFORE that edit. Rendering then reads the right byte count at the wrong offset
+; and splices mangled identifiers into the file — which is exactly the failure a
+; source-rewriting tool must not have. Caught here, at the same place as the other
+; filters, so such a fix is never even recorded.
+(defstruct RuleSrcBox [(init i64) (lst (ptr (ArrayList i64)))])
+(defn rule-src-box [] (-> (ptr RuleSrcBox))
+  (alloc-static RuleSrcBox))
+(defn rule-srcs [] (-> (ptr (ArrayList i64)))
+  (let [b (rule-src-box)]
+    (when (icmp-eq (load (field b init)) 0)
+          (store! (field b lst) (unwrap-ptr [(ArrayList i64)] (create [(ArrayList i64)] (malloc-allocator))))
+          (store! (load (field b lst)) (al-new [i64] (malloc-allocator)))
+          (store! (field b init) 1)
+          0)
+    (load (field b lst))))
+(defn rule-src-add [(sid i64)] (-> i64)
+  (unless (icmp-lt sid 0) (al-push! (rule-srcs) sid) 0))
+(defn rule-src-reset [] (-> i64)
+  (let [b (rule-src-box)]
+    (unless (icmp-eq (load (field b init)) 0) (store! (load (field b lst)) (al-new [i64] (malloc-allocator))) 0)))
+(defn rule-src? [(sid i64)] (-> bool)
+  (let [l (rule-srcs)
+        n (al-len [i64] (load l))
+        (mut i) 0
+        (mut r) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (if (icmp-eq (al-get [i64] (load l) (load i)) sid)
+                  (do (store! r true) (break))
+                  (store! i (iadd (load i) 1)))))
+    (load r)))
+
 ; Record a proposed rewrite. The filters live HERE rather than at apply time, so a
 ; node a fix could never legally touch never advertises one either:
 ;   * ctxt ≠ 0     — macro-generated. Its span points at the macro or the call site,
 ;                    so "fixing" it would write nonsense into an unrelated form. This
 ;                    filter is not optional and not configurable.
 ;   * not user code — a bundled stdlib node has no file on disk to edit.
+;   * a rule's own source — see above; the analysis may not rewrite its own input.
 (defn cop-record-fix [(node Sexp) (repl Sexp) (msg (slice u8)) (di i64)] (-> i64)
-  (if (or (icmp-ne (sx-ctxt node) 0) (not (code-from-user-node? node)))
-      0
-      (let [s (alloc-stack Suggestion)]
-        (store! (field s source) (sx-source node))
-        (store! (field s lo) (sx-lo node))
-        (store! (field s hi) (sx-hi node))
-        (store! (field s col) (sug-col-at (sug-file-text (sx-source node)) (sx-lo node)))
-        (store! (field s repl) repl)
-        (store! (field s msg) msg)
-        (store! (field s diag) di)
-        (sug-push (load s))
-        0)))
+  (unless (or (icmp-ne (sx-ctxt node) 0)
+              (or (not (code-from-user-node? node)) (rule-src? (sx-source node))))
+          (let [s (alloc-stack Suggestion)]
+            (store! (field s source) (sx-source node))
+            (store! (field s lo) (sx-lo node))
+            (store! (field s hi) (sx-hi node))
+            (store! (field s col) (sug-col-at (sug-file-text (sx-source node)) (sx-lo node)))
+            (store! (field s repl) repl)
+            (store! (field s msg) msg)
+            (store! (field s diag) di)
+            (sug-push (load s))
+            0)))
 
 ; ops 32 `(warn NODE MSG)` and 44 `(suggest NODE MSG REPLACEMENT)`. Both record a
 ; located, non-fatal warning at NODE — that half is identical, so it is written once —
@@ -1174,9 +1201,11 @@
               (do
                 (let [sp (alloc-stack Suggestion)]
                   (store! sp (sug-at (load i)))
-                  (if (icmp-eq (load (field sp diag)) di)
-                      (do (ps w "help: try: ") (ps w (sug-render-at a (load sp) 11)) (wb w 10) 0)
-                      0))
+                  (when (icmp-eq (load (field sp diag)) di)
+                        (ps w "help: try: ")
+                        (ps w (sug-render-at a (load sp) 11))
+                        (wb w 10)
+                        0))
                 (store! i (iadd (load i) 1))))))
   0)
 
@@ -1253,14 +1282,12 @@
   (alloc-static TypeMapBox))
 (defn type-map-list [] (-> (ptr (ArrayList TypeMapEntry)))
   (let [b (type-map-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList TypeMapEntry)] (create [(ArrayList TypeMapEntry)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [TypeMapEntry] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn type-map-reset [] (-> i64)
   (let [_ (type-map-list)
@@ -1268,13 +1295,13 @@
     (store! (load (field b lst)) (al-new [TypeMapEntry] (malloc-allocator)))
     0))
 (defn type-map-record [(nid i64) (ty Type)] (-> i64)
-  (if (icmp-le nid 0)
-      0  ; skip synthesized nodes (nid -1) / the "no id" sentinel
-      (let [e (alloc-stack TypeMapEntry)]
-        (store! (field e nid) nid)
-        (store! (field e ty) ty)
-        (al-push! (type-map-list) (load e))
-        0)))
+  (unless (icmp-le nid 0)
+          ; skip synthesized nodes (nid -1) / the "no id" sentinel
+          (let [e (alloc-stack TypeMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e ty) ty)
+            (al-push! (type-map-list) (load e))
+            0)))
 ; Look up a node id's type; scan from the END so the last (most-refined) record wins.
 (defn type-map-lookup [(nid i64)] (-> (Option Type))
   (if (icmp-le nid 0)
@@ -1287,7 +1314,7 @@
                   (break)
                   (do
                     (let [e (al-elem [TypeMapEntry] lst (load i))]
-                      (if (icmp-eq (load (field e nid)) nid) (do (store! r (Some (load (field e ty)))) (break)) 0))
+                      (when (icmp-eq (load (field e nid)) nid) (store! r (Some (load (field e ty)))) (break)))
                     (store! i (isub (load i) 1)))))
         (load r))))
 ; ── S3: the BINDING MAP — per-reference local-binding identity for a borrow/
@@ -1311,14 +1338,12 @@
   (alloc-static BindMapBox))
 (defn bind-map-list [] (-> (ptr (ArrayList BindMapEntry)))
   (let [b (bind-map-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList BindMapEntry)] (create [(ArrayList BindMapEntry)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [BindMapEntry] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn bind-map-reset [] (-> i64)
   (let [_ (bind-map-list)
@@ -1328,27 +1353,25 @@
     (store! (field c n) 0)
     0))
 (defn bind-map-record [(nid i64) (bid i64)] (-> i64)
-  (if (icmp-le nid 0)
-      0
-      (let [e (alloc-stack BindMapEntry)]
-        (store! (field e nid) nid)
-        (store! (field e bid) bid)
-        (al-push! (bind-map-list) (load e))
-        0)))
+  (unless (icmp-le nid 0)
+          (let [e (alloc-stack BindMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e bid) bid)
+            (al-push! (bind-map-list) (load e))
+            0)))
 (defn bind-map-lookup [(nid i64)] (-> i64)
-  (if (icmp-le nid 0)
-      0
-      (let [lst (bind-map-list)
-            n (al-len [BindMapEntry] (load lst))
-            (mut i) (isub n 1)
-            (mut r) 0]
-        (loop (if (icmp-lt (load i) 0)
-                  (break)
-                  (do
-                    (let [e (al-elem [BindMapEntry] lst (load i))]
-                      (if (icmp-eq (load (field e nid)) nid) (do (store! r (load (field e bid))) (break)) 0))
-                    (store! i (isub (load i) 1)))))
-        (load r))))
+  (unless (icmp-le nid 0)
+          (let [lst (bind-map-list)
+                n (al-len [BindMapEntry] (load lst))
+                (mut i) (isub n 1)
+                (mut r) 0]
+            (loop (if (icmp-lt (load i) 0)
+                      (break)
+                      (do
+                        (let [e (al-elem [BindMapEntry] lst (load i))]
+                          (when (icmp-eq (load (field e nid)) nid) (store! r (load (field e bid))) (break)))
+                        (store! i (isub (load i) 1)))))
+            (load r))))
 (defn cop-binding-of [(args (ptr (ArrayList CtVal))) (cx (ptr CtCtx))] (-> (Result CtVal Diag))
   (match (cv-get args 0)
     (Some [v]
@@ -1377,14 +1400,12 @@
   (alloc-static ResMapBox))
 (defn res-map-list [] (-> (ptr (ArrayList ResMapEntry)))
   (let [b (res-map-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList ResMapEntry)] (create [(ArrayList ResMapEntry)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn res-map-reset [] (-> i64)
   (let [_ (res-map-list)
@@ -1392,13 +1413,12 @@
     (store! (load (field b lst)) (al-new [ResMapEntry] (malloc-allocator)))
     0))
 (defn res-map-record [(nid i64) (name (slice u8))] (-> i64)
-  (if (icmp-le nid 0)
-      0
-      (let [e (alloc-stack ResMapEntry)]
-        (store! (field e nid) nid)
-        (store! (field e name) name)
-        (al-push! (res-map-list) (load e))
-        0)))
+  (unless (icmp-le nid 0)
+          (let [e (alloc-stack ResMapEntry)]
+            (store! (field e nid) nid)
+            (store! (field e name) name)
+            (al-push! (res-map-list) (load e))
+            0)))
 (defn res-map-lookup [(nid i64)] (-> (slice u8))
   (if (icmp-le nid 0)
       ""
@@ -1410,7 +1430,7 @@
                   (break)
                   (do
                     (let [e (al-elem [ResMapEntry] lst (load i))]
-                      (if (icmp-eq (load (field e nid)) nid) (do (store! r (load (field e name))) (break)) 0))
+                      (when (icmp-eq (load (field e nid)) nid) (store! r (load (field e name))) (break)))
                     (store! i (isub (load i) 1)))))
         (load r))))
 ; The module part of a fully-qualified name `mod.simple` → "mod" (before last dot), else "".
@@ -1421,7 +1441,7 @@
     (loop (if (icmp-lt (load i) 0)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get name (load i))) 46) (do (store! at (load i)) (break)) 0)
+                (when (icmp-eq (cast i64 (slice-get name (load i))) 46) (store! at (load i)) (break))
                 (store! i (isub (load i) 1)))))
     (if (icmp-lt (load at) 0) "" (subslice [u8] name 0 (load at)))))
 ; The simple (module-stripped, alias-stripped) name a query symbol refers to.
@@ -1538,16 +1558,14 @@
               (break)
               (do
                 (let [f (al-elem [Func] fs (load i))]
-                  (if (cp-name-match (load (field f name)) simple wantmod)
-                      (do
-                        (if (icmp-eq (cast i64 (load first)) 0) (do (store! first f) 0) 0)
+                  (when (cp-name-match (load (field f name)) simple wantmod)
+                        (when (icmp-eq (cast i64 (load first)) 0) (store! first f) 0)
                         (store! cnt (iadd (load cnt) 1))
-                        0)
-                      0))
+                        0))
                 (store! i (iadd (load i) 1)))))
     (let [r (alloc-stack CpFn)]
       (store! (field r fn) (load first))
-      (store! (field r status) (if (icmp-eq (load cnt) 0) 1 (if (icmp-eq (load cnt) 1) 0 2)))
+      (store! (field r status) (if (icmp-eq (load cnt) 0) 1 (unless (icmp-eq (load cnt) 1) 2)))
       (load r))))
 ; Find a function by its EXACT fully-qualified name (what resolution recorded).
 (defn cp-find-fn-exact [(p (ptr Program)) (qname (slice u8))] (-> (ptr Func))
@@ -1559,7 +1577,7 @@
               (break)
               (do
                 (let [f (al-elem [Func] fs (load i))]
-                  (if (str-eq (load (field f name)) qname) (do (store! r f) (break)) 0))
+                  (when (str-eq (load (field f name)) qname) (store! r f) (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; The qualified name of the SUM that owns a variant whose qualified name is `qname`,
@@ -1579,9 +1597,9 @@
                   (loop (if (icmp-ge (load j) nv)
                             (break)
                             (do
-                              (if (str-eq (load (field (al-elem [Variant] vs (load j)) name)) qname)
-                                  (do (store! r (load (field sd name))) (break))
-                                  0)
+                              (when (str-eq (load (field (al-elem [Variant] vs (load j)) name)) qname)
+                                    (store! r (load (field sd name)))
+                                    (break))
                               (store! j (iadd (load j) 1))))))
                 (store! i (iadd (load i) 1)))))
     (load r)))
@@ -1602,22 +1620,17 @@
                     (break)
                     (do
                       (let [e (al-elem [NamedKind] nks (load i))]
-                        (if (str-eq (load (field e name)) qname)
-                            (do
+                        (when (str-eq (load (field e name)) qname)
                               (store! (field r found) true)
                               (store! (field r rec) (kind-decl-record a (qual-module-of qname) (load (field e kind))))
-                              0)
-                            0))
+                              0))
                       (store! i (iadd (load i) 1)))))
-          (if (load (field r found))
-              0
-              (let [sq (cp-sum-of-variant p qname)]  ; variant construction → its sum
-                (if (icmp-gt (slice-len [u8] sq) 0)
-                    (do
-                      (store! (field r found) true)
-                      (store! (field r rec) (kind-decl-record a (qual-module-of sq) "sum"))
-                      0)
-                    0)))))
+          (unless (load (field r found))
+                  (let [sq (cp-sum-of-variant p qname)]  ; variant construction → its sum
+                    (when (icmp-gt (slice-len [u8] sq) 0)
+                          (store! (field r found) true)
+                          (store! (field r rec) (kind-decl-record a (qual-module-of sq) "sum"))
+                          0)))))
     (load r)))
 ; A (qualified-name, kind) pair, for the non-function declaration kinds.
 (defstruct NamedKind [(name (slice u8)) (kind (slice u8))])
@@ -1712,17 +1725,13 @@
                                                       (break)
                                                       (do
                                                         (let [e (al-elem [NamedKind] nks (load i))]
-                                                          (if (cp-name-match (load (field e name)) simple wantmod)
-                                                              (do
-                                                                (if (icmp-eq (load cnt) 0)
-                                                                    (do
+                                                          (when (cp-name-match (load (field e name)) simple wantmod)
+                                                                (when (icmp-eq (load cnt) 0)
                                                                       (store! fk (load (field e kind)))
                                                                       (store! fm (qual-module-of (load (field e name))))
                                                                       0)
-                                                                    0)
                                                                 (store! cnt (iadd (load cnt) 1))
-                                                                0)
-                                                              0))
+                                                                0))
                                                         (store! i (iadd (load i) 1)))))
                                             (if (icmp-eq (load cnt) 0)
                                                 (Ok [CtVal Diag] (CCode (mk-sexp (KKw "unresolved") -1 -1)))
@@ -1737,9 +1746,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) name)
-                    (do (store! r (al-elem [SumDef] lst (load i))) 0)
-                    0)
+                (when (str-eq (load (field (al-elem [SumDef] lst (load i)) name)) name)
+                      (store! r (al-elem [SumDef] lst (load i)))
+                      0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn ct-trait-find [(cx (ptr CtCtx)) (name (slice u8))] (-> (ptr TraitDef))
@@ -1750,9 +1759,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [TraitDef] lst (load i)) name)) name)
-                    (do (store! r (al-elem [TraitDef] lst (load i))) 0)
-                    0)
+                (when (str-eq (load (field (al-elem [TraitDef] lst (load i)) name)) name)
+                      (store! r (al-elem [TraitDef] lst (load i)))
+                      0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn cstr-of [(v CtVal)] (-> (slice u8))
@@ -1919,9 +1928,9 @@
                 (loop (if (icmp-ge (load i) nf)
                           (break)
                           (do
-                            (if (str-eq (load (field (al-elem [Field] flds (load i)) name)) want)
-                                (do (store! r (load i)) (break))
-                                0)
+                            (when (str-eq (load (field (al-elem [Field] flds (load i)) name)) want)
+                                  (store! r (load i))
+                                  (break))
                             (store! i (iadd (load i) 1)))))
                 (if (icmp-lt (load r) 0)
                     (Err [CtVal Diag] (derr (sconcat3 a "field-index: struct has no field '" want "'")))
@@ -1936,9 +1945,9 @@
           (loop (if (or (not (load ok)) (icmp-ge (load i) nx))
                     (break)
                     (do
-                      (if (sexp-eq (al-get [Sexp] (load xs) (load i)) (al-get [Sexp] (load ys) (load i)))
-                          0
-                          (do (store! ok false) 0))
+                      (unless (sexp-eq (al-get [Sexp] (load xs) (load i)) (al-get [Sexp] (load ys) (load i)))
+                              (store! ok false)
+                              0)
                       (store! i (iadd (load i) 1)))))
           (load ok)))))
 (defn sexp-eq [(x Sexp) (y Sexp)] (-> bool)
@@ -1972,9 +1981,9 @@
                     (break)
                     (do
                       (let [sp (al-elem [StructDef] lst (load i))]
-                        (if (str-eq (after-last-dot (load (field sp name))) tname)
-                            (do (if (icmp-eq (load cnt) 0) (do (store! first sp) 0) 0) (store! cnt (iadd (load cnt) 1)))
-                            0))
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
                       (store! i (iadd (load i) 1)))))
           (if (icmp-eq (load cnt) 0)
               (do (store! (field r status) 1) (load r))
@@ -1996,9 +2005,9 @@
                     (break)
                     (do
                       (let [sp (al-elem [SumDef] lst (load i))]
-                        (if (str-eq (after-last-dot (load (field sp name))) tname)
-                            (do (if (icmp-eq (load cnt) 0) (do (store! first sp) 0) 0) (store! cnt (iadd (load cnt) 1)))
-                            0))
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
                       (store! i (iadd (load i) 1)))))
           (if (icmp-eq (load cnt) 0)
               (do (store! (field r status) 1) (load r))
@@ -2020,9 +2029,9 @@
                     (break)
                     (do
                       (let [sp (al-elem [TraitDef] lst (load i))]
-                        (if (str-eq (after-last-dot (load (field sp name))) tname)
-                            (do (if (icmp-eq (load cnt) 0) (do (store! first sp) 0) 0) (store! cnt (iadd (load cnt) 1)))
-                            0))
+                        (when (str-eq (after-last-dot (load (field sp name))) tname)
+                              (when (icmp-eq (load cnt) 0) (store! first sp) 0)
+                              (store! cnt (iadd (load cnt) 1))))
                       (store! i (iadd (load i) 1)))))
           (if (icmp-eq (load cnt) 0)
               (do (store! (field r status) 1) (load r))
@@ -2038,9 +2047,9 @@
     (loop (if (or (load r) (icmp-ge (load i) n))
               (break)
               (do
-                (if (str-eq (after-last-dot (load (field (al-elem [Variant] vs (load i)) name))) want)
-                    (do (store! r true) 0)
-                    0)
+                (when (str-eq (after-last-dot (load (field (al-elem [Variant] vs (load i)) name))) want)
+                      (store! r true)
+                      0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn find-variant-sum [(cx (ptr CtCtx)) (want (slice u8))] (-> FindVS)
@@ -2054,11 +2063,9 @@
               (break)
               (do
                 (let [sp (al-elem [SumDef] lst (load i))]
-                  (if (sum-has-variant sp want)
-                      (do
-                        (if (icmp-eq (load cnt) 0) (do (store! first (load (field sp name))) 0) 0)
-                        (store! cnt (iadd (load cnt) 1)))
-                      0))
+                  (when (sum-has-variant sp want)
+                        (when (icmp-eq (load cnt) 0) (store! first (load (field sp name))) 0)
+                        (store! cnt (iadd (load cnt) 1))))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-eq (load cnt) 0)
         (do (store! (field r status) 1) (load r))
@@ -2151,9 +2158,8 @@
           (loop (if (or (icmp-ge (load idx) 0) (icmp-ge (load i) np))
                     (break)
                     (do
-                      (if (and (str-eq (al-get [(slice u8)] (load params) (load i)) nm) (icmp-lt (load i) nt))
-                          (store! idx (load i))
-                          0)
+                      (when (and (str-eq (al-get [(slice u8)] (load params) (load i)) nm) (icmp-lt (load i) nt))
+                            (store! idx (load i)))
                       (store! i (iadd (load i) 1)))))
           (if (icmp-ge (load idx) 0) (al-get [Sexp] (load targs) (load idx)) node))
         (if (or (icmp-eq tg 6) (icmp-eq tg 7))
@@ -2637,10 +2643,9 @@
     (if (icmp-eq (cast i64 lst) 0)
         false
         (do
-          (if (or (icmp-eq (load (field ix built)) 0)
-                  (icmp-ne (cast i64 (load (field ix src))) (cast i64 lst)))
-              (module-fns-index-build! ix lst)
-              0)
+          (when (or (icmp-eq (load (field ix built)) 0)
+                    (icmp-ne (cast i64 (load (field ix src))) (cast i64 lst)))
+                (module-fns-index-build! ix lst))
           (match (hm-get [(slice u8) i64] (load (field ix m)) q)
             (Some [_] true)
             (None [] false))))))
@@ -2667,10 +2672,9 @@
                                         (UAll [] true)
                                         (UNames [names] (set-contains names name)))
                                     exported (exports-check (load (field cx qexports)) target name)]
-                                (if (and used exported)
-                                    (let [q (sconcat3 a target "." name)]
-                                      (if (module-fns-has cx q) (do (store! r (Some q)) (break)) 0))
-                                    0)))
+                                (when (and used exported)
+                                      (let [q (sconcat3 a target "." name)]
+                                        (when (module-fns-has cx q) (store! r (Some q)) (break))))))
                             (store! i (iadd (load i) 1)))))
                 (load r)))))))
 (defn quasi-head-is-lit-sym [(items (ptr (ArrayList Quasi)))] (-> bool)
@@ -2680,28 +2684,22 @@
                   (QLit [fp] (icmp-eq (sx-tag (load fp)) 2))
                   (_ false))))
 (defn qualify-head [(out (ptr (ArrayList Sexp))) (items (ptr (ArrayList Quasi))) (cx (ptr CtCtx))] (-> i64)
-  (if (not (quasi-head-is-lit-sym items))
-      0
-      (if (icmp-eq (al-len [Sexp] (load out)) 0)
-          0
+  (unless (or (not (quasi-head-is-lit-sym items)) (icmp-eq (al-len [Sexp] (load out)) 0))
           (match (load (field cx qmodule))
             (None [] 0)
             (Some [m]
-                  (if (icmp-eq (cast i64 (load (field cx module_fns))) 0)
-                      0
-                      (let [hp (al-elem [Sexp] out 0)]
-                        (if (icmp-ne (sx-tag (load hp)) 2)
-                            0
-                            (let [name (sx-sval (load hp))]
-                              (if (or (has-dot name) (icmp-ge (find-slash name) 0))
-                                  0
-                                  (match (resolve-in-module cx name m)
-                                    (None [] 0)
-                                    (Some [q] (do (store! (field hp kind) (KSym q)) 0)))))))))))))
+                  (unless (icmp-eq (cast i64 (load (field cx module_fns))) 0)
+                          (let [hp (al-elem [Sexp] out 0)]
+                            (unless (icmp-ne (sx-tag (load hp)) 2)
+                                    (let [name (sx-sval (load hp))]
+                                      (unless (or (has-dot name) (icmp-ge (find-slash name) 0))
+                                              (match (resolve-in-module cx name m)
+                                                (None [] 0)
+                                                (Some [q] (do (store! (field hp kind) (KSym q)) 0))))))))))))
 (defn type-is-code [(t (ptr Type))] (-> bool)
   (match-else (load t) (TCode [] true) (_ false)))
 (defn cc-push! [(out (ptr SBox)) (names (ptr (ArrayList (slice u8)))) (func (slice u8))] (-> i64)
-  (if (set-contains names func) (do (al-push! (mut (field out items)) func) 0) 0))
+  (when (set-contains names func) (al-push! (mut (field out items)) func) 0))
 (defn cc-list [(es (ptr (ArrayList Expr))) (names (ptr (ArrayList (slice u8)))) (out (ptr SBox))] (-> i64)
   (let [n (al-len [Expr] (load es))
         (mut i) 0]
@@ -2797,9 +2795,9 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-elem [Func] fs (load i)) name)) name)
-                    (do (store! r (al-elem [Func] fs (load i))) (break))
-                    0)
+                (when (str-eq (load (field (al-elem [Func] fs (load i)) name)) name)
+                      (store! r (al-elem [Func] fs (load i)))
+                      (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn closure-funcs [(p (ptr Program)) (seeds (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
@@ -2854,12 +2852,10 @@
                       nm (al-get [(slice u8)] sl (isub top 1))]
                   ; pop
                   (store! (field (field stackb items) len) (isub top 1))
-                  (if (set-contains (field wantedb items) nm)
-                      0
-                      (do
-                        (al-push! (mut (field wantedb items)) nm)
-                        (let [f (prog-fn-find p nm)]
-                          (if (icmp-eq (cast i64 f) 0) 0 (cc-list (load (field f body)) names stackb)))))))))
+                  (unless (set-contains (field wantedb items) nm)
+                          (al-push! (mut (field wantedb items)) nm)
+                          (let [f (prog-fn-find p nm)]
+                            (unless (icmp-eq (cast i64 f) 0) (cc-list (load (field f body)) names stackb))))))))
     (field wantedb items)))
 ; ---- pruned closure (macro STAGING, interp deletion step 5 Phase B) ---------------
 ; closure-funcs minus the impl-method and const-value seeding: only the seeds'
@@ -2888,12 +2884,10 @@
                       top (al-len [(slice u8)] sl)
                       nm (al-get [(slice u8)] sl (isub top 1))]
                   (store! (field (field stackb items) len) (isub top 1))
-                  (if (set-contains (field wantedb items) nm)
-                      0
-                      (do
-                        (al-push! (mut (field wantedb items)) nm)
-                        (let [f (prog-fn-find p nm)]
-                          (if (icmp-eq (cast i64 f) 0) 0 (cc-list (load (field f body)) names stackb)))))))))
+                  (unless (set-contains (field wantedb items) nm)
+                          (al-push! (mut (field wantedb items)) nm)
+                          (let [f (prog-fn-find p nm)]
+                            (unless (icmp-eq (cast i64 f) 0) (cc-list (load (field f body)) names stackb))))))))
     (field wantedb items)))
 ; closure-subprogram with impls and consts PRUNED (companion of the above): a
 ; macro whose callees genuinely need trait impls fails this check and simply
@@ -2908,7 +2902,7 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (set-contains wanted (load (field fp name))) (do (al-push! (mut keep) (load fp)) 0) 0))
+                  (when (set-contains wanted (load (field fp name))) (al-push! (mut keep) (load fp)) 0))
                 (store! i (iadd (load i) 1)))))
     (store! (field pp conventions) (load (field p conventions)))
     (store! (field pp structs) (load (field p structs)))
@@ -2933,7 +2927,7 @@
               (break)
               (do
                 (let [fp (al-elem [Func] fs (load i))]
-                  (if (set-contains wanted (load (field fp name))) (do (al-push! (mut keep) (load fp)) 0) 0))
+                  (when (set-contains wanted (load (field fp name))) (al-push! (mut keep) (load fp)) 0))
                 (store! i (iadd (load i) 1)))))
     (store! (field pp conventions) (load (field p conventions)))
     (store! (field pp structs) (load (field p structs)))
@@ -3327,7 +3321,7 @@
     (loop (if (or (load r) (icmp-ge (load i) n))
               (break)
               (do
-                (if (is-meta-form (field (al-elem [TaggedForm] out (load i)) form)) (do (store! r true) 0) 0)
+                (when (is-meta-form (field (al-elem [TaggedForm] out (load i)) form)) (store! r true) 0)
                 (store! i (iadd (load i) 1)))))
     (load r)))
 ; splice: rebuild s.out = (tagged forms sans meta) ++ generated forms (tagged with the
@@ -3344,7 +3338,7 @@
               (do
                 (let [tf (al-elem [TaggedForm] old (load i))]
                   (if (is-meta-form (field tf form))
-                      (do (if (load found) 0 (do (store! mmod (load (field tf module))) (store! found true) 0)) 0)
+                      (do (unless (load found) (store! mmod (load (field tf module))) (store! found true) 0) 0)
                       (do (al-push! (mut newout) (load tf)) 0)))
                 (store! i (iadd (load i) 1)))))
     (let [ng (al-len [Sexp] (load gen))

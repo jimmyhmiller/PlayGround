@@ -232,6 +232,13 @@ async function benchServer(label, buildCmd, startCmd, port) {
 const results = [];
 if (!only || only === "diffpack") {
   results.push(
+    // NO `--sourcemap` / `--no-sourcemap`: with neither flag diffpack follows the
+    // app's own next.config exactly as `next build` does — server maps always,
+    // browser maps under `productionBrowserSourceMaps`. Both columns below therefore
+    // emit the SAME set of maps for the same app, which is the only way this timing
+    // is a comparison rather than a handicap. (Passing `--no-sourcemap` would make
+    // diffpack look faster by doing strictly less work than the reference; on
+    // cal.com that is worth ~8 s of a ~20 s build, so it is not a rounding error.)
     await benchServer(
       "diffpack (build production + start)",
       { cmd: DIFFPACK, args: ["build-app", ".", "production"] },

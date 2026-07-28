@@ -262,14 +262,12 @@
   (alloc-static TypeResBox))
 (defn type-res-list [] (-> (ptr (ArrayList TypeResEntry)))
   (let [b (type-res-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList TypeResEntry)] (create [(ArrayList TypeResEntry)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [TypeResEntry] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn type-res-reset [] (-> i64)
   (let [_ (type-res-list)
@@ -293,9 +291,9 @@
               (break)
               (do
                 (store! e (al-get [TypeResEntry] (load lst) (load i)))
-                (if (and (str-eq (load (field e module)) module) (str-eq (load (field e raw)) raw))
-                    (do (store! r (load (field e qual))) (break))
-                    0)
+                (when (and (str-eq (load (field e module)) module) (str-eq (load (field e raw)) raw))
+                      (store! r (load (field e qual)))
+                      (break))
                 (store! i (isub (load i) 1)))))
     (load r)))
 ; ── source-id → module-name map (so a node's module is known at query time) ───
@@ -305,14 +303,12 @@
   (alloc-static SrcModBox))
 (defn src-mod-list [] (-> (ptr (ArrayList SrcModEntry)))
   (let [b (src-mod-box)]
-    (if (icmp-eq (load (field b init)) 0)
-        (do
+    (when (icmp-eq (load (field b init)) 0)
           (store! (field b lst)
                   (unwrap-ptr [(ArrayList SrcModEntry)] (create [(ArrayList SrcModEntry)] (malloc-allocator))))
           (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
           (store! (field b init) 1)
           0)
-        0)
     (load (field b lst))))
 (defn src-mod-reset [] (-> i64)
   (let [_ (src-mod-list)
@@ -320,13 +316,12 @@
     (store! (load (field b lst)) (al-new [SrcModEntry] (malloc-allocator)))
     0))
 (defn src-mod-record [(source i64) (module (slice u8))] (-> i64)
-  (if (icmp-lt source 0)
-      0
-      (let [e (alloc-stack SrcModEntry)]
-        (store! (field e source) source)
-        (store! (field e module) module)
-        (al-push! (src-mod-list) (load e))
-        0)))
+  (unless (icmp-lt source 0)
+          (let [e (alloc-stack SrcModEntry)]
+            (store! (field e source) source)
+            (store! (field e module) module)
+            (al-push! (src-mod-list) (load e))
+            0)))
 (defn src-mod-lookup [(source i64)] (-> (slice u8))
   (let [lst (src-mod-list)
         n (al-len [SrcModEntry] (load lst))
@@ -337,7 +332,7 @@
               (break)
               (do
                 (store! e (al-get [SrcModEntry] (load lst) (load i)))
-                (if (icmp-eq (load (field e source)) source) (do (store! r (load (field e module))) (break)) 0)
+                (when (icmp-eq (load (field e source)) source) (store! r (load (field e module))) (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn mk-sexp [(kind SexpKind) (lo i64) (hi i64)] (-> Sexp)
@@ -345,7 +340,7 @@
     (store! (field p kind) kind)
     (store! (field p lo) lo)
     (store! (field p hi) hi)
-    (store! (field p source) (if (icmp-lt lo 0) -1 0))
+    (store! (field p source) (when (icmp-lt lo 0) -1))
     (store! (field p ctxt) 0)
     (store! (field p nid) (next-nid))
     (load p)))

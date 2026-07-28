@@ -41,7 +41,9 @@
 //! generation), not part of the incremental transform hot path: a leaf edit still
 //! re-transforms exactly one module.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use rayon::prelude::*;
 
 /// The upstream `tailwindcss` release every vendored artifact below was taken
 /// from. ONE definition: the banner is formatted from it, the installed-theme
@@ -897,36 +899,80 @@ pub fn scan_class_candidates(source: &str, out: &mut BTreeSet<String>) {
 /// from one file's class positions resolve against `const` bindings in ANY of
 /// the files (`import { COLOR } from './colors'` + `className={COLOR[kind]}`),
 /// iterated to a fixpoint so chains across files resolve too.
-pub fn scan_class_candidates_multi<S: AsRef<str>>(sources: &[S], out: &mut BTreeSet<String>) {
+pub fn scan_class_candidates_multi<S: AsRef<str> + Sync>(
+    sources: &[S],
+    out: &mut BTreeSet<String>,
+) {
+    // Pass 1: every file's class-valued positions. Per-file independent, so it fans
+    // out across the pool and the per-file results are merged in `sources` order —
+    // the sets are order-independent anyway, but merging deterministically keeps the
+    // emitted stylesheet byte-identical run to run.
+    let positions_stage = crate::build_profile::stage("css/tailwind-scan-positions");
+    let scanned = sources
+        .par_iter()
+        .map(|source| {
+            let mut found = BTreeSet::new();
+            let mut idents = BTreeSet::new();
+            scan_class_positions(source.as_ref(), &mut found, &mut idents);
+            scan_safelist_arrays(source.as_ref(), &mut found, &mut idents);
+            (found, idents)
+        })
+        .collect::<Vec<_>>();
     let mut idents: BTreeSet<String> = BTreeSet::new();
-    for source in sources {
-        scan_class_positions(source.as_ref(), out, &mut idents);
-        scan_safelist_arrays(source.as_ref(), out, &mut idents);
+    for (found, file_idents) in scanned {
+        out.extend(found);
+        idents.extend(file_idents);
     }
+    drop(positions_stage);
+
+    // Pass 2: resolve the identifiers those positions referenced against `const`/
+    // `let`/`var` string bindings anywhere in the source set, to a fixpoint.
+    //
+    // Driven by an INDEX built in one pass over every file, not by re-scanning every
+    // file for every identifier. Both find exactly the same bindings — the index is
+    // the same predicate read from the declaration keyword instead of from the name —
+    // but the rescan is O(identifiers x files) full-text searches, which on a
+    // monorepo-sized source set (cal.com: thousands of files, hundreds of referenced
+    // identifiers) was the single largest phase of a production build.
+    let index_stage = crate::build_profile::stage("css/tailwind-binding-index");
+    let mut bindings: HashMap<&str, Vec<&str>> = HashMap::new();
+    for per_file in sources
+        .par_iter()
+        .map(|source| binding_initializers(source.as_ref()))
+        .collect::<Vec<_>>()
+    {
+        for (name, init) in per_file {
+            bindings.entry(name).or_default().push(init);
+        }
+    }
+    drop(index_stage);
+
+    let _resolve_stage = crate::build_profile::stage("css/tailwind-resolve-idents");
     let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut worklist: Vec<String> = idents.into_iter().collect();
     while let Some(name) = worklist.pop() {
         if !visited.insert(name.clone()) {
             continue;
         }
-        for source in sources {
-            for init in find_binding_initializers(source.as_ref(), &name) {
-                let init = init.trim();
-                // String-shaped: literals, templates, parenthesized
-                // expressions, ternaries, and string-container literals
-                // (`[…].join(' ')`, `{ primary: '…' }` maps indexed from a
-                // class position).
-                let eligible = init.starts_with(['"', '\'', '`', '(', '[', '{'])
-                    || split_ternary(init).is_some();
-                if !eligible {
-                    continue;
-                }
-                let mut new_idents = BTreeSet::new();
-                collect_class_expression(init, out, &mut new_idents);
-                for ident in new_idents {
-                    if !visited.contains(&ident) {
-                        worklist.push(ident);
-                    }
+        let Some(initializers) = bindings.get(name.as_str()) else {
+            continue;
+        };
+        for init in initializers {
+            let init = init.trim();
+            // String-shaped: literals, templates, parenthesized
+            // expressions, ternaries, and string-container literals
+            // (`[…].join(' ')`, `{ primary: '…' }` maps indexed from a
+            // class position).
+            let eligible = init.starts_with(['"', '\'', '`', '(', '[', '{'])
+                || split_ternary(init).is_some();
+            if !eligible {
+                continue;
+            }
+            let mut new_idents = BTreeSet::new();
+            collect_class_expression(init, out, &mut new_idents);
+            for ident in new_idents {
+                if !visited.contains(&ident) {
+                    worklist.push(ident);
                 }
             }
         }
@@ -1191,34 +1237,55 @@ fn tokenize_class_segment(segment: &str, out: &mut BTreeSet<String>) {
 
 /// Finds every `const|let|var <name> = <initializer>` in the source and returns
 /// the initializer texts (up to the top-level `;`).
-fn find_binding_initializers<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+/// Every `const`/`let`/`var NAME = <initializer>` binding in one source, as
+/// `(name, initializer)` slices of it.
+///
+/// Driven from the declaration keyword, so ONE pass over the file yields the bindings
+/// for every name at once. A destructuring pattern (`const { a } = x`) is not a name
+/// binding and is skipped, as is `constFoo` (the keyword must end at a word boundary)
+/// and `x == y` / `f = () =>` (the `=` must be a single assignment).
+///
+/// This is a deliberately naive text scan, exactly like the class-position scan beside
+/// it: string and comment contents are not excluded. A candidate that only ever appears
+/// inside a string is harmless (Tailwind's own scanner is likewise text-based and
+/// over-collects), whereas parsing every file of a monorepo to be precise would cost
+/// far more than the utilities it would exclude.
+fn binding_initializers(source: &str) -> Vec<(&str, &str)> {
+    const KEYWORDS: [&str; 3] = ["const", "let", "var"];
     let bytes = source.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
-    while let Some(rel) = source[i..].find(name) {
-        let start = i + rel;
-        let end = start + name.len();
-        i = end;
-        // Word boundaries around the identifier.
-        if (start > 0 && is_ident_byte(bytes[start - 1]))
-            || (end < bytes.len() && is_ident_byte(bytes[end]))
-        {
+    while i < bytes.len() {
+        // The next declaration keyword at or after `i`.
+        let Some((start, keyword)) = KEYWORDS
+            .iter()
+            .filter_map(|kw| source[i..].find(kw).map(|rel| (i + rel, *kw)))
+            .min_by_key(|(at, _)| *at)
+        else {
+            break;
+        };
+        let after_keyword = start + keyword.len();
+        i = after_keyword;
+        // The keyword must be a whole word: not the tail of `myconst`, not the head
+        // of `constant`.
+        if start > 0 && is_ident_byte(bytes[start - 1]) {
             continue;
         }
-        // Preceded (over whitespace) by a declaration keyword.
-        let before = source[..start].trim_end();
-        let declared = ["const", "let", "var"].iter().any(|kw| {
-            before.ends_with(kw)
-                && before[..before.len() - kw.len()]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-        });
-        if !declared {
+        if after_keyword < bytes.len() && is_ident_byte(bytes[after_keyword]) {
+            continue;
+        }
+        // The bound NAME, over whitespace. Anything else (`{`, `[`) is a destructuring
+        // pattern, which binds no single name this scan can resolve.
+        let name_start = skip_ws(bytes, after_keyword);
+        let mut name_end = name_start;
+        while name_end < bytes.len() && is_ident_byte(bytes[name_end]) {
+            name_end += 1;
+        }
+        if name_end == name_start {
             continue;
         }
         // Followed (over whitespace) by a single `=`.
-        let mut k = skip_ws(bytes, end);
+        let mut k = skip_ws(bytes, name_end);
         if k >= bytes.len() || bytes[k] != b'=' {
             continue;
         }
@@ -1251,8 +1318,12 @@ fn find_binding_initializers<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
             }
             k += 1;
         }
-        found.push(&source[init_start..k]);
-        i = k;
+        found.push((&source[name_start..name_end], &source[init_start..k.min(bytes.len())]));
+        // Resume just after the NAME, not after the initializer: a binding declared
+        // INSIDE another's initializer (`cva("…", { … })` bodies, IIFEs, arrow bodies)
+        // is a binding too, and skipping the enclosing initializer would silently lose
+        // every class string it holds.
+        i = name_end;
     }
     found
 }
@@ -9669,6 +9740,103 @@ mod tests {
         assert!(out.contains("bg-amber-500"));
         assert!(out.contains("text-white"));
         assert!(out.contains("dark:border-amber-500"));
+    }
+
+    /// The identifier resolution is driven by a one-pass binding INDEX rather than by
+    /// re-scanning every file for every name. These lock the index's contract.
+    #[test]
+    fn binding_index_finds_every_declaration_form_the_name_rescan_found() {
+        let source = r#"
+            const base = "px-3 py-1";
+            let hovered = 'hover:bg-slate-100';
+            var legacy = `text-sm`;
+            const { destructured } = props;
+            const notAssigned;
+            for (const item of items) {}
+            const arrow = () => "rounded-lg";
+            const shorthand => never;
+            const eq == never;
+        "#;
+        let index = binding_initializers(source);
+        let by_name = |name: &str| {
+            index
+                .iter()
+                .filter(|(n, _)| *n == name)
+                .map(|(_, init)| init.trim())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(by_name("base"), vec!["\"px-3 py-1\""]);
+        assert_eq!(by_name("hovered"), vec!["'hover:bg-slate-100'"]);
+        assert_eq!(by_name("legacy"), vec!["`text-sm`"]);
+        // A destructuring pattern binds no single name this scan can resolve.
+        assert!(by_name("destructured").is_empty(), "destructuring is not a name binding");
+        assert!(by_name("props").is_empty());
+        // `const notAssigned;` and `for (const item of …)` have no `=`.
+        assert!(by_name("notAssigned").is_empty());
+        assert!(by_name("item").is_empty());
+        // An arrow-function initializer IS indexed — returning a class string from one
+        // is a real pattern, and the fixpoint decides eligibility, not this scan.
+        assert_eq!(by_name("arrow"), vec!["() => \"rounded-lg\""]);
+        // A bare `=>` / `==` after the name is not an assignment at all.
+        assert!(by_name("shorthand").is_empty(), "`=>` is not an assignment");
+        assert!(by_name("eq").is_empty(), "`==` is not an assignment");
+        // The keyword must be a whole word.
+        assert!(
+            binding_initializers("myconst notAKeyword = \"p-1\";").is_empty(),
+            "`myconst` is not a declaration keyword",
+        );
+    }
+
+    /// Regression: a binding declared INSIDE another binding's initializer — the
+    /// `cva("base", { variants: { color: { yellow: "bg-yellow-500" } } })` shape, arrow
+    /// bodies, IIFEs — must still be indexed. Resuming the scan past the enclosing
+    /// initializer silently dropped every class string held in one (cal.com's
+    /// `bg-yellow-500` / `text-yellow-500` / `text-rose-600` vanished from the emitted
+    /// stylesheet with no error at all).
+    #[test]
+    fn binding_index_sees_declarations_nested_inside_another_initializer() {
+        let source = r#"
+            const outer = (() => {
+              const nested = "bg-yellow-500";
+              return nested;
+            })();
+            const after = "text-rose-600";
+        "#;
+        let index = binding_initializers(source);
+        let names = index.iter().map(|(n, _)| *n).collect::<Vec<_>>();
+        assert!(names.contains(&"outer"), "the outer binding is indexed: {names:?}");
+        assert!(names.contains(&"nested"), "the NESTED binding is indexed: {names:?}");
+        assert!(names.contains(&"after"), "scanning continues past the nesting: {names:?}");
+
+        // End to end: the class string only reachable through the nested binding
+        // reaches the candidate set.
+        let component = r#"
+            const styles = (() => {
+              const palette = { yellow: "bg-yellow-500", rose: "text-rose-600" };
+              return palette;
+            })();
+            export const Badge = () => <span className={styles[tone]} />;
+        "#;
+        let mut out = BTreeSet::new();
+        scan_class_candidates(component, &mut out);
+        assert!(out.contains("bg-yellow-500"), "nested map value is a candidate: {out:?}");
+        assert!(out.contains("text-rose-600"), "nested map value is a candidate: {out:?}");
+    }
+
+    /// The index is built across the whole source set, so a name bound in one file and
+    /// referenced from another still resolves — and a name bound in SEVERAL files
+    /// contributes every one of its initializers, not just the first.
+    #[test]
+    fn binding_index_spans_files_and_keeps_every_initializer_of_a_shared_name() {
+        let light = r#"const TONE = "bg-white text-black";"#;
+        let dark = r#"const TONE = "bg-black text-white";"#;
+        let user = r#"export const C = () => <i className={TONE} />;"#;
+        let mut out = BTreeSet::new();
+        scan_class_candidates_multi(&[light, dark, user], &mut out);
+        assert!(out.contains("bg-white"), "the first file's binding: {out:?}");
+        assert!(out.contains("bg-black"), "the second file's binding too: {out:?}");
+        assert!(out.contains("text-white"));
+        assert!(out.contains("text-black"));
     }
 
     #[test]

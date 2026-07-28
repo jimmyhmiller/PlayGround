@@ -9,7 +9,7 @@
 // self-contained) SSR and react-server graphs, each carrying its own inlined React.
 
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
@@ -35,20 +35,24 @@ function pickRender(mod) {
 }
 
 /// Memoized dynamic import of the SSR-of-flight bundle → its `renderFlightToDocument`.
-/// In dev the bundle is re-imported (fresh `?v=<mtime>`) when it changes on disk; in
-/// prod it is imported once and cached.
+/// The bundle is imported ONCE and cached.
+///
+/// There is deliberately no dev/watch mode here. This module is the BUILD-TIME seam
+/// (the SSG prerenderer): the bundle it reads is written once and never re-emitted
+/// underneath it. Live-reload freshness belongs to `next-server.mjs`, which owns the
+/// dev hot-update channel — and re-importing this entry could not deliver it anyway,
+/// because the entry reaches its split chunks through query-less
+/// `import("./server.chunk-N.mjs")` URLs that Node serves from its ESM cache.
+/// Passing `{ dev: true }` is therefore a hard error, not a silently ignored option.
 export function getRenderFlightToDocument(ssrEntry, options) {
-  const dev = !!(options && options.dev);
-  let cache = { key: null, fn: null };
+  if (options && options.dev) {
+    throw new Error(
+      "next-render-core: `dev` is not supported — this is the build-time render seam. Dev freshness is next-server.mjs's hot-update channel (POST /__diffpack_dev/hot).",
+    );
+  }
+  let cache = { fn: null };
   return async function render(...args) {
-    if (!dev) {
-      if (!cache.fn) cache.fn = pickRender(await import(pathToFileURL(ssrEntry).href));
-      return cache.fn(...args);
-    }
-    const key = statSync(ssrEntry).mtimeMs;
-    if (!cache.fn || cache.key !== key) {
-      cache = { key, fn: pickRender(await import(pathToFileURL(ssrEntry).href + "?v=" + key)) };
-    }
+    if (!cache.fn) cache.fn = pickRender(await import(pathToFileURL(ssrEntry).href));
     return cache.fn(...args);
   };
 }
@@ -61,7 +65,13 @@ export function getRenderFlightToDocument(ssrEntry, options) {
 export function makeRunReactServer(rscRenderEntry) {
   return function runReactServer(args, stdinBody) {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [rscRenderEntry, ...args], {
+      // `--enable-source-maps`, not `process.setSourceMapsEnabled()`: this child's
+      // entry IS an emitted chunk (`rsc-render/server.mjs`), so there is no
+      // diffpack-authored line in it to make the call from, and source-map support
+      // does not cross a process boundary. Without the flag the Server Component
+      // render — the layer whose exceptions are hardest to place — reports
+      // positions in `server.chunk-N.mjs` while its `.map` sits unread beside it.
+      const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, ...args], {
         stdio: ["pipe", "pipe", "pipe", "pipe"],
       });
       const out = [];

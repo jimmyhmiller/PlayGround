@@ -58,14 +58,14 @@
     (loop (if (icmp-ge (load k) off)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get src (load k))) 10)
-                    (do (store! line (iadd (load line) 1)) (store! ls (iadd (load k) 1)))
-                    0)
+                (when (icmp-eq (cast i64 (slice-get src (load k))) 10)
+                      (store! line (iadd (load line) 1))
+                      (store! ls (iadd (load k) 1)))
                 (store! k (iadd (load k) 1)))))
     (let [(mut le) off]
-      (loop (if (icmp-ge (load le) n)
+      (loop (if (or (icmp-ge (load le) n) (icmp-eq (cast i64 (slice-get src (load le))) 10))
                 (break)
-                (if (icmp-eq (cast i64 (slice-get src (load le))) 10) (break) (store! le (iadd (load le) 1)))))
+                (store! le (iadd (load le) 1))))
       (let [lp (alloc-stack Loc)]
         (store! (field lp line) (load line))
         (store! (field lp col) (iadd (isub off (load ls)) 1))
@@ -103,13 +103,13 @@
                         pre (icmp-gt wstart lstart)
                         post (icmp-lt wend lend)
                         ; caret offset = span start within the window (+3 for a leading "...")
-                        pad (iadd (isub lo wstart) (if pre 3 0))
+                        pad (iadd (isub lo wstart) (when pre 3))
                         ; don't let carets run past the visible window
                         shown
                           (let [avail (isub wend lo)
                                 c (if (icmp-lt carets avail) carets avail)]
                             (if (icmp-lt c 1) 1 c))]
-                    (if (icmp-gt (slice-len msg) 0) (do (ps w msg) (wb w 10)) 0)
+                    (when (icmp-gt (slice-len msg) 0) (ps w msg) (wb w 10))
                     (wspaces w numlen)
                     (wb w 32)
                     (ps w arrow)
@@ -125,9 +125,9 @@
                     (wb w 10)
                     (dump-dec w line)
                     (ps w " | ")
-                    (if pre (ps w "...") 0)
+                    (when pre (ps w "..."))
                     (print-str w (subslice src wstart wend))
-                    (if post (ps w "...") 0)
+                    (when post (ps w "..."))
                     (wb w 10)
                     (wspaces w numlen)
                     (ps w " | ")
@@ -162,7 +162,7 @@
                                               (load (field ep macro_name))
                                               "`")]
                               (wb w 10)  ; the "\n" before each note
-                              (if (not (render-frame w (mut s) at-src at-lo at-hi note ":::")) (ps w note) 0)
+                              (when (not (render-frame w (mut s) at-src at-lo at-hi note ":::")) (ps w note))
                               (store! ctxt (load (field ep parent))))))))))))
   0)
 
@@ -172,12 +172,12 @@
 (defn render-all [(w (ptr Writer)) (s (mut LS)) (diags (ptr (ArrayList Diag)))] (-> i64)
   (let [n (al-len [Diag] (load diags))]
     (if (icmp-le n 1)
-        (if (icmp-eq n 0) 0 (render-diag w (mut s) (al-get [Diag] (load diags) 0)))
+        (unless (icmp-eq n 0) (render-diag w (mut s) (al-get [Diag] (load diags) 0)))
         (let [(mut i) 0]
           (loop (if (icmp-ge (load i) n)
                     (break)
                     (do
-                      (if (icmp-gt (load i) 0) (ps w "\n\nerror: ") 0)
+                      (when (icmp-gt (load i) 0) (ps w "\n\nerror: "))
                       (render-diag w (mut s) (al-get [Diag] (load diags) (load i)))
                       (store! i (iadd (load i) 1)))))
           (ps w "\n\n")

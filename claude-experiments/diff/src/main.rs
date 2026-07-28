@@ -14,7 +14,22 @@ use diffpack::bundler::{Bundler, EmitOptions};
 use notify::{RecursiveMode, Watcher};
 
 fn main() -> ExitCode {
-    match run() {
+    let started = Instant::now();
+    // `build-app <root> production` -> "build-app production": the subcommand plus the
+    // environment, skipping the project path (noise) and the flags.
+    let words: Vec<String> = env::args()
+        .skip(1)
+        .filter(|word| !word.starts_with("--") && !word.contains('/') && word != ".")
+        .take(2)
+        .collect();
+    let label = if words.is_empty() {
+        "diffpack".to_string()
+    } else {
+        words.join(" ")
+    };
+    let result = run();
+    diffpack::build_profile::report(&label, started.elapsed().as_secs_f64() * 1000.0);
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -124,7 +139,16 @@ fn run() -> Result<(), String> {
             let has_flag = |flag: &str| remaining.iter().any(|value| value.to_str() == Some(flag));
             let vite = has_flag("--vite");
             let minify = !has_flag("--no-minify");
-            let source_map = has_flag("--sourcemap");
+            // `diffpack build` is the Vite-shaped web build, and Vite's own
+            // `build.sourcemap` default is `false` — so `Auto` is off here. (Honoring
+            // a Vite config that DOES set `build.sourcemap` is a separate change; its
+            // `'inline'` and `'hidden'` modes are emit shapes diffpack has no
+            // representation for yet, and half-reading the field would silently treat
+            // them as plain external maps.)
+            let source_map = diffpack::source_map::SourceMapChoice::from_flags(
+                remaining.iter().filter_map(|value| value.to_str()),
+            )?
+            .resolve(false);
             let out_dir = remaining
                 .iter()
                 .position(|value| value.to_str() == Some("--out-dir"))
@@ -175,14 +199,15 @@ fn run() -> Result<(), String> {
                 .iter()
                 .any(|value| value.to_str() == Some("--no-minify"));
             let minify = !no_minify;
-            // Production source maps, composed through the minify pass, are opt-in
-            // per build (`--sourcemap`) so the default acceptance/benchmark path is
-            // unchanged. When set, both the client `public/` and server `server/`
-            // emits ship a sibling `.map` per chunk resolving minified positions
-            // back to the original source.
-            let source_map = remaining
-                .iter()
-                .any(|value| value.to_str() == Some("--sourcemap"));
+            // Production source maps, composed through the minify pass. With NO flag
+            // the app's own framework config decides, per graph — for a Next app that
+            // is `next build`'s policy: server maps always, browser maps only under
+            // `productionBrowserSourceMaps` (see `next_adapter::default_source_maps`),
+            // which is what makes a diffpack build comparable with a `next build` of
+            // the same app. `--sourcemap` / `--no-sourcemap` force it either way.
+            let source_map = diffpack::source_map::SourceMapChoice::from_flags(
+                remaining.iter().filter_map(|value| value.to_str()),
+            )?;
             let environment = remaining
                 .iter()
                 .find(|value| !value.to_string_lossy().starts_with("--"))
@@ -237,6 +262,7 @@ fn run() -> Result<(), String> {
             // three RSC entries (+ minimal `next/*` shims) under `.diffpack-next/`,
             // and returns a ready config; a non-Next project returns `None` and falls
             // back to the TanStack `derive_config` path unchanged.
+            let configure_stage = diffpack::build_profile::stage("adapter/configure");
             let mut config = match diffpack::next_adapter::configure(
                 Path::new(&project_root),
                 &environment,
@@ -249,6 +275,13 @@ fn run() -> Result<(), String> {
                 }
                 None => diffpack::config::derive_config(Path::new(&project_root), &environment)?,
             };
+            // A real per-module source map costs a second print per module, so it
+            // is produced only when the emit will actually write `.map` files. The
+            // adapter already set the framework's own default for this graph; a CLI
+            // flag overrides it, absence of one keeps it.
+            config.build.source_maps = source_map.resolve(config.build.source_maps);
+            let source_map = config.build.source_maps;
+            drop(configure_stage);
             let entry = config
                 .entry
                 .clone()
@@ -381,8 +414,10 @@ fn run() -> Result<(), String> {
                 config.build.aliases.len(),
                 entry.display(),
             );
+            let discover_stage = diffpack::build_profile::stage("graph/discover");
             let (bundler, update) =
                 Bundler::discover_direct_with_config(&entry, &config.build)?;
+            drop(discover_stage);
             // A fatal diagnostic (an unresolved import, a source error) means the
             // chunk this build would write is already broken, so it is not written
             // at all. Only the non-fatal diagnostics survive as warnings.
@@ -390,7 +425,9 @@ fn run() -> Result<(), String> {
                 &update.diagnostics,
                 &format!("{} build", config.environment),
             )?;
+            let reachability_stage = diffpack::build_profile::stage("graph/reachability");
             let reachable = bundler.reachable_modules_direct();
+            drop(reachability_stage);
             println!(
                 "reachable {} modules; {} warning(s)",
                 reachable.len(),
@@ -414,23 +451,44 @@ fn run() -> Result<(), String> {
                 ..EmitOptions::default()
             };
             if config.environment == "client" {
+                let emit_stage = diffpack::build_profile::stage("emit/public");
                 let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
+                drop(emit_stage);
+                let copy_stage = diffpack::build_profile::stage("emit/copy-static-public");
                 let static_files = diffpack::config::copy_static_public(
                     Path::new(&project_root),
                     &summary.output_dir,
                 )?;
+                drop(copy_stage);
                 // next/image (Slice J): emit downscaled responsive variants for every
                 // raster under `public/` into `<public>/_diffpack-image/`. The runtime
                 // shim's `srcset` points at these static files (no image server). A
                 // no-op for a non-Next project (no public images / no app-router).
+                //
+                // An app whose next.config turns Next's optimizer off (or replaces it
+                // with its own loader) gets NO variants — the emitted `<img>` can never
+                // reference one. Reported, never silent: skipping this is a large chunk
+                // of a build on an image-heavy app and must be visible in the log.
+                if let diffpack::next_adapter::ImageOptimization::Disabled(reason) =
+                    diffpack::next_adapter::ImageOptimization::for_project(Path::new(&project_root))
+                {
+                    println!(
+                        "next/image: {reason}, so no build-time variants are generated \
+                         (every <Image> renders a plain <img src> with no srcset, as under next build)"
+                    );
+                }
+                let scan_stage = diffpack::build_profile::stage("image/scan-public");
                 let public_images =
                     diffpack::next_adapter::scan_public_images(Path::new(&project_root))?;
+                drop(scan_stage);
                 if !public_images.is_empty() {
+                    let variants_stage = diffpack::build_profile::stage("image/emit-variants");
                     let variants = diffpack::next_adapter::emit_image_variants(
                         Path::new(&project_root),
                         &summary.output_dir,
                         &public_images,
                     )?;
+                    drop(variants_stage);
                     if variants > 0 {
                         println!(
                             "emitted {variants} next/image variant file(s) under {}/_diffpack-image",
@@ -500,7 +558,9 @@ fn run() -> Result<(), String> {
                     client_manifest.routes.len(),
                 );
             } else {
+                let emit_stage = diffpack::build_profile::stage("emit/server");
                 let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
+                drop(emit_stage);
                 // The react-server graph is authoritative for the app's CSS (Server
                 // Components render there, so its CSS-Module class scoping matches the
                 // flight-rendered classNames). Preserve its compiled `server.css` to
@@ -588,9 +648,12 @@ fn run() -> Result<(), String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("dist/bundle.js"));
             let flags = remaining;
-            let source_map = flags
-                .iter()
-                .any(|value| value.to_str() == Some("--sourcemap"));
+            // A bare module entry has no framework config to consult, so `Auto` here
+            // is off — the same default Rollup/esbuild use for a library bundle.
+            let source_map = diffpack::source_map::SourceMapChoice::from_flags(
+                flags.iter().filter_map(|value| value.to_str()),
+            )?
+            .resolve(false);
             let minify = flags.iter().any(|value| value.to_str() == Some("--minify"));
             // `--format esm` emits real ES modules (top-level `import`/`export`,
             // native dynamic `import()`), where `import.meta` and top-level
@@ -613,7 +676,13 @@ fn run() -> Result<(), String> {
             };
             let profile = env::var_os("DIFFPACK_PROFILE_FRONTEND").is_some();
             let discover_started = Instant::now();
-            let (bundler, update) = Bundler::discover_direct(Path::new(&entry))?;
+            let (bundler, update) = Bundler::discover_direct_with_config(
+                Path::new(&entry),
+                &diffpack::bundler::BuildConfig {
+                    source_maps: source_map,
+                    ..Default::default()
+                },
+            )?;
             if profile {
                 eprintln!("discover: {:.1} ms", discover_started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -694,7 +763,11 @@ fn run() -> Result<(), String> {
                 .any(|value| value.to_str() == Some("--no-minify"));
             // Dev source maps default ON so a runtime-error stack frame in the error
             // overlay resolves back to the original source; `--no-sourcemap` opts out.
-            // (Production `build-app` keeps its opt-in `--sourcemap` default-off.)
+            // (Production `build-app` with no flag follows the framework's own
+            // policy per graph — for a Next app that is server maps always, browser
+            // maps only under `productionBrowserSourceMaps`, which is what makes a
+            // diffpack build comparable with `next build`. See
+            // `next_adapter::default_source_maps`.)
             let source_map = !remaining
                 .iter()
                 .any(|value| value.to_str() == Some("--no-sourcemap"));
@@ -857,6 +930,19 @@ fn run() -> Result<(), String> {
             if let Ok(exe) = std::env::current_exe() {
                 command.env("DIFFPACK_BIN", exe);
             }
+            // `next start` loads next.config in the process that serves, so whatever the
+            // config puts in `process.env` — for cal.com its whole `.env`, `DATABASE_URL`
+            // included — is part of the environment the app's server code runs under.
+            // Diffpack evaluated the config in a build-time child, so the delta it
+            // recorded is replayed here. Variables THIS process already defines are left
+            // alone: that is what `dotenv.config()` itself does, and it keeps an explicit
+            // `DATABASE_URL=… diffpack start` from being silently overridden by a value
+            // baked at build time.
+            for (key, value) in diffpack::next_adapter::config_env_from_output(out) {
+                if std::env::var_os(&key).is_none() {
+                    command.env(key, value);
+                }
+            }
             let status = command
                 .status()
                 .map_err(|error| format!("cannot start node server ({}): {error}", entry.display()))?;
@@ -980,7 +1066,9 @@ fn web_build(
     minify: bool,
     source_map: bool,
 ) -> Result<(), String> {
-    let config = diffpack::config::derive_web_config(root, vite)?;
+    let mut config = diffpack::config::derive_web_config(root, vite)?;
+    // See `build-app`: the per-module map is paid for only when maps are emitted.
+    config.build.source_maps = source_map;
 
     // The page set: the configured `rollupOptions.input` HTML entries, or the
     // single-`index.html` default. A non-HTML input is a hard, specific error (a
@@ -1237,10 +1325,14 @@ fn build_pages_app(
     project_root: &Path,
     environment: &str,
     minify: bool,
-    source_map: bool,
+    source_map: diffpack::source_map::SourceMapChoice,
 ) -> Result<(), String> {
-    let config = diffpack::next_pages::configure(project_root, environment, false)?
+    let mut config = diffpack::next_pages::configure(project_root, environment, false)?
         .ok_or_else(|| "next pages-router configure returned None for a pages project".to_string())?;
+    // See `build-app`: the per-module map is paid for only when maps are emitted, and
+    // with no CLI flag the framework default the adapter chose stands.
+    config.build.source_maps = source_map.resolve(config.build.source_maps);
+    let source_map = config.build.source_maps;
     println!(
         "next pages-router adapter: scaffolded {} for environment={environment}",
         diffpack::next_pages::ADAPTER_DIR,
@@ -1338,7 +1430,21 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         .filter(|f| f.starts_with("--") && *f != "--static-export")
         .map(str::to_string)
         .collect();
+    // Rejects a contradictory pair here, before any child runs, instead of letting
+    // three children fail one after another.
+    let source_map_choice = diffpack::source_map::SourceMapChoice::from_flags(
+        flags.iter().filter_map(|f| f.to_str()),
+    )?;
     let run = |environment: &str| -> Result<(), String> {
+        // Each environment is a child process with its own stage table; this stage is
+        // the parent's view of it, so the production table always accounts for the
+        // whole wall clock even though the detail lives in the children.
+        let _stage = match environment {
+            "client" => diffpack::build_profile::stage("build/client"),
+            "react-server" => diffpack::build_profile::stage("build/react-server"),
+            "ssr" => diffpack::build_profile::stage("build/ssr"),
+            _ => diffpack::build_profile::stage("build/other"),
+        };
         let status = std::process::Command::new(&exe)
             .arg("build-app")
             .arg(&root)
@@ -1382,8 +1488,10 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         // overwrites `server/` — the orchestrator reads the two from distinct dirs.
         let server = out.join("server");
         let rsc_render = out.join("rsc-render");
+        let publish_stage = diffpack::build_profile::stage("build/publish-rsc-render");
         let _ = std::fs::remove_dir_all(&rsc_render);
         copy_dir_recursive(&server, &rsc_render)?;
+        drop(publish_stage);
         // Publish the react-server graph's emitted assets (content-hashed images
         // and their build-emitted responsive variants from static image imports)
         // into the SERVED `public/assets/`. A static image import
@@ -1413,12 +1521,20 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         if let Some(wrapper) = diffpack::next_adapter::write_instrumentation_wrapper(project_root)? {
             println!("=== instrumentation (register() boot hook) ===");
             let instr_out = out.join("instrumentation.mjs");
+            // `instrumentation.mjs` runs in the SERVER process — it is exactly the code
+            // whose stack traces are unreadable without a map (OpenTelemetry/Sentry
+            // boot hooks), and it never reaches a browser. The `bundle` subcommand has
+            // no framework config to consult, so the server policy resolved here is
+            // passed explicitly; without it this was the one server artifact of a
+            // `--sourcemap` build that shipped with no map at all.
+            let instrumentation_maps = source_map_choice.resolve(true);
             let status = std::process::Command::new(&exe)
                 .arg("bundle")
                 .arg(&wrapper)
                 .arg(&instr_out)
                 .arg("--format")
                 .arg("esm")
+                .args(instrumentation_maps.then_some("--sourcemap"))
                 .status()
                 .map_err(|error| format!("cannot bundle instrumentation ({}): {error}", wrapper.display()))?;
             if !status.success() {
@@ -1454,7 +1570,7 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
 }
 
 fn usage() -> String {
-    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack preview <build-dir> [port] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--no-sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
+    "usage: diffpack build <project-root> [--vite] [--out-dir <dir>] [--no-minify] [--sourcemap] | diffpack preview <build-dir> [port] | diffpack build-app <project-root> [client|react-server|ssr|nitro|static] [--no-minify] [--sourcemap|--no-sourcemap] [--static-export] | diffpack dev <project-root> [port] [--no-minify] [--no-sourcemap] | diffpack bundle <entry> [output] [--sourcemap] [--minify] [--format esm|cjs] | diffpack visualize <entry> [output.html] | diffpack visualize-scale [modules] [imports-per-module] [output.html] | diffpack watch <entry> [output] | diffpack bundle-scale-direct [modules] [imports-per-module] | diffpack bundle-scale-direct-deps [modules] [imports-per-module] | diffpack bundle-scale-direct-live [modules] [imports-per-module] | diffpack bundle-scale-direct-live-deps [modules] [imports-per-module]".into()
 }
 
 fn print_bundle_scale(result: diffpack::bundle_benchmark::BundleScaleResult, mode: &str) {
@@ -1556,7 +1672,9 @@ fn build_static(project_root: &Path, static_export: bool) -> Result<(), String> 
 /// react-server (`rsc-render/`) / ssr (`server/`) bundles are already built.
 fn next_prerender(project_root: &Path, output_root: &Path, static_export: bool) -> Result<(), String> {
     // Native route classification -> the machine-readable prerender plan.
+    let plan_stage = diffpack::build_profile::stage("prerender/classify-routes");
     let route_count = diffpack::next_adapter::write_prerender_plan(project_root, output_root)?;
+    drop(plan_stage);
     println!(
         "next SSG/ISR: classified {route_count} route(s) -> {}",
         output_root.join("static/prerender-plan.json").display(),
@@ -1575,12 +1693,18 @@ fn next_prerender(project_root: &Path, output_root: &Path, static_export: bool) 
     // Rust). Its stdout/stderr stream straight through; a nonzero exit fails the build.
     let mut command = std::process::Command::new("node");
     command.arg(&prerender_path).arg(output_root);
+    // The environment evaluating `next.config` produced. `next build` prerenders inside
+    // the process that loaded the config, so a route's `getStaticProps`/server component
+    // sees whatever the config put in `process.env` (for cal.com, its entire `.env`).
+    command.envs(diffpack::next_adapter::config_env_from_manifest(project_root));
     if static_export {
         command.arg("--static-export");
     }
+    let render_stage = diffpack::build_profile::stage("prerender/render-routes");
     let status = command
         .status()
         .map_err(|error| format!("cannot spawn node for the SSG prerenderer: {error}"))?;
+    drop(render_stage);
     if !status.success() {
         return Err(format!(
             "the SSG prerenderer (node {}) failed with {status}",

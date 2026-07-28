@@ -106,7 +106,7 @@
                   (loop (if (or (icmp-ge (load j) n) (icmp-eq (nz-b l (load j)) 34))
                             (break)
                             (store! j (iadd (load j) 1))))
-                  (if (icmp-lt (load j) n) (store! j (iadd (load j) 1)) 0)
+                  (when (icmp-lt (load j) n) (store! j (iadd (load j) 1)))
                   (subslice l at (load j)))
                 (do
                   (loop (if (or (icmp-ge (load j) n) (not (nz-sym? (nz-b l (load j)))))
@@ -117,11 +117,9 @@
 (defn nz-pos-define-name? [(name (slice u8))] (-> bool)
   (let [pre "@__coil_llvm_ir_"
         pl (slice-len pre)]
-    (if (not (starts-with name pre))
+    (if (or (not (starts-with name pre)) (icmp-le (slice-len name) pl))
         false
-        (if (icmp-le (slice-len name) pl)
-            false
-            (nz-all-digits? (subslice name pl (slice-len name)))))))
+        (nz-all-digits? (subslice name pl (slice-len name))))))
 
 ; ---- scan_positional -------------------------------------------------------
 (defn nz-mk-scan [(fam i64) (num i64) (endd i64)] (-> ScanRes)
@@ -135,39 +133,35 @@
   (let [n (slice-len s)
         pl (slice-len pre)
         ps (iadd i 1)]
-    (if (icmp-gt (iadd ps pl) n)
+    (if (or (icmp-gt (iadd ps pl) n) (not (str-eq (subslice s ps (iadd ps pl)) pre)))
         (None [ScanRes])
-        (if (not (str-eq (subslice s ps (iadd ps pl)) pre))
-            (None [ScanRes])
-            (let [nr (alloc-stack NumRes)]
-              (store! nr (nz-leading-number s (iadd ps pl)))
-              (if (icmp-eq (load (field nr len)) 0)
-                  (None [ScanRes])
-                  (let [endd (iadd (iadd ps pl) (load (field nr len)))]
-                    (if (or (icmp-ge endd n) (not (nz-ident? (nz-b s endd))))
-                        (Some (nz-mk-scan fam (load (field nr val)) endd))
-                        (None [ScanRes])))))))))
+        (let [nr (alloc-stack NumRes)]
+          (store! nr (nz-leading-number s (iadd ps pl)))
+          (if (icmp-eq (load (field nr len)) 0)
+              (None [ScanRes])
+              (let [endd (iadd (iadd ps pl) (load (field nr len)))]
+                (if (or (icmp-ge endd n) (not (nz-ident? (nz-b s endd))))
+                    (Some (nz-mk-scan fam (load (field nr val)) endd))
+                    (None [ScanRes]))))))))
 
 (defn nz-scan-positional [(s (slice u8)) (i i64)] (-> (Option ScanRes))
-  (if (icmp-ge i (slice-len s))
+  (if (or (icmp-ge i (slice-len s)) (icmp-ne (nz-b s i) 64))
       (None [ScanRes])
-      (if (icmp-ne (nz-b s i) 64)
-          (None [ScanRes])
-          (match (nz-try-fam s i "g." 0)
-            (Some [r] (Some r))
-            (None []
-                  (match (nz-try-fam s i "str." 1)
-                    (Some [r] (Some r))
-                    (None []
-                          (match (nz-try-fam s i "cstr." 2)
-                            (Some [r] (Some r))
-                            (None [] (nz-try-fam s i "__coil_llvm_ir_" 3))))))))))
+      (match (nz-try-fam s i "g." 0)
+        (Some [r] (Some r))
+        (None []
+              (match (nz-try-fam s i "str." 1)
+                (Some [r] (Some r))
+                (None []
+                      (match (nz-try-fam s i "cstr." 2)
+                        (Some [r] (Some r))
+                        (None [] (nz-try-fam s i "__coil_llvm_ir_" 3)))))))))
 
 ; ---- renumber map (4 first-encounter lists) --------------------------------
 (defn nz-renum-assign! [(r (ptr Renum)) (fam i64) (old i64)] (-> i64)
-  (cond (icmp-eq fam 0) (if (icmp-lt (nz-find-i64 (load (field r g)) old) 0) (al-push! (mut (field r g)) old) 0)
-        (icmp-eq fam 1) (if (icmp-lt (nz-find-i64 (load (field r st)) old) 0) (al-push! (mut (field r st)) old) 0)
-        (icmp-eq fam 2) (if (icmp-lt (nz-find-i64 (load (field r cs)) old) 0) (al-push! (mut (field r cs)) old) 0)
+  (cond (icmp-eq fam 0) (when (icmp-lt (nz-find-i64 (load (field r g)) old) 0) (al-push! (mut (field r g)) old))
+        (icmp-eq fam 1) (when (icmp-lt (nz-find-i64 (load (field r st)) old) 0) (al-push! (mut (field r st)) old))
+        (icmp-eq fam 2) (when (icmp-lt (nz-find-i64 (load (field r cs)) old) 0) (al-push! (mut (field r cs)) old))
         (icmp-lt (nz-find-i64 (load (field r lv)) old) 0) (al-push! (mut (field r lv)) old)
         :else 0))
 
@@ -237,13 +231,11 @@
                     (loop (if (icmp-ge (load bi) n)
                               (break)
                               (do
-                                (if (not (al-get [bool] (load used) (load bi)))
-                                    (if (or (icmp-lt (load best) 0)
-                                            (str-lt (nz-name-of blocks (al-get [i64] idxs (load bi)))
-                                                    (nz-name-of blocks (al-get [i64] idxs (load best)))))
-                                        (store! best (load bi))
-                                        0)
-                                    0)
+                                (when (and (not (al-get [bool] (load used) (load bi)))
+                                           (or (icmp-lt (load best) 0)
+                                               (str-lt (nz-name-of blocks (al-get [i64] idxs (load bi)))
+                                                       (nz-name-of blocks (al-get [i64] idxs (load best))))))
+                                      (store! best (load bi)))
                                 (store! bi (iadd (load bi) 1)))))
                     (al-set! [bool] (mut used) (load best) true)
                     (al-push! (mut out) (al-get [i64] idxs (load best))))
@@ -265,13 +257,11 @@
                     (loop (if (icmp-ge (load bi) n)
                               (break)
                               (do
-                                (if (not (al-get [bool] (load used) (load bi)))
-                                    (if (or (icmp-lt (load best) 0)
-                                            (icmp-lt (nz-pnum blocks (al-get [i64] idxs (load bi)) r)
-                                                     (nz-pnum blocks (al-get [i64] idxs (load best)) r)))
-                                        (store! best (load bi))
-                                        0)
-                                    0)
+                                (when (and (not (al-get [bool] (load used) (load bi)))
+                                           (or (icmp-lt (load best) 0)
+                                               (icmp-lt (nz-pnum blocks (al-get [i64] idxs (load bi)) r)
+                                                        (nz-pnum blocks (al-get [i64] idxs (load best)) r))))
+                                      (store! best (load bi)))
                                 (store! bi (iadd (load bi) 1)))))
                     (al-set! [bool] (mut used) (load best) true)
                     (al-push! (mut out) (al-get [i64] idxs (load best))))
@@ -293,11 +283,10 @@
                 (do
                   (let [b (alloc-stack NzBlock)]
                     (store! b (al-get [NzBlock] blocks (load k)))
-                    (if (icmp-eq (load (field b cat)) 3)
-                        (if (nz-pos-define-name? (load (field b name)))
-                            (al-push! (mut pos) (load k))
-                            (al-push! (mut stable) (load k)))
-                        0))
+                    (when (icmp-eq (load (field b cat)) 3)
+                          (if (nz-pos-define-name? (load (field b name)))
+                              (al-push! (mut pos) (load k))
+                              (al-push! (mut stable) (load k)))))
                   (store! k (iadd (load k) 1)))))
       (nz-assign-idxs rstk blocks (nz-sort-idx-by-name a blocks (load stable)))
       (nz-assign-idxs rstk blocks (nz-sort-idx-by-pnum a blocks (load pos) rstk))
@@ -307,9 +296,7 @@
                   (do
                     (let [b (alloc-stack NzBlock)]
                       (store! b (al-get [NzBlock] blocks (load g2)))
-                      (if (icmp-eq (load (field b cat)) 1)
-                          (nz-assign-block-bodies rstk blocks (load g2))
-                          0))
+                      (when (icmp-eq (load (field b cat)) 1) (nz-assign-block-bodies rstk blocks (load g2))))
                     (store! g2 (iadd (load g2) 1)))))))
     (load rstk)))
 
@@ -394,9 +381,9 @@
     (loop (if (or (icmp-ge (load j) nlines) (str-eq (al-get [(slice u8)] lines (load j)) "}"))
               (break)
               (do (al-push! (mut body) (al-get [(slice u8)] lines (load j))) (store! j (iadd (load j) 1)))))
-    (if (icmp-lt (load j) nlines)
-        (do (al-push! (mut body) (al-get [(slice u8)] lines (load j))) (store! j (iadd (load j) 1)))
-        0)
+    (when (icmp-lt (load j) nlines)
+          (al-push! (mut body) (al-get [(slice u8)] lines (load j)))
+          (store! j (iadd (load j) 1)))
     (nz-push-block! a (mut blocks) 3 (nz-at-symbol l) (load body))
     (load j)))
 
@@ -462,11 +449,9 @@
                     (loop (if (icmp-ge (load bi) n)
                               (break)
                               (do
-                                (if (not (al-get [bool] (load used) (load bi)))
-                                    (if (or (icmp-lt (load best) 0) (nz-block-lt blocks (load bi) (load best)))
-                                        (store! best (load bi))
-                                        0)
-                                    0)
+                                (when (and (not (al-get [bool] (load used) (load bi)))
+                                           (or (icmp-lt (load best) 0) (nz-block-lt blocks (load bi) (load best))))
+                                      (store! best (load bi)))
                                 (store! bi (iadd (load bi) 1)))))
                     (al-set! [bool] (mut used) (load best) true)
                     (al-push! (mut out) (al-get [NzBlock] blocks (load best))))
@@ -492,12 +477,10 @@
                     (loop (if (icmp-ge (load bi) n)
                               (break)
                               (do
-                                (if (not (al-get [bool] (load used) (load bi)))
-                                    (if (or (icmp-lt (load best) 0)
-                                            (str-lt (nz-body-of defs (load bi)) (nz-body-of defs (load best))))
-                                        (store! best (load bi))
-                                        0)
-                                    0)
+                                (when (and (not (al-get [bool] (load used) (load bi)))
+                                           (or (icmp-lt (load best) 0)
+                                               (str-lt (nz-body-of defs (load bi)) (nz-body-of defs (load best)))))
+                                      (store! best (load bi)))
                                 (store! bi (iadd (load bi) 1)))))
                     (al-set! [bool] (mut used) (load best) true)
                     (al-push! (mut out) (al-get [AttrDef] defs (load best))))
@@ -513,7 +496,7 @@
               (do
                 (let [d (alloc-stack AttrDef)]
                   (store! d (al-get [AttrDef] defs (load i)))
-                  (if (icmp-eq (load (field d old)) old) (store! res (load i)) 0))
+                  (when (icmp-eq (load (field d old)) old) (store! res (load i))))
                 (store! i (iadd (load i) 1)))))
     (load res)))
 
@@ -548,20 +531,18 @@
               (break)
               (do
                 (let [l (al-get [(slice u8)] lines (load i))]
-                  (if (starts-with l pre)
-                      (let [rest (subslice l (slice-len pre) (slice-len l))]
-                        (match (str-find rest " = ")
-                          (None [] 0)
-                          (Some [eq]
-                                (let [numpart (subslice rest 0 eq)]
-                                  (if (nz-all-digits? numpart)
-                                      (let [d (alloc-stack AttrDef)]
-                                        (store! (field d old) (nz-parse-int numpart))
-                                        (store! (field d body) (subslice rest (iadd eq 3) (slice-len rest)))
-                                        (al-push! (mut defs) (load d))
-                                        0)
-                                      0)))))
-                      0))
+                  (when (starts-with l pre)
+                        (let [rest (subslice l (slice-len pre) (slice-len l))]
+                          (match (str-find rest " = ")
+                            (None [] 0)
+                            (Some [eq]
+                                  (let [numpart (subslice rest 0 eq)]
+                                    (when (nz-all-digits? numpart)
+                                          (let [d (alloc-stack AttrDef)]
+                                            (store! (field d old) (nz-parse-int numpart))
+                                            (store! (field d body) (subslice rest (iadd eq 3) (slice-len rest)))
+                                            (al-push! (mut defs) (load d))
+                                            0))))))))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-eq (al-len [AttrDef] defs) 0)
         text

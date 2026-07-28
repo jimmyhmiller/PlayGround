@@ -746,24 +746,26 @@ fn hmr_push_client(
 
     // The chunk(s) the browser re-imports to pick up the new factories.
     let chunks: BTreeSet<String> = if let Some(output_root) = micro_chunk {
-        match client_env
-            .bundler
-            .render_hmr_chunk(&reachable, changed_ids, "client.js", client_env.options)
-        {
-            Ok(Some(code)) => {
-                let path = output_root.join("public/client.hmr.js");
-                if let Err(error) = std::fs::write(&path, code) {
-                    hub.broadcast_reload();
-                    return format!("client: micro-chunk write failed ({error}); reloaded");
-                }
-                std::iter::once("/client.hmr.js".to_string()).collect()
-            }
+        // The micro-chunk is written WITH its source map (see `write_hmr_chunk`) —
+        // the edited module's stack traces are the whole point of a hot update.
+        match client_env.bundler.write_hmr_chunk(
+            &reachable,
+            changed_ids,
+            "client.js",
+            client_env.options,
+            // The client graph emits browser ESM; the micro-chunk must match it or a
+            // hot-updated module's `__dirname`/`__filename` would not be the browser
+            // stubs the rest of the chunk uses.
+            crate::bundler::ModuleFormat::BrowserEsm,
+            &output_root.join("public/client.hmr.js"),
+        ) {
+            Ok(true) => std::iter::once("/client.hmr.js".to_string()).collect(),
             // No live changed module rendered — nothing to push (defensive; located
             // was non-empty, so this is unexpected but not a crash).
-            Ok(None) => return "client: no live changed module for micro-chunk".to_string(),
+            Ok(false) => return "client: no live changed module for micro-chunk".to_string(),
             Err(error) => {
                 hub.broadcast_reload();
-                return format!("client: micro-chunk render failed ({error}); reloaded");
+                return format!("client: micro-chunk render/write failed ({error}); reloaded");
             }
         }
     } else {
@@ -795,13 +797,20 @@ fn json_string(value: &str) -> String {
 
 /// Minimal HTTP POST to the emitted server's loopback control endpoint.
 fn post_control(control_port: u16, json: &str) -> Result<(), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", control_port))
-        .map_err(|error| format!("cannot reach hmr control on :{control_port}: {error}"))?;
+    post_json(control_port, "/__diffpack_hmr", json)
+}
+
+/// Minimal loopback HTTP POST of a JSON body. Non-200 (and any transport failure) is
+/// an error carrying the server's reason — a dev control channel that silently no-ops
+/// is exactly how stale output ships.
+fn post_json(port: u16, path: &str, json: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| format!("cannot reach 127.0.0.1:{port}{path}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .ok();
     let request = format!(
-        "POST /__diffpack_hmr HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
         json.len()
     );
     stream
@@ -816,10 +825,15 @@ fn post_control(control_port: u16, json: &str) -> Result<(), String> {
     if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") {
         Ok(())
     } else {
-        Err(format!(
-            "control endpoint returned: {}",
-            head.lines().next().unwrap_or("<no status>")
-        ))
+        // Carry the BODY, not just the status line: the endpoint answers a failure with
+        // the reason (usually a stack from the module it could not apply), and dropping
+        // it turns a diagnosable error into "something went wrong".
+        let (status, body) = head
+            .split_once("\r\n\r\n")
+            .map_or((head.as_ref(), ""), |(head, body)| {
+                (head.lines().next().unwrap_or("<no status>"), body)
+            });
+        Err(format!("control endpoint returned {status}: {body}"))
     }
 }
 
@@ -887,6 +901,9 @@ fn build_client(
     // DEV-ONLY: instrument the client graph for HMR / React Fast Refresh, and
     // select the dependencies' development builds.
     config::set_development_mode(&mut config);
+    // Dev serves source maps by default (`--no-sourcemap` opts out), so the real
+    // per-module map is produced exactly when the emit will write one.
+    config.build.source_maps = options.source_map;
     let entry = config
         .entry
         .clone()
@@ -940,6 +957,7 @@ fn build_server(
     // so a server edit hot-reloads without restarting Node.
     config::set_development_mode(&mut config);
     register_server_virtual_modules(&mut config, project_root, output_root)?;
+    config.build.source_maps = options.source_map;
     let entry = config
         .entry
         .clone()
@@ -1576,6 +1594,111 @@ fn start_watcher(root: &Path) -> Result<Receiver<notify::Result<notify::Event>>,
 /// The SPA path watches `src` recursively AND the project root non-recursively, so
 /// root-level files (`index.html`, `vite.config.*`) are seen without recursing into
 /// `node_modules`.
+/// The source trees `diffpack dev` must watch, derived from the modules the build
+/// ACTUALLY compiled rather than from a convention directory.
+///
+/// Watching only `app/` was wrong for every application bigger than an example: a Next
+/// app keeps its components in `components/`, `modules/`, `lib/`, `src/`, and in a
+/// monorepo in sibling workspace packages. Editing any of those produced no event at
+/// all — the dev server sat there while nothing happened, which is worse than a slow
+/// rebuild because it looks like the tool is working. cal.com renders its login form
+/// from `apps/web/modules/auth/login-view.tsx` and its design system from
+/// `packages/ui/**`; neither is under `app/`.
+///
+/// Every reachable module's directory is collected and then reduced to the ONE level
+/// below their deepest common ancestor: for a monorepo that is `<repo>/apps` and
+/// `<repo>/packages`, for a standalone app `<app>/app`, `<app>/components`, … The
+/// common ancestor itself is watched non-recursively, so a loose file sitting directly
+/// in it (cal.com's root `i18n.json`, which its i18n config reads) is covered without
+/// one such file collapsing the whole tree into a single enormous root.
+///
+/// Modules inside `node_modules` are excluded (a dependency is not edited during a dev
+/// session, and the trees are enormous), as is anything inside a dot directory
+/// (`.diffpack-next` shims and other generated output — regenerating them during a
+/// rebuild must not look like a user edit and retrigger one).
+/// Whether `path` is inside an installed dependency or inside generated output — the
+/// two kinds of file a source watcher must never treat as a user edit. One rule covers
+/// both: `node_modules`, and any dot directory (`.diffpack-output`, `.diffpack-next`,
+/// `.next`, `.git`, `.turbo`). Application source never lives in either.
+///
+/// Only the part of the path BELOW `base` is examined. A project can perfectly well
+/// live inside a dot directory itself (`~/.config/site`, a CI checkout under
+/// `/.builds/…`); judging the absolute path would then exclude every file in it and
+/// the dev server would silently stop reacting to anything.
+fn is_dependency_or_generated(path: &Path, base: &Path) -> bool {
+    let relative = path.strip_prefix(base).unwrap_or(path);
+    relative.components().any(|component| {
+        let name = component.as_os_str();
+        name == "node_modules" || name.as_encoded_bytes().starts_with(b".")
+    })
+}
+
+fn source_watch_roots(
+    project_root: &Path,
+    envs: [&EnvBuild; 3],
+) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut directories: BTreeSet<PathBuf> = BTreeSet::new();
+    for env in envs {
+        for id in &env.reachable {
+            // A module id can carry a `?query` (route splits, virtual variants); the
+            // file on disk is the part before it.
+            let path = Path::new(id.split('?').next().unwrap_or(id.as_str()));
+            if !path.is_absolute() {
+                continue;
+            }
+            let excluded = path.components().any(|component| {
+                let name = component.as_os_str();
+                name == "node_modules" || name.as_encoded_bytes().starts_with(b".")
+            });
+            if excluded {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+    }
+    if directories.is_empty() {
+        return vec![(project_root.to_path_buf(), RecursiveMode::Recursive)];
+    }
+    // The deepest common ancestor, never allowed above the project's own parent: a
+    // module linked in from somewhere else entirely must not turn `/` (or `/Users`)
+    // into a watch root.
+    let mut common = directories
+        .iter()
+        .cloned()
+        .reduce(|a, b| {
+            a.ancestors()
+                .find(|ancestor| b.starts_with(ancestor))
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/"))
+        })
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let floor = project_root.parent().unwrap_or(project_root);
+    if !floor.starts_with(&common) || common.components().count() < 2 {
+        common = project_root.to_path_buf();
+    }
+
+    let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
+    for directory in &directories {
+        // A directory outside the common ancestor (only reachable when the ancestor was
+        // clamped above) is watched on its own; otherwise take the one segment below it.
+        match directory.strip_prefix(&common) {
+            Ok(relative) => {
+                if let Some(first) = relative.components().next() {
+                    roots.insert(common.join(first));
+                }
+            }
+            Err(_) => {
+                roots.insert(directory.clone());
+            }
+        }
+    }
+    let mut out = vec![(common, RecursiveMode::NonRecursive)];
+    out.extend(roots.into_iter().map(|root| (root, RecursiveMode::Recursive)));
+    out
+}
+
 fn start_watcher_paths(
     roots: &[(PathBuf, RecursiveMode)],
 ) -> Result<Receiver<notify::Result<notify::Event>>, String> {
@@ -1628,6 +1751,7 @@ fn spawn_supplement_poller(
             let mut snapshot: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
             let mut first = true;
             loop {
+                let scan_started = Instant::now();
                 let mut current: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
                 for (root, mode) in &roots {
                     scan_root(root, *mode, &mut current);
@@ -1648,7 +1772,17 @@ fn spawn_supplement_poller(
                 }
                 snapshot = current;
                 first = false;
-                std::thread::sleep(Duration::from_millis(2));
+                // SELF-THROTTLING. The 2ms interval is tuned for a small source tree,
+                // where a scan costs microseconds. A real application's watch set is
+                // orders of magnitude larger (cal.com compiles ~6k modules across a
+                // monorepo), and a fixed 2ms interval there would burn a whole core
+                // scanning. The poller is only a LATENCY optimization — the OS watcher
+                // is the never-miss backstop — so it caps itself at a ~20% duty cycle:
+                // small trees keep the 2ms floor and their ~1ms detection, large ones
+                // degrade gracefully toward the OS watcher's latency instead of
+                // degrading the machine.
+                let scan = scan_started.elapsed();
+                std::thread::sleep(std::cmp::max(Duration::from_millis(2), scan * 4));
             }
         });
 }
@@ -1668,7 +1802,13 @@ fn scan_root(root: &Path, mode: RecursiveMode, out: &mut HashMap<PathBuf, (Syste
         if file_type.is_dir() {
             if mode == RecursiveMode::Recursive {
                 let name = entry.file_name();
-                if name == "node_modules" || name == ".diffpack-output" || name == ".git" {
+                // `node_modules` and every DOT directory. The latter covers `.git`,
+                // `.diffpack-output`, `.next`, `.turbo`, `.yarn` and any other tool
+                // cache in one rule: application source never lives in a dot directory,
+                // and those caches are both large and constantly rewritten, so polling
+                // them costs a great deal and can never detect a user edit. The OS
+                // watcher still sees them.
+                if name == "node_modules" || name.as_encoded_bytes().starts_with(b".") {
                     continue;
                 }
                 scan_root(&path, mode, out);
@@ -1941,7 +2081,9 @@ mod spa {
         config: &crate::config::WebConfig,
         emit_options: EmitOptions,
     ) -> Result<EnvBuild, String> {
-        let (bundler, update) = Bundler::discover_direct_with_config(entry, &config.build)?;
+        let mut build_config = config.build.clone();
+        build_config.source_maps = emit_options.source_map;
+        let (bundler, update) = Bundler::discover_direct_with_config(entry, &build_config)?;
         // The initial build is a hard error: a dev server with nothing loadable to
         // serve should say so, not start and hand the browser a broken chunk.
         for warning in
@@ -2626,7 +2768,7 @@ mod next {
         fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
             .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
         let node_port = free_port()?;
-        let mut node = spawn_next_node(&next_server_script, &output_root, node_port)?;
+        let mut node = spawn_next_node(&next_server_script, project_root, &output_root, node_port)?;
         wait_for_node(node_port).inspect_err(|_| {
             let _ = node.kill();
         })?;
@@ -2668,11 +2810,29 @@ mod next {
         let app_dir = crate::next_adapter::app_dir(project_root).ok_or_else(|| {
             format!("next dev: {} has no app/ or src/app directory", project_root.display())
         })?;
-        println!("[dev] watching {}", app_dir.display());
-        let watch_roots = vec![
-            (app_dir, RecursiveMode::Recursive),
-            (project_root.to_path_buf(), RecursiveMode::NonRecursive),
-        ];
+        let mut watch_roots = source_watch_roots(project_root, [&client, &react_server, &ssr]);
+        if !watch_roots
+            .iter()
+            .any(|(root, mode)| *mode == RecursiveMode::Recursive && app_dir.starts_with(root))
+        {
+            watch_roots.push((app_dir.clone(), RecursiveMode::Recursive));
+        }
+        if !watch_roots.iter().any(|(root, _)| root == project_root) {
+            watch_roots.push((project_root.to_path_buf(), RecursiveMode::NonRecursive));
+        }
+        for (root, mode) in &watch_roots {
+            println!(
+                "[dev] watching {}{}",
+                root.display(),
+                if *mode == RecursiveMode::Recursive { "" } else { " (top level only)" }
+            );
+        }
+        // The shallowest watched directory; everything watched lives under it.
+        let watch_base = watch_roots
+            .iter()
+            .map(|(root, _)| root.clone())
+            .min_by_key(|root| root.components().count())
+            .unwrap_or_else(|| project_root.to_path_buf());
         let receiver = start_watcher_paths(&watch_roots)?;
 
         let result = next_watch_loop(
@@ -2688,6 +2848,7 @@ mod next {
             &mut ssr,
             &hub,
             emit_options,
+            &watch_base,
         );
         let _ = node.kill();
         let _ = node.wait();
@@ -2760,6 +2921,8 @@ mod next {
         label: &str,
         options: EmitOptions,
     ) -> Result<EnvBuild, String> {
+        let mut config = config;
+        config.build.source_maps = options.source_map;
         let entry = config
             .entry
             .clone()
@@ -2889,10 +3052,348 @@ mod next {
         Ok(summary)
     }
 
+    /// Where per-edit server micro-chunks are written, under the output dir so the
+    /// watcher already ignores it and no graph's emit prunes it.
+    const HOT_DIR: &str = ".hot";
+
+    /// One pushed micro-chunk: the file a live Node process imports, and the runtime
+    /// ids whose factories it re-registers.
+    #[derive(Clone)]
+    struct HotUpdate {
+        chunk: PathBuf,
+        ids: Vec<usize>,
+    }
+
+    /// The two server graphs a batch may have touched, each with the module ids that
+    /// changed in it.
+    struct HotGraphs<'a> {
+        ssr: Option<(&'a EnvBuild, &'a BTreeSet<String>)>,
+        react_server: Option<(&'a EnvBuild, &'a BTreeSet<String>)>,
+    }
+
+    /// The dev server → orchestrator hot-update channel: the Next analogue of the
+    /// TanStack control endpoint ([`hmr_reload_server`]), at the granularity that
+    /// actually changes.
+    ///
+    /// Node caches an ES module by URL forever, so the only way an edit reaches an
+    /// already-loaded server graph is a URL Node has never seen. Re-importing the
+    /// ENTRY under a fresh `?v=` cannot be that URL: the entry reaches its split
+    /// chunks through query-less `import("./server.chunk-N.mjs")`, which Node answers
+    /// from its cache — so the fresh entry binds stale factories (on cal.com's 69-chunk
+    /// react-server graph that was not even silent: the fresh runtime's id table and
+    /// the cached chunks' registrations disagreed and the worker died with
+    /// `Module is not loaded: <id>`).
+    ///
+    /// So each edit gets its own tiny register-only chunk holding ONLY the changed
+    /// modules, at a filename no previous edit used. The live runtime imports it,
+    /// re-registers exactly those factories, and `serverInvalidate` re-runs them and
+    /// their importers up to the entry — leaving React and every untouched dependency
+    /// cached. Per edit that is ~1 KB of new module, not a graph-wide re-import: the
+    /// inverse failure (re-importing the whole SSR graph per keystroke, and leaking a
+    /// copy of it every time) is what the granularity choice avoids.
+    struct HotChannel {
+        /// Monotonic, so each micro-chunk gets a URL Node has never resolved.
+        seq: u64,
+        /// react-server updates that are NOT yet on disk in full. The orchestrator
+        /// replays these into any worker it respawns, so a crash-respawn in the window
+        /// between the hot push and the deferred full re-emit is still caught up.
+        pending_react_server: Vec<HotUpdate>,
+        /// Micro-chunk files the orchestrator may still hold a reference to. Deleted
+        /// once a later push has told it a shorter list.
+        live_files: Vec<PathBuf>,
+    }
+
+    impl HotChannel {
+        fn new(output_root: &Path) -> Result<Self, String> {
+            let mut channel = Self {
+                seq: 0,
+                pending_react_server: Vec::new(),
+                live_files: Vec::new(),
+            };
+            channel.reset(output_root)?;
+            Ok(channel)
+        }
+
+        /// Drop every pending update and clear the directory. Called when all three
+        /// graphs were just re-emitted from scratch and the orchestrator restarted, so
+        /// disk IS the truth and no replay is owed.
+        fn reset(&mut self, output_root: &Path) -> Result<(), String> {
+            self.pending_react_server.clear();
+            self.live_files.clear();
+            let dir = output_root.join(HOT_DIR);
+            if dir.exists() {
+                fs::remove_dir_all(&dir)
+                    .map_err(|error| format!("cannot clear {}: {error}", dir.display()))?;
+            }
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            Ok(())
+        }
+
+        /// The deferred full re-emit has landed: `rsc-render/` on disk now contains
+        /// every react-server edit pushed so far, so a respawned worker needs no
+        /// replay. The files stay until the next push tells the orchestrator to drop
+        /// them (it is still holding the list it was last sent).
+        fn mark_react_server_on_disk(&mut self) {
+            self.pending_react_server.clear();
+        }
+
+        /// Render a micro-chunk per changed server graph and apply them to the live
+        /// Node processes, returning a log fragment. Returns `Err` — never a quiet
+        /// no-op — if the orchestrator could not apply one: the alternative is serving
+        /// HTML that disagrees with the editor.
+        fn push(
+            &mut self,
+            node_port: u16,
+            output_root: &Path,
+            graphs: HotGraphs<'_>,
+            profile: &mut EditProfile,
+        ) -> Result<String, String> {
+            if graphs.ssr.is_none() && graphs.react_server.is_none() {
+                return Ok("server: no change".to_string());
+            }
+            self.seq += 1;
+            let dir = output_root.join(HOT_DIR);
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let ssr = profile.stage("hot-render-ssr", || {
+                graphs
+                    .ssr
+                    .map(|(env, ids)| {
+                        Self::render(env, ids, &dir.join(format!("ssr.{}.mjs", self.seq)))
+                    })
+                    .transpose()
+            })?
+            .flatten();
+            let react_server = profile.stage("hot-render-rsc", || {
+                graphs
+                    .react_server
+                    .map(|(env, ids)| {
+                        Self::render(env, ids, &dir.join(format!("rsc.{}.mjs", self.seq)))
+                    })
+                    .transpose()
+            })?
+            .flatten();
+
+            let mut pending = self.pending_react_server.clone();
+            if let Some(update) = &react_server {
+                pending.push(update.clone());
+            }
+            let payload = serde_json::json!({
+                "ssr": ssr.as_ref().map(Self::json),
+                "reactServer": react_server.as_ref().map(Self::json),
+                "pendingReactServer": pending.iter().map(Self::json).collect::<Vec<_>>(),
+            })
+            .to_string();
+            profile.stage("hot-post", || {
+                post_json(node_port, "/__diffpack_dev/hot", &payload)
+            })?;
+
+            // The orchestrator now holds exactly `pending`; anything it no longer
+            // references (including the SSR chunk, which it imported synchronously
+            // during the POST above and never replays) can go.
+            let keep = pending
+                .iter()
+                .map(|update| update.chunk.clone())
+                .collect::<BTreeSet<_>>();
+            for file in std::mem::take(&mut self.live_files) {
+                if !keep.contains(&file) {
+                    // The micro-chunk carries a source-map sidecar (`<chunk>.map`) —
+                    // the code being edited right now is exactly the code whose stack
+                    // traces matter — so retire the pair together.
+                    let mut map = file.clone().into_os_string();
+                    map.push(".map");
+                    let _ = fs::remove_file(&file);
+                    let _ = fs::remove_file(PathBuf::from(map));
+                }
+            }
+            self.live_files = keep.iter().cloned().collect();
+            if let Some(update) = &ssr {
+                self.live_files.push(update.chunk.clone());
+            }
+            self.pending_react_server = pending;
+
+            Ok(format!(
+                "server hot: ssr {} module(s), react-server {} module(s)",
+                ssr.as_ref().map_or(0, |update| update.ids.len()),
+                react_server.as_ref().map_or(0, |update| update.ids.len()),
+            ))
+        }
+
+        /// Render one graph's micro-chunk. `None` when no changed module is live in
+        /// that graph (e.g. it was tree-shaken away), which is a real "nothing to
+        /// apply", not a swallowed failure.
+        fn render(
+            env: &EnvBuild,
+            changed: &BTreeSet<String>,
+            path: &Path,
+        ) -> Result<Option<HotUpdate>, String> {
+            let reachable = reachable_ids(env);
+            // Both server graphs emit through `emit_server`, whose entry chunk is
+            // `server.mjs`; the ids must be the ones that emit assigned or the
+            // registration would bind against the wrong modules.
+            let located = env.bundler.hmr_locate(&reachable, changed, "server.mjs")?;
+            if located.is_empty() {
+                return Ok(None);
+            }
+            // Node ESM, matching `emit_server`: a module that references `__dirname` /
+            // `__filename` binds the entry's REAL values there, where browser output
+            // would hand it `"/index.js"` / `"/"` stubs. Getting this wrong would only
+            // show up after a hot update, on a server module that reads a file.
+            if !env.bundler.write_hmr_chunk(
+                &reachable,
+                changed,
+                "server.mjs",
+                env.options,
+                crate::bundler::ModuleFormat::Esm,
+                path,
+            )? {
+                return Ok(None);
+            }
+            Ok(Some(HotUpdate {
+                chunk: path.to_path_buf(),
+                ids: located.iter().map(|located| located.runtime_id).collect(),
+            }))
+        }
+
+        fn json(update: &HotUpdate) -> serde_json::Value {
+            serde_json::json!({ "chunk": update.chunk.to_string_lossy(), "ids": update.ids })
+        }
+    }
+
+    /// How long the watch loop waits for another file event before flushing the full
+    /// chunk re-emit it owes disk. Short enough that a developer who stops typing and
+    /// reaches for the reload button finds disk already current; long enough that a
+    /// burst of keystrokes coalesces into ONE re-emit instead of one per keystroke.
+    const SETTLE_MS: u64 = 150;
+
+    /// Stage-by-stage timing of one edit, appended to the `[dev]` summary line when
+    /// `DIFFPACK_DEV_PROFILE=1`. The headline edit number is a single total; when it
+    /// regresses there is no way to aim a fix without knowing which stage grew, and
+    /// guessing has already cost one round of wasted work.
+    #[derive(Default)]
+    struct EditProfile {
+        on: bool,
+        stages: Vec<(&'static str, f64)>,
+    }
+
+    impl EditProfile {
+        fn new() -> Self {
+            Self {
+                on: std::env::var_os("DIFFPACK_DEV_PROFILE").is_some(),
+                stages: Vec::new(),
+            }
+        }
+
+        /// Time `body`, recording it under `name`. Always runs `body` — the profile is
+        /// observation only, so an unprofiled run takes exactly the same path.
+        fn stage<T>(&mut self, name: &'static str, body: impl FnOnce() -> T) -> T {
+            if !self.on {
+                return body();
+            }
+            let started = Instant::now();
+            let value = body();
+            self.stages
+                .push((name, started.elapsed().as_secs_f64() * 1_000.0));
+            value
+        }
+
+        fn note(&mut self, name: &'static str, ms: f64) {
+            if self.on {
+                self.stages.push((name, ms));
+            }
+        }
+
+        /// ` | profile: a=1.2ms b=3.4ms`, or empty when profiling is off.
+        fn label(&self) -> String {
+            if !self.on || self.stages.is_empty() {
+                return String::new();
+            }
+            let mut merged: Vec<(&'static str, f64)> = Vec::new();
+            for (name, ms) in &self.stages {
+                match merged.iter_mut().find(|(seen, _)| seen == name) {
+                    Some((_, total)) => *total += ms,
+                    None => merged.push((name, *ms)),
+                }
+            }
+            let body = merged
+                .iter()
+                .map(|(name, ms)| format!("{name}={ms:.1}ms"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(" | profile: {body}")
+        }
+    }
+
+    /// How long ago `path` was written, in milliseconds — the file-event detection
+    /// latency (FSEvents delivery + the coalesce window + dedup) that precedes every
+    /// stage the rebuild itself can see. Measured against the edited file's own mtime
+    /// so it covers the part of the edit budget the dev server spends before it has
+    /// even woken up. `None` when the file has no readable mtime (e.g. deleted).
+    fn detection_lag_ms(path: &Path) -> Option<f64> {
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        Some(SystemTime::now().duration_since(modified).ok()?.as_secs_f64() * 1_000.0)
+    }
+
+    /// Which graphs owe disk a full chunk re-emit. See the `owed` binding in
+    /// [`next_watch_loop`] for why this is deferred and coalesced rather than run
+    /// inside the edit.
+    #[derive(Clone, Copy, Default)]
+    struct OwedEmits {
+        client: bool,
+        ssr: bool,
+        react_server: bool,
+    }
+
+    impl OwedEmits {
+        fn any(self) -> bool {
+            self.client || self.ssr || self.react_server
+        }
+
+        fn label(self) -> String {
+            let names = [
+                self.client.then_some("client"),
+                self.ssr.then_some("ssr"),
+                self.react_server.then_some("react-server"),
+            ];
+            names.into_iter().flatten().collect::<Vec<_>>().join(" + ")
+        }
+    }
+
+    /// Re-render the full chunks of every graph that owes disk one, so `public/` and
+    /// `rsc-render/` match what the live processes are already running. Clears the debt
+    /// only for graphs that succeeded, so a failing emit is retried rather than lost.
+    fn flush_owed(
+        owed: &mut OwedEmits,
+        output_root: &Path,
+        rsc_root: &Path,
+        client: &EnvBuild,
+        react_server: &EnvBuild,
+        ssr: &EnvBuild,
+    ) -> Result<usize, String> {
+        let mut rendered_chunks = 0;
+        if owed.client {
+            rendered_chunks += emit_next_client_hmr(client, output_root)?;
+            owed.client = false;
+        }
+        if owed.ssr {
+            rendered_chunks += emit_next_ssr(ssr, output_root)?.rendered_chunks;
+            owed.ssr = false;
+        }
+        if owed.react_server {
+            rendered_chunks +=
+                emit_next_react_server(react_server, output_root, rsc_root)?.rendered_chunks;
+            owed.react_server = false;
+        }
+        Ok(rendered_chunks)
+    }
+
     /// The incremental rebuild loop. Classifies each coalesced batch and applies the
     /// smallest correct update: a structural change → full rebuild + orchestrator
     /// restart + reload; an island edit → client+ssr rebuild + Fast Refresh WS update;
-    /// a server-component edit → react-server rebuild + reload.
+    /// a server-component edit → react-server rebuild + in-place RSC refresh. Both
+    /// server graphs are hot-patched through [`HotChannel`] BEFORE the browser push, so
+    /// the next full document load renders the edit.
     #[allow(clippy::too_many_arguments)]
     fn next_watch_loop(
         receiver: &Receiver<notify::Result<notify::Event>>,
@@ -2907,6 +3408,9 @@ mod next {
         ssr: &mut EnvBuild,
         hub: &HmrHub,
         emit_options: EmitOptions,
+        // The topmost watched directory: dependency/generated-output exclusion is
+        // judged relative to it (see `is_dependency_or_generated`).
+        watch_base: &Path,
     ) -> Result<(), String> {
         // Last processed `(mtime, len)` per path, so the FSEvents + fast-poller pair
         // (see `start_watcher_paths`) never rebuilds twice for one edit: whichever
@@ -2916,15 +3420,72 @@ mod next {
         // Whether a build-error overlay is currently shown, so the next good rebuild
         // clears it (build-ok).
         let mut build_error_showing = false;
+        // The chunk-granular hot-update channel into the live orchestrator + worker.
+        // Constructing it clears `<out>/.hot` — the three graphs were just emitted from
+        // scratch, so any micro-chunk left by a previous session is already superseded.
+        let mut hot = HotChannel::new(output_root)?;
+        // Which graphs owe disk a full chunk re-emit. STICKY across iterations: the
+        // re-emit is what makes a browser FULL RELOAD and a respawned react-server
+        // worker correct, and nothing in a hot update needs it, so it runs when typing
+        // STOPS rather than between two keystrokes. Re-rendering cal.com's 18.6 MB
+        // client entry and 20.8 MB SSR entry costs ~1.2s; doing that inside every
+        // keystroke's loop iteration would make a burst of edits queue behind it and
+        // turn a 166ms hot update into a 1.2s one. Coalescing is sound because the emit
+        // reads the CURRENT graph state, so one run after the burst covers every edit
+        // in it.
+        let mut owed = OwedEmits::default();
         loop {
-            let first = match receiver.recv() {
-                Ok(event) => event,
-                Err(_) => return Ok(()),
+            let first = if owed.any() {
+                // Deferred work outstanding: wait only for the settle window. Nothing
+                // new means typing stopped — flush disk now.
+                match receiver.recv_timeout(Duration::from_millis(SETTLE_MS)) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let started = Instant::now();
+                        let flushed = owed;
+                        match flush_owed(&mut owed, output_root, rsc_root, client, react_server, ssr)
+                        {
+                            Ok(rendered_chunks) => {
+                                // Disk now matches the live processes for the
+                                // react-server graph, so a worker respawned from here
+                                // on needs no replay.
+                                if flushed.react_server {
+                                    hot.mark_react_server_on_disk();
+                                }
+                                println!(
+                                    "[dev] next settled: full re-emit of {} in {:.1}ms | rendered_chunks={rendered_chunks}",
+                                    flushed.label(),
+                                    started.elapsed().as_secs_f64() * 1_000.0,
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!("[dev] build error (kept serving): {error}");
+                                hub.broadcast_build_error(&error);
+                                build_error_showing = true;
+                            }
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            } else {
+                match receiver.recv() {
+                    Ok(event) => event,
+                    Err(_) => return Ok(()),
+                }
             };
             let paths = coalesce_batch(receiver, first);
             let changed = paths
                 .into_iter()
                 .filter(|path| is_module_path(path))
+                // Never react to a dependency or to generated output. The watch roots
+                // are derived from the compiled module set, which in a monorepo means
+                // watching a tree that CONTAINS `node_modules` and diffpack's own
+                // `.diffpack-output` / `.diffpack-next`. Those are unknown to every
+                // graph, so a write there would be classified as a new module — a
+                // structural change — and a rebuild's own emit would retrigger the
+                // rebuild, forever.
+                .filter(|path| !is_dependency_or_generated(path, watch_base))
                 .filter(|path| {
                     // Drop a path whose content signature is unchanged since we last
                     // processed it (a duplicate event from the other watch source). A
@@ -2976,7 +3537,12 @@ mod next {
                     ssr,
                     emit_options,
                 )?;
-                restart_next_node(node, next_server_script, output_root, node_port)?;
+                // Everything was re-emitted from scratch: no deferred debt survives, and
+                // the worker replay list (whose micro-chunks the new bundles already
+                // contain) is discharged.
+                owed = OwedEmits::default();
+                hot.reset(output_root)?;
+                restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
                     "[dev] next structural change ({} file(s)) in {:.1}ms | full rebuild + reload",
@@ -2987,16 +3553,21 @@ mod next {
             }
 
             let started = Instant::now();
+            let mut profile = EditProfile::new();
+            // How much of the budget was already spent before this loop woke up.
+            if let Some(lag) = changed.iter().filter_map(|path| detection_lag_ms(path)).fold(
+                None,
+                |worst: Option<f64>, lag| Some(worst.map_or(lag, |worst| worst.max(lag))),
+            ) {
+                profile.note("detect", lag);
+            }
             let mut island_ids: BTreeSet<String> = BTreeSet::new();
+            let mut ssr_ids: BTreeSet<String> = BTreeSet::new();
+            let mut react_server_ids: BTreeSet<String> = BTreeSet::new();
             let mut client_c = EnvCounters::default();
             let mut server_c = EnvCounters::default();
             let mut server_reload = false;
             let mut graph_changed = false;
-            // Islands re-emitted leanly on the critical path; their SSR-of-flight
-            // re-emit is deferred PAST the push (below) so it never inflates the
-            // measured edit-to-update latency — the Fast Refresh hot update never
-            // consults the SSR bundle, only the next full document load does.
-            let mut deferred_ssr: Vec<PathBuf> = Vec::new();
 
             // Catch edit-time build errors (e.g. a syntax error in the edited island or
             // server component) and surface them in the browser overlay instead of
@@ -3004,35 +3575,42 @@ mod next {
             // good rebuild. The full rebuilds (`rebuild_all`) stay hard errors.
             let batch = (|| -> Result<(), String> {
                 for path in &changed {
-                    let source = fs::read_to_string(path).unwrap_or_default();
-                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    let is_island = crate::rsc::detect_directive(&canonical, &source)
-                        == Some(crate::rsc::RscDirective::Client);
+                    let is_island = profile.stage("classify", || {
+                        let source = fs::read_to_string(path).unwrap_or_default();
+                        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                        crate::rsc::detect_directive(&canonical, &source)
+                            == Some(crate::rsc::RscDirective::Client)
+                    });
                     if is_island && client.bundler.is_known_module(path) {
-                        // Island edit — CRITICAL PATH: rebuild the client Fast Refresh
-                        // boundary and incrementally re-emit ONLY the changed chunk. A
-                        // same-graph island edit cannot move ids, so the manifests, the
-                        // copied `public/` static assets, and the next/image variants are
-                        // all unchanged — none of that is re-run here (only a structural
-                        // change, handled by `rebuild_all`, touches them). The SSR re-emit
-                        // is deferred past the push.
-                        let rebuilt = client.rebuild(path)?;
-                        let rendered_chunks = emit_next_client_hmr(client, output_root)?;
+                        // Island edit — CRITICAL PATH: re-transform the changed module in
+                        // the client graph AND in the SSR-of-flight graph, which is the
+                        // one that renders this island into the served HTML. A same-graph
+                        // island edit cannot move ids, so the manifests, the copied
+                        // `public/` static assets and the next/image variants are all
+                        // unchanged — none of that is re-run here (only a structural
+                        // change, handled by `rebuild_all`, touches them).
+                        let rebuilt = profile.stage("rebuild-client", || client.rebuild(path))?;
                         island_ids.extend(rebuilt.changed_ids.iter().cloned());
                         graph_changed |= rebuilt.graph_changed;
-                        client_c.add(&rebuilt, rendered_chunks);
+                        client_c.add(&rebuilt, 0);
+                        owed.client = true;
                         if ssr.bundler.is_known_module(path) {
-                            deferred_ssr.push(path.clone());
+                            let rebuilt = profile.stage("rebuild-ssr", || ssr.rebuild(path))?;
+                            ssr_ids.extend(rebuilt.changed_ids.iter().cloned());
+                            graph_changed |= rebuilt.graph_changed;
+                            server_c.add(&rebuilt, 0);
+                            owed.ssr = true;
                         }
                     } else if react_server.bundler.is_known_module(path) {
-                        // Server-component edit: rebuild ONLY the react-server graph and
-                        // re-publish it to `rsc-render`. The persistent dev worker
-                        // re-imports the bundle (`?v=<mtime>`) on the next `?__rsc=1` flight
-                        // fetch, so it sees this bundle — no orchestrator/worker restart.
-                        let rebuilt = react_server.rebuild(path)?;
-                        let summary = emit_next_react_server(react_server, output_root, rsc_root)?;
+                        // Server-component edit: re-transform ONLY the react-server graph.
+                        // The persistent dev worker is hot-patched below, so the next
+                        // `?__rsc=1` flight fetch renders this code — no worker respawn.
+                        let rebuilt =
+                            profile.stage("rebuild-react-server", || react_server.rebuild(path))?;
+                        react_server_ids.extend(rebuilt.changed_ids.iter().cloned());
                         graph_changed |= rebuilt.graph_changed;
-                        server_c.add(&rebuilt, summary.rendered_chunks);
+                        server_c.add(&rebuilt, 0);
+                        owed.react_server = true;
                         server_reload = true;
                     } else {
                         // Known to neither the client nor the react-server graph as an
@@ -3052,8 +3630,9 @@ mod next {
             }
 
             // A graph-structure change (import added/removed) re-partitions chunks and
-            // shifts ids — the hot update's ESM re-import would fail to bind. Re-emit
-            // already ran; a full rebuild + reload is the correct, non-crashing path.
+            // shifts ids — the hot update's ESM re-import would fail to bind. A full
+            // rebuild + reload is the correct, non-crashing path; it re-emits all three
+            // graphs, so it also clears everything the hot channel was carrying.
             if graph_changed {
                 rebuild_all(
                     project_root,
@@ -3064,7 +3643,11 @@ mod next {
                     ssr,
                     emit_options,
                 )?;
-                restart_next_node(node, next_server_script, output_root, node_port)?;
+                // Every graph was just emitted from scratch: disk IS the truth, so the
+                // deferred debt and the worker replay list are both discharged.
+                owed = OwedEmits::default();
+                hot.reset(output_root)?;
+                restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
                     "[dev] next rebuilt {} file(s) in {:.1}ms | graph changed -> full reload",
@@ -3074,17 +3657,51 @@ mod next {
                 continue;
             }
 
-            // PUSH FIRST — the user-visible edit-to-update event, measured here.
+            // SERVER FIRST, on the critical path: hand each changed server graph a
+            // micro-chunk holding ONLY its changed modules and have the live Node
+            // processes swap them in place. This is what makes the next full document
+            // load fresh, and it must happen BEFORE the browser is told anything —
+            // otherwise a user who reloads the instant Fast Refresh lands sees the old
+            // HTML. It is chunk-granular by construction: the micro-chunk carries the
+            // changed modules and nothing else, so no unrelated chunk is re-imported
+            // and no module leaks per keystroke beyond the ~1 KB update itself.
+            let hot_result = hot.push(
+                node_port,
+                output_root,
+                HotGraphs {
+                    ssr: (!ssr_ids.is_empty()).then_some((&*ssr, &ssr_ids)),
+                    react_server: (!react_server_ids.is_empty())
+                        .then_some((&*react_server, &react_server_ids)),
+                },
+                &mut profile,
+            );
+            let hot_note = match hot_result {
+                Ok(note) => note,
+                Err(error) => {
+                    // A hot update that did not land means the server would serve stale
+                    // HTML for this edit. Say so loudly (overlay + log) rather than
+                    // pushing a browser update that disagrees with the server.
+                    let error = format!("dev server hot update failed: {error}");
+                    eprintln!("[dev] {error}");
+                    hub.broadcast_build_error(&error);
+                    build_error_showing = true;
+                    continue;
+                }
+            };
+
+            // Then the browser push — the user-visible edit-to-update event.
             let update = if !island_ids.is_empty() {
                 // State-preserving React Fast Refresh (no reload). Push a MICRO-CHUNK
                 // (only the changed modules) so the browser re-parses ~1 KB, not the
                 // ~1 MB entry chunk; served directly off disk by the proxy.
-                hmr_push_client(client, &island_ids, hub, Some(output_root))
+                profile.stage("push-client", || {
+                    hmr_push_client(client, &island_ids, hub, Some(output_root))
+                })
             } else if server_reload {
                 // Server-component edit: an in-place RSC refresh (no full page reload).
                 // The client refetches the current route's flight and diff-renders it;
-                // the fresh react-server bundle is already published to `rsc-render`,
-                // and client-island state is preserved by React reconciliation.
+                // the react-server worker is already running the new code (above), and
+                // client-island state is preserved by React reconciliation.
                 hub.broadcast_rsc_refresh();
                 "server component -> in-place RSC refresh (no reload)".to_string()
             } else {
@@ -3092,38 +3709,29 @@ mod next {
             };
             let update_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
-            // OFF THE CRITICAL PATH (after the push, before the next event drains):
-            // finish each island's SSR-of-flight re-emit so a subsequent FULL document
-            // load hydrates against fresh code. Both steps are incremental.
-            let deferred = (|| -> Result<(), String> {
-                for path in &deferred_ssr {
-                    let rebuilt = ssr.rebuild(path)?;
-                    let summary = emit_next_ssr(ssr, output_root)?;
-                    server_c.add(&rebuilt, summary.rendered_chunks);
-                }
-                Ok(())
-            })();
-            if let Err(error) = deferred {
-                eprintln!("[dev] build error (kept serving): {error}");
-                hub.broadcast_build_error(&error);
-                build_error_showing = true;
-                continue;
-            }
+            // The full chunk re-emit each touched graph now owes DISK is NOT run here.
+            // Nothing in the update just delivered needs it — the browser has the
+            // micro-chunk, both server graphs are hot-patched — and it costs ~1.2s on
+            // cal.com, which inside the loop would make every keystroke of a burst queue
+            // behind the previous one's re-emit. It runs at the top of the loop as soon
+            // as `SETTLE_MS` passes with no new event, coalesced across the whole burst.
+            // Until it lands, `hot.pending_react_server` keeps the worker replay list
+            // non-empty, so a react-server worker respawned in that window is still
+            // caught up from the micro-chunks.
             if build_error_showing {
                 hub.broadcast_build_ok();
                 build_error_showing = false;
             }
 
             println!(
-                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms (total {:.1}ms) | client transformed={} changed={} rendered_chunks={} | server transformed={} changed={} rendered_chunks={} | {update}",
+                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms | client transformed={} changed={} | server transformed={} changed={} | {hot_note} | {update} | disk re-emit owed: {}{}",
                 changed.len(),
-                started.elapsed().as_secs_f64() * 1_000.0,
                 client_c.transformed,
                 client_c.changed,
-                client_c.rendered_chunks,
                 server_c.transformed,
                 server_c.changed,
-                server_c.rendered_chunks,
+                if owed.any() { owed.label() } else { "none".to_string() },
+                profile.label(),
             );
         }
     }
@@ -3154,13 +3762,29 @@ mod next {
     /// orchestrator (and, in turn, its persistent worker) shuts down instead of
     /// orphaning. The returned [`Child`] owns the write end; keeping it alive keeps the
     /// pipe open for the orchestrator's lifetime.
-    fn spawn_next_node(script: &Path, output_root: &Path, port: u16) -> Result<Child, String> {
+    fn spawn_next_node(
+        script: &Path,
+        project_root: &Path,
+        output_root: &Path,
+        port: u16,
+    ) -> Result<Child, String> {
         let mut command = Command::new("node");
         command
             .arg(script)
             .arg(output_root)
             .arg(port.to_string())
-            .env("DIFFPACK_NEXT_DEV", "1");
+            // `next dev` loads next.config in the process that then serves, so the
+            // config's `process.env` side effects (cal.com's whole `.env`, loaded by a
+            // `dotenv.config()` call in `next.config.ts`) are the environment the app's
+            // server code runs under. Diffpack evaluates the config in a child process,
+            // so the delta it recorded is handed to the orchestrator here — and through
+            // it to the SSR worker.
+            .envs(crate::next_adapter::config_env_from_manifest(project_root))
+            .env("DIFFPACK_NEXT_DEV", "1")
+            // The app's own working directory, as when a developer runs `next dev` from
+            // it: server code that resolves a path relative to the cwd (a locale
+            // directory, an on-disk template) must find it where the app expects.
+            .current_dir(project_root);
         // The next/image optimizer (`/_next/image`) in the orchestrator shells back to
         // this binary for a native resize the build did not precompute.
         if let Ok(exe) = std::env::current_exe() {
@@ -3179,12 +3803,13 @@ mod next {
     fn restart_next_node(
         node: &mut Child,
         script: &Path,
+        project_root: &Path,
         output_root: &Path,
         port: u16,
     ) -> Result<(), String> {
         let _ = node.kill();
         let _ = node.wait();
-        *node = spawn_next_node(script, output_root, port)?;
+        *node = spawn_next_node(script, project_root, output_root, port)?;
         wait_for_node(port)
     }
 
@@ -3219,6 +3844,58 @@ mod next {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The embedded orchestrator must take its dev freshness from the hot-update
+        /// channel and NOT from polling a bundle's mtime.
+        ///
+        /// The mtime cache is the exact defect this replaced, and it is the kind that
+        /// reads as harmless: an island edit re-emits only the chunk that HOSTS the
+        /// changed module, so `server/server.mjs`'s own mtime never moves and the cached
+        /// module is returned forever — a `curl` after an edit served the OLD string for
+        /// the life of the process while every browser-side HMR gate stayed green. The
+        /// end-to-end proof is `scripts/rsc/next-dev-fresh-check.sh`; this asserts the
+        /// shape at unit-test speed so a reintroduced poll is caught immediately.
+        #[test]
+        fn the_embedded_orchestrator_takes_dev_freshness_from_the_hot_channel_not_an_mtime_poll() {
+            assert!(
+                NEXT_SERVER_MJS.contains("/__diffpack_dev/hot"),
+                "the orchestrator must expose the dev hot-update endpoint",
+            );
+            assert!(
+                NEXT_SERVER_MJS.contains("serverInvalidate"),
+                "a hot update must drive the live runtime's serverInvalidate",
+            );
+            assert!(
+                !NEXT_SERVER_MJS.contains("statSync(ssrEntry).mtimeMs"),
+                "the orchestrator must not key its SSR module cache on the entry's mtime",
+            );
+            assert!(
+                !NEXT_SERVER_MJS.contains("ssrEntry).href + \"?v=\""),
+                "re-importing the SSR entry under a query cannot bust its chunks' ESM cache",
+            );
+        }
+
+        /// The deferred full re-emit is tracked as DEBT, not run inside the edit. The
+        /// bookkeeping has to survive a batch that touches several graphs and has to
+        /// report exactly what it owes, because that log line is how a developer sees
+        /// which half of the update is still pending.
+        #[test]
+        fn owed_emits_accumulate_across_graphs_and_report_what_is_pending() {
+            let mut owed = OwedEmits::default();
+            assert!(!owed.any(), "nothing is owed before an edit");
+            assert_eq!(owed.label(), "");
+            owed.client = true;
+            owed.ssr = true;
+            assert!(owed.any());
+            assert_eq!(owed.label(), "client + ssr", "an island edit owes both browser-facing graphs");
+            owed.react_server = true;
+            assert_eq!(owed.label(), "client + ssr + react-server");
+        }
     }
 }
 

@@ -655,6 +655,14 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
             import_meta_glob: None,
             defines,
             hmr: dev,
+            // Next's own source-map policy, applied to this router too — it is a
+            // property of `next build`, not of a router. See
+            // `next_adapter::default_source_maps`.
+            source_maps: crate::next_adapter::default_source_maps(
+                target,
+                dev,
+                next_config.as_ref(),
+            ),
             scss: crate::sass::ScssOptions {
                 additional_data: None,
                 root: Some(root.clone()),
@@ -670,6 +678,11 @@ pub fn configure(root: &Path, environment: &str, dev: bool) -> Result<Option<App
             jsx_extensions: crate::parser::JsxExtensions::NextJs,
             // As for the app router: the tsconfig is the only JSX-lowering input.
             jsx: crate::transform::JsxConfig::default(),
+            // next.config `serverExternalPackages`, honored on the pages router too:
+            // the field is a property of the SERVER compile, not of a router.
+            server_external_packages: crate::next_adapter::server_external_packages(
+                next_config.as_ref(),
+            ),
         },
         entry: Some(entry),
     }))

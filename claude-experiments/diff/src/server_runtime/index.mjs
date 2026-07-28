@@ -15,6 +15,13 @@ import { createRequestListener } from "./_ssr/node-adapter.mjs";
 import { fetch as ssrFetch } from "./_ssr/ssr.mjs";
 import { tsrStartManifest } from "./_ssr/router.mjs";
 
+// Every emitted server chunk ships a `.map` beside it; Node only reads them when
+// source-map support is on. Without this the maps are written and never consumed,
+// so an SSR exception prints positions in `server.chunk-12.mjs` rather than in the
+// file the developer wrote. Resolution is lazy — paid only when a stack is
+// formatted — so an app that never throws pays nothing.
+process.setSourceMapsEnabled(true);
+
 const serverDir = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(serverDir, "..", "public");
 

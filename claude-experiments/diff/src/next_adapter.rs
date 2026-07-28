@@ -49,6 +49,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::bundler::BuildConfig;
 use crate::config::AppConfig;
 use crate::rsc::{detect_directive, RscDirective};
@@ -633,6 +635,12 @@ struct RouteConfig {
     /// Reads request-scoped state at the top level (cookies/headers/draftMode or the
     /// `searchParams` prop) — forces per-request rendering.
     reads_request_state: bool,
+    /// A layout/template ABOVE this page in the route's level chain that reads request
+    /// state (`next/headers`). Next composes the whole segment tree for a route, so a
+    /// read anywhere in it — the ROOT layout included — makes the entire route
+    /// per-request even though the page's own source shows nothing. Holds the display
+    /// path of the first such module (root→leaf) so the manifest reason can name it.
+    request_state_module: Option<String>,
     /// `export const runtime = "nodejs" | "edge"`. `edge` opts the route into diffpack's
     /// lean WinterCG (edge-like) context (see [`RouteRuntime`] + [`validate_edge_module`]);
     /// `nodejs` (the default) is inert.
@@ -790,12 +798,41 @@ fn scan_route_config(raw_source: &str) -> RouteConfig {
         dynamic_params,
         revalidate,
         reads_request_state,
+        // Filled in by the caller, which is the only place that knows the level chain.
+        request_state_module: None,
         runtime,
         fetch_cache,
         preferred_region,
         max_duration,
         experimental_ppr,
     }
+}
+
+/// The first layout/template in a route's root→leaf level chain that reads request-scoped
+/// state (`next/headers`: cookies / headers / draftMode), or None if none does.
+///
+/// A route is not just its `page` module: Next composes the ENTIRE segment tree — every
+/// enclosing `layout.tsx` and `template.tsx` — into one render. A request read anywhere in
+/// that tree makes the whole route per-request, and the page's own source cannot show it.
+/// (The root layout is the common case: one `headers()` there makes every route in the app
+/// dynamic, which is exactly what `next build` reports.)
+///
+/// Layouts and templates receive `params` but NOT `searchParams`, so — unlike a page — only
+/// the `next/headers` read counts here; a `searchParams` mention in a layout is not a
+/// request read.
+fn level_chain_request_state_read(levels: &[Level]) -> Option<PathBuf> {
+    for level in levels {
+        for module in [level.layout.as_ref(), level.template.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(raw) = std::fs::read_to_string(module) else { continue };
+            if strip_comments(&raw).contains("next/headers") {
+                return Some(module.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Which runtime a route / route-handler / middleware declares. Next's default is
@@ -947,7 +984,7 @@ fn classify_route(has_dynamic_segment: bool, cfg: &RouteConfig) -> RouteKind {
     if matches!(cfg.dynamic_config.as_deref(), Some("force-static") | Some("error")) {
         return RouteKind::ForceStatic;
     }
-    if cfg.reads_request_state {
+    if cfg.reads_request_state || cfg.request_state_module.is_some() {
         return RouteKind::Dynamic;
     }
     if has_dynamic_segment {
@@ -979,6 +1016,11 @@ fn dynamic_reason(has_dynamic_segment: bool, cfg: &RouteConfig) -> String {
         } else {
             "reads request state (cookies/headers/searchParams); no generateStaticParams".to_string()
         }
+    } else if let Some(module) = cfg.request_state_module.as_deref() {
+        // The page itself is static-looking; a layout/template wrapping it reads request
+        // state, which is what makes the WHOLE route per-request. Name the module so the
+        // manifest never leaves the reason unattributable to a file.
+        format!("a layout/template in this route's tree reads request state (next/headers): {module}")
     } else if has_dynamic_segment {
         "dynamic segment with no generateStaticParams".to_string()
     } else {
@@ -1284,6 +1326,132 @@ struct Discovered {
     /// Metadata IMAGE file conventions (`app/icon.png`, `app/favicon.ico`, ...) at the
     /// app root: copied to `public/` at build and head-linked into every route.
     meta_images: Vec<MetaImage>,
+    /// `pages/api/**` HTTP endpoints of a HYBRID app (`app/` pages + pages-router API
+    /// routes), most-specific first. Served after `app/**/route.ts`, which wins on a
+    /// path both could answer — Next's own precedence.
+    pages_api: Vec<PagesApiRoute>,
+}
+
+/// A pages-router API route (`pages/api/**`) in a project whose pages live in `app/`.
+///
+/// Next supports this hybrid shape and real apps lean on it: cal.com serves next-auth
+/// (`pages/api/auth/[...nextauth].ts`) and its entire tRPC surface as pages API routes
+/// while every page is app-router. Building only `app/` leaves those endpoints unserved,
+/// so the client cannot read a session, cannot log in, and every data query 404s.
+///
+/// The endpoint contract differs from an app-router `route.ts`: a pages API route is a
+/// single default-exported `(req, res)` function taking a Node request/response pair,
+/// not per-method functions taking a Web `Request`. See `next_runtime/pages_api.js`.
+#[derive(Debug, Clone)]
+struct PagesApiRoute {
+    /// The matched URL path (`/api/auth/[...nextauth]`).
+    url_path: String,
+    segments: Vec<Seg>,
+    /// The handler module (absolute, canonical).
+    file: PathBuf,
+}
+
+/// The file extensions Next treats as a route module, in `pageExtensions` default order.
+const PAGES_API_EXTENSIONS: [&str; 4] = ["tsx", "ts", "jsx", "js"];
+
+/// Parse one pages-router path component into a URL segment. The pages router has no
+/// route groups and no parallel slots, so every component is a literal or a
+/// `[param]`/`[...catchAll]`/`[[...optionalCatchAll]]` — it deliberately does NOT reuse
+/// the app-router [`parse_segment`], which would swallow a directory literally named
+/// `(x)` as a group.
+fn parse_pages_segment(raw: &str) -> Seg {
+    if let Some(inner) = raw.strip_prefix("[[...").and_then(|s| s.strip_suffix("]]")) {
+        Seg::OptionalCatchAll(inner.to_string())
+    } else if let Some(inner) = raw.strip_prefix("[...").and_then(|s| s.strip_suffix(']')) {
+        Seg::CatchAll(inner.to_string())
+    } else if let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Seg::Dynamic(inner.to_string())
+    } else {
+        Seg::Static(raw.to_string())
+    }
+}
+
+/// The `pages/` directory of an app-router project, if it has one: `pages/` beside
+/// `app/`, or `src/pages/` beside `src/app/`. Next looks for the two dirs as siblings,
+/// which is why this is derived from the app dir rather than probed independently.
+fn sibling_pages_dir(app_dir: &Path) -> Option<PathBuf> {
+    let pages = app_dir.parent()?.join("pages");
+    pages.is_dir().then_some(pages)
+}
+
+/// Discover every `pages/api/**` endpoint of a hybrid app, most-specific first (the same
+/// specificity order route handlers and pages use).
+fn discover_pages_api_routes(app_dir: &Path) -> Result<Vec<PagesApiRoute>, String> {
+    let Some(api_dir) = sibling_pages_dir(app_dir).map(|pages| pages.join("api")) else {
+        return Ok(Vec::new());
+    };
+    if !api_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    discover_pages_api_dir(&api_dir, &["api".to_string()], &mut out)?;
+    out.sort_by(|a, b| {
+        let count = |r: &PagesApiRoute, f: fn(&Seg) -> bool| r.segments.iter().filter(|s| f(s)).count();
+        let ca = count(a, |s| matches!(s, Seg::CatchAll(_) | Seg::OptionalCatchAll(_)));
+        let cb = count(b, |s| matches!(s, Seg::CatchAll(_) | Seg::OptionalCatchAll(_)));
+        let da = count(a, |s| matches!(s, Seg::Dynamic(_)));
+        let db = count(b, |s| matches!(s, Seg::Dynamic(_)));
+        ca.cmp(&cb)
+            .then(da.cmp(&db))
+            .then(b.segments.len().cmp(&a.segments.len()))
+            .then(a.url_path.cmp(&b.url_path))
+    });
+    Ok(out)
+}
+
+fn discover_pages_api_dir(
+    dir: &Path,
+    prefix: &[String],
+    out: &mut Vec<PagesApiRoute>,
+) -> Result<(), String> {
+    let read = std::fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    let mut entries: Vec<PathBuf> = read
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .collect();
+    entries.sort();
+    for path in entries {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if path.is_dir() {
+            let mut nested = prefix.to_vec();
+            nested.push(name.to_string());
+            discover_pages_api_dir(&path, &nested, out)?;
+            continue;
+        }
+        if !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| PAGES_API_EXTENSIONS.contains(&ext))
+        {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        // `pages/api/x/index.ts` serves `/api/x`, exactly as `pages/api/x.ts` does.
+        let mut parts = prefix.to_vec();
+        if stem != "index" {
+            parts.push(stem.to_string());
+        }
+        let segments: Vec<Seg> = parts.iter().map(|part| parse_pages_segment(part)).collect();
+        out.push(PagesApiRoute {
+            url_path: segments_display(&segments),
+            segments,
+            file: path.canonicalize().unwrap_or(path.clone()),
+        });
+    }
+    Ok(())
 }
 
 /// An intercepting route (`app/@modal/(..)photo/[id]/page.tsx`): on a SOFT navigation to
@@ -1462,6 +1630,7 @@ fn discover_routes(app_dir: &Path, root_layout: Option<&Path>) -> Result<Discove
         handlers: discover_route_handlers(app_dir)?,
         intercepts: discover_intercepts(app_dir)?,
         meta_images: scan_metadata_images(app_dir)?,
+        pages_api: discover_pages_api_routes(app_dir)?,
     })
 }
 
@@ -1718,7 +1887,11 @@ fn discover_routes_dir(
             let page_abs = page.canonicalize().unwrap_or_else(|_| page.clone());
             let metadata = app_metadata(&page_abs, root_layout);
             let page_source = std::fs::read_to_string(&page_abs).unwrap_or_default();
-            let cfg = scan_route_config(&page_source);
+            let mut cfg = scan_route_config(&page_source);
+            // A layout/template anywhere above this page reading `next/headers` makes the
+            // whole route per-request — the page's own source cannot show that.
+            cfg.request_state_module = level_chain_request_state_read(level_chain)
+                .map(|p| p.display().to_string());
             let has_dynamic_segment = segments.iter().any(|s| {
                 matches!(s, Seg::Dynamic(_) | Seg::CatchAll(_) | Seg::OptionalCatchAll(_))
             });
@@ -2281,7 +2454,9 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // walk: the head <link> is derived from the react-server build's emitted
     // `server.css` at render time (see `rsc_entry_module`), which is the same artifact
     // `main.rs` preserves to `public/rsc.css`.
+    let scan_stage = crate::build_profile::stage("adapter/scan-project");
     let scan = scan_project(&root)?;
+    drop(scan_stage);
     let mut islands = scan.islands.clone();
 
     // Evaluate `next.config.*` ONCE for this pass (redirects/rewrites/headers + images +
@@ -2289,7 +2464,9 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // image-config module, the baked asset/base-path prefixes below, and (on the
     // react-server pass) the config manifest — so node is spawned a single time instead of
     // once per consumer (a build-time win over the previous two spawns).
+    let config_eval_stage = crate::build_profile::stage("adapter/next-config-eval");
     let next_config = run_next_config_eval(&root);
+    drop(config_eval_stage);
     // Honor next.config `pageExtensions` (e.g. what `@next/mdx` merges): a configured
     // extension diffpack cannot discover is a clear hard error, never a silently-missing
     // route. Supported extensions (incl. md/mdx) flow through the built-in discovery set.
@@ -2336,6 +2513,86 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         alias("next/dynamic", &shims_dir.join("dynamic.ts")),
         alias("next/script", &shims_dir.join("script.tsx")),
     ];
+    // The SAME entry points spelled with their file extension. The `next` package has no
+    // `exports` map, so `next/navigation` and `next/navigation.js` name one and the same
+    // file on disk — and an alias table that covers only the bare spelling silently
+    // splits the module in two, half of it diffpack's shim and half of it Next's real
+    // implementation. That is not hypothetical: `nuqs` (a dependency of cal.com, used on
+    // most of its pages) imports `useRouter` from `"next/navigation.js"`, which reached
+    // Next's own `useRouter` — and it throws `invariant expected app router to be
+    // mounted` against a context nothing here provides, taking the whole SSR render of
+    // every affected page down to an empty document.
+    let extensioned: Vec<(String, String)> = aliases
+        .iter()
+        .map(|(spec, file)| (format!("{spec}.js"), file.clone()))
+        .collect();
+    aliases.extend(extensioned);
+
+    // Every file those aliases name is written HERE, before anything resolves a
+    // specifier. The island reachability probe below resolves `next/*` exactly as the
+    // build will, and a resolver reports a missing file as "does not resolve" — so on a
+    // tree with no `.diffpack-next/` (a genuinely cold build) a probe that ran before
+    // these writes would judge every `next/link` importer unbuildable and silently drop
+    // real islands, leaving the client graph short of the references the react-server
+    // graph emits. Writing first makes the cold build identical to the warm one.
+    // `request-context.ts` / `hooks-context.ts` come along because the `next/headers`,
+    // `next/cache` and `next/navigation` shims import them, and the image manifest +
+    // config because the `next/image` shim does.
+    let request_context = adapter_dir.join("request-context.ts");
+    write_if_changed(&request_context, &request_context_module())?;
+    let request_context_canon = request_context
+        .canonicalize()
+        .unwrap_or_else(|_| request_context.clone());
+    let hooks_context = adapter_dir.join("hooks-context.ts");
+    write_if_changed(&hooks_context, hooks_context_module())?;
+    let hooks_context_canon = hooks_context
+        .canonicalize()
+        .unwrap_or_else(|_| hooks_context.clone());
+    // The next.config `images` block (remote allow-list + loader), bundled into every
+    // graph so the shim can allow/deny remote hosts and drive a custom/built-in loader.
+    // Resolved FIRST because it also decides whether this build pre-optimizes at all
+    // (see `ImageOptimization`), which the scan below obeys. Persisted alongside as
+    // JSON so the later out-of-`configure` steps (main.rs's variant emit, the dev
+    // server's) read the same resolved block without re-spawning node.
+    let images = images_from_eval(next_config.as_ref());
+    write_if_changed(
+        &adapter_dir.join(IMAGE_CONFIG_JSON),
+        &serde_json::to_string_pretty(&images)
+            .map_err(|error| format!("cannot serialize the next.config images block: {error}"))?,
+    )?;
+    write_if_changed(&adapter_dir.join("image-config.ts"), &image_config_module(&images))?;
+    // next/image (Slice J / gap 4.2): generate the variant manifest the shim reads.
+    // Scanning `public/` is deterministic (no build-output dependency), so it runs in
+    // every environment and the manifest agrees across the three graphs; the actual
+    // variant files are emitted once, from the client build's public-copy step
+    // (main.rs `emit_image_variants`), keyed by the same deterministic hash.
+    let images_stage = crate::build_profile::stage("image/scan-public");
+    let optimization = ImageOptimization::from_images(&images);
+    let public_images = scan_public_images_with(&root, &optimization)?;
+    drop(images_stage);
+    write_if_changed(
+        &adapter_dir.join("image-manifest.ts"),
+        &image_manifest_module(&public_images),
+    )?;
+    let link_shim = shims_dir.join("link.tsx");
+    write_if_changed(&link_shim, &next_link_shim(&base_path))?;
+    let script_shim = shims_dir.join("script.tsx");
+    write_if_changed(&script_shim, next_script_shim())?;
+    write_if_changed(&shims_dir.join("image.tsx"), &next_image_shim(&asset_base))?;
+    write_if_changed(
+        &shims_dir.join("navigation.ts"),
+        &next_navigation_shim(&hooks_context_canon),
+    )?;
+    write_if_changed(
+        &shims_dir.join("headers.ts"),
+        &next_headers_shim(&request_context_canon),
+    )?;
+    write_if_changed(
+        &shims_dir.join("cache.ts"),
+        &next_cache_shim(&request_context_canon),
+    )?;
+    write_if_changed(&shims_dir.join("server.ts"), next_server_shim())?;
+    write_if_changed(&shims_dir.join("dynamic.ts"), next_dynamic_shim())?;
 
     // --- app-router route table (every route + its nested layout/boundary chain) --
     let _ = &page; // detection anchor; the full route set comes from discovery.
@@ -2373,8 +2630,21 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // `.diffpack-next/`) so its client reference resolves; in the react-server graph
     // it stays a client reference. Keyed by the SAME canonical path the react-server
     // render imports it from → manifest ids match. Write it first so its path exists.
+    // The CONTROL boundary island: same island contract (bundled + registered in the
+    // client/ssr graphs, a client reference in the react-server graph). It completes a
+    // redirect() thrown once the shell had already flushed, and it owns the ONE
+    // definition of "this error is app-router control flow" that the error boundary and
+    // the client entry both read. Written first: both of those import from it.
+    let control_boundary = adapter_dir.join("control-boundary.tsx");
+    write_if_changed(&control_boundary, control_boundary_module())?;
+    let control_boundary_canon = control_boundary
+        .canonicalize()
+        .unwrap_or_else(|_| control_boundary.clone());
+    if !islands.contains(&control_boundary_canon) {
+        islands.push(control_boundary_canon.clone());
+    }
     let error_boundary = adapter_dir.join("error-boundary.tsx");
-    write_if_changed(&error_boundary, error_boundary_module())?;
+    write_if_changed(&error_boundary, &error_boundary_module(&control_boundary_canon))?;
     let error_boundary_canon = error_boundary
         .canonicalize()
         .unwrap_or_else(|_| error_boundary.clone());
@@ -2391,17 +2661,6 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // no hydration mismatch). `hooks-context` guards `createContext` so it loads
     // harmlessly in the react-server graph too (where it's imported via `next/navigation`
     // for `redirect`, but createContext is undefined under the react-server condition).
-    let request_context = adapter_dir.join("request-context.ts");
-    write_if_changed(&request_context, &request_context_module())?;
-    let request_context_canon = request_context
-        .canonicalize()
-        .unwrap_or_else(|_| request_context.clone());
-    let hooks_context = adapter_dir.join("hooks-context.ts");
-    write_if_changed(&hooks_context, hooks_context_module())?;
-    let hooks_context_canon = hooks_context
-        .canonicalize()
-        .unwrap_or_else(|_| hooks_context.clone());
-
     // The SEGMENT boundary island (useSelectedLayoutSegment(s)): like the error boundary
     // it is a `"use client"` island wrapped around each layout in the react-server render,
     // BUNDLED + REGISTERED in the client + ssr graphs so it PROVIDES SelectedSegmentContext
@@ -2416,7 +2675,6 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     if !islands.contains(&segment_boundary_canon) {
         islands.push(segment_boundary_canon.clone());
     }
-
     write_if_changed(&adapter_dir.join("lazy.js"), lazy_module())?;
     // Middleware: `middleware.{ts,js}` at the project root or under `src/`. Next
     // middleware ALWAYS runs on the edge (WinterCG) runtime, so enforce the
@@ -2436,6 +2694,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             &fonts,
             &error_boundary_canon,
             &segment_boundary_canon,
+            &control_boundary_canon,
             &request_context_canon,
             middleware.as_deref(),
             &asset_base,
@@ -2445,11 +2704,11 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // react-server graph it stays a client reference (resolved to real code through
     // the seam); in the client + ssr graphs it must be BUNDLED and REGISTERED like
     // any island so its client reference resolves and it hydrates. Because
-    // `scan_project` skips `.diffpack-next/`, pin it explicitly here (write the
-    // file first so its canonical path exists), keyed by the SAME canonical path the
-    // react-server render resolves the `next/link` alias to → manifest ids match.
-    let link_shim = shims_dir.join("link.tsx");
-    write_if_changed(&link_shim, &next_link_shim(&base_path))?;
+    // `scan_project` skips `.diffpack-next/`, pin it explicitly here, keyed by the SAME
+    // canonical path the react-server render resolves the `next/link` alias to →
+    // manifest ids match. The file itself was written above the reachability probe (it
+    // has to exist before ANY specifier resolves); the pin belongs AFTER the probe so
+    // diffpack's own shims are never candidates for being dropped as unreachable.
     let link_canon = link_shim.canonicalize().unwrap_or_else(|_| link_shim.clone());
     if !islands.contains(&link_canon) {
         islands.push(link_canon);
@@ -2458,9 +2717,8 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // sees only as a client reference. Next's own `next/script` is CommonJS inside
     // `node_modules`, which `scan_project` cannot see (it skips dependencies), so without
     // this alias + pin the flight carries a client reference no client manifest has an
-    // entry for. Pinned by canonical path so all three graphs agree on the id.
-    let script_shim = shims_dir.join("script.tsx");
-    write_if_changed(&script_shim, next_script_shim())?;
+    // entry for. Pinned by canonical path so all three graphs agree on the id; the file
+    // itself was written above the reachability probe.
     let script_canon = script_shim
         .canonicalize()
         .unwrap_or_else(|_| script_shim.clone());
@@ -2475,38 +2733,6 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &adapter_dir.join("client.tsx"),
         &client_entry_module(&adapter_dir, &islands, &hooks_context_canon),
     )?;
-    // next/image (Slice J / gap 4.2): generate the variant manifest the shim reads.
-    // Scanning `public/` is deterministic (no build-output dependency), so it runs in
-    // every environment and the manifest agrees across the three graphs; the actual
-    // variant files are emitted once, from the client build's public-copy step
-    // (main.rs `emit_image_variants`), keyed by the same deterministic hash.
-    let public_images = scan_public_images(&root)?;
-    write_if_changed(
-        &adapter_dir.join("image-manifest.ts"),
-        &image_manifest_module(&public_images),
-    )?;
-    // The next.config `images` block (remote allow-list + loader), bundled into every
-    // graph so the shim can allow/deny remote hosts and drive a custom/built-in loader.
-    write_if_changed(
-        &adapter_dir.join("image-config.ts"),
-        &image_config_module(&images_from_eval(next_config.as_ref())),
-    )?;
-    write_if_changed(&shims_dir.join("image.tsx"), &next_image_shim(&asset_base))?;
-    write_if_changed(
-        &shims_dir.join("navigation.ts"),
-        &next_navigation_shim(&hooks_context_canon),
-    )?;
-    write_if_changed(
-        &shims_dir.join("headers.ts"),
-        &next_headers_shim(&request_context_canon),
-    )?;
-    write_if_changed(
-        &shims_dir.join("cache.ts"),
-        &next_cache_shim(&request_context_canon),
-    )?;
-    write_if_changed(&shims_dir.join("server.ts"), next_server_shim())?;
-    write_if_changed(&shims_dir.join("dynamic.ts"), next_dynamic_shim())?;
-
     // --- per-environment config --------------------------------------------------
     let (entry, target, conditions): (PathBuf, Target, Vec<&str>) = match environment {
         "client" => (
@@ -2610,6 +2836,11 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             import_meta_glob: None,
             defines,
             hmr: dev,
+            // Next's own source-map policy, so `diffpack build-app` and `next build`
+            // of the same app produce comparable artifacts (see
+            // `default_source_maps`). The CLI's `--sourcemap` / `--no-sourcemap`
+            // override this afterwards; with neither, the app's next.config decides.
+            source_maps: default_source_maps(target, dev, next_config.as_ref()),
             scss: crate::sass::ScssOptions {
                 additional_data: None,
                 root: Some(root.to_path_buf()),
@@ -2618,7 +2849,13 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             // `{ src, width, height, blurDataURL, variants }` object shape with
             // build-emitted responsive variants. ONLY the Next adapter opts in;
             // Vite/TanStack/generic builds keep bare-URL-string asset imports.
-            image_import_shape: crate::bundler::ImageImportShape::NextObject,
+            // The ladder obeys the same next.config decision as the `public/` one:
+            // an app with `images.unoptimized` (or its own loader) gets the object
+            // WITHOUT `variants`, so nothing is encoded for URLs the emitted `<img>`
+            // can never reference.
+            image_import_shape: crate::bundler::ImageImportShape::NextObject {
+                responsive_variants: optimization == ImageOptimization::Enabled,
+            },
             css_preprocess: crate::bundler::CssPreprocess {
                 root: Some(root.to_path_buf()),
                 postcss: crate::postcss::discover(&root).map(std::sync::Arc::new),
@@ -2630,6 +2867,12 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             // wants a different JSX runtime says so in its tsconfig, which
             // `jsx_config_for` reads per file.
             jsx: crate::transform::JsxConfig::default(),
+            // next.config `serverExternalPackages`: never bundled into a server graph,
+            // `require`d from node_modules at serve time instead. The list exists
+            // because bundling these packages FAILS, so ignoring it turns a config the
+            // app already wrote into a build error (cal.com's `rest-facade` reaches an
+            // uninstalled `superagent-proxy` behind a runtime `if`).
+            server_external_packages: server_external_packages(next_config.as_ref()),
         },
         entry: Some(entry),
     }))
@@ -2649,19 +2892,143 @@ pub(crate) fn run_next_config_eval(root: &Path) -> Option<serde_json::Value> {
     let config = next_config_path(root)?;
     let loader = std::env::temp_dir().join("diffpack-next-config-eval.mjs");
     std::fs::write(&loader, include_str!("../scripts/rsc/next-config-eval.mjs")).ok()?;
+    // The payload goes to a FILE, not stdout. A next.config is ordinary code that
+    // routinely prints (cal.com logs which rewrite set it chose; many configs warn about
+    // unset variables), and reading the payload off stdout meant one `console.log` made
+    // the JSON unparseable — so the ENTIRE config was silently discarded and the app
+    // served with no redirects, rewrites, headers, basePath or i18n at all. A private
+    // sink cannot be corrupted by anything the config writes.
+    let payload = std::env::temp_dir().join(format!(
+        "diffpack-next-config-{}-{}.json",
+        std::process::id(),
+        EVAL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
+    let _ = std::fs::remove_file(&payload);
     let out = std::process::Command::new("node")
         .arg(&loader)
         .arg(&config)
+        .arg(&payload)
         .current_dir(root)
         .output()
         .ok()?;
     if !out.stderr.is_empty() {
         eprintln!("[next.config] {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    if !out.status.success() || out.stdout.is_empty() {
+    let text = std::fs::read_to_string(&payload).ok();
+    let _ = std::fs::remove_file(&payload);
+    if !out.status.success() {
         return None;
     }
-    serde_json::from_slice(&out.stdout).ok()
+    serde_json::from_str(&text?).ok()
+}
+
+/// Distinguishes concurrent config-eval payload files (each environment's build
+/// evaluates the config, and builds can run in parallel).
+static EVAL_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The environment variables evaluating `next.config` ADDED or CHANGED, as reported by
+/// `next-config-eval.mjs`.
+///
+/// `next dev` and `next build` load next.config in the same process that then compiles
+/// and serves, so the config's side effects on `process.env` are part of the environment
+/// the app runs under. Real apps depend on exactly that: cal.com's config is essentially
+/// `dotenv.config({ path: "../../.env" })` plus a handful of computed variables, and its
+/// `DATABASE_URL` exists nowhere else — without this the SSR server connected to a
+/// default-named database and every data-backed route failed.
+///
+/// Diffpack evaluates the config in a CHILD process (so a config that throws cannot take
+/// the build down), which is why the delta has to be carried back out and applied to
+/// every process diffpack spawns. Removals are reported by the script but not applied:
+/// unsetting a variable the real environment provided is not something the propagation
+/// can do to an already-spawned parent, and no config in the wild deletes one.
+/// [`config_env`] read back from the manifest the build persisted, for the steps that
+/// run AFTER the compile (the SSG prerenderer, the dev orchestrator) and therefore no
+/// longer hold the evaluated config in memory. Empty when there is no manifest — an app
+/// with no `next.config` has no side effects to propagate.
+pub fn config_env_from_manifest(root: &Path) -> Vec<(String, String)> {
+    config_env_from_output(&root.join(".diffpack-output"))
+}
+
+/// The same propagation keyed off the BUILD OUTPUT directory instead of the project root.
+///
+/// `diffpack start <output> [port]` is handed the output directory and nothing else — the
+/// project root it was built from is not knowable from there (and may not even exist on
+/// the serving host). Serving without this is what made every data-backed route fail:
+/// cal.com's `DATABASE_URL` lives only in the `.env` its next.config `dotenv`-loads, so
+/// the production server connected to a database named after the OS user and every
+/// `prisma` call threw inside the Server Components render.
+pub fn config_env_from_output(output: &Path) -> Vec<(String, String)> {
+    let path = output.join("next-config-manifest.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    config_env(Some(&value))
+}
+
+/// Whether a Next build emits source maps for one graph BY DEFAULT.
+///
+/// This is Next's own policy, which diffpack follows so that `diffpack build-app`
+/// and `next build` of the same app produce comparable artifacts — otherwise a
+/// build-time comparison between them is measuring different work:
+///
+/// - **Server** graphs (`react-server`, `ssr`) ALWAYS get maps. Next does not make
+///   this configurable, because a production stack trace out of a Server Component
+///   or a route handler is unreadable without one, and server maps never leave the
+///   server.
+/// - **Browser** graphs get maps only when the app asks, via
+///   `productionBrowserSourceMaps`. These ship to every visitor and publish the
+///   app's source, so Next defaults them off and so does diffpack.
+/// - In **dev** both graphs get maps: that is what `next dev` does, and it is the
+///   setting a developer is actually debugging under.
+pub(crate) fn default_source_maps(
+    target: Target,
+    dev: bool,
+    next_config: Option<&serde_json::Value>,
+) -> bool {
+    if dev {
+        return true;
+    }
+    match target {
+        Target::Client => production_browser_source_maps(next_config),
+        Target::Server | Target::ReactServer => true,
+    }
+}
+
+/// next.config `productionBrowserSourceMaps`, as reported by `next-config-eval.mjs`.
+/// Next's default is off, and so is the answer for an app with no config at all.
+pub(crate) fn production_browser_source_maps(eval: Option<&serde_json::Value>) -> bool {
+    eval.and_then(|value| value.get("productionBrowserSourceMaps"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// next.config `serverExternalPackages` (and the pre-15
+/// `experimental.serverComponentsExternalPackages`), as reported by
+/// `next-config-eval.mjs`. Empty when there is no config or it names none.
+pub(crate) fn server_external_packages(eval: Option<&serde_json::Value>) -> Vec<String> {
+    eval.and_then(|value| value.get("serverExternalPackages"))
+        .and_then(|value| value.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| entry.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn config_env(eval: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let Some(map) = eval.and_then(|value| value.get("env")).and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = map
+        .iter()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+        .collect::<Vec<_>>();
+    out.sort();
+    out
 }
 
 /// The next.config `images` block (remote-host allow-list + loader), defaulted to Next's
@@ -2679,6 +3046,81 @@ fn default_images_json() -> serde_json::Value {
 fn images_from_eval(eval: Option<&serde_json::Value>) -> serde_json::Value {
     eval.and_then(|v| v.get("images").cloned())
         .unwrap_or_else(default_images_json)
+}
+
+/// The machine-readable twin of the generated `image-config.ts`: the SAME resolved
+/// `images` block, persisted so the later build steps that run outside `configure`
+/// (`main.rs`'s public-image emit, the dev server's) can read what the app configured
+/// without re-spawning node to re-evaluate `next.config`.
+pub(crate) const IMAGE_CONFIG_JSON: &str = "image-config.json";
+
+/// Whether this build pre-optimizes images at all — and, when it does not, the
+/// next.config setting that says so.
+///
+/// `next build` runs NO image work at build time in two cases, and diffpack must not
+/// either:
+///
+/// * `images.unoptimized` — Next's contract is that `<Image>` degrades to a plain
+///   `<img src>` with no `srcset` and no `/_next/image` URL. Nothing can ever request
+///   an optimized variant, so every emitted variant file is dead weight.
+/// * `images.loader` other than `"default"`, or an `images.loaderFile` — the app's own
+///   loader builds every URL, so diffpack's `/_next/image` optimizer (and therefore its
+///   build-emitted variants behind it) is never reached.
+///
+/// This is not a heuristic and not a fallback: in both cases the emitted `srcset` is
+/// decided by the shim from the SAME config, so "no variant is reachable" is a fact
+/// about the generated HTML, not a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageOptimization {
+    /// Scan `public/` and emit the responsive variant ladder.
+    Enabled,
+    /// Off. Carries the next.config setting that turned it off, for the build log.
+    Disabled(String),
+}
+
+impl ImageOptimization {
+    /// Read the resolved `images` block and decide.
+    pub(crate) fn from_images(images: &serde_json::Value) -> Self {
+        if images
+            .get("unoptimized")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return ImageOptimization::Disabled("images.unoptimized is true".to_string());
+        }
+        if let Some(file) = images.get("loaderFile").and_then(serde_json::Value::as_str)
+            && !file.is_empty()
+        {
+            return ImageOptimization::Disabled(format!("images.loaderFile is {file:?}"));
+        }
+        match images.get("loader").and_then(serde_json::Value::as_str) {
+            Some(loader) if loader != "default" => {
+                ImageOptimization::Disabled(format!("images.loader is {loader:?}"))
+            }
+            _ => ImageOptimization::Enabled,
+        }
+    }
+
+    /// Read the decision back from the persisted `image-config.json` the adapter wrote
+    /// for this project. A project with no adapter dir (a non-Next build) has no image
+    /// config to honor, so optimization stays on and the existing behaviour is unchanged.
+    pub fn for_project(root: &Path) -> Self {
+        let path = root.join(ADAPTER_DIR).join(IMAGE_CONFIG_JSON);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return ImageOptimization::Enabled;
+        };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(images) => ImageOptimization::from_images(&images),
+            // A corrupt file is a build defect, not something to silently ignore.
+            Err(error) => {
+                eprintln!(
+                    "next/image: cannot read {} ({error}); building the full variant ladder",
+                    path.display(),
+                );
+                ImageOptimization::Enabled
+            }
+        }
+    }
 }
 
 /// The next.config routing surface diffpack BAKES into generated modules at build time:
@@ -2945,14 +3387,92 @@ fn lazy_module() -> &'static str {
 /// `error.tsx`) with `{ error, reset }`, else `props.children`. In the react-server
 /// graph the throwing children become a recoverable client-boundary subtree (so the
 /// flight render completes); the SSR/browser React catches and renders the fallback.
-fn error_boundary_module() -> &'static str {
-    r#""use client";
+fn error_boundary_module(control_boundary: &Path) -> String {
+    let control_import = js_str(&control_boundary.to_string_lossy());
+    format!(
+        r#""use client";
 // Generated by diffpack's next app-router adapter — the client Error Boundary that
 // implements the app-router `error.tsx` convention. React error boundaries must be
 // client components; this wraps each route level that has an `error.tsx`.
+import {{ Component, createElement }} from "react";
+import {{ isControlFlowError }} from {control_import};
+
+export default class ErrorBoundary extends Component {{
+  constructor(props) {{
+    super(props);
+    this.state = {{ error: null }};
+  }}
+  static getDerivedStateFromError(error) {{
+    return {{ error }};
+  }}
+  render() {{
+    const error = this.state.error;
+    if (error) {{
+      // A redirect()/notFound() is CONTROL FLOW, not a failure. `error.tsx` must never
+      // swallow it — showing an error page for a logged-out redirect is exactly what an
+      // app-router error boundary is forbidden to do — so hand it to the control boundary
+      // above, which completes the navigation. (Next's ErrorBoundaryHandler does the same.)
+      if (isControlFlowError(error)) throw error;
+      return createElement(this.props.fallback, {{
+        error,
+        reset: () => this.setState({{ error: null }}),
+      }});
+    }}
+    return this.props.children;
+  }}
+}}
+"#,
+    )
+}
+
+/// The `CONTROL_BOUNDARY` island (`control-boundary.tsx`). A `"use client"` boundary
+/// wrapped around the matched PAGE so a `redirect()` the page throws from BEHIND a
+/// Suspense boundary still happens.
+///
+/// Once the shell has flushed, the HTTP status is already on the wire and no 307 can be
+/// issued (that is Next's behaviour too: a route with a `loading.tsx` answers 200 and the
+/// redirect travels in the stream). React hands the errored flight row to the client with
+/// its `digest` attached; this boundary is where the digest is turned back into a real
+/// navigation — the same job Next's `RedirectBoundary` does.
+///
+/// It is deliberately NOT a general error boundary: anything that is not a redirect digest
+/// is re-thrown from `render`, so the app's own `error.tsx` / `global-error.tsx` chain sees
+/// exactly the failure it saw before.
+fn control_boundary_module() -> &'static str {
+    r#""use client";
+// Generated by diffpack's next app-router adapter — the client CONTROL boundary that
+// completes a redirect() thrown after the response shell already flushed, plus the ONE
+// definition of "this error is app-router control flow" (the error boundary and the
+// client entry's onRecoverableError both import it from here).
 import { Component, createElement } from "react";
 
-export default class ErrorBoundary extends Component {
+// NEXT_REDIRECT;<type>;<url>;<status>; — the digest `next/navigation`'s redirect() throws.
+// The URL itself may contain `;`, so the middle is rejoined rather than indexed.
+export function redirectFromDigest(digest) {
+  if (typeof digest !== "string" || !digest.startsWith("NEXT_REDIRECT;")) return null;
+  const parts = digest.split(";");
+  return { href: parts.slice(2, -2).join(";"), type: parts[1] || "replace" };
+}
+
+// notFound() thrown after the shell flushed. The status is already sent, so this cannot
+// become a 404 — but it must never be silent either.
+export function isNotFoundDigest(digest) {
+  return digest === "NEXT_HTTP_ERROR_FALLBACK;404";
+}
+
+// Whether an error is app-router CONTROL FLOW rather than a failure. React wraps an error
+// it recovers from (`new Error(<react code>, { cause: original })`) before handing it on,
+// so the digest can sit a few `cause` hops down; the walk is bounded so a self-referential
+// or cyclic cause chain terminates.
+export function isControlFlowError(error) {
+  for (let e = error, hops = 0; e && hops < 8; e = e.cause, hops += 1) {
+    const digest = e.digest;
+    if (redirectFromDigest(digest) || isNotFoundDigest(digest)) return true;
+  }
+  return false;
+}
+
+export default class ControlBoundary extends Component {
   constructor(props) {
     super(props);
     this.state = { error: null };
@@ -2960,14 +3480,64 @@ export default class ErrorBoundary extends Component {
   static getDerivedStateFromError(error) {
     return { error };
   }
-  render() {
-    if (this.state.error) {
-      return createElement(this.props.fallback, {
-        error: this.state.error,
-        reset: () => this.setState({ error: null }),
-      });
+  componentDidCatch(error) {
+    const target = redirectFromDigest(error && error.digest);
+    if (!target) return;
+    const hard = () => {
+      if (typeof window === "undefined") return;
+      if (target.type === "push") window.location.assign(target.href);
+      else window.location.replace(target.href);
+    };
+    // Catching the SAME target twice means the soft navigation did not actually replace
+    // this subtree. Escalate to a real browser navigation instead of looping — the user
+    // still lands where the server sent them.
+    if (this.redirectedTo === target.href) {
+      hard();
+      return;
     }
-    return this.props.children;
+    this.redirectedTo = target.href;
+    // Prefer the client Router's soft navigation (keeps the document mounted); before it
+    // has installed itself (a redirect caught during hydration) a real browser navigation
+    // is always correct.
+    const navigate = typeof window !== "undefined" && window.__diffpack_navigate;
+    if (typeof navigate !== "function") {
+      hard();
+      return;
+    }
+    // This boundary is holding its subtree at `null` while the navigation runs. React
+    // reuses a boundary instance that lands in the same position of the NEXT tree, so the
+    // error state has to be cleared once the Router has swapped — otherwise the target
+    // route renders into a boundary that is still showing nothing, and the user gets a
+    // blank page after a redirect that "worked".
+    Promise.resolve(navigate(target.href, { replace: target.type !== "push" })).then(
+      () => this.setState({ error: null }),
+      () => hard(),
+    );
+  }
+  render() {
+    const error = this.state.error;
+    if (!error) return this.props.children;
+    if (redirectFromDigest(error.digest)) {
+      // The navigation is under way (componentDidCatch); render nothing in this subtree
+      // rather than the half-rendered page it belongs to.
+      return null;
+    }
+    if (isNotFoundDigest(error.digest)) {
+      // notFound() from behind a Suspense boundary: the 200 is already sent, so this is
+      // the app's `not-found.tsx` UI in Next. diffpack renders the not-found DOCUMENT
+      // server-side (a real 404) only for a notFound() raised while the response still
+      // had no bytes; reaching here means the throw came too late for that. Say so —
+      // loudly, once — instead of showing a blank subtree with no explanation.
+      console.error(
+        "diffpack next: notFound() was thrown after the response shell had already flushed (" +
+          (typeof location !== "undefined" ? location.pathname : "") +
+          "). The 200 status cannot be withdrawn and the app's not-found.tsx is not part of " +
+          "this document, so the built-in 404 body is shown instead.",
+      );
+      return createElement("main", { id: "not-found" }, "404 — This page could not be found.");
+    }
+    // Not ours: hand it to the app's own error boundaries unchanged.
+    throw error;
   }
 }
 "#
@@ -3152,6 +3722,7 @@ fn rsc_entry_module(
     fonts: &crate::next_font::FontOutput,
     error_boundary: &Path,
     segment_boundary: &Path,
+    control_boundary: &Path,
     request_context: &Path,
     middleware: Option<&Path>,
     asset_base: &str,
@@ -3212,6 +3783,7 @@ fn rsc_entry_module(
 
     let error_boundary_id = format!("M{}", intern(&mut modules, error_boundary));
     let segment_boundary_id = format!("M{}", intern(&mut modules, segment_boundary));
+    let control_boundary_id = format!("M{}", intern(&mut modules, control_boundary));
 
     // Namespace imports for Ssg routes (generateStaticParams is a NAMED export; the
     // default-only `M<i>` binding cannot reach it). Keyed by page path → `NS<i>`.
@@ -3309,6 +3881,24 @@ fn rsc_entry_module(
         .map(|(i, s)| format!("import * as H{i} from {};\n", js_str(s)))
         .collect();
 
+    // Pages-router API routes (`pages/api/**`) of a hybrid app. Each is loaded through
+    // its own `import()` so it lands in its own chunk: that mirrors Next's per-route
+    // entry, and it means a worker only pays a route's module-init cost when a request
+    // actually reaches it (cal.com has 45 of them behind next-auth and tRPC).
+    let mut pages_api_entries = String::new();
+    for route in &disc.pages_api {
+        pages_api_entries.push_str(&format!(
+            "  {{ path: {}, segments: {}, load: () => import({}) }},\n",
+            js_str(&route.url_path),
+            segments_js(&route.segments),
+            js_str(&route.file.to_string_lossy()),
+        ));
+    }
+    // The pages-router API runtime is real source (src/next_runtime/pages_api.js),
+    // spliced verbatim so the node regression test imports the SAME code this entry
+    // runs. It carries its own `node:http` / `node:stream` imports.
+    let pages_api_runtime = include_str!("next_runtime/pages_api.js");
+
     // Middleware: namespace-import it (named `middleware` or default export) so
     // `runMiddleware` can invoke it; `null` when the app has none.
     let (middleware_import, middleware_const) = match middleware {
@@ -3327,6 +3917,12 @@ fn rsc_entry_module(
     let global_error_id = opt_id(&mut modules, &disc.global_error);
     let root_title = disc.root_metadata.title.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
     let root_description = disc.root_metadata.description.as_deref().map(js_str).unwrap_or_else(|| "null".to_string());
+    // The metadata chain of the real-404 document: the root layout, then `not-found.tsx`'s
+    // own `metadata`/`generateMetadata`. Next resolves this for a 404 exactly like any
+    // other document — cal.com's not-found sets the `404: This page could not be found.`
+    // title and `robots: noindex` there — so the 404 must carry a <head>, not just a body.
+    let not_found_meta_chain = meta_ns(&mut namespaces, &disc.root_layout);
+    let not_found_page_meta = meta_ns(&mut namespaces, &disc.app_not_found);
 
     let imports: String = modules
         .iter()
@@ -3418,10 +4014,13 @@ fn rsc_entry_module(
 import {{ renderToReadableStream }} from "react-server-dom-webpack/server";
 import {{ createElement, Fragment, Suspense }} from "react";
 import {{ readFileSync, writeSync, statSync, existsSync }} from "node:fs";
-import {{ fileURLToPath }} from "node:url";
+import {{ fileURLToPath, pathToFileURL }} from "node:url";
 import {{ handleServerAction }} from "#diffpack-rsc-action-handler";
 import {{ NextRequest }} from "next/server";
 {request_context_import}{imports}{ns_imports}{handler_imports}{middleware_import}
+// --- pages-router api runtime (src/next_runtime/pages_api.js, verbatim) -------------
+{pages_api_runtime}
+// --- end pages-router api runtime ---------------------------------------------------
 {middleware_const}
 {css_const}{font_const}const ROUTES = [
 {route_entries}];
@@ -3432,6 +4031,12 @@ const INTERCEPTS = [
 // method to its exported handler function; `handleRoute` matches a request path here.
 const ROUTE_HANDLERS = [
 {handler_entries}];
+// Pages-router API routes (`pages/api/**`) of a HYBRID app — `app/` renders the pages,
+// these serve the HTTP endpoints under the pages-router `(req, res)` contract. Matched
+// only after ROUTE_HANDLERS, so an `app/**/route.ts` wins a path both could answer
+// (Next's precedence). Each entry loads its module on first use.
+const PAGES_API = [
+{pages_api_entries}];
 // Ssg routes (a dynamic segment with generateStaticParams) → their module namespace,
 // so the `staticparams` op can enumerate concrete param sets at build time.
 const STATIC_PARAM_ROUTES = {{
@@ -3442,9 +4047,17 @@ const ERROR_BOUNDARY = {error_boundary_id};
 // The client SEGMENT boundary wrapped around each layout, providing SelectedSegmentContext
 // (the layout's active child URL segments) so useSelectedLayoutSegment(s) resolve.
 const SEGMENT_BOUNDARY = {segment_boundary_id};
+// The client CONTROL boundary wrapped around the matched page: it turns a redirect()
+// digest that reaches the client (thrown after the shell flushed, so no 307 was possible)
+// back into a real navigation.
+const CONTROL_BOUNDARY = {control_boundary_id};
 // The app-root global-error boundary (owns <html>), or null when the app has none.
 const GLOBAL_ERROR = {global_error_id};
 const ROOT_META = {{ title: {root_title}, description: {root_description} }};
+// The pseudo-route the real-404 document resolves its <head> from: the root layout's
+// metadata, then `not-found.tsx`'s own. Same shape `resolveMetadata` walks for a matched
+// route, so the 404 gets the identical title-template / robots / openGraph treatment.
+const NOT_FOUND_ROUTE = {{ path: "/_not-found", metaChain: [{not_found_meta_chain}], pageMeta: {not_found_page_meta}, title: ROOT_META.title, description: ROOT_META.description }};
 
 // The route's head elements (stylesheet + font + this route's metadata). React 19
 // hoists these into <head> from anywhere in the tree.
@@ -3646,8 +4259,18 @@ function notFoundTree() {{
   const body = APP_NOT_FOUND
     ? createElement(APP_NOT_FOUND)
     : createElement("main", {{ id: "not-found" }}, "404 — This page could not be found.");
-  let node = createElement(Fragment, null, ...headItems(ROOT_META), body);
-  if (ROOT_LAYOUT) node = createElement(ROOT_LAYOUT, null, node);
+  // The 404 is a real document: it resolves the metadata chain (root layout +
+  // not-found.tsx) exactly like a matched route, so its <title>/robots/openGraph are the
+  // ones the app declares. `headItems({{}})` carries the stylesheet/font/icon links only —
+  // the title comes from the resolved chain, so it is never emitted twice.
+  let node = createElement(
+    Fragment,
+    null,
+    ...headItems({{}}),
+    createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route: NOT_FOUND_ROUTE, params: {{}} }})),
+    body,
+  );
+  if (ROOT_LAYOUT) node = createElement(ROOT_LAYOUT, {{ params: Promise.resolve({{}}) }}, node);
   return node;
 }}
 
@@ -3658,7 +4281,13 @@ function notFoundTree() {{
 // Layout > Template > ErrorBoundary > Suspense(loading) > children order.
 function composeLevels(page, levels, params, remountKey) {{
   const paramsPromise = Promise.resolve(params);
-  let node = createElement(page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }});
+  // Same CONTROL boundary the main route composition installs, so a slot/intercept page
+  // that redirect()s after its shell flushed navigates instead of rendering nothing.
+  let node = createElement(
+    CONTROL_BOUNDARY,
+    null,
+    createElement(page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }}),
+  );
   for (let i = levels.length - 1; i >= 0; i -= 1) {{
     const level = levels[i];
     if (level.loading) node = createElement(Suspense, {{ fallback: createElement(level.loading) }}, node);
@@ -3698,7 +4327,68 @@ function matchSlots(level, parts, outerParams, remountKey) {{
 // props on its layout. On a SOFT navigation (`opts.softNav`) to an intercepting route's
 // target, returns JUST the overlay tree (marked `intercept: true`) so the client renders
 // it over the still-mounted current page. Returns `{{ tree, status, params, intercept }}`.
-function documentTree(pathname, opts) {{
+// Resolve the matched route's own page component BEFORE the flight render starts, so a
+// `redirect()` / `notFound()` it throws is known while the response still has no bytes.
+//
+// Next answers a top-level redirect with a real 307 because its shell — everything not
+// inside a user `<Suspense>` — is complete before any byte leaves. Diffpack streams, and
+// React's flight writer emits its first chunk as soon as the ROOT row is serializable:
+// an async page is a pending row in that first chunk, so a redirect thrown while
+// awaiting it landed AFTER the headers were already gone. A logged-in cal.com `/`
+// redirects to `/event-types` from exactly there — the browser got a 200 with a
+// half-rendered document instead of the redirect.
+//
+// Awaiting the page here does not weaken anything below it: what the page RETURNS
+// (including its own `<Suspense>` boundaries and slow children) still streams normally.
+// A page that throws an ordinary error is re-thrown INSIDE the tree so its segment's
+// `error.tsx` boundary handles it exactly as before; the throw is only inspected here,
+// never swallowed.
+async function resolvePage(Page, props, control) {{
+  // A client-reference page ("use client") is not callable here — render it as an element.
+  if (typeof Page !== "function" || Page.$$typeof) return createElement(Page, props);
+  let out;
+  try {{
+    out = Page(props);
+    if (out && typeof out.then === "function") out = await out;
+  }} catch (error) {{
+    if (isControlThrow(error)) {{
+      // redirect() / notFound() / a prerender bailout: record it NOW — that is the whole
+      // point of resolving here — and re-throw inside the tree so React's boundaries and
+      // the flight stream see the identical failure they saw before.
+      flightControlOnError(control, error);
+      return createElement(function DiffpackPageThrow() {{ throw error; }});
+    }}
+    // Any OTHER throw is handed back to React unrendered. A component that threw is
+    // re-invoked by React anyway, and this keeps a page that legitimately cannot run
+    // outside the renderer — a synchronous Server Component calling `use()`, whose
+    // dispatcher only exists inside a render — on exactly the path it had before.
+    return createElement(Page, props);
+  }}
+  return out;
+}}
+
+// Whether a throw is app-router CONTROL FLOW (redirect / notFound / a build-time
+// request-state bailout) rather than a render failure. Keyed on the same digests
+// `flightControlOnError` classifies, so the two can never disagree.
+function isControlThrow(error) {{
+  const digest = (error && error.digest) || "";
+  return (
+    digest.startsWith("NEXT_REDIRECT;") ||
+    digest === "NEXT_HTTP_ERROR_FALLBACK;404" ||
+    digest === "DIFFPACK_DYNAMIC_BAILOUT"
+  );
+}}
+
+async function documentTree(pathname, opts, control) {{
+  // The real-404 document, requested EXPLICITLY by the orchestrator (`reqCtx.notFound`)
+  // after a render signalled notFound(). The requested pathname is kept as-is so
+  // usePathname()/headers() still report the URL the visitor asked for.
+  //
+  // This must never be selected by a magic pathname: an app with a catch-all route
+  // (cal.com's `app/[user]/page.tsx`) matches ANY sentinel too, so the "not-found"
+  // render would render that catch-all page — which threw notFound() again and left the
+  // 404 document with an errored, empty body.
+  if (opts && opts.notFound) return {{ tree: notFoundTree(), status: 404, params: {{}} }};
   if (opts && opts.softNav) {{
     const hit = matchIntercept(pathname);
     if (hit) {{
@@ -3715,8 +4405,29 @@ function documentTree(pathname, opts) {{
   const {{ route, params }} = m;
   const parts = pathname.split("/").filter(Boolean);
   const paramsPromise = Promise.resolve(params);
-  let node = createElement(route.page, {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }});
+  // The page is resolved BEFORE the flight render, so a top-level redirect()/notFound()
+  // reaches `control` while the response still has no bytes.
+  //
+  // ONLY when the page is part of Next's SHELL. Next's shell is everything not inside a
+  // `<Suspense>`, and a `loading.tsx` on any level of this route puts the page inside
+  // one: Next flushes the loading fallback as the shell and a redirect()/notFound() the
+  // page throws afterwards can no longer change the HTTP status — Next answers 200 and
+  // the streamed flight makes the client Router navigate. Awaiting the page here in that
+  // case would manufacture a redirect Next does not send (cal.com `/event-types` is
+  // exactly this: `loading.tsx` present, Next 200, diffpack was answering 307).
+  const pageProps = {{ params: paramsPromise, searchParams: Promise.resolve({{}}) }};
+  const pageInShell = !route.levels.some((level) => level.loading);
+  let node = pageInShell
+    ? await resolvePage(route.page, pageProps, control || {{}})
+    : createElement(route.page, pageProps);
+  // The CONTROL boundary sits directly around the page (inside every layout, loading and
+  // error boundary): a redirect() the page throws once the shell has flushed arrives on
+  // the client as an errored flight row, and this is what turns it back into a real
+  // navigation. Placed here — not around the Suspense — so the layouts stay mounted,
+  // which is exactly where Next puts its RedirectBoundary.
+  node = createElement(CONTROL_BOUNDARY, null, node);
   let headInjected = false;
+
   for (let i = route.levels.length - 1; i >= 0; i -= 1) {{
     const level = route.levels[i];
     if (level.loading) node = createElement(Suspense, {{ fallback: createElement(level.loading) }}, node);
@@ -3748,6 +4459,12 @@ function documentTree(pathname, opts) {{
         createElement(level.layout, {{ params: paramsPromise, ...slotProps }}, node),
       );
     }}
+    // One CONTROL boundary per level, OUTSIDE that level's layout. React's flight writer
+    // errors the whole ROW a throw happened in, and an async layout owns its subtree's
+    // row — so a boundary nested INSIDE that layout is destroyed together with it and
+    // never renders. Only a boundary above the errored row survives to act, and putting
+    // one at every level means the nearest surviving layouts stay mounted.
+    node = createElement(CONTROL_BOUNDARY, null, node);
   }}
   if (!headInjected) node = createElement(Fragment, null, ...headItems({{}}), createElement(Suspense, {{ fallback: null }}, createElement(MetadataHead, {{ route, params }})), node);
   // global-error.tsx (owns <html>): wrap the entire composed document — root layout
@@ -3814,6 +4531,11 @@ function flightControlOnError(control, error) {{
   }} else if (digest === "NEXT_HTTP_ERROR_FALLBACK;404") {{
     control.notFound = true;
     control.status = 404;
+  }} else if (digest === "DIFFPACK_DYNAMIC_BAILOUT") {{
+    // A request-state read during a build-time prerender. This is CONTROL FLOW, not a
+    // render failure: the route is demoted to per-request rendering (Next's contract).
+    // Keep the FIRST one — it is the read that actually decided the route's fate.
+    if (!control.dynamicBailout) control.dynamicBailout = String((error && error.message) || digest);
   }} else {{
     // A genuine error (recovered by an app-router error boundary, or fatal) — log it;
     // returning the digest marks it known to React so the stream drains.
@@ -3825,12 +4547,44 @@ function flightControlOnError(control, error) {{
 // Build the per-request store (url/headers/cookie + matched params). `requestAls.run`
 // MUST enclose BOTH the render call AND the stream drain, or a late async Server
 // Component loses the store.
+// The route params for `pathname`, resolved WITHOUT composing the tree. The request
+// store has to exist before `documentTree` runs — composition now calls the page (see
+// `resolvePage`), and the page reads request state through the store — so the params it
+// carries are looked up here first.
+// The render options carried by the per-request context. ONE definition, so
+// `matchParams` and `documentTree` can never be handed a different view of the same
+// request (a not-found document that still resolved a catch-all route's params is
+// exactly the kind of drift this prevents).
+function renderOpts(reqCtx) {{
+  return {{ softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound }};
+}}
+
+function matchParams(pathname, opts) {{
+  // The not-found document is not a route match: it has no params, even though a
+  // catch-all route would happily match the pathname that produced the 404.
+  if (opts && opts.notFound) return {{}};
+  if (opts && opts.softNav) {{
+    const hit = matchIntercept(pathname);
+    if (hit) return hit.params;
+  }}
+  const m = matchRoute(pathname);
+  return m ? m.params : {{}};
+}}
+
 function renderStore(pathname, reqCtx, params) {{
   return {{
     url: new URL(reqCtx.url || ("http://localhost" + pathname), "http://localhost"),
     headers: new Headers(reqCtx.headers || []),
     cookieHeader: reqCtx.cookie || "",
     params,
+    // A BUILD-TIME prerender has no request at all. Reading request state under it is not
+    // "read an empty header" — the value does not exist yet, so any answer would be a
+    // fabrication that bakes into a static file. Next's contract is to DEMOTE the route to
+    // per-request rendering instead; `cookies()`/`headers()`/`draftMode()` therefore throw
+    // the DIFFPACK_DYNAMIC_BAILOUT digest here and the prerenderer records the route as
+    // Dynamic. Deliberately false for `dynamic = "force-static"`, where Next's documented
+    // behaviour IS to hand back empty values.
+    prerender: !!reqCtx.prerender,
     // next/cache: the cache TAGS a page reads (unstable_cache / tagged fetch), captured so
     // the prerenderer can register the page under them (revalidateTag → pathname), and the
     // on-demand invalidations (revalidatePath/revalidateTag) collected during a render.
@@ -3849,9 +4603,15 @@ function renderStore(pathname, reqCtx, params) {{
 // Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
 // `render` op AND the persistent `serve` worker, so both paths render identically.
 export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
-  const {{ tree, status, params, intercept }} = documentTree(pathname, {{ softNav: !!reqCtx.softNav }});
-  const store = renderStore(pathname, reqCtx, params);
   const control = {{}};
+  // `documentTree` awaits the matched page (see `resolvePage`), and the page reads
+  // request state through the ALS store — so the store has to be established around the
+  // composition, not just around the flight render.
+  const store = renderStore(pathname, reqCtx, matchParams(pathname, renderOpts(reqCtx)));
+  const {{ tree, status, params, intercept }} = await requestAls.run(store, () =>
+    documentTree(pathname, renderOpts(reqCtx), control),
+  );
+  store.params = params;
   const flight = await requestAls.run(store, async () => {{
     const stream = renderToReadableStream(tree, bundlerConfig, {{
       onError(error) {{ return flightControlOnError(control, error); }},
@@ -3864,6 +4624,9 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
     params,
     redirect: control.redirect,
     notFound: control.notFound,
+    // Set only under a prerender (`reqCtx.prerender`): the route read request state, so it
+    // is not statically prerenderable and the caller must record it Dynamic.
+    dynamicBailout: control.dynamicBailout,
     intercept,
     // The cache tags this page read — the prerenderer records them so revalidateTag can
     // later map a tag back to this concrete pathname.
@@ -3885,17 +4648,26 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
 // (after the shell has flushed) cannot unwind an already-streamed response; it is
 // reported on `sink.end` and the orchestrator logs it loudly (never silently dropped).
 export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink) {{
-  const {{ tree, status, params, intercept }} = documentTree(pathname, {{ softNav: !!reqCtx.softNav }});
-  const store = renderStore(pathname, reqCtx, params);
   const control = {{}};
+  // See `renderRequest`: composing the tree now RUNS the page, which reads request state.
+  const store = renderStore(pathname, reqCtx, matchParams(pathname, renderOpts(reqCtx)));
+  const {{ tree, status, params, intercept }} = await requestAls.run(store, () =>
+    documentTree(pathname, renderOpts(reqCtx), control),
+  );
+  store.params = params;
   await requestAls.run(store, async () => {{
     const stream = renderToReadableStream(tree, bundlerConfig, {{
       onError(error) {{ return flightControlOnError(control, error); }},
     }});
     const reader = stream.getReader();
     let metaSent = false;
+    // What the meta ALREADY told the orchestrator. A redirect/notFound present here was
+    // acted on (real 307/404); only one that appears afterwards is "too late", and the
+    // orchestrator must distinguish the two or it warns about redirects it did honour.
+    let metaControl = {{ redirect: undefined, notFound: undefined }};
     const sendMeta = () => {{
       metaSent = true;
+      metaControl = {{ redirect: control.redirect, notFound: control.notFound }};
       // Snapshot the top-level response cookies (writes that ran before the shell
       // flushed) INTO the meta so the orchestrator can attach them to docHeaders.
       sink.meta({{ status: control.status || status || 200, params, redirect: control.redirect, notFound: control.notFound, intercept, setCookies: store.responseCookies.slice() }});
@@ -3918,7 +4690,12 @@ export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink)
       sink.chunk(Buffer.from(value).toString("base64"));
     }}
     if (!metaSent) sendMeta();
-    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, tags: [...store.tags], setCookies: store.responseCookies.slice() }});
+    // `lateControl`: a redirect()/notFound() that appeared only AFTER the meta went out —
+    // i.e. thrown behind a Suspense boundary, once the shell had already flushed. That one
+    // cannot change the response and the orchestrator reports it. A redirect/notFound the
+    // meta already carried was acted on and must NOT be reported.
+    const lateControl = !!((control.redirect && !metaControl.redirect) || (control.notFound && !metaControl.notFound));
+    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, lateControl, tags: [...store.tags], setCookies: store.responseCookies.slice() }});
   }});
 }}
 
@@ -3992,7 +4769,7 @@ function ensureEdgeContext() {{
 }}
 
 // Dispatch a ROUTE HANDLER (`route.ts` HTTP endpoint). Matches `pathname` against the
-// ROUTE_HANDLERS table, invokes the exported method function with a real `Request` and
+// ROUTE_HANDLERS table, invokes the exported method function with a real `NextRequest` and
 // `{{ params }}` (inside the request store so cookies()/headers() work), and returns
 // the Response serialized as `{{ status, headers, body(base64) }}`. Returns `null` when
 // no handler path matches (the orchestrator then falls back to page rendering), or a
@@ -4015,7 +4792,11 @@ export async function handleRoute(pathname, method, reqCtx) {{
         : reqCtx.bodyIsBase64
           ? Buffer.from(reqCtx.body, "base64")
           : reqCtx.body;
-    const request = new Request(url, {{
+    // A `NextRequest`, not a bare `Request`: Next hands route handlers the former, and
+    // reading the query off `request.nextUrl.searchParams` is the ordinary way to do it
+    // (cal.com does in a dozen handlers). With a plain `Request` that is a read of
+    // `undefined.searchParams` — the handler 500s on its first line.
+    const request = new NextRequest(url, {{
       method,
       headers: new Headers(reqCtx.headers || []),
       body: bodyBytes,
@@ -4064,15 +4845,43 @@ export async function handleRoute(pathname, method, reqCtx) {{
       setCookies,
     }};
   }}
+  // No `app/**/route.ts` matched. A hybrid app's `pages/api/**` endpoints answer next.
+  return handlePagesApi(pathname, method, reqCtx);
+}}
+
+// Dispatch a PAGES-ROUTER api route (`pages/api/**`). Same result shape as
+// `handleRoute`, so the orchestrator serves both through one path; the handler contract
+// is the pages-router one (a single default-exported `(req, res)`), implemented by
+// `runPagesApiHandler` above.
+async function handlePagesApi(pathname, method, reqCtx) {{
+  const parts = pathname.split("/").filter(Boolean);
+  for (const entry of PAGES_API) {{
+    const params = matchSegments(entry.segments, parts);
+    if (!params) continue;
+    const ns = await entry.load();
+    const mod = ns && ns.default !== undefined ? ns : {{ default: ns }};
+    return runPagesApiHandler({{
+      routeLabel: entry.path,
+      handler: mod.default,
+      config: ns && ns.config,
+      pathname,
+      method: method || "GET",
+      reqCtx: reqCtx || {{}},
+      params,
+    }});
+  }}
   return null;
 }}
 
 // The route-handler routes (segment patterns + methods) + whether the app has
 // middleware — queried once at boot by the orchestrator so it can match locally and
-// dispatch handler/middleware without a per-page-request round-trip.
+// dispatch handler/middleware without a per-page-request round-trip. `pagesApi` carries
+// the hybrid app's `pages/api/**` patterns so the orchestrator routes those requests to
+// `handleRoute` too instead of rendering a page for them.
 export function routeManifest() {{
   return {{
     handlers: ROUTE_HANDLERS.map((entry) => ({{ segments: entry.segments, methods: Object.keys(entry.methods) }})),
+    pagesApi: PAGES_API.map((entry) => ({{ segments: entry.segments }})),
     hasMiddleware: MIDDLEWARE != null,
   }};
 }}
@@ -4102,42 +4911,56 @@ export async function runMiddleware(reqCtx) {{
 // The persistent DEV worker (`serve` op). Instead of the orchestrator spawning a
 // fresh Node child per request (the cold-start cost dominates a server-component
 // HMR edit), it spawns ONE `serve` worker that stays warm and answers requests over
-// newline-delimited JSON on stdin/stdout. Fresh code after a `diffpack dev` re-emit:
-// the worker RE-IMPORTS ITSELF with `?v=<mtime>` whenever this file changes on disk,
-// giving a fresh module instance (fresh app code + its own inlined React) — the SAME
-// process isolation the per-request child had, minus the per-request spawn. Requests
-// carry the flight back base64-encoded (one JSON line per response).
+// newline-delimited JSON on stdin/stdout — the SAME process isolation the
+// per-request child had, minus the per-request spawn. Requests carry the flight
+// back base64-encoded (one JSON line per response).
+//
+// Fresh code after a `diffpack dev` edit arrives through the `invalidate` op, NOT by
+// re-importing this file. Re-importing the entry (with a fresh `?v=<mtime>`) was the
+// old mechanism and it is unfixable: the entry reaches its split chunks through
+// `import("./server.chunk-N.mjs")`, a URL with no query, so Node's ESM cache hands
+// the fresh entry the ALREADY-EVALUATED chunks. On any app whose graph is split that
+// left the fresh runtime's id table disagreeing with the stale chunks'
+// registrations, and the worker died with `Module is not loaded: <id>` on the first
+// render after a server-component edit. Only a URL Node has never seen re-evaluates,
+// which is what the dev server's per-edit micro-chunk is.
 async function serveLoop() {{
-  const selfPath = fileURLToPath(import.meta.url.split("?")[0]);
-  let cached = {{ mtime: 0, mod: null }};
-  async function fresh() {{
-    const mtime = statSync(selfPath).mtimeMs;
-    if (mtime !== cached.mtime) {{
-      // The bundle's registry runtime is a GLOBAL singleton keyed by entry path
-      // (`globalThis["__diffpack_runtime:…"] ??= …`) with a per-module instance cache.
-      // A bare re-import would share that runtime and keep returning the OLD cached
-      // factories, so the fresh code never takes effect. Drop every diffpack runtime
-      // first (this worker holds only the react-server one) so the re-imported bundle
-      // builds a fresh runtime + fresh module cache and its new code actually runs.
-      for (const key of Object.keys(globalThis)) {{
-        if (key.indexOf("__diffpack_runtime:") === 0) delete globalThis[key];
-      }}
-      const m = await import(import.meta.url.split("?")[0] + "?v=" + mtime);
-      // diffpack exposes the entry's named exports on the default namespace
-      // (`export default __diffpackEntry`, whose members are renderRequest/runAction).
-      const ns = m.default || m;
-      const renderRequest = ns.renderRequest || m.renderRequest;
-      const renderRequestStream = ns.renderRequestStream || m.renderRequestStream;
-      const runAction = ns.runAction || m.runAction;
-      const handleRoute = ns.handleRoute || m.handleRoute;
-      const routeManifest = ns.routeManifest || m.routeManifest;
-      const runMiddleware = ns.runMiddleware || m.runMiddleware;
-      if (typeof renderRequest !== "function" || typeof runAction !== "function") {{
-        throw new Error("rsc-entry serve: re-imported bundle does not export renderRequest/runAction");
-      }}
-      cached = {{ mtime, mod: {{ renderRequest, renderRequestStream, runAction, handleRoute, routeManifest, runMiddleware }} }};
+  // This module instance IS the bundle as loaded; its own exports are the render
+  // functions until a hot update replaces them.
+  let cached = {{ renderRequest, renderRequestStream, runAction, handleRoute, routeManifest, runMiddleware }};
+  // Serializes hot updates against renders: a render started after an `invalidate`
+  // line arrived must see the new code, and a hot update must not interleave with a
+  // render already resolving its modules.
+  let applying = Promise.resolve();
+  async function applyHotUpdate(req) {{
+    if (!req.chunk) throw new Error("rsc-entry serve: an invalidate op needs a `chunk` path");
+    // Importing the micro-chunk REGISTERS the changed modules' fresh factories into
+    // the live runtime; `serverInvalidate` then drops the cache for them and every
+    // importer up to the entry, re-runs exactly that path, and republishes the
+    // entry's exports. React and every untouched dependency stay cached, so the
+    // react-server React singleton survives.
+    await import(pathToFileURL(req.chunk).href);
+    const runtime = globalThis.__diffpack_hmr_runtime;
+    if (!runtime || typeof runtime.serverInvalidate !== "function") {{
+      throw new Error("rsc-entry serve: this bundle exposes no __diffpack_hmr_runtime.serverInvalidate; it was not emitted with HMR enabled, so a hot update cannot be applied");
     }}
-    return cached.mod;
+    const invalidated = await runtime.serverInvalidate(req.ids || [], []);
+    const fresh = globalThis.__diffpack_ssr_entry;
+    if (!fresh) {{
+      throw new Error("rsc-entry serve: the runtime did not republish globalThis.__diffpack_ssr_entry after serverInvalidate; the entry re-run failed");
+    }}
+    if (typeof fresh.renderRequest !== "function" || typeof fresh.runAction !== "function") {{
+      throw new Error("rsc-entry serve: the hot-updated bundle does not export renderRequest/runAction");
+    }}
+    cached = {{
+      renderRequest: fresh.renderRequest,
+      renderRequestStream: fresh.renderRequestStream,
+      runAction: fresh.runAction,
+      handleRoute: fresh.handleRoute,
+      routeManifest: fresh.routeManifest,
+      runMiddleware: fresh.runMiddleware,
+    }};
+    return invalidated;
   }}
   const manifestCache = new Map();
   function manifest(path) {{
@@ -4158,12 +4981,21 @@ async function serveLoop() {{
       let req;
       try {{ req = JSON.parse(line); }} catch {{ continue; }}
       try {{
-        const mod = await fresh();
+        if (req.op === "invalidate") {{
+          // Chained so concurrent hot updates apply in arrival order; the render ops
+          // below await the same chain, so they always observe the newest code.
+          const settled = applying.then(() => applyHotUpdate(req), () => applyHotUpdate(req));
+          applying = settled.then(() => {{}}, () => {{}});
+          reply({{ id: req.id, invalidated: await settled }});
+          continue;
+        }}
+        await applying;
+        const mod = cached;
         // A re-emit can change the manifest too; always re-read on the worker path.
         manifestCache.delete(req.manifestPath);
         if (req.op === "render") {{
           const r = await mod.renderRequest(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}});
-          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, tags: r.tags || [], setCookies: r.setCookies || [] }});
+          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, tags: r.tags || [], setCookies: r.setCookies || [] }});
         }} else if (req.op === "render-stream") {{
           // Streaming render: one `streamMeta` line, then N `streamChunk` lines, then a
           // single `streamEnd` line — all sharing this request id. The orchestrator
@@ -4224,7 +5056,7 @@ async function main() {{
     }}
     const r = await renderRequest(pathname, bundlerConfig, reqCtx);
     process.stdout.write(r.flight);
-    writeMeta({{ status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, tags: r.tags || [] }});
+    writeMeta({{ status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, tags: r.tags || [] }});
     return;
   }}
   if (op === "action") {{
@@ -4247,11 +5079,19 @@ async function main() {{
   throw new Error(`rsc-entry: unknown op ${{JSON.stringify(op)}}; expected "render", "action", "staticparams", or "serve"`);
 }}
 
-// Only the ORIGINAL entry process runs `main()`. A `serve`-mode re-import (which
-// carries `?v=<mtime>` in its URL — see `serveLoop`) is loaded PURELY for its
-// exported render functions; it must NOT re-enter main()/serveLoop or it would start
-// a second stdin reader and recurse.
-if (!import.meta.url.includes("?v=")) {{
+// `main()` runs ONCE per process, ever. This module's body is not only executed by the
+// original import: a dev hot update re-runs the entry factory in place
+// (`serverInvalidate` → `__hmrRerun(__entryId)`) to pick up an edited Server Component,
+// and a second `serveLoop()` would install a SECOND `process.stdin` reader — every
+// request line then handled twice, so the worker renders the page twice and writes both
+// flights under one reply id. That is not a crash: the orchestrator concatenates them
+// and the SSR flight client dies decoding a duplicated row
+// (`chunk.reason.enqueueModel is not a function`), with a flight exactly 2x its correct
+// size. Keyed by this module's own URL so a process that legitimately hosts two
+// different entries still starts each one.
+const __diffpackStarted = (globalThis.__diffpack_rsc_entry_started ??= new Set());
+if (!__diffpackStarted.has(import.meta.url)) {{
+  __diffpackStarted.add(import.meta.url);
   main().catch((error) => {{
     console.error(error && error.stack ? error.stack : String(error));
     process.exit(1);
@@ -4563,6 +5403,10 @@ fn client_entry_module(adapter_dir: &Path, islands: &[PathBuf], hooks_context: &
     let pins = island_pins(adapter_dir, islands);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
+    // The ONE control-flow predicate, shared with the error boundary (see
+    // `control_boundary_module`), so hydration's recoverable-error filter and the
+    // boundaries can never disagree about what counts as a redirect/notFound.
+    let control_import = js_str(&adapter_dir.join("control-boundary.tsx").to_string_lossy());
     format!(
         r##"// Generated by diffpack's next app-router adapter — the BROWSER entry
 // (Target::Client, with the RSC `__webpack_*` seam installed over its registry). It
@@ -4579,6 +5423,7 @@ import {{ createPortal }} from "react-dom";
 import {{ use, useState, useEffect, useRef, useTransition, createElement, Fragment, Suspense }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext }} from {hooks_import};
 import {{ callServer }} from "#diffpack-call-server";
+import {{ isControlFlowError }} from {control_import};
 {pins}
 // Force a code split so the client build uses the registry runtime + the RSC seam.
 import({lazy}).then((module) => {{
@@ -4593,8 +5438,37 @@ async function fetchFlight(href) {{
   const sep = href.includes("?") ? "&" : "?";
   const res = await fetch(href + sep + "__rsc=1");
   const intercept = res.headers.get("x-diffpack-intercept") === "1";
+  // A server-side `redirect()` cannot be a 3xx on this channel — `fetch` follows those
+  // transparently and the Router would never learn the URL changed — so the orchestrator
+  // reports it as JSON. Handing that JSON to the flight reader (which is what happened
+  // before this check existed) fails deep inside the reader and blanks the page: a login
+  // whose callback lands on a redirecting route dead-ended on an empty document.
+  if ((res.headers.get("content-type") || "").includes("application/json")) {{
+    const payload = await res.json();
+    if (payload && typeof payload.__redirect === "string") return {{ redirect: payload.__redirect }};
+    throw new Error(
+      "diffpack next client: unexpected JSON on the soft-navigation channel for " +
+        href + ": " + JSON.stringify(payload).slice(0, 200),
+    );
+  }}
   const tree = createFromReadableStream(res.body, {{ callServer }});
   return {{ tree, intercept }};
+}}
+
+// Follow a soft navigation through any server-side redirects, returning the final
+// `{{ tree, intercept }}` plus the href it settled on. Bounded: a redirect cycle is a
+// server bug, and looping forever would hang the tab with no diagnostic.
+const MAX_REDIRECTS = 10;
+async function fetchFlightFollowing(href, take) {{
+  let target = href;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {{
+    const result = await (take(target) || fetchFlight(target));
+    if (!result.redirect) return {{ ...result, href: target }};
+    target = result.redirect;
+  }}
+  throw new Error(
+    "diffpack next client: more than " + MAX_REDIRECTS + " server redirects following " + href,
+  );
 }}
 
 // Portals an overlay (intercept modal) flight into <body>, so it sits ABOVE the still
@@ -4635,12 +5509,16 @@ function Router({{ initialTree }}) {{
     async function navigate(to, options) {{
       const opts = options || {{}};
       const push = opts.push !== false;
-      const href = typeof to === "string" ? to : to.href;
+      const requested = typeof to === "string" ? to : to.href;
       const replace = opts.replace || (typeof to === "object" && to && to.replace);
-      // Consume a warmed prefetch (single-use) if one exists, else fetch now.
-      let pending = prefetchCache.get(href);
-      if (pending) prefetchCache.delete(href);
-      const {{ tree: next, intercept }} = await (pending || fetchFlight(href));
+      // Consume a warmed prefetch (single-use) if one exists, else fetch now — and follow
+      // any server redirect, so the URL that lands in history is the one that rendered.
+      const take = (target) => {{
+        const warmed = prefetchCache.get(target);
+        if (warmed) prefetchCache.delete(target);
+        return warmed;
+      }};
+      const {{ tree: next, intercept, href }} = await fetchFlightFollowing(requested, take);
       if (intercept) {{
         underlying.current = location.pathname + location.search;
         modalOpen.current = true;
@@ -4655,6 +5533,9 @@ function Router({{ initialTree }}) {{
         setModal(null);
         setTree(next);
         if (push) history[replace ? "replaceState" : "pushState"](null, "", href);
+        // A back/forward navigation does not push, but if the server redirected, the
+        // address bar still shows the URL that no longer renders — correct it in place.
+        else if (href !== requested) history.replaceState(null, "", href);
       }});
     }}
     // Close an open overlay (used by a modal's own close / router.back()).
@@ -4668,8 +5549,10 @@ function Router({{ initialTree }}) {{
     // the prefetch cache) and swap the tree inside a transition, keeping the document
     // mounted so island state survives. Never a window.location.reload().
     async function refresh() {{
-      const href = location.pathname + location.search;
-      const {{ tree: next }} = await fetchFlight(href);
+      const current = location.pathname + location.search;
+      const {{ tree: next, href }} = await fetchFlightFollowing(current, () => undefined);
+      // The route redirected since it was last rendered — land on the new URL.
+      if (href !== current) history.replaceState(null, "", href);
       startTransition(() => {{
         setModal(null);
         setTree(next);
@@ -4766,7 +5649,18 @@ function boot() {{
     ),
   );
   // The RootLayout owns the document, so we hydrate the whole document.
-  hydrateRoot(document, app);
+  hydrateRoot(document, app, {{
+    // A redirect()/notFound() that reaches the browser is CONTROL FLOW, not a failure:
+    // the page threw it from behind a Suspense boundary, so no 307 was possible and the
+    // control boundary is already completing the navigation. React's DEFAULT
+    // onRecoverableError reports every recovered error through `reportError`, which
+    // surfaces as an uncaught page error — an ordinary logged-out redirect would look
+    // like a crash. Everything else keeps React's default reporting, unchanged.
+    onRecoverableError(error, errorInfo) {{
+      if (isControlFlowError(error) || isControlFlowError(errorInfo)) return;
+      reportError(error);
+    }},
+  }});
 }}
 
 boot();
@@ -5089,20 +5983,97 @@ pub(crate) fn variant_widths(intrinsic: u32) -> Vec<u32> {
 /// `srcset` (never silently degrading, never throwing on a known image). A raster
 /// the shim can't find an entry for at all is a hard error there (naming the src).
 pub fn scan_public_images(root: &Path) -> Result<Vec<PublicImage>, String> {
+    scan_public_images_with(root, &ImageOptimization::for_project(root))
+}
+
+/// [`scan_public_images`] with the optimization decision already in hand (the adapter
+/// resolved `next.config` this pass and does not need to read it back off disk).
+///
+/// When optimization is off, every entry is registered `unoptimized` WITHOUT decoding
+/// the file: the shim renders each one as a plain `<img src>` (no `srcset`), so nothing
+/// downstream can consult an intrinsic size or a blur placeholder, and decoding hundreds
+/// of rasters to fill fields no one reads is pure build time. This is exactly what
+/// `next build` does — Next inspects `public/` not at all.
+pub(crate) fn scan_public_images_with(
+    root: &Path,
+    optimization: &ImageOptimization,
+) -> Result<Vec<PublicImage>, String> {
     let public_dir = root.join("public");
     if !public_dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut entries = Vec::new();
-    scan_public_images_dir(&public_dir, &public_dir, &mut entries)?;
+    // Walk first (cheap directory reads), then decode the rasters in PARALLEL — the
+    // decode plus blur encode is the whole cost of this scan, and it is per-file
+    // independent. The result is re-sorted by `src` below, so the emitted manifest is
+    // byte-identical to the sequential walk's.
+    let mut files = Vec::new();
+    scan_public_images_dir(&public_dir, &public_dir, &mut files)?;
+    let mut entries = files
+        .into_par_iter()
+        .map(|(path, rel, src, ext)| public_image_entry(&path, rel, src, ext, optimization))
+        .collect::<Result<Vec<_>, String>>()?;
     entries.sort_by(|a, b| a.src.cmp(&b.src));
     Ok(entries.into_iter().map(PublicImage).collect())
 }
 
+/// One `public/` image: decode it (when this build optimizes) into its intrinsic size,
+/// variant plan and blur placeholder, or register it as a passthrough.
+fn public_image_entry(
+    path: &Path,
+    rel: PathBuf,
+    src: String,
+    ext: String,
+    optimization: &ImageOptimization,
+) -> Result<ImageEntry, String> {
+    let passthrough = |ext: String| ImageEntry {
+        src: src.clone(),
+        rel: rel.clone(),
+        ext,
+        unoptimized: true,
+        width: 0,
+        height: 0,
+        variants: Vec::new(),
+        blur_data_url: None,
+    };
+    let optimizable =
+        matches!(ext.as_str(), "png" | "jpg" | "jpeg") && *optimization == ImageOptimization::Enabled;
+    if !optimizable {
+        return Ok(passthrough(ext));
+    }
+    // Decode ONCE here: this yields both intrinsic dimensions AND the blurDataURL (a
+    // tiny downscale for `placeholder="blur"`). The full decode replaces the old
+    // dimensions-only read; the marginal cost is one small resize/encode per
+    // optimizable image, at build time.
+    let out_ext = if ext == "jpg" { "jpeg" } else { ext.as_str() };
+    match image::open(path) {
+        Ok(decoded) if decoded.width() > 0 && decoded.height() > 0 => {
+            let width = decoded.width();
+            let height = decoded.height();
+            Ok(ImageEntry {
+                src,
+                rel,
+                ext: out_ext.to_string(),
+                unoptimized: false,
+                width,
+                height,
+                variants: variant_widths(width),
+                blur_data_url: Some(crate::bundler::generate_blur_data_url(&decoded, out_ext)?),
+            })
+        }
+        // Undecodable/zero-size raster: register it unoptimized rather than throw at
+        // the shim (honest passthrough, no fake variants).
+        _ => Ok(passthrough(ext)),
+    }
+}
+
+/// Collect every image file under `public/` as `(path, rel, served src, lowercase ext)`.
+/// Directory walking only — no decoding, so it stays sequential and cheap.
+type PublicImageFile = (PathBuf, PathBuf, String, String);
+
 fn scan_public_images_dir(
     base: &Path,
     dir: &Path,
-    out: &mut Vec<ImageEntry>,
+    out: &mut Vec<PublicImageFile>,
 ) -> Result<(), String> {
     let read = std::fs::read_dir(dir)
         .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
@@ -5140,58 +6111,7 @@ fn scan_public_images_dir(
                 .collect::<Vec<_>>()
                 .join("/")
         );
-        let optimizable = matches!(ext.as_str(), "png" | "jpg" | "jpeg");
-        if optimizable {
-            // Decode ONCE here: this yields both intrinsic dimensions AND the
-            // blurDataURL (a tiny downscale for `placeholder="blur"`). The full
-            // decode replaces the old dimensions-only read; the marginal cost is
-            // one small resize/encode per optimizable image, at build time.
-            let out_ext = if ext == "jpg" { "jpeg" } else { ext.as_str() };
-            match image::open(&path) {
-                Ok(decoded) if decoded.width() > 0 && decoded.height() > 0 => {
-                    let width = decoded.width();
-                    let height = decoded.height();
-                    let variants = variant_widths(width);
-                    let blur_data_url =
-                        Some(crate::bundler::generate_blur_data_url(&decoded, out_ext)?);
-                    out.push(ImageEntry {
-                        src,
-                        rel,
-                        ext: out_ext.to_string(),
-                        unoptimized: false,
-                        width,
-                        height,
-                        variants,
-                        blur_data_url,
-                    });
-                }
-                _ => {
-                    // Undecodable/zero-size raster: register it unoptimized rather than
-                    // throw at the shim (honest passthrough, no fake variants).
-                    out.push(ImageEntry {
-                        src,
-                        rel,
-                        ext,
-                        unoptimized: true,
-                        width: 0,
-                        height: 0,
-                        variants: Vec::new(),
-                        blur_data_url: None,
-                    });
-                }
-            }
-        } else {
-            out.push(ImageEntry {
-                src,
-                rel,
-                ext,
-                unoptimized: true,
-                width: 0,
-                height: 0,
-                variants: Vec::new(),
-                blur_data_url: None,
-            });
-        }
+        out.push((path, rel, src, ext));
     }
     Ok(())
 }
@@ -5272,6 +6192,10 @@ fn prerender_og_image(root: &Path, generator: &Path, dest: &Path) -> Result<(), 
         .arg(&gen_mjs)
         .arg(dest)
         .current_dir(root)
+        // An `opengraph-image` generator is app code: under `next build` it runs in the
+        // process that loaded next.config, so it sees the environment that config
+        // produced.
+        .envs(config_env_from_manifest(root))
         .output()
         .map_err(|error| {
             format!(
@@ -5296,46 +6220,59 @@ pub fn emit_image_variants(
 ) -> Result<usize, String> {
     let public_dir = root.join("public");
     let variant_dir = out_public.join("_diffpack-image");
-    let mut written = 0usize;
-    let mut served: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    for PublicImage(entry) in images {
-        if entry.unoptimized {
-            continue;
-        }
-        let source = public_dir.join(&entry.rel);
-        let decoded = image::open(&source)
-            .map_err(|error| format!("cannot decode image {}: {error}", source.display()))?;
+    let optimizable = images
+        .iter()
+        .filter(|PublicImage(entry)| !entry.unoptimized)
+        .collect::<Vec<_>>();
+    if !optimizable.is_empty() {
         std::fs::create_dir_all(&variant_dir)
             .map_err(|error| format!("cannot create {}: {error}", variant_dir.display()))?;
-        for &w in &entry.variants {
-            // Preserve aspect ratio; `resize` never upscales past the requested box,
-            // and we only request widths `<=` intrinsic, so this is downscale-or-copy.
-            let target_h = ((entry.height as u64 * w as u64) / entry.width.max(1) as u64).max(1);
-            let variant = decoded.resize(w, target_h as u32, image::imageops::FilterType::Triangle);
-            let dest = variant_dir.join(format!(
-                "{}-{w}.{}",
-                image_hash(&entry.src),
-                entry.ext
-            ));
-            variant
-                .save(&dest)
-                .map_err(|error| format!("cannot write {}: {error}", dest.display()))?;
-            written += 1;
-        }
-        let widths: serde_json::Map<String, serde_json::Value> = entry
-            .variants
-            .iter()
-            .map(|&w| {
-                (
-                    w.to_string(),
-                    serde_json::Value::String(image_variant_url(&entry.src, w, &entry.ext)),
-                )
-            })
-            .collect();
-        served.insert(
-            entry.src.clone(),
-            serde_json::json!({ "width": entry.width, "widths": widths }),
-        );
+    }
+    // Every image's ladder is independent — one decode plus N resize/encodes, all
+    // writing distinct content-hashed file names — so the whole emit fans out across
+    // the rayon pool. Sequentially this was the single largest phase of a production
+    // build on an image-heavy app.
+    let per_image = optimizable
+        .into_par_iter()
+        .map(|PublicImage(entry)| {
+            let source = public_dir.join(&entry.rel);
+            let decoded = image::open(&source)
+                .map_err(|error| format!("cannot decode image {}: {error}", source.display()))?;
+            for &w in &entry.variants {
+                // Preserve aspect ratio; `resize` never upscales past the requested box,
+                // and we only request widths `<=` intrinsic, so this is downscale-or-copy.
+                let target_h = ((entry.height as u64 * w as u64) / entry.width.max(1) as u64).max(1);
+                let variant =
+                    decoded.resize(w, target_h as u32, image::imageops::FilterType::Triangle);
+                let dest =
+                    variant_dir.join(format!("{}-{w}.{}", image_hash(&entry.src), entry.ext));
+                variant
+                    .save(&dest)
+                    .map_err(|error| format!("cannot write {}: {error}", dest.display()))?;
+            }
+            let widths: serde_json::Map<String, serde_json::Value> = entry
+                .variants
+                .iter()
+                .map(|&w| {
+                    (
+                        w.to_string(),
+                        serde_json::Value::String(image_variant_url(&entry.src, w, &entry.ext)),
+                    )
+                })
+                .collect();
+            Ok((
+                entry.src.clone(),
+                serde_json::json!({ "width": entry.width, "widths": widths }),
+                entry.variants.len(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let written = per_image.iter().map(|(_, _, count)| count).sum::<usize>();
+    // Re-keyed in `images` order (already sorted by src), so the manifest is identical
+    // whatever order the pool finished in.
+    let mut served: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for (src, plan, _) in per_image {
+        served.insert(src, plan);
     }
     // The orchestrator's `/_next/image` handler reads this to answer a request from a
     // build-emitted variant instead of re-optimizing at runtime. Written even when
@@ -5585,12 +6522,15 @@ export default function Image(props) {
     blurDataURL || (isObjectSrc ? src.blurDataURL : undefined) || (entry && entry.blurDataURL);
   // `placeholder="blur"` with no resolvable blurDataURL is a hard error (naming the
   // src), never a silent no-op. Provide `blurDataURL`, use a static import, or a
-  // public png/jpeg (diffpack auto-generates one at build).
+  // public png/jpeg (diffpack auto-generates one at build — but only when next.config
+  // leaves image optimization ON; with `images.unoptimized` or a custom loader the
+  // build never decodes `public/`, exactly as `next build` never does).
   if (placeholder === "blur" && !resolvedBlur) {
     throw new Error(
       "next/image: placeholder=\"blur\" requires a blurDataURL for src '" + rawSrc +
       "'. Import the image statically (import img from './x.png') or pass the " +
-      "`blurDataURL` prop; public png/jpeg get one generated automatically."
+      "`blurDataURL` prop; public png/jpeg get one generated automatically unless " +
+      "next.config turns image optimization off (images.unoptimized / images.loader)."
     );
   }
   // Next's `getImgProps` img style, assembled in Next's exact order:
@@ -5822,9 +6762,36 @@ export function usePathname() {{
   return React.useContext(PathnameContext);
 }}
 
-export function useSearchParams() {{
-  return new URLSearchParams(React.useContext(SearchParamsContext) || "");
+// The exact type `useSearchParams()` returns. Next exports the CLASS as well, because
+// user code does `instanceof ReadonlyURLSearchParams` and because the mutators must
+// refuse: the query string is owned by the router, so writing to the object returned by
+// the hook would silently do nothing. Returning a plain `URLSearchParams` (and not
+// exporting the name at all) made any module that imports it fail to load outright —
+// `The requested module "next/navigation" does not provide an export named
+// "ReadonlyURLSearchParams"`.
+class ReadonlyURLSearchParamsError extends Error {{
+  constructor() {{
+    super("Method unavailable on `ReadonlyURLSearchParams`. The search params are owned by the router — navigate with router.push/replace to change them.");
+  }}
 }}
+export class ReadonlyURLSearchParams extends URLSearchParams {{
+  append() {{ throw new ReadonlyURLSearchParamsError(); }}
+  delete() {{ throw new ReadonlyURLSearchParamsError(); }}
+  set() {{ throw new ReadonlyURLSearchParamsError(); }}
+  sort() {{ throw new ReadonlyURLSearchParamsError(); }}
+}}
+
+export function useSearchParams() {{
+  return new ReadonlyURLSearchParams(React.useContext(SearchParamsContext) || "");
+}}
+
+// `redirect(href, RedirectType.push)` — the second argument's enum, re-exported by Next
+// from next/navigation. The values are the strings the NEXT_REDIRECT digest carries.
+export const RedirectType = {{ push: "push", replace: "replace" }};
+
+// Next re-exports the CONTEXT beside the hook, so a CSS-in-JS registry can provide its
+// own value. Same object the hook reads, or the two would not meet.
+export {{ ServerInsertedHTMLContext }};
 
 export function useParams() {{
   return React.useContext(PathParamsContext) || {{}};
@@ -5885,6 +6852,36 @@ export function notFound() {{
   throw Object.assign(new Error("NEXT_HTTP_ERROR_FALLBACK;404"), {{
     digest: "NEXT_HTTP_ERROR_FALLBACK;404",
   }});
+}}
+
+// `forbidden()` / `unauthorized()` are Next's 403/401 interrupts, and they only exist
+// behind `experimental.authInterrupts` — they need a `forbidden.tsx`/`unauthorized.tsx`
+// convention this adapter does not discover. The EXPORTS exist (a missing name is a load
+// failure for the whole module), but calling one refuses by name instead of throwing a
+// digest no renderer here would turn into a 403/401 page.
+export function forbidden() {{
+  throw new Error("diffpack next shim: forbidden() needs experimental.authInterrupts and a forbidden.tsx convention, which this adapter does not implement. Render your own 403 UI, or redirect().");
+}}
+
+export function unauthorized() {{
+  throw new Error("diffpack next shim: unauthorized() needs experimental.authInterrupts and an unauthorized.tsx convention, which this adapter does not implement. Render your own 401 UI, or redirect().");
+}}
+
+// The digests above are CONTROL FLOW, not failures: a `catch` that swallows one silently
+// cancels the redirect / 404. `unstable_rethrow` is what user code calls first inside a
+// catch to let them through.
+export function unstable_rethrow(error) {{
+  const digest = error && error.digest;
+  if (typeof digest === "string" && (digest.startsWith("NEXT_REDIRECT;") || digest.startsWith("NEXT_HTTP_ERROR_FALLBACK;") || digest === "DIFFPACK_DYNAMIC_BAILOUT")) {{
+    throw error;
+  }}
+}}
+
+// True when the error means "this deployment does not know that server action id" — the
+// deployment-skew case, where the browser holds a reference minted by an older build.
+// diffpack's action resolver raises exactly that condition by name.
+export function unstable_isUnrecognizedActionError(error) {{
+  return !!error && typeof error.message === "string" && error.message.startsWith("diffpack rsc: no server action registered for id ");
 }}
 "#,
     )
@@ -5955,6 +6952,19 @@ function pushResponseCookie(store, serialized, api) {{
   store.responseCookies.push(serialized);
 }}
 
+// A request-state read reached during a BUILD-TIME prerender. There is no request, so
+// there is no honest value to return; Next's contract is that the route stops being
+// statically prerenderable and is served per-request instead. Carrying the same
+// DIFFPACK_DYNAMIC_BAILOUT digest as the no-store case lets `flightControlOnError` classify
+// it as control flow (like redirect()/notFound()) rather than a render failure, and the
+// message names the API so the build log attributes the demotion to a real call.
+function dynamicBailout(api) {{
+  return Object.assign(
+    new Error("diffpack next shim: " + api + " was called while prerendering — a build-time prerender has no request, so this route cannot be statically prerendered and is served per-request instead"),
+    {{ digest: "DIFFPACK_DYNAMIC_BAILOUT" }},
+  );
+}}
+
 export async function cookies() {{
   const store = requestAls.getStore();
   if (!store) {{
@@ -5962,6 +6972,7 @@ export async function cookies() {{
     // treated static that actually reads request state) from a generic render failure.
     throw Object.assign(new Error("diffpack next shim: cookies() was called outside a request context (no AsyncLocalStorage store) — call it inside a Server Component during a render"), {{ digest: "DIFFPACK_DYNAMIC_BAILOUT" }});
   }}
+  if (store.prerender) throw dynamicBailout("cookies()");
   const map = parseCookieHeader(store.cookieHeader);
   return {{
     get(name) {{ return map.has(name) ? {{ name: name, value: map.get(name) }} : undefined; }},
@@ -5997,6 +7008,7 @@ export async function headers() {{
   if (!store) {{
     throw Object.assign(new Error("diffpack next shim: headers() was called outside a request context (no AsyncLocalStorage store) — call it inside a Server Component during a render"), {{ digest: "DIFFPACK_DYNAMIC_BAILOUT" }});
   }}
+  if (store.prerender) throw dynamicBailout("headers()");
   return store.headers;
 }}
 
@@ -6030,6 +7042,7 @@ export async function draftMode() {{
   if (!store) {{
     throw Object.assign(new Error("diffpack next shim: draftMode() was called outside a request context (no AsyncLocalStorage store) — call it inside a Server Component during a render, a Server Action, or a Route Handler"), {{ digest: "DIFFPACK_DYNAMIC_BAILOUT" }});
   }}
+  if (store.prerender) throw dynamicBailout("draftMode()");
   const token = parseCookieHeader(store.cookieHeader).get(DRAFT_COOKIE);
   const isEnabled = verifyDraftToken(token);
   // httpOnly + Path=/ + SameSite=None; Secure so it survives a cross-site preview
@@ -6344,6 +7357,101 @@ mod tests {
         assert!(matches!(parse_segment("(.)photo"), SegParse::Skip));
     }
 
+    /// A route is its whole SEGMENT TREE, not just its `page`. A `layout.tsx`
+    /// anywhere above the page reading `next/headers` makes the entire route
+    /// per-request — the page's own source shows nothing.
+    ///
+    /// This is the dominant real shape, not a corner: cal.com's ROOT layout calls
+    /// `headers()` (for the locale and the embed flags), which is why `next build`
+    /// prerenders 2 of its ~161 app routes. Reading only the page said 79 routes were
+    /// static, and every one of them then tried to render without a request.
+    #[test]
+    fn a_layout_that_reads_request_state_makes_every_route_below_it_dynamic() {
+        let root = scratch("layout-request-state");
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("plain")).unwrap();
+        std::fs::write(
+            app.join("layout.tsx"),
+            "import { headers } from \"next/headers\";\n\
+             export default async function Root({ children }) {\n\
+             const h = await headers();\n  return <html><body>{children}</body></html>;\n}\n",
+        )
+        .unwrap();
+        // A page with NOTHING dynamic in it — the layout above is the only reason.
+        std::fs::write(
+            app.join("plain/page.tsx"),
+            "export default function Plain() { return <p>plain</p>; }\n",
+        )
+        .unwrap();
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let route = disc
+            .routes
+            .iter()
+            .find(|r| r.url_path == "/plain")
+            .expect("/plain discovered");
+        assert_eq!(
+            route.kind,
+            RouteKind::Dynamic,
+            "a layout reading next/headers makes the route per-request"
+        );
+        assert!(
+            route.dynamic_reason.contains("layout.tsx"),
+            "the reason must name the module that reads request state, got: {}",
+            route.dynamic_reason
+        );
+    }
+
+    /// The same tree without the request read stays Static — so the rule above is not
+    /// just "any layout makes everything dynamic".
+    #[test]
+    fn a_layout_that_reads_nothing_leaves_its_routes_static() {
+        let root = scratch("layout-no-request-state");
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("plain")).unwrap();
+        std::fs::write(
+            app.join("layout.tsx"),
+            "export default function Root({ children }) {\n\
+             return <html><body>{children}</body></html>;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("plain/page.tsx"),
+            "export default function Plain() { return <p>plain</p>; }\n",
+        )
+        .unwrap();
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let route = disc.routes.iter().find(|r| r.url_path == "/plain").unwrap();
+        assert_eq!(route.kind, RouteKind::Static);
+    }
+
+    /// `dynamic = "force-static"` still wins: Next's documented behaviour there is that
+    /// `cookies()`/`headers()` return EMPTY values rather than opting the route out, so
+    /// a force-static page under a headers-reading layout is prerendered.
+    #[test]
+    fn force_static_survives_a_request_reading_layout() {
+        let root = scratch("layout-force-static");
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("icons")).unwrap();
+        std::fs::write(
+            app.join("layout.tsx"),
+            "import { headers } from \"next/headers\";\n\
+             export default async function Root({ children }) { await headers(); return children; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("icons/page.tsx"),
+            "export const dynamic = \"force-static\";\n\
+             export default function Icons() { return <p>icons</p>; }\n",
+        )
+        .unwrap();
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let route = disc.routes.iter().find(|r| r.url_path == "/icons").unwrap();
+        assert_eq!(route.kind, RouteKind::ForceStatic);
+    }
+
     #[test]
     fn classify_route_reproduces_next_fixture() {
         // Runs discovery + classification on the REAL fixture and asserts the kinds
@@ -6524,8 +7632,9 @@ mod tests {
         // Codegen: the react-server entry emits the slot tables + the matcher/composer.
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
         assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
@@ -6541,8 +7650,9 @@ mod tests {
         let disc = discover_routes(&app, layout.as_deref()).unwrap();
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         // Each route carries a metadata namespace chain resolved at render time.
         assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
         assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
@@ -6664,8 +7774,9 @@ mod tests {
         let disc = discover_routes(&app, first_existing(&app, "layout").as_deref()).unwrap();
         let boundary = root.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = root.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = root.join(".diffpack-next/control-boundary.tsx");
         let reqctx = root.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
         assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
         assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
@@ -6794,8 +7905,9 @@ mod tests {
         // client Router portals the overlay and masks the URL.
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
         assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
         assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
@@ -6982,6 +8094,123 @@ mod tests {
         assert_eq!(next_runtime_define(Target::Client), "\"\"");
         assert_eq!(next_runtime_define(Target::Server), "\"nodejs\"");
         assert_eq!(next_runtime_define(Target::ReactServer), "\"nodejs\"");
+    }
+
+    /// `next/dist/build/define-env.js`: `'process.browser': isClient`. It is the
+    /// switch isomorphic library code branches on to reach for Node — `next-i18next`'s
+    /// `createConfig` does `if (!process.browser && typeof window === 'undefined') {
+    /// var fs = require('fs') }`. Undefined, the test stays undecidable, the branch
+    /// survives, and the unfiltered dependency walk puts `fs` in the CLIENT graph,
+    /// where Next has no polyfill for it by design.
+    #[test]
+    fn process_browser_is_defined_per_target_the_way_next_defines_it() {
+        assert_eq!(process_browser_define(Target::Client), "true");
+        assert_eq!(process_browser_define(Target::Server), "false");
+        assert_eq!(process_browser_define(Target::ReactServer), "false");
+    }
+
+    /// Both Next routers must carry the define, in every environment.
+    #[test]
+    fn every_next_environment_defines_process_browser() {
+        let root = scratch("process-browser-define");
+        write_next_package_json(&root, "dependencies");
+        write_app_route(&root.join("app"));
+        for environment in ["client", "react-server", "ssr"] {
+            let config = configure(&root, environment).unwrap().expect("configured");
+            let value = config
+                .build
+                .defines
+                .iter()
+                .find(|(key, _)| key == "process.browser")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("{environment} must define process.browser"));
+            let expected = if environment == "client" { "true" } else { "false" };
+            assert_eq!(value, expected, "{environment}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The persistent `serve` worker must pick up an edit through the dev server's
+    /// `invalidate` op (a micro-chunk import + `serverInvalidate`) and must NEVER go
+    /// back to re-importing its own entry under a fresh `?v=<mtime>` URL.
+    ///
+    /// That was the original mechanism and it cannot be made to work: the entry
+    /// reaches its split chunks through `import("./server.chunk-N.mjs")`, a URL with
+    /// no query, so Node's ESM cache hands the freshly imported entry the
+    /// ALREADY-EVALUATED chunks. On cal.com (69 server chunks) the fresh runtime's id
+    /// table and the stale chunks' registrations disagreed and the worker died with
+    /// `Module is not loaded: 9947` on the first render after a server-component edit
+    /// — a "fix" that looked like freshness and was a crash. The regression this
+    /// guards is someone reinstating an mtime poll.
+    #[test]
+    fn the_serve_worker_hot_updates_through_invalidate_and_never_re_imports_its_entry() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &fixture.join(".diffpack-next/error-boundary.tsx"),
+            &fixture.join(".diffpack-next/segment-boundary.tsx"),
+            &fixture.join(".diffpack-next/control-boundary.tsx"),
+            &fixture.join(".diffpack-next/request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            source.contains("req.op === \"invalidate\""),
+            "serveLoop must handle the dev server's `invalidate` op: {source}"
+        );
+        assert!(
+            source.contains("runtime.serverInvalidate("),
+            "an invalidate must drive the live runtime's serverInvalidate: {source}"
+        );
+        assert!(
+            !source.contains("statSync(selfPath).mtimeMs"),
+            "serveLoop must not poll its own mtime — an entry re-import cannot bust the chunk cache: {source}"
+        );
+        assert!(
+            !source.contains("?v=\" + mtime"),
+            "serveLoop must not re-import its own entry under a fresh query: {source}"
+        );
+    }
+
+    /// The rsc entry's `main()` must start AT MOST ONCE PER PROCESS, and the guard must
+    /// survive a hot re-run of the entry FACTORY — which is exactly what a dev
+    /// server-component edit does (`serverInvalidate` re-runs the entry in place).
+    ///
+    /// The guard used to be `if (!import.meta.url.includes("?v="))`, which only saw the
+    /// re-IMPORT case. On a hot re-run that test is true, so `main()` ran again and
+    /// `serveLoop()` installed a SECOND `process.stdin` reader: every request line was
+    /// then handled twice, the worker rendered the page twice, and both flights went
+    /// out under one reply id. The orchestrator concatenated them, and the SSR flight
+    /// client died decoding the duplicated row (`chunk.reason.enqueueModel is not a
+    /// function`) on a flight exactly twice its correct size.
+    #[test]
+    fn the_rsc_entry_starts_main_at_most_once_per_process() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &fixture.join(".diffpack-next/error-boundary.tsx"),
+            &fixture.join(".diffpack-next/segment-boundary.tsx"),
+            &fixture.join(".diffpack-next/control-boundary.tsx"),
+            &fixture.join(".diffpack-next/request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            source.contains("globalThis.__diffpack_rsc_entry_started"),
+            "the entry must guard main() with process-level state that survives a factory re-run: {source}"
+        );
+        assert!(
+            !source.contains("if (!import.meta.url.includes(\"?v=\"))"),
+            "a URL-shaped guard does not see a hot re-run of the entry factory: {source}"
+        );
     }
 
     #[test]
@@ -7435,7 +8664,7 @@ mod tests {
         assert!(rs_src.contains("const ROUTES = ["), "{rs_src}");
         assert!(rs_src.contains("path: \"/\""), "{rs_src}");
         assert!(rs_src.contains("levels: ["), "{rs_src}");
-        assert!(rs_src.contains("function documentTree(pathname, opts)"), "{rs_src}");
+        assert!(rs_src.contains("async function documentTree(pathname, opts, control)"), "{rs_src}");
         // Dynamic-segment matching (Slice H): the `[slug]` dir becomes a Dynamic
         // segment, matched at request time by the generated `matchRoute`.
         assert!(rs_src.contains("function matchRoute(pathname)"), "{rs_src}");
@@ -7544,6 +8773,15 @@ mod tests {
         for spec in ["next/link", "next/image", "next/navigation", "next/headers"] {
             let target = aliased.get(spec).unwrap_or_else(|| panic!("{spec} aliased"));
             assert!(Path::new(target).is_file(), "{spec} shim file exists");
+            // The `next` package has no `exports` map, so `next/x` and `next/x.js` are
+            // the SAME file. An alias covering only the bare spelling splits the module
+            // in two — half diffpack's shim, half Next's real implementation — and the
+            // real `useRouter` then throws `invariant expected app router to be mounted`
+            // during SSR. `nuqs` imports `"next/navigation.js"` exactly like this.
+            let with_extension = aliased
+                .get(&format!("{spec}.js"))
+                .unwrap_or_else(|| panic!("{spec}.js must alias to the same shim"));
+            assert_eq!(with_extension, target, "{spec}.js and {spec} must be one module");
         }
 
         // Slice J: next/image is a getImgProps port reading a generated variant
@@ -7581,6 +8819,50 @@ mod tests {
         assert!(!nav.contains("window.location.reload()") || nav.contains("__diffpack_refresh"), "refresh prefers soft refresh over reload: {nav}");
         assert!(nav.contains("window.__diffpack_prefetch"), "useRouter().prefetch warms the prefetch cache: {nav}");
         assert!(nav.contains("not supported by this adapter"), "a named parallelRouteKey throws a clear error (no silent default): {nav}");
+        // EXPORT SURFACE. A named export the shim omits is not a degraded feature — it is
+        // a MODULE LOAD FAILURE for anything that imports it ("The requested module
+        // \"next/navigation\" does not provide an export named ..."), which took down a
+        // whole page render. This list is Next's own, read off
+        // `next/dist/client/components/navigation.js`'s export table.
+        for name in [
+            "ReadonlyURLSearchParams",
+            "RedirectType",
+            "ServerInsertedHTMLContext",
+            "forbidden",
+            "notFound",
+            "permanentRedirect",
+            "redirect",
+            "unauthorized",
+            "unstable_isUnrecognizedActionError",
+            "unstable_rethrow",
+            "useParams",
+            "usePathname",
+            "useRouter",
+            "useSearchParams",
+            "useSelectedLayoutSegment",
+            "useSelectedLayoutSegments",
+            "useServerInsertedHTML",
+        ] {
+            assert!(
+                nav.contains(&format!("export function {name}("))
+                    || nav.contains(&format!("export class {name} "))
+                    || nav.contains(&format!("export const {name} "))
+                    || nav.contains(&format!("export {{ {name} }}")),
+                "next/navigation must export {name} (a missing name fails the whole module load): {nav}"
+            );
+        }
+        // The hook returns the READ-ONLY subclass, so `instanceof
+        // ReadonlyURLSearchParams` holds in user code and a mutator refuses instead of
+        // silently editing a copy the router never reads.
+        assert!(
+            nav.contains("return new ReadonlyURLSearchParams("),
+            "useSearchParams returns a ReadonlyURLSearchParams: {nav}"
+        );
+        assert!(
+            nav.contains("append() {{ throw new ReadonlyURLSearchParamsError(); }}")
+                || nav.contains("append() { throw new ReadonlyURLSearchParamsError(); }"),
+            "the read-only search params refuse mutation: {nav}"
+        );
         // The rsc-entry wraps each layout in the SEGMENT_BOUNDARY island carrying the
         // active child segments (parts.slice(level.slotBase)).
         assert!(rs_src.contains("const SEGMENT_BOUNDARY ="), "rsc-entry interns the SEGMENT_BOUNDARY island: {rs_src}");
@@ -7717,6 +8999,154 @@ mod tests {
                 "manifest entry {url} points at a file that was actually emitted",
             );
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression: `images.unoptimized` / a custom loader turn diffpack's build-time
+    /// image optimization OFF, because under either setting the shim renders a plain
+    /// `<img src>` (or an app-loader URL) and nothing can ever request a diffpack
+    /// variant. This is the decision, tested against the `images` block alone.
+    #[test]
+    fn next_config_images_decide_whether_the_build_pre_optimizes() {
+        assert_eq!(
+            ImageOptimization::from_images(&default_images_json()),
+            ImageOptimization::Enabled,
+            "Next's stock images config pre-optimizes",
+        );
+        assert_eq!(
+            ImageOptimization::from_images(&serde_json::json!({})),
+            ImageOptimization::Enabled,
+            "an app that configures no `images` block pre-optimizes",
+        );
+        // `unoptimized: true` — Next emits a plain <img src>, generating nothing.
+        let disabled = ImageOptimization::from_images(&serde_json::json!({ "unoptimized": true }));
+        match &disabled {
+            ImageOptimization::Disabled(reason) => {
+                assert!(reason.contains("unoptimized"), "the reason names the setting: {reason}")
+            }
+            other => panic!("images.unoptimized must disable pre-optimization, got {other:?}"),
+        }
+        // `unoptimized: false` is the explicit stock value, not a disable.
+        assert_eq!(
+            ImageOptimization::from_images(&serde_json::json!({ "unoptimized": false })),
+            ImageOptimization::Enabled,
+        );
+        // A named built-in loader replaces `/_next/image` entirely.
+        match ImageOptimization::from_images(&serde_json::json!({ "loader": "cloudinary" })) {
+            ImageOptimization::Disabled(reason) => {
+                assert!(reason.contains("cloudinary"), "the reason names the loader: {reason}")
+            }
+            other => panic!("a non-default loader must disable pre-optimization, got {other:?}"),
+        }
+        assert_eq!(
+            ImageOptimization::from_images(&serde_json::json!({ "loader": "default" })),
+            ImageOptimization::Enabled,
+        );
+        // A `loaderFile` does the same; a null/empty one does not.
+        match ImageOptimization::from_images(&serde_json::json!({ "loaderFile": "./loader.js" })) {
+            ImageOptimization::Disabled(reason) => {
+                assert!(reason.contains("loader.js"), "the reason names the file: {reason}")
+            }
+            other => panic!("a loaderFile must disable pre-optimization, got {other:?}"),
+        }
+        assert_eq!(
+            ImageOptimization::from_images(&serde_json::json!({ "loaderFile": null })),
+            ImageOptimization::Enabled,
+        );
+    }
+
+    /// Regression for the dominant cost of an image-heavy production build: with
+    /// optimization off, `public/` is neither decoded nor re-encoded and NOT ONE variant
+    /// file is written — while every image still gets a manifest entry, so the shim's
+    /// "no entry for this src" hard error cannot start firing.
+    #[test]
+    fn optimization_off_emits_no_variants_but_still_registers_every_public_image() {
+        let root = scratch("image-unoptimized");
+        let public = root.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        image::RgbImage::from_fn(900, 300, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 7]))
+            .save(public.join("hero.png"))
+            .unwrap();
+        std::fs::write(public.join("logo.svg"), "<svg/>").unwrap();
+
+        // Optimization ON is the control: the ladder is emitted as before.
+        let on = scan_public_images_with(&root, &ImageOptimization::Enabled).unwrap();
+        let on_written =
+            emit_image_variants(&root, &root.join("out-on").join("public"), &on).unwrap();
+        assert!(on_written >= 2, "the control build emits a ladder: {on_written}");
+
+        let off = scan_public_images_with(
+            &root,
+            &ImageOptimization::Disabled("images.unoptimized is true".to_string()),
+        )
+        .unwrap();
+        assert_eq!(off.len(), on.len(), "every public image is still registered");
+        assert!(
+            off.iter().all(|PublicImage(entry)| entry.unoptimized),
+            "with optimization off every entry is a passthrough",
+        );
+        // The manifest the shim imports still names both srcs (no entry = hard error there).
+        let module = image_manifest_module(&off);
+        assert!(module.contains("\"/hero.png\""), "the raster is registered: {module}");
+        assert!(module.contains("\"/logo.svg\""), "the svg is registered: {module}");
+
+        let out_public = root.join("out-off").join("public");
+        let written = emit_image_variants(&root, &out_public, &off).unwrap();
+        assert_eq!(written, 0, "no variant file is written");
+        let variant_dir = out_public.join("_diffpack-image");
+        let files = std::fs::read_dir(&variant_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files,
+            vec![IMAGE_VARIANT_MANIFEST.to_string()],
+            "only the (empty) manifest is written, so a missing file still means \
+             `this build emitted no variants` rather than `the step did not run`",
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(variant_dir.join(IMAGE_VARIANT_MANIFEST)).unwrap())
+                .unwrap();
+        assert_eq!(manifest, serde_json::json!({}), "the variant manifest is empty");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The adapter persists the resolved `images` block next to the generated
+    /// `image-config.ts`, so the build steps that run after `configure` (the variant
+    /// emit in `main.rs`, the dev server's) read the app's real setting instead of
+    /// re-spawning node — and read the SAME value the bundled shim was generated from.
+    #[test]
+    fn configure_persists_the_images_block_for_the_later_build_steps() {
+        let root = scratch("image-config-json");
+        std::fs::write(
+            root.join("next.config.ts"),
+            "export default { images: { unoptimized: true } }\n",
+        )
+        .unwrap();
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return null}\n").unwrap();
+        // Without node the config cannot be evaluated at all; the decision then
+        // defaults to Enabled, which this test is not about.
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        configure(&root, "client").unwrap().unwrap();
+        let persisted = root.join(ADAPTER_DIR).join(IMAGE_CONFIG_JSON);
+        assert!(persisted.is_file(), "the resolved images block is persisted at {}", persisted.display());
+        let images: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&persisted).unwrap()).unwrap();
+        assert_eq!(images["unoptimized"], serde_json::Value::Bool(true));
+        assert_eq!(
+            ImageOptimization::for_project(&root),
+            ImageOptimization::from_images(&images),
+            "the persisted file is what the later steps read",
+        );
+        // The generated shim config module agrees — one resolved block, two artifacts.
+        let module = std::fs::read_to_string(root.join(ADAPTER_DIR).join("image-config.ts")).unwrap();
+        assert!(module.contains("unoptimized: true"), "the shim config agrees: {module}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -7938,10 +9368,11 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let disc = discover_routes(&app, layout.as_deref()).unwrap();
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
         // With an asset base the stylesheet href carries the prefix — and it is still
         // only linked when the react-server build emitted a stylesheet beside the entry.
-        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "/docs");
+        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
         assert!(
             src.contains(
                 r#"const RSC_CSS_HREF = existsSync(new URL("./server.css", import.meta.url)) ? "/docs/rsc.css" : null;"#
@@ -7956,7 +9387,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
             "the head <link> is conditional on the emitted stylesheet: {src}",
         );
         // Empty asset base keeps the bare `/rsc.css`.
-        let plain = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let plain = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(plain.contains(r#"? "/rsc.css" : null;"#), "no prefix -> bare /rsc.css: {plain}");
     }
 
@@ -7975,8 +9406,9 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let disc = discover_routes(&app, layout.as_deref()).unwrap();
         let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         for line in src.lines() {
             if !line.contains(RSC_CSS_URL) {
                 continue;
@@ -8377,6 +9809,292 @@ const STUB_MANIFEST = {
         assert!(shim.contains("__useCacheMemo.delete"), "revalidateTag purges the use-cache memo");
     }
 
+    /// diffpack's DEFAULT source-map policy is Next's, so that a `diffpack build-app`
+    /// and a `next build` of the same app produce comparable artifacts. Getting this
+    /// backwards is not a cosmetic difference: emitting no server maps makes every
+    /// production Server Component stack trace unreadable, and emitting browser maps
+    /// an app never asked for publishes its source to every visitor.
+    #[test]
+    fn the_default_source_map_policy_is_next_s_own() {
+        let asked = serde_json::json!({ "productionBrowserSourceMaps": true });
+        let silent = serde_json::json!({ "basePath": "" });
+
+        for target in [Target::Server, Target::ReactServer] {
+            assert!(
+                default_source_maps(target, false, Some(&silent))
+                    && default_source_maps(target, false, None),
+                "{target:?} maps are NOT configurable in Next — they are always emitted, \
+                 config or no config"
+            );
+        }
+
+        assert!(
+            !default_source_maps(Target::Client, false, Some(&silent)),
+            "browser maps ship to every visitor, so an app that did not ask gets none"
+        );
+        assert!(
+            !default_source_maps(Target::Client, false, None),
+            "an app with no next.config at all has not asked either"
+        );
+        assert!(
+            default_source_maps(Target::Client, false, Some(&asked)),
+            "`productionBrowserSourceMaps: true` is the app asking, and is honored"
+        );
+
+        for target in [Target::Client, Target::Server, Target::ReactServer] {
+            assert!(
+                default_source_maps(target, true, Some(&silent)),
+                "in dev BOTH graphs get maps ({target:?}) — that is what `next dev` does, \
+                 and it is the setting a developer is actually debugging under"
+            );
+        }
+    }
+
+    /// Anything other than a literal `true` is Next's default of off — including the
+    /// truthy-looking strings a hand-written config can end up with.
+    #[test]
+    fn production_browser_source_maps_reads_only_a_literal_true() {
+        for value in [
+            serde_json::json!({ "productionBrowserSourceMaps": false }),
+            serde_json::json!({ "productionBrowserSourceMaps": "true" }),
+            serde_json::json!({ "productionBrowserSourceMaps": 1 }),
+            serde_json::json!({}),
+        ] {
+            assert!(!production_browser_source_maps(Some(&value)), "{value}");
+        }
+        assert!(production_browser_source_maps(Some(&serde_json::json!({
+            "productionBrowserSourceMaps": true
+        }))));
+    }
+
+    /// The policy is only as good as the field reaching Rust: the real config eval
+    /// must report `productionBrowserSourceMaps`, present or absent.
+    #[test]
+    fn the_config_eval_reports_production_browser_source_maps() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let asked = scratch("next-config-browser-maps-on");
+        std::fs::write(
+            asked.join("next.config.mjs"),
+            "export default { productionBrowserSourceMaps: true };\n",
+        )
+        .unwrap();
+        let eval = run_next_config_eval(&asked).expect("the config must evaluate");
+        assert!(
+            production_browser_source_maps(Some(&eval)),
+            "the eval dropped the field: {eval}"
+        );
+        assert!(default_source_maps(Target::Client, false, Some(&eval)));
+
+        let silent = scratch("next-config-browser-maps-off");
+        std::fs::write(silent.join("next.config.mjs"), "export default { basePath: '' };\n")
+            .unwrap();
+        let eval = run_next_config_eval(&silent).expect("the config must evaluate");
+        assert!(
+            !production_browser_source_maps(Some(&eval)),
+            "a config that says nothing must not read as an opt-in: {eval}"
+        );
+    }
+
+    /// Evaluating `next.config` mutates `process.env`, and under `next dev`/`next build`
+    /// those mutations ARE the environment the app is compiled and served in — the config
+    /// runs in the same process. cal.com's config is exactly that shape
+    /// (`dotenv.config({ path: "../../.env" })` plus computed variables), and its
+    /// `DATABASE_URL` exists nowhere else: without carrying the delta out of diffpack's
+    /// config-eval child process, every data-backed route rendered against a
+    /// default-named database that does not exist.
+    ///
+    /// The delta must be exactly what the config CHANGED — propagating the child's whole
+    /// environment would overwrite the real one.
+    #[test]
+    fn next_config_env_side_effects_are_carried_out_of_the_eval_child_process() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let root = scratch("next-config-env");
+        // A config that loads variables from a file the way dotenv does, computes one
+        // from another, and leaves everything else alone.
+        std::fs::write(root.join("secrets.txt"), "DIFFPACK_TEST_DB=postgres://seeded\n").unwrap();
+        std::fs::write(
+            root.join("next.config.mjs"),
+            "import { readFileSync } from 'node:fs';\n\
+             for (const line of readFileSync(new URL('./secrets.txt', import.meta.url), 'utf8').split('\\n')) {\n\
+               const [k, v] = line.split('=');\n\
+               if (k) process.env[k] = v;\n\
+             }\n\
+             process.env.DIFFPACK_TEST_DERIVED = process.env.DIFFPACK_TEST_DB + '/derived';\n\
+             export default { basePath: '' };\n",
+        )
+        .unwrap();
+
+        let eval = run_next_config_eval(&root).expect("the config must evaluate");
+        let env = config_env(Some(&eval));
+        assert_eq!(
+            env,
+            vec![
+                ("DIFFPACK_TEST_DB".to_string(), "postgres://seeded".to_string()),
+                (
+                    "DIFFPACK_TEST_DERIVED".to_string(),
+                    "postgres://seeded/derived".to_string()
+                ),
+            ],
+            "only the variables the config set are reported"
+        );
+        assert!(
+            !env.iter().any(|(key, _)| key == "PATH"),
+            "an inherited, unmodified variable is not part of the delta: {env:?}"
+        );
+
+        // The prerenderer and the dev orchestrator run after the compile and read the
+        // delta back off the persisted manifest.
+        write_next_config_manifest(&root, Some(&eval));
+        assert_eq!(
+            config_env_from_manifest(&root),
+            env,
+            "the persisted manifest must carry the same environment"
+        );
+    }
+
+    /// A `next.config` that PRINTS must not lose its config.
+    ///
+    /// The eval used to hand its JSON back on the child's stdout, so a single
+    /// `console.log` in the config — cal.com logs which rewrite set it selected, and
+    /// warning about unset variables is a common idiom — made the payload unparseable.
+    /// Diffpack then fell back to the EMPTY config and served the app with none of its
+    /// redirects, rewrites, headers, basePath or i18n, with nothing to show for it. The
+    /// payload now goes to a private file, and the config's own output is re-pointed at
+    /// stderr so it stays visible.
+    #[test]
+    fn a_next_config_that_prints_still_yields_its_full_config() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let root = scratch("next-config-noisy");
+        std::fs::write(
+            root.join("next.config.mjs"),
+            "console.log('[Phase] selecting rewrites');\n\
+             process.stdout.write('raw bytes straight to stdout\\n');\n\
+             export default {\n\
+               basePath: '/app',\n\
+               async redirects() {\n\
+                 console.log('building redirects');\n\
+                 return [{ source: '/old', destination: '/new', permanent: true }];\n\
+               },\n\
+             };\n",
+        )
+        .unwrap();
+
+        let eval = run_next_config_eval(&root)
+            .expect("a config that prints must still be read back in full");
+        assert_eq!(eval["basePath"], "/app");
+        assert_eq!(eval["redirects"][0]["source"], "/old");
+        assert_eq!(eval["redirects"][0]["destination"], "/new");
+    }
+
+    /// `has` / `missing` conditions decide whether a next.config redirect, rewrite or
+    /// header rule applies at all.
+    ///
+    /// Dropping them is not "unsupported", it is WRONG: a conditional rule then fires
+    /// unconditionally. cal.com gates `/api/auth/:path*` -> `/404` on a `callbackUrl`
+    /// query, so with the conditions ignored every auth API request 307'd to /404 and
+    /// the whole client — session, tRPC — got HTML where it expected JSON.
+    ///
+    /// This runs the real matcher out of `next-server.mjs` (sliced, not reimplemented)
+    /// against the four condition types Next supports.
+    #[test]
+    fn next_config_has_and_missing_conditions_gate_a_rule() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        let start = SERVER
+            .find("function safeParamName(")
+            .expect("next-server.mjs still defines the has/missing matcher");
+        let end = SERVER[start..]
+            .find("// Apply next.config redirects")
+            .expect("the matcher block still ends before applyNextConfig")
+            + start;
+        let region = &SERVER[start..end];
+        assert!(region.contains("function matchHas("), "sliced the right block: {region}");
+
+        // `readCookie` lives earlier in the file and the matcher calls it; slice that
+        // one too rather than restating it here.
+        let cookie_start = SERVER
+            .find("function readCookie(")
+            .expect("next-server.mjs still defines readCookie");
+        let cookie_end = SERVER[cookie_start..]
+            .find("\n// Parse an Accept-Language")
+            .expect("readCookie still ends before the Accept-Language parser")
+            + cookie_start;
+        let cookie_region = &SERVER[cookie_start..cookie_end];
+
+        let driver = r#"
+const req = (headers) => ({ headers });
+const u = (s) => new URL("http://example.test" + s);
+const out = {};
+// cal.com's real rule: only redirect when a `callbackUrl` query is present AND is not
+// an absolute URL.
+const authRule = { has: [{ type: "query", key: "callbackUrl", value: "^(?!https?://).*$" }] };
+out.noQuery = matchHas(authRule, req({}), u("/api/auth/session"));
+out.relativeQuery = matchHas(authRule, req({}), u("/api/auth/signin?callbackUrl=/dashboard"));
+out.absoluteQuery = matchHas(authRule, req({}), u("/api/auth/signin?callbackUrl=https://evil.test"));
+// host, with a named capture that becomes a destination param
+const orgRule = { has: [{ type: "host", value: "(?<orgslug>.*)\\.cal\\.local" }] };
+out.hostMatch = matchHas(orgRule, req({ host: "acme.cal.local:3000" }), u("/"));
+out.hostMiss = matchHas(orgRule, req({ host: "cal.local:3000" }), u("/"));
+// presence-only header binds the value as a param
+out.headerPresent = matchHas({ has: [{ type: "header", key: "x-tenant" }] }, req({ "x-tenant": "acme" }), u("/"));
+// cookie + missing
+out.cookieMissing = matchHas({ missing: [{ type: "cookie", key: "session" }] }, req({ cookie: "other=1" }), u("/"));
+out.cookiePresent = matchHas({ missing: [{ type: "cookie", key: "session" }] }, req({ cookie: "session=abc" }), u("/"));
+// no conditions at all: always applies, contributes nothing
+out.unconditional = matchHas({}, req({}), u("/"));
+console.log(JSON.stringify(out));
+"#;
+        let file = scratch("next-config-has").join("has.mjs");
+        std::fs::write(&file, format!("{cookie_region}\n{region}\n{driver}")).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the has/missing matcher failed to run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(got["noQuery"].is_null(), "an absent query must NOT match: {got}");
+        assert_eq!(got["relativeQuery"], serde_json::json!({}), "{got}");
+        assert!(
+            got["absoluteQuery"].is_null(),
+            "a value the regex rejects must not match: {got}"
+        );
+        assert_eq!(
+            got["hostMatch"],
+            serde_json::json!({ "orgslug": "acme" }),
+            "the port is stripped and named groups become params: {got}"
+        );
+        assert!(got["hostMiss"].is_null(), "{got}");
+        assert_eq!(
+            got["headerPresent"],
+            serde_json::json!({ "xtenant": "acme" }),
+            "a presence-only condition binds the value under Next's safe param name: {got}"
+        );
+        assert_eq!(got["cookieMissing"], serde_json::json!({}), "{got}");
+        assert!(
+            got["cookiePresent"].is_null(),
+            "`missing` must reject when the cookie IS present: {got}"
+        );
+        assert_eq!(got["unconditional"], serde_json::json!({}), "{got}");
+    }
+
+    /// No `next.config` (or no manifest yet) means nothing to propagate — never a panic
+    /// and never a partial environment.
+    #[test]
+    fn next_config_env_is_empty_without_a_config() {
+        let root = scratch("next-config-env-absent");
+        assert!(config_env_from_manifest(&root).is_empty());
+        assert!(config_env(None).is_empty());
+    }
+
     #[test]
     fn next_cache_alias_and_shim_written_by_build() {
         // build_next_app must write shims/cache.ts AND alias next/cache to it (an app
@@ -8543,15 +10261,101 @@ export default function Page(){ return null; }
         // Codegen: the react-server entry emits the template id, GLOBAL_ERROR const, the
         // pathname remount key, and the global-error boundary wrapping the whole tree.
         let boundary = app.join("error-boundary.tsx");
-        std::fs::write(&boundary, error_boundary_module()).unwrap();
         let seg_boundary = app.join("segment-boundary.tsx");
+        let ctl_boundary = app.join("control-boundary.tsx");
+        std::fs::write(&boundary, error_boundary_module(&ctl_boundary)).unwrap();
         let reqctx = app.join("request-context.ts");
         std::fs::write(&reqctx, request_context_module()).unwrap();
-        let rsc = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &reqctx, None, "");
+        let rsc = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc.contains("template:"), "levels carry a template id");
         assert!(rsc.contains("const GLOBAL_ERROR ="), "GLOBAL_ERROR const emitted");
         assert!(rsc.contains("key: pathname"), "template is keyed by pathname for remount");
         assert!(rsc.contains("fallback: GLOBAL_ERROR"), "global-error wraps the document tree");
+    }
+
+    /// A BUILD-TIME prerender has no request. Reading `cookies()`/`headers()`/
+    /// `draftMode()` under one must raise the dynamic bailout — Next's static→dynamic
+    /// demotion — instead of handing back a fabricated empty value.
+    ///
+    /// Returning empty was silently wrong in the worst way: cal.com's settings pages ask
+    /// `getServerSession(headers(), cookies())`, got "no session" from the empty answer,
+    /// and `redirect("/auth/login")`ed — so a login redirect would have been baked into a
+    /// static HTML file and served to every signed-in user. The store carries a
+    /// `prerender` flag; the shims consult it; the prerenderer records the route Dynamic.
+    #[test]
+    fn a_request_state_read_under_a_prerender_raises_the_dynamic_bailout() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let root = scratch("prerender-bailout");
+        let reqctx = root.join("request-context.mjs");
+        std::fs::write(&reqctx, request_context_module()).unwrap();
+        let shim = root.join("headers.mjs");
+        std::fs::write(&shim, next_headers_shim(&reqctx)).unwrap();
+        let driver = root.join("driver.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import {{ requestAls }} from {reqctx};
+import {{ cookies, headers, draftMode }} from {shim};
+const base = {{ headers: new Headers([["x-a", "1"]]), cookieHeader: "k=v", responseCookies: [], tags: new Set() }};
+const out = [];
+for (const api of [["cookies", cookies], ["headers", headers], ["draftMode", draftMode]]) {{
+  // Under a prerender: must throw the tagged bailout naming the API.
+  await requestAls.run({{ ...base, prerender: true }}, async () => {{
+    try {{ await api[1](); out.push(api[0] + ":NO-THROW"); }}
+    catch (error) {{ out.push(api[0] + ":" + error.digest + ":" + (error.message.includes(api[0] + "()") ? "named" : "unnamed")); }}
+  }});
+}}
+// Under a real request (and under force-static, which does NOT set the flag): the real value.
+await requestAls.run({{ ...base, prerender: false }}, async () => {{
+  const h = await headers();
+  const c = await cookies();
+  out.push("live:" + h.get("x-a") + ":" + c.get("k").value);
+}});
+console.log(out.join("|"));
+"#,
+                reqctx = js_str(&reqctx.to_string_lossy()),
+                shim = js_str(&shim.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            printed,
+            "cookies:DIFFPACK_DYNAMIC_BAILOUT:named|headers:DIFFPACK_DYNAMIC_BAILOUT:named|draftMode:DIFFPACK_DYNAMIC_BAILOUT:named|live:1:v",
+            "prerender reads bail out (tagged + naming the API); a real request still reads through"
+        );
+    }
+
+    /// The prerenderer must DEMOTE a bailed-out route to Dynamic, not fail the build:
+    /// `next build` prints "couldn't be rendered statically because it used `headers`"
+    /// and serves the route on demand. Pinned on the shipped script's bytes.
+    #[test]
+    fn the_prerenderer_demotes_a_bailed_out_route_instead_of_failing() {
+        const PRERENDER_MJS: &str = include_str!("../scripts/rsc/next-prerender.mjs");
+        assert!(
+            PRERENDER_MJS.contains("reqCtx: { prerender: !forceStatic }"),
+            "the prerenderer tells the shims there is no request (except under force-static)"
+        );
+        assert!(
+            PRERENDER_MJS.contains("if (dynamicBailout) return { demoted: String(dynamicBailout) };"),
+            "a bailout demotes the route rather than dying"
+        );
+        assert!(
+            PRERENDER_MJS.contains("dynamic.push({ path: d.path, reason: d.reason })"),
+            "a demoted route lands in the SAME dynamic list a statically-classified one does"
+        );
+        assert!(
+            PRERENDER_MJS.contains("could not be prerendered —"),
+            "every demotion is reported by name (never a silent reclassification)"
+        );
     }
 
     #[test]
@@ -8698,5 +10502,983 @@ export default function Page(){ return null; }
                 "{label} entry must pin the next/script shim: {source}",
             );
         }
+    }
+
+    // --- hybrid `pages/api/**` in an app-router build ---------------------------------
+
+    /// Lay out a hybrid app: pages under `app/`, HTTP endpoints under `pages/api/**` —
+    /// the shape cal.com has, where next-auth and every tRPC router are pages API routes.
+    fn write_hybrid_app(root: &Path) -> PathBuf {
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return null;}\n").unwrap();
+        for (rel, body) in [
+            ("api/health.ts", "export default function h(req,res){res.json({ok:true});}\n"),
+            ("api/auth/[...nextauth].ts", "export default function h(req,res){res.json({});}\n"),
+            ("api/user/[id]/index.ts", "export default function h(req,res){res.json({});}\n"),
+            ("api/nested/deep/thing.js", "export default function h(req,res){res.end();}\n"),
+        ] {
+            let file = root.join("pages").join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        }
+        // A non-api page is NOT an api route: only `pages/api/**` is served here.
+        let page = root.join("pages/router/index.tsx");
+        std::fs::create_dir_all(page.parent().unwrap()).unwrap();
+        std::fs::write(page, "export default function R(){return null;}\n").unwrap();
+        app
+    }
+
+    /// An app-router project with a `pages/api/**` tree must discover those endpoints.
+    /// Building only `app/` is what left cal.com with no `/api/auth/session`, no CSRF
+    /// token and no tRPC — the login form rendered and could never submit.
+    #[test]
+    fn a_hybrid_apps_pages_api_routes_are_discovered() {
+        let dir = scratch("hybrid-pages-api");
+        let app = write_hybrid_app(&dir);
+        let routes = discover_pages_api_routes(&app).unwrap();
+        let paths: Vec<&str> = routes.iter().map(|r| r.url_path.as_str()).collect();
+        assert!(paths.contains(&"/api/health"), "{paths:?}");
+        // `pages/api/user/[id]/index.ts` serves `/api/user/[id]`, not `/api/user/[id]/index`.
+        assert!(paths.contains(&"/api/user/[id]"), "{paths:?}");
+        assert!(paths.contains(&"/api/nested/deep/thing"), "{paths:?}");
+        assert!(paths.contains(&"/api/auth/[...nextauth]"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("router")),
+            "a pages PAGE is not an api route: {paths:?}",
+        );
+        // Most-specific first: every literal route is ordered before the catch-all, or a
+        // `[...nextauth]` at `/api/auth/**` would swallow sibling endpoints.
+        let catch_all = paths.iter().position(|p| *p == "/api/auth/[...nextauth]").unwrap();
+        let literal = paths.iter().position(|p| *p == "/api/health").unwrap();
+        assert!(literal < catch_all, "literal must beat catch-all: {paths:?}");
+    }
+
+    /// No `pages/` directory at all (the overwhelmingly common app-router project) must
+    /// discover nothing and cost nothing.
+    #[test]
+    fn an_app_router_project_without_pages_has_no_pages_api_routes() {
+        let dir = scratch("hybrid-pages-api-absent");
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        assert!(discover_pages_api_routes(&app).unwrap().is_empty());
+    }
+
+    /// The react-server entry must carry the PAGES_API table, load each endpoint, and
+    /// publish the patterns in `routeManifest` — the orchestrator routes a request to a
+    /// handler only when the manifest claims the path, so a missing entry means the
+    /// request is rendered as a page instead (which is how `/api/auth/session` came back
+    /// as an HTML 404 body and next-auth died on `Unexpected token '<'`).
+    #[test]
+    fn the_react_server_entry_dispatches_pages_api_routes() {
+        let dir = scratch("hybrid-pages-api-entry");
+        let app = write_hybrid_app(&dir);
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        assert!(!disc.pages_api.is_empty(), "the hybrid app has pages api routes");
+        let boundary = dir.join("error-boundary.tsx");
+        let seg_boundary = dir.join("segment-boundary.tsx");
+        let ctl_boundary = dir.join("control-boundary.tsx");
+        let reqctx = dir.join("request-context.ts");
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &boundary,
+            &seg_boundary,
+            &ctl_boundary,
+            &reqctx,
+            None,
+            "",
+        );
+        assert!(source.contains("const PAGES_API = ["), "the table is emitted: {source}");
+        assert!(
+            source.contains(r#"path: "/api/auth/[...nextauth]""#),
+            "each endpoint is in the table",
+        );
+        assert!(
+            source.contains("load: () => import(") && source.contains("nextauth"),
+            "each endpoint is loaded through its own import() so it gets its own chunk",
+        );
+        assert!(
+            source.contains("return handlePagesApi(pathname, method, reqCtx);"),
+            "handleRoute falls through to the pages api table",
+        );
+        assert!(
+            source.contains("pagesApi: PAGES_API.map("),
+            "routeManifest publishes the patterns so the orchestrator routes them",
+        );
+        // The runtime is the real file, spliced verbatim — not a second copy.
+        assert!(
+            source.contains("export async function runPagesApiHandler("),
+            "src/next_runtime/pages_api.js is spliced into the entry",
+        );
+        // An app-router `route.ts` must still be matched FIRST (Next's precedence).
+        let handlers = source.find("const ROUTE_HANDLERS = [").unwrap();
+        let pages_api = source.find("const PAGES_API = [").unwrap();
+        assert!(handlers < pages_api, "ROUTE_HANDLERS is declared before PAGES_API");
+    }
+
+    /// A server-side `redirect()` reached over the SOFT-NAVIGATION channel must be
+    /// followed. `fetch` swallows a 3xx, so the orchestrator reports the redirect as
+    /// JSON — and the client Router used to hand that JSON straight to the flight
+    /// reader, which fails deep inside it and leaves a blank page. That is where
+    /// cal.com's login dead-ended: signing in navigates to the callback URL `/`, `/`
+    /// redirects logged-in users to `/event-types`, and the browser sat on an empty `/`.
+    #[test]
+    fn the_client_router_follows_a_soft_navigation_redirect() {
+        let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
+        let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks);
+        // The producer side must still be the JSON contract this consumer reads.
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        assert!(
+            SERVER.contains(r#"res.end(JSON.stringify({ __redirect: addBasePath(meta.redirect, localeSeg) }));"#),
+            "the orchestrator answers a soft-nav redirect with __redirect JSON",
+        );
+        assert!(
+            client.contains(r#"if (payload && typeof payload.__redirect === "string") return { redirect: payload.__redirect };"#),
+            "the client reads __redirect off the JSON instead of parsing it as flight: {client}",
+        );
+        assert!(
+            client.contains(r#"if ((res.headers.get("content-type") || "").includes("application/json")) {"#),
+            "the JSON channel is detected by content-type: {client}",
+        );
+        // Unexpected JSON is a loud error, never a silent blank page.
+        assert!(
+            client.contains("unexpected JSON on the soft-navigation channel for"),
+            "any other JSON payload throws with the href: {client}",
+        );
+        // Redirects are followed, bounded, and the URL that lands in history is the one
+        // that actually rendered.
+        assert!(
+            client.contains("async function fetchFlightFollowing(href, take)")
+                && client.contains("const MAX_REDIRECTS = 10;")
+                && client.contains("more than \" + MAX_REDIRECTS + \" server redirects following "),
+            "the follow loop is bounded and diagnosable: {client}",
+        );
+        assert!(
+            client.contains("const { tree: next, intercept, href } = await fetchFlightFollowing(requested, take);"),
+            "navigate() follows redirects: {client}",
+        );
+        assert!(
+            client.contains(r#"else if (href !== requested) history.replaceState(null, "", href);"#),
+            "a redirected back/forward navigation corrects the address bar: {client}",
+        );
+        assert!(
+            client.contains("await fetchFlightFollowing(current, () => undefined);"),
+            "router.refresh() follows redirects too: {client}",
+        );
+    }
+
+    /// A `public/` DIRECTORY must never be served as a static asset. `existsSync` says
+    /// yes for one, so the orchestrator wrote a 200 + content-type and then threw
+    /// `EISDIR` reading it — headers already gone, body never written, page never
+    /// rendered. cal.com ships `public/apps/`, so its real `/apps` page answered an
+    /// empty 200. The test runs the orchestrator's own `isStaticFile` against a real
+    /// directory, a real file and a missing path.
+    #[test]
+    fn a_public_directory_is_not_served_as_a_static_asset() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        assert!(
+            SERVER.contains("if (name && filePath.startsWith(publicDir) && isStaticFile(filePath)) {"),
+            "the public-asset serve must gate on isStaticFile",
+        );
+        assert!(
+            !SERVER.contains("if (name && existsSync(filePath) && filePath.startsWith(publicDir)) {"),
+            "the existsSync-only gate must be gone",
+        );
+        let start = SERVER
+            .find("function isStaticFile(filePath) {")
+            .expect("next-server.mjs defines isStaticFile");
+        let end = SERVER[start..].find("\n}\n").expect("isStaticFile is a complete function") + start + 3;
+
+        let dir = scratch("public-dir-not-a-file");
+        std::fs::create_dir_all(dir.join("apps")).unwrap();
+        std::fs::write(dir.join("favicon.ico"), b"icon").unwrap();
+        let driver = dir.join("driver.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                "import {{ statSync }} from \"node:fs\";\n{}\nconsole.log(JSON.stringify([\
+                 isStaticFile({dir}+\"/apps\"), isStaticFile({dir}+\"/favicon.ico\"), isStaticFile({dir}+\"/missing\")]));\n",
+                &SERVER[start..end],
+                dir = js_str(&dir.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "isStaticFile failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            serde_json::from_slice::<Vec<bool>>(&out.stdout).unwrap(),
+            vec![false, true, false],
+            "a directory is not a file; a real file is; a missing path is not",
+        );
+    }
+
+    /// A `redirect()` an ASYNC page throws must reach the orchestrator as a real HTTP
+    /// redirect. React's flight writer emits its first chunk as soon as the root row is
+    /// serializable, so an async page is a pending row in that chunk and a redirect
+    /// thrown while awaiting it used to land after the headers were already gone — a
+    /// logged-in cal.com `/` answered 200 with a half-rendered document instead of
+    /// redirecting to `/event-types`, and the login round-trip dead-ended there.
+    /// Resolving the page BEFORE the render starts is what makes the shell complete
+    /// first, exactly as Next's is.
+    #[test]
+    fn an_async_pages_redirect_is_known_before_any_flight_byte_is_produced() {
+        let dir = scratch("async-page-redirect");
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "import { redirect } from \"next/navigation\";\n\
+             export default async function P(){ await Promise.resolve(); redirect(\"/event-types\"); }\n",
+        )
+        .unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        // The page is invoked and awaited by the composer, not merely elementized.
+        assert!(
+            source.contains("async function resolvePage(Page, props, control)"),
+            "the entry resolves the page before rendering: {source}",
+        );
+        assert!(
+            source.contains("const pageInShell = !route.levels.some((level) => level.loading);")
+                && source.contains("? await resolvePage(route.page, pageProps, control || {})"),
+            "documentTree awaits the matched page when it is part of the shell: {source}",
+        );
+        // A throw from the page is recorded in `control` AND re-thrown inside the tree,
+        // so an ordinary error still reaches the segment's error.tsx boundary.
+        assert!(
+            source.contains("flightControlOnError(control, error);")
+                && source.contains("function DiffpackPageThrow() {"),
+            "a control-flow throw is recorded and re-thrown inside the tree: {source}",
+        );
+        // Only redirect/notFound/bailout are intercepted. Any OTHER throw goes back to
+        // React unrendered, so a page that cannot run outside the renderer (a sync
+        // Server Component calling `use()`) keeps exactly the path it had before.
+        assert!(
+            source.contains("function isControlThrow(error)")
+                && source.contains("if (isControlThrow(error)) {")
+                && source.contains("    return createElement(Page, props);"),
+            "a non-control throw is handed back to React: {source}",
+        );
+        // Both render entries compose INSIDE the request store, or the page's own
+        // cookies()/headers() reads would run with no store at all.
+        assert_eq!(
+            source.matches("documentTree(pathname, renderOpts(reqCtx), control)").count(),
+            2,
+            "renderRequest and renderRequestStream both pass control: {source}",
+        );
+        assert_eq!(
+            source
+                .matches(
+                    "await requestAls.run(store, () =>\n    documentTree(pathname, renderOpts(reqCtx), control),\n  );",
+                )
+                .count(),
+            2,
+            "both compose inside the request store: {source}",
+        );
+    }
+
+    /// An app-router `route.ts` handler is called by Next with a `NextRequest`, and
+    /// reading the query off `request.nextUrl.searchParams` is the ordinary way to do it.
+    /// Handing it a bare `Request` makes that a read of `undefined.searchParams`, so the
+    /// handler 500s on its first line — which is what every cal.com endpoint that parses
+    /// a query string did.
+    #[test]
+    fn a_route_handler_is_invoked_with_a_next_request() {
+        let dir = scratch("route-handler-next-request");
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join("api/link")).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return null;}\n").unwrap();
+        std::fs::write(
+            app.join("api/link/route.ts"),
+            "export async function GET(req){ return Response.json({ q: req.nextUrl.searchParams.get(\"q\") }); }\n",
+        )
+        .unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        assert_eq!(disc.handlers.len(), 1, "the route handler is discovered");
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            source.contains("const request = new NextRequest(url, {"),
+            "handleRoute must build a NextRequest, not a bare Request: {source}",
+        );
+        assert!(
+            !source.contains("const request = new Request(url, {"),
+            "no bare-Request construction may survive: {source}",
+        );
+        // The class it constructs has to be in scope AND actually carry `nextUrl`.
+        assert!(
+            source.contains("import {{ NextRequest }} from \"next/server\";")
+                || source.contains("import { NextRequest } from \"next/server\";"),
+            "the entry imports NextRequest: {source}",
+        );
+        assert!(
+            next_server_shim().contains("this.nextUrl = new URL(url,"),
+            "the next/server shim's NextRequest carries nextUrl",
+        );
+    }
+
+    /// The pages-api runtime itself, exercised through node: a catch-all endpoint sees
+    /// its segments as an ARRAY (next-auth dispatches on `req.query.nextauth`), a
+    /// urlencoded POST body is parsed, cookies are parsed, and BOTH `Set-Cookie` headers
+    /// a handler writes come back as separate values rather than one comma-joined string
+    /// (a joined pair is an unusable cookie, which is exactly how a login round-trip
+    /// loses its session).
+    #[test]
+    fn the_pages_api_runtime_runs_a_node_style_handler() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = scratch("pages-api-runtime");
+        let runtime = dir.join("pages_api.mjs");
+        std::fs::write(&runtime, include_str!("next_runtime/pages_api.js")).unwrap();
+        let driver = dir.join("driver.mjs");
+        std::fs::write(
+            &driver,
+            r#"import { runPagesApiHandler } from "./pages_api.mjs";
+
+function handler(req, res) {
+  res.setHeader("Set-Cookie", ["a=1; Path=/", "b=2; Path=/"]);
+  res.status(201).json({
+    method: req.method,
+    nextauth: req.query.nextauth,
+    q: req.query.callbackUrl,
+    body: req.body,
+    cookie: req.cookies.session,
+    url: req.url,
+  });
+}
+
+const result = await runPagesApiHandler({
+  routeLabel: "/api/auth/[...nextauth]",
+  handler,
+  config: undefined,
+  pathname: "/api/auth/callback/credentials",
+  method: "POST",
+  reqCtx: {
+    url: "http://localhost/api/auth/callback/credentials?callbackUrl=%2Fevent-types",
+    headers: [["content-type", "application/x-www-form-urlencoded"]],
+    cookie: "session=abc",
+    body: Buffer.from("email=pro%40example.com&password=pro").toString("base64"),
+    bodyIsBase64: true,
+  },
+  params: { nextauth: ["callback", "credentials"] },
+});
+console.log(JSON.stringify({
+  status: result.status,
+  setCookies: result.setCookies,
+  payload: JSON.parse(Buffer.from(result.body, "base64").toString("utf8")),
+}));
+"#,
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the pages api runtime failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(got["status"], 201, "{got}");
+        assert_eq!(
+            got["setCookies"],
+            serde_json::json!(["a=1; Path=/", "b=2; Path=/"]),
+            "both Set-Cookie values survive as separate headers: {got}",
+        );
+        let payload = &got["payload"];
+        assert_eq!(payload["method"], "POST", "{got}");
+        assert_eq!(
+            payload["nextauth"],
+            serde_json::json!(["callback", "credentials"]),
+            "a catch-all param reaches the handler as an array: {got}",
+        );
+        assert_eq!(payload["q"], "/event-types", "search params merge into req.query: {got}");
+        assert_eq!(payload["body"]["email"], "pro@example.com", "urlencoded body parsed: {got}");
+        assert_eq!(payload["cookie"], "abc", "req.cookies parsed: {got}");
+        assert_eq!(
+            payload["url"], "/api/auth/callback/credentials?callbackUrl=%2Fevent-types",
+            "req.url keeps its query, as Next's does: {got}",
+        );
+    }
+
+    /// `export const config = { api: { bodyParser: false } }` must leave the bytes
+    /// unparsed AND readable off the request stream — a Stripe/webhook endpoint verifies
+    /// a signature over the exact bytes, so a parsed body silently breaks it.
+    #[test]
+    fn a_pages_api_route_can_opt_out_of_the_body_parser_and_read_the_raw_stream() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = scratch("pages-api-raw-body");
+        std::fs::write(dir.join("pages_api.mjs"), include_str!("next_runtime/pages_api.js")).unwrap();
+        let driver = dir.join("driver.mjs");
+        std::fs::write(
+            &driver,
+            r#"import { runPagesApiHandler } from "./pages_api.mjs";
+
+async function handler(req, res) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  res.status(200).send(JSON.stringify({ raw: Buffer.concat(chunks).toString("utf8"), parsed: req.body }));
+}
+
+const result = await runPagesApiHandler({
+  routeLabel: "/api/stripe/webhook",
+  handler,
+  config: { api: { bodyParser: false } },
+  pathname: "/api/stripe/webhook",
+  method: "POST",
+  reqCtx: {
+    url: "http://localhost/api/stripe/webhook",
+    headers: [["content-type", "application/json"]],
+    body: Buffer.from('{"id":"evt_1"}').toString("base64"),
+    bodyIsBase64: true,
+  },
+  params: {},
+});
+console.log(Buffer.from(result.body, "base64").toString("utf8"));
+"#,
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the raw-body path failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(got["raw"], "{\"id\":\"evt_1\"}", "the exact bytes reach the handler: {got}");
+        assert!(got["parsed"].is_null(), "bodyParser:false leaves req.body unset: {got}");
+    }
+
+    /// `diffpack start <output>` is handed the OUTPUT directory, not the project root, so
+    /// the env propagation has to be keyed off it. Without this the production server ran
+    /// with none of the variables the app's next.config loads — cal.com's `DATABASE_URL`
+    /// lives only there, so every Server Component that touched Prisma threw and each
+    /// route degraded to an error shell.
+    #[test]
+    fn config_env_is_readable_from_the_build_output_directory_alone() {
+        let dir = scratch("config-env-from-output");
+        let output = dir.join(".diffpack-output");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(
+            output.join("next-config-manifest.json"),
+            r#"{"env":{"DATABASE_URL":"postgresql://localhost/app","NEXTAUTH_URL":"http://localhost:3000"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config_env_from_output(&output),
+            vec![
+                ("DATABASE_URL".to_string(), "postgresql://localhost/app".to_string()),
+                ("NEXTAUTH_URL".to_string(), "http://localhost:3000".to_string()),
+            ],
+        );
+        // The project-root spelling still answers, so the build-time callers are unchanged.
+        assert_eq!(config_env_from_manifest(&dir), config_env_from_output(&output));
+        // No manifest at all: nothing to propagate, and no error.
+        assert!(config_env_from_output(&dir.join("nope")).is_empty());
+    }
+
+    /// `serverExternalPackages` (and its pre-15 `experimental.` spelling) must be read
+    /// out of the evaluated config; both are merged, deduplicated and order-preserving.
+    #[test]
+    fn server_external_packages_are_read_from_both_config_spellings() {
+        let eval = serde_json::json!({
+            "serverExternalPackages": ["rest-facade", "jose"],
+        });
+        assert_eq!(
+            server_external_packages(Some(&eval)),
+            vec!["rest-facade".to_string(), "jose".to_string()],
+        );
+        assert!(server_external_packages(None).is_empty());
+        assert!(server_external_packages(Some(&serde_json::json!({}))).is_empty());
+    }
+
+    /// REGRESSION (#51). The real-404 document must be selected by an explicit FLAG on
+    /// the request context, never by a magic pathname handed to the ordinary router.
+    ///
+    /// The orchestrator used to ask for it by rendering the pathname
+    /// `/__diffpack_notfound__`, and the react-server entry had no case for that string
+    /// at all — it just happened to match nothing in a small app. cal.com has a catch-all
+    /// `app/[user]/page.tsx`, which matches EVERY pathname including that sentinel, so the
+    /// "not-found" render rendered the catch-all page; that page threw notFound() again
+    /// and the 404 was served with an errored, completely empty body.
+    #[test]
+    fn the_not_found_document_is_requested_by_flag_and_a_catch_all_cannot_capture_it() {
+        let dir = scratch("not-found-flag");
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join("[...slug]")).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("not-found.tsx"), "export default function NF(){return <p>gone</p>;}\n").unwrap();
+        std::fs::write(
+            app.join("[...slug]/page.tsx"),
+            "import { notFound } from \"next/navigation\";\nexport default function P(){ notFound(); }\n",
+        )
+        .unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        assert!(disc.app_not_found.is_some(), "the fixture has an app/not-found.tsx");
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        // The flag short-circuits BEFORE any route matching, so the catch-all above can
+        // never be what a not-found render renders.
+        assert!(
+            source.contains(
+                "if (opts && opts.notFound) return { tree: notFoundTree(), status: 404, params: {} };",
+            ),
+            "the entry renders the not-found tree from the flag, before matchRoute: {source}",
+        );
+        // The flag reaches BOTH `matchParams` and `documentTree` through one definition,
+        // so the store cannot end up carrying a catch-all's params for a 404 document.
+        assert!(
+            source.contains("function renderOpts(reqCtx) {")
+                && source.contains("return { softNav: !!reqCtx.softNav, notFound: !!reqCtx.notFound };"),
+            "one definition of the render options: {source}",
+        );
+        assert_eq!(
+            source.matches("matchParams(pathname, renderOpts(reqCtx))").count(),
+            2,
+            "both render entries resolve params through renderOpts: {source}",
+        );
+        assert!(
+            source.contains("if (opts && opts.notFound) return {};"),
+            "a not-found document has no route params: {source}",
+        );
+        // And the sentinel pathname is gone from BOTH sides of the seam.
+        assert!(
+            !source.contains("__diffpack_notfound__"),
+            "no magic not-found pathname in the react-server entry: {source}",
+        );
+        assert!(
+            !NEXT_SERVER_MJS.contains("__diffpack_notfound__"),
+            "no magic not-found pathname in the orchestrator",
+        );
+    }
+
+    /// The orchestrator must ask for the not-found document at the REQUESTED pathname
+    /// with `notFound: true`, and must refuse to serve the result if the render answers
+    /// with another notFound()/redirect() — that means the entry ignored the flag and we
+    /// would be about to serve some other route's document under a 404.
+    #[test]
+    fn the_orchestrator_asks_for_the_not_found_document_by_flag_and_verifies_the_reply() {
+        let block = NEXT_SERVER_MJS
+            .split_once("if (meta.notFound) {")
+            .expect("the orchestrator has a notFound branch")
+            .1
+            .split_once("res.end(nfDoc);")
+            .expect("the notFound branch ends by writing the document")
+            .0;
+        assert!(
+            block.contains("[\"render\", url.pathname, clientManifestPath]")
+                && block.contains("JSON.stringify({ ...reqCtxObj, notFound: true })"),
+            "the not-found render is asked for by flag at the requested pathname: {block}",
+        );
+        assert!(
+            block.contains("if (nf.notFound || nf.redirect) {") && block.contains("throw new Error("),
+            "a not-found render that itself signals control flow is a hard error: {block}",
+        );
+        assert!(
+            block.contains("res.writeHead(404, nfHeaders)"),
+            "the not-found document is served 404: {block}",
+        );
+    }
+
+    /// REGRESSION. Next's shell is everything NOT inside a `<Suspense>`, and the HTTP
+    /// status is decided once the shell is complete. A `loading.tsx` on the route puts the
+    /// page INSIDE a Suspense boundary: Next flushes the loading fallback and answers 200,
+    /// and a redirect() the page throws afterwards travels in the stream.
+    ///
+    /// diffpack awaited the matched page unconditionally, which manufactured a 307 Next
+    /// never sends — cal.com `/event-types` logged out is exactly this route shape (Next
+    /// 200 + skeleton, diffpack 307) — and, worse, defeated `loading.tsx` on every route
+    /// that has one by blocking the shell on the page.
+    #[test]
+    fn the_page_is_resolved_eagerly_only_when_it_is_part_of_the_shell() {
+        let dir = scratch("shell-eager-resolve");
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join("slow")).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return <p>root</p>;}\n").unwrap();
+        std::fs::write(app.join("slow/loading.tsx"), "export default function Loading(){return <p>...</p>;}\n").unwrap();
+        std::fs::write(
+            app.join("slow/page.tsx"),
+            "import { redirect } from \"next/navigation\";\n\
+             export default async function P(){ await Promise.resolve(); redirect(\"/login\"); }\n",
+        )
+        .unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        // The fixture really does carry a loading boundary on `/slow` and none on `/`.
+        let slow = disc
+            .routes
+            .iter()
+            .find(|r| r.segments.iter().any(|s| matches!(s, Seg::Static(name) if name == "slow")))
+            .expect("the /slow route was discovered");
+        assert!(
+            slow.levels.iter().any(|l| l.loading.is_some()),
+            "the /slow route carries a loading.tsx level",
+        );
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            source.contains("const pageInShell = !route.levels.some((level) => level.loading);"),
+            "the shell test is the presence of a loading.tsx on the route: {source}",
+        );
+        assert!(
+            source.contains("let node = pageInShell\n    ? await resolvePage(route.page, pageProps, control || {})\n    : createElement(route.page, pageProps);"),
+            "only a shell page is awaited before the flight render starts: {source}",
+        );
+    }
+
+    /// A redirect() thrown once the shell has flushed cannot become a 307, so it has to be
+    /// completed on the CLIENT — that is what Next's RedirectBoundary does and what the
+    /// `pageInShell` rule above makes routine. The boundary wraps the PAGE (inside every
+    /// layout/loading/error boundary), and hands anything that is not a control digest
+    /// back to the app's own error boundaries untouched.
+    #[test]
+    fn a_client_control_boundary_completes_a_redirect_that_reaches_the_browser() {
+        let boundary = control_boundary_module();
+        assert!(boundary.starts_with("\"use client\";"), "the control boundary is a client island");
+        assert!(
+            boundary.contains("window.__diffpack_navigate")
+                && boundary.contains("window.location.replace(target.href)")
+                && boundary.contains("window.location.assign(target.href)"),
+            "it navigates through the Router when present and the browser otherwise: {boundary}",
+        );
+        // REGRESSION. React reuses a boundary instance that lands in the same position of
+        // the NEXT tree, so a boundary left in its error state renders the target route as
+        // nothing: cal.com `/settings` reached `/auth/login` and showed a blank document.
+        assert!(
+            boundary.contains(") => this.setState({ error: null }),"),
+            "the boundary clears its error once the Router has swapped: {boundary}",
+        );
+        // And catching the same target twice must escalate, never loop.
+        assert!(
+            boundary.contains("if (this.redirectedTo === target.href) {")
+                && boundary.contains("this.redirectedTo = target.href;"),
+            "a repeated catch of the same target escalates to a real navigation: {boundary}",
+        );
+        assert!(
+            boundary.contains("    // Not ours: hand it to the app's own error boundaries unchanged.\n    throw error;"),
+            "a non-control error is re-thrown to the app's error.tsx chain: {boundary}",
+        );
+        // The digest carries the target between `;` separators and the URL itself may
+        // contain one, so the parse must rejoin the middle — a naive `split(";")[2]`
+        // truncates `?a=1;b=2` and redirects to the wrong place. Run the real function.
+        let dir = scratch("control-boundary-digest");
+        let driver = dir.join("driver.mjs");
+        let start = boundary
+            .find("export function redirectFromDigest")
+            .expect("the digest parser is exported");
+        let end = boundary.find("// notFound() thrown after").expect("the parser block ends");
+        std::fs::write(
+            &driver,
+            format!(
+                "{}\nconsole.log(JSON.stringify([\
+                 redirectFromDigest(\"NEXT_REDIRECT;replace;/auth/login;307;\"),\
+                 redirectFromDigest(\"NEXT_REDIRECT;push;/x?a=1;b=2;308;\"),\
+                 redirectFromDigest(\"NEXT_HTTP_ERROR_FALLBACK;404\"),\
+                 redirectFromDigest(undefined)]));\n",
+                &boundary[start..end],
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the digest parser runs: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            r#"[{"href":"/auth/login","type":"replace"},{"href":"/x?a=1;b=2","type":"push"},null,null]"#,
+            "the redirect target survives a `;` in the URL and only redirect digests match",
+        );
+    }
+
+    /// The boundary has to be WRAPPED AROUND THE PAGE by the react-server composition —
+    /// both on the ordinary route path and on a parallel/intercepting slot route, or a
+    /// redirect from a slot page renders nothing at all.
+    #[test]
+    fn the_control_boundary_wraps_every_composed_page() {
+        let dir = scratch("control-boundary-composition");
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return <p>hi</p>;}\n").unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        assert!(source.contains("const CONTROL_BOUNDARY = M"), "the island is interned: {source}");
+        assert!(
+            source.contains("node = createElement(CONTROL_BOUNDARY, null, node);"),
+            "documentTree wraps the page in the control boundary: {source}",
+        );
+        assert!(
+            source.contains("createElement(\n    CONTROL_BOUNDARY,\n    null,\n    createElement(page, {"),
+            "composeLevels (slot/intercept routes) wraps its page too: {source}",
+        );
+        // REGRESSION. A boundary only around the page is NOT enough: React's flight writer
+        // errors the whole ROW a throw happened in, and an async LAYOUT owns that row, so a
+        // boundary nested inside it is destroyed with it and never renders. cal.com
+        // `/settings/my-account/profile` proved it — the redirect row arrived in the flight,
+        // the boundary was in the tree, and the browser still sat on the settings page. A
+        // boundary per level, outside each layout, is what survives to act.
+        let loop_body = source
+            .split_once("for (let i = route.levels.length - 1; i >= 0; i -= 1) {")
+            .expect("documentTree composes level by level")
+            .1
+            .split_once("\n  }\n")
+            .unwrap()
+            .0;
+        assert!(
+            loop_body.contains("node = createElement(CONTROL_BOUNDARY, null, node);"),
+            "every level is wrapped, outside its layout: {loop_body}",
+        );
+        let after_layout = loop_body
+            .rsplit_once("SEGMENT_BOUNDARY,")
+            .expect("the layout wrap is in the loop")
+            .1;
+        assert!(
+            after_layout.contains("node = createElement(CONTROL_BOUNDARY, null, node);"),
+            "the level's control boundary sits OUTSIDE its layout: {after_layout}",
+        );
+    }
+
+    /// The orchestrator's "redirect after the shell flushed" report must fire ONLY for a
+    /// redirect that appeared after the meta went out. A redirect the meta CARRIED was
+    /// turned into a real 307 — reporting that one made every redirecting route log a
+    /// scary "the response was already streamed and cannot be changed" line that was
+    /// simply false.
+    #[test]
+    fn the_late_control_report_distinguishes_a_redirect_that_was_honoured() {
+        let dir = scratch("late-control-report");
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children;}\n").unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return <p>hi</p>;}\n").unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            source.contains("metaControl = { redirect: control.redirect, notFound: control.notFound };")
+                && source.contains(
+                    "const lateControl = !!((control.redirect && !metaControl.redirect) || (control.notFound && !metaControl.notFound));",
+                ),
+            "the stream end reports whether the control flow was LATE: {source}",
+        );
+        assert!(
+            source.contains("lateControl, tags:"),
+            "lateControl travels on the stream-end message: {source}",
+        );
+        assert!(
+            NEXT_SERVER_MJS.contains("if (m && m.metaSent && m.lateControl && (m.redirect || m.notFound)) {"),
+            "the orchestrator reports only a LATE redirect/notFound",
+        );
+    }
+
+    /// The real-404 document is a DOCUMENT: Next resolves its `<head>` from the root
+    /// layout's metadata plus `not-found.tsx`'s own `metadata`/`generateMetadata`, which is
+    /// where cal.com sets the `404: This page could not be found.` title and
+    /// `robots: noindex`. diffpack's not-found tree carried a body and no metadata at all,
+    /// so every 404 was served with no <title> and no robots directive.
+    #[test]
+    fn the_not_found_document_resolves_its_own_metadata_chain() {
+        let dir = scratch("not-found-metadata");
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("layout.tsx"),
+            "export const metadata = { title: { template: \"%s | Site\", default: \"Site\" } };\n\
+             export default function L({children}){return <html><body>{children}</body></html>;}\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function P(){return <p>hi</p>;}\n").unwrap();
+        std::fs::write(
+            app.join("not-found.tsx"),
+            "export const metadata = { title: \"404\", robots: { index: false } };\n\
+             export default function NF(){return <p>gone</p>;}\n",
+        )
+        .unwrap();
+        let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
+        let source = rsc_entry_module(
+            &disc,
+            &crate::next_font::FontOutput::default(),
+            &dir.join("error-boundary.tsx"),
+            &dir.join("segment-boundary.tsx"),
+            &dir.join("control-boundary.tsx"),
+            &dir.join("request-context.ts"),
+            None,
+            "",
+        );
+        // Both metadata-carrying modules are imported as namespaces and wired into the
+        // 404's own chain, root layout first so its title template applies.
+        assert!(
+            source.contains(r#"const NOT_FOUND_ROUTE = { path: "/_not-found", metaChain: [NS"#),
+            "the not-found pseudo-route carries a metadata chain: {source}",
+        );
+        let decl = source
+            .split_once("const NOT_FOUND_ROUTE = ")
+            .expect("NOT_FOUND_ROUTE is declared")
+            .1
+            .split_once('\n')
+            .unwrap()
+            .0;
+        assert!(
+            !decl.contains("metaChain: [null]") && !decl.contains("pageMeta: null"),
+            "both the root layout and not-found.tsx contribute metadata: {decl}",
+        );
+        assert!(
+            decl.contains("title: ROOT_META.title") && decl.contains("description: ROOT_META.description"),
+            "the statically scanned root title/description remain the fallback: {decl}",
+        );
+        // notFoundTree renders that chain through the SAME MetadataHead a matched route
+        // uses, and emits the link/font head items with no second <title>.
+        assert!(
+            source.contains("createElement(MetadataHead, { route: NOT_FOUND_ROUTE, params: {} })"),
+            "the 404 head is resolved by MetadataHead: {source}",
+        );
+        let tree = source
+            .split_once("function notFoundTree() {")
+            .expect("notFoundTree is generated")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            tree.contains("...headItems({})") && !tree.contains("headItems(ROOT_META)"),
+            "the 404 takes its title from the resolved chain, not a second static one: {tree}",
+        );
+    }
+
+    /// A redirect()/notFound() that reaches the browser (thrown behind a Suspense boundary,
+    /// so the status was already sent) is CONTROL FLOW. React recovers from it and reports
+    /// it through `onRecoverableError`, whose default handler calls `reportError` — which
+    /// surfaces as an UNCAUGHT page error. cal.com `/event-types` logged out did exactly
+    /// that: the redirect worked and the browser still logged a React #520.
+    ///
+    /// React wraps the original error (`new Error(<code>, { cause })`) before recovering, so
+    /// the digest is not on the error React hands over — the `cause` chain has to be walked.
+    #[test]
+    fn a_control_flow_error_recovered_by_react_is_not_reported_as_a_page_error() {
+        let dir = scratch("recoverable-control-flow");
+        let hooks = dir.join("hooks-context.ts");
+        let client = client_entry_module(&dir, &[dir.join("Island.tsx")], &hooks);
+        assert!(
+            client.contains("onRecoverableError(error, errorInfo) {")
+                && client.contains("if (isControlFlowError(error) || isControlFlowError(errorInfo)) return;")
+                && client.contains("      reportError(error);"),
+            "hydrateRoot filters control flow out of the recoverable-error report: {client}",
+        );
+        // ONE definition of the predicate, imported from the control boundary — the error
+        // boundary reads the SAME one, so they cannot disagree about what control flow is.
+        assert!(
+            client.contains("import { isControlFlowError } from \"")
+                && client.contains("control-boundary.tsx\";"),
+            "the client entry imports the shared predicate: {client}",
+        );
+        let error_boundary = error_boundary_module(&dir.join("control-boundary.tsx"));
+        assert!(
+            error_boundary.contains("import { isControlFlowError } from \"")
+                && error_boundary.contains("if (isControlFlowError(error)) throw error;"),
+            "error.tsx never swallows a redirect/notFound: {error_boundary}",
+        );
+        // Walking the cause chain is the whole point — assert it by RUNNING the predicate.
+        let boundary = control_boundary_module();
+        let start = boundary
+            .find("export function redirectFromDigest")
+            .expect("the digest parser is exported");
+        let end = boundary
+            .find("export default class ControlBoundary")
+            .expect("the predicate block ends before the component");
+        let driver = dir.join("driver.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                "{}\nconst wrap = (e) => Object.assign(new Error(\"react\"), {{ cause: e }});\n\
+                 const redirect = Object.assign(new Error(\"x\"), {{ digest: \"NEXT_REDIRECT;replace;/auth/login;307;\" }});\n\
+                 const nf = Object.assign(new Error(\"x\"), {{ digest: \"NEXT_HTTP_ERROR_FALLBACK;404\" }});\n\
+                 const plain = new Error(\"a real bug\");\n\
+                 const cycle = new Error(\"cycle\"); cycle.cause = cycle;\n\
+                 console.log(JSON.stringify([\
+                 isControlFlowError(redirect), isControlFlowError(wrap(redirect)), \
+                 isControlFlowError(wrap(wrap(nf))), isControlFlowError(plain), \
+                 isControlFlowError(wrap(plain)), isControlFlowError(undefined), \
+                 isControlFlowError(cycle), \
+                 redirectFromDigest(\"NEXT_REDIRECT;push;/x?a=1;b=2;308;\").href]));\n",
+                &boundary[start..end],
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node").arg(&driver).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the predicate runs: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            r#"[true,true,true,false,false,false,false,"/x?a=1;b=2"]"#,
+            "control flow is recognised through the cause chain, a real error still reports, \
+             a self-referential cause terminates, and a `;` in the URL survives the parse",
+        );
     }
 }

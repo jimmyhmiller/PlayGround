@@ -1,3 +1,4 @@
+pub mod build_profile;
 pub mod bundle_benchmark;
 pub mod bundler;
 pub mod config;
@@ -34,6 +35,7 @@ pub mod sfc;
 pub mod route_tree;
 pub mod server_fn;
 pub mod side_effects;
+pub mod source_map;
 pub mod tailwind;
 pub mod tailwind_delegate;
 pub mod transform;

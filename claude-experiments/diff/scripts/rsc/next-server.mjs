@@ -29,12 +29,22 @@ import { pathToFileURL } from "node:url";
 import os from "node:os";
 import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
 
-// DEV (`diffpack dev`): the diffpack dev server re-emits the SSR bundle in place on a
-// client-island edit, but Node caches an ESM module by URL forever. In dev we
-// therefore re-import the SSR bundle with a fresh `?v=<mtime>` whenever its mtime
-// changes, so a manual refresh after an island edit runs the fresh SSR code (the
-// react-server render child is already spawned fresh per request). The production
-// path (a single top-level import) is untouched.
+// The server graphs ship a `.map` beside every emitted chunk (Next emits server
+// source maps unconditionally and so does diffpack — see
+// `next_adapter::default_source_maps`). Node only READS those maps when source-map
+// support is on, so without this the maps exist and nothing consumes them: an
+// exception out of a Server Component or a route handler prints positions in
+// `server.chunk-12.mjs` instead of the file the developer wrote. Node resolves a
+// map lazily, only when a stack is actually formatted, so an app that never throws
+// pays nothing.
+process.setSourceMapsEnabled(true);
+
+// DEV (`diffpack dev`): Node caches an ES module by URL forever, so an edit can only
+// reach an already-loaded server graph through a URL Node has never seen. The dev
+// server pushes each edit to `POST /__diffpack_dev/hot` as a tiny register-only
+// micro-chunk holding ONLY the changed modules; this process applies it to the live
+// SSR runtime and forwards it to the react-server worker. Nothing here polls a file's
+// mtime — see `getSsrRenderers` for why entry-level re-importing cannot work.
 const DEV = process.env.DIFFPACK_NEXT_DEV === "1";
 
 // DEV lifetime: `diffpack dev` holds this process's stdin open as a pipe. When the
@@ -157,10 +167,24 @@ try {
 }
 
 // --- The SSR bundle (in-process; its own inlined React) --------------------------
-// Resolve `renderFlightToDocument` from the SSR bundle. In production it is imported
-// once and cached; in dev it is re-imported (fresh `?v=<mtime>`) whenever the bundle
-// changes on disk, so a client-island re-emit is picked up on the next request.
-let __ssrCache = { key: null, fns: null };
+// Resolve `renderFlightToDocument` from the SSR bundle. It is imported ONCE, in both
+// modes. In dev, freshness after an edit does NOT come from re-importing this entry:
+// see `applyHotUpdate` — the dev server pushes the changed modules as a micro-chunk
+// and the live runtime swaps them in place.
+//
+// Re-importing the entry cannot work and must never be reintroduced. Two independent
+// reasons, both verified:
+//   1. An edit re-emits only the chunk that HOSTS the changed module, so the entry's
+//      own mtime does not move — an mtime-keyed cache never even re-imports.
+//   2. Even forcing a fresh `?v=` on the entry keeps serving stale code, because the
+//      entry reaches its split chunks through `import("./server.chunk-N.mjs")`, whose
+//      URL carries no query: Node returns the already-evaluated chunk from its ESM
+//      cache, so the fresh entry binds against STALE factories (in the react-server
+//      worker that surfaced as a hard `Module is not loaded: <id>` crash, because the
+//      fresh runtime's id table and the cached chunk's registrations disagree).
+// Only a URL Node has never seen re-evaluates, which is exactly what the per-edit
+// micro-chunk is.
+let __ssrCache = { fns: null };
 function pickRender(mod) {
   const ns = mod.default && mod.default.renderFlightToDocument ? mod.default : mod;
   const doc = ns.renderFlightToDocument;
@@ -172,15 +196,8 @@ function pickRender(mod) {
   return { doc, stream };
 }
 async function getSsrRenderers() {
-  if (!DEV) {
-    if (!__ssrCache.fns) __ssrCache.fns = pickRender(await import(pathToFileURL(ssrEntry).href));
-    return __ssrCache.fns;
-  }
-  const key = statSync(ssrEntry).mtimeMs;
-  if (__ssrCache.fns && __ssrCache.key === key) return __ssrCache.fns;
-  const fns = pickRender(await import(pathToFileURL(ssrEntry).href + "?v=" + key));
-  __ssrCache = { key, fns };
-  return fns;
+  if (!__ssrCache.fns) __ssrCache.fns = pickRender(await import(pathToFileURL(ssrEntry).href));
+  return __ssrCache.fns;
 }
 async function getRenderFlightToDocument() {
   return (await getSsrRenderers()).doc;
@@ -197,11 +214,10 @@ await getSsrRenderers();
 // EVERY request — ruinous for production latency and memory. Instead we keep a pool of
 // long-lived `serve` workers (`rsc-render/server.mjs serve`) that stay warm and answer
 // render/action requests over newline-delimited JSON on stdin/stdout. DEV runs ONE
-// worker (a single browser) which re-imports its bundle with `?v=<mtime>` on a diffpack
-// re-emit so a server-component edit is picked up without a respawn; PRODUCTION runs a
-// small pool (round-robined) so concurrent requests render in parallel, with the bundle
-// mtime stable so each worker imports it exactly once. Same process isolation, no
-// per-request spawn.
+// worker (a single browser), hot-patched in place by the `invalidate` op below so a
+// server-component edit is picked up without a respawn; PRODUCTION runs a small pool
+// (round-robined) so concurrent requests render in parallel, each importing the bundle
+// exactly once. Same process isolation, no per-request spawn.
 // Pool size trades memory for CPU-bound render parallelism. Each worker is a separate
 // Node process (~one Node baseline + the react-server bundle), so memory scales with
 // the count. Default to ONE: an RSC render is mostly async-I/O-bound, so a single
@@ -215,9 +231,19 @@ const POOL_SIZE = DEV
   : Math.max(1, Number(process.env.DIFFPACK_RSC_WORKERS) || 1);
 let workerPool = null;
 let poolCursor = 0;
+// DEV: the react-server hot updates (see `POST /__diffpack_dev/hot`) the dev server has
+// not yet re-emitted to disk in full, replayed into any worker spawned meanwhile.
+let pendingHot = [];
 
 function spawnWorker() {
-  const child = spawn(process.execPath, [rscRenderEntry, "serve"], {
+  // `--enable-source-maps`, not `process.setSourceMapsEnabled()`: this worker's entry
+  // IS an emitted chunk (`rsc-render/server.mjs`), so there is no diffpack-authored
+  // line in it to make the call from, and source-map support does not cross a process
+  // boundary. Without the flag the SERVER COMPONENT render — the layer whose
+  // exceptions are hardest to place — reports positions in `server.chunk-N.mjs` while
+  // its `.map` sits unread beside it. The worker's stderr is this server's log, so
+  // this is the trace a developer actually reads.
+  const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, "serve"], {
     stdio: ["pipe", "pipe", "inherit"], // worker stderr -> server log
   });
   const pending = new Map();
@@ -295,6 +321,21 @@ function spawnWorker() {
     streamPending.set(id, handlers);
     child.stdin.write(JSON.stringify({ id, ...req }) + "\n");
   };
+  // DEV: a freshly spawned worker loads `rsc-render/` FROM DISK, which lags the live
+  // process by every hot update the dev server has not yet re-emitted in full. Replay
+  // them, in order, before this worker can answer anything — the worker reads stdin
+  // sequentially, so queueing the ops here is enough to order them ahead of the first
+  // render. `pendingHot` is the dev server's own list (it re-sends it on every push and
+  // empties it once the full re-emit has landed on disk), so the replay is never a
+  // guess about what disk holds.
+  for (const update of pendingHot) {
+    worker.call({ op: "invalidate", chunk: update.chunk, ids: update.ids }).catch((error) => {
+      console.error(
+        "next-server: replaying a dev hot update into a respawned react-server worker failed:",
+        error && error.stack ? error.stack : String(error),
+      );
+    });
+  }
   return worker;
 }
 
@@ -307,6 +348,49 @@ function nextWorker() {
   const worker = workerPool[poolCursor % workerPool.length];
   poolCursor += 1;
   return worker;
+}
+
+// --- DEV hot updates (`POST /__diffpack_dev/hot`) ---------------------------------
+// The dev server's chunk-granular invalidation channel, the Next analogue of the
+// TanStack control endpoint (`dev_server::hmr_reload_server`). Per edit it renders a
+// register-only micro-chunk holding ONLY the changed modules of a server graph and
+// POSTs its path here. Applying one is: import the micro-chunk (a URL Node has never
+// seen, so it really evaluates and re-registers those factories into the LIVE runtime),
+// then `serverInvalidate(ids)` — which drops the cache for the changed modules and
+// everything that imports them up to the entry, re-runs exactly that path, and
+// republishes the entry's exports. Everything else (React, the app's dependencies)
+// stays cached, so the React singleton and the process both survive.
+//
+// `pendingHot` (declared with the worker pool above) mirrors the react-server updates
+// the dev server has not yet re-emitted to disk in full, so a respawned worker can be
+// caught up — see `spawnWorker`.
+
+/// Resolve the live HMR runtime of the bundle loaded in THIS process. Emitted only in
+/// dev builds (`EmitOptions.hmr`), so its absence is a hard error, never a fallback.
+function hotRuntime(graph) {
+  const runtime = globalThis.__diffpack_hmr_runtime;
+  if (!runtime || typeof runtime.serverInvalidate !== "function") {
+    throw new Error(
+      `diffpack dev: the ${graph} bundle exposes no __diffpack_hmr_runtime.serverInvalidate; it was not emitted with HMR enabled, so a hot update cannot be applied`,
+    );
+  }
+  return runtime;
+}
+
+/// Apply one micro-chunk to the SSR bundle living in THIS process and rebind the
+/// cached render functions to the entry's fresh exports.
+async function applySsrHotUpdate(update) {
+  await import(pathToFileURL(update.chunk).href);
+  await hotRuntime("ssr").serverInvalidate(update.ids, []);
+  // `serverInvalidate` re-runs the entry and publishes its fresh exports here; the
+  // namespace object the original `import` returned is bound to the OLD run.
+  const fresh = globalThis.__diffpack_ssr_entry;
+  if (!fresh) {
+    throw new Error(
+      "diffpack dev: the ssr runtime did not republish globalThis.__diffpack_ssr_entry after serverInvalidate; the entry re-run failed",
+    );
+  }
+  __ssrCache = { fns: pickRender(fresh) };
 }
 
 // --- Spawn the react-server child for a flight (render or action) ----------------
@@ -367,7 +451,8 @@ async function runReactServer(args, stdinBody, reqCtxOverride) {
   }
   // Unknown op falls through to a one-shot spawn (defensive; not reached today).
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [rscRenderEntry, ...args], {
+    // See `spawnWorker`: an emitted-chunk entry takes the flag.
+    const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, ...args], {
       stdio: ["pipe", "pipe", "pipe", "pipe"],
     });
     const out = [];
@@ -574,26 +659,110 @@ function detectPreferredLocale(i18n, cookieHeader, acceptLanguage) {
   return i18n.defaultLocale;
 }
 
+// --- `has` / `missing` conditions on a redirect/rewrite/header rule -------------------
+// A rule may be conditional on a request header, cookie, query parameter or host
+// (`has`: all must match; `missing`: none may). Ignoring them does not make a rule
+// inert — it makes it fire UNCONDITIONALLY, which is strictly worse than not
+// supporting it: cal.com's `/api/auth/:path*` -> `/404` redirect is gated on a
+// `callbackUrl` query, so every one of its auth API requests was redirected to /404.
+//
+// Semantics mirror Next's `matchHas` (next/dist/shared/lib/router/utils/prepare-
+// destination.ts, MIT, Copyright (c) Vercel): a bare `{type,key}` matches when the
+// value is merely PRESENT (and binds it as a param); with a `value` the whole value
+// must match `^value$`, and any named capture groups become destination params.
+// `host` compares the hostname with the port removed.
+//
+// Next keeps only ASCII letters in a param name (`getSafeParamName`), so the name is
+// substitutable in a `:param` destination.
+function safeParamName(name) {
+  let out = "";
+  for (const ch of String(name)) if (/[A-Za-z]/.test(ch)) out += ch;
+  return out;
+}
+function hasItemValue(item, req, url) {
+  switch (item.type) {
+    case "header":
+      return req.headers[String(item.key).toLowerCase()];
+    case "cookie":
+      return readCookie(req.headers.cookie, item.key) ?? undefined;
+    case "query": {
+      const all = url.searchParams.getAll(item.key);
+      if (all.length === 0) return undefined;
+      return all.length === 1 ? all[0] : all;
+    }
+    case "host": {
+      const host = req.headers.host;
+      return host ? String(host).split(":", 1)[0].toLowerCase() : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+// Returns the params a matching set of conditions contributes, or null when the rule
+// must not apply. A rule with neither `has` nor `missing` always matches (no params).
+function matchHas(rule, req, url) {
+  const has = Array.isArray(rule.has) ? rule.has : [];
+  const missing = Array.isArray(rule.missing) ? rule.missing : [];
+  if (!has.length && !missing.length) return {};
+  const params = {};
+  const hasMatch = (item) => {
+    const value = hasItemValue(item, req, url);
+    if (!item.value && value) {
+      params[safeParamName(item.key)] = Array.isArray(value) ? value[value.length - 1] : value;
+      return true;
+    }
+    if (value) {
+      const matcher = new RegExp(`^${item.value}$`);
+      const target = Array.isArray(value) ? value[value.length - 1] : value;
+      const matches = String(target).match(matcher);
+      if (matches) {
+        if (matches.groups) for (const k of Object.keys(matches.groups)) params[k] = matches.groups[k];
+        else if (item.type === "host" && matches[0]) params.host = matches[0];
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!has.every(hasMatch)) return null;
+  if (missing.some(hasMatch)) return null;
+  return params;
+}
+
 // Apply next.config redirects (short-circuit) + rewrites (mutate url) and COLLECT
 // matching response headers. Returns { redirect } to short-circuit, or { headers }.
-function applyNextConfig(url) {
+// `req` is needed for the `has`/`missing` conditions above.
+function applyNextConfig(url, req) {
   for (const r of nextConfig.redirects) {
     const params = matchCompiled(r.__compiled, url.pathname);
-    if (params) {
-      return { redirect: { status: r.permanent ? 308 : r.statusCode || 307, location: substitutePattern(r.destination, params) } };
-    }
+    if (!params) continue;
+    const conditionParams = matchHas(r, req, url);
+    if (!conditionParams) continue;
+    const all = { ...params, ...conditionParams };
+    return {
+      redirect: {
+        status: r.permanent ? 308 : r.statusCode || 307,
+        location: substitutePattern(r.destination, all),
+      },
+    };
   }
   for (const r of nextConfig.rewrites) {
     const params = matchCompiled(r.__compiled, url.pathname);
-    if (params) {
-      url.pathname = substitutePattern(r.destination, params);
-      break;
-    }
+    if (!params) continue;
+    const conditionParams = matchHas(r, req, url);
+    if (!conditionParams) continue;
+    url.pathname = substitutePattern(r.destination, { ...params, ...conditionParams });
+    break;
   }
   const headers = [];
   for (const h of nextConfig.headers) {
     const params = matchCompiled(h.__compiled, url.pathname);
-    if (params) for (const kv of h.headers || []) headers.push([kv.key, kv.value]);
+    if (!params) continue;
+    const conditionParams = matchHas(h, req, url);
+    if (!conditionParams) continue;
+    const all = { ...params, ...conditionParams };
+    for (const kv of h.headers || []) {
+      headers.push([kv.key, substitutePattern(kv.value, all)]);
+    }
   }
   return { headers };
 }
@@ -610,10 +779,13 @@ async function getManifest() {
       const routes = msg.routes || {};
       __manifest = {
         handlers: (routes.handlers || []).map((r) => ({ segments: r.segments, methods: new Set(r.methods) })),
+        // A hybrid app's `pages/api/**` endpoints. They are dispatched through the same
+        // `route` op as an app-router `route.ts`, so they only need their patterns here.
+        pagesApi: (routes.pagesApi || []).map((r) => ({ segments: r.segments })),
         hasMiddleware: !!routes.hasMiddleware,
       };
     } catch {
-      __manifest = { handlers: [], hasMiddleware: false };
+      __manifest = { handlers: [], pagesApi: [], hasMiddleware: false };
     }
   }
   return __manifest;
@@ -643,9 +815,24 @@ function matchHandlerSegments(segments, parts) {
   }
   return i === parts.length ? params : null;
 }
+// Whether `filePath` is a REGULAR FILE that can be streamed as a static asset. A
+// directory exists but cannot be read, and a broken symlink does not resolve — both must
+// fall through to route rendering rather than being answered with a truncated 200.
+function isStaticFile(filePath) {
+  try {
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function pathIsRouteHandler(pathname) {
   const parts = pathname.split("/").filter(Boolean);
-  for (const h of (await getManifest()).handlers) {
+  const manifest = await getManifest();
+  for (const h of manifest.handlers) {
+    if (matchHandlerSegments(h.segments, parts)) return true;
+  }
+  for (const h of manifest.pagesApi) {
     if (matchHandlerSegments(h.segments, parts)) return true;
   }
   return false;
@@ -1106,7 +1293,7 @@ async function serveOptimizedImage(url, res) {
       const rel = src.split("?")[0].replace(/^\/+/, "");
       const filePath = join(publicDir, rel);
       // Path-traversal guard: the resolved file must stay inside public/.
-      if (!filePath.startsWith(publicDir) || !existsSync(filePath)) {
+      if (!filePath.startsWith(publicDir) || !isStaticFile(filePath)) {
         return void res.writeHead(404, { "content-type": "text/plain" }).end("image not found");
       }
       bytes = readFileSync(filePath);
@@ -1179,6 +1366,45 @@ const server = createServer(async (req, res) => {
   });
   try {
     const url = new URL(req.url, "http://localhost");
+    // DEV hot update: the dev server's chunk-granular invalidation channel. Applied
+    // BEFORE the reply, so by the time `diffpack dev` pushes the browser update both
+    // server graphs in this process tree already run the new code — the next document
+    // request cannot observe the old one. Any failure is a 500 with the reason; the dev
+    // server surfaces it in the error overlay rather than silently serving stale HTML.
+    if (req.method === "POST" && url.pathname === "/__diffpack_dev/hot") {
+      if (!DEV) {
+        res.writeHead(404).end("hot updates are dev-only");
+        return;
+      }
+      const body = [];
+      for await (const chunk of req) body.push(Buffer.from(chunk));
+      let applied = { ssr: 0, reactServer: 0 };
+      try {
+        const msg = JSON.parse(Buffer.concat(body).toString("utf8") || "{}");
+        // The dev server owns the truth about what disk still lacks; it re-sends the
+        // whole list every push, so this is a replace, not an append.
+        pendingHot = Array.isArray(msg.pendingReactServer) ? msg.pendingReactServer : [];
+        if (msg.ssr) {
+          await applySsrHotUpdate(msg.ssr);
+          applied.ssr = msg.ssr.ids.length;
+        }
+        if (msg.reactServer) {
+          const reply = await nextWorker().call({
+            op: "invalidate",
+            chunk: msg.reactServer.chunk,
+            ids: msg.reactServer.ids,
+          });
+          applied.reactServer = reply.invalidated || 0;
+        }
+      } catch (error) {
+        res
+          .writeHead(500, { "content-type": "text/plain" })
+          .end(error && error.stack ? error.stack : String(error));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, applied }));
+      return;
+    }
     // Server actions.
     if (req.method === "POST" && url.pathname === "/_action/") {
       const id = req.headers["x-diffpack-action-id"];
@@ -1302,7 +1528,12 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET") {
       const name = url.pathname.replace(/^\//, "");
       const filePath = join(publicDir, name);
-      if (name && existsSync(filePath) && filePath.startsWith(publicDir)) {
+      // A DIRECTORY is not a static asset. `existsSync` says yes for one, and the app
+      // route that shares its name then died between the header and the body: the 200 +
+      // content-type went out, `readFileSync` threw EISDIR, and the response was never
+      // ended — an empty body under a 200, with the page never rendered. cal.com ships
+      // `public/apps/`, so `/apps` (a real page) answered exactly that.
+      if (name && filePath.startsWith(publicDir) && isStaticFile(filePath)) {
         res.writeHead(200, { "content-type": MIME[extname(filePath)] || "application/octet-stream" });
         res.end(readFileSync(filePath));
         return;
@@ -1345,7 +1576,7 @@ const server = createServer(async (req, res) => {
     // redirect short-circuits with a 3xx; a matching rewrite mutates url.pathname (so
     // the render/route dispatch below sees the destination); matching header rules are
     // collected and merged onto whatever response we ultimately send.
-    const nc = applyNextConfig(url);
+    const nc = applyNextConfig(url, req);
     if (nc.redirect) {
       const h = { location: addBasePath(nc.redirect.location, localeSeg) };
       if (mwSetCookies.length) h["set-cookie"] = mwSetCookies;
@@ -1469,7 +1700,10 @@ const server = createServer(async (req, res) => {
           onEnd: (m) => {
             // redirect()/notFound() thrown BEHIND a Suspense boundary (after the shell
             // already flushed) can't unwind the streamed response. Never silent: log it.
-            if (m && m.metaSent && (m.redirect || m.notFound)) {
+            // `lateControl` is what makes this a real report: a redirect the META carried
+            // was turned into a real 307 above, and warning about THAT one would be noise
+            // on every single redirecting route.
+            if (m && m.metaSent && m.lateControl && (m.redirect || m.notFound)) {
               const what = m.redirect ? `redirect(${m.redirect})` : "notFound()";
               console.error(
                 `[diffpack] next: ${what} after the shell flushed on ${url.pathname}; the response was already streamed and cannot be changed.`,
@@ -1521,12 +1755,25 @@ const server = createServer(async (req, res) => {
         return;
       }
       // Server-side notFound(): render the real not-found tree (buffered — an error
-      // path) and serve it 404.
+      // path) and serve it 404. The render is asked for BY FLAG (`reqCtx.notFound`) at
+      // the pathname the visitor requested, never by a sentinel pathname: an app with a
+      // catch-all route matches every sentinel too, and rendering that catch-all page is
+      // how the 404 document ended up empty.
       if (meta.notFound) {
         const nf = await runReactServer(
-          ["render", "/__diffpack_notfound__", clientManifestPath],
-          JSON.stringify(reqCtxObj),
+          ["render", url.pathname, clientManifestPath],
+          JSON.stringify({ ...reqCtxObj, notFound: true }),
         );
+        // The not-found tree cannot itself redirect or 404 — if it reports either, the
+        // react-server entry did not honour the flag and we would be about to serve the
+        // WRONG document under a 404. Fail loudly instead.
+        if (nf.notFound || nf.redirect) {
+          throw new Error(
+            `next-server: the not-found document render for ${url.pathname} itself signalled ` +
+              `${nf.redirect ? `redirect(${nf.redirect})` : "notFound()"} — the react-server entry ` +
+              `did not honour reqCtx.notFound and rendered a matched route instead of app/not-found`,
+          );
+        }
         const nfDoc = await (await getRenderFlightToDocument())(
           new Uint8Array(nf.flight),
           serverConsumerManifest,

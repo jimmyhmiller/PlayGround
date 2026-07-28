@@ -466,9 +466,9 @@ fn server_exports<'a>(
     Ok((named, default_value))
 }
 
-/// Transforms a `"use server"` module for the SERVER build (both the normal SSR
-/// server and the react-server graph) into its server-reference surface: keeps the
-/// real bodies verbatim, imports `registerServerReference` from
+/// Transforms a `"use server"` module for the REACT-SERVER graph into its
+/// server-reference surface: keeps the real bodies verbatim, imports
+/// `registerServerReference` from
 /// `react-server-dom-webpack/server`, and registers each export under its
 /// `action_reference_id`. Named exports are registered by a footer that references
 /// the live local binding; the default export's value is wrapped in place. The

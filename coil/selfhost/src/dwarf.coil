@@ -61,9 +61,8 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (str-eq (load (field (al-at [DwStr] (field t items) (load i)) s)) s)
-                    (store! found (load (field (al-at [DwStr] (field t items) (load i)) off)))
-                    0)
+                (when (str-eq (load (field (al-at [DwStr] (field t items) (load i)) s)) s)
+                      (store! found (load (field (al-at [DwStr] (field t items) (load i)) off))))
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load found) 0)
         (load found)
@@ -88,9 +87,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (cast i64 (slice-get text (load i))) 10)
-                    (al-push! (mut ls) (iadd (load i) 1))
-                    0)
+                (when (icmp-eq (cast i64 (slice-get text (load i))) 10) (al-push! (mut ls) (iadd (load i) 1)))
                 (store! i (iadd (load i) 1)))))
     (dw-box-al [i64] a (load ls))))
 ; (line, col) both 1-based; returned packed line<<20|col.
@@ -468,7 +465,7 @@
                                         (let [(mut ex) (al-new [u8] a)]
                                           (b-u8! (mut ex) 145)  ; DW_OP_fbreg
                                           (sleb! (mut ex) fboff)
-                                          (if (load (field vp indirect)) (b-u8! (mut ex) 6) 0)  ; DW_OP_deref
+                                          (when (load (field vp indirect)) (b-u8! (mut ex) 6))  ; DW_OP_deref
                                           (uleb! (mut info) (al-len [u8] (load ex)))
                                           (b-bytes! (mut info) (al-slice [u8] (load ex)))))
                                       (store! v (iadd (load v) 1))))))
@@ -530,31 +527,30 @@
                               ls (al-get [(ptr (ArrayList i64))] (load lstarts) (load (field e source)))
                               lc (dw-linecol ls (load (field e lo)))
                               f (iadd (load (field e source)) 1)]
-                          (if (icmp-ne f (load curfile))
-                              (do (b-u8! (mut line) 4) (uleb! (mut line) f) (store! curfile f) 0)
-                              0)
+                          (when (icmp-ne f (load curfile))
+                                (b-u8! (mut line) 4)
+                                (uleb! (mut line) f)
+                                (store! curfile f)
+                                0)
                           (b-u8! (mut line) 5)
                           (uleb! (mut line) (iand lc 1048575))
-                          (if (icmp-ne (ishr lc 20) (load curline))
-                              (do
+                          (when (icmp-ne (ishr lc 20) (load curline))
                                 (b-u8! (mut line) 3)
                                 (sleb! (mut line) (isub (ishr lc 20) (load curline)))
                                 (store! curline (ishr lc 20))
                                 0)
-                              0)
-                          (if (icmp-ne (load (field e textoff)) (load curoff))
-                              (do
+                          (when (icmp-ne (load (field e textoff)) (load curoff))
                                 (b-u8! (mut line) 2)
                                 (uleb! (mut line) (isub (load (field e textoff)) (load curoff)))
                                 (store! curoff (load (field e textoff)))
                                 0)
-                              0)
-                          (if (load (field e pe)) (b-u8! (mut line) 10) 0)  ; set_prologue_end
+                          (when (load (field e pe)) (b-u8! (mut line) 10))  ; set_prologue_end
                           (b-u8! (mut line) 1))  ; copy
                         (store! i (iadd (load i) 1)))))
-            (if (icmp-gt textlen (load curoff))
-                (do (b-u8! (mut line) 2) (uleb! (mut line) (isub textlen (load curoff))) 0)
-                0)
+            (when (icmp-gt textlen (load curoff))
+                  (b-u8! (mut line) 2)
+                  (uleb! (mut line) (isub textlen (load curoff)))
+                  0)
             (b-u8! (mut line) 0)
             (uleb! (mut line) 1)
             (b-u8! (mut line) 1))  ; end_sequence

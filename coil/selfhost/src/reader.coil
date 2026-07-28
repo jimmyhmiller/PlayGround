@@ -55,10 +55,8 @@
         (let [c0 (cast i64 (slice-get s 0))]
           (if (and (icmp-ge c0 48) (icmp-le c0 57))
               true
-              (if (or (icmp-eq c0 45) (or (icmp-eq c0 43) (icmp-eq c0 46)))
-                  (if (icmp-ge n 2)
-                      (let [c1 (cast i64 (slice-get s 1))] (and (icmp-ge c1 48) (icmp-le c1 57)))
-                      false)
+              (if (and (or (icmp-eq c0 45) (or (icmp-eq c0 43) (icmp-eq c0 46))) (icmp-ge n 2))
+                  (let [c1 (cast i64 (slice-get s 1))] (and (icmp-ge c1 48) (icmp-le c1 57)))
                   false))))))
 
 (defn parse-int [(s (slice u8))] (-> (Option i64))
@@ -71,7 +69,7 @@
                   (let [c0 (cast i64 (slice-get s 0))]
                     (if (icmp-eq c0 45)
                         (do (store! neg true) (store! i 1))
-                        (if (icmp-eq c0 43) (store! i 1) 0)))
+                        (when (icmp-eq c0 43) (store! i 1))))
                   (if (icmp-ge (load i) n)
                       (None [i64])
                       (let [(mut mag) 0
@@ -103,38 +101,34 @@
                     (let [c0 (cast i64 (slice-get s 0))]
                       (if (icmp-eq c0 45)
                           (do (store! neg2 true) (store! bstart 1))
-                          (if (icmp-eq c0 43) (store! bstart 1) 0)))
+                          (when (icmp-eq c0 43) (store! bstart 1))))
                     (let [blen (isub n (load bstart))
                           (mut radix) 0
                           (mut dstart) (load bstart)]
-                      (if (and (icmp-ge blen 2) (icmp-eq (cast i64 (slice-get s (load bstart))) 48))
-                          (let [c1 (cast i64 (slice-get s (iadd (load bstart) 1)))]
-                            (cond (or (icmp-eq c1 120) (icmp-eq c1 88))
-                                    (do (store! radix 16) (store! dstart (iadd (load bstart) 2)))
-                                  (or (icmp-eq c1 98) (icmp-eq c1 66))
-                                    (do (store! radix 2) (store! dstart (iadd (load bstart) 2)))
-                                  (or (icmp-eq c1 111) (icmp-eq c1 79))
-                                    (do (store! radix 8) (store! dstart (iadd (load bstart) 2)))
-                                  :else 0))
-                          0)
-                      (if (icmp-eq (load radix) 0)
-                          (let [body (subslice s (load bstart) n)
-                                has-us
-                                  (do
-                                    (let [(mut f) false
-                                          (mut j) (load bstart)]
-                                      (loop (if (icmp-ge (load j) n)
-                                                (break)
-                                                (do
-                                                  (if (icmp-eq (cast i64 (slice-get s (load j))) 95)
-                                                      (do (store! f true) 0)
-                                                      0)
-                                                  (store! j (iadd (load j) 1)))))
-                                      (load f)))]
-                            (if (and has-us (looks-numeric body))
-                                (do (store! radix 10) (store! dstart (load bstart)))
-                                0))
-                          0)
+                      (when (and (icmp-ge blen 2) (icmp-eq (cast i64 (slice-get s (load bstart))) 48))
+                            (let [c1 (cast i64 (slice-get s (iadd (load bstart) 1)))]
+                              (cond (or (icmp-eq c1 120) (icmp-eq c1 88))
+                                      (do (store! radix 16) (store! dstart (iadd (load bstart) 2)))
+                                    (or (icmp-eq c1 98) (icmp-eq c1 66))
+                                      (do (store! radix 2) (store! dstart (iadd (load bstart) 2)))
+                                    (or (icmp-eq c1 111) (icmp-eq c1 79))
+                                      (do (store! radix 8) (store! dstart (iadd (load bstart) 2)))
+                                    :else 0)))
+                      (when (icmp-eq (load radix) 0)
+                            (let [body (subslice s (load bstart) n)
+                                  has-us
+                                    (do
+                                      (let [(mut f) false
+                                            (mut j) (load bstart)]
+                                        (loop (if (icmp-ge (load j) n)
+                                                  (break)
+                                                  (do
+                                                    (when (icmp-eq (cast i64 (slice-get s (load j))) 95)
+                                                          (store! f true)
+                                                          0)
+                                                    (store! j (iadd (load j) 1)))))
+                                        (load f)))]
+                              (when (and has-us (looks-numeric body)) (store! radix 10) (store! dstart (load bstart)))))
                       (if (icmp-eq (load radix) 0)
                           (None [i64])
                           (let [(mut mag) 0
@@ -147,28 +141,27 @@
                                       (break)
                                       (let [c (cast i64 (slice-get s (load j)))]
                                         (store! j (iadd (load j) 1))
-                                        (if (icmp-eq c 95)
-                                            0
-                                            (let [dv
-                                                    (let [v0
-                                                            (cond (and (icmp-ge c 48) (icmp-le c 57)) (isub c 48)
-                                                                  (and (icmp-ge c 97) (icmp-le c 122))
-                                                                    (iadd (isub c 97) 10)
-                                                                  (and (icmp-ge c 65) (icmp-le c 90))
-                                                                    (iadd (isub c 65) 10)
-                                                                  :else -1)]
-                                                      (if (icmp-lt v0 0) -1 (if (icmp-ge v0 rr) -1 v0)))]
-                                              (if (icmp-lt dv 0)
-                                                  (do (store! bad true) (break))
-                                                  (let [maxdiv (udiv -1 rr)
-                                                        maxrem (urem -1 rr)]
-                                                    (if (or (icmp-gt (cast u64 (load mag)) (cast u64 maxdiv))
-                                                            (and (icmp-eq (load mag) maxdiv)
-                                                                 (icmp-gt (cast u64 dv) (cast u64 maxrem))))
-                                                        (do (store! ovf true) (break))
-                                                        (do
-                                                          (store! mag (iadd (imul (load mag) rr) dv))
-                                                          (store! count (iadd (load count) 1)))))))))))
+                                        (unless (icmp-eq c 95)
+                                                (let [dv
+                                                        (let [v0
+                                                                (cond (and (icmp-ge c 48) (icmp-le c 57)) (isub c 48)
+                                                                      (and (icmp-ge c 97) (icmp-le c 122))
+                                                                        (iadd (isub c 97) 10)
+                                                                      (and (icmp-ge c 65) (icmp-le c 90))
+                                                                        (iadd (isub c 65) 10)
+                                                                      :else -1)]
+                                                          (if (or (icmp-lt v0 0) (icmp-ge v0 rr)) -1 v0))]
+                                                  (if (icmp-lt dv 0)
+                                                      (do (store! bad true) (break))
+                                                      (let [maxdiv (udiv -1 rr)
+                                                            maxrem (urem -1 rr)]
+                                                        (if (or (icmp-gt (cast u64 (load mag)) (cast u64 maxdiv))
+                                                                (and (icmp-eq (load mag) maxdiv)
+                                                                     (icmp-gt (cast u64 dv) (cast u64 maxrem))))
+                                                            (do (store! ovf true) (break))
+                                                            (do
+                                                              (store! mag (iadd (imul (load mag) rr) dv))
+                                                              (store! count (iadd (load count) 1)))))))))))
                             (if (or (load bad) (or (load ovf) (icmp-eq (load count) 0)))
                                 (None [i64])
                                 (Some (if (load neg2) (isub 0 (load mag)) (load mag))))))))))))))
@@ -188,9 +181,9 @@
                                        (break)
                                        (do
                                          (let [c (cast i64 (slice-get s (load j)))]
-                                           (if (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69)))
-                                               (do (store! f true) 0)
-                                               0))
+                                           (when (or (icmp-eq c 46) (or (icmp-eq c 101) (icmp-eq c 69)))
+                                                 (store! f true)
+                                                 0))
                                          (store! j (iadd (load j) 1)))))
                              (load f))))
                     (let [a (malloc-allocator)
@@ -284,7 +277,7 @@
                                   (break)
                                   (let [ch (cast i64 (slice-get src (load i)))]
                                     (store! i (iadd (load i) 1))
-                                    (if (icmp-eq ch 10) (break) 0))))
+                                    (when (icmp-eq ch 10) (break)))))
                       (or (icmp-eq c 40) (icmp-eq c 91))
                         (do
                           (al-push! (mut toks) (mk-tok (TOpen c) (load i) (iadd (load i) 1)))
@@ -327,16 +320,15 @@
                               (let [first (cast i64 (slice-get src (load i)))]
                                 (store! i (iadd (load i) 1))
                                 (let [(mut nend) (load i)]
-                                  (if (sh-is-alpha first)
-                                      (loop (if (icmp-ge (load i) n)
-                                                (break)
-                                                (let [cc (cast i64 (slice-get src (load i)))]
-                                                  (if (sh-is-alnum cc)
-                                                      (do
-                                                        (store! i (iadd (load i) 1))
-                                                        (store! nend (load i)))
-                                                      (break)))))
-                                      0)
+                                  (when (sh-is-alpha first)
+                                        (loop (if (icmp-ge (load i) n)
+                                                  (break)
+                                                  (let [cc (cast i64 (slice-get src (load i)))]
+                                                    (if (sh-is-alnum cc)
+                                                        (do
+                                                          (store! i (iadd (load i) 1))
+                                                          (store! nend (load i)))
+                                                        (break))))))
                                   (let [nlen (isub (load nend) (iadd cstart 1))
                                         v
                                           (if (icmp-eq nlen 1)
@@ -552,7 +544,7 @@
 (defn diag-with-source [(d Diag) (source i64)] (-> Diag)
   (let [p (alloc-stack Diag)]
     (store! p d)
-    (if (icmp-ge (load (field p lo)) 0) (store! (field p source) source) 0)
+    (when (icmp-ge (load (field p lo)) 0) (store! (field p source) source))
     (load p)))
 
 (defn read-all [(a (ptr Allocator)) (src (slice u8)) (source i64)] (-> (Result (ptr (ArrayList Sexp)) Diag))

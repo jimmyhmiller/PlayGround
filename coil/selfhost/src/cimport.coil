@@ -172,7 +172,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (slice-get [u8] s (load i)) (cast u8 47)) (store! cut (iadd (load i) 1)) 0)
+                (when (icmp-eq (slice-get [u8] s (load i)) (cast u8 47)) (store! cut (iadd (load i) 1)))
                 (store! i (iadd (load i) 1)))))
     (subslice [u8] s (load cut) n)))
 
@@ -183,7 +183,7 @@
       (let [(mut neg) false
             (mut v) n
             (mut tmp) (al-new [u8] a)]
-        (if (icmp-lt (load v) 0) (do (store! neg true) (store! v (isub 0 (load v))) 0) 0)
+        (when (icmp-lt (load v) 0) (store! neg true) (store! v (isub 0 (load v))) 0)
         (loop (if (icmp-eq (load v) 0)
                   (break)
                   (do
@@ -191,7 +191,7 @@
                     (store! v (idiv (load v) 10)))))
         (let [(mut out) (sb-new a)
               len (al-len [u8] (load tmp))]
-          (if (load neg) (sb-push-byte! (mut out) (cast u8 45)) 0)
+          (when (load neg) (sb-push-byte! (mut out) (cast u8 45)))
           (let [(mut k) len]
             (loop (if (icmp-le (load k) 0)
                       (break)
@@ -265,7 +265,7 @@
 (defn j-number [(p (ptr P))] (-> Json)
   (let [(mut neg) 0
         (mut v) 0]
-    (if (icmp-eq (p-peek p) 45) (do (store! neg 1) (p-adv p)) 0)
+    (when (icmp-eq (p-peek p) 45) (store! neg 1) (p-adv p))
     (loop (let [c (p-peek p)] (if (j-digit? c) (do (store! v (iadd (imul (load v) 10) (isub c 48))) (p-adv p)) (break))))
     (loop (let [c (p-peek p)]  ; swallow . / digits / e / +/-
             (if (or (icmp-eq c 46)
@@ -432,19 +432,18 @@
                       (loop (if (icmp-ge (load i) n)
                                 (break)
                                 (let [p (al-get [Json] (load inner) (load i))]
-                                  (if (str-eq (jkind p) "ParmVarDecl")
-                                      (match (jgets (jget p "type") "qualType")
-                                        (None [] (do (store! err (Some "a parameter has no type")) (break)))
-                                        (Some [ty]
-                                              (match (map-type a ty ctx)
-                                                (Err [e] (do (store! err (Some e)) (break)))
-                                                (Ok [mt]
-                                                    (do
-                                                      (if (load first)
-                                                          (do (store! first false) 0)
-                                                          (sb-push-str! (mut ps) " "))
-                                                      (sb-push-str! (mut ps) mt))))))
-                                      0)
+                                  (when (str-eq (jkind p) "ParmVarDecl")
+                                        (match (jgets (jget p "type") "qualType")
+                                          (None [] (do (store! err (Some "a parameter has no type")) (break)))
+                                          (Some [ty]
+                                                (match (map-type a ty ctx)
+                                                  (Err [e] (do (store! err (Some e)) (break)))
+                                                  (Ok [mt]
+                                                      (do
+                                                        (if (load first)
+                                                            (do (store! first false) 0)
+                                                            (sb-push-str! (mut ps) " "))
+                                                        (sb-push-str! (mut ps) mt)))))))
                                   (store! i (iadd (load i) 1))))))))
             (match (load err)
               (Some [e] (Err e))
@@ -514,54 +513,53 @@
               (loop (if (icmp-ge (load i) n)
                         (break)
                         (let [f (al-get [Json] (load inner) (load i))]
-                          (if (str-eq (jkind f) "FieldDecl")
-                              (if (not (jbool-true? f "isBitfield"))
-                                  (do
-                                    (store! err
-                                            (Some "mixed bitfield and normal fields (packed layout — Phase 2+ — needs record layout)"))
-                                    (break))
-                                  (match (jgets f "name")
-                                    (None []
-                                          (do (store! err (Some "an unnamed bitfield (padding — Phase 2+)")) (break)))
-                                    (Some [fname]
-                                          (let [width (find-value f)]
-                                            (if (icmp-eq width -9999999999)
-                                                (do (store! err (Some "a bitfield with no foldable width")) (break))
-                                                (match (jgets (jget f "type") "qualType")
-                                                  (None [] (do (store! err (Some "a field has no type")) (break)))
-                                                  (Some [fty]
-                                                        (match (map-type a fty ctx)
-                                                          (Err [e] (do (store! err (Some e)) (break)))
-                                                          (Ok [mt]
-                                                              (match (scalar-size-align mt)
-                                                                (None []
-                                                                      (do
-                                                                        (store! err
-                                                                                (Some "a bitfield of non-scalar type (Phase 2+)"))
-                                                                        (break)))
-                                                                (Some [sa]
-                                                                      (let [bits (imul (szal-size sa) 8)]
-                                                                        (if (and (icmp-ge (load backing) 0)
-                                                                                 (icmp-ne (load backing) bits))
-                                                                            (do
-                                                                              (store! err
-                                                                                      (Some "bitfields of differing storage widths (Phase 2+ — needs record layout)"))
-                                                                              (break))
-                                                                            (do
-                                                                              (store! backing bits)
-                                                                              (store! sum (iadd (load sum) width))
-                                                                              (if (load first)
-                                                                                  (do (store! first false) 0)
-                                                                                  (sb-push-str! (mut out) " "))
-                                                                              (sb-push-str! (mut out)
-                                                                                            (cat3 a
-                                                                                                  (cat3 a
-                                                                                                        "("
-                                                                                                        fname
-                                                                                                        " :bits ")
-                                                                                                  (i64->dec a width)
-                                                                                                  ")"))))))))))))))))
-                              0)
+                          (when (str-eq (jkind f) "FieldDecl")
+                                (if (not (jbool-true? f "isBitfield"))
+                                    (do
+                                      (store! err
+                                              (Some "mixed bitfield and normal fields (packed layout — Phase 2+ — needs record layout)"))
+                                      (break))
+                                    (match (jgets f "name")
+                                      (None []
+                                            (do (store! err (Some "an unnamed bitfield (padding — Phase 2+)")) (break)))
+                                      (Some [fname]
+                                            (let [width (find-value f)]
+                                              (if (icmp-eq width -9999999999)
+                                                  (do (store! err (Some "a bitfield with no foldable width")) (break))
+                                                  (match (jgets (jget f "type") "qualType")
+                                                    (None [] (do (store! err (Some "a field has no type")) (break)))
+                                                    (Some [fty]
+                                                          (match (map-type a fty ctx)
+                                                            (Err [e] (do (store! err (Some e)) (break)))
+                                                            (Ok [mt]
+                                                                (match (scalar-size-align mt)
+                                                                  (None []
+                                                                        (do
+                                                                          (store! err
+                                                                                  (Some "a bitfield of non-scalar type (Phase 2+)"))
+                                                                          (break)))
+                                                                  (Some [sa]
+                                                                        (let [bits (imul (szal-size sa) 8)]
+                                                                          (if (and (icmp-ge (load backing) 0)
+                                                                                   (icmp-ne (load backing) bits))
+                                                                              (do
+                                                                                (store! err
+                                                                                        (Some "bitfields of differing storage widths (Phase 2+ — needs record layout)"))
+                                                                                (break))
+                                                                              (do
+                                                                                (store! backing bits)
+                                                                                (store! sum (iadd (load sum) width))
+                                                                                (if (load first)
+                                                                                    (do (store! first false) 0)
+                                                                                    (sb-push-str! (mut out) " "))
+                                                                                (sb-push-str! (mut out)
+                                                                                              (cat3 a
+                                                                                                    (cat3 a
+                                                                                                          "("
+                                                                                                          fname
+                                                                                                          " :bits ")
+                                                                                                    (i64->dec a width)
+                                                                                                    ")")))))))))))))))))
                           (store! i (iadd (load i) 1))))))))
     (match (load err)
       (Some [e] (Err e))
@@ -602,79 +600,76 @@
                                 (loop (if (icmp-ge (load i) n)
                                           (break)
                                           (let [f (al-get [Json] (load inner) (load i))]
-                                            (if (str-eq (jkind f) "FieldDecl")
-                                                (if (jbool-true? f "isBitfield")
-                                                    (do
-                                                      (store! err
-                                                              (Some (if is-union
-                                                                        "union with a bitfield member (Phase 2+ — needs record layout)"
-                                                                        "contains a bitfield (packed layout — Phase 2+ — needs record layout)")))
-                                                      (break))
-                                                    (match (jgets f "name")
-                                                      (None []
-                                                            (do
-                                                              (store! err (Some "an unnamed field (anon struct/union)"))
-                                                              (break)))
-                                                      (Some [fname]
-                                                            (match (jgets (jget f "type") "qualType")
-                                                              (None []
-                                                                    (do
-                                                                      (store! err (Some "a field has no type"))
-                                                                      (break)))
-                                                              (Some [fty]
-                                                                    (match (map-type a fty ctx)
-                                                                      (Err [e] (do (store! err (Some e)) (break)))
-                                                                      (Ok [mt]
-                                                                          (if is-union
-                                                                              (match (scalar-size-align mt)
-                                                                                (None []
-                                                                                      (do
-                                                                                        (store! err
-                                                                                                (Some (cat3 a
-                                                                                                            (cat3 a
-                                                                                                                  "union member '"
-                                                                                                                  fname
-                                                                                                                  "' has aggregate type '")
-                                                                                                            mt
-                                                                                                            "' (Phase 2 — needs record layout)")))
-                                                                                        (break)))
-                                                                                (Some [sa]
-                                                                                      (do
-                                                                                        (if (icmp-gt (szal-size sa)
-                                                                                                     (load max-size))
-                                                                                            (store! max-size
-                                                                                                    (szal-size sa))
-                                                                                            0)
-                                                                                        (if (icmp-gt (szal-align sa)
-                                                                                                     (load max-align))
-                                                                                            (store! max-align
-                                                                                                    (szal-align sa))
-                                                                                            0)
-                                                                                        (if (load first)
-                                                                                            (do (store! first false) 0)
-                                                                                            (sb-push-str! (mut fields)
-                                                                                                          " "))
-                                                                                        (sb-push-str! (mut fields)
+                                            (when (str-eq (jkind f) "FieldDecl")
+                                                  (if (jbool-true? f "isBitfield")
+                                                      (do
+                                                        (store! err
+                                                                (Some (if is-union
+                                                                          "union with a bitfield member (Phase 2+ — needs record layout)"
+                                                                          "contains a bitfield (packed layout — Phase 2+ — needs record layout)")))
+                                                        (break))
+                                                      (match (jgets f "name")
+                                                        (None []
+                                                              (do
+                                                                (store! err (Some "an unnamed field (anon struct/union)"))
+                                                                (break)))
+                                                        (Some [fname]
+                                                              (match (jgets (jget f "type") "qualType")
+                                                                (None []
+                                                                      (do
+                                                                        (store! err (Some "a field has no type"))
+                                                                        (break)))
+                                                                (Some [fty]
+                                                                      (match (map-type a fty ctx)
+                                                                        (Err [e] (do (store! err (Some e)) (break)))
+                                                                        (Ok [mt]
+                                                                            (if is-union
+                                                                                (match (scalar-size-align mt)
+                                                                                  (None []
+                                                                                        (do
+                                                                                          (store! err
+                                                                                                  (Some (cat3 a
+                                                                                                              (cat3 a
+                                                                                                                    "union member '"
+                                                                                                                    fname
+                                                                                                                    "' has aggregate type '")
+                                                                                                              mt
+                                                                                                              "' (Phase 2 — needs record layout)")))
+                                                                                          (break)))
+                                                                                  (Some [sa]
+                                                                                        (do
+                                                                                          (when (icmp-gt (szal-size sa)
+                                                                                                         (load max-size))
+                                                                                                (store! max-size
+                                                                                                        (szal-size sa)))
+                                                                                          (when (icmp-gt (szal-align sa)
+                                                                                                         (load max-align))
+                                                                                                (store! max-align
+                                                                                                        (szal-align sa)))
+                                                                                          (if (load first)
+                                                                                              (do (store! first false) 0)
+                                                                                              (sb-push-str! (mut fields)
+                                                                                                            " "))
+                                                                                          (sb-push-str! (mut fields)
+                                                                                                        (cat3 a
+                                                                                                              (cat3 a
+                                                                                                                    "("
+                                                                                                                    fname
+                                                                                                                    " ")
+                                                                                                              mt
+                                                                                                              " :at 0)")))))
+                                                                                (do
+                                                                                  (if (load first)
+                                                                                      (do (store! first false) 0)
+                                                                                      (sb-push-str! (mut fields) " "))
+                                                                                  (sb-push-str! (mut fields)
+                                                                                                (cat3 a
                                                                                                       (cat3 a
-                                                                                                            (cat3 a
-                                                                                                                  "("
-                                                                                                                  fname
-                                                                                                                  " ")
-                                                                                                            mt
-                                                                                                            " :at 0)")))))
-                                                                              (do
-                                                                                (if (load first)
-                                                                                    (do (store! first false) 0)
-                                                                                    (sb-push-str! (mut fields) " "))
-                                                                                (sb-push-str! (mut fields)
-                                                                                              (cat3 a
-                                                                                                    (cat3 a
-                                                                                                          "("
-                                                                                                          fname
-                                                                                                          " ")
-                                                                                                    mt
-                                                                                                    ")")))))))))))
-                                                0)
+                                                                                                            "("
+                                                                                                            fname
+                                                                                                            " ")
+                                                                                                      mt
+                                                                                                      ")"))))))))))))
                                             (store! i (iadd (load i) 1))))))))
                       (match (load err)
                         (Some [e] (Err e))
@@ -710,34 +705,33 @@
               (loop (if (icmp-ge (load i) n)
                         (break)
                         (let [c (al-get [Json] (load inner) (load i))]
-                          (if (str-eq (jkind c) "EnumConstantDecl")
-                              (match (jgets c "name")
-                                (None [] (do (store! err (Some "an unnamed enumerator")) (break)))
-                                (Some [cname]
-                                      (let [ev (enumerator-value c)
-                                            has-init (has-inner c)]
-                                        ; ev == sentinel means "no foldable integer initializer":
-                                        ; with an initializer present → refuse; without → running counter.
-                                        (if (and (icmp-eq ev -9999999999) has-init)
-                                            (do
-                                              (store! err
-                                                      (Some (cat3 a "enumerator '" cname "' has a non-integer value")))
-                                              (break))
-                                            (let [value (if (icmp-eq ev -9999999999) (load next) ev)
-                                                  skey (cat a "const:" cname)]  ; SAME keyspace as the #define pass
+                          (when (str-eq (jkind c) "EnumConstantDecl")
+                                (match (jgets c "name")
+                                  (None [] (do (store! err (Some "an unnamed enumerator")) (break)))
+                                  (Some [cname]
+                                        (let [ev (enumerator-value c)
+                                              has-init (has-inner c)]
+                                          ; ev == sentinel means "no foldable integer initializer":
+                                          ; with an initializer present → refuse; without → running counter.
+                                          (if (and (icmp-eq ev -9999999999) has-init)
                                               (do
-                                                (store! next (iadd value 1))
-                                                (match (hm-get [(slice u8) i64] (load seen) skey)
-                                                  (Some [_] 0)
-                                                  (None []
-                                                        (do
-                                                          (hm-put! [(slice u8) i64] seen skey 1)
-                                                          (sb-push-str! (mut out)
-                                                                        (cat3 a
-                                                                              (cat3 a "(const " cname " ")
-                                                                              (i64->dec a value)
-                                                                              ")\n")))))))))))
-                              0)
+                                                (store! err
+                                                        (Some (cat3 a "enumerator '" cname "' has a non-integer value")))
+                                                (break))
+                                              (let [value (if (icmp-eq ev -9999999999) (load next) ev)
+                                                    skey (cat a "const:" cname)]  ; SAME keyspace as the #define pass
+                                                (do
+                                                  (store! next (iadd value 1))
+                                                  (match (hm-get [(slice u8) i64] (load seen) skey)
+                                                    (Some [_] 0)
+                                                    (None []
+                                                          (do
+                                                            (hm-put! [(slice u8) i64] seen skey 1)
+                                                            (sb-push-str! (mut out)
+                                                                          (cat3 a
+                                                                                (cat3 a "(const " cname " ")
+                                                                                (i64->dec a value)
+                                                                                ")\n"))))))))))))
                           (store! i (iadd (load i) 1))))))))
     (match (load err) (Some [e] (Err e)) (None [] (Ok (sb-str (load out)))))))
 
@@ -800,16 +794,15 @@
                               (None [] 0)
                               (Some [under]
                                     (do (hm-put! [(slice u8) (slice u8)] (load (field ctx typedefs)) name under) 0)))))
-                    (if (str-eq (jkind d) "EnumDecl")
-                        (match (jgets d "name")
-                          (None [] 0)
-                          (Some [name]
-                                (let [ty
-                                        (match (jgets (jget d "fixedUnderlyingType") "qualType")
-                                          (None [] "i32")
-                                          (Some [q] (match (map-type a q ctx) (Ok [t] t) (Err [_] "i32"))))]
-                                  (do (hm-put! [(slice u8) (slice u8)] (load (field ctx enums)) name ty) 0))))
-                        0))
+                    (when (str-eq (jkind d) "EnumDecl")
+                          (match (jgets d "name")
+                            (None [] 0)
+                            (Some [name]
+                                  (let [ty
+                                          (match (jgets (jget d "fixedUnderlyingType") "qualType")
+                                            (None [] "i32")
+                                            (Some [q] (match (map-type a q ctx) (Ok [t] t) (Err [_] "i32"))))]
+                                    (do (hm-put! [(slice u8) (slice u8)] (load (field ctx enums)) name ty) 0))))))
                 (store! i (iadd (load i) 1)))))
     0))
 
@@ -834,14 +827,13 @@
                         (break)))))
         (let [name (subslice [u8] rest 0 (load k))
               after (subslice [u8] rest (load k) n)]
-          (if (icmp-eq (load k) 0)
+          (if (or (icmp-eq (load k) 0)
+                  (and (icmp-gt (slice-len [u8] after) 0) (icmp-eq (slice-get [u8] after 0) (cast u8 40))))
               (None [Define])
-              (if (and (icmp-gt (slice-len [u8] after) 0) (icmp-eq (slice-get [u8] after 0) (cast u8 40)))
-                  (None [Define])
-                  (let [d (alloc-stack Define)]
-                    (store! (field d name) name)
-                    (store! (field d body) (trim after))
-                    (Some (load d)))))))))
+              (let [d (alloc-stack Define)]
+                (store! (field d name) name)
+                (store! (field d body) (trim after))
+                (Some (load d))))))))
 
 ; Strip a trailing float suffix (f/F/l/L).
 (defn strip-float-suffix [(s (slice u8))] (-> (slice u8))
@@ -893,13 +885,14 @@
             (float-literal a b)
             (let [(mut neg) false
                   (mut digits) b]
-              (if (icmp-eq (slice-get [u8] b 0) (cast u8 45))
-                  (do (store! neg true) (store! digits (trim (subslice [u8] b 1 (slice-len [u8] b)))) 0)
-                  0)
-              (if (and (icmp-gt (slice-len [u8] (load digits)) 0)
-                       (icmp-eq (slice-get [u8] (load digits) 0) (cast u8 43)))
-                  (do (store! digits (subslice [u8] (load digits) 1 (slice-len [u8] (load digits)))) 0)
-                  0)
+              (when (icmp-eq (slice-get [u8] b 0) (cast u8 45))
+                    (store! neg true)
+                    (store! digits (trim (subslice [u8] b 1 (slice-len [u8] b))))
+                    0)
+              (when (and (icmp-gt (slice-len [u8] (load digits)) 0)
+                         (icmp-eq (slice-get [u8] (load digits) 0) (cast u8 43)))
+                    (store! digits (subslice [u8] (load digits) 1 (slice-len [u8] (load digits))))
+                    0)
               (let [ds (strip-int-suffix (load digits))
                     mag (parse-int-radix ds)]
                 (if (icmp-eq mag -9999999999)
@@ -1013,15 +1006,12 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-eq (slice-get [u8] text (load i)) (cast u8 10))
-                    (do
+                (when (icmp-eq (slice-get [u8] text (load i)) (cast u8 10))
                       (al-push! [(slice u8)] lines (subslice [u8] text (load start) (load i)))
                       (store! start (iadd (load i) 1)))
-                    0)
                 (store! i (iadd (load i) 1)))))
-    (if (icmp-gt (load start) (load i))
-        0
-        (if (icmp-lt (load start) n) (al-push! [(slice u8)] lines (subslice [u8] text (load start) n)) 0))
+    (unless (icmp-gt (load start) (load i))
+            (when (icmp-lt (load start) n) (al-push! [(slice u8)] lines (subslice [u8] text (load start) n))))
     lines))
 
 ; ============================ driver =======================================
@@ -1072,53 +1062,52 @@
                         (match (jgets (jget d "loc") "file")
                           (Some [f] (do (store! from-header (emit-file? f header)) 0))
                           (None [] 0))
-                        (if (not (load from-header))
-                            0
-                            (let [k (jkind d)]
-                              (cond (str-eq k "FunctionDecl")
-                                      (let [key (cat a "fn:" (jname d))]
-                                        (match (hm-get [(slice u8) i64] (load seen) key)
-                                          (Some [_] 0)
-                                          (None []
-                                                (do
-                                                  (hm-put! [(slice u8) i64] seen key 1)
-                                                  (match (function-extern a d ctx)
-                                                    (Ok [s] (sb-push-str! (mut externs) s))
-                                                    (Err [why]
-                                                         (al-push! [(slice u8)]
-                                                                   (mut skipped)
-                                                                   (cat3 a "fn " (jname d) (cat a " — " why)))))))))
-                                    (str-eq k "RecordDecl")
-                                      (match (record-defstruct a d ctx)
-                                        (Ok [opt]
-                                            (match opt
-                                              (Some [s]
-                                                    (let [key (cat a "struct:" (jname d))]
-                                                      (match (hm-get [(slice u8) i64] (load seen) key)
-                                                        (Some [_] 0)
-                                                        (None []
-                                                              (do
-                                                                (hm-put! [(slice u8) i64] seen key 1)
-                                                                (sb-push-str! (mut structs) s))))))
-                                              (None [] 0)))
-                                        (Err [why]
-                                             (let [key (cat a "struct:" (jname d))]
-                                               (match (hm-get [(slice u8) i64] (load seen) key)
-                                                 (Some [_] 0)
-                                                 (None []
-                                                       (do
-                                                         (hm-put! [(slice u8) i64] seen key 1)
-                                                         (al-push! [(slice u8)]
-                                                                   (mut skipped)
-                                                                   (cat3 a "struct " (jname d) (cat a " — " why)))))))))
-                                    (str-eq k "EnumDecl")
-                                      (match (enum-consts a d seen)
-                                        (Ok [s] (sb-push-str! (mut consts) s))
-                                        (Err [why]
-                                             (al-push! [(slice u8)]
-                                                       (mut skipped)
-                                                       (cat3 a "enum " (jname d) (cat a " — " why)))))
-                                    :else 0)))
+                        (unless (not (load from-header))
+                                (let [k (jkind d)]
+                                  (cond (str-eq k "FunctionDecl")
+                                          (let [key (cat a "fn:" (jname d))]
+                                            (match (hm-get [(slice u8) i64] (load seen) key)
+                                              (Some [_] 0)
+                                              (None []
+                                                    (do
+                                                      (hm-put! [(slice u8) i64] seen key 1)
+                                                      (match (function-extern a d ctx)
+                                                        (Ok [s] (sb-push-str! (mut externs) s))
+                                                        (Err [why]
+                                                             (al-push! [(slice u8)]
+                                                                       (mut skipped)
+                                                                       (cat3 a "fn " (jname d) (cat a " — " why)))))))))
+                                        (str-eq k "RecordDecl")
+                                          (match (record-defstruct a d ctx)
+                                            (Ok [opt]
+                                                (match opt
+                                                  (Some [s]
+                                                        (let [key (cat a "struct:" (jname d))]
+                                                          (match (hm-get [(slice u8) i64] (load seen) key)
+                                                            (Some [_] 0)
+                                                            (None []
+                                                                  (do
+                                                                    (hm-put! [(slice u8) i64] seen key 1)
+                                                                    (sb-push-str! (mut structs) s))))))
+                                                  (None [] 0)))
+                                            (Err [why]
+                                                 (let [key (cat a "struct:" (jname d))]
+                                                   (match (hm-get [(slice u8) i64] (load seen) key)
+                                                     (Some [_] 0)
+                                                     (None []
+                                                           (do
+                                                             (hm-put! [(slice u8) i64] seen key 1)
+                                                             (al-push! [(slice u8)]
+                                                                       (mut skipped)
+                                                                       (cat3 a "struct " (jname d) (cat a " — " why)))))))))
+                                        (str-eq k "EnumDecl")
+                                          (match (enum-consts a d seen)
+                                            (Ok [s] (sb-push-str! (mut consts) s))
+                                            (Err [why]
+                                                 (al-push! [(slice u8)]
+                                                           (mut skipped)
+                                                           (cat3 a "enum " (jname d) (cat a " — " why)))))
+                                        :else 0)))
                         (store! i (iadd (load i) 1)))))
             ; #define pass
             (let [baseline (each-line a (dump-macros a "" "base" flags))
@@ -1171,8 +1160,7 @@
                               "; A clang-parsed C binding (real header import). Audit before trusting the ABI.\n")
                 (sb-push-str! (mut body) "(module cbindings)\n\n")
                 (let [ns (al-len [(slice u8)] (load skipped))]
-                  (if (icmp-gt ns 0)
-                      (do
+                  (when (icmp-gt ns 0)
                         (sb-push-str! (mut body)
                                       "; SKIPPED (unmappable — left out rather than emit a wrong binding):\n")
                         (let [(mut si) 0]
@@ -1182,16 +1170,15 @@
                                       (sb-push-str! (mut body)
                                                     (cat3 a ";   " (al-get [(slice u8)] (load skipped) (load si)) "\n"))
                                       (store! si (iadd (load si) 1))))))
-                        (sb-push-str! (mut body) "\n"))
-                      0))
+                        (sb-push-str! (mut body) "\n")))
                 (let [cs (sb-str (load consts))]
                   (do
                     (sb-push-str! (mut body) cs)
-                    (if (icmp-gt (slice-len [u8] cs) 0) (sb-push-str! (mut body) "\n") 0)))
+                    (when (icmp-gt (slice-len [u8] cs) 0) (sb-push-str! (mut body) "\n"))))
                 (let [ss (sb-str (load structs))]
                   (do
                     (sb-push-str! (mut body) ss)
-                    (if (icmp-gt (slice-len [u8] ss) 0) (sb-push-str! (mut body) "\n") 0)))
+                    (when (icmp-gt (slice-len [u8] ss) 0) (sb-push-str! (mut body) "\n"))))
                 (sb-push-str! (mut body) (sb-str (load externs)))
                 ; surface skips on stderr too (not part of the file)
                 (let [ns (al-len [(slice u8)] (load skipped))
@@ -1291,23 +1278,21 @@
 
 ; put every EnumConstantDecl's folded value into `m` (used for the probe enum).
 (defn ee-one [(a (ptr Allocator)) (d Json) (m (ptr (HashMap (slice u8) i64)))] (-> i64)
-  (if (not (str-eq (jkind d) "EnumDecl"))
-      0
-      (match (jinner d)
-        (None [] 0)
-        (Some [inner]
-              (let [(mut k) 0
-                    nk (al-len [Json] (load inner))]
-                (loop (if (icmp-ge (load k) nk)
-                          (break)
-                          (do
-                            (let [c (al-get [Json] (load inner) (load k))]
-                              (if (str-eq (jkind c) "EnumConstantDecl")
-                                  (let [v (enumerator-value c)]
-                                    (if (icmp-ne v -9999999999) (do (hm-put! [(slice u8) i64] m (jname c) v) 0) 0))
-                                  0))
-                            (store! k (iadd (load k) 1)))))
-                0)))))
+  (unless (not (str-eq (jkind d) "EnumDecl"))
+          (match (jinner d)
+            (None [] 0)
+            (Some [inner]
+                  (let [(mut k) 0
+                        nk (al-len [Json] (load inner))]
+                    (loop (if (icmp-ge (load k) nk)
+                              (break)
+                              (do
+                                (let [c (al-get [Json] (load inner) (load k))]
+                                  (when (str-eq (jkind c) "EnumConstantDecl")
+                                        (let [v (enumerator-value c)]
+                                          (when (icmp-ne v -9999999999) (hm-put! [(slice u8) i64] m (jname c) v) 0))))
+                                (store! k (iadd (load k) 1)))))
+                    0)))))
 (defn extract-enum-values [(a (ptr Allocator)) (ast Json) (m (ptr (HashMap (slice u8) i64)))] (-> i64)
   (let [top (match (jinner ast) (Some [t] t) (None [] (box a (ArrayList Json) (al-new [Json] a))))
         (mut i) 0
@@ -1384,7 +1369,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (ws-byte? (slice-get [u8] t (load i))) (store! cut (iadd (load i) 1)) 0)
+                (when (ws-byte? (slice-get [u8] t (load i))) (store! cut (iadd (load i) 1)))
                 (store! i (iadd (load i) 1)))))
     (subslice [u8] t (load cut) n)))
 
@@ -1401,30 +1386,27 @@
               (do
                 (let [line (al-get [(slice u8)] (load lines) (load i))
                       bar (index-of line (cast u8 124) 0)]  ; '|'
-                  (if (icmp-ge bar 0)
-                      (let [left (trim (subslice [u8] line 0 bar))
-                            right (subslice [u8] line (iadd bar 1) (slice-len [u8] line))
-                            colon (index-of left (cast u8 58) 0)]  ; ':'
-                        (if (and (icmp-ge colon 0) (str-eq (last-token right) fname))
-                            (let [byte (subslice [u8] left 0 colon)
-                                  rest (subslice [u8] left (iadd colon 1) (slice-len [u8] left))
-                                  dash (index-of rest (cast u8 45) 0)]  ; '-'
-                              (if (icmp-ge dash 0)
-                                  (let [sbit (parse-signed (subslice [u8] rest 0 dash))
-                                        ebit (parse-signed (subslice [u8] rest (iadd dash 1) (slice-len [u8] rest)))]
-                                    (sb-push-str! (mut out) (cat3 a (cat3 a "(const " name "_byte ") (trim byte) ")\n"))
-                                    (sb-push-str! (mut out)
-                                                  (cat3 a (cat3 a "(const " name "_bit ") (i64->dec a sbit) ")\n"))
-                                    (sb-push-str! (mut out)
-                                                  (cat3 a
-                                                        (cat3 a "(const " name "_width ")
-                                                        (i64->dec a (iadd (isub ebit sbit) 1))
-                                                        ")\n"))
-                                    (store! done true)
-                                    0)
-                                  0))
-                            0))
-                      0))
+                  (when (icmp-ge bar 0)
+                        (let [left (trim (subslice [u8] line 0 bar))
+                              right (subslice [u8] line (iadd bar 1) (slice-len [u8] line))
+                              colon (index-of left (cast u8 58) 0)]  ; ':'
+                          (when (and (icmp-ge colon 0) (str-eq (last-token right) fname))
+                                (let [byte (subslice [u8] left 0 colon)
+                                      rest (subslice [u8] left (iadd colon 1) (slice-len [u8] left))
+                                      dash (index-of rest (cast u8 45) 0)]  ; '-'
+                                  (when (icmp-ge dash 0)
+                                        (let [sbit (parse-signed (subslice [u8] rest 0 dash))
+                                              ebit (parse-signed (subslice [u8] rest (iadd dash 1) (slice-len [u8] rest)))]
+                                          (sb-push-str! (mut out) (cat3 a (cat3 a "(const " name "_byte ") (trim byte) ")\n"))
+                                          (sb-push-str! (mut out)
+                                                        (cat3 a (cat3 a "(const " name "_bit ") (i64->dec a sbit) ")\n"))
+                                          (sb-push-str! (mut out)
+                                                        (cat3 a
+                                                              (cat3 a "(const " name "_width ")
+                                                              (i64->dec a (iadd (isub ebit sbit) 1))
+                                                              ")\n"))
+                                          (store! done true)
+                                          0)))))))
                 (store! i (iadd (load i) 1)))))
     (sb-str (load out))))
 

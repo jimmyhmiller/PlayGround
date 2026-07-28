@@ -28,6 +28,10 @@ import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { MANIFEST_FILES, loadServerConsumerManifest } from "./ssr-module-map.mjs";
 
+// The emitted server chunks carry a `.map` each; Node only consumes them with
+// source-map support on. See `next-server.mjs` for why this is unconditional.
+process.setSourceMapsEnabled(true);
+
 function fail(message) {
   console.error(`rsc-server: ${message}`);
   process.exit(1);
@@ -73,7 +77,8 @@ if (typeof renderFlightToHTML !== "function") {
 // --- Spawn the react-server child for a flight (render or action) ----------------
 function runReactServer(args, stdinBody) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [rscRenderEntry, ...args], {
+    // See `next-render-core.mjs`: an emitted-chunk entry takes the flag.
+    const child = spawn(process.execPath, ["--enable-source-maps", rscRenderEntry, ...args], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const out = [];

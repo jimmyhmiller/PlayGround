@@ -62,7 +62,9 @@ try {
 console.log(`OK: divergent-id ssrModuleMapping ${JSON.stringify(moduleMap)} (flight/client id -> SSR id)`);
 
 // --- The react-server render child produces the flight ---------------------------
-const render = spawnSync(process.execPath, [rscRenderEntry, "render", clientManifestPath], {
+// See `next-server.mjs`: a process whose entry is an emitted chunk gets source maps
+// by flag, so a failing check reports the app's own file rather than a chunk offset.
+const render = spawnSync(process.execPath, ["--enable-source-maps", rscRenderEntry, "render", clientManifestPath], {
   encoding: "buffer",
   input: "",
 });

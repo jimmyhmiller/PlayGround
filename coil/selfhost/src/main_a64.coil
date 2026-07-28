@@ -118,9 +118,8 @@
           (let [r (ip/interp-call-entry icx "coil.ct.thunk" (cast (ptr i64) 0) 0)]
             (store! (cast (ptr i64) cell) r)
             0))
-      (if (ip/interp-has-entry? icx "coil.ct.status")
-          (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)
-          0))))
+      (when (ip/interp-has-entry? icx "coil.ct.status")
+            (ip/interp-call-entry icx "coil.ct.status" (cast (ptr i64) 0) 0)))))
 (defn meta-interp-env? [] (-> bool)
   (let [v (getenv c"COIL_META_INTERP")]
     (if (icmp-eq (cast i64 v) 0) false (str-eq (cstr->slice v) "1"))))
@@ -130,13 +129,11 @@
   (set-meta-build-mobj! (fnptr-of meta-build-mobj-a64))
   ; opt-in interpreter meta path: register the run hooks + the interp extern/abort
   ; hooks. Off by default ⇒ the native dylib/JIT path is byte-unchanged.
-  (if (meta-interp-env?)
-      (do
+  (when (meta-interp-env?)
         (set-meta-interp! (fnptr-of meta-build-interp) (fnptr-of meta-run-interp) (fnptr-of meta-run-ct-interp))
         (ip/set-interp-extern-hook! (fnptr-of mh/mh-interp-dispatch))
         (ip/set-interp-abort-check! (fnptr-of mh/mh-interp-halted?))
         0)
-      0)
   (register-comptime-fold!)  ; route comptime/const sites the interpreter can't fold through the compiled engine (mac-8)
   (driver-main argc
                argv

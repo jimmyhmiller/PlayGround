@@ -174,6 +174,7 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // Off by default; the dev server flips it on per environment. `build-app`
             // uses this config path with `hmr` false, so production is unaffected.
             hmr: false,
+            source_maps: false,
             scss,
             // Vite parity: default raster imports stay bare-URL strings.
             image_import_shape: crate::bundler::ImageImportShape::Url,
@@ -182,6 +183,9 @@ pub fn derive_config(root: &Path, environment: &str) -> Result<AppConfig, String
             // JavaScript, so JSX there is a syntax error in a Vite app too.
             jsx_extensions: crate::parser::JsxExtensions::JsxAndTsxOnly,
             jsx,
+            // A Vite build has no `serverExternalPackages` equivalent; everything a
+            // module imports is bundled.
+            server_external_packages: Vec::new(),
         },
         entry,
     })
@@ -248,6 +252,7 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             import_meta_glob: None,
             defines: Vec::new(),
             hmr: false,
+            source_maps: false,
             // Even a generic build knows the project root, so root-relative
             // `@use "/src/..."` targets resolve; additionalData stays a
             // Vite-mode opt-in below.
@@ -270,6 +275,8 @@ pub fn derive_web_config(root: &Path, vite: bool) -> Result<WebConfig, String> {
             // no `vite.config` read, the tsconfig that owns each file (which is
             // honored in every mode) is the only input.
             jsx: crate::transform::JsxConfig::default(),
+            // A generic build bundles everything it can resolve.
+            server_external_packages: Vec::new(),
         },
         base: "/".to_string(),
         vite: false,

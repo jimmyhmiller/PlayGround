@@ -61,7 +61,7 @@
   (match (load d)
     (DNil    []      0)
     (DText   [s]     (slice-len s))
-    (DLine   [k]     (if (icmp-eq k 0) 1 (if (icmp-eq k 1) 0 (doc-inf))))
+    (DLine   [k]     (if (icmp-eq k 0) 1 (unless (icmp-eq k 1) (doc-inf))))
     (DNest   [n x]   (flat-width x))
     (DAlign  [n x]   (flat-width x))
     (DGroup  [x f]   (if (icmp-ne f 0) (doc-inf) (flat-width x)))

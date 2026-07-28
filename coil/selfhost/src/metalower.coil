@@ -139,7 +139,7 @@
               (TBool [] 4)
               (TFloat [b] 5)
               (TNever [] 6)
-              (TSlice [e] (match-else (load e) (TInt [b s] (if (and (icmp-eq b 8) (not s)) 3 0)) (_ 0)))
+              (TSlice [e] (match-else (load e) (TInt [b s] (when (and (icmp-eq b 8) (not s)) 3)) (_ 0)))
               (_ 0)))
 ; The checked type of an ORIGINAL (pre-lowering) expr: type map by nid, else a
 ; structural fallback for the node kinds whose type is intrinsic.

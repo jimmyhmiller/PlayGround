@@ -19,7 +19,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (dstr w (al-get [(slice u8)] (load v) (load i)))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -38,7 +38,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [t (alloc-stack Type)] (store! t (al-get [Type] (load v) (load i))) (d-type w t))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -176,7 +176,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [e (alloc-stack Expr)] (store! e (al-get [Expr] (load v) (load i))) (d-expr w e))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -193,7 +193,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [b (alloc-stack Bind)]
                   (store! b (al-get [Bind] (load v) (load i)))
                   (ps w "(bind ")
@@ -213,7 +213,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [a (alloc-stack Arm)]
                   (store! a (al-get [Arm] (load v) (load i)))
                   (ps w "(arm ")
@@ -522,7 +522,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [p (alloc-stack Param)] (store! p (al-get [Param] (load v) (load i))) (d-param w p))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -540,7 +540,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [f (alloc-stack Field)] (store! f (al-get [Field] (load v) (load i))) (d-field w f))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -552,7 +552,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (dump-dec w (al-get [i64] (load v) (load i)))
                 (store! i (iadd (load i) 1))))))
   (wb w 93))
@@ -564,7 +564,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [b (alloc-stack Bound)]
                   (store! b (al-get [Bound] (load v) (load i)))
                   (ps w "(bound ")
@@ -659,7 +659,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [vr (alloc-stack Variant)]
                   (store! vr (al-get [Variant] (load (field s variants)) (load i)))
                   (d-variant w vr))
@@ -710,7 +710,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [m (alloc-stack TraitMethod)]
                   (store! m (al-get [TraitMethod] (load (field t methods)) (load i)))
                   (ps w "(method ")
@@ -736,7 +736,7 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (if (icmp-gt (load i) 0) (wb w 32) 0)
+                (when (icmp-gt (load i) 0) (wb w 32))
                 (let [f (alloc-stack Func)] (store! f (al-get [Func] (load (field im methods)) (load i))) (d-func w f))
                 (store! i (iadd (load i) 1))))))
   (wb w 93)
@@ -792,13 +792,11 @@
                     (loop (if (icmp-ge (load bi) n)
                               (break)
                               (do
-                                (if (not (al-get [bool] (load used) (load bi)))
-                                    (if (or (icmp-lt (load best) 0)
-                                            (str-lt (conv-name (al-get [Convention] convs (load bi)))
-                                                    (conv-name (al-get [Convention] convs (load best)))))
-                                        (store! best (load bi))
-                                        0)
-                                    0)
+                                (when (and (not (al-get [bool] (load used) (load bi)))
+                                           (or (icmp-lt (load best) 0)
+                                               (str-lt (conv-name (al-get [Convention] convs (load bi)))
+                                                       (conv-name (al-get [Convention] convs (load best))))))
+                                      (store! best (load bi)))
                                 (store! bi (iadd (load bi) 1)))))
                     (al-set! [bool] (mut used) (load best) true)
                     (wb w 32)

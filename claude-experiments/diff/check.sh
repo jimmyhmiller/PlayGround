@@ -145,6 +145,15 @@ rsc_gate "RSC flight render + SSR" scripts/rsc/flight-check.sh integration/rsc-r
 rsc_gate "RSC minimal app (SSR + hydrate + action)" scripts/rsc/rsc-check.sh integration/rsc-reference
 rsc_gate "Next app-router (real create-next-app, RSC end-to-end)" scripts/rsc/next-check.sh integration/next-app-router
 rsc_gate "Next dev server (Fast Refresh island + server-component reload)" scripts/rsc/next-dev-check.sh integration/next-app-router
+# No browser needed (curl-level): asserts an edit reaches the SERVER-RENDERED HTML,
+# which the browser-side HMR gates above structurally cannot see.
+if [ "$have_node" = "0" ]; then
+  skip_step "Next dev freshness (an edit must reach a freshly fetched document)" "node not found"
+elif ! deps_ready integration/next-app-router; then
+  skip_step "Next dev freshness (an edit must reach a freshly fetched document)" "integration/next-app-router/node_modules missing (npm install there)"
+else
+  step "Next dev freshness (an edit must reach a freshly fetched document)" bash scripts/rsc/next-dev-fresh-check.sh
+fi
 rsc_gate "Next UNMODIFIED create-next-app default (build + render + hydrate)" scripts/rsc/next-authentic-check.sh integration/next-app-router
 rsc_gate "Next SSG (prerender + dumb static serve + hydrate + soft-nav)" scripts/rsc/next-ssg-check.sh integration/next-app-router
 rsc_gate "Next corpus (multi-app SSR + classification smoke)" scripts/rsc/next-corpus-check.sh integration/next-corpus

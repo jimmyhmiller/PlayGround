@@ -143,9 +143,9 @@
           (loop (if (icmp-ge (load i) n)
                     (break)
                     (do
-                      (if (str-eq (load (field (al-elem [MEEntry] es (load i)) name)) name)
-                          (do (store! r (al-elem [MEEntry] es (load i))) (break))
-                          0)
+                      (when (str-eq (load (field (al-elem [MEEntry] es (load i)) name)) name)
+                            (store! r (al-elem [MEEntry] es (load i)))
+                            (break))
                       (store! i (iadd (load i) 1)))))
           (load r)))))
 
@@ -164,32 +164,24 @@
   (alloc-static MainSvc))
 (defn main-svc-init! [] (-> i64)
   (let [b (main-svc)]
-    (if (icmp-ne (load (field b isinit)) 0)
-        0
-        (do
-          (store! (field b jobsem) (me-sem-create 0))
-          (store! (field b donesem) (me-sem-create 0))
-          (store! (field b isinit) 1)
-          0))))
+    (unless (icmp-ne (load (field b isinit)) 0)
+            (store! (field b jobsem) (me-sem-create 0))
+            (store! (field b donesem) (me-sem-create 0))
+            (store! (field b isinit) 1)
+            0)))
 ; the driver's main thread sits here servicing metaprogram calls until the
 ; pipeline thread signals it is done (no-op unless main-svc-init! ran)
 (defn main-svc-loop [] (-> i64)
   (let [b (main-svc)]
-    (if (icmp-eq (load (field b isinit)) 0)
-        0
-        (loop (do
-                (me-sem-wait (load (field b jobsem)) -1)
-                (if (icmp-ne (load (field b finished)) 0) (break 0) 0)
-                (me-tramp (load (field b call)))
-                (me-sem-signal (load (field b donesem))))))))
+    (unless (icmp-eq (load (field b isinit)) 0)
+            (loop (do
+                    (me-sem-wait (load (field b jobsem)) -1)
+                    (when (icmp-ne (load (field b finished)) 0) (break 0))
+                    (me-tramp (load (field b call)))
+                    (me-sem-signal (load (field b donesem))))))))
 (defn main-svc-finish! [] (-> i64)
   (let [b (main-svc)]
-    (if (icmp-eq (load (field b isinit)) 0)
-        0
-        (do
-          (store! (field b finished) 1)
-          (me-sem-signal (load (field b jobsem)))
-          0))))
+    (unless (icmp-eq (load (field b isinit)) 0) (store! (field b finished) 1) (me-sem-signal (load (field b jobsem))) 0)))
 (defn main-svc-run [(c (ptr i8))] (-> i64)
   (let [b (main-svc)]
     (store! (field b call) c)
@@ -434,9 +426,7 @@
                                            (and (icmp-ge (sx-len (sx-items (load f))) 1)
                                                 (and (icmp-eq (sx-tag (sx-at (sx-items (load f)) 0)) 2)
                                                      (str-eq (sx-sval (sx-at (sx-items (load f)) 0)) "module"))))]
-                                (if ismod
-                                    0
-                                    (do (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0)))
+                                (unless ismod (al-push! (mut out) (mk-tagged (load f) (Some "metashim"))) 0))
                               (store! i (iadd (load i) 1)))))
                   (Ok [(ptr (ArrayList TaggedForm)) Diag] (box-al [TaggedForm] a (load out))))))))))
 
@@ -456,7 +446,7 @@
                 (break)
                 (do
                   (let [nm (func-name (al-get [Func] (load fs) (load j)))]
-                    (if (starts-with nm "metashim.") (do (al-push! (mut out) nm) 0) 0))
+                    (when (starts-with nm "metashim.") (al-push! (mut out) nm) 0))
                   (store! j (iadd (load j) 1))))))
     (box-al [(slice u8)] a (load out))))
 
@@ -520,18 +510,17 @@
                   (store! i (iadd (load i) 1))))))
     ; the link flags are part of what the dylib IS (frameworks a metaprogram binds)
     (let [lb (meta-link-box)]
-      (if (icmp-eq (load (field lb isset)) 0)
-          0
-          (let [fl (load (field lb flags))
-                n (al-len [(slice u8)] (load fl))
-                (mut i) 0]
-            (loop (if (icmp-ge (load i) n)
-                      (break)
-                      (do
-                        (me-fnv-str c (al-get [(slice u8)] (load fl) (load i)))
-                        (me-fnv-str c "|")
-                        (store! i (iadd (load i) 1)))))
-            0)))
+      (unless (icmp-eq (load (field lb isset)) 0)
+              (let [fl (load (field lb flags))
+                    n (al-len [(slice u8)] (load fl))
+                    (mut i) 0]
+                (loop (if (icmp-ge (load i) n)
+                          (break)
+                          (do
+                            (me-fnv-str c (al-get [(slice u8)] (load fl) (load i)))
+                            (me-fnv-str c "|")
+                            (store! i (iadd (load i) 1)))))
+                0)))
     (me-hex a (load (field c h)))))
 ; the program's --link-flag list, space-joined (empty string if none)
 (defn me-link-flags-str [(a (ptr Allocator))] (-> (slice u8))
@@ -575,11 +564,10 @@
                                                                                                                      Diag))
   (try (do
          (let [bb (meta-build-box)]
-           (if (icmp-eq (load (field bb isset)) 0)
-               (return-from :try
-                            (Err [(ptr i8) Diag]
-                                 (derr "metaengine: this compiler build has no backend object builder registered, so it cannot compile metaprograms (compiler bug)")))
-               0)
+           (when (icmp-eq (load (field bb isset)) 0)
+                 (break :try
+                        (Err [(ptr i8) Diag]
+                             (derr "metaengine: this compiler build has no backend object builder registered, so it cannot compile metaprograms (compiler bug)"))))
            (let [mp (try! (monomorphize a lowered))]
              (sort-mono-program a mp)
              (let [cdir (if (me-cache-on?) (me-cache-dir a) (None [(slice u8)]))
@@ -590,9 +578,7 @@
                ; cache hit: the dylib for this exact program already exists
                (match cpath
                  (Some [p]
-                       (if (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0)
-                           (return-from :try (me-open-dylib a p))
-                           0))
+                       (when (icmp-eq (cast i64 (access (slice->cstr a p) 0)) 0) (break :try (me-open-dylib a p))))
                  (None [] 0))
                (let [id (me-unique a)
                      obj-s (sconcat3 a "/tmp/coil-mp-" id ".o")
@@ -615,9 +601,8 @@
                                    (Some [d]
                                          (do
                                            (system (slice->cstr a (sconcat a "mkdir -p " d)))
-                                           (if (icmp-eq (cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
-                                               (return-from :try (me-open-dylib a p))
-                                               0)))
+                                           (when (icmp-eq (cast i64 (rename (slice->cstr a tmp-s) (slice->cstr a p))) 0)
+                                                 (break :try (me-open-dylib a p)))))
                                    (None [] 0)))
                            (None [] 0))
                          ; no cache (or rename failed): open the temp dylib directly
@@ -733,9 +718,9 @@
                 ; per-qual builds land first; the batch build fills in the rest).
                 ; An existing entry wins — it is the same macro, already compiled.
                 (let [b (meta-engine)]
-                  (if (icmp-eq (cast i64 (load (field b entries))) 0)
-                      (do (store! (field b entries) (box-al [MEEntry] a (al-new [MEEntry] a))) 0)
-                      0)
+                  (when (icmp-eq (cast i64 (load (field b entries))) 0)
+                        (store! (field b entries) (box-al [MEEntry] a (al-new [MEEntry] a)))
+                        0)
                   (let [no (al-len [MEEntry] out)
                         (mut k) 0]
                     (loop (if (icmp-ge (load k) no)
@@ -744,9 +729,9 @@
                                 (let [mev (al-get [MEEntry] out (load k))
                                       mep (alloc-stack MEEntry)]
                                   (store! mep mev)
-                                  (if (icmp-eq (cast i64 (meta-engine-entry (load (field mep name)))) 0)
-                                      (do (al-push! (mut (load (field b entries))) (load mep)) 0)
-                                      0))
+                                  (when (icmp-eq (cast i64 (meta-engine-entry (load (field mep name)))) 0)
+                                        (al-push! (mut (load (field b entries))) (load mep))
+                                        0))
                                 (store! k (iadd (load k) 1))))))
                   (store! (field b active) 1)
                   (None [Diag]))))))))
