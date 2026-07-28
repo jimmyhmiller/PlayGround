@@ -4010,7 +4010,16 @@
                              (mut (field g dwvars))
                              (mut (field g dwevs))
                              (al-len [u8] (load (field (field g asm) buf)))
-                             ltmp)
+                             ltmp
+                             ; DWARF register 6 is rbp on x86-64.
+                             6
+                             ; A slot at offset k lives at rbx+k, and
+                             ;   rbx = rsp + outbytes = (rbp - 8 - total) + outbytes
+                             ; where total = slotbytes + outbytes + 8. So
+                             ;   rbx + k = rbp - 16 - slotbytes + k
+                             ; and dwarf.coil computes  k - (bias + slotbytes),
+                             ; which is exactly right with bias = 16.
+                             16)
                 ; debug sections are not SHF_ALLOC: they exist in the file but are
                 ; never loaded into the process image.
                 sline (eobj-add-sect! (mut (field g obj)) ".debug_line" 1 (sht-progbits) 0)

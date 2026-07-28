@@ -3661,7 +3661,9 @@
                              (mut (field g dwvars))
                              (mut (field g dwevs))
                              (al-len [u8] (load (field (field g asm) buf)))
-                             ltmp)
+                             ltmp
+                             29  ; DW_OP_reg29 — x29 is the frame base here
+                             16)
                 dbgattr 33554432
                 sline (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_line" 0 dbgattr)
                 sinfo (mobj-add-sect! (mut (field g obj)) "__DWARF" "__debug_info" 0 dbgattr)
