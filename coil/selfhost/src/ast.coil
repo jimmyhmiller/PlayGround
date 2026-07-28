@@ -89,7 +89,7 @@
   ; but it type-CHECKS rather than numeric-converts.
   (EAscribe   [(ty Type) (inner (ptr Expr))])
   ; ---- the 6 check-introduced variants (parser/resolver never emit these;
-  ; the type-checker LOWERS calls/borrows/etc. into them). Mirror src/ast.rs.
+  ; the type-checker LOWERS calls/borrows/etc. into them). Mirror.
   (ESpillRef  [(inner (ptr Expr))])
   (EConstruct [(sum (slice u8)) (variant (slice u8)) (args (ptr (ArrayList Expr)))])
   (ETraitCall [(trait_name (slice u8)) (method (slice u8)) (self_tp (slice u8)) (args (ptr (ArrayList Expr)))])
@@ -107,7 +107,7 @@
 ; A match arm (variant, bound names, body).
 (defstruct Arm [(variant (slice u8)) (binds (ptr (ArrayList (slice u8)))) (body Expr)])
 
-; A quasiquote template node (src/ast.rs Quasi).
+; A quasiquote template node.
 (defsum Quasi
   (QLit     [(form (ptr Sexp))])
   (QUnquote [(e (ptr Expr))])
@@ -115,7 +115,7 @@
   (QList    [(items (ptr (ArrayList Quasi)))])
   (QVector  [(items (ptr (ArrayList Quasi)))]))
 
-; Calling-convention lowering (src/convention.rs).
+; Calling-convention lowering.
 (defsum Lowering
   (LNative [(cc i64)])   ; cc: 0=c 1=fast 2=cold
   (LShim   []))
@@ -128,7 +128,7 @@
    (preserve (ptr (ArrayList (slice u8))))
    (lowering Lowering)])
 
-; Struct memory layout (src/ast.rs Layout).
+; Struct memory layout.
 (defsum Layout
   (LC       [])
   (LPacked  [])
@@ -172,7 +172,7 @@
 (defstruct Const [(name (slice u8)) (ty (Option Type)) (value Expr)])
 
 (defstruct TraitMethod [(name (slice u8)) (params (ptr (ArrayList Param))) (ret Type)])
-; `type_params` = the EXTRA trait type parameters beyond Self (src/ast.rs):
+; `type_params` = the EXTRA trait type parameters beyond Self:
 ; `(deftrait Get [Self K E] …)` — Self determines them (one impl per type).
 ; `requires` = the SUPERTRAITS from a `:requires [Base …]` clause (gen-8): every
 ; impl of this trait must also impl each Base. This is a SEPARATE axis from the
@@ -191,7 +191,7 @@
   [(name (slice u8)) (symbol (Option (slice u8))) (params (ptr (ArrayList Type)))
    (lo i64) (hi i64) (source i64) (ctxt i64)])
 
-; The whole program (src/ast.rs Program). `statics` is omitted: parsing never
+; The whole program. `statics` is omitted: parsing never
 ; produces statics (they come from checking), so the dump always emits an empty
 ; `(statics)` section.
 (defstruct Program
@@ -207,7 +207,7 @@
    (metas (ptr (ArrayList Expr)))
    (exports (ptr (ArrayList ExportC)))])
 
-; A parse/read diagnostic (src/span.rs Diag); dummy span = -1.
+; A parse/read diagnostic; dummy span = -1.
 (defstruct Diag [(lo i64) (hi i64) (msg (slice u8)) (source i64) (ctxt i64)])
 
 ; ============================ small constructors =============================
@@ -324,7 +324,7 @@
     (store! (field p source) source) (store! (field p ctxt) ctxt) (store! (field p nid) nid)
     (load p)))
 ; Rebuild a Sexp of `kind` preserving `orig`'s full span (source+ctxt+lo+hi),
-; mirroring Rust `Sexp::new(kind, s.span)` — so the expander's non-macro
+; mirroring `Sexp::new(kind, s.span)` — so the expander's non-macro
 ; List/Vector reconstruction never drops source/ctxt.
 (defn mk-sexp-src [(kind SexpKind) (orig (ptr Sexp))] (-> Sexp)
   (let [p (alloc-stack Sexp)]
@@ -403,7 +403,7 @@
 (defn dbool [(w (ptr Writer)) (b bool)] (-> i64) (if b (wb w 49) (wb w 48)))
 
 ; ============================ Sexp canonical dump (for quote) =================
-; Mirrors src/reader.rs dump_node (reused by EQuote / QLit). Identical to
+; Mirrors dump_node (reused by EQuote / QLit). Identical to
 ; selfhost/reader.coil's dumper.
 (defn sx-atom [(w (ptr Writer)) (tag (slice u8)) (s (slice u8)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
   (wb w 40) (ps w tag) (dump-span w source lo hi ctxt) (ps w " \"") (esc-write w s) (ps w "\")"))
@@ -432,6 +432,5 @@
       (KVec   [items] (sx-seq w "vec" items src lo hi ctxt)))))
 
 ; ============================ AST canonical dump =============================
-; Mirrors src/dump_ast.rs EXACTLY. Every helper corresponds to a Rust dumper.
 
 ; `["a" "b"]` — a vector of strings.

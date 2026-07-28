@@ -1,6 +1,6 @@
 ; selfhost/src/dwarf.coil — DWARF v4 emission for the arm64 backend.
 ; Zero dependencies: builds __debug_abbrev / __debug_info / __debug_str /
-; __debug_line section bytes directly. The Rust -g reference sets the spec:
+; __debug_line section bytes directly. The spec:
 ; DWARF v4, language C, one DW_TAG_subprogram per function at its defn line,
 ; per-expression line rows, params/locals as DW_OP_fbreg over x29, and DI
 ; types for scalars/pointers/structs/slices/arrays (sums/fnptrs omitted —

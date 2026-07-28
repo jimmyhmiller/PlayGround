@@ -34,7 +34,7 @@
 (defstruct TBox [(items (ArrayList DefEntry))])
 (defstruct SBox [(items (ArrayList (slice u8)))])
 
-; The threaded resolution context (mirrors the args of src/resolve.rs::resolve /
+; The threaded resolution context (mirrors the args of /
 ; qualify_*). `m`/`imp` change per module; `strict`/`bareok` are constant for the
 ; whole program (dump-resolved resolves with strict=true).
 (defstruct Ctx
@@ -104,7 +104,7 @@
   (let [bp (unwrap-ptr [(ArrayList (slice u8))] (create [(ArrayList (slice u8))] a))]
     (store! bp (al-new [(slice u8)] a)) bp))
 
-; src/ast.rs is_scalar_typename: bool / f32 / f64 / (i|u)<digits>.
+; is_scalar_typename: bool / f32 / f64 / (i|u)<digits>.
 (defn is-scalar-typename [(s (slice u8))] (-> bool)
   (if (str-eq s "bool") true
     (if (str-eq s "f32") true
@@ -121,7 +121,7 @@
                     (load ok))
                   false))))))))
 
-; ---- error messages (faithful to src/resolve.rs) --------------------------
+; ---- error messages (faithful to) --------------------------
 (defn priv-msg [(a (ptr Allocator)) (m (slice u8)) (rest (slice u8)) (target (slice u8))] (-> (slice u8))
   (let [p1 (sconcat3 a "in module '" m "': '")
         p2 (sconcat3 a p1 rest "' is private to module '")]
@@ -251,7 +251,7 @@
         (Err [(Option (slice u8)) Diag] (derr (use-ambig-msg a (load (field c m)) name (load m1) (load m2))))
         (Ok [(Option (slice u8)) Diag] (load r)))))
 
-; src/resolve.rs::resolve — kind: 0 callables, 1 types, 2 traits, 3 convs.
+; — kind: 0 callables, 1 types, 2 traits, 3 convs.
 (defn resolve [(c (ptr Ctx)) (name (slice u8)) (kind i64)] (-> (Result (slice u8) Diag))
   (let [a (load (field c a)) m (load (field c m)) imp (load (field c imp))
         table (load (field c table)) exp (load (field c exp)) sl (find-slash name)]
@@ -353,8 +353,8 @@
       (and (booleq (load (field x variadic)) (load (field y variadic)))
            (type-eq (field x ret) (field y ret))))))
 
-; ============================ check.rs foundation =============================
-; display_name (src/check.rs:116) — strip the auto-referred "coil.core." prefix
+; ============================ foundation =============================
+; display_name — strip the auto-referred "coil.core." prefix
 ; from a name for diagnostics. "coil.core." is 10 bytes.
 (defn ty-str-join [(a (ptr Allocator)) (v (ptr (ArrayList Type)))] (-> (slice u8))
   (let [(mut out) "" n (al-len [Type] (load v)) (mut i) 0]
@@ -410,7 +410,7 @@
     (if (icmp-eq tg 10) (sconcat3 a (sconcat3 a (sconcat3 a "(fnptr " (t-fn-cc t) " [") (ty-str-join a (t-fn-params t)) "] ") (ty-str a (t-fn-ret t)) ")")
     (sconcat3 a (sconcat3 a "(" (t-app-name t) " ") (ty-str-join a (t-fn-params t)) ")")))))))))))))))))
 
-; ---- qualify a Type in place (src/resolve.rs::qualify_type) ----------------
+; ---- qualify a Type in place ----------------
 (defn qualify-type-list [(c (ptr Ctx)) (lst (ptr (ArrayList Type))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -451,7 +451,7 @@
                 (match (qualify-type-list c params tps) (Err [d] (Err [i64 Diag] d))
                   (Ok [_] (qualify-type c ret tps))))))))))
 
-; ---- qualify Exprs / quasi / lists (src/resolve.rs::qualify_expr) ----------
+; ---- qualify Exprs / quasi / lists ----------
 (defn qualify-expr-list [(c (ptr Ctx)) (lst (ptr (ArrayList Expr))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Expr] (load lst)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -569,7 +569,7 @@
           (EStaticRef [_] (do (unimplemented "qualify/EStaticRef") 0)))
         (Ok 0)))))
 
-; ---- qualify per-section helpers (src/resolve.rs::qualify_program) ---------
+; ---- qualify per-section helpers ---------
 (defn qualify-param-types [(c (ptr Ctx)) (ps (ptr (ArrayList Param))) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Param] (load ps)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -768,8 +768,7 @@
             (_ 0))
           ; Qualify the implementing type (the impl's own type params stay
           ; unqualified — scalars and `slice` are structurally exempt), then
-          ; re-derive the dispatch base name from the qualified type
-          ; (src/resolve.rs).
+          ; re-derive the dispatch base name from the qualified type.
           (try! (qualify-type c (field ip self_type) (load (field ip type_params))))
           (store! (field ip for_type) (impl-base-name a (field ip self_type)))
           (try! (qualify-impl-methods c (load (field ip methods))))
@@ -872,7 +871,7 @@
           (try! (q-consts c p empty)) (try! (q-metas c p empty)) (try! (q-traits c p)) (try! (q-impls c p empty))
           (Ok 0)))))
 
-; ---- merge (src/resolve.rs::merge) -----------------------------------------
+; ---- merge -----------------------------------------
 (defn out-extern [(o (mut Out)) (i i64)] (-> (ptr Extern)) (index (load (field (field o externs) data)) i))
 (defn out-const  [(o (mut Out)) (i i64)] (-> (ptr Const))  (index (load (field (field o consts) data)) i))
 
@@ -1158,7 +1157,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 
-; ---- resolve-program (src/resolve.rs::resolve_program), strict=true --------
+; ---- resolve-program, strict=true --------
 ; `tolerant` = SKIP a top-level form that does not parse, instead of aborting. Only
 ; the macro-context build (expander.coil::expand-stage3) passes true: at that point
 ; macros are not yet expanded, so a top-level macro CALL — `(gctype Node)` — is not
@@ -1234,8 +1233,8 @@
                 (store! qi (iadd (load qi) 1)))))
           (if (load qfailed) (Err (load qerr)) (Ok (out->program o a))))))))
 
-; ============================ check.rs: tables (Cx) ==========================
-; Mirror src/check.rs's Sig/StructInfo/SumInfo/Cx. The Rust HashMaps become
+; ============================ tables (Cx) ==========================
+; Sig/StructInfo/SumInfo/Cx. The HashMaps become
 ; linear-scan ArrayList tables (the resolver's deftable idiom). Cx tables are
 ; BY-VALUE ArrayList fields so they can be pushed via (mut (field cx X)); they are
 ; read via (field cx X) for al-elem and (load (field cx X)) for al-len/al-get.

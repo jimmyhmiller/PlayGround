@@ -54,7 +54,7 @@
     (TNever []            (ps w "never"))
     (TCode  []            (ps w "code")) (TExternRef [] (ps w "externref"))))
 
-; ---- enum-tag dumpers (i64 code -> string, mirrors *_tag in dump_ast.rs) ----
+; ---- enum-tag dumpers (i64 code -> string) ----
 (defn d-binop [(w (ptr Writer)) (op i64)] (-> i64)
   (ps w (if (icmp-eq op 0) "add" (if (icmp-eq op 1) "sub" (if (icmp-eq op 2) "mul"
         (if (icmp-eq op 3) "div" (if (icmp-eq op 4) "rem" (if (icmp-eq op 5) "udiv"
@@ -196,7 +196,7 @@
       (EQuasi [q] (do (ps w "quasi") (dump-span w src lo hi ctxt) (wb w 32) (let [qp (alloc-stack Quasi)] (store! qp q) (d-quasi w qp))))
       (EComptime[inner] (do (ps w "comptime") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
       (EAscribe [ty inner] (do (ps w "ascribe") (dump-span w src lo hi ctxt) (wb w 32) (let [t (alloc-stack Type)] (store! t ty) (d-type w t)) (wb w 32) (d-expr w inner)))
-      ; ---- the 6 check-introduced variants (mirror src/dump_ast.rs) ----
+      ; ---- the 6 check-introduced variants  ----
       (ESpillRef[inner] (do (ps w "spillref") (dump-span w src lo hi ctxt) (wb w 32) (d-expr w inner)))
       (EConstruct[sum variant args] (do (ps w "construct") (dump-span w src lo hi ctxt) (wb w 32) (dstr w sum) (wb w 32) (dstr w variant) (wb w 32) (d-exprs w args)))
       (ETraitCall[trait_name method self_tp args] (do (ps w "traitcall") (dump-span w src lo hi ctxt) (wb w 32) (dstr w trait_name) (wb w 32) (dstr w method) (wb w 32) (dstr w self_tp) (wb w 32) (d-exprs w args)))
@@ -359,7 +359,7 @@
   (d-types w (load (field e params))) (wb w 32)
   (dump-span w (load (field e source)) (load (field e lo)) (load (field e hi)) (load (field e ctxt))) (wb w 41))
 
-; Byte-lexicographic `<` on strings (Rust String Ord over ASCII conv names):
+; Byte-lexicographic `<` on strings (ASCII conv names):
 ; a proper prefix is less than the longer string.
 (defn str-lt [(x (slice u8)) (y (slice u8))] (-> bool)
   (let [nx (slice-len x) ny (slice-len y) (mut i) 0 (mut res) 0]
@@ -458,4 +458,4 @@
 
 ; ============================ the PORT (implement these) =====================
 ; Each stub HARD-ABORTS (never a silent wrong value). Replace the body with a
-; faithful port of the same-named function in src/parse.rs.
+; faithful.

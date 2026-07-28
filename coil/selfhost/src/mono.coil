@@ -21,7 +21,7 @@
 (defstruct Subst [(names (ptr (ArrayList (slice u8)))) (types (ptr (ArrayList Type)))])
 ; A pending instantiation request (template name + concrete type-args).
 (defstruct PendInst [(name (slice u8)) (args (ptr (ArrayList Type)))])
-; The monomorphizer state (mirrors src/mono.rs::Mono). gfuncs/gstructs/gsums are
+; The monomorphizer state. gfuncs/gstructs/gsums are
 ; the FILTERED generic templates; the rest are growable output/work lists.
 (defstruct MonoCtx
   [(a (ptr Allocator))
@@ -75,13 +75,13 @@
   (let [p (alloc-stack PendInst)] (store! (field p name) name) (store! (field p args) args) (load p)))
 (defn t-app-args [(t (ptr Type))] (-> (ptr (ArrayList Type))) (t-fn-params t))
 
-; ---- Subst (src/mono.rs Subst = HashMap<String,Type>) -----------------------
+; ---- Subst -----------------------
 (defn mk-subst [(a (ptr Allocator)) (names (ptr (ArrayList (slice u8)))) (types (ptr (ArrayList Type)))] (-> (ptr Subst))
   (let [s (unwrap-ptr [Subst] (create [Subst] a))]
     (store! (field s names) names) (store! (field s types) types) s))
 (defn subst-empty [(a (ptr Allocator))] (-> (ptr Subst))
   (mk-subst a (box-al [(slice u8)] a (al-new [(slice u8)] a)) (box-items-type a)))
-; src/mono.rs::subst_map — zip params with args (parallel-list HashMap).
+; — zip params with args (parallel-list HashMap).
 (defn subst-map [(a (ptr Allocator)) (params (ptr (ArrayList (slice u8)))) (args (ptr (ArrayList Type)))] (-> (ptr Subst))
   (mk-subst a params args))
 (defn subst-lookup [(s (ptr Subst)) (name (slice u8))] (-> (Option Type))
@@ -92,7 +92,7 @@
           (store! i (iadd (load i) 1)))))
     (load r)))
 
-; ---- type_key / mangle (src/mono.rs) — mutually recursive -------------------
+; ---- type_key / mangle — mutually recursive -------------------
 (defn type-key [(a (ptr Allocator)) (t (ptr Type))] (-> (slice u8))
   (let [tg (type-tag t)]
     (if (icmp-eq tg 12) "never"
@@ -116,7 +116,7 @@
           (store! i (iadd (load i) 1)))))
     (load s)))
 
-; ---- trait_method_fn / type_impl_name (src/ast.rs) --------------------------
+; ---- trait_method_fn / type_impl_name --------------------------
 ; Delegates to check's `tmfn` — the ONE definition. These were two hand-synced copies
 ; of the same scheme; a mangler that drifts from the one used to EMIT the impl's
 ; functions produces calls to symbols that don't exist.
@@ -131,7 +131,7 @@
   (let [n (impl-base-name a t)]
     (if (icmp-eq (slice-len n) 0) (None [(slice u8)]) (Some n))))
 
-; ---- generic-impl resolution for deferred trait calls (src/mono.rs) ----------
+; ---- generic-impl resolution for deferred trait calls ----------
 (defn impl-lookup [(m (ptr MonoCtx)) (tr (slice u8)) (base (slice u8))] (-> (ptr ImplDef))
   (let [is (load (field m impls)) n (al-len [ImplDef] (load is)) (mut i) 0 (mut r) (cast (ptr ImplDef) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -187,7 +187,7 @@
           (store! i (iadd (load i) 1)))))
     (load r)))
 
-; ---- queues (src/mono.rs::queue_*) — dedup via the queued set ----------------
+; ---- queues — dedup via the queued set ----------------
 (defn io-record! [(m (ptr MonoCtx)) (mng (slice u8)) (nm (slice u8)) (args (ptr (ArrayList Type)))] (-> i64)
   (if (hm-contains? [(slice u8) i64] (load (field m io-index)) mng) 0
       ; index the new record gets = current length (its slot after the push), so
@@ -281,7 +281,7 @@
 (defn arity-err [(a (ptr Allocator)) (prefix (slice u8)) (n i64) (m i64)] (-> (slice u8))
   (sconcat a prefix (sconcat a " expects " (sconcat a (i64->str a n) (sconcat a " type arguments, got " (i64->str a m))))))
 
-; ---- resolve_ty (src/mono.rs) — substitute params, mangle generic apps ------
+; ---- resolve_ty — substitute params, mangle generic apps ------
 (defn resolve-ty-list [(m (ptr MonoCtx)) (lst (ptr (ArrayList Type))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Type)) Diag))
   (let [a (load (field m a)) n (al-len [Type] (load lst)) (mut out) (al-new [Type] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -329,7 +329,7 @@
         (match (subst-lookup map (type-struct-name t)) (Some [ct] (Ok ct)) (None [] (Ok (TStruct (type-struct-name t)))))
       (resolve-ty-app m t map)))))))))))))))))
 
-; ---- resolve a sum / its variants (src/mono.rs::resolve_sum) -----------------
+; ---- resolve a sum / its variants -----------------
 (defn resolve-fields [(m (ptr MonoCtx)) (fs (ptr (ArrayList Field))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Field)) Diag))
   (let [a (load (field m a)) n (al-len [Field] (load fs)) (mut out) (al-new [Field] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -364,7 +364,7 @@
           (store! (field ns variants) (box-al [Variant] a (load out)))
           (Ok (load ns))))))
 
-; ---- resolve a function (src/mono.rs::resolve_func) --------------------------
+; ---- resolve a function --------------------------
 (defn resolve-func [(m (ptr MonoCtx)) (f (ptr Func)) (map (ptr Subst)) (name (slice u8))] (-> (Result Func Diag))
   (let [a (load (field m a))]
     (match (resolve-params m (load (field f params)) map)
@@ -389,7 +389,7 @@
                   (store! (field nf hi) (load (field f hi)))
                   (Ok (load nf)))))))))))
 
-; ---- resolve expressions (src/mono.rs::resolve_expr) -------------------------
+; ---- resolve expressions -------------------------
 (defn resolve-expr-list [(m (ptr MonoCtx)) (lst (ptr (ArrayList Expr))) (map (ptr Subst))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [a (load (field m a)) n (al-len [Expr] (load lst)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -500,7 +500,7 @@
         ; directly. A receiver that resolved to a MANGLED instantiation
         ; (ArrayList__i64) dispatches by its BASE name, and its recorded args
         ; feed the impl pattern; a GENERIC impl's lowered method is a generic
-        ; function, instantiated by matching that pattern (src/mono.rs).
+        ; function, instantiated by matching that pattern.
         (ETraitCall [trait_name method self_tp args]
           (let [tp (alloc-stack Type)] (store! tp (TStruct self_tp))
             (let [styp (alloc-stack Type)] (store! styp (try! (resolve-ty m tp map)))
@@ -569,8 +569,8 @@
     (Err [d] (Err [Expr Diag] d))
     (Ok [k] (Ok (mk-expr k (load (field e lo)) (load (field e hi)) (load (field e source)) (load (field e ctxt)))))))
 
-; ---- drain the worklist (src/mono.rs::drain) --------------------------------
-; LIFO in Rust; an append-only cursor sweep here (same fixpoint, output order is
+; ---- drain the worklist --------------------------------
+; An append-only cursor sweep (same fixpoint, output order is
 ; unobserved by the oracle — every corpus file errors during seeding).
 (defn drain [(m (ptr MonoCtx))] (-> (Result i64 Diag))
   (let [a (load (field m a)) (mut sc) 0 (mut uc) 0 (mut fc) 0 (mut err) (zeroed Diag) (mut failed) false (mut done) false]
@@ -622,7 +622,7 @@
               (do (store! done true) 0)))))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
-; ---- orchestration (src/mono.rs::monomorphize) ------------------------------
+; ---- orchestration ------------------------------
 (defn collect-generic-structs [(a (ptr Allocator)) (p (ptr Program))] (-> (ptr (ArrayList StructDef)))
   (let [fs (load (field p structs)) n (al-len [StructDef] (load fs)) (mut out) (al-new [StructDef] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -644,7 +644,7 @@
             (if (icmp-gt (al-len [(slice u8)] (load (field fp type_params))) 0) (al-push! (mut out) (load fp)) 0))
           (store! i (iadd (load i) 1)))))
     (box-al [Func] a (load out))))
-; src/mono.rs: build variant_to_sum (error if a variant name is in two sums).
+; build variant_to_sum (error if a variant name is in two sums).
 (defn build-vsum [(m (ptr MonoCtx)) (p (ptr Program))] (-> (Result i64 Diag))
   (let [a (load (field m a)) ss (load (field p sums)) n (al-len [SumDef] (load ss)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (or (load failed) (icmp-ge (load i) n)) (break)
@@ -720,7 +720,7 @@
     (store! (field out metas) (box-al [Expr] a (al-new [Expr] a)))
     (store! (field out exports) (load (field p exports)))
     (Ok out)))
-; src/mono.rs keeps out_structs/out_sums/out_funcs in HashMaps keyed by name, so a
+; keeps out_structs/out_sums/out_funcs in HashMaps keyed by name, so a
 ; second insert with the same name OVERWRITES (last-writer-wins) — duplicate-named
 ; concrete definitions (e.g. a fn re-seen via two import paths) collapse to one.
 ; Our out lists are ArrayLists, so mirror that with insert-or-replace by name.
@@ -799,7 +799,7 @@
                             (Err [d] (Err [(ptr Program) Diag] d))
                             (Ok [_] (build-mono-program a m p asserts))))))))))))))))
 
-; ---- post-check Code-func drop (mirror lib.rs::elaborate_on_stack's retain) --
+; ---- post-check Code-func drop ----
 ; Comptime-only functions (a `Code` parameter or return — macros, generators,
 ; code helpers) have no runtime representation and are dropped after check,
 ; before mono. Without this the auto-loaded prelude's Code-returning macros reach
@@ -825,7 +825,7 @@
     (store! (field p funcs) (box-al [Func] a (load out)))
     0))
 
-; ---- canonicalize mono output order (mirror dump_mono.rs's name sorts) -------
+; ---- canonicalize mono output order (name sorts) ----
 ; `mono::monomorphize` builds funcs/structs/sums from `HashMap::into_values()`
 ; (nondeterministic), so the raw dump is not a stable oracle. Sort these three
 ; sections by name (mangled names are unique → total order) before dumping. This

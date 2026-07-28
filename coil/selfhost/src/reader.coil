@@ -43,11 +43,11 @@
 (defstruct StrRead [(s (slice u8)) (end i64)])
 
 ; ============================ AST representation =============================
-; Mirrors src/ast.rs. Recursion goes through (ptr Expr) / (ptr Type) (single
+; Mirrors. Recursion goes through (ptr Expr) / (ptr Type) (single
 ; box) and (ptr (ArrayList X)) (a sequence), like reader.coil/Sexp. Spans live as
 ; raw i64 lo/hi (dummy = -1), exactly as the reader stores them.
 
-; Type — 14 constructable variants (src/ast.rs Type).
+; Type — 14 constructable variants.
 (defn looks-numeric [(s (slice u8))] (-> bool)
   (let [n (slice-len s)]
     (if (icmp-eq n 0) false

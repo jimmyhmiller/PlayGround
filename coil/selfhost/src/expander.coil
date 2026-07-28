@@ -82,7 +82,7 @@
                           (if (icmp-eq (cast i64 core) 0) (None [(slice u8)]) (macro-reexport-match core macros expb head a)))))))))))))
 ; Tag every macro-synthesized (dummy-span) node with the expansion `ctxt`, located
 ; at the call site. Non-dummy nodes (template literals, ~unquote-spliced caller
-; code) keep their own span. Faithful port of src/lib.rs::stamp_expansion.
+; code) keep their own span. Faithful.
 (defn stamp-expansion [(s (ptr Sexp)) (source i64) (lo i64) (hi i64) (ctxt i64)] (-> i64)
   (if (icmp-lt (sx-lo (load s)) 0)
       (do (store! (field s source) source) (store! (field s lo) lo) (store! (field s hi) hi) (store! (field s ctxt) ctxt) 0) 0)

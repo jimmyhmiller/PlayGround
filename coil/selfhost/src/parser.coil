@@ -80,10 +80,9 @@
 (defn opt-is-str [(o (Option Sexp))] (-> bool) (match o (Some [s] (icmp-eq (sx-tag s) 4)) (None [] false)))
 (defn opt-str-val [(o (Option Sexp))] (-> (slice u8)) (match o (Some [s] (sx-sval s)) (None [] "")))
 
-; Faithful port of Rust `str::escape_debug` (what `{s:?}` renders in Display),
-; used by sexp-display for Str/CStr. Differs from the DUMP escaper (esc-write,
-; which emits `\xNN`): Display renders NUL as `\0` and any other control byte as
-; `\u{hex}` (minimal lowercase hex), matching Rust's `{:?}` for &str.
+; The DISPLAY escaper for Str/CStr, used by sexp-display. Differs from the DUMP
+; escaper (esc-write, which emits `\xNN`): Display renders NUL as `\0` and any
+; other control byte as `\u{hex}` (minimal lowercase hex).
 (defn dbg-hexnum [(a (ptr Allocator)) (b i64)] (-> (slice u8))
   (if (icmp-lt b 16) (char1 a (hexd b))
     (sconcat a (char1 a (hexd (udiv b 16))) (char1 a (hexd (urem b 16))))))
@@ -103,8 +102,8 @@
                 (char1 a b)))))))))))
           (store! i (iadd (load i) 1)))))
     (load acc)))
-; CStr Debug (Rust `{:?}` on a `&CStr`) — used by the llvm-ir parse-error path, where
-; inkwell's LLVMString Display is `{:?}` over its `Deref::Target = CStr`. Unlike str
+; CStr Debug — used by the llvm-ir parse-error path, where
+; An LLVM error string renders as `{:?}` over a `CStr`. Unlike str
 ; Debug (dbg-escape), CStr Debug is `ascii::escape_default` per byte: it escapes `'`
 ; as `\'` and renders any non-printable byte as `\xHH` (two lowercase hex digits),
 ; NOT `\u{…}`. Distinct helper so dbg-escape's str-Debug callers stay unchanged.
@@ -123,22 +122,21 @@
                 (sconcat a "\\x" (sconcat a (char1 a (hexd (iand (ishr b 4) 15))) (char1 a (hexd (iand b 15)))))))))))))))
           (store! i (iadd (load i) 1)))))
     (load acc)))
-; ---- f64 Debug (Rust `{x:?}`), for error interpolation of float literals ----
+; ---- f64 Debug, for error interpolation of float literals ----
 ; A string of `n` ASCII '0' characters.
 (defn nzeros [(a (ptr Allocator)) (n i64)] (-> (slice u8))
   (let [(mut acc) "" (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
       (do (store! acc (sconcat a (load acc) "0")) (store! i (iadd (load i) 1)))))
     (load acc)))
-; Faithful reproduction of Rust's `impl Debug for f64` (the shortest decimal that
-; round-trips, formatted via `float_to_general_debug`). Input is the raw f64 bit
+; Render an f64 as the SHORTEST decimal that round-trips. Input is the raw f64 bit
 ; pattern (a KFloat carries bits, not a decimal). Strategy: libc gives correctly
 ; rounded p-significant-digit decimals; we search p=1..17 for the SHORTEST p whose
 ; `%.*e` output parses back (strtod) to the identical f64 — this is exactly the
-; shortest-round-trip Ryū would find. We then re-render (sign, digits, exponent) in
-; Rust's own layout: fixed notation with a mandatory `.0`, switching to exponential
-; iff `abs < 1e-4 || abs >= 1e16` (Rust's GeneralFormat rule, equivalently the
-; leading-digit exponent E < -4 || E >= 16).
+; shortest-round-trip Ryū would find. We then re-render (sign, digits, exponent) as
+; fixed notation with a mandatory `.0`, switching to exponential iff
+; `abs < 1e-4 || abs >= 1e16` (equivalently the leading-digit exponent
+; E < -4 || E >= 16).
 (defn f64-debug [(a (ptr Allocator)) (bits i64)] (-> (slice u8))
   (let [absbits  (iand bits 9223372036854775807)
         sign     (icmp-eq (cast i64 (ishr (cast u64 bits) 63)) 1)
@@ -202,7 +200,7 @@
                               (sconcat a (sconcat a dg (nzeros a (isub point k))) ".0")
                             (sconcat a (sconcat a (subslice dg 0 point) ".") (subslice dg point k)))))]
                   (if sign (sconcat a "-" body) body)))))))))))
-; ---- Sexp Display (src/reader.rs Display), for error interpolation ----
+; ---- Sexp Display, for error interpolation ----
 (defn sexp-display [(a (ptr Allocator)) (s Sexp)] (-> (slice u8))
   (let [tg (sx-tag s)]
     (if (icmp-eq tg 0) (i64->str a (sx-ival s))
@@ -212,7 +210,7 @@
     (if (icmp-eq tg 5) (sconcat a (sconcat a "c\"" (dbg-escape a (sx-sval s))) "\"")
     (if (icmp-eq tg 6) (seq-display a (sx-items s) 40 41)
     (if (icmp-eq tg 7) (seq-display a (sx-items s) 91 93)
-      ; Float (tag 1) Display is Rust `{x:?}` = shortest-round-trip f64 decimal.
+      ; Float (tag 1) Display is the shortest-round-trip f64 decimal.
       ; The KFloat carries the raw bit pattern (sx-ival); f64-debug reproduces it.
       (f64-debug a (sx-ival s)))))))))))
 (defn seq-display [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (open i64) (close i64)] (-> (slice u8))
@@ -242,7 +240,7 @@
 (defn need [T] [(o (Option T)) (msg (slice u8))] (-> (Result T Diag))
   (match o (Some [v] (Ok v)) (None [] (Err (derr msg)))))
 
-; ---- matchers (src/parse.rs small helpers) ----
+; ---- matchers ----
 (defn as-list [(s Sexp) (msg (slice u8))] (-> (Result (ptr (ArrayList Sexp)) Diag))
   (if (icmp-eq (sx-tag s) 6) (Ok (sx-items s)) (Err (derr-at (sx-lo s) (sx-hi s) msg))))
 (defn head-sym [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (slice u8) Diag))
@@ -276,7 +274,7 @@
   (if (icmp-ne (sx-len args) 2) (Err (derr (sconcat a head ": expects exactly 2 arguments")))
       (Ok (let [p (alloc-stack Two)] (store! (field p x) (sx-at args 0)) (store! (field p y) (sx-at args 1)) (load p)))))
 
-; ---- types (src/parse.rs prim_type / int_type / parse_type) ----
+; ---- types ----
 (defn type-int-bits [(t Type)] (-> i64)
   (match t (TInt [b s] b) (TFloat [_] -1) (TBool [] -1) (TVoid [] -1) (TPtr [_] -1) (TRef [_ _] -1)
     (TStruct [_] -1) (TArray [_ _] -1) (TSlice [_] -1) (TVec [_ _] -1) (TFn [_ _ _] -1) (TApp [_ _] -1) (TNever [] -1) (TCode [] -1) (TExternRef [] -1)))
@@ -366,7 +364,7 @@
           (Ok (TFn cc params ret)))
       (Ok (TApp head (try! (parse-types a (rest-from a items 1)))))))))))))))))
 
-; ---- type parameters (src/parse.rs parse_type_params) ----
+; ---- type parameters ----
 ; ONE type-parameter entry: a bare `T`, or `(T Trait…)` carrying bounds. Shared by
 ; `defn`'s `[T (U Ord)]` vector and `impl`'s, so the two spellings cannot drift apart.
 (defstruct TPEntry [(name (slice u8)) (traits (ptr (ArrayList (slice u8))))])
@@ -412,7 +410,7 @@
                 (store! (field r bounds) (box-al [Bound] a (load bounds)))
                 (store! (field r consumed) true) (load r))))))))
 
-; ---- quasiquote (src/parse.rs build_quasi) ----
+; ---- quasiquote ----
 (defn build-quasi-seq [(a (ptr Allocator)) (items (ptr (ArrayList Sexp))) (isvec bool)] (-> (Result Quasi Diag))
   (try (let [(mut out) (al-new [Quasi] a) n (sx-len items) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break) (do (al-push! (mut out) (try! (build-quasi a (sx-at items (load i))))) (store! i (iadd (load i) 1)))))
@@ -435,7 +433,7 @@
       (if (icmp-eq tg 7) (build-quasi-seq a (sx-items s) true)
           (Ok (QLit (box-sexp a s)))))))
 
-; ---- expressions (src/parse.rs parse_expr / parse_list_expr) ----
+; ---- expressions ----
 (defn mk-bin [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (head (slice u8)) (op i64)] (-> (Result ExprKind Diag))
   (try (let [tp (alloc-stack Two)] (store! tp (try! (need-two a args head)))
     (Ok (EBin op (box-expr a (try! (parse-expr a (load (field tp x))))) (box-expr a (try! (parse-expr a (load (field tp y))))))))))
@@ -505,7 +503,7 @@
     (if (icmp-eq tg 7) (Err (derr-at slo shi "unexpected vector in expression"))
       (parse-list-expr a (sx-items s) slo shi (sx-source s) (sx-ctxt s)))))))))))
 
-; A leading :label keyword (src/parse.rs parse_label).
+; A leading:label keyword.
 (defstruct LabelSplit [(label (Option (slice u8))) (rest (ptr (ArrayList Sexp)))])
 (defn split-label [(a (ptr Allocator)) (args (ptr (ArrayList Sexp)))] (-> LabelSplit)
   (let [r (alloc-stack LabelSplit)]
@@ -514,7 +512,7 @@
         (do (store! (field r label) (None [(slice u8)])) (store! (field r rest) args)))
     (load r)))
 
-; (let [binds...] body...) — src/parse.rs `let` arm.
+; (let [binds...] body...) — `let` arm.
 (defn parse-let [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
   (try (let [bvo (sx-get args 0)]
     (if (not (opt-is-vec bvo)) (return-from :try (Err [ExprKind Diag] (derr-at slo shi "let: expected binding vector"))) 0)
@@ -536,7 +534,7 @@
           (if (icmp-eq (al-len [Expr] (load body)) 0) (return-from :try (Err [ExprKind Diag] (derr-at slo shi "let: empty body"))) 0)
           (Ok (ELet (box-al [Bind] a (load binds)) body))))))))
 
-; (match scrut arms...) — src/parse.rs `match` arm.
+; (match scrut arms...) — `match` arm.
 (defn parse-match [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
   (try (let [scrut (box-expr a (try! (parse-expr a (try! (need [Sexp] (sx-get args 0) "match: missing scrutinee")))))
              (mut arms) (al-new [Arm] a) n (sx-len args) (mut i) 1]
@@ -555,7 +553,7 @@
                 (let [ap (alloc-stack Arm)] (store! (field ap variant) variant) (store! (field ap binds) (box-al [(slice u8)] a (load binds))) (store! (field ap body) body) (al-push! (mut arms) (load ap))))))))))
     (Ok (EMatch scrut (box-al [Arm] a (load arms)))))))
 
-; (llvm-ir RESULT [operands] "BODY") — src/parse.rs `llvm-ir` arm.
+; (llvm-ir RESULT [operands] "BODY") — `llvm-ir` arm.
 (defn parse-llvm-ir [(a (ptr Allocator)) (args (ptr (ArrayList Sexp))) (slo i64) (shi i64)] (-> (Result ExprKind Diag))
   (try (if (icmp-ne (sx-len args) 3) (Err [ExprKind Diag] (derr-at slo shi "llvm-ir: expects (llvm-ir RESULT-TYPE [operands...] \"BODY\")"))
     (let [result (try! (parse-type a (sx-at args 0)))
@@ -598,7 +596,7 @@
     (derr-at slo shi
       (sconcat a what " is a top-level definition, but it appears inside an expression — an enclosing form is missing a ')'"))))
 
-; the big head dispatch (src/parse.rs parse_list_expr).
+; the big head dispatch.
 ; A bare `:` reads as an empty keyword (KKw ""), so a list whose head is one is the
 ; type-ascription form `(: value type)` — checked here BEFORE head-sym, which would
 ; otherwise reject the non-symbol head.
@@ -704,7 +702,7 @@
             (Ok (ECall head (try! (parse-types a (sx-items (opt-get fv)))) (try! (parse-exprs a (rest-from a args 1)))))
             (Ok (ECall head (box-al [Type] a (al-new [Type] a)) (try! (parse-exprs a args))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
 )
-; ---- declaration parsers (src/parse.rs) ----
+; ---- declaration parsers ----
 (defn func-name [(f Func)] (-> (slice u8)) (let [p (alloc-stack Func)] (store! p f) (load (field p name))))
 
 ; variant/struct fields: (name :type) -> Field.
@@ -983,7 +981,7 @@
                       (store! (field f cc) (load cc)) (store! (field f params) (box-al [Param] a (load params))) (store! (field f ret) ret)
                       (store! (field f body) body) (store! (field f macro_variadic) (load macrov)) (store! (field f lo) -1) (store! (field f hi) -1) (store! (field f source) -1) (store! (field f ctxt) 0) (load f))))))))))))
 
-; ---- impl-target helpers (src/ast.rs type_impl_name / type_mentions_name) ----
+; ---- impl-target helpers ----
 ; The dispatch KEY a type carries an impl under: nominal types by (base) name,
 ; scalars by spelling, and each structural type by a pseudo-name ("slice", "ptr",
 ; "array", "vec", "fn") — so structural types are first-class impl targets, not
@@ -1040,7 +1038,7 @@
 (defn parse-deftrait [(a (ptr Allocator)) (rest (ptr (ArrayList Sexp)))] (-> (Result TraitDef Diag))
   (try (let [name (try! (sym-of a (try! (need [Sexp] (sx-get rest 0) "deftrait: missing name")) "trait name"))
              ; [Self …]: the first entry is Self; any further entries are EXTRA
-             ; trait type parameters, determined by Self (src/parse.rs).
+             ; trait type parameters, determined by Self.
              tp-items (if (and (opt-is-vec (sx-get rest 1)) (icmp-gt (sx-len (sx-items (opt-get (sx-get rest 1)))) 0))
                           (sx-items (opt-get (sx-get rest 1)))
                           (return-from :try (Err [TraitDef Diag] (derr "deftrait: expected [Self …] after the name"))))
@@ -1089,8 +1087,8 @@
               (let [mp (alloc-stack TraitMethod)] (store! (field mp name) mname) (store! (field mp params) (box-al [Param] a (load params))) (store! (field mp ret) ret) (al-push! (mut methods) (load mp)))))))))
     (Ok (let [t (alloc-stack TraitDef)] (store! (field t name) name) (store! (field t self_param) self-param) (store! (field t type_params) (box-al [(slice u8)] a (load type-params))) (store! (field t requires) (box-al [(slice u8)] a (load requires))) (store! (field t methods) (box-al [TraitMethod] a (load methods))) (load t))))))
 
-; `(impl Trait Type …)` or the GENERIC form `(impl [T] Trait (ArrayList T) …)`
-; (src/parse.rs parse_impl): an optional leading type-parameter vector, then the
+; `(impl Trait Type …)` or the GENERIC form `(impl [T] Trait (ArrayList T) …)`:
+; an optional leading type-parameter vector, then the
 ; full implementing type. Each method carries the impl's type params as its own
 ; (the lowered functions are ordinary generic functions); every declared param
 ; must appear in the implementing type (dispatch infers them from the receiver).
@@ -1175,7 +1173,7 @@
     (store! (field c clobber) (box-al [(slice u8)] a (al-new [(slice u8)] a))) (store! (field c preserve) (box-al [(slice u8)] a (al-new [(slice u8)] a)))
     (store! (field c lowering) (LNative 0)) (load c)))
 
-; `parse_program` in src/parse.rs: fold the top-level forms into a Program.
+; `parse_program` in: fold the top-level forms into a Program.
 (defn parse-program [(a (ptr Allocator)) (forms (ptr (ArrayList Sexp)))] (-> (Result Program Diag))
   (let [(mut convs) (al-new [Convention] a) (mut structs) (al-new [StructDef] a) (mut sums) (al-new [SumDef] a)
         (mut externs) (al-new [Extern] a) (mut funcs) (al-new [Func] a) (mut asserts) (al-new [StaticAssert] a)
@@ -1242,7 +1240,7 @@
               (store! (field pp exports) (box-al [ExportC] a (load exports)))
               (load pp))))))
 
-; static-assert (src/parse.rs): condition presence + message rule.
+; static-assert: condition presence + message rule.
 (defn assert-msg [(a (ptr Allocator)) (items (ptr (ArrayList Sexp)))] (-> (Result (slice u8) Diag))
   (match (sx-get items 2)
     (None [] (Ok "static assertion failed"))

@@ -19,7 +19,7 @@
 ; functions are unreferenced → dead-stripped).
 (import "print.coil" :reexport)
 
-; Option / Result (and Some/None/Ok/Err) are core vocabulary — like Rust's prelude.
+; Option / Result (and Some/None/Ok/Err) are core vocabulary, always in scope.
 ; Pure generic sums (no runtime/externs), so this is freestanding-safe, and the
 ; allocator/IO trait signatures can use Option with no import at the use site.
 ; `match` recovers the concrete instance from the scrutinee, and bidirectional
@@ -43,7 +43,7 @@
 (deftrait Hash [Self]
   (hash [(x Self)] (-> i64)))
 
-; ---- arithmetic + ordering, as traits (Rust-style) -------------------------
+; ---- arithmetic + ordering, as traits -------------------------
 ; So `+ - * / %` and `< <= > >=` work and dispatch by type — and a generic can be
 ; bounded `(T Add)` / `(T Ord)`. Each lowers to the core op in the impl, which the
 ; optimizer inlines, so there's no overhead on primitives.
@@ -67,8 +67,8 @@
 (impl Eq u16 (= [(a u16) (b u16)] (-> bool) (icmp-eq a b)))
 (impl Eq u32 (= [(a u32) (b u32)] (-> bool) (icmp-eq a b)))
 (impl Eq u64 (= [(a u64) (b u64)] (-> bool) (icmp-eq a b)))
-; bool is Eq (i1 compare). Note: f64 is deliberately NOT Eq — like Rust, because
-; NaN != NaN breaks reflexivity; use fcmp-eq / fcmp-ne for floats.
+; bool is Eq (i1 compare). Note: f64 is deliberately NOT Eq, because NaN != NaN
+; breaks reflexivity; use fcmp-eq / fcmp-ne for floats.
 (impl Eq bool (= [(a bool) (b bool)] (-> bool) (if a b (not b))))
 (impl Hash i64 (hash [(x i64)] (-> i64) x))
 (impl Add i64 (+ [(a i64) (b i64)] (-> i64) (iadd a b)))
@@ -94,7 +94,7 @@
   (>= [(a f64) (b f64)] (-> bool) (fcmp-ge a b)))
 
 ; ---- pointers are ordered and compared BY ADDRESS ---------------------------
-; Like Rust's `*const T`. `T` is irrelevant to an address comparison, so these are
+; `T` is irrelevant to an address comparison, so these are
 ; UNBOUNDED — `(ptr T)` for any T at all, including a T that is itself unordered.
 ; One blanket impl covers every pointer type (dispatch keys all pointers as "ptr").
 ; Casting to u64, NOT i64: `icmp-*` signedness is read off the operand type, and an
@@ -110,7 +110,7 @@
   (>= [(a (ptr T)) (b (ptr T))] (-> bool) (icmp-ge (cast u64 a) (cast u64 b))))
 
 ; ---- bitwise, as traits ----------------------------------------------------
-; Rust-style bit operators `& | ^ << >>`, dispatched by type and inlined to the
+; Bit operators `& | ^ << >>`, dispatched by type and inlined to the
 ; core op — so `(& op 0xC7)` reads like C's `op & 0xC7` with no overhead. (Unary
 ; bitwise-not has no operator: `~` is the reader's unquote; use `(^ a -1)`.)
 (deftrait BitAnd [Self] (& [(a Self) (b Self)] (-> Self)))

@@ -7,7 +7,7 @@
 (extern close    :cc c [i32] (-> i32))
 ; libc `void exit(int)` — process exit with a code. Declared `(-> i64)` (like
 ; `abort`) so it composes as an expression; the return is never taken (exit does
-; not return). Used to halt the tool with the faithful nonzero exit code Rust's
+; not return). Used to halt the tool with the nonzero exit code the
 ; `report`/`ExitCode::FAILURE` produces, instead of `abort`'s SIGABRT (134).
 (extern exit     :cc c [i32] (-> i64))
 (extern strtod   :cc c [(ptr i8) (ptr (ptr i8))] (-> f64))
@@ -16,7 +16,7 @@
 (extern getcwd   :cc c [(ptr i8) i64] (-> (ptr i8)))
 (extern getenv   :cc c [(ptr i8)] (-> (ptr i8)))            ; NULL if the var is unset
 ; pthread FFI — run the deeply-recursive pipeline on a big stack, mirroring
-; src/lib.rs::elaborate which spawns a 256MB-stack scoped thread. A `coil build`
+; which spawns a 256MB-stack scoped thread. A `coil build`
 ; binary gets the default ~8MB main stack, which the recursive passes overflow on a
 ; large input (the self-host's own source). pthread_t / pthread_attr_t are carried
 ; as opaque buffers (a pointer-sized handle; attr is 64 bytes on macOS).
@@ -27,9 +27,9 @@
 
 ; ============================ LLVM-C FFI surface =============================
 ; The codegen pass builds the module with LLVMBuild* and prints it with
-; LLVMPrintModuleToString (mirroring src/lib.rs::emit_ir, which uses inkwell over
+; LLVMPrintModuleToString (which goes over
 ; the same C API). Opaque LLVM handles are carried as `(ptr i8)`. This is the
-; surface src/codegen.rs needs; the full port wires each `LLVMBuild*` call. The
+; surface needs; the full port wires each `LLVMBuild*` call. The
 ; feasibility of linking + calling these is PROVEN by selfhost/llvm_probe.coil.
 (extern LLVMContextCreate                  :cc c [] (-> (ptr i8)))
 (extern LLVMContextDispose                 :cc c [(ptr i8)] (-> void))
@@ -89,7 +89,7 @@
 (extern LLVMInitializeX86Target            :cc c [] (-> void))
 (extern LLVMInitializeX86TargetMC          :cc c [] (-> void))
 ; AsmPrinter init is REQUIRED for object emission (without it the target machine
-; reports "can't emit a file of this type"). Rust's Target::initialize_all does it.
+; reports "can't emit a file of this type").
 (extern LLVMInitializeAArch64AsmPrinter    :cc c [] (-> void))
 (extern LLVMInitializeX86AsmPrinter        :cc c [] (-> void))
 ; AsmParser init is required to emit INLINE ASM — which is how a `:lower shim`
@@ -113,7 +113,7 @@
 ; ---- object emission + new pass manager (the `build` subcommand) ----
 ; LLVMTargetMachineEmitToFile(tm, mod, filename, codegen, &err) -> LLVMBool (1=err);
 ;   codegen: LLVMObjectFile = 1. LLVMRunPasses(mod, "default<O3>", tm, opts) ->
-;   LLVMErrorRef (null=success). Mirrors src/lib.rs::compile_to_object_dbg.
+;   LLVMErrorRef (null=success). Mirrors.
 (extern LLVMTargetMachineEmitToFile        :cc c [(ptr i8) (ptr i8) (ptr i8) i32 (ptr (ptr i8))] (-> i32))
 (extern LLVMCreatePassBuilderOptions       :cc c [] (-> (ptr i8)))
 (extern LLVMDisposePassBuilderOptions      :cc c [(ptr i8)] (-> void))
@@ -190,7 +190,7 @@
 (extern LLVMPositionBuilderBefore          :cc c [(ptr i8) (ptr i8)] (-> void))
 (extern LLVMGetBasicBlockTerminator        :cc c [(ptr i8)] (-> (ptr i8)))
 (extern LLVMSetValueName2                  :cc c [(ptr i8) (ptr i8) i64] (-> void))
-; ---- attributes + memcpy (C-ABI struct-by-value passing: src/abi.rs + codegen) ----
+; ---- attributes + memcpy (C-ABI struct-by-value passing: + codegen) ----
 (extern LLVMGetEnumAttributeKindForName    :cc c [(ptr i8) i64] (-> i32))
 (extern LLVMCreateEnumAttribute            :cc c [(ptr i8) i32 i64] (-> (ptr i8)))
 (extern LLVMCreateTypeAttribute            :cc c [(ptr i8) i32 (ptr i8)] (-> (ptr i8)))

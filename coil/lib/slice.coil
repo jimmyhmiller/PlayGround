@@ -10,7 +10,7 @@
 ;
 ; Slices ALIAS their backing storage: `slice-set!` writes through to the original,
 ; and a `subslice` shares the same memory. A slice is a small value (two words),
-; so it is passed/returned BY VALUE (like Rust's `&str`).
+; so it is passed/returned BY VALUE.
 ;
 ; Bounds checking is the `--debug-checks` build mode (mem-6): `slice-get`,
 ; `slice-set!` and `subslice` verify their indices (and reject a `lo > hi`

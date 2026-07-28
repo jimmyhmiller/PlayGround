@@ -64,9 +64,9 @@
 (defstruct ImpEntry [(name (slice u8)) (imp ModImports)])
 (defstruct ExpEntry [(name (slice u8)) (names (ArrayList (slice u8)))])
 
-; One registered source (mirrors src/span.rs Source): a display name + full text.
+; One registered source: a display name + full text.
 (defstruct Source [(name (slice u8)) (text (slice u8))])
-; A macro-expansion record (src/span.rs Expansion): the macro name, its call site
+; A macro-expansion record: the macro name, its call site
 ; and def site (spans), and the enclosing expansion context (parent ctxt).
 (defstruct Expansion
   [(macro_name (slice u8))
@@ -83,7 +83,7 @@
    (srccount i64)
    ; The SourceMap: sources[id] = the file at that id (main=0, prelude=1, imports
    ; 2..). expansions[ctxt-1] = the macro provenance for ctxt (>=1). Both grow in
-   ; the exact order src/span.rs registers them, so ids/ctxts match the reference.
+   ; the exact order registers them, so ids/ctxts match the reference.
    (sources    (ArrayList Source))
    (expansions (ArrayList Expansion))
    ; All type-check body errors (build path renders every one; the dump-checked
@@ -96,8 +96,8 @@
    ; their bodies but keeps their SIGNATURES in the table, so callers don't cascade.
    (resolve_diags    (ptr (ArrayList Diag)))
    (resolve_poisoned (ptr (ArrayList (slice u8))))
-   ; The loader's first error, as a framed Diag (src/macros.rs returns Result<_,
-   ; Diag>). Threaded via a slot (not a Result return) so the loop-heavy loader
+   ; The loader's first error, as a framed Diag.
+   ; Threaded via a slot (not a Result return) so the loop-heavy loader
    ; keeps its i64 signatures; set once, then process-forms/-import bail early and
    ; run-pipeline reports it through the SAME render path as every other diagnostic.
    (loaderr Diag)
@@ -125,7 +125,7 @@
   (abort)
   0)
 
-; A framed loader diagnostic anchored at `f`'s span (src/macros.rs Diag::at(form.span, …)).
+; A framed loader diagnostic anchored at `f`'s span.
 (defn diag-at-form [(f (ptr Sexp)) (msg (slice u8))] (-> Diag)
   (let [d (alloc-stack Diag)]
     (store! (field d lo) (load (field f lo)))
@@ -603,7 +603,7 @@
 ; Each file's forms are walked as it is loaded (EVERY file, always — no dependence
 ; on the macro-expansion pass), and each `(include-str "rel")` is replaced by a
 ; string literal of the file's bytes. `rel` resolves relative to the INCLUDING
-; file's own directory (Rust's `include_str!` semantics). A missing file or a
+; file's own directory. A missing file or a
 ; non-literal path is a hard load error — never a silent empty embed.
 (defn incl-is-include-str [(items (ptr (ArrayList Sexp)))] (-> bool)
   (and (icmp-ge (sx-len items) 1)
@@ -650,7 +650,7 @@
     (store! cur cur0)
     ; Bail the moment the loader records an error (this file's import failed, or a
     ; nested imported file's did): stop processing further forms so the first
-    ; diagnostic is the one reported (src/macros.rs short-circuits via `?`).
+    ; diagnostic is the one reported.
     (loop (if (or (icmp-ge (load i) n) (ls-err? (mut s))) (break)
       (do (let [f (alloc-stack Sexp)] (store! f (al-get [Sexp] (load forms) (load i)))
             (match (l-list-head f)
@@ -685,7 +685,7 @@
         prelude-id (load (field s srccount))
         _ignore (store! (field s srccount) (iadd prelude-id 1))
         _reg (register-source! (mut s) "<prelude>" prelude-text)]
-    ; Pre-register the MAIN file's module as loaded (src/macros.rs): compiling a
+    ; Pre-register the MAIN file's module as loaded: compiling a
     ; stdlib file directly must not ALSO pull the bundled copy of the same
     ; module in through the prelude's import chain (the module would collect
     ; twice — "duplicate impl", silent last-wins for functions).
@@ -703,7 +703,7 @@
     0))
 
 ; ============================ resolve representation =======================
-; Mirrors src/resolve.rs. `Defs` = a module's definition names split by namespace
+; Mirrors. `Defs` = a module's definition names split by namespace
 ; (HashSets become ArrayLists, membership = linear str-eq scan). `DefTable` =
 ; per-module Defs (ArrayList of DefEntry). `ParsedForm` = one tagged form parsed
 ; into its own Program, retaining its module identity.

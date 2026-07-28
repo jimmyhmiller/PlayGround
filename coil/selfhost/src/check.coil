@@ -87,7 +87,7 @@
 
 ; ---- Cx table lookups (return a live (ptr T) or null) ----------------------
 (defn sig-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr Sig))
-  ; Mirror Rust's `sigs.insert` HashMap semantics: on a duplicate function name
+  ; HashMap `insert` semantics: on a duplicate function name
   ; the LAST inserted sig wins, so keep scanning and return the final match.
   (let [n (al-len [Sig] (load (field cx sigs))) (mut i) 0 (mut r) (cast (ptr Sig) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -203,14 +203,14 @@
           (store! i (iadd (load i) 1)))))
     (load f)))
 
-; ============================ check.rs: pure type helpers ====================
+; ============================ pure type helpers ====================
 (defn type-is-void  [(t (ptr Type))] (-> bool) (match-else (load t) (TVoid [] true) (_ false)))
 (defn type-is-never [(t (ptr Type))] (-> bool) (match-else (load t) (TNever [] true) (_ false)))
 (defn type-is-int   [(t (ptr Type))] (-> bool) (match-else (load t) (TInt [_ _] true) (_ false)))
 (defn type-is-float [(t (ptr Type))] (-> bool) (match-else (load t) (TFloat [_] true) (_ false)))
 (defn type-is-ptr   [(t (ptr Type))] (-> bool) (match-else (load t) (TPtr [_] true) (_ false)))
 
-; type_mentions (src/check.rs:2290)
+; type_mentions
 (defn type-list-mentions [(v (ptr (ArrayList Type))) (name (slice u8))] (-> bool)
   (let [n (al-len [Type] (load v)) (mut i) 0 (mut f) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -228,7 +228,7 @@
     (TFn    [cc ps r] (or (type-list-mentions ps name) (type-mentions r name)))
     (_ false)))
 
-; typename_to_type (src/check.rs:2303)
+; typename_to_type
 (defn typename-to-type [(name (slice u8))] (-> Type)
   (if (str-eq name "bool") (TBool)
     (if (str-eq name "externref") (TExternRef)
@@ -248,7 +248,7 @@
                     (if (load ok) (TInt (load val) (icmp-eq c0 105)) (TStruct name)))
                   (TStruct name))))))))))
 
-; subst_self (src/check.rs:2326)
+; subst_self
 (defn subst-self-list [(a (ptr Allocator)) (v (ptr (ArrayList Type))) (selfp (slice u8)) (concrete (ptr Type))] (-> (ptr (ArrayList Type)))
   (let [(mut out) (al-new [Type] a) n (al-len [Type] (load v)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -266,7 +266,7 @@
     (TFn    [cc ps r] (TFn cc (subst-self-list a ps selfp concrete) (box-type a (subst-self a r selfp concrete))))
     (_ (load t))))
 
-; erase_refs (src/check.rs:2345)
+; erase_refs
 (defn erase-refs-list [(a (ptr Allocator)) (v (ptr (ArrayList Type)))] (-> (ptr (ArrayList Type)))
   (let [(mut out) (al-new [Type] a) n (al-len [Type] (load v)) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -281,7 +281,7 @@
     (TFn    [cc ps r] (TFn cc (erase-refs-list a ps) (box-type a (erase-refs a r))))
     (_ (load t))))
 
-; param_ref_type (src/check.rs:2364)
+; param_ref_type
 (defn is-aggregate-name [(cx (ptr Cx)) (name (slice u8)) (tps (ptr (ArrayList (slice u8))))] (-> bool)
   (and (not (set-contains tps name))
        (or (icmp-ne (cast i64 (struct-find cx name)) 0) (icmp-ne (cast i64 (sum-find cx name)) 0))))
@@ -295,7 +295,7 @@
       (TArray [e k] (TRef false (box-type a (load t))))
       (_ (load t)))))
 
-; is_literal (src/check.rs:2750), is_literal_value (2827), numeric/is_cond/etc.
+; is_literal, is_literal_value (2827), numeric/is_cond/etc.
 (defn al-last-expr [(v (ptr (ArrayList Expr)))] (-> (ptr Expr))
   (let [n (al-len [Expr] (load v))]
     (if (icmp-le n 0) (cast (ptr Expr) 0) (al-elem [Expr] v (isub n 1)))))
@@ -318,7 +318,7 @@
   (or (and (type-is-int x) (type-is-int y)) (and (type-is-float x) (type-is-float y))))
 (defn arg-ok [(got (ptr Type)) (want (ptr Type)) (is_extern bool)] (-> bool)
   (if (type-eq got want) true (and is_extern (and (type-is-ptr got) (type-is-ptr want)))))
-; fits (src/check.rs:2783)
+; fits
 (defn fits [(n i64) (bits i64) (signed bool)] (-> bool)
   (if (icmp-ge bits 64) true
     (if signed
@@ -330,8 +330,8 @@
 (defn prefix-diag [(a (ptr Allocator)) (d Diag) (pre (slice u8))] (-> Diag)
   (let [dp (alloc-stack Diag)] (store! dp d) (derr (sconcat a pre (load (field dp msg))))))
 
-; ============================ check.rs: coerce =============================
-; coerce_lit (src/check.rs:2867)
+; ============================ coerce =============================
+; coerce_lit
 (defn coerce-lit [(a (ptr Allocator)) (e Expr) (target (ptr Type)) (fname (slice u8))] (-> (Result Expr Diag))
   (let [ep (alloc-stack Expr)] (store! ep e)
     (let [wrap (mk-expr (ECast (load target) (box-expr a (load ep))) (load (field ep lo)) (load (field ep hi)) (load (field ep source)) (load (field ep ctxt)))]
@@ -344,7 +344,7 @@
                   (Ok wrap)))
             (_ (Ok wrap))))
         (_ (Ok wrap))))))
-; coerce (src/check.rs:2886)
+; coerce
 (defn coerce-fail [(a (ptr Allocator)) (et (ptr Type)) (target (ptr Type)) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
   (Err [Expr Diag] (derr (sconcat a (sconcat a (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " has type ")) (ty-str a et)) " but expected ") (ty-str a target)))))
 (defn coerce [(a (ptr Allocator)) (e Expr) (et (ptr Type)) (target (ptr Type)) (is_extern bool) (fname (slice u8)) (what (slice u8))] (-> (Result Expr Diag))
@@ -362,7 +362,7 @@
                         (coerce-fail a et target fname what)))
                   (_ (coerce-fail a et target fname what)))))))))))
 
-; const_entry (src/check.rs:2835)
+; const_entry
 (defn const-entry [(a (ptr Allocator)) (cp (ptr Const))] (-> (Result EvalPair Diag))
   (let [nm (load (field cp name))]
     (match-else (load (field (field cp value) kind))
@@ -392,7 +392,7 @@
               (_ (Err [EvalPair Diag] (derr (sconcat a (sconcat3 a "const '" nm "': boolean value cannot have type ") (ty-str a (box-type a wt))))))))))
       (_ (do (unimplemented "check/const-entry called on non-literal (unreachable)") (Err [EvalPair Diag] (derr "")))))))
 
-; ============================ check.rs: validate_type ========================
+; ============================ validate_type ========================
 (defn validate-type-list [(v (ptr (ArrayList Type))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8))))] (-> (Result i64 Diag))
   (let [n (al-len [Type] (load v)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -492,7 +492,7 @@
         (match (validate-type-list params cx tps) (Err [d] (Err [i64 Diag] d)) (Ok [_] (validate-type ret cx tps))))
       (TApp [name args] (validate-app a cx name args tps)))))
 
-; ============================ check.rs: setup (Phase 1) ======================
+; ============================ setup (Phase 1) ======================
 (defn layout-is-bits [(l (ptr Layout))] (-> bool) (match-else (load l) (LBits [b o] true) (_ false)))
 (defn conv-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr Convention))
   (let [cv (field cx conventions) n (al-len [Convention] (load (load (field cx conventions)))) (mut i) 0 (mut r) (cast (ptr Convention) 0)]
@@ -683,7 +683,7 @@
 (defn impl-prefix [(a (ptr Allocator)) (tr (slice u8)) (forty (slice u8))] (-> (slice u8))
   (sconcat a (sconcat3 a "impl " tr " for ") (sconcat a forty ": ")))
 
-; ---- trait-extras unification (src/check.rs unify_trait_extras) --------------
+; ---- trait-extras unification --------------
 ; Match a trait-declared type (`want`, the trait's EXTRA type parameters open)
 ; against an impl method's declared type (`got`): bind each extra on first
 ; sight, require consistency after; everything else must match exactly. The
@@ -869,7 +869,7 @@
 (defn compute-const-entry [(a (ptr Allocator)) (cx (ptr Cx)) (cp (ptr Const))] (-> (Result EvalPair Diag))
   (if (is-literal-value (field cp value))
       (const-entry a cp)
-      ; non-literal const value = a compile-time computation (src/check.rs:388):
+      ; non-literal const value = a compile-time computation:
       ; synth the value (fname "const <name>"), then—if the const declares a
       ; type—coerce to it; report (value, declared|synth type). A const reference
       ; later elaborates to `(comptime value)` for the fold pass (see synth EVar).
@@ -983,7 +983,7 @@
       (try! (setup-validate-sum-fields a cx prog))
       (Ok (field fb items))))))
 
-; ============================ check.rs: check_func (Phase 2) =================
+; ============================ check_func (Phase 2) =================
 (defn validate-params [(a (ptr Allocator)) (cx (ptr Cx)) (ps (ptr (ArrayList Param))) (tps (ptr (ArrayList (slice u8)))) (fnm (slice u8))] (-> (Result i64 Diag))
   (let [n (al-len [Param] (load ps)) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1077,7 +1077,7 @@
           (store! (field outf ctxt) (load (field fp ctxt)))
           (Ok (load outf))))))))
 
-; ============================ check.rs: synth helpers =======================
+; ============================ synth helpers =======================
 (defstruct SynPair [(e (ptr Expr)) (t (ptr Type))])
 (defstruct SubstEntry [(name (slice u8)) (ty Type)])
 (defstruct ArgSlot [(present bool) (e (ptr Expr)) (t (ptr Type))])
@@ -1365,7 +1365,7 @@
           (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " on mixed signedness (")) (ty-str a x)) (sconcat a " and " (sconcat a (ty-str a y) ")")))))
       (derr (sconcat a (sconcat a (sconcat a (sconcat3 a "in '" fname "': ") (sconcat a what " on different types (")) (ty-str a x)) (sconcat a " vs " (sconcat a (ty-str a y) ")"))))))
 
-; unify_branches (src/check.rs:2943): fill `out` with coerced exprs, return target type.
+; unify_branches: fill `out` with coerced exprs, return target type.
 (defn unify-branches [(a (ptr Allocator)) (branches (ptr (ArrayList Branch))) (out (ptr (ArrayList Expr))) (fname (slice u8)) (what (slice u8))] (-> (Result Type Diag))
   (let [n (al-len [Branch] (load branches)) (mut i) 0 (mut have) false (mut concrete) (cast (ptr Type) 0)
         (mut err) (zeroed Diag) (mut failed) false]
@@ -1398,7 +1398,7 @@
                 (store! k (iadd (load k) 1)))))
           (if (load failed2) (Err [Type Diag] (load err2)) (Ok (load (load target)))))))))
 
-; coerce_arg (src/check.rs:2485)
+; coerce_arg
 ; The offending argument's own span, so an argument-type error underlines the
 ; argument (`"hello"`) not the whole call. dwspan only fills an unset (lo<0)
 ; span, so once attached here the enclosing call's synth won't overwrite it.
@@ -1443,7 +1443,7 @@
     (Ok [sp0] (let [sp (alloc-stack SynPair)] (store! sp sp0)
                 (coerce a (load (load (field sp e))) (load (field sp t)) want false fname what)))))
 
-; unify (src/check.rs:2212)
+; unify
 (defn unify [(a (ptr Allocator)) (decl (ptr Type)) (actual (ptr Type)) (tpset (ptr (ArrayList (slice u8)))) (subst (ptr (ArrayList SubstEntry))) (fname (slice u8))] (-> (Result i64 Diag))
   (if (or (type-is-void decl) (type-is-void actual))
       (Err [i64 Diag] (derr (sconcat3 a "in '" fname "': a void value cannot be used as a type argument (a (-> void) call yields nothing)")))
@@ -1459,7 +1459,7 @@
       (let [dt (type-tag decl) at2 (type-tag actual)]
         (if (and (icmp-eq dt 4) (icmp-eq at2 4)) (unify a (t-inner decl) (t-inner actual) tpset subst fname)
         ; a (ptr T) argument satisfies a (mut T)/(ref T) parameter — see through
-        ; BOTH wrappers (src/check.rs); a BARE type-parameter pointee keeps the
+        ; BOTH wrappers; a BARE type-parameter pointee keeps the
         ; general Ref-arm reading below (T := the whole pointer)
         (if (and (and (icmp-eq dt 5) (icmp-eq at2 4))
                  (not (and (icmp-eq (type-tag (t-inner decl)) 6) (set-contains tpset (type-struct-name (t-inner decl))))))
@@ -1486,7 +1486,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [i64 Diag] (load err)) (Ok [i64 Diag] 0))))
 
-; solve_type_args (src/check.rs:2160)
+; solve_type_args
 (defn solve-type-args [(a (ptr Allocator)) (type_params (ptr (ArrayList (slice u8)))) (declared (ptr (ArrayList Type))) (type_args (ptr (ArrayList Type))) (arglist (ptr (ArrayList ArgSlot))) (ret_tmpl (ptr Type)) (expected (ptr Type)) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (what (slice u8))] (-> (Result (ptr (ArrayList SubstEntry)) Diag))
   (let [subst (subst-new a) np (al-len [(slice u8)] (load type_params))]
     (if (icmp-gt (al-len [Type] (load type_args)) 0)
@@ -1522,7 +1522,7 @@
                     (Err [(ptr (ArrayList SubstEntry)) Diag] (derr (sconcat a (sconcat a (sconcat4 a "in '" fname "': cannot infer type argument '" (sconcat a (load mp) "' for '")) (sconcat a what "'; provide it explicitly: (")) (sconcat a what " [<types>] ...)"))))
                   (Ok subst))))))))))
 
-; bit_field_type (src/check.rs:2715)
+; bit_field_type
 (defn bit-field-type [(a (ptr Allocator)) (ptr (ptr Expr)) (field (slice u8)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result SynPair Diag))
   (match (do-synth a ptr (null-type) env cx tps fname)
     (Err [d] (Err [SynPair Diag] d))
@@ -1544,7 +1544,7 @@
                           (Ok (mk-synpair a (load (field sp e)) (load fty)))))))
                 (Err [SynPair Diag] (derr (sconcat a (sconcat a (sconcat3 a "in '" fname "': get/set! needs a pointer to a :layout bits struct, got (ptr ") (ty-str a pointee)) ")")))))))))))
 
-; check_quasi (src/check.rs:2799)
+; check_quasi
 (defn check-quasi [(a (ptr Allocator)) (qp (ptr Quasi)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result Quasi Diag))
   (match-else (load qp)
     (QLit [form] (Ok [Quasi Diag] (QLit form)))
@@ -1640,7 +1640,7 @@
             (let [head (sconcat a (sconcat5 a "in '" fname "': qualifier '" qual "' is ambiguous — ") (i64->str a (load cnt)))]
               (Err [MethodEntry Diag] (derr (sconcat3 a head " traits named '" (sconcat a qual "' declare this method; qualify with the module-prefixed trait name"))))))))))
 
-; resolve_method (src/check.rs:125) — returns a chosen MethodEntry.
+; resolve_method — returns a chosen MethodEntry.
 (defn resolve-method [(a (ptr Allocator)) (cx (ptr Cx)) (func (slice u8)) (fname (slice u8))] (-> (Result MethodEntry Diag))
   (let [ms (field cx methods) n (al-len [MethodEntry] (load (field cx methods))) (mut i) 0 (mut cnt) 0 (mut only) (cast (ptr MethodEntry) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1721,7 +1721,7 @@
           (let [tr (dyn-struct-trait cx wdname)]
             (if (icmp-gt (slice-len [u8] tr) 0) (build-make-dyn a cx tr ae at lo hi src ctxt fname) (Ok (mk-synpair a ae at))))
         (Ok (mk-synpair a ae at))))))
-; synth_construct (src/check.rs:2016)
+; synth_construct
 (defn variant-in-sum [(si (ptr SumInfo)) (variant (slice u8))] (-> (ptr Variant))
   (let [vs (load (field si variants)) n (al-len [Variant] (load vs)) (mut i) 0 (mut r) (cast (ptr Variant) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1831,7 +1831,7 @@
                       (store! m (iadd (load m) 1)))))
                 (if (load failed3) (Err [(ptr (ArrayList Expr)) Diag] (load err3)) (Ok (box-al [Expr] a (load out2))))))))))))
 
-; ---- ECall (src/check.rs:1324) ----
+; ---- ECall ----
 (defn methods-has [(cx (ptr Cx)) (func (slice u8))] (-> bool)
   (let [n (al-len [MethodEntry] (load (field cx methods))) (mut i) 0 (mut r) false]
     (loop (if (icmp-ge (load i) n) (break)
@@ -1864,7 +1864,7 @@
 ; Now that they can, a pointer's OWN impl must win: `(< p q)` with `Ord (ptr T)` in
 ; scope compares ADDRESSES, and must not silently peel to the pointee's `Ord`. So we
 ; try the receiver's own type first and peel one ptr/ref layer at a time, stopping at
-; the first level that dispatches — Rust's rule (the receiver type is tried before any
+; the first level that dispatches (the receiver type is tried before any
 ; autoderef step). `(len xs)` on `(ptr (ArrayList T))` still works: "ptr" has no `Len`
 ; impl, so the chain peels to the ArrayList exactly as before. If nothing in the chain
 ; dispatches, fall back to the fully-peeled type so existing diagnostics are unchanged.
@@ -1926,7 +1926,7 @@
             (store! j (iadd (load j) 1))))))
     (box-al [(slice u8)] a (load out))))
 
-; trait type-parameter Self deferred args (check.rs:1424). `subst` maps Self -> the
+; trait type-parameter Self deferred args. `subst` maps Self -> the
 ; bounded param and every associated type -> its synthetic name (build-trait-subst).
 (defn trait-tp-args [(a (ptr Allocator)) (tm (ptr TraitMethod)) (subst (ptr (ArrayList SubstEntry))) (args (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (func (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [ps (load (field tm params)) n (al-len [Expr] (load args)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
@@ -1944,7 +1944,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 
-; non-generic call args (check.rs:1476)
+; non-generic call args
 (defn ca-nongeneric [(a (ptr Allocator)) (sig (ptr Sig)) (args (ptr (ArrayList Expr))) (func (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result (ptr (ArrayList Expr)) Diag))
   (let [params (load (field sig params)) nparams (al-len [Type] (load params)) is_extern (load (field sig is_extern))
         n (al-len [Expr] (load args)) (mut out) (al-new [Expr] a) (mut i) 0 (mut err) (zeroed Diag) (mut failed) false]
@@ -1977,7 +1977,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList Expr)) Diag] (load err)) (Ok (box-al [Expr] a (load out))))))
 
-; generic call (check.rs:1536). Returns the elaborated ECall as EvalPair.
+; generic call. Returns the elaborated ECall as EvalPair.
 (defn ca-build-arglist [(a (ptr Allocator)) (args (ptr (ArrayList Expr))) (defs (ptr (ArrayList Deferred))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (ptr (ArrayList ArgSlot)))
   (let [n (al-len [Expr] (load args)) (mut out) (al-new [ArgSlot] a) (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -2096,7 +2096,7 @@
                   ret (subst-apply a (field sig ret) subst)]
               ; call_func, not func: a trait-method call on a concrete receiver
               ; was rewritten to the impl's lowered function — GENERIC for a
-              ; generic impl, so it lands here (src/check.rs).
+              ; generic impl, so it lands here.
               (ok-ep (mk-expr (ECall call_func out_targs new_args) elo ehi esrc ectxt) ret)))))))))
 
 (defn synth-call [(a (ptr Allocator)) (func (slice u8)) (type_args (ptr (ArrayList Type))) (args (ptr (ArrayList Expr))) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (elo i64) (ehi i64) (esrc i64) (ectxt i64)] (-> (Result EvalPair Diag))
@@ -2159,7 +2159,7 @@
               (return-from :try (err-ep (derr (sconcat a (sconcat5 a "in '" fname "': '" func "' names no trait method '") (sconcat a mname "'")))))
               0))
       (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi esrc ectxt)))))
-; ELet (src/check.rs:1231)
+; ELet
 (defn mk-bind [(name (slice u8)) (mutable bool) (value Expr)] (-> Bind)
   (let [p (alloc-stack Bind)] (store! (field p name) name) (store! (field p mutable) mutable) (store! (field p value) value) (load p)))
 (defn synth-let-body [(a (ptr Allocator)) (body (ptr (ArrayList Expr))) (expected (ptr Type)) (out (ptr (ArrayList Expr))) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8)) (what (slice u8))] (-> (Result Type Diag))
@@ -2253,7 +2253,7 @@
             (Err [d] (err-ep d))
             (Ok [last] (do (env-truncate! env saved) (ok-ep (mk-expr (ELet nbinds outl) elo ehi esrc ectxt) last)))))))))
 
-; EMatch (src/check.rs:1848)
+; EMatch
 (defn variant-by-name [(variants (ptr (ArrayList Variant))) (name (slice u8))] (-> (ptr Variant))
   (let [n (al-len [Variant] (load variants)) (mut i) 0 (mut r) (cast (ptr Variant) 0)]
     (loop (if (icmp-ge (load i) n) (break)
@@ -2579,7 +2579,7 @@
           (let [na (try! (synth-callptr-args a params args env cx tps fname))]
             (ok-ep (mk-expr (ECallPtr (load (field sp e)) na) elo ehi esrc ectxt) (load ret)))))))))
 
-; ============================ synth_inner (src/check.rs:836) =================
+; ============================ synth_inner =================
 (defn synth-inner [(a (ptr Allocator)) (e (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result EvalPair Diag))
   (let [elo (load (field e lo)) ehi (load (field e hi))
         esrc (load (field e source)) ectxt (load (field e ctxt))]
@@ -2704,7 +2704,7 @@
       (EDynDispatch [ds vt mi cc params ret recv args] (ok-ep (load e) ret))
       (ESpillRef [inner] (err-ep (derr (sconcat3 a "in '" fname "': internal: SpillRef in input")))))))
 
-; synth (src/check.rs:800) — span-fill + auto dyn-coercion wrapper.
+; synth — span-fill + auto dyn-coercion wrapper.
 (defn synth [(a (ptr Allocator)) (e (ptr Expr)) (expected (ptr Type)) (env (ptr (ArrayList EnvEntry))) (cx (ptr Cx)) (tps (ptr (ArrayList (slice u8)))) (fname (slice u8))] (-> (Result EvalPair Diag))
   (let [dynt (if (expected-some? expected) (is-dyn-target expected cx) false)]
     (match (synth-inner a e expected env cx tps fname)
@@ -2718,7 +2718,7 @@
 
 
 
-; ============================ check.rs: finish (Phase 3) =====================
+; ============================ finish (Phase 3) =====================
 ; Static-assert conditions are synth'd + is-cond-checked. The comptime fold
 ; (comptime::fold_program), aggregate-const statics, (meta …) elaboration, and
 ; export-c symbol resolution are a separate unported subsystem: finish passes
@@ -2742,7 +2742,7 @@
           (store! i (iadd (load i) 1)))))
     (if (load failed) (Err [(ptr (ArrayList StaticAssert)) Diag] (load err)) (Ok (box-al [StaticAssert] a (load out))))))
 
-; ---- check.rs finish: (meta …) elaboration + (export-c …) symbol resolution ----
+; ---- finish: (meta …) elaboration + (export-c …) symbol resolution ----
 ; display_name: strip the auto-referred coil.core. prefix in diagnostics.
 (defn display-name [(n (slice u8))] (-> (slice u8))
   (let [pfx "coil.core." pl (slice-len pfx)]
@@ -2877,19 +2877,19 @@
                 (store! (field out impls) (load (field prog impls)))
                 (store! (field out metas) metas)
                 (store! (field out exports) exports)
-                ; Phase 3 comptime fold (src/comptime.rs::fold_program): replace every
+                ; Phase 3 comptime fold: replace every
                 ; `(comptime …)` in a function body / static-assert with its literal.
                 ; A no-op for comptime-free programs (bootstrap + IR corpus unaffected).
                 (match (fold-program out (load (field out asserts)) a)
                   (Err [d] (Err [(ptr Program) Diag] d))
                   (Ok [_] (Ok out)))))))))))
 
-; ============================ the check pass (src/check.rs) ===================
-; check-program mirrors src/check.rs::check_with: setup (Phase 1, fail-fast) ->
+; ============================ the check pass ===================
+; check-program: setup (Phase 1, fail-fast) ->
 ; check_func over every function (Phase 2; FIRST error wins, matching the oracle's
 ; dump_error of diagnostics[0]) -> finish (Phase 3). Returns the typed/elaborated/
 ; LOWERED Program, or Err(diag) dumped canonically.
-; Check every function body. Mirrors src/check.rs check_with Phase 2: it collects
+; Check every function body. Mirrors check_with Phase 2: it collects
 ; ALL body errors (checking continues past a failing function) into `diags`, so the
 ; build path can render every error (`N errors`). The single-Diag return keeps the
 ; dump-checked oracle unchanged (it reports diagnostics[0]).
@@ -2934,12 +2934,12 @@
           (Err [d] (Err [(ptr Program) Diag] d))
           (Ok [funcs] (finish a cx p funcs)))))))
 
-; ============================ the mono pass (src/mono.rs) =====================
+; ============================ the mono pass =====================
 ; A PURE specializer: the checker already wrote explicit type-args on every
 ; generic call/construction, so mono instantiates each generic func/struct/sum
 ; per concrete type-arg set, rewrites calls to the specialized (mangled) names,
 ; and drops the generic templates. Output is a Program with no remaining
-; generics. Faithful port of src/mono.rs; mono's String errors become spanless
-; Diags (derr, lo=hi=-1) so they dump as (error@D:D "...") matching the reference.
+; generics. mono's String errors become spanless Diags (derr, lo=hi=-1) so they
+; dump as (error@D:D "...").
 
 ; A type-parameter substitution (param-name -> concrete Type), parallel lists.

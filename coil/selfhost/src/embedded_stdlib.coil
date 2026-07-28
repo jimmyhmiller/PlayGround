@@ -1,6 +1,6 @@
 ; selfhost/src/embedded_stdlib.coil — the prelude + bundled stdlib, embedded as
 ; string constants so the compiler is portable (runs outside the repo, where
-; lib/*.coil don't exist). This is the Coil analog of the Rust compiler's
+; lib/*.coil don't exist). This is the same trick as the
 ; `include_str!`: `(include-str "path")` reads the file AT COMPILE TIME and folds it
 ; into a string literal, so the bytes are baked into the compiler binary. Paths are
 ; resolved relative to THIS file's directory (selfhost/src), so prelude.coil is a

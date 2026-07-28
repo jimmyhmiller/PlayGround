@@ -3031,7 +3031,7 @@
     (load r)))
 
 ; type -> DwTy index, or -1 when we deliberately don't describe it (sums,
-; fnptrs, vecs, non-C struct layouts — mirrors the Rust di_type policy:
+; fnptrs, vecs, non-C struct layouts — mirrors the DI-type policy:
 ; never a wrong type).
 (defn dw-ty-of! [(g (ptr Cga)) (t (ptr Type))] (-> i64)
   (let [a (load (field g a))

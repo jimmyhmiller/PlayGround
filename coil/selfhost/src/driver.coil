@@ -398,7 +398,7 @@
   0)
 
 ; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).
-; Each line must match exactly what src/dump_ast.rs would emit for the same node.
+; Each line must match exactly what would emit for the same node.
 (defn smoke [(a (ptr Allocator))] (-> i64)
   (let [w (stdout)]
     ; (staticref@1:2 "foo")
@@ -425,7 +425,7 @@
           args (box-al [Expr] a (al-new [Expr] a))
           recv (box-expr a (mk-expr (EVar "r") 19 20 0 0)) e (alloc-stack Expr)]
       (store! e (mk-expr (EDynDispatch "Dyn" "VT" 2 "c" params (TVoid) recv args) 17 18 0 0)) (d-expr w e)) (wb w 10)
-    ; ---- ty-str byte-exact checks (vs src/check.rs::ty_str) ----
+    ; ---- ty-str byte-exact checks ----
     (let [t (alloc-stack Type)] (store! t (TInt 64 true))  (ps w (ty-str a t))) (wb w 10)  ; i64
     (let [t (alloc-stack Type)] (store! t (TInt 8 false))  (ps w (ty-str a t))) (wb w 10)  ; u8
     (let [t (alloc-stack Type)] (store! t (TPtr (box-type a (TInt 8 false)))) (ps w (ty-str a t))) (wb w 10)  ; (ptr u8)
@@ -439,12 +439,12 @@
     0))
 
 ; ============================ codegen (the frontier) =========================
-; src/codegen.rs (3496 lines): monomorphized Program -> LLVM module, built via the
+; (3496 lines): monomorphized Program -> LLVM module, built via the
 ; LLVM-C FFI surface above. FAITHFUL, call-for-call port of `compile_for_dbg` with
 ; dbg=None (every debug-info path skipped). The corpus has no shims / no struct-by-
-; value C ABI, so abi.rs is deferred (a struct-by-value extern would hard-error).
+; value C ABI, so ABI classification is deferred (a struct-by-value extern hard-errors).
 
-; ---- Tv: a lowered (value, Coil type) pair (Rust `Tv<'ctx>` = (BasicValueEnum, Type))
+; ---- Tv: a lowered (value, Coil type) pair
 ; ── CLI-applied metaprograms: `--use PATH` imports a module (which self-registers
 ; its (checker …)/(transform …)) WITHOUT editing the source — so you can run a linter
 ; optionally: `coil run app.coil --use lint.coil`.
@@ -590,7 +590,7 @@
 ; `mode` 0 = emit-ir (print IR to stdout); 1 = build (emit object to `obj`).
 ; `triple` = the `--target` override cstr (null = host default) for cross-compiling.
 ; `ok` is the pipeline result the thread writes back so the caller (main / build-cmd)
-; can HALT and exit nonzero on a compile error — mirroring Rust, where a failed
+; can HALT and exit nonzero on a compile error —, where a failed
 ; `build_executable_*` / `emit_ir` returns Err and `main` prints + exits FAILURE
 ; BEFORE any link step. 1 = pipeline succeeded, 0 = a diagnostic was reported.
 ;
@@ -696,12 +696,12 @@
     (store! (field ctx dump-fn) dfn)
     (run-on-big-stack ctx)))
 
-; The intermediate object path for output `out`, mirroring Rust's
+; The intermediate object path for output `out`
 ; `out_path.with_extension("o")`: REPLACE the final path-component extension with
 ; `o` (`a.out` -> `a.o`, `foo.coil` -> `foo.o`), or APPEND `.o` when the basename
 ; has none (`foo` -> `foo.o`). A `.` in a parent directory doesn't count; a leading
 ; dot (`.foo`) is not an extension. This keeps the `.o` name — hence any linker
-; diagnostic that prints it — byte-identical to the Rust reference for ANY `-o`.
+; diagnostic that prints it — for ANY `-o`.
 (defn obj-path [(a (ptr Allocator)) (out (slice u8))] (-> (slice u8))
   (let [n (slice-len out) (mut slash) -1 (mut i) 0]
     (loop (if (icmp-ge (load i) n) (break)
@@ -729,8 +729,8 @@
 ; that named neither the file nor the mistake — and `fmt --write` on a missing path
 ; FABRICATED the file. `read-file-opt` already separates "missing" from "empty" and its
 ; own comment says so; this is the one door every user-supplied path goes through.
-; `rc` is the process exit code for a missing file: 1 for build/emit (what clang and
-; rustc do), 2 for `fmt --check`, where 1 already means "this file is not formatted"
+; `rc` is the process exit code for a missing file: 1 for build/emit (what clang
+; does), 2 for `fmt --check`, where 1 already means "this file is not formatted"
 ; and a CI gate must be able to tell that apart from a broken invocation.
 (defn read-src-rc [(a (ptr Allocator)) (path (ptr i8)) (rc i64)] (-> (slice u8))
   (match (read-file-opt a path)
@@ -982,8 +982,8 @@
         0)))))
 
 ; `build <file> -o <out> [--link-flag X]...` : emit `<out>.o` then link it into a
-; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the Rust
-; `coil build` argv handling (src/main.rs) + link step (src/lib.rs).
+; native executable with `cc <out>.o -o <out> <link-flags...>`. Mirrors the
+; `coil build` argv handling + link step.
 (defn build-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))
                  (build-fn  (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (ptr i8) (slice u8)] i64))
                  (emitir-fn (fnptr c [(ptr Allocator) (slice u8) (slice u8) (ptr i8) (slice u8)] i64))
@@ -1085,7 +1085,7 @@
         ; dlopen'd into it ("interceptors … loaded too late"). (mem-7)
         (set-meta-link-flags! (filter-meta-link-flags a (load flags)))
         ; HALT on a compile error: run-on-big-stack returns 0 when the pipeline
-        ; reported a diagnostic. Mirror Rust — the diagnostic was already printed;
+        ; reported a diagnostic — it was already printed;
         ; return FAILURE (1) BEFORE the link step so no spurious `cc: no such
         ; file` / undefined-symbol junk is ever emitted.
         (if (icmp-eq (run-on-big-stack ctx) 0) 1
@@ -1134,7 +1134,7 @@
                       (None [] 0))))))))))))
 
 ; ============================ cheader (export-c → C header) =================
-; Port of src/cheader.rs — the inverse of cimport: emit a C header (prototypes +
+; Port of — the inverse of cimport: emit a C header (prototypes +
 ; typedef structs) for a program's (export-c …) set.
 
 (defn ch-cname [(a (ptr Allocator)) (qualified (slice u8))] (-> (slice u8))
@@ -1302,7 +1302,7 @@
 
 ; ============================ Coil.toml manifest ============================
 ; `coil build` / `coil run` with no source file read ./Coil.toml and expand it
-; into the flags the CLI already accepts (port of src/manifest.rs). Deliberately
+; into the flags the CLI already accepts. Deliberately
 ; tiny: a line-based reader for [package]/[build]/[link]/[run].
 
 (defn m-ws? [(c u8)] (-> bool)
@@ -1511,7 +1511,7 @@
 
 ; `run <file> [--link-flag X]... [--backend arm64] [-- prog args...]` : build the
 ; file to a temp executable, exec it with the forwarded args, propagate its exit
-; code. Mirrors the Rust `coil run` (src/main.rs run_aot): build then exec.
+; code. `coil run` is build then exec.
 (defn run-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   ; `run` reuses the working `build` subcommand as a subprocess (self = argv[0]):
   ;   <self> build <file> -o /tmp/coil-run <flags-before-'--'>   then exec it with
@@ -1657,7 +1657,7 @@
         (do (ps (stderr) "usage: coil fmt [--check|--write] <file.coil>...\n") 2)
       (load rc))))
 
-; `new <name>` — scaffold Coil.toml + src/main.coil (mirrors Rust cmd_new).
+; `new <name>` — scaffold Coil.toml + src/main.coil.
 (defn new-cmd [(a (ptr Allocator)) (argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (if (icmp-lt (cast i64 argc) 3)
       (do (ps (stderr) "usage: coil new <name>\n") 1)
@@ -2203,6 +2203,6 @@ Pipeline stage dumps (for debugging the compiler itself), each <file.coil>
             (store! (field ctx build-fn)  build-fn)
             (store! (field ctx emitir-fn) emitir-fn)
             ; emit-ir: exit FAILURE (1) if the pipeline reported a diagnostic,
-            ; mirroring Rust's `report(emit_ir(...))` returning ExitCode::FAILURE.
+            ; `report(emit_ir(...))` returning ExitCode::FAILURE.
             (if (icmp-eq (run-on-big-stack ctx) 0) 1 0)))))))))))))))))))))))))))))
   );; ===== GRAFTED FROM expander.coil: comptime interpreter + expand-stage3 driver =====

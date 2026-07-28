@@ -128,7 +128,7 @@
   0)
 
 ; A single diagnostic → the top-level `error: <rendered>` on stderr (mirrors
-; main.rs report/print_error). The main source (id 0) is registered under the real
+; The main source (id 0) is registered under the real
 ; path, so no `<source>` substitution is needed.
 (defn report-diag [(w (ptr Writer)) (s (mut LS)) (d Diag)] (-> i64)
   (ps w "error: ") (render-diag w (mut s) d) (wb w 10) 0)

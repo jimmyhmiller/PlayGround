@@ -334,7 +334,7 @@
           (let [sp (alloc-stack Source)] (store! sp (al-get [Source] (load lst) sid))
             (ct-col-at (load (field sp text)) (sx-lo node))))))))
 ; `(code-src NODE)` — the raw SOURCE TEXT of a node's span (lo..hi), so a macro can
-; show the user exactly what they wrote (Rust's `assert!` prints the expression).
+; show the user exactly what they wrote.
 ; Empty when the node has no known source or a dummy span.
 (defn code-src-of [(node Sexp)] (-> (slice u8))
   (let [b (src-box) lst (load (field b lst))]
@@ -1463,7 +1463,7 @@
       (loop (if (icmp-ge (load si) ns) (break) (do (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si))) (store! si (iadd (load si) 1))))))
     ; The sub-program keeps every impl, and checking lowers each impl's METHODS,
     ; whose bodies call ordinary library functions — those callees must ride
-    ; along or the sub-program's check reports them undefined (src/lib.rs).
+    ; along or the sub-program's check reports them undefined.
     (let [is (load (field p impls)) ni (al-len [ImplDef] (load is)) (mut ii) 0]
       (loop (if (icmp-ge (load ii) ni) (break)
         (do (let [ip (al-elem [ImplDef] is (load ii))
@@ -1556,7 +1556,7 @@
        (let [it (sx-items (load f))]
          (and (icmp-ge (sx-len it) 1) (and (icmp-eq (sx-tag (sx-at it 0)) 2) (str-eq (sx-sval (sx-at it 0)) "meta"))))))
 ; ============================ comptime::fold_program ========================
-; The comptime FOLD pass (src/comptime.rs fold_program/fold_expr/build_value):
+; The comptime FOLD pass:
 ; walk every checked function body (and static-assert cond) and replace each
 ; `(comptime E)` node with the literal E evaluates to. Runs the SAME interpreter
 ; `eval` used for (meta …). Implemented as an IN-PLACE mutating walk (like
@@ -1564,8 +1564,7 @@
 ; pass is a NO-OP for comptime-free programs (the exhaustive IR corpus + bootstrap
 ; stay unchanged); only `(comptime …)` nodes — currently a hard mono error — get
 ; folded. build_value reconstructs the literal-back (scalars → literals, a sum →
-; a variant call, a struct/array → an imperative alloc+store+load), mirroring
-; src/comptime.rs::build_value/build_content faithfully.
+; a variant call, a struct/array → an imperative alloc+store+load).
 (defn f64->bits [(x f64)] (-> i64)
   (let [p (alloc-stack f64)] (store! p x) (load (cast (ptr i64) p))))
 ; NB: CtVal (a sum) is threaded BY POINTER through this mutual recursion — a
@@ -1679,7 +1678,7 @@
           (EComptime [inner]
             ; Evaluate the inner directly (eval handles nested comptime/reflection
             ; with the proper environment) and splice the literal-back IN PLACE,
-            ; keeping this node's span (src/comptime.rs fold_expr Comptime arm). When
+            ; keeping this node's span. When
             ; the tree-walk interpreter REJECTS the site (a generic call, sizeof, a
             ; string — the mac-8 weaknesses), route it through the compiled metaprogram
             ; engine via the registered hook (interp deletion step 1); the hook returns
@@ -1776,7 +1775,7 @@
           (store! i (iadd (load i) 1)))))
     (load r)))
 ; splice: rebuild s.out = (tagged forms sans meta) ++ generated forms (tagged with the
-; first meta form's module, mirroring src/lib.rs::elaborate_on_stack's tagged2).
+; first meta form's module's tagged2).
 (defn splice-metas [(s (mut LS)) (gen (ptr (ArrayList Sexp))) (a (ptr Allocator))] (-> i64)
   (let [old (box-al [TaggedForm] a (load (field s out))) n (al-len [TaggedForm] (load old)) (mut newout) (al-new [TaggedForm] a)
         (mut mmod) (None [(slice u8)]) (mut found) false (mut i) 0]
@@ -1795,6 +1794,6 @@
             (store! j (iadd (load j) 1))))))
     (store! (field s out) (load newout))
     0))
-; src/lib.rs::elaborate_on_stack — the (meta …) staged-macro loop. `prog` is the
+; — the (meta …) staged-macro loop. `prog` is the
 ; NON-STRICT first resolve (metas non-empty): check the generator closure, run the
 ; metas, splice the generated forms, then STRICT re-resolve + final check.

@@ -61,7 +61,7 @@
       (if (icmp-eq n 0) c"default<O0>"
         (if (icmp-eq n 1) c"default<O1>"
           (if (icmp-eq n 2) c"default<O2>" c"default<O3>"))))))
-; mono'd Program -> native object file. Mirrors src/lib.rs::compile_to_object_dbg
+; mono'd Program -> native object file. Mirrors
 ; (the release/`src_path = None` path): build the module (codegen-module already
 ; sets target + datalayout), create a host target machine (cpu "generic", no
 ; features, reloc PIC=2, codemodel Default=0) at CodeGenOptLevel `optlvl`, run the
@@ -115,7 +115,7 @@
 
 ; Returns 1 if the pipeline succeeded (object emitted), 0 if a diagnostic was
 ; reported. build-cmd checks this and HALTS before linking on failure (mirroring
-; Rust: `compile_to_object_dbg(...)?` returns Err before `cc` is ever invoked).
+; the object build fails before `cc` is ever invoked).
 (defn build-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
   (let [w (stderr)
         (mut sp0) (al-new [(slice u8)] a) (mut st0) (al-new [(slice u8)] a)]

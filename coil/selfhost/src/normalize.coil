@@ -467,7 +467,7 @@
         (nz-assemble a header (nz-sort-blocks a (load nblocks)))))))
 
 ; Tail of the pipeline: mono'd Program -> codegen -> print -> normalize -> stdout.
-; Mirrors src/lib.rs::dump_ir (emit_ir then normalize_ir::normalize).
+; Mirrors (emit_ir then normalize_ir::normalize).
 (defn emit-ir-normalized [(a (ptr Allocator)) (w (ptr Writer)) (mp (ptr Program)) (triple (ptr i8))] (-> i64)
   (let [m       (codegen-module a mp triple)
         ir-cstr (LLVMPrintModuleToString m)
@@ -482,6 +482,6 @@
 ; `w` and returns `(None)`. Both `dump-ir-program` (print IR) and `build-ir-program`
 ; (emit object) drive this so the two share ONE pipeline.
 ; ============================ diagnostic renderer ===========================
-; Faithful port of src/span.rs render/render_all + main.rs report/print_error:
+; Faithful render/render_all + report/print_error:
 ; `error: <msg>\n  --> file:line:col\n   |\nN | <src line>\n   |   ^^^^`, plus a
 ; `note: in expansion of macro …` trace and an `N errors` multi-error summary.
