@@ -208,6 +208,18 @@ fn run() -> Result<(), String> {
             let source_map = diffpack::source_map::SourceMapChoice::from_flags(
                 remaining.iter().filter_map(|value| value.to_str()),
             )?;
+            // `--server-dir=<name>`: which directory under `.diffpack-output/` a
+            // server-like graph emits into (default `server`). The production
+            // orchestrator points the react-server graph at `rsc-render` so it can
+            // build concurrently with the ssr graph, which owns `server/`. The
+            // `=` spelling is deliberate: a separate value token would be
+            // indistinguishable from the positional environment argument.
+            let server_dir_name = remaining
+                .iter()
+                .filter_map(|value| value.to_str())
+                .find_map(|value| value.strip_prefix("--server-dir="))
+                .unwrap_or("server")
+                .to_string();
             let environment = remaining
                 .iter()
                 .find(|value| !value.to_string_lossy().starts_with("--"))
@@ -414,20 +426,55 @@ fn run() -> Result<(), String> {
                 config.build.aliases.len(),
                 entry.display(),
             );
-            let discover_stage = diffpack::build_profile::stage("graph/discover");
-            let (bundler, update) =
-                Bundler::discover_direct_with_config(&entry, &config.build)?;
-            drop(discover_stage);
-            // A fatal diagnostic (an unresolved import, a source error) means the
-            // chunk this build would write is already broken, so it is not written
-            // at all. Only the non-fatal diagnostics survive as warnings.
-            let warnings = diffpack::bundler::partition_diagnostics(
-                &update.diagnostics,
-                &format!("{} build", config.environment),
-            )?;
-            let reachability_stage = diffpack::build_profile::stage("graph/reachability");
-            let reachable = bundler.reachable_modules_direct();
-            drop(reachability_stage);
+            let mut rebuilt_for_async_islands = false;
+            let (bundler, reachable, warnings) = loop {
+                let discover_stage = diffpack::build_profile::stage("graph/discover");
+                let (bundler, update) =
+                    Bundler::discover_direct_with_config(&entry, &config.build)?;
+                drop(discover_stage);
+                // A fatal diagnostic (an unresolved import, a source error) means the
+                // chunk this build would write is already broken, so it is not written
+                // at all. Only the non-fatal diagnostics survive as warnings.
+                let warnings = diffpack::bundler::partition_diagnostics(
+                    &update.diagnostics,
+                    &format!("{} build", config.environment),
+                )?;
+                let reachability_stage = diffpack::build_profile::stage("graph/reachability");
+                let reachable = bundler.reachable_modules_direct();
+                drop(reachability_stage);
+                // Client islands are pinned LAZILY (bundled + registered, evaluated on
+                // demand by the RSC seam) except the async-tainted ones, which must be
+                // evaluated at entry boot. That set is a fact of the discovered graph;
+                // when it differs from what the entries on disk were generated with,
+                // regenerate them and rediscover. Steady state (a recorded, unchanged
+                // set) takes this branch zero times.
+                if matches!(config.environment.as_str(), "client" | "ssr")
+                    && diffpack::next_adapter::reconcile_async_islands(
+                        Path::new(&project_root),
+                        &config.environment,
+                        &bundler,
+                        &reachable,
+                    )?
+                {
+                    if rebuilt_for_async_islands {
+                        return Err(
+                            "the async-island set did not stabilize after regenerating the \
+                             entries once; this is a diffpack bug"
+                                .to_string(),
+                        );
+                    }
+                    rebuilt_for_async_islands = true;
+                    println!(
+                        "async island set changed; regenerating the entries and rediscovering"
+                    );
+                    diffpack::next_adapter::configure(
+                        Path::new(&project_root),
+                        &config.environment,
+                    )?;
+                    continue;
+                }
+                break (bundler, reachable, warnings);
+            };
             println!(
                 "reachable {} modules; {} warning(s)",
                 reachable.len(),
@@ -451,6 +498,37 @@ fn run() -> Result<(), String> {
                 ..EmitOptions::default()
             };
             if config.environment == "client" {
+                // BOTH manifests the server-like graphs consume are pure functions
+                // of the discovered graph (live-module refinement + the chunk
+                // plan), not of any emitted bytes — so they are computed and
+                // published FIRST. The production orchestrator watches for them
+                // and starts the react-server and ssr builds the moment they
+                // exist, overlapping those whole builds with this one's
+                // render/minify tail. Each is staged and renamed into place so a
+                // watcher can never read a half-written manifest.
+                let manifests_stage = diffpack::build_profile::stage("emit/client-manifests");
+                let client_manifest =
+                    bundler.client_route_manifest(&reachable, "client.js", "/")?;
+                let client_manifest_path =
+                    output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
+                let client_references =
+                    bundler.client_references_manifest(&reachable, "client.js")?;
+                let client_references_path = output_root
+                    .join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
+                std::fs::create_dir_all(&output_root)
+                    .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
+                let publish = |write: &dyn Fn(&Path) -> Result<(), String>,
+                               path: &Path|
+                 -> Result<(), String> {
+                    let staged = path.with_extension(format!("staged-{}", std::process::id()));
+                    write(&staged)?;
+                    std::fs::rename(&staged, path).map_err(|error| {
+                        format!("cannot publish {}: {error}", path.display())
+                    })
+                };
+                publish(&|path| client_manifest.write(path), &client_manifest_path)?;
+                publish(&|path| client_references.write(path), &client_references_path)?;
+                drop(manifests_stage);
                 let emit_stage = diffpack::build_profile::stage("emit/public");
                 let summary = bundler.emit_public(&reachable, &output_root, emit_options)?;
                 drop(emit_stage);
@@ -523,22 +601,6 @@ fn run() -> Result<(), String> {
                         diffpack::next_font::FONT_ASSET_DIR,
                     );
                 }
-                // Persist the route -> client chunk mapping so the server build can
-                // generate the TanStack manifest from real emitted chunk URLs.
-                let client_manifest =
-                    bundler.client_route_manifest(&reachable, "client.js", "/")?;
-                let client_manifest_path =
-                    output_root.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
-                client_manifest.write(&client_manifest_path)?;
-                // Persist the client-references manifest (Manifest #1 / bundlerConfig)
-                // so the react-server render can resolve each `"use client"` `$$id` to
-                // its client runtime id + hosting chunk. Regenerated on every client
-                // emit (the ids are build-derived; the moduleId key is stable).
-                let client_references =
-                    bundler.client_references_manifest(&reachable, "client.js")?;
-                let client_references_path = output_root
-                    .join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
-                client_references.write(&client_references_path)?;
                 println!(
                     "wrote {} ({} client reference(s))",
                     client_references_path.display(),
@@ -559,7 +621,11 @@ fn run() -> Result<(), String> {
                 );
             } else {
                 let emit_stage = diffpack::build_profile::stage("emit/server");
-                let summary = bundler.emit_server(&reachable, &output_root, emit_options)?;
+                let summary = bundler.emit_server_into(
+                    &reachable,
+                    &output_root.join(&server_dir_name),
+                    emit_options,
+                )?;
                 drop(emit_stage);
                 // The react-server graph is authoritative for the app's CSS (Server
                 // Components render there, so its CSS-Module class scoping matches the
@@ -575,7 +641,7 @@ fn run() -> Result<(), String> {
                 // link, which is why nothing is copied and nothing is reported.
                 if config.environment == "react-server" {
                     let css = output_root
-                        .join("server")
+                        .join(&server_dir_name)
                         .join(diffpack::next_adapter::RSC_EMITTED_CSS_FILE);
                     if css.is_file() {
                         let dest = output_root
@@ -1481,31 +1547,115 @@ fn build_production(project_root: &Path, flags: &[std::ffi::OsString]) -> Result
         return Ok(());
     }
     if diffpack::next_adapter::is_app_router(project_root) {
-        println!("=== production build (next app-router): client -> react-server -> ssr ===");
-        run("client")?;
-        run("react-server")?;
-        // Publish the react-server bundle to `rsc-render/` BEFORE the ssr build
-        // overwrites `server/` — the orchestrator reads the two from distinct dirs.
-        let server = out.join("server");
+        println!("=== production build (next app-router): client -> (react-server || ssr) ===");
+        // The react-server and ssr builds depend only on the CLIENT build's two
+        // manifests — pure graph facts the client publishes (atomically, via
+        // rename) BEFORE its emit — never on the client's emitted bytes or on
+        // each other's output. So all three overlap: the client build streams
+        // its logs live; the moment both manifests exist the other two spawn,
+        // react-server emitting straight into `rsc-render/` (`--server-dir`,
+        // which also retires the publish-copy that used to sit between them)
+        // while ssr owns `server/`. Their outputs are captured and replayed
+        // after the client logs so the three builds' reporting never
+        // interleaves. Stale manifests from an earlier build are removed first,
+        // or the server builds would launch against the previous graph.
         let rsc_render = out.join("rsc-render");
-        let publish_stage = diffpack::build_profile::stage("build/publish-rsc-render");
-        let _ = std::fs::remove_dir_all(&rsc_render);
-        copy_dir_recursive(&server, &rsc_render)?;
-        drop(publish_stage);
+        let client_manifest_path = out.join(diffpack::manifest::CLIENT_MANIFEST_FILE);
+        let client_references_path = out.join(diffpack::rsc::CLIENT_REFERENCES_MANIFEST_FILE);
+        let _ = std::fs::remove_file(&client_manifest_path);
+        let _ = std::fs::remove_file(&client_references_path);
+        let client_stage = diffpack::build_profile::stage("build/client");
+        let mut client_child = std::process::Command::new(&exe)
+            .arg("build-app")
+            .arg(&root)
+            .arg("client")
+            .args(&passthrough)
+            .spawn()
+            .map_err(|error| format!("cannot run build-app client: {error}"))?;
+        // Wait for the manifests (or for the client to fail first).
+        loop {
+            if client_manifest_path.is_file() && client_references_path.is_file() {
+                break;
+            }
+            match client_child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    return Err(format!("build-app client failed ({status})"));
+                }
+                Ok(Some(_)) => break,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                Err(error) => {
+                    return Err(format!("cannot wait for build-app client: {error}"));
+                }
+            }
+        }
+        let rsc_stage = diffpack::build_profile::stage("build/react-server");
+        let rsc_child = std::process::Command::new(&exe)
+            .arg("build-app")
+            .arg(&root)
+            .arg("react-server")
+            .arg("--server-dir=rsc-render")
+            .args(&passthrough)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("cannot run build-app react-server: {error}"))?;
+        let ssr_stage = diffpack::build_profile::stage("build/ssr");
+        let ssr_child = std::process::Command::new(&exe)
+            .arg("build-app")
+            .arg(&root)
+            .arg("ssr")
+            .args(&passthrough)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("cannot run build-app ssr: {error}"))?;
+        // Drain both captured children on their own threads so neither can stall
+        // on a full pipe while the parent is still waiting for the client.
+        let rsc_thread = std::thread::spawn(move || rsc_child.wait_with_output());
+        let ssr_thread = std::thread::spawn(move || ssr_child.wait_with_output());
+        let client_status = client_child
+            .wait()
+            .map_err(|error| format!("cannot wait for build-app client: {error}"))?;
+        drop(client_stage);
+        // Every child is always reaped (and its logs always surfaced), even when
+        // an earlier one failed — a failure report that swallows another build's
+        // output would hide half the story.
+        let rsc_output = rsc_thread
+            .join()
+            .map_err(|_| "the react-server drain thread panicked".to_string())?
+            .map_err(|error| format!("cannot wait for build-app react-server: {error}"))?;
+        drop(rsc_stage);
+        let ssr_output = ssr_thread
+            .join()
+            .map_err(|_| "the ssr drain thread panicked".to_string())?
+            .map_err(|error| format!("cannot wait for build-app ssr: {error}"))?;
+        drop(ssr_stage);
+        print!("{}", String::from_utf8_lossy(&rsc_output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&rsc_output.stderr));
+        print!("{}", String::from_utf8_lossy(&ssr_output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&ssr_output.stderr));
+        if !client_status.success() {
+            return Err(format!("build-app client failed ({client_status})"));
+        }
+        if !rsc_output.status.success() {
+            return Err(format!("build-app react-server failed ({})", rsc_output.status));
+        }
+        if !ssr_output.status.success() {
+            return Err(format!("build-app ssr failed ({})", ssr_output.status));
+        }
         // Publish the react-server graph's emitted assets (content-hashed images
         // and their build-emitted responsive variants from static image imports)
         // into the SERVED `public/assets/`. A static image import
         // (`import img from './x.png'`) is referenced only by Server Components, so
         // its variants are emitted in the react-server build, not the client one;
-        // merging them here (before the ssr build's prerender copies `public/` ->
-        // `static/`) makes the `<img>`'s `/assets/...` srcset URLs resolve. Names
-        // are content-hashed, so this is a copy of new files only (zero per-request
+        // merging them here (before the prerender copies `public/` -> `static/`)
+        // makes the `<img>`'s `/assets/...` srcset URLs resolve. Names are
+        // content-hashed, so this is a copy of new files only (zero per-request
         // cost, no image server). A no-op when the graph emitted no assets.
         let rsc_assets = rsc_render.join("assets");
         if rsc_assets.is_dir() {
             copy_dir_recursive(&rsc_assets, &out.join("public/assets"))?;
         }
-        run("ssr")?;
         std::fs::write(
             out.join("next-server.mjs"),
             include_str!("../scripts/rsc/next-server.mjs"),

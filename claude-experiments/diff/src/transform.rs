@@ -1478,7 +1478,14 @@ fn lower_module_ast<'a>(
                     // This statement IS the ESM syntax, so the flag holds whether or
                     // not the specifier scan reached it.
                     demand.import_syntax = true;
-                    if demand_downgraded.insert(source) {
+                    // A specifier that is ALSO `require`d anywhere in this module
+                    // keeps its whole-module demand: `require("m")` hands out
+                    // `module.exports` wholesale, so downgrading to this import
+                    // statement's named list would shake off exports the require
+                    // observably reads (that is how the entry's lazy island pins —
+                    // require thunks beside a named import of the same module —
+                    // lost `control-boundary`'s default export and broke hydration).
+                    if demand_downgraded.insert(source) && !demand.require_syntax {
                         demand.all = false;
                         demand.names.clear();
                     }

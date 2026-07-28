@@ -2745,47 +2745,40 @@ mod next {
             ..EmitOptions::default()
         };
 
-        // Build order is load-bearing: client first (its manifest feeds the server
-        // graphs), then react-server (-> rsc-render), then ssr.
-        println!("[dev] next: building client graph...");
-        let mut client = build_next_client(project_root, &output_root, emit_options)?;
-        println!("[dev] next: building react-server graph...");
-        let mut react_server =
-            build_next_react_server(project_root, &output_root, &rsc_root, emit_options)?;
-        println!("[dev] next: building ssr graph...");
-        let mut ssr = build_next_ssr(project_root, &output_root, emit_options)?;
-
-        // Write the orchestrator into the output dir and boot it on an internal port.
-        let next_server_script = output_root.join("next-server.mjs");
-        fs::create_dir_all(&output_root)
-            .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
-        fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
-            format!("cannot write {}: {error}", next_server_script.display())
-        })?;
-        // The orchestrator imports this as a sibling (the one place that joins the
-        // three references manifests into the divergent-id ssrModuleMapping).
-        let ssr_module_map = output_root.join(crate::rsc::SSR_MODULE_MAP_FILE);
-        fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
-            .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
-        let node_port = free_port()?;
-        let mut node = spawn_next_node(&next_server_script, project_root, &output_root, node_port)?;
-        wait_for_node(node_port).inspect_err(|_| {
-            let _ = node.kill();
-        })?;
-        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
-
         // Fast Refresh runtime (must be present — a missing dep is a hard error now,
         // not a broken update later).
         let refresh_runtime = Arc::new(crate::hmr::find_refresh_runtime(project_root)?);
-
-        // The diffpack reverse proxy: serves the HMR client + Fast Refresh runtime,
-        // upgrades the WS channel, and injects the preamble into every HTML document.
         let hub = HmrHub::default();
-        let proxy_listener = TcpListener::bind(("127.0.0.1", options.port)).map_err(|error| {
-            let _ = node.kill();
-            format!("cannot bind dev port {}: {error}", options.port)
-        })?;
-        {
+
+        // Everything the orchestrator needs beyond the graph outputs, written
+        // before ANY boot (warm or cold) so both paths run the same bytes.
+        let next_server_script = output_root.join("next-server.mjs");
+        let write_orchestrator_scripts = || -> Result<(), String> {
+            fs::create_dir_all(&output_root)
+                .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
+            fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
+                format!("cannot write {}: {error}", next_server_script.display())
+            })?;
+            // The orchestrator imports this as a sibling (the one place that joins the
+            // three references manifests into the divergent-id ssrModuleMapping).
+            let ssr_module_map = output_root.join(crate::rsc::SSR_MODULE_MAP_FILE);
+            fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
+                .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
+            Ok(())
+        };
+        let boot_node = |port: u16| -> Result<Child, String> {
+            let mut node = spawn_next_node(&next_server_script, project_root, &output_root, port)?;
+            wait_for_node(port).inspect_err(|_| {
+                let _ = node.kill();
+            })?;
+            Ok(node)
+        };
+        let start_proxy = |node_port: u16| -> Result<(), String> {
+            // The diffpack reverse proxy: serves the HMR client + Fast Refresh
+            // runtime, upgrades the WS channel, and injects the preamble into
+            // every served HTML document.
+            let proxy_listener = TcpListener::bind(("127.0.0.1", options.port))
+                .map_err(|error| format!("cannot bind dev port {}: {error}", options.port))?;
             let hub = hub.clone();
             let refresh_runtime = Arc::clone(&refresh_runtime);
             // Serve the emitted client `public/` (chunks + assets) directly from the
@@ -2797,11 +2790,93 @@ mod next {
                     serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir)
                 })
                 .map_err(|error| format!("cannot start proxy thread: {error}"))?;
+            Ok(())
+        };
+
+        // WARM START: when the previous session's recorded inputs (every module
+        // file + its directory + the config surface) are byte-for-byte where it
+        // left them, its emitted output is still correct — so the orchestrator
+        // and proxy boot on it IMMEDIATELY, and the three graphs rebuild BEHIND
+        // the live server (they are needed in memory for the edit loop). The
+        // rebuild's outputs are then compared against what the orchestrator
+        // loaded; any drift restarts it and reloads the browser, so a stale
+        // serve can outlive the rebuild by nothing. A fingerprint miss falls
+        // back to the cold path with the server booting after the builds,
+        // exactly as before.
+        let warm = dev_fingerprint_matches(&output_root, project_root);
+        let mut warm_node: Option<(Child, u16, BTreeMap<PathBuf, (u64, i128)>)> = None;
+        if warm {
+            write_orchestrator_scripts()?;
+            let node_port = free_port()?;
+            match boot_node(node_port) {
+                Ok(node) => {
+                    start_proxy(node_port)?;
+                    println!(
+                        "[dev] warm start: serving the previous session's build on \
+                         http://127.0.0.1:{} (inputs verified unchanged); graphs rebuilding \
+                         in the background for the edit loop",
+                        options.port
+                    );
+                    let snapshot = snapshot_output_tree(&output_root);
+                    warm_node = Some((node, node_port, snapshot));
+                }
+                Err(error) => {
+                    println!("[dev] warm start failed ({error}); falling back to a full build");
+                }
+            }
         }
+
+        // Build order is load-bearing: client first (its manifest feeds the server
+        // graphs), then react-server (-> rsc-render), then ssr.
+        println!("[dev] next: building client graph...");
+        let mut client = build_next_client(project_root, &output_root, emit_options)?;
+        println!("[dev] next: building react-server graph...");
+        let mut react_server =
+            build_next_react_server(project_root, &output_root, &rsc_root, emit_options)?;
+        println!("[dev] next: building ssr graph...");
+        let mut ssr = build_next_ssr(project_root, &output_root, emit_options)?;
+
+        let (mut node, node_port) = match warm_node {
+            Some((mut node, node_port, snapshot)) => {
+                let drifted = output_tree_drift(&output_root, &snapshot);
+                if drifted == 0 {
+                    // The rebuild reproduced the cached bytes exactly
+                    // (write_if_changed left every mtime alone): the running
+                    // orchestrator is already serving the current build.
+                    (node, node_port)
+                } else {
+                    println!(
+                        "[dev] warm start: rebuild changed {drifted} output file(s); \
+                         restarting the orchestrator and reloading"
+                    );
+                    let _ = node.kill();
+                    let _ = node.wait();
+                    let node = boot_node(node_port)?;
+                    hub.broadcast_reload();
+                    (node, node_port)
+                }
+            }
+            None => {
+                write_orchestrator_scripts()?;
+                let node_port = free_port()?;
+                let node = boot_node(node_port)?;
+                println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
+                start_proxy(node_port)?;
+                (node, node_port)
+            }
+        };
         println!(
             "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
             options.port
         );
+        // Record what this build consumed, so the NEXT start can warm-boot.
+        // Refreshed at every settle in the watch loop, so an edited session's
+        // final state is also warm-startable.
+        if let Err(error) =
+            write_dev_fingerprint(&output_root, project_root, [&client, &react_server, &ssr])
+        {
+            println!("[dev] could not record the warm-start fingerprint: {error}");
+        }
 
         // Watch the app dir recursively (all convention files live there) + the project
         // root non-recursively (next.config.*), without recursing into node_modules.
@@ -2863,16 +2938,53 @@ mod next {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "client")?;
-        // The client needs `#diffpack-call-server` so a `"use server"` client stub
-        // resolves its transport (harmless/unreachable when there is no action).
-        config.build.virtual_modules.push((
-            crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
-            crate::rsc::call_server_module_source().to_string(),
-        ));
-        let build = discover_next_env(config, "client", options)?;
+        let build = discover_next_env_reconciled(project_root, "client", options, &|config| {
+            // The client needs `#diffpack-call-server` so a `"use server"` client stub
+            // resolves its transport (harmless/unreachable when there is no action).
+            config.build.virtual_modules.push((
+                crate::rsc::CALL_SERVER_SPECIFIER.to_string(),
+                crate::rsc::call_server_module_source().to_string(),
+            ));
+            Ok(())
+        })?;
         emit_next_client(&build, project_root, output_root)?;
         Ok(build)
+    }
+
+    /// [`discover_next_env`] with the async-island reconcile loop: client islands
+    /// are pinned lazily except the recorded async set; when discovery shows the
+    /// recorded set is stale, the entries are regenerated (a fresh
+    /// `configure_dev` pass rewrites them) and the graph rediscovered once.
+    fn discover_next_env_reconciled(
+        project_root: &Path,
+        environment: &str,
+        options: EmitOptions,
+        prepare: &dyn Fn(&mut AppConfig) -> Result<(), String>,
+    ) -> Result<EnvBuild, String> {
+        let mut regenerated = false;
+        loop {
+            let mut config = next_config_dev(project_root, environment)?;
+            prepare(&mut config)?;
+            let build = discover_next_env(config, environment, options)?;
+            if !crate::next_adapter::reconcile_async_islands(
+                project_root,
+                environment,
+                &build.bundler,
+                &build.reachable,
+            )? {
+                return Ok(build);
+            }
+            if regenerated {
+                return Err(format!(
+                    "dev {environment}: the async-island set did not stabilize after \
+                     regenerating the entries once; this is a diffpack bug"
+                ));
+            }
+            regenerated = true;
+            println!(
+                "[dev] async island set changed; regenerating the {environment} entry and rediscovering"
+            );
+        }
     }
 
     /// Build the react-server graph (flight render/action bundle) into the isolated
@@ -2896,9 +3008,9 @@ mod next {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "ssr")?;
-        register_server_virtual_modules(&mut config, project_root, output_root)?;
-        let build = discover_next_env(config, "ssr", options)?;
+        let build = discover_next_env_reconciled(project_root, "ssr", options, &|config| {
+            register_server_virtual_modules(config, project_root, output_root)
+        })?;
         emit_next_ssr(&build, output_root)?;
         Ok(build)
     }
@@ -3019,7 +3131,7 @@ mod next {
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
             }
-            fs::copy(&css, &dest).map_err(|error| {
+            copy_file_if_changed(&css, &dest).map_err(|error| {
                 format!("cannot preserve react-server CSS to {}: {error}", dest.display())
             })?;
         }
@@ -3838,12 +3950,26 @@ mod next {
             if file_type.is_dir() {
                 copy_dir_recursive(&from, &to)?;
             } else {
-                fs::copy(&from, &to).map_err(|error| {
-                    format!("cannot copy {} -> {}: {error}", from.display(), to.display())
-                })?;
+                copy_file_if_changed(&from, &to)?;
             }
         }
         Ok(())
+    }
+
+    /// `fs::copy`, except a destination already holding the source's exact bytes
+    /// is left alone. Skipping the write keeps the destination's mtime stable
+    /// across a rebuild that reproduced it — which is what lets the dev warm
+    /// start prove "the rebuild changed nothing" from an mtime snapshot — and
+    /// costs a read the copy was going to do anyway.
+    fn copy_file_if_changed(from: &Path, to: &Path) -> Result<(), String> {
+        let source = fs::read(from)
+            .map_err(|error| format!("cannot read {}: {error}", from.display()))?;
+        if fs::read(to).ok().as_deref() == Some(source.as_slice()) {
+            return Ok(());
+        }
+        fs::write(to, source).map_err(|error| {
+            format!("cannot copy {} -> {}: {error}", from.display(), to.display())
+        })
     }
 
     #[cfg(test)]

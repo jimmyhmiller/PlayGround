@@ -47,6 +47,7 @@
 //! [`crate::server_fn::generate_resolver_module`]: diffpack-authored build glue, not
 //! guest source hidden in a string.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -59,6 +60,85 @@ use crate::transform::Target;
 /// The directory under the project root where the adapter writes its generated
 /// entries and `next/*` shims.
 pub const ADAPTER_DIR: &str = ".diffpack-next";
+
+/// The full pinned-island list (canonical paths) the last scaffold generated,
+/// recorded so [`reconcile_async_islands`] can intersect it with the discovered
+/// graph's async closure without re-walking the project.
+const ISLANDS_FILE: &str = "islands.json";
+
+/// Which pinned islands are ASYNC (top-level await, directly or transitively),
+/// per environment: `{"client": [paths...], "ssr": [paths...]}`. The entry
+/// generators pin the UNION eagerly (static `import * as`) and everything else
+/// lazily (a never-called `require` thunk). Maintained by
+/// [`reconcile_async_islands`] from each graph's real discovery, so it is a
+/// recorded build fact; a stale set is caught after discovery and repaired by
+/// regenerating the entries and rediscovering once.
+const ASYNC_ISLANDS_FILE: &str = "async-islands.json";
+
+/// The recorded eager-island union (all environments). Empty when never
+/// recorded — the correct default: a lazily-pinned async island is caught by
+/// the reconcile step before emit.
+fn recorded_eager_islands(adapter_dir: &Path) -> BTreeSet<String> {
+    let Ok(text) = std::fs::read_to_string(adapter_dir.join(ASYNC_ISLANDS_FILE)) else {
+        return BTreeSet::new();
+    };
+    let Ok(map) = serde_json::from_str::<BTreeMap<String, BTreeSet<String>>>(&text) else {
+        return BTreeSet::new();
+    };
+    map.into_values().flatten().collect()
+}
+
+/// After a client/ssr graph discovery: intersect the pinned islands with the
+/// graph's async closure and reconcile the result against
+/// [`ASYNC_ISLANDS_FILE`]. Returns `true` when the recorded UNION changed —
+/// meaning the entries on disk were generated from a stale eager set, and the
+/// caller must re-run `configure` (which rewrites them) and rediscover. A
+/// non-app-router project (no recorded island list) always reconciles to
+/// unchanged.
+pub fn reconcile_async_islands(
+    root: &Path,
+    environment: &str,
+    bundler: &crate::bundler::Bundler,
+    reachable: &std::collections::BTreeSet<crate::bundler::ModuleId>,
+) -> Result<bool, String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let adapter_dir = root.join(ADAPTER_DIR);
+    let islands_path = adapter_dir.join(ISLANDS_FILE);
+    let Ok(islands_text) = std::fs::read_to_string(&islands_path) else {
+        return Ok(false);
+    };
+    let islands: Vec<String> = serde_json::from_str(&islands_text).map_err(|error| {
+        format!("cannot parse {}: {error}", islands_path.display())
+    })?;
+    let tainted = bundler.async_tainted_modules(reachable);
+    let needed: BTreeSet<String> = islands
+        .into_iter()
+        .filter(|island| tainted.contains(island))
+        .collect();
+    let recorded_path = adapter_dir.join(ASYNC_ISLANDS_FILE);
+    let mut map: BTreeMap<String, BTreeSet<String>> = std::fs::read_to_string(&recorded_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if map.get(environment) == Some(&needed) || (map.get(environment).is_none() && needed.is_empty())
+    {
+        return Ok(false);
+    }
+    let union_before: BTreeSet<String> = map.values().flatten().cloned().collect();
+    map.insert(environment.to_string(), needed);
+    let union_after: BTreeSet<String> = map.values().flatten().cloned().collect();
+    let serialized = serde_json::to_string_pretty(&map)
+        .map_err(|error| format!("cannot serialize the async-island set: {error}"))?;
+    let staged = recorded_path.with_extension(format!("staged-{}", std::process::id()));
+    std::fs::write(&staged, serialized)
+        .map_err(|error| format!("cannot write {}: {error}", staged.display()))?;
+    std::fs::rename(&staged, &recorded_path)
+        .map_err(|error| format!("cannot publish {}: {error}", recorded_path.display()))?;
+    // Only a UNION change invalidates the generated entries (they pin the
+    // union); a per-environment shrink that leaves the union intact is recorded
+    // but needs no rebuild.
+    Ok(union_after != union_before)
+}
 
 /// Module-file extensions the adapter recognizes for app-router convention files
 /// (layout/loading/error/not-found/route).
@@ -2725,13 +2805,31 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     if !islands.contains(&script_canon) {
         islands.push(script_canon);
     }
+    // Record the pinned-island list (canonical) and split the pins into lazy
+    // thunks vs the recorded async set's eager imports — see `island_pins`.
+    let canonical_islands: Vec<String> = islands
+        .iter()
+        .map(|island| {
+            island
+                .canonicalize()
+                .unwrap_or_else(|_| island.clone())
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    write_if_changed(
+        &adapter_dir.join(ISLANDS_FILE),
+        &serde_json::to_string_pretty(&canonical_islands)
+            .map_err(|error| format!("cannot serialize the island list: {error}"))?,
+    )?;
+    let eager_islands = recorded_eager_islands(&adapter_dir);
     write_if_changed(
         &adapter_dir.join("server.tsx"),
-        &ssr_entry_module(&adapter_dir, &islands, &hooks_context_canon, &asset_base),
+        &ssr_entry_module(&adapter_dir, &islands, &eager_islands, &hooks_context_canon, &asset_base),
     )?;
     write_if_changed(
         &adapter_dir.join("client.tsx"),
-        &client_entry_module(&adapter_dir, &islands, &hooks_context_canon),
+        &client_entry_module(&adapter_dir, &islands, &eager_islands, &hooks_context_canon),
     )?;
     // --- per-environment config --------------------------------------------------
     let (entry, target, conditions): (PathBuf, Target, Vec<&str>) = match environment {
@@ -2890,8 +2988,21 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
 /// build error). stderr from the eval is surfaced.
 pub(crate) fn run_next_config_eval(root: &Path) -> Option<serde_json::Value> {
     let config = next_config_path(root)?;
+    // The loader path is SHARED between concurrent diffpack processes (the
+    // production orchestrator builds react-server and ssr at the same time, and
+    // both evaluate the config at startup), so it is written to a private name
+    // and renamed into place: a plain `fs::write` truncates first, and the other
+    // process's node could read the file inside that window.
     let loader = std::env::temp_dir().join("diffpack-next-config-eval.mjs");
-    std::fs::write(&loader, include_str!("../scripts/rsc/next-config-eval.mjs")).ok()?;
+    let loader_bytes = include_str!("../scripts/rsc/next-config-eval.mjs");
+    if std::fs::read_to_string(&loader).ok().as_deref() != Some(loader_bytes) {
+        let staged = std::env::temp_dir().join(format!(
+            "diffpack-next-config-eval-{}.mjs",
+            std::process::id(),
+        ));
+        std::fs::write(&staged, loader_bytes).ok()?;
+        std::fs::rename(&staged, &loader).ok()?;
+    }
     // The payload goes to a FILE, not stdout. A next.config is ordinary code that
     // routinely prints (cal.com logs which rewrite set it chose; many configs warn about
     // unset variables), and reading the payload off stdout meant one `console.log` made
@@ -3205,13 +3316,15 @@ fn write_next_config_manifest(root: &Path, eval: Option<&serde_json::Value>) {
     let output = root.join(".diffpack-output");
     let _ = std::fs::create_dir_all(&output);
     let manifest_path = output.join("next-config-manifest.json");
-    match eval {
-        Some(value) => {
-            let _ = std::fs::write(&manifest_path, value.to_string());
-        }
-        None => {
-            let _ = std::fs::write(&manifest_path, EMPTY_CONFIG_MANIFEST);
-        }
+    let text = match eval {
+        Some(value) => value.to_string(),
+        None => EMPTY_CONFIG_MANIFEST.to_string(),
+    };
+    // Skip the write when the bytes already match: the artifact's mtime then
+    // stays stable across a rebuild that reproduced it, which the dev warm
+    // start relies on to prove "the rebuild changed nothing".
+    if std::fs::read_to_string(&manifest_path).ok().as_deref() != Some(text.as_str()) {
+        let _ = std::fs::write(&manifest_path, text);
     }
 }
 
@@ -5103,15 +5216,49 @@ if (!__diffpackStarted.has(import.meta.url)) {{
 
 /// Imports every `"use client"` island so the graph bundles + registers it under a
 /// runtime id (pinned to a global so DCE keeps it).
-fn island_pins(adapter_dir: &Path, islands: &[PathBuf]) -> String {
+fn island_pins(adapter_dir: &Path, islands: &[PathBuf], eager: &BTreeSet<String>) -> String {
     let _ = adapter_dir;
+    // Reachability pins. Each island must be bundled and REGISTERED in this graph
+    // so the RSC seam (`runtime.require(id)`) can resolve it while consuming a
+    // flight — but nothing needs it EVALUATED before a render actually reaches
+    // it. A `require` inside a never-called closure records the graph edge at
+    // transform time without running the module at boot; evaluating every island
+    // eagerly (469 on cal.com) was ~100% of the SSR bundle's boot time (425 ms
+    // -> 9 ms measured). Lazy is also what the reference does: webpack's flight
+    // consumer calls `requireModule` per client reference, on demand, in both
+    // its SSR and browser runtimes.
+    //
+    // The exception is `eager`: islands whose evaluation is ASYNC (top-level
+    // await, directly or transitively). The seam's require is synchronous, so an
+    // async island must be evaluated-and-settled before any flight consumes it —
+    // exactly what a static `import * as` guarantees (and the build's
+    // async-closure guard enforces, by rejecting a bare `require` edge to an
+    // async module). The set is recorded by [`reconcile_async_islands`] from the
+    // discovered graph, so it is a build fact, not a guess; when it drifts, the
+    // build regenerates this entry and rediscovers once.
     let mut out = String::new();
+    let mut lazy: Vec<&PathBuf> = Vec::new();
     for (index, island) in islands.iter().enumerate() {
+        let canonical = island.canonicalize().unwrap_or_else(|_| island.clone());
+        if eager.contains(canonical.to_string_lossy().as_ref()) {
+            out.push_str(&format!(
+                "import * as __island{index} from {};\n(globalThis).__diffpack_next_island_{index} = __island{index};\n",
+                js_str(&island.to_string_lossy()),
+            ));
+        } else {
+            lazy.push(island);
+        }
+    }
+    // The globalThis assignment keeps the thunk array (and so the recorded
+    // edges) alive under export shaking.
+    out.push_str("const __diffpackIslandPins = [\n");
+    for island in lazy {
         out.push_str(&format!(
-            "import * as __island{index} from {};\n(globalThis).__diffpack_next_island_{index} = __island{index};\n",
+            "  () => require({}),\n",
             js_str(&island.to_string_lossy()),
         ));
     }
+    out.push_str("];\n(globalThis).__diffpack_next_island_pins = __diffpackIslandPins;\n");
     out
 }
 
@@ -5123,10 +5270,11 @@ fn island_pins(adapter_dir: &Path, islands: &[PathBuf]) -> String {
 fn ssr_entry_module(
     adapter_dir: &Path,
     islands: &[PathBuf],
+    eager_islands: &BTreeSet<String>,
     hooks_context: &Path,
     asset_base: &str,
 ) -> String {
-    let pins = island_pins(adapter_dir, islands);
+    let pins = island_pins(adapter_dir, islands, eager_islands);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The browser fetches the client bootstrap under the app's basePath/assetPrefix (the
@@ -5399,8 +5547,13 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
 /// The browser entry (Target::Client). Reconstructs the inlined flight and hydrates
 /// the whole document (the RootLayout owns `<html>`). Imports each island so the
 /// flight's client references resolve to real code in this build's registry.
-fn client_entry_module(adapter_dir: &Path, islands: &[PathBuf], hooks_context: &Path) -> String {
-    let pins = island_pins(adapter_dir, islands);
+fn client_entry_module(
+    adapter_dir: &Path,
+    islands: &[PathBuf],
+    eager_islands: &BTreeSet<String>,
+    hooks_context: &Path,
+) -> String {
+    let pins = island_pins(adapter_dir, islands, eager_islands);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The ONE control-flow predicate, shared with the error boundary (see
@@ -7914,7 +8067,7 @@ mod tests {
 
         let islands = [app.join("Counter.tsx")];
         let hooks = fixture.join(".diffpack-next/hooks-context.ts");
-        let client_src = client_entry_module(&fixture.join(".diffpack-next"), &islands, &hooks);
+        let client_src = client_entry_module(&fixture.join(".diffpack-next"), &islands, &BTreeSet::new(), &hooks);
         assert!(client_src.contains("x-diffpack-intercept"), "client reads the intercept header");
         assert!(client_src.contains("createPortal"), "client portals the overlay over the page");
         assert!(client_src.contains("__diffpackModal"), "client masks the URL for the overlay");
@@ -9345,7 +9498,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let dir = scratch("ssr-asset-base");
         let hooks = dir.join("hooks-context.ts");
         // With an asset base the browser bootstrap is fetched under the prefix.
-        let with_prefix = ssr_entry_module(&dir, &[], &hooks, "/cdn/docs");
+        let with_prefix = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "/cdn/docs");
         assert!(
             with_prefix.contains(r#"bootstrapModules: ["/cdn/docs/client.js"]"#),
             "bootstrapModules carry the asset base (both render paths): {with_prefix}",
@@ -9356,7 +9509,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
             "both the buffered and streaming render paths are prefixed",
         );
         // Empty asset base keeps the bare `/client.js`.
-        let plain = ssr_entry_module(&dir, &[], &hooks, "");
+        let plain = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "");
         assert!(plain.contains(r#"bootstrapModules: ["/client.js"]"#), "no prefix -> bare client.js");
     }
 
@@ -10431,6 +10584,7 @@ console.log(out.join("|"));
         let ssr = ssr_entry_module(
             Path::new("/app/.diffpack-next"),
             &[],
+            &BTreeSet::new(),
             Path::new("/app/.diffpack-next/hooks-context.ts"),
             "",
         );
@@ -10449,6 +10603,7 @@ console.log(out.join("|"));
         let ssr = ssr_entry_module(
             Path::new("/app/.diffpack-next"),
             &[],
+            &BTreeSet::new(),
             Path::new("/app/.diffpack-next/hooks-context.ts"),
             "",
         );
@@ -10494,8 +10649,8 @@ console.log(out.join("|"));
         // resolves to nothing at render time.
         let islands = [PathBuf::from("/app/.diffpack-next/shims/script.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks);
-        let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks, "");
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, "");
         for (label, source) in [("client", &client), ("ssr", &ssr)] {
             assert!(
                 source.contains("shims/script.tsx") || source.contains("shims\\script.tsx"),
@@ -10628,7 +10783,7 @@ console.log(out.join("|"));
     fn the_client_router_follows_a_soft_navigation_redirect() {
         let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &hooks);
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
         // The producer side must still be the JSON contract this consumer reads.
         const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
         assert!(
@@ -11421,7 +11576,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
     fn a_control_flow_error_recovered_by_react_is_not_reported_as_a_page_error() {
         let dir = scratch("recoverable-control-flow");
         let hooks = dir.join("hooks-context.ts");
-        let client = client_entry_module(&dir, &[dir.join("Island.tsx")], &hooks);
+        let client = client_entry_module(&dir, &[dir.join("Island.tsx")], &BTreeSet::new(), &hooks);
         assert!(
             client.contains("onRecoverableError(error, errorInfo) {")
                 && client.contains("if (isControlFlowError(error) || isControlFlowError(errorInfo)) return;")

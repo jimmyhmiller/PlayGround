@@ -1627,13 +1627,27 @@ impl Bundler {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EmitSummary, String> {
+        self.emit_server_into(reachable, &output_root.join("server"), options)
+    }
+
+    /// [`Self::emit_server`] with the server directory itself named by the
+    /// caller. The production orchestrator points the react-server graph straight
+    /// at `<out>/rsc-render/` so it can build concurrently with the ssr graph
+    /// (which owns `<out>/server/`) instead of emitting into `server/` and being
+    /// copied aside before ssr may start.
+    pub fn emit_server_into(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        server_dir: &Path,
+        options: EmitOptions,
+    ) -> Result<EmitSummary, String> {
         // The server build is always Node ESM, regardless of the caller's
         // options, so every emitted `.mjs` executes under Node's ESM goal.
         let options = EmitOptions {
             format: ModuleFormat::Esm,
             ..options
         };
-        let server_dir = output_root.join("server");
+        let server_dir = server_dir.to_path_buf();
         let mut stats = self.emit_environment(reachable, &server_dir, "server.mjs", options)?;
         // Emit the Node HTTP runtime entry (`server/index.mjs`) and its sibling
         // SSR/router runtime modules on top of the module graph. Their paths join
@@ -1713,9 +1727,6 @@ impl Bundler {
         let assets_stage = crate::build_profile::stage("emit/assets");
         self.emit_assets(&allowed, parent, &mut stats.written)?;
         drop(assets_stage);
-        let css_stage = crate::build_profile::stage("emit/css");
-        self.emit_css(&allowed, output, &mut stats.written)?;
-        drop(css_stage);
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, &dense_id) in reachable_dense.iter().enumerate() {
             runtime_ids[dense_id] = Some(runtime_id);
@@ -1903,58 +1914,97 @@ impl Bundler {
         let async_stage = crate::build_profile::stage("emit/async-closure");
         let async_modules = self.async_module_closure(&reachable_dense, &runtime_ids)?;
         drop(async_stage);
-        let split_stage = crate::build_profile::stage("emit/render-split-chunks");
-        for plan in &plans {
-            let chunk_path = parent.join(&plan.file_name);
-            let prerequisites = plan
-                .prerequisites
-                .iter()
-                .map(|&index| format!("./{}", plans[index].file_name))
-                .collect::<Vec<_>>();
-            let rendered = self.render_chunk_cached(
-                &plan.members,
-                &plan.roots,
-                &chunk_names,
-                &runtime_ids,
-                &global_demands,
-                &prerequisites,
-                false,
-                flat_allowed,
-                &async_modules,
-                options.format,
-                options.minify,
-                options.source_map,
-                options.hmr,
-                &plan.file_name,
-                &mut live_keys,
-                &mut stats.rendered_chunks,
-            )?;
-            let rendered = substitute_workers(rendered);
-            self.write_rendered(rendered, &chunk_path, options, &mut stats.written)?;
-        }
-        drop(split_stage);
-        let main_stage = crate::build_profile::stage("emit/render-main-chunk");
-        let rendered = self.render_chunk_cached(
-            &main_modules,
-            &[self.entry],
-            &chunk_names,
-            &runtime_ids,
-            &global_demands,
-            &[],
-            true,
-            flat_allowed,
-            &async_modules,
-            options.format,
-            options.minify,
-            options.source_map,
-            options.hmr,
-            entry_name,
-            &mut live_keys,
-            &mut stats.rendered_chunks,
-        )?;
-        let rendered = substitute_workers(rendered);
-        self.write_rendered(rendered, output, options, &mut stats.written)?;
-        drop(main_stage);
+        // The stylesheet pipeline (for a Tailwind app: candidate scan, source
+        // read, compile — the react-server graph's second-largest cost) and the
+        // JS chunk renders touch disjoint outputs and only read `&self`, so they
+        // run side by side. The css written-set merges into `stats` afterwards,
+        // before the caller's stale-file prune ever looks at it.
+        let (css_written, render_result) = rayon::join(
+            || -> Result<BTreeSet<PathBuf>, String> {
+                let css_stage = crate::build_profile::stage("emit/css");
+                let mut written = BTreeSet::new();
+                self.emit_css(&allowed, output, &mut written)?;
+                drop(css_stage);
+                Ok(written)
+            },
+            || -> Result<(), String> {
+                let split_stage = crate::build_profile::stage("emit/render-split-chunks");
+                // Each split chunk's render, worker substitution, and file write
+                // is independent work against `&self` (the render cache is a
+                // Mutex and every chunk writes its own path), so the whole set
+                // runs across the pool. The per-chunk accumulators (live key,
+                // rendered flag, written paths) are merged serially afterwards,
+                // keeping `stats` deterministic.
+                let split_results = self.frontend_pool.install(|| {
+                    plans
+                        .par_iter()
+                        .map(|plan| -> Result<(u64, bool, BTreeSet<PathBuf>), String> {
+                            let chunk_path = parent.join(&plan.file_name);
+                            let prerequisites = plan
+                                .prerequisites
+                                .iter()
+                                .map(|&index| format!("./{}", plans[index].file_name))
+                                .collect::<Vec<_>>();
+                            let (rendered, key, fresh) = self.render_chunk_cached(
+                                &plan.members,
+                                &plan.roots,
+                                &chunk_names,
+                                &runtime_ids,
+                                &global_demands,
+                                &prerequisites,
+                                false,
+                                flat_allowed,
+                                &async_modules,
+                                options.format,
+                                options.minify,
+                                options.source_map,
+                                options.hmr,
+                                &plan.file_name,
+                            )?;
+                            let rendered = substitute_workers(rendered);
+                            let mut written = BTreeSet::new();
+                            self.write_rendered(rendered, &chunk_path, options, &mut written)?;
+                            Ok((key, fresh, written))
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })?;
+                for (key, fresh, written) in split_results {
+                    live_keys.insert(key);
+                    if fresh {
+                        stats.rendered_chunks += 1;
+                    }
+                    stats.written.extend(written);
+                }
+                drop(split_stage);
+                let main_stage = crate::build_profile::stage("emit/render-main-chunk");
+                let (rendered, main_key, main_fresh) = self.render_chunk_cached(
+                    &main_modules,
+                    &[self.entry],
+                    &chunk_names,
+                    &runtime_ids,
+                    &global_demands,
+                    &[],
+                    true,
+                    flat_allowed,
+                    &async_modules,
+                    options.format,
+                    options.minify,
+                    options.source_map,
+                    options.hmr,
+                    entry_name,
+                )?;
+                live_keys.insert(main_key);
+                if main_fresh {
+                    stats.rendered_chunks += 1;
+                }
+                let rendered = substitute_workers(rendered);
+                self.write_rendered(rendered, output, options, &mut stats.written)?;
+                drop(main_stage);
+                Ok(())
+            },
+        );
+        stats.written.extend(css_written?);
+        render_result?;
         self.evict_render_cache(&live_keys);
         Ok(stats)
     }
@@ -2060,11 +2110,84 @@ impl Bundler {
         Ok(AsyncModules { flags, any: true })
     }
 
+    /// DETECTION-ONLY variant of [`Self::async_module_closure`]: which reachable
+    /// modules evaluate asynchronously (top-level `await`, plus everything that
+    /// statically imports one, transitively). Unlike the emit-time closure this
+    /// never errors — non-propagating edge kinds (a bare `require`, a lazy
+    /// namespace re-export) are simply skipped, because the caller is asking the
+    /// question BEFORE emit precisely to rewrite such edges into legal ones. The
+    /// next adapter uses it to decide which client-island pins must stay eager
+    /// static imports (an async island cannot be evaluated on demand by the RSC
+    /// seam's synchronous require).
+    pub fn async_tainted_modules(&self, reachable: &BTreeSet<ModuleId>) -> HashSet<ModuleId> {
+        let reachable_dense: Vec<DenseModuleId> = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect();
+        let in_reachable: HashSet<DenseModuleId> = reachable_dense.iter().copied().collect();
+        let mut flags = vec![false; self.modules.len()];
+        let mut queue: Vec<DenseModuleId> = Vec::new();
+        for &dense in &reachable_dense {
+            if self.modules[dense]
+                .as_ref()
+                .is_some_and(|module| module.uses_top_level_await)
+            {
+                flags[dense] = true;
+                queue.push(dense);
+            }
+        }
+        if queue.is_empty() {
+            return HashSet::new();
+        }
+        let mut importers: HashMap<DenseModuleId, Vec<(DenseModuleId, String)>> = HashMap::new();
+        for &dense in &reachable_dense {
+            let Some(module) = self.modules[dense].as_ref() else {
+                continue;
+            };
+            for (specifier, target, _) in &module.dependencies {
+                if !in_reachable.contains(target) || module.pruned_imports.contains(specifier) {
+                    continue;
+                }
+                importers
+                    .entry(*target)
+                    .or_default()
+                    .push((dense, specifier.clone()));
+            }
+        }
+        while let Some(dense) = queue.pop() {
+            let Some(edges) = importers.get(&dense) else {
+                continue;
+            };
+            for (importer, specifier) in edges {
+                let Some(module) = self.modules[*importer].as_ref() else {
+                    continue;
+                };
+                match AwaitableImport::classify(&module.code, specifier) {
+                    AwaitableImport::Statement | AwaitableImport::ReExportAll => {}
+                    AwaitableImport::None
+                    | AwaitableImport::LazyNamespace
+                    | AwaitableImport::BareRequire => continue,
+                }
+                if !flags[*importer] {
+                    flags[*importer] = true;
+                    queue.push(*importer);
+                }
+            }
+        }
+        flags
+            .iter()
+            .enumerate()
+            .filter(|(_, flagged)| **flagged)
+            .map(|(dense, _)| self.ids[dense].to_string())
+            .collect()
+    }
+
     /// Renders one chunk, consulting the per-chunk render cache: on a hit the
     /// cached bytes are returned verbatim (byte-identical to a fresh render) and
     /// `render_best` is skipped; on a miss the chunk is rendered, cached, and
-    /// `rendered` is incremented. The chunk's key is recorded in `live_keys` so it
-    /// survives the post-emit eviction whether or not it was re-rendered.
+    /// the returned flag is true. The chunk's key is returned so the caller can
+    /// record it live (surviving the post-emit eviction) whether or not it was
+    /// re-rendered. `&self` throughout, so chunks render in parallel.
     #[allow(clippy::too_many_arguments)]
     fn render_chunk_cached(
         &self,
@@ -2082,9 +2205,7 @@ impl Bundler {
         source_map: bool,
         hmr: bool,
         chunk_name: &str,
-        live_keys: &mut HashSet<u64>,
-        rendered: &mut usize,
-    ) -> Result<RenderedBundle, String> {
+    ) -> Result<(RenderedBundle, u64, bool), String> {
         let key = self.chunk_render_key(
             modules,
             roots,
@@ -2100,10 +2221,10 @@ impl Bundler {
             source_map,
             hmr,
         );
-        live_keys.insert(key);
         if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
-            return Ok(hit.clone());
+            return Ok((hit.clone(), key, false));
         }
+        let best_stage = crate::build_profile::stage("emit/render-best");
         let mut bundle = self.render_best(
             modules,
             roots,
@@ -2117,11 +2238,14 @@ impl Bundler {
             format,
             hmr,
         )?;
+        drop(best_stage);
         // The readable mappings are what BOTH output shapes' maps are built from
         // (a minified chunk's map is composed from them), so this is the one place
         // to prove they describe the bytes that were actually rendered.
         if source_map {
+            let validate_stage = crate::build_profile::stage("emit/validate-mappings");
             self.validate_chunk_mappings(&bundle.code, &bundle.mappings, chunk_name)?;
+            drop(validate_stage);
         }
         // Whitespace/syntax minification of the FINISHED chunk. The chunk's `code`
         // is already clean, valid JS (markers were consumed during render; it
@@ -2138,14 +2262,18 @@ impl Bundler {
                 // result resolves a minified position back to the correct ORIGINAL
                 // source file+region. The readable `mappings` no longer describe
                 // the emitted bytes, so they are cleared in favour of `map_json`.
+                let minify_stage = crate::build_profile::stage("emit/minify");
                 let (minified, minified_map) =
                     minify_chunk_code_with_map(&bundle.code, chunk_name)?;
+                drop(minify_stage);
+                let compose_stage = crate::build_profile::stage("emit/compose-map");
                 let composed = self.compose_source_map(
                     &bundle.mappings,
                     &minified_map,
                     chunk_name,
                     chunk_name,
                 )?;
+                drop(compose_stage);
                 bundle.code = minified;
                 bundle.mappings = Vec::new();
                 bundle.map_json = Some(composed);
@@ -2157,13 +2285,12 @@ impl Bundler {
                 bundle.mappings = Vec::new();
             }
         }
-        *rendered += 1;
         self.render_cache
             .lock()
             .unwrap()
             .entries
             .insert(key, bundle.clone());
-        Ok(bundle)
+        Ok((bundle, key, true))
     }
 
     /// Evicts every cached chunk render whose key was not used in the emit that
@@ -4947,87 +5074,95 @@ const __newChunks={{{chunks}}};
         let mut builder = SourceMapBuilder::default();
         builder.set_file(output_name);
         let mut source_ids: HashMap<DenseModuleId, u32> = HashMap::new();
-        // Byte offsets of each line of a module's source, built lazily the first
-        // time a name has to be checked against the source text.
-        let mut source_lines: HashMap<DenseModuleId, Vec<usize>> = HashMap::new();
         let mut mapped_any = false;
-        // Marks the minified position this token occupies as having no origin at
-        // all. Emitted in generated order alongside the real tokens, so the map
-        // stays sorted.
-        macro_rules! unmapped {
-            ($minified:expr) => {{
-                builder.add_token($minified.get_dst_line(), $minified.get_dst_col(), 0, 0, None, None);
+        // Resolution (the binary search per minified token, plus the occasional
+        // name verification against the module's source text) is read-only work
+        // over millions of tokens for a large chunk, so it runs across the pool in
+        // generated-order slices. Emission stays serial below: source ids and
+        // names must be assigned in first-use order for the output to stay
+        // byte-identical to the single-threaded composition.
+        let tokens: Vec<oxc_sourcemap::Token> = minified_map.get_tokens().collect();
+        const PARALLEL_TOKEN_SLICE: usize = 1 << 15;
+        let resolved: Vec<Option<ResolvedMinifiedToken<'_>>> = if tokens.len()
+            > PARALLEL_TOKEN_SLICE
+        {
+            self.frontend_pool.install(|| {
+                tokens
+                    .par_chunks(PARALLEL_TOKEN_SLICE)
+                    .flat_map_iter(|slice| {
+                        // Byte offsets of each line of a module's source, built
+                        // lazily the first time a name has to be checked against
+                        // the source text. Per-slice: tokens are in generated
+                        // order, so a slice's tokens cluster in few modules.
+                        let mut source_lines: HashMap<DenseModuleId, Vec<usize>> = HashMap::new();
+                        let mut hint = 0usize;
+                        slice
+                            .iter()
+                            .map(|minified| {
+                                self.resolve_minified_token(
+                                    minified,
+                                    minified_map,
+                                    &readable,
+                                    &mut hint,
+                                    &mut source_lines,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            })
+        } else {
+            let mut source_lines: HashMap<DenseModuleId, Vec<usize>> = HashMap::new();
+            let mut hint = 0usize;
+            tokens
+                .iter()
+                .map(|minified| {
+                    self.resolve_minified_token(
+                        minified,
+                        minified_map,
+                        &readable,
+                        &mut hint,
+                        &mut source_lines,
+                    )
+                })
+                .collect()
+        };
+        for (minified, resolved) in tokens.iter().zip(resolved) {
+            // A token that resolved to no module at all is marked as having no
+            // origin. Emitted in generated order alongside the real tokens, so the
+            // map stays sorted.
+            let Some(token) = resolved else {
+                builder.add_token(minified.get_dst_line(), minified.get_dst_col(), 0, 0, None, None);
                 continue;
-            }};
-        }
-        for minified in minified_map.get_tokens() {
-            let position = (minified.get_src_line(), minified.get_src_col());
-            let candidate = readable
-                .partition_point(|(token, _)| (token.generated_line, token.generated_column) <= position);
-            if candidate == 0 {
-                unmapped!(minified);
-            }
-            let (token, dense) = &readable[candidate - 1];
-            // A readable token only speaks for positions on its OWN line; past the
-            // end of that line the minifier is printing something this chunk's
-            // readable map says nothing about.
-            if token.generated_line != minified.get_src_line() {
-                unmapped!(minified);
-            }
-            let Some(module) = self.modules[*dense].as_ref() else {
-                unmapped!(minified);
             };
-            let Some(map) = module.map.as_ref() else {
-                unmapped!(minified);
-            };
-            let Some(label) = labels.get(dense) else {
-                unmapped!(minified);
-            };
-            let source_id = match source_ids.get(dense) {
+            let dense = token.dense;
+            let source_id = match source_ids.get(&dense) {
                 Some(id) => *id,
                 None => {
+                    let (Some(module), Some(label)) =
+                        (self.modules[dense].as_ref(), labels.get(&dense))
+                    else {
+                        // The resolver only returns a module it verified has a
+                        // map and a label, so this cannot happen; refuse loudly
+                        // rather than emit a token pointing at a missing source.
+                        return Err(format!(
+                            "source-map composition for chunk `{chunk_name}` resolved a token \
+                             into module {dense}, which has no map or label"
+                        ));
+                    };
+                    let Some(map) = module.map.as_ref() else {
+                        return Err(format!(
+                            "source-map composition for chunk `{chunk_name}` resolved a token \
+                             into module {dense}, which has no module map"
+                        ));
+                    };
                     let id = builder
                         .add_source_and_content(label.as_str(), map.source_text(&module.source));
-                    source_ids.insert(*dense, id);
+                    source_ids.insert(dense, id);
                     id
                 }
             };
-            // `names` means "the identifier this position had in the ORIGINAL
-            // source". The readable token's name is that by construction — Oxc
-            // records it from the source text under the node's span — so it wins.
-            //
-            // The minified map's name is only the identifier as it stood in the
-            // READABLE chunk. That is the original name whenever the lowering left
-            // it alone (the common case, and what makes a mangled stack trace
-            // readable), but where the lowering renamed it the readable name is a
-            // diffpack internal (`__import`, `__diffpack_import_7`) that never
-            // appeared in the user's file. So it is a fallback, not the first
-            // choice: preferring it would put a name in the map that the source at
-            // the mapped position does not have.
-            let name = match token
-                .name
-                .and_then(|index| map.names().get(index as usize))
-                .filter(|name| is_identifier(name))
-            {
-                Some(name) => Some(name.as_str()),
-                None => minified
-                    .get_name_id()
-                    .and_then(|index| minified_map.get_name(index))
-                    // ...and only when the ORIGINAL source really has that
-                    // identifier at the position being mapped. A `__import` /
-                    // `__diffpack_import_3` the lowering introduced would
-                    // otherwise be published as the source's own name for a
-                    // position where the source says `useEffect`.
-                    .filter(|candidate| {
-                        let text = map.source_text(&module.source);
-                        let lines = source_lines
-                            .entry(*dense)
-                            .or_insert_with(|| line_starts(text));
-                        identifier_at(text, lines, token.source_line, token.source_column)
-                            == Some(*candidate)
-                    }),
-            }
-            .map(|name| builder.add_name(name));
+            let name = token.name.map(|name| builder.add_name(name));
             builder.add_token(
                 minified.get_dst_line(),
                 minified.get_dst_col(),
@@ -5054,6 +5189,78 @@ const __newChunks={{{chunks}}};
         // is legitimately empty: every position in it came from code diffpack
         // wrote, and saying nothing is the truthful answer.
         Ok(builder.into_sourcemap().to_json_string())
+    }
+
+    /// Resolves one minified-map token against the chunk's readable tokens: the
+    /// last readable token at or before it on the SAME readable line is the
+    /// construct the minifier was printing. `None` means the position resolved
+    /// into no module at all and must be written as an explicit unmapped marker.
+    ///
+    /// `names` means "the identifier this position had in the ORIGINAL source".
+    /// The readable token's name is that by construction — Oxc records it from
+    /// the source text under the node's span — so it wins. The minified map's
+    /// name is only the identifier as it stood in the READABLE chunk. That is
+    /// the original name whenever the lowering left it alone (the common case,
+    /// and what makes a mangled stack trace readable), but where the lowering
+    /// renamed it the readable name is a diffpack internal (`__import`,
+    /// `__diffpack_import_7`) that never appeared in the user's file. So it is a
+    /// fallback, not the first choice, and only accepted when the ORIGINAL
+    /// source really has that identifier at the position being mapped
+    /// (`source_lines` memoizes each module's line offsets for that check).
+    fn resolve_minified_token<'a>(
+        &'a self,
+        minified: &oxc_sourcemap::Token,
+        minified_map: &'a oxc_sourcemap::SourceMap,
+        readable: &[(MapToken, DenseModuleId)],
+        hint: &mut usize,
+        source_lines: &mut HashMap<DenseModuleId, Vec<usize>>,
+    ) -> Option<ResolvedMinifiedToken<'a>> {
+        let position = (minified.get_src_line(), minified.get_src_col());
+        // Minified tokens arrive in generated order and their readable positions
+        // are nearly monotone, so the previous token's partition point is almost
+        // always within a few entries of this one's: searching outward from it
+        // replaces ~20 cache-missing probes of a full binary search per token
+        // (millions of tokens for a large chunk) with 2-4 local ones. Exact by
+        // construction — `partition_point_from_hint` returns precisely
+        // `partition_point`'s answer for every hint.
+        let candidate = partition_point_from_hint(readable, position, *hint);
+        *hint = candidate;
+        if candidate == 0 {
+            return None;
+        }
+        let (token, dense) = &readable[candidate - 1];
+        // A readable token only speaks for positions on its OWN line; past the
+        // end of that line the minifier is printing something this chunk's
+        // readable map says nothing about.
+        if token.generated_line != minified.get_src_line() {
+            return None;
+        }
+        let module = self.modules[*dense].as_ref()?;
+        let map = module.map.as_ref()?;
+        let name = match token
+            .name
+            .and_then(|index| map.names().get(index as usize))
+            .filter(|name| is_identifier(name))
+        {
+            Some(name) => Some(name.as_str()),
+            None => minified
+                .get_name_id()
+                .and_then(|index| minified_map.get_name(index))
+                .filter(|candidate| {
+                    let text = map.source_text(&module.source);
+                    let lines = source_lines
+                        .entry(*dense)
+                        .or_insert_with(|| line_starts(text));
+                    identifier_at(text, lines, token.source_line, token.source_column)
+                        == Some(*candidate)
+                }),
+        };
+        Some(ResolvedMinifiedToken {
+            dense: *dense,
+            source_line: token.source_line,
+            source_column: token.source_column,
+            name,
+        })
     }
 
     /// The directory every emitted `sources` label is relative to: the PROJECT
@@ -9305,6 +9512,77 @@ fn minify_chunk_code_inner(
 /// `import("./x")` expression, say). Publishing the latter would put text in
 /// `names` that is not a name — and, for a source that embeds one, an absolute
 /// path. So only real identifiers are published.
+/// What one minified-map token resolved to during source-map composition: the
+/// module whose readable token it landed on, that token's original position, and
+/// the name (already chosen and verified) the composed map should carry there.
+struct ResolvedMinifiedToken<'a> {
+    dense: DenseModuleId,
+    source_line: u32,
+    source_column: u32,
+    name: Option<&'a str>,
+}
+
+/// Exactly `readable.partition_point(|(token, _)| (line, column) <= position)`,
+/// found by expanding exponentially outward from `hint` and binary-searching the
+/// bracketed range. For the nearly-sorted queries source-map composition makes
+/// (each token's answer sits within a few entries of the previous one's) this
+/// costs O(log distance-from-hint) local probes instead of O(log n) random ones.
+fn partition_point_from_hint(
+    readable: &[(MapToken, DenseModuleId)],
+    position: (u32, u32),
+    hint: usize,
+) -> usize {
+    let at_or_before = |index: usize| {
+        let token = &readable[index].0;
+        (token.generated_line, token.generated_column) <= position
+    };
+    let length = readable.len();
+    if length == 0 {
+        return 0;
+    }
+    let anchor = hint.min(length - 1);
+    let (mut low, mut high);
+    if at_or_before(anchor) {
+        // The partition point is right of `anchor`.
+        low = anchor + 1;
+        high = length;
+        let mut width = 1;
+        while anchor + width < length {
+            let probe = anchor + width;
+            if at_or_before(probe) {
+                low = probe + 1;
+                width *= 2;
+            } else {
+                high = probe;
+                break;
+            }
+        }
+    } else {
+        // The partition point is at or left of `anchor`.
+        low = 0;
+        high = anchor;
+        let mut width = 1;
+        while width <= anchor {
+            let probe = anchor - width;
+            if at_or_before(probe) {
+                low = probe + 1;
+                break;
+            }
+            high = probe;
+            width *= 2;
+        }
+    }
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if at_or_before(middle) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 fn is_identifier(name: &str) -> bool {
     let mut characters = name.chars();
     characters
@@ -9755,6 +10033,53 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    /// The hinted partition search must return EXACTLY `partition_point`'s
+    /// answer for every (query, hint) pair — it is the thing that makes the
+    /// composed source map identical to the single-cursor composition. Checked
+    /// exhaustively over a readable array with duplicate positions, line
+    /// boundaries, and gaps, for every hint from 0 past the end.
+    #[test]
+    fn partition_point_from_hint_matches_partition_point_for_every_hint() {
+        let token = |line: u32, column: u32| MapToken {
+            generated_line: line,
+            generated_column: column,
+            source_line: 0,
+            source_column: 0,
+            name: None,
+        };
+        let readable: Vec<(MapToken, DenseModuleId)> = [
+            (0, 0),
+            (0, 4),
+            (0, 4),
+            (0, 9),
+            (1, 0),
+            (3, 2),
+            (3, 2),
+            (3, 7),
+            (7, 0),
+            (7, 1),
+        ]
+        .into_iter()
+        .map(|(line, column)| (token(line, column), 0))
+        .collect();
+        for query_line in 0..9u32 {
+            for query_column in 0..11u32 {
+                let position = (query_line, query_column);
+                let expected = readable.partition_point(|(token, _)| {
+                    (token.generated_line, token.generated_column) <= position
+                });
+                for hint in 0..=readable.len() + 2 {
+                    assert_eq!(
+                        partition_point_from_hint(&readable, position, hint),
+                        expected,
+                        "position {position:?} hint {hint}"
+                    );
+                }
+            }
+        }
+        assert_eq!(partition_point_from_hint(&[], (5, 5), 3), 0);
+    }
 
     /// `node`, with an inherited terminal-colour override stripped.
     ///
@@ -10372,6 +10697,50 @@ mod tests {
                 String::from_utf8_lossy(&executed.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&executed.stdout), format!("{url}\n"));
+        }
+    }
+
+    /// A module that is BOTH named-imported and bare-`require`d by the same
+    /// importer keeps its whole-module demand: `require("m")` hands out
+    /// `module.exports` wholesale, so the import statement's named list must not
+    /// downgrade the demand and shake off exports the require observably reads.
+    /// This is exactly the shape of the next adapter's lazy island pins (a
+    /// require thunk beside a named import of `control-boundary`), where the
+    /// downgrade shook off the island's `default` export and broke hydration.
+    #[test]
+    fn a_bare_require_beside_a_named_import_keeps_every_export() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join("m.js"),
+            "export default function island() { return \"DEFAULT\"; }\n\
+             export const named = \"NAMED\";\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("entry.js"),
+            "import { named } from './m.js';\n\
+             const pins = [() => require('./m.js')];\n\
+             globalThis.__pins = pins;\n\
+             console.log(named, typeof pins[0]().default === 'function' ? pins[0]().default() : 'MISSING');\n",
+        )
+        .unwrap();
+        let entry = directory.path().join("entry.js");
+        let output = directory.path().join("dist/bundle.js");
+        let (bundler, update) = Bundler::discover_direct(&entry).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let reachable = bundler.reachable_modules_direct();
+        bundler.emit(&reachable, &output).unwrap();
+        if node_command().arg("--version").output().is_ok() {
+            let executed = node_command().arg(&output).output().unwrap();
+            assert!(
+                executed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&executed.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&executed.stdout),
+                "NAMED DEFAULT\n"
+            );
         }
     }
 

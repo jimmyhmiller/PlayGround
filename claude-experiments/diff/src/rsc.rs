@@ -1308,6 +1308,12 @@ impl ClientReferencesManifest {
     pub fn write(&self, path: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&self.to_json())
             .map_err(|error| format!("cannot serialize client-references manifest: {error}"))?;
+        // Skip the write when the bytes already match, keeping the artifact's
+        // mtime stable across a rebuild that reproduced it — which is what lets
+        // the dev warm start prove "the rebuild changed nothing" from mtimes.
+        if fs::read_to_string(path).ok().as_deref() == Some(text.as_str()) {
+            return Ok(());
+        }
         fs::write(path, text)
             .map_err(|error| format!("cannot write {}: {error}", path.display()))
     }

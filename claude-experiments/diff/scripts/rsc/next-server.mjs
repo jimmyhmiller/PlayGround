@@ -47,6 +47,13 @@ process.setSourceMapsEnabled(true);
 // mtime — see `getSsrRenderers` for why entry-level re-importing cannot work.
 const DEV = process.env.DIFFPACK_NEXT_DEV === "1";
 
+// `DIFFPACK_BOOT_TRACE=1`: stamp each boot phase to stderr. Costs one env read
+// otherwise; kept permanently so a slow start is diagnosable in the field.
+const BOOT_TRACE = process.env.DIFFPACK_BOOT_TRACE === "1";
+const bootMark = (label) => {
+  if (BOOT_TRACE) console.error(`[boot] ${label} @ ${performance.now().toFixed(0)}ms`);
+};
+
 // DEV lifetime: `diffpack dev` holds this process's stdin open as a pipe. When the
 // dev server dies for ANY reason (including SIGKILL, where no Rust cleanup runs), the
 // OS closes the pipe and stdin ends here — so exit instead of orphaning. Exiting also
@@ -165,6 +172,7 @@ try {
 } catch (error) {
   fail(error.message);
 }
+bootMark("manifests loaded");
 
 // --- The SSR bundle (in-process; its own inlined React) --------------------------
 // Resolve `renderFlightToDocument` from the SSR bundle. It is imported ONCE, in both
@@ -205,9 +213,12 @@ async function getRenderFlightToDocument() {
 async function getRenderFlightToStream() {
   return (await getSsrRenderers()).stream;
 }
-// Prime + validate the exports up front (fail fast if the bundle is malformed), in
-// both modes.
-await getSsrRenderers();
+// Priming + validating the SSR bundle up front (fail fast if it is malformed)
+// happens below, AFTER the worker pool is prespawned — the two most expensive
+// boot steps are this process evaluating the SSR bundle and the react-server
+// worker evaluating its own bundle, and prespawning first runs them in separate
+// processes concurrently instead of back to back. See the prespawn site after
+// `nextWorker` for the `await`.
 
 // --- Persistent react-server worker POOL (dev + production) -----------------------
 // Spawning a fresh Node child per `?__rsc=1` render pays the whole cold-start cost on
@@ -349,6 +360,17 @@ function nextWorker() {
   poolCursor += 1;
   return worker;
 }
+
+// Prespawn the pool, THEN prime + validate this process's SSR bundle: the worker
+// children evaluate `rsc-render/server.mjs` while this process evaluates the SSR
+// bundle, so the two big imports overlap instead of the first render paying the
+// worker's whole cold start on top of a boot that already sat through the SSR
+// import. A worker that fails to boot surfaces exactly as before — its first
+// call rejects and `nextWorker` respawns on demand.
+workerPool = Array.from({ length: POOL_SIZE }, spawnWorker);
+bootMark("worker pool prespawned");
+await getSsrRenderers();
+bootMark("ssr bundle primed");
 
 // --- DEV hot updates (`POST /__diffpack_dev/hot`) ---------------------------------
 // The dev server's chunk-granular invalidation channel, the Next analogue of the
@@ -1858,9 +1880,11 @@ const server = createServer(async (req, res) => {
 const instrumentationPath = join(outputDir, "instrumentation.mjs");
 if (existsSync(instrumentationPath)) {
   await import(pathToFileURL(instrumentationPath).href);
+  bootMark("instrumentation ran");
 }
 
 server.listen(port, () => {
   const actual = server.address().port;
+  bootMark("listening");
   console.log(`next-server listening on http://localhost:${actual}`);
 });
