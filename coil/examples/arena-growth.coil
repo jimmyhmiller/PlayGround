@@ -98,13 +98,14 @@
   (let [a        (overflow-arena-allocator 65536)
         (mut xs) (al-new [i64] a)]
     (assert-eq (arena-used a) 0)
-    (al-push! (mut xs) 1)                           ; first growth: cap 0 -> 4 elements
-    (assert-eq (arena-used a) 32)
+    (al-push! (mut xs) 1)                           ; first block: 2 elements (al-push!)
+    (assert-eq (arena-used a) 16)
     (al-push! (mut xs) 2)
-    (al-push! (mut xs) 3)
+    (assert-eq (arena-used a) 16)                   ; still inside that block
+    (al-push! (mut xs) 3)                           ; 2 -> 4, in place: it is the top block
+    (assert-eq (arena-used a) 32)
     (al-push! (mut xs) 4)
-    (assert-eq (arena-used a) 32)                   ; still within the 4-element buffer
-    (al-push! (mut xs) 5)                           ; grows to 8 in place: top block
+    (al-push! (mut xs) 5)                           ; 4 -> 8, in place again
     (assert-eq (arena-used a) 64)
     (assert-eq (al-get (load xs) 4) 5)))
 

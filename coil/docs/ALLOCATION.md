@@ -312,6 +312,49 @@ faster allocator. A single unnecessary whole-tree copy in the expander is worth 
 everything in this document put together. Worth checking first: whether the expander
 re-materializes the tree on every pass even when a pass expands nothing.
 
+### The first parsimony win: initial list capacity
+
+Histogramming every allocation by *exact* size (a throwaway build counting requests inside
+`aro-alloc`) says where the bytes are far better than any guess. `check
+selfhost/src/main.coil`, 5.8M allocations, 891 MiB:
+
+| size | count | MiB | what it is |
+| --- | --- | --- | --- |
+| 672 | 360,022 | 230.7 | `(ArrayList Expr)`, capacity 4 (4 × 168) |
+| 256 | 917,016 | 223.9 | `(ArrayList Sexp)`, capacity 4 (4 × 64) |
+| ≥4096 | 3,000 | 114.5 | read buffers and other large one-offs |
+| 168 | 673,612 | 107.9 | a single heap `Expr` |
+| 32 | 2,102,219 | 64.2 | the `ArrayList` struct itself |
+| 1344 | 11,036 | 14.1 | `(ArrayList Expr)`, capacity 8 |
+
+The two biggest line items are *first* blocks, and the capacity-8 blocks are rarer than
+the capacity-4 blocks by more than 20×. Almost nothing was outgrowing its first
+allocation — the first allocation was simply too big. `al-push!` started every list at 4
+elements, which for a 168-byte `Expr` is 672 bytes handed to a list that usually holds one
+or two.
+
+Changing that one literal from 4 to 2:
+
+| initial capacity | peak RSS | median wall |
+| --- | --- | --- |
+| 4 (was) | 1022 MiB | 0.530s |
+| **2 (now)** | **841 MiB** | **0.495s** |
+| 1 | 811 MiB | 0.500s |
+
+**-18% memory and -30 ms**, from one token. It is faster *and* smaller because less memory
+allocated is less memory to fault in and miss on — at this scale the two are the same
+lever, not a trade. 1 saves a little more memory but the extra growth step stops paying,
+so 2 is where it lands.
+
+`examples/arena-growth.coil` caught this change immediately (it asserts exact arena
+offsets), which is the argument for asserting exact numbers rather than bounds.
+
+The next candidate, not yet done: **`Expr` is 168 bytes because `ExprKind` is padded to
+its largest variant, `EDynDispatch`, whose payload is exactly 120 bytes.** Every
+expression in every program pays for a `dyn`-dispatch variant that almost none of them
+are. Boxing it behind a pointer should take `Expr` to ~112 bytes and save roughly another
+70 MiB, at the cost of touching its ~17 match sites across 13 files.
+
 ### What is left
 
 Step 5's 38 `resolve.coil` sites now look much less valuable than they did. Step 4 already

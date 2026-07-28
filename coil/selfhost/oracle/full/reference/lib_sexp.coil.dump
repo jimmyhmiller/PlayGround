@@ -203,7 +203,7 @@ else8:                                            ; preds = %then
   br label %ifcont
 
 ifcont:                                           ; preds = %else8, %then7
-  %ifval = phi i64 [ 4, %then7 ], [ %mul, %else8 ]
+  %ifval = phi i64 [ 2, %then7 ], [ %mul, %else8 ]
   %call = call i64 @"arraylist.al-reserve!__ptr_sexp.Sexp"(ptr %l, i64 %ifval)
   br label %ifcont11
 
@@ -250,7 +250,7 @@ else8:                                            ; preds = %then
   br label %ifcont
 
 ifcont:                                           ; preds = %else8, %then7
-  %ifval = phi i64 [ 4, %then7 ], [ %mul, %else8 ]
+  %ifval = phi i64 [ 2, %then7 ], [ %mul, %else8 ]
   %call = call i64 @"arraylist.al-reserve!__slice_u8"(ptr %l, i64 %ifval)
   br label %ifcont11
 
@@ -297,7 +297,7 @@ else8:                                            ; preds = %then
   br label %ifcont
 
 ifcont:                                           ; preds = %else8, %then7
-  %ifval = phi i64 [ 4, %then7 ], [ %mul, %else8 ]
+  %ifval = phi i64 [ 2, %then7 ], [ %mul, %else8 ]
   %call = call i64 @"arraylist.al-reserve!__u8"(ptr %l, i64 %ifval)
   br label %ifcont11
 
