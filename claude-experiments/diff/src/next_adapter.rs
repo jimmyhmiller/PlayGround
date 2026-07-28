@@ -120,7 +120,8 @@ pub fn reconcile_async_islands(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    if map.get(environment) == Some(&needed) || (map.get(environment).is_none() && needed.is_empty())
+    if map.get(environment) == Some(&needed)
+        || (!map.contains_key(environment) && needed.is_empty())
     {
         return Ok(false);
     }

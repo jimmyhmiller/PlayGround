@@ -2793,90 +2793,34 @@ mod next {
             Ok(())
         };
 
-        // WARM START: when the previous session's recorded inputs (every module
-        // file + its directory + the config surface) are byte-for-byte where it
-        // left them, its emitted output is still correct — so the orchestrator
-        // and proxy boot on it IMMEDIATELY, and the three graphs rebuild BEHIND
-        // the live server (they are needed in memory for the edit loop). The
-        // rebuild's outputs are then compared against what the orchestrator
-        // loaded; any drift restarts it and reloads the browser, so a stale
-        // serve can outlive the rebuild by nothing. A fingerprint miss falls
-        // back to the cold path with the server booting after the builds,
-        // exactly as before.
-        let warm = dev_fingerprint_matches(&output_root, project_root);
-        let mut warm_node: Option<(Child, u16, BTreeMap<PathBuf, (u64, i128)>)> = None;
-        if warm {
-            write_orchestrator_scripts()?;
-            let node_port = free_port()?;
-            match boot_node(node_port) {
-                Ok(node) => {
-                    start_proxy(node_port)?;
-                    println!(
-                        "[dev] warm start: serving the previous session's build on \
-                         http://127.0.0.1:{} (inputs verified unchanged); graphs rebuilding \
-                         in the background for the edit loop",
-                        options.port
-                    );
-                    let snapshot = snapshot_output_tree(&output_root);
-                    warm_node = Some((node, node_port, snapshot));
-                }
-                Err(error) => {
-                    println!("[dev] warm start failed ({error}); falling back to a full build");
-                }
-            }
-        }
-
-        // Build order is load-bearing: client first (its manifest feeds the server
-        // graphs), then react-server (-> rsc-render), then ssr.
+        // Build order is load-bearing only for the client (its manifests feed the
+        // server graphs). The react-server and ssr graphs read those manifests and
+        // never each other's output — react-server emits into `.rsc`/`rsc-render`,
+        // ssr into `server/` — so the two build concurrently, which is most of the
+        // difference between a ~8.5s and a ~6s cold start on cal.com.
         println!("[dev] next: building client graph...");
         let mut client = build_next_client(project_root, &output_root, emit_options)?;
-        println!("[dev] next: building react-server graph...");
-        let mut react_server =
-            build_next_react_server(project_root, &output_root, &rsc_root, emit_options)?;
-        println!("[dev] next: building ssr graph...");
-        let mut ssr = build_next_ssr(project_root, &output_root, emit_options)?;
+        println!("[dev] next: building react-server and ssr graphs (concurrently)...");
+        let (react_server_result, ssr_result) = std::thread::scope(|scope| {
+            let react_server = scope.spawn(|| {
+                build_next_react_server(project_root, &output_root, &rsc_root, emit_options)
+            });
+            let ssr = scope.spawn(|| build_next_ssr(project_root, &output_root, emit_options));
+            (react_server.join(), ssr.join())
+        });
+        let mut react_server = react_server_result
+            .map_err(|_| "the react-server build thread panicked".to_string())??;
+        let mut ssr = ssr_result.map_err(|_| "the ssr build thread panicked".to_string())??;
 
-        let (mut node, node_port) = match warm_node {
-            Some((mut node, node_port, snapshot)) => {
-                let drifted = output_tree_drift(&output_root, &snapshot);
-                if drifted == 0 {
-                    // The rebuild reproduced the cached bytes exactly
-                    // (write_if_changed left every mtime alone): the running
-                    // orchestrator is already serving the current build.
-                    (node, node_port)
-                } else {
-                    println!(
-                        "[dev] warm start: rebuild changed {drifted} output file(s); \
-                         restarting the orchestrator and reloading"
-                    );
-                    let _ = node.kill();
-                    let _ = node.wait();
-                    let node = boot_node(node_port)?;
-                    hub.broadcast_reload();
-                    (node, node_port)
-                }
-            }
-            None => {
-                write_orchestrator_scripts()?;
-                let node_port = free_port()?;
-                let node = boot_node(node_port)?;
-                println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
-                start_proxy(node_port)?;
-                (node, node_port)
-            }
-        };
+        write_orchestrator_scripts()?;
+        let node_port = free_port()?;
+        let mut node = boot_node(node_port)?;
+        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
+        start_proxy(node_port)?;
         println!(
             "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
             options.port
         );
-        // Record what this build consumed, so the NEXT start can warm-boot.
-        // Refreshed at every settle in the watch loop, so an edited session's
-        // final state is also warm-startable.
-        if let Err(error) =
-            write_dev_fingerprint(&output_root, project_root, [&client, &react_server, &ssr])
-        {
-            println!("[dev] could not record the warm-start fingerprint: {error}");
-        }
 
         // Watch the app dir recursively (all convention files live there) + the project
         // root non-recursively (next.config.*), without recursing into node_modules.
