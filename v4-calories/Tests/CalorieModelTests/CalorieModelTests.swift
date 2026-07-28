@@ -73,6 +73,43 @@ final class TrendFilterTests: XCTestCase {
     }
 }
 
+final class GoalPaceTests: XCTestCase {
+
+    private func series(ratePerWeek: Double, target: Double) -> [WeightPoint] {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let cal = Calendar.current
+        let records = (0...28).map { i in
+            DailyRecord(date: cal.startOfDay(for: base.addingTimeInterval(Double(i) * 86400)),
+                        weightLb: i % 2 == 0 ? 200 - Double(i) * 0.1 : nil)
+        }
+        return Analyzer.analyze(records: records,
+                               goal: Goal(targetWeightLb: target, ratePerWeek: ratePerWeek)).trendSeries
+    }
+
+    func testGoalPaceStartsAtTheAnchorAndDescendsAtThePlannedRate() {
+        let s = series(ratePerWeek: 1.4, target: 150)
+        XCTAssertEqual(s[0].goalPace!, 200, accuracy: 0.001, "pace must share the trend's anchor")
+        // 14 days = 2 weeks at 1.4 lb/wk = 2.8 lb below the anchor.
+        XCTAssertEqual(s[14].goalPace!, 200 - 2.8, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 200 - 5.6, accuracy: 0.001)
+    }
+
+    /// The plan after reaching the target is to hold, so the line must not sail past it.
+    func testGoalPaceFlattensAtTheTarget() {
+        let s = series(ratePerWeek: 7.0, target: 198)   // 1 lb/day: hits 198 on day 2
+        XCTAssertEqual(s[2].goalPace!, 198, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 198, accuracy: 0.001, "must hold at the target, not overshoot")
+    }
+
+    /// A gaining goal (negative rate) walks up and clamps from below.
+    func testGoalPaceHandlesAGainingGoal() {
+        let s = series(ratePerWeek: -1.4, target: 210)
+        XCTAssertEqual(s[14].goalPace!, 202.8, accuracy: 0.001)
+        XCTAssertEqual(s[28].goalPace!, 205.6, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(s.compactMap(\.goalPace).max()!, 210.001)
+    }
+}
+
 /// Regression tests for the scale floor: the trend must never claim a weight lower than every
 /// reading the scale has produced so far.
 ///

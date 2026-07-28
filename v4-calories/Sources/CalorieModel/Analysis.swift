@@ -5,6 +5,10 @@ public struct WeightPoint: Sendable, Equatable {
     public var trend: Double?
     public var observed: Double?
     public var logsOnly: Double?   // where the logs-at-face-value line would put you
+    /// Where the goal rate says you'd be: the start anchor walked down at `goal.ratePerWeek`.
+    /// Trend above this line = behind plan, below = ahead. Flattens once it reaches the target
+    /// weight, since the plan after that is to hold rather than keep going.
+    public var goalPace: Double?
 }
 
 public struct DatedValue: Sendable, Equatable {
@@ -190,7 +194,7 @@ public enum Analyzer {
         // --- Reconciliation (logs-only vs scale) ---
         let (logsPredicted, scaleChange, trendSeries) =
             reconciliation(records: records, points: points, truth: truth, effective: effective,
-                           firstIdx: firstIdx, lastIdx: lastIdx)
+                           goal: goal, firstIdx: firstIdx, lastIdx: lastIdx)
 
         // --- Chart series ---
         let cumSeries = cumulativeDeficitSeries(records: records, points: points,
@@ -285,7 +289,7 @@ public enum Analyzer {
     }
 
     static func reconciliation(records: [DailyRecord], points: [TrendFilter.Point],
-                               truth: Estimate?, effective: Estimate?,
+                               truth: Estimate?, effective: Estimate?, goal: Goal,
                                firstIdx: Int?, lastIdx: Int?)
         -> (logsPredicted: Double?, scaleChange: Double?, series: [WeightPoint]) {
 
@@ -307,10 +311,22 @@ public enum Analyzer {
                 }
                 logsOnly = a + logsOnlyEnergy / kcalPerLb
             }
+            // Goal pace: the start anchor walked toward the target at the planned rate, then
+            // held once it arrives. Defined from the first weigh-in so it shares the trend's
+            // anchor and the two lines are directly comparable.
+            var goalPace: Double? = nil
+            if let a = anchor, let fi = firstIdx, i >= fi {
+                let weeks = records[i].date.timeIntervalSince(records[fi].date) / (7 * 86400)
+                let planned = a - goal.ratePerWeek * weeks
+                goalPace = goal.ratePerWeek >= 0
+                    ? max(goal.targetWeightLb, planned)
+                    : min(goal.targetWeightLb, planned)
+            }
             series.append(WeightPoint(date: records[i].date,
                                       trend: points[i].trend,
                                       observed: records[i].weightLb,
-                                      logsOnly: logsOnly))
+                                      logsOnly: logsOnly,
+                                      goalPace: goalPace))
         }
 
         var logsPredicted: Double? = nil
