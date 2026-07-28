@@ -41,6 +41,7 @@
 (import "interp.coil" :use *)  ; `coil interp` — additive bytecode interpreter (guarded; never in the compile path)
 (import "wasm.coil" :use *)
 (import "codegen_wasm.coil" :use *)  ; native wasm64 (memory64) backend, no LLVM
+(import "codegen_x64.coil" :use *)  ; native x86-64 (ELF) backend, no LLVM
 (import "../../fmt/rules.coil" :as fmtr)  ; the `coil fmt` formatter (qualified to avoid name clashes)
 
 ; ============================ `coil doc` ====================================
@@ -756,6 +757,25 @@
               1))
       (None [] 0))))
 
+; x86-64 native backend: mono Program -> ELF object, no LLVM anywhere.
+(defn build-x64-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (obj-cstr (ptr i8)) (path (slice u8))] (-> i64)
+  (let [w (stderr)
+        (mut sp0) (al-new [(slice u8)] a)
+        (mut st0) (al-new [(slice u8)] a)]
+    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+      (Some [mp]
+            (do
+              (cgx64-build-object a
+                                  mp
+                                  obj-cstr
+                                  path
+                                  cwd
+                                  (box-al [(slice u8)] a (load sp0))
+                                  (box-al [(slice u8)] a (load st0))
+                                  true)
+              1))
+      (None [] 0))))
+
 ; native wasm64 backend: mono Program -> a FINAL memory64 wasm module (no LLVM, no
 ; linker, no finalizer step). The module bytes are written straight to `obj-cstr`,
 ; which build-cmd points at the -o output path for --backend wasm.
@@ -822,6 +842,12 @@
                                        (load (field ctx cwd))
                                        (load (field ctx obj))
                                        (load (field ctx path)))
+                (icmp-eq (load (field ctx mode)) 5)
+                  (build-x64-program (load (field ctx a))
+                                     (load (field ctx src))
+                                     (load (field ctx cwd))
+                                     (load (field ctx obj))
+                                     (load (field ctx path)))
                 (icmp-eq (load (field ctx mode)) 1)
                   (call-ptr (load (field ctx build-fn))
                             (load (field ctx a))
@@ -1334,7 +1360,9 @@
                                   (store! backend 2)
                                   (if (str-eq bn "wasm")
                                       (store! backend 4)  ; native wasm64 (memory64) backend
-                                      (store! backend 1))))
+                                      (if (or (str-eq bn "x64") (str-eq bn "x86_64"))
+                                          (store! backend 5)  ; native x86-64 (ELF) backend
+                                          (store! backend 1)))))
                             (store! i (iadd (load i) 2))
                             0)
                         (str-eq arg "--wasm-side-module")
@@ -2760,9 +2788,12 @@
                         (do (store! trip (load (index argv (iadd (load i) 1)))) (store! i (iadd (load i) 2)) 0)
                       (str-eq arg "--backend")
                         (do
-                          (if (str-eq (cstr->slice (load (index argv (iadd (load i) 1)))) "arm64")
-                              (store! backend 2)
-                              (store! backend 1))
+                          (let [bn (cstr->slice (load (index argv (iadd (load i) 1))))]
+                            (if (str-eq bn "arm64")
+                                (store! backend 2)
+                                (if (or (str-eq bn "x64") (str-eq bn "x86_64"))
+                                    (store! backend 5)
+                                    (store! backend 1))))
                           (store! i (iadd (load i) 2))
                           0)
                       :else (do (store! i (iadd (load i) 1)) 0)))))

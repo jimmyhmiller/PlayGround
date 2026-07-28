@@ -558,7 +558,7 @@
               (_ true)))
 
 ; ============================ program registration ===========================
-; extern "io.write" links against C symbol "_write" (last dot component).
+; extern "io.write" links against C symbol "write" (last dot component; ELF adds no underscore).
 (defn g-last-component [(nm (slice u8))] (-> (slice u8))
   (let [n (slice-len nm)
         (mut dot) -1
@@ -570,8 +570,12 @@
                 (store! i (iadd (load i) 1)))))
     (if (icmp-ge (load dot) 0) (subslice nm (iadd (load dot) 1) n) nm)))
 
+; The assembly-level name of a Coil/C symbol. Mach-O prefixes every C symbol
+; with an underscore; ELF does NOT — `main` is `main`, `write` is `write`. So
+; unlike codegen_a64's g-mangle this is the identity, and it stays a named
+; function purely so the two backends line up call-site for call-site.
 (defn g-mangle [(g (ptr Cga)) (nm (slice u8))] (-> (slice u8))
-  (sconcat (load (field g a)) "_" nm))
+  nm)
 
 ; the C symbol a function is exported under, or None. Mirrors codegen.coil's
 ; cg-export-find: an (export-c …) entry pins the function's public symbol. On this
@@ -2262,9 +2266,9 @@
             iav (emit-expr g inner)
             slot (slot-new! g 16 8)]
         ; dyn object { data, vtable } by value
-        (av-to-x! g iav 9)
+        (av-to-x! g iav (x-scratch0))
         (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
-        (emit-sym-addr! g 9 vtsym)
+        (emit-sym-addr! g (x-scratch0) vtsym)
         (emit-store-int! g (x-scratch0) (x-slotbase) (iadd slot 8) 8)
         (mk-aval 1 slot (TStruct ds))))))
 
@@ -2358,7 +2362,7 @@
                      a (load (field g a))
                      vslot (av-slot! g av)
                      pslot (slot-new! g 8 8)]
-                 (emit-slot-addr! g 9 vslot)
+                 (emit-slot-addr! g (x-scratch0) vslot)
                  (emit-store-int! g (x-scratch0) (x-slotbase) pslot 8)
                  (mk-aval 1 pslot (TPtr (box-type a (av-ty av))))))
     (ELet [binds body]
@@ -2374,7 +2378,7 @@
           (let [av (emit-expr g inner)
                 t (alloc-stack Type)]
             (store! t (av-ty av))
-            (av-to-x! g av 9)
+            (av-to-x! g av (x-scratch0))
             (if (match-else (load t) (TBool [] true) (_ false))
                 (do
                   (x64-mov-imm! (mut (field g asm)) (x-scratch1) 1)
@@ -2473,7 +2477,7 @@
                                                                    fi)
                                                             ty))
                                              slot (slot-new! g 8 8)]
-                                         (av-to-x! g av 9)
+                                         (av-to-x! g av (x-scratch0))
                                          (if (icmp-le off 4095)
                                              (x64-add-ri! (mut (field g asm)) (x-scratch0) off)
                                              (do
@@ -2494,10 +2498,10 @@
                (store! pt (ty-pointee t))
                (let [sz (ty-size g pt)
                      slot (slot-for-ty! g pt)]
-                 (av-to-x! g av 9)
+                 (av-to-x! g av (x-scratch0))
                  (if (icmp-le sz 8)
                      (do
-                       (emit-load-from-mem! g 10 9 sz)
+                       (emit-load-from-mem! g (x-scratch1) (x-scratch0) sz)
                        (emit-store-int! g (x-scratch1) (x-slotbase) slot sz)
                        0)
                      (emit-copy-from-mem! g slot 9 sz))
@@ -2510,12 +2514,12 @@
               (let [sz (ty-size g t)]
                 (if (ty-is-scalar t)
                     (do
-                      (av-to-x! g vav 10)
-                      (av-to-x! g pav 9)
-                      (emit-store-to-mem! g 10 9 sz)
+                      (av-to-x! g vav (x-scratch1))
+                      (av-to-x! g pav (x-scratch0))
+                      (emit-store-to-mem! g (x-scratch1) (x-scratch0) sz)
                       0)
                     (do
-                      (av-to-x! g pav 9)
+                      (av-to-x! g pav (x-scratch0))
                       (emit-copy-to-mem! g 9 (av-slot! g vav) sz)
                       0))
                 ; std-12: store! yields unit (canonical i64 0), matching its checked type.
@@ -2535,8 +2539,8 @@
                               (_ (store! ep (load pt))))
                   (let [esz (ty-size g ep)
                         slot (slot-new! g 8 8)]
-                    (av-to-x! g pav 9)
-                    (av-to-x! g iav 10)
+                    (av-to-x! g pav (x-scratch0))
+                    (av-to-x! g iav (x-scratch1))
                     (x64-mov-imm! (mut (field g asm)) (x-scratch2) esz)
                     (do (x64-imul-rr! (mut (field g asm)) (x-scratch1) (x-scratch2))
                          (x64-add-rr! (mut (field g asm)) (x-scratch0) (x-scratch1)) 0)
@@ -2576,7 +2580,7 @@
                 (when (icmp-lt si 0) (cgx-fail2 "fnptr-of unknown function: " name))
                 (let [e (xal-at [GSig] (field g sigs) si)
                       slot (slot-new! g 8 8)]
-                  (emit-sym-addr! g 9 (load (field e symidx)))
+                  (emit-sym-addr! g (x-scratch0) (load (field e symidx)))
                   (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
                   (mk-aval 1
                            slot
@@ -3193,17 +3197,20 @@
                                                     vt)
                                         vtp (alloc-stack Type)]
                                     (store! vtp vt)
-                                    (av-to-x! g pav 9)
-                                    (av-to-x! g vav 10)
+                                    (av-to-x! g pav (x-scratch0))
+                                    (av-to-x! g vav (x-scratch1))
                                     (cond (str-eq sub "add") 0
                                           (str-eq sub "sub") (do (x64-neg! (mut s) (x-scratch1)) 0)
                                           (str-eq sub "xchg") 0
                                           :else (cgx-fail2 "llvm-ir: unsupported atomicrmw op: " sub))
+                                    ; both xchg and xadd return the OLD value in the
+                                    ; source register, so the value is copied into r11
+                                    ; and r11 is what gets read back afterwards.
                                     (if (str-eq sub "xchg")
                                         (do (x64-mov-rr! (mut s) (x-scratch2) (x-scratch1))
-                                    (x64-xchg-mr! (mut s) (x-scratch0) 0 (x-scratch2)))
+                                            (x64-xchg-mr! (mut s) (x-scratch0) 0 (x-scratch2)))
                                         (do (x64-mov-rr! (mut s) (x-scratch2) (x-scratch1))
-                                    (x64-lock-xadd! (mut s) (x-scratch0) 0 (x-scratch2))))
+                                            (x64-lock-xadd! (mut s) (x-scratch0) 0 (x-scratch2))))
                                     (let [slot (slot-for-ty! g vtp)]
                                       (emit-store-int! g (x-scratch2) (x-slotbase) slot (ty-size g vtp))
                                       (store! envp (gscope-put a (load envp) t0 (mk-aval 1 slot vt)))
@@ -3232,14 +3239,19 @@
                                                       avsp
                                                       (al-get [(slice u8)] (load toks) (load tokp))
                                                       nt)]
-                                      (av-to-x! g pav 9)
-                                      (av-to-x! g eav 10)  ; expected (in/out)
-                                      (av-to-x! g nav 11)  ; new
-                                      (x64-mov-rr! (mut s) 0 (x-scratch1))  ; rax = expected (cmpxchg compares against it)
-                                      (x64-lock-cmpxchg! (mut s) (x-scratch0) 0 (x-scratch2))
-                                      ; pair {old, success}: old at +0, success bit at +8
+                                      ; cmpxchg PINS rax as the expected value and
+                                      ; overwrites it with the old value, so neither
+                                      ; the pointer nor the new value may live there:
+                                      ; rcx = pointer, rax = expected, r11 = new.
+                                      (av-to-x! g pav 1)
+                                      (av-to-x! g nav (x-scratch2))
+                                      (av-to-x! g eav 0)
+                                      (x64-mov-rr! (mut s) (x-scratch1) 0)  ; keep the expected value to compare after
+                                      (x64-lock-cmpxchg! (mut s) 1 0 (x-scratch2))
+                                      ; pair {old, success}: old at +0, success bit at +8.
+                                      ; rax now holds the OLD value either way.
                                       (let [slot (slot-new! g 16 8)]
-                                        (emit-store-int! g (x-scratch1) (x-slotbase) slot 8)
+                                        (emit-store-int! g 0 (x-slotbase) slot 8)
                                         (x64-cmp-rr! (mut s) 0 (x-scratch1))
                                         (x64-setcc-bool! (mut s) (x64-cc-e) 2)
                                         (emit-store-int! g 2 (x-slotbase) (iadd slot 8) 8)
@@ -3265,7 +3277,7 @@
                                                                   (load toks)
                                                                   (iadd (load tokp) 1))
                                                           (TPtr (box-type a (TInt 8 true))))]
-                                          (av-to-x! g pav 9)
+                                          (av-to-x! g pav (x-scratch0))
                                           (x64-mov-rm! (mut s) (x-scratch1) (x-scratch0) 0)  ; x86 loads are acquire
                                           (let [slot (slot-for-ty! g vtp)]
                                             (emit-store-int! g (x-scratch1) (x-slotbase) slot (ty-size g vtp))
