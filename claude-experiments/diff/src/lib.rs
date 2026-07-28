@@ -23,6 +23,7 @@ pub mod next_adapter;
 pub mod next_pages;
 pub mod parser;
 pub mod next_font;
+pub mod styled_jsx;
 pub mod postcss;
 pub mod project_graph;
 pub mod resource_id;

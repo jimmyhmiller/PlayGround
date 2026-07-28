@@ -2901,7 +2901,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // (small, no dev warnings); DEV bundles the development React whose renderer
     // exposes the Fast Refresh hook the island HMR path needs.
     let node_env = if dev { "\"development\"" } else { "\"production\"" };
-    let defines = vec![
+    let mut defines = vec![
         ("process.env.NODE_ENV".to_string(), node_env.to_string()),
         (
             "process.env.NEXT_RUNTIME".to_string(),
@@ -2912,6 +2912,17 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             process_browser_define(target).to_string(),
         ),
     ];
+    // `NEXT_PUBLIC_*` is inlined in EVERY compilation, exactly as `next build`
+    // does (see `next_public_env`). Server graphs additionally get the full
+    // config environment at runtime via the manifest; the browser has only
+    // these inlines, which is the whole point of the prefix.
+    for (name, value) in next_public_env(&root, dev, next_config.as_ref()) {
+        defines.push((
+            format!("process.env.{name}"),
+            serde_json::to_string(&value)
+                .expect("serializing an environment string cannot fail"),
+        ));
+    }
 
     // Evaluate `next.config` once (on the react-server pass) into the routing-rules
     // manifest the orchestrator applies (redirects/rewrites/headers). Best-effort: a
@@ -3129,6 +3140,59 @@ pub(crate) fn server_external_packages(eval: Option<&serde_json::Value>) -> Vec<
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Every `NEXT_PUBLIC_*` variable as `next build` would see it at compile time,
+/// in Next's own precedence: the `@next/env` file stack (`.env` <
+/// `.env.<mode>` < `.env.local` < `.env.<mode>.local`, never overriding a
+/// variable the real environment already has), then the real process
+/// environment, then — overriding everything, because in `next build` the
+/// config runs in-process BEFORE compilation and assigns `process.env`
+/// directly — the side effects `next.config` evaluation reported.
+///
+/// `next build` INLINES each of these as a `process.env.NEXT_PUBLIC_X` define
+/// in every compilation (`next/dist/build/define-env`). diffpack was not
+/// inlining any of them, so client code read them off the browser process shim
+/// at runtime and got `undefined`: cal.com's footer rendered `v.undefined-sh`,
+/// its `cityTimezones` query sent `CalComVersion: null` and got a 400, and
+/// react-query's retries re-rendered the booker's timezone select forever —
+/// the residual render loop under cal.com's own Playwright suite once the
+/// styled-jsx hydration mismatch was fixed.
+///
+/// Only the `NEXT_PUBLIC_` prefix is collected: inlining anything else would
+/// bake server secrets into the browser bundle, which Next never does.
+fn next_public_env(root: &Path, dev: bool, eval: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let mode = if dev { "development" } else { "production" };
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    for file_name in [
+        ".env".to_string(),
+        format!(".env.{mode}"),
+        ".env.local".to_string(),
+        format!(".env.{mode}.local"),
+    ] {
+        let path = root.join(&file_name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // A malformed env file is reported by the config-eval path already;
+        // here it only loses the file's contribution to the inline set.
+        let Ok(pairs) = crate::env_file::parse(&text, &path.display().to_string()) else {
+            continue;
+        };
+        for (name, value) in pairs {
+            merged.insert(name, value);
+        }
+    }
+    for (name, value) in std::env::vars() {
+        merged.insert(name, value);
+    }
+    for (name, value) in config_env(eval) {
+        merged.insert(name, value);
+    }
+    merged
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("NEXT_PUBLIC_"))
+        .collect()
 }
 
 pub(crate) fn config_env(eval: Option<&serde_json::Value>) -> Vec<(String, String)> {

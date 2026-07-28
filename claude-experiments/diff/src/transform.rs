@@ -754,6 +754,33 @@ pub fn transform_module_in_language(
     };
     let source = next_font.as_deref().unwrap_or(source);
 
+    // styled-jsx: compile `<style jsx global>` to the app's own `styled-jsx`
+    // runtime component (renders no DOM node; inserts client-side), as Next's
+    // SWC pass does. Without it the raw `<style>` element reaches the React
+    // tree and any client-only site (cal.com's theme provider) is a guaranteed
+    // hydration mismatch. Scoped styled-jsx is a hard error, never mis-scoped.
+    let styled_jsx = match crate::styled_jsx::transform_styled_jsx(path, source) {
+        Ok(rewritten) => rewritten,
+        Err(error) => {
+            return TransformResult {
+                code: String::new(),
+                diagnostics: vec![TransformDiagnostic::error(error)],
+                is_esm: true,
+                dependencies: Vec::new(),
+                dependency_demands: Vec::new(),
+                flat_module: None,
+                liveness: ModuleLiveness::default(),
+                uses_top_level_await: false,
+                uses_import_meta: false,
+                uses_cjs_globals: false,
+                uses_dirname: false,
+                workers: Vec::new(),
+                map: None,
+            };
+        }
+    };
+    let source = styled_jsx.as_deref().unwrap_or(source);
+
     // A module defining `createServerFn(...).handler(fn)` is rewritten per target:
     // the client gets a thin RPC stub keyed by the function's deterministic id
     // (dropping the server handler body), the server keeps the real handler and

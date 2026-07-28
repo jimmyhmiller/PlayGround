@@ -54,7 +54,7 @@ pub fn load_vite_env(root: &Path, mode: &str) -> Result<Vec<(String, String)>, S
 
 /// Parses one env file's text into `(name, value)` pairs, in file order.
 /// `origin` names the file in errors.
-fn parse(text: &str, origin: &str) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn parse(text: &str, origin: &str) -> Result<Vec<(String, String)>, String> {
     let mut variables = Vec::new();
     for (line_index, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
