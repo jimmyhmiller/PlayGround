@@ -701,3 +701,34 @@
   (x64-b! (mut s) 15)
   (x64-b! (mut s) 174)
   (x64-b! (mut s) 240))
+
+; ============================ patchable forms ================================
+; A function's frame size is only known after its whole body is emitted, so the
+; prologue emits these two at their MAXIMUM width and patches the immediate in
+; place afterwards. Fixed width is the point: a shorter encoding chosen up
+; front would have to move every byte of the function to widen later.
+
+; sub rsp, imm32 — always 7 bytes (REX.W 81 /5 id), never the imm8 short form.
+(defn x64-sub-ri32! [(s (mut XAsm)) (dst i64) (imm i64)] (-> i64)
+  (x64-rexw! (mut s) 0 0 dst)
+  (x64-b! (mut s) 129)
+  (x64-modrm! (mut s) 3 5 dst)
+  (x64-w32! (mut s) imm))
+; patch the immediate of a `sub r64, imm32` written at `off`.
+; layout: REX(1) 81(1) modrm(1) imm32 -> the immediate starts at off+3.
+(defn x64-patch-sub-ri32! [(s (mut XAsm)) (off i64) (imm i64)] (-> i64)
+  (xb-patch-u32! (mut (field s buf)) (iadd off 3) imm))
+
+; lea dst, [base+disp32] — always 8 bytes, forcing mod=10 (disp32) and a SIB
+; byte, so the encoding length does not depend on the displacement's value.
+; (base is rsp here, which needs the SIB byte anyway.)
+(defn x64-lea32! [(s (mut XAsm)) (dst i64) (base i64) (disp i64)] (-> i64)
+  (x64-rexw! (mut s) dst 0 base)
+  (x64-b! (mut s) 141)
+  (x64-modrm! (mut s) 2 dst base)
+  (x64-sib! (mut s) 0 4 base)
+  (x64-w32! (mut s) disp))
+; patch the displacement of an `x64-lea32!` written at `off`.
+; layout: REX(1) 8D(1) modrm(1) sib(1) disp32 -> the displacement starts at off+4.
+(defn x64-patch-lea32! [(s (mut XAsm)) (off i64) (disp i64)] (-> i64)
+  (xb-patch-u32! (mut (field s buf)) (iadd off 4) disp))

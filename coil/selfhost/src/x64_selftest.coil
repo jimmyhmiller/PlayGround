@@ -185,6 +185,12 @@
     (x64-movq-rx! (mut s) (x64-rax) 0)       (emit-case! (mut s) "movq %xmm0, %rax")
     (x64-xorps! (mut s) 0 0)                 (emit-case! (mut s) "xorps %xmm0, %xmm0")
 
+    ; ---- fixed-width patchable forms (frame prologue)
+    (x64-sub-ri32! (mut s) (x64-rsp) 64)     (emit-case! (mut s) "subq $64, %rsp #wide")
+    (x64-sub-ri32! (mut s) (x64-rsp) 4096)   (emit-case! (mut s) "subq $4096, %rsp #wide")
+    (x64-lea32! (mut s) (x64-rbx) (x64-rsp) 0)    (emit-case! (mut s) "leaq 0(%rsp), %rbx #wide")
+    (x64-lea32! (mut s) (x64-rbx) (x64-rsp) 4096) (emit-case! (mut s) "leaq 4096(%rsp), %rbx #wide")
+
     ; ---- atomics
     (x64-lock-xadd! (mut s) (x64-rdi) 0 (x64-rax))      (emit-case! (mut s) "lock xaddq %rax, (%rdi)")
     (x64-xchg-mr! (mut s) (x64-rdi) 0 (x64-rax))        (emit-case! (mut s) "xchgq %rax, (%rdi)")

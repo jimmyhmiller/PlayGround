@@ -3505,3 +3505,271 @@
                                       0))
                               (_ (cgx-fail "llvm-ir: reduce on non-vector")))))
               (cgx-fail2 "llvm-ir: unsupported intrinsic: " callee))))))
+
+; ============================ function emission ==============================
+; Frame, in the order the prologue builds it:
+;     push rbp            ; rbp chain intact => backtraces work with no eh_frame
+;     mov  rsp, rbp
+;     push rbx            ; rbx is callee-saved and holds the slot base
+;     sub  rsp, total     ; patched once slotbytes/outbytes are known
+;     lea  rbx, [rsp+out] ; slots start above the outgoing-argument area
+; After `push rbp; push rbx` the stack is 16-byte aligned again (the call
+; pushed the return address, so entry was 8 mod 16), and `total` is kept a
+; multiple of 16, so rsp stays aligned at every call site — required by SysV,
+; and the first thing that breaks (in libc, via movaps) when it is wrong.
+;
+; Incoming stack arguments live at [rbp+16] and up: +0 is the saved rbp, +8 the
+; return address.
+(defn emit-func! [(g (ptr Cga)) (fd (ptr Func))] (-> i64)
+  (store! (field g frame) 0)
+  (store! (field g dwcursrc) -1)
+  (store! (field g dwcurlo) -1)
+  (store! (field g env) (gscope-nil (load (field g a))))
+  (store! (field (field g loops) len) 0)
+  (store! (field g terminated) false)
+  (store! (field g retty) (load (field fd ret)))
+  (store! (field g sretslot) -1)
+  (store! (field g outbytes) 0)
+  (let [s (field g asm)
+        a (load (field g a))
+        si (g-sig-idx g (load (field fd name)))]
+    (when (icmp-lt si 0) (cgx-fail2 "emit-func!: unregistered function " (load (field fd name))))
+    (eobj-set-sym! (mut (field g obj))
+                   (if (load (field (xal-at [GSig] (field g sigs) si) shim))
+                       (load (field (xal-at [GSig] (field g sigs) si) implsym))
+                       (load (field (xal-at [GSig] (field g sigs) si) symidx)))
+                   (load (field g text))
+                   (x64-off (mut s)))
+    (store! (field g fnstart) (x64-off (mut s)))
+    (when (icmp-ge (load (field fd source)) 0)
+          (let [ev (alloc-stack DwLineEv)]
+            (store! (field ev textoff) (x64-off (mut s)))
+            (store! (field ev source) (load (field fd source)))
+            (store! (field ev lo) (unless (icmp-lt (load (field fd lo)) 0) (load (field fd lo))))
+            (store! (field ev pe) false)
+            (al-push! (mut (field g dwevs)) (load ev))
+            (store! (field g dwcursrc) (load (field fd source)))
+            (store! (field g dwcurlo) (load (field ev lo)))
+            0))
+    (let [dwvarlo (al-len [DwVar] (load (field g dwvars)))
+          dwfnlo (load (field fd lo))
+          dwfnsrc (load (field fd source))]
+      ; ---- prologue
+      (x64-push! (mut s) 5)                     ; push rbp
+      (x64-mov-rr! (mut s) 5 4)                 ; mov rsp, rbp
+      (x64-push! (mut s) (x-slotbase))          ; push rbx
+      (let [p1 (x64-off (mut s))]
+        ; two placeholders, patched below: `sub rsp, imm32` (7 bytes) and
+        ; `lea rbx, [rsp+imm32]` (8 bytes). Both are emitted at their maximum
+        ; width so the patch never has to move code.
+        (x64-sub-ri32! (mut s) 4 0)
+        (x64-lea32! (mut s) (x-slotbase) 4 0)
+        (let [retp (alloc-stack Type)]
+          (store! retp (load (field fd ret)))
+          (let [retvoid (match-else (load (field fd ret)) (TVoid [] true) (_ false))
+                retinfo (if retvoid (mk-abi-scalar) (g-abi-info g retp))]
+            ; incoming hidden sret pointer (rdi) for a >16B return
+            (when (icmp-eq (abi-cls retinfo) 4)
+                  (let [ss (slot-new! g 8 8)]
+                    (emit-store-int! g 7 (x-slotbase) ss 8)
+                    (store! (field g sretslot) ss))
+                  0)
+            (let [ps (load (field fd params))
+                  np (al-len [Param] (load ps))
+                  (mut gp) (if (icmp-eq (abi-cls retinfo) 4) 1 0)
+                  (mut fp) 0
+                  (mut stk) 0
+                  (mut i) 0]
+              (loop (if (icmp-ge (load i) np)
+                        (break)
+                        (do
+                          (let [prm (xal-at [Param] ps (load i))
+                                t (field prm ty)
+                                info (g-abi-info g t)
+                                cls (abi-cls info)
+                                slot (slot-for-ty! g t)
+                                sz (ty-size g t)]
+                            (cond
+                              ; ---- int-like scalar
+                              (icmp-eq cls 0)
+                                (if (icmp-lt (load gp) 6)
+                                    (do (emit-store-int! g (x-argreg (load gp)) (x-slotbase) slot sz)
+                                        (store! gp (iadd (load gp) 1)) 0)
+                                    (do (emit-load-int! g (x-scratch0) 5 (iadd 16 (load stk)) 8 false)
+                                        (emit-store-int! g (x-scratch0) (x-slotbase) slot sz)
+                                        (store! stk (iadd (load stk) 8)) 0))
+                              ; ---- float scalar
+                              (icmp-eq cls 1)
+                                (if (icmp-lt (load fp) 8)
+                                    (do (emit-store-fp! g (load fp) (x-slotbase) slot (ty-float-bytes t))
+                                        (store! fp (iadd (load fp) 1)) 0)
+                                    (do (emit-load-int! g (x-scratch0) 5 (iadd 16 (load stk)) 8 false)
+                                        (emit-store-int! g (x-scratch0) (x-slotbase) slot sz)
+                                        (store! stk (iadd (load stk) 8)) 0))
+                              ; ---- aggregate <= 8B, one register of class eb0
+                              (icmp-eq cls 2)
+                                (let [sse (icmp-eq (abi-eb0 info) 2)]
+                                  (if (if sse (icmp-lt (load fp) 8) (icmp-lt (load gp) 6))
+                                      (do (if sse
+                                              (emit-store-fp! g (load fp) (x-slotbase) slot 8)
+                                              (emit-store-int! g (x-argreg (load gp)) (x-slotbase) slot 8))
+                                          (if sse (store! fp (iadd (load fp) 1)) (store! gp (iadd (load gp) 1)))
+                                          0)
+                                      (do (emit-load-int! g (x-scratch0) 5 (iadd 16 (load stk)) 8 false)
+                                          (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
+                                          (store! stk (iadd (load stk) 8)) 0)))
+                              ; ---- aggregate <= 16B, one register per eightbyte
+                              (icmp-eq cls 3)
+                                (let [s0 (icmp-eq (abi-eb0 info) 2)
+                                      s1 (icmp-eq (abi-eb1 info) 2)
+                                      needg (iadd (if s0 0 1) (if s1 0 1))
+                                      needf (iadd (if s0 1 0) (if s1 1 0))]
+                                  (if (and (icmp-le (iadd (load gp) needg) 6)
+                                           (icmp-le (iadd (load fp) needf) 8))
+                                      (do
+                                        (if s0
+                                            (do (emit-store-fp! g (load fp) (x-slotbase) slot 8)
+                                                (store! fp (iadd (load fp) 1)) 0)
+                                            (do (emit-store-int! g (x-argreg (load gp)) (x-slotbase) slot 8)
+                                                (store! gp (iadd (load gp) 1)) 0))
+                                        (if s1
+                                            (do (emit-store-fp! g (load fp) (x-slotbase) (iadd slot 8) 8)
+                                                (store! fp (iadd (load fp) 1)) 0)
+                                            (do (emit-store-int! g (x-argreg (load gp)) (x-slotbase) (iadd slot 8) 8)
+                                                (store! gp (iadd (load gp) 1)) 0))
+                                        0)
+                                      (do
+                                        (emit-load-int! g (x-scratch0) 5 (iadd 16 (load stk)) 8 false)
+                                        (emit-store-int! g (x-scratch0) (x-slotbase) slot 8)
+                                        (emit-load-int! g (x-scratch0) 5 (iadd 24 (load stk)) 8 false)
+                                        (emit-store-int! g (x-scratch0) (x-slotbase) (iadd slot 8) 8)
+                                        (store! stk (iadd (load stk) 16)) 0)))
+                              ; ---- > 16B: the caller placed a copy on the stack;
+                              ; copy it into this function's own slot.
+                              :else
+                                (let [asz (imul (idiv (iadd sz 7) 8) 8)
+                                      (mut kk) 0]
+                                  (loop (if (icmp-ge (load kk) asz)
+                                            (break)
+                                            (do
+                                              (emit-load-int! g (x-scratch0) 5
+                                                              (iadd 16 (iadd (load stk) (load kk))) 8 false)
+                                              (emit-store-int! g (x-scratch0) (x-slotbase)
+                                                               (iadd slot (load kk)) 8)
+                                              (store! kk (iadd (load kk) 8)))))
+                                  (store! stk (iadd (load stk) asz))
+                                  0))
+                            (dw-note-var! g
+                                          (load (field prm name))
+                                          t
+                                          slot
+                                          false
+                                          true
+                                          (load (field fd source))
+                                          (load (field fd lo)))
+                            (store! (field g env)
+                                    (gscope-put a
+                                                (load (field g env))
+                                                (load (field prm name))
+                                                (mk-aval 1 slot (load t)))))
+                          (store! i (iadd (load i) 1))))))
+            ; ---- prologue complete: the prologue_end row, so a debugger's
+            ; breakpoint lands after the parameters are spilled and frame
+            ; variables are valid.
+            (when (icmp-ge (load (field fd source)) 0)
+                  (let [ev (alloc-stack DwLineEv)]
+                    (store! (field ev textoff) (x64-off (mut s)))
+                    (store! (field ev source) (load (field fd source)))
+                    (store! (field ev lo) (unless (icmp-lt (load (field fd lo)) 0) (load (field fd lo))))
+                    (store! (field ev pe) true)
+                    (al-push! (mut (field g dwevs)) (load ev))
+                    0))
+            ; ---- body
+            (let [bav (emit-body g (load (field fd body)))]
+              (unless (load (field g terminated))
+                      (unless retvoid
+                              (let [cls (abi-cls retinfo)]
+                                (cond (icmp-eq cls 0) (av-to-x! g bav 0)
+                                      (icmp-eq cls 1) (av-to-d! g bav 0)
+                                      (icmp-eq cls 2)
+                                        (if (icmp-eq (abi-eb0 retinfo) 2)
+                                            (emit-load-fp! g 0 (x-slotbase) (av-slot! g bav) 8)
+                                            (emit-load-int! g 0 (x-slotbase) (av-slot! g bav) (ty-size g retp) false))
+                                      (icmp-eq cls 3)
+                                        ; two eightbytes leave in (rax,rdx) / (xmm0,xmm1)
+                                        ; / a mix, each file numbered independently.
+                                        (let [bs (av-slot! g bav)
+                                              s0 (icmp-eq (abi-eb0 retinfo) 2)
+                                              s1 (icmp-eq (abi-eb1 retinfo) 2)]
+                                          (if s0
+                                              (emit-load-fp! g 0 (x-slotbase) bs 8)
+                                              (emit-load-int! g 0 (x-slotbase) bs 8 false))
+                                          (if s1
+                                              (emit-load-fp! g (if s0 1 0) (x-slotbase) (iadd bs 8) 8)
+                                              (emit-load-int! g (if s0 0 2) (x-slotbase) (iadd bs 8) 8 false))
+                                          0)
+                                      :else
+                                        ; cls 4: copy into *sret, and SysV also
+                                        ; requires the pointer to come back in rax.
+                                        (do
+                                          (emit-load-int! g (x-scratch2) (x-slotbase) (load (field g sretslot)) 8 false)
+                                          (emit-copy-to-mem! g (x-scratch2) (av-slot! g bav) (ty-size g retp))
+                                          (emit-load-int! g 0 (x-slotbase) (load (field g sretslot)) 8 false)
+                                          0))))
+                      0)
+              ; ---- epilogue: restore rbx from just below rbp, then leave/ret.
+              (x64-mov-rm! (mut s) (x-slotbase) 5 -8)
+              (x64-leave! (mut s))
+              (x64-ret! (mut s))
+              ; ---- resolve labels, patch the frame size
+              (x64-resolve-fixups! (mut s))
+              (let [slotbytes (imul (idiv (iadd (load (field g frame)) 15) 16) 16)
+                    out (load (field g outbytes))
+                    total (iadd slotbytes out)]
+                (when (icmp-gt total 2147483647) (cgx-fail "frame too large"))
+                (x64-patch-sub-ri32! (mut s) p1 total)
+                (x64-patch-lea32! (mut s) (iadd p1 7) out)
+                (let [df (alloc-stack DwFn)]
+                  (store! (field df name) (load (field fd name)))
+                  (store! (field df symidx) (load (field (xal-at [GSig] (field g sigs) si) symidx)))
+                  (store! (field df source) (unless (icmp-lt dwfnsrc 0) dwfnsrc))
+                  (store! (field df lo) (unless (icmp-lt dwfnlo 0) dwfnlo))
+                  (store! (field df textoff) (load (field g fnstart)))
+                  (store! (field df len) (isub (x64-off (mut s)) (load (field g fnstart))))
+                  (store! (field df slotbytes) slotbytes)
+                  (store! (field df varlo) dwvarlo)
+                  (store! (field df varhi) (al-len [DwVar] (load (field g dwvars))))
+                  (al-push! (mut (field g dwfns)) (load df)))
+                ; :shim: the Coil-named symbol is a trampoline that moves the
+                ; convention's registers into the C argument registers, calls
+                ; __impl, and moves rax back into the convention's return register.
+                (when (load (field (xal-at [GSig] (field g sigs) si) shim))
+                      (let [e (xal-at [GSig] (field g sigs) si)
+                            regs (load (field e shimregs))
+                            nr (al-len [i64] (load regs))]
+                        (eobj-set-sym! (mut (field g obj))
+                                       (load (field e symidx))
+                                       (load (field g text))
+                                       (x64-off (mut s)))
+                        (x64-push! (mut s) 5)
+                        (x64-mov-rr! (mut s) 5 4)
+                        (let [(mut j) 0]
+                          (loop (if (icmp-ge (load j) nr)
+                                    (break)
+                                    (do
+                                      (x64-mov-rr! (mut s) (x-argreg (load j)) (al-get [i64] (load regs) (load j)))
+                                      (store! j (iadd (load j) 1))))))
+                        (let [coff (x64-call-rel32! (mut s))]
+                          (eobj-add-reloc! (mut (field g obj))
+                                           (load (field g text))
+                                           coff
+                                           (load (field e implsym))
+                                           (r-x86-64-plt32)
+                                           -4))
+                        (when (icmp-ne (load (field e shimret)) 0)
+                              (x64-mov-rr! (mut s) (load (field e shimret)) 0))
+                        (x64-leave! (mut s))
+                        (x64-ret! (mut s))
+                        0))
+                0)))))))
+  0)
