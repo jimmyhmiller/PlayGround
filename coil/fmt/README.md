@@ -22,8 +22,13 @@ flat; a single-binding vector stays inline.
 ## What it preserves
 
 Formatting only ever changes whitespace and line breaks. Comments, blank lines
-(collapsed to at most one), and every atom/string/number are kept **verbatim** —
-verified against the whole codebase by `fmt/check.sh` (token-equivalence + idempotence).
+(collapsed to at most one), and every atom/string/number are kept **verbatim**.
+
+To check that over the tree: `coil fmt --check` on every `.coil` file must be clean
+after a `--write` pass (idempotence), and `coil dump-read` of a file must match
+`coil dump-read` of its formatted form once spans are stripped (token-equivalence —
+the compiler's own reader, not `fmt`, is the judge). `selfhost/oracle/gate-cli.sh`
+gates the `fmt` CLI contract itself: argv, exit codes, multi-file, `--check`/`--write`.
 
 ## Reflow policy (hybrid)
 
@@ -58,8 +63,7 @@ line after a comment.
 | `doc.coil`  | a Wadler/Prettier **Doc** algebra + width-driven renderer (`DNest` relative indent, `DAlign` anchor-to-column, `DGroup` flat-if-fits) |
 | `rules.coil`| lowers the CST to a Doc, applying the layout conventions above |
 | `fmt.coil`  | the CLI |
-| `dump.coil` | debug: print the CST node tree (used by the safety gate) |
-| `check.sh`  | safety gate: token-equivalence + idempotence over the codebase |
+| `dump.coil` | debug: print the CST node tree |
 | `sample.coil` | a small fixture exercising comments, prefixes, strings, bindings |
 
 ## Known limitations (v1)

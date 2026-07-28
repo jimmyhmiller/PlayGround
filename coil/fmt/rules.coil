@@ -43,9 +43,11 @@
             (if (is h "fn")                                    (mk-rule 1 1)
               (if (or (is h "cond") (or (is h "case") (is h "condp"))) (mk-rule 3 0)
               (if (is h "match")                                 (mk-rule 1 1)
-                (if (or (is h "defsum") (or (is h "defstruct") (or (is h "deftrait") (is h "defenum")))) (mk-rule 1 1)
-                  (if (is h "impl")                            (mk-rule 1 2)
-                    (mk-rule 0 0))))))))))))   ; default: function call
+                (mk-rule 0 0))))))))))   ; default: function call
+; (defstruct/defsum/deftrait/defenum/impl are dispatched ahead of this table, in
+;  list->doc — their head line depends on the shape of the form, not just the head
+;  symbol, so a fixed Rule cannot express them. Each admits an optional leading
+;  [type-params] vector, which shifts every later element by one.)
 
 ; ---- predicates over a node ------------------------------------------------
 (defn any-child-multiline [(n (ptr Node))] (-> bool)
@@ -289,6 +291,30 @@
   (let [cnt (node-count n)]
     (if (icmp-lt (isub cnt 2) 1) 1 (isub cnt 2))))
 
+; A defsum/deftrait/defenum signature — the name plus an optional [type-params]
+; vector — stays on the head line; the variants (or trait methods) after it are the
+; body, one per line. Unlike defstruct there may be many body elements, so the
+; count is not "all but the last": it is 2 when child 2 is a [...] vector
+;   (defsum Option [T]        (deftrait Eq [Self]
+;     (None) …)                 (= [(a Self) (b Self)] (-> bool)))
+; and 1 when there are no type params and child 2 is already a variant
+;   (defsum CtVal
+;     (CInt [(v i64)]) …)
+(defn defsum-inline-n [(n (ptr Node))] (-> i64)
+  (if (icmp-le (node-count n) 2) 1
+    (let [ch (node-nth n 2)]
+      (if (and (node-list? ch) (icmp-eq (node-open ch) 91)) 2 1))))
+
+; An impl header — `(impl [type-params]? Trait Type …)` — stays on the head line;
+; the method definitions are the body. Same optional-[type-params] shift as above,
+; one position earlier because impl has no name:
+;   (impl BitOr i64 …)        -> 2   (Trait, Type)
+;   (impl [T] Eq (ptr T) …)   -> 3   ([T], Trait, Type)
+(defn impl-inline-n [(n (ptr Node))] (-> i64)
+  (if (icmp-le (node-count n) 1) 1
+    (let [ch (node-nth n 1)]
+      (if (and (node-list? ch) (icmp-eq (node-open ch) 91)) 3 2))))
+
 ; ---- list dispatch ---------------------------------------------------------
 (defn list->doc [(a (ptr Allocator)) (n (ptr Node))] (-> (ptr Doc))
   (if (icmp-eq (node-open n) 91)
@@ -303,6 +329,12 @@
           (if (is h "defstruct")
               ; name + [type-params] + :layout/:size/… options inline; field vector body.
               (layout a n 40 41 (defstruct-inline-n n) 2 false)
+          (if (or (is h "defsum") (or (is h "deftrait") (is h "defenum")))
+              ; name + optional [type-params] inline; variants/methods are the body.
+              (layout a n 40 41 (defsum-inline-n n) 2 false)
+          (if (is h "impl")
+              ; optional [type-params] + Trait + Type inline; methods are the body.
+              (layout a n 40 41 (impl-inline-n n) 2 false)
           (if (icmp-eq style 3)
               (layout-clauses a n)
           (if (icmp-eq style 0)
@@ -320,7 +352,7 @@
                     ; never joined with its body, even when it would fit flat.
                     (layout a n 40 41 sig-end 2 true)))
               ; BLOCK n
-              (layout a n 40 41 rn 2 false))))))))))))
+              (layout a n 40 41 rn 2 false))))))))))))))
 
 ; true if child `i` is a list whose head symbol equals `lit`.
 (defn list-head-is [(n (ptr Node)) (i i64) (lit (slice u8))] (-> bool)

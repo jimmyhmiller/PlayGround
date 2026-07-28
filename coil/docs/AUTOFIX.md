@@ -319,7 +319,7 @@ dump, so the oracle stays byte-exact throughout.
 
 **Tests, in the repo's style:** (a) the F1 round-trip identity above; (b)
 **idempotence** — `--fix` twice produces a byte-identical file, which is `fmt`'s own
-discipline (`fmt/check.sh`); (c) **token-equivalence outside the fixed span** — the
+discipline (`coil fmt --check`); (c) **token-equivalence outside the fixed span** — the
 untouched bytes of the file are untouched, verbatim; (d) artifact equality on a
 `--verify` corpus.
 
