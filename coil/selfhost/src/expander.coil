@@ -57,6 +57,7 @@
 (defn mac-idx [] (-> (ptr MacIdx))
   (alloc-static MacIdx))
 (defn macros-index-reset! [] (-> i64)
+  (mac-memo-reset!)
   (let [ix (mac-idx)]
     (store! (field ix built) 0)
     (store! (field ix src) (cast (ptr (ArrayList (slice u8))) 0))
@@ -128,7 +129,44 @@
                   (when (and (exports-check expb target head) (macros-has? macros q)) (store! r (Some q)) (break)))
                 (store! i (iadd (load i) 1)))))
     (load r)))
+; ── the macro-resolution memo ────────────────────────────────────────────────
+; `expand-calls-list` asks `resolve-macro` about EVERY list head in the program, and the
+; answer costs an allocation before it can even be looked up: the bare-name path builds
+; `module.head` with sconcat3, then hashes and compares it. Heads repeat constantly
+; (`if`, `let`, `do`, `store!`…), and for one module the answer is a pure function of the
+; head — the macro set, imports and exports are all fixed for the duration of a run.
+;
+; So it is memoised per module, keyed on the head alone, which removes the concatenation
+; entirely and leaves one hash of a short string. "" encodes "not a macro", so negative
+; answers — the overwhelming majority — are cached too. The memo is dropped when the
+; module changes and, with the macro index, at the top of every `run-expand`.
+(defstruct MacMemo [(mod (slice u8)) (valid i64) (m (HashMap (slice u8) (slice u8)))])
+(defn mac-memo [] (-> (ptr MacMemo))
+  (alloc-static MacMemo))
+(defn mac-memo-reset! [] (-> i64)
+  (store! (field (mac-memo) valid) 0)
+  0)
 (defn resolve-macro [(head (slice u8))
+                     (module (Option (slice u8)))
+                     (macros (ptr (ArrayList (slice u8))))
+                     (impb (ptr (ArrayList ImpEntry)))
+                     (expb (ptr (ArrayList ExpEntry)))
+                     (a (ptr Allocator))] (-> (Option (slice u8)))
+  (let [mk (match module (Some [m] m) (None [] ""))
+        mm (mac-memo)]
+    (when (or (icmp-eq (load (field mm valid)) 0) (not (str-eq (load (field mm mod)) mk)))
+          (store! (field mm m) (hm-new [(slice u8) (slice u8)] (malloc-allocator) (str-keyops)))
+          (store! (field mm mod) mk)
+          (store! (field mm valid) 1))
+    (match (hm-get [(slice u8) (slice u8)] (load (field mm m)) head)
+      (Some [hit] (if (icmp-eq (slice-len [u8] hit) 0) (None [(slice u8)]) (Some hit)))
+      (None []
+            (let [r (resolve-macro-uncached head module macros impb expb a)]
+              (hm-put! [(slice u8) (slice u8)] (mut (field mm m)) head
+                       (match r (Some [q] q) (None [] "")))
+              r)))))
+
+(defn resolve-macro-uncached [(head (slice u8))
                      (module (Option (slice u8)))
                      (macros (ptr (ArrayList (slice u8))))
                      (impb (ptr (ArrayList ImpEntry)))
@@ -1237,6 +1275,8 @@
               (store! (field subls a) a)
               (store! (field subls out) (load (load (field b sub-forms))))
               (store! (field subls loaded) (al-new [(slice u8)] a))
+              (store! (field subls readpaths) (al-new [(slice u8)] a))
+              (store! (field subls readmods) (al-new [(slice u8)] a))
               (store! (field subls imports) (load (field b imports)))
               (store! (field subls exports) (load (field b exports)))
               (store! (field b resolved) 1)
@@ -1261,6 +1301,8 @@
             (store! (field checkls a) a)
             (store! (field checkls out) (al-new [TaggedForm] a))
             (store! (field checkls loaded) (al-new [(slice u8)] a))
+            (store! (field checkls readpaths) (al-new [(slice u8)] a))
+            (store! (field checkls readmods) (al-new [(slice u8)] a))
             (store! (field checkls imports) (al-new [ImpEntry] a))
             (store! (field checkls exports) (al-new [ExpEntry] a))
             (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
@@ -1305,6 +1347,8 @@
     (store! (field subls a) a)
     (store! (field subls out) (load sub-forms))
     (store! (field subls loaded) (al-new [(slice u8)] a))
+    (store! (field subls readpaths) (al-new [(slice u8)] a))
+    (store! (field subls readmods) (al-new [(slice u8)] a))
     (store! (field subls imports) (load (field s imports)))
     (store! (field subls exports) (load (field s exports)))
     (match (resolve-program a (mut subls) false true)
@@ -1339,6 +1383,8 @@
                             (store! (field checkls a) a)
                             (store! (field checkls out) (al-new [TaggedForm] a))
                             (store! (field checkls loaded) (al-new [(slice u8)] a))
+                            (store! (field checkls readpaths) (al-new [(slice u8)] a))
+                            (store! (field checkls readmods) (al-new [(slice u8)] a))
                             (store! (field checkls imports) (al-new [ImpEntry] a))
                             (store! (field checkls exports) (al-new [ExpEntry] a))
                             ; this LS checks a closure sub-program WITHOUT a resolve pass, so the
@@ -1642,6 +1688,8 @@
            (store! (field subls a) a)
            (store! (field subls out) (load sub-forms))
            (store! (field subls loaded) (al-new [(slice u8)] a))
+           (store! (field subls readpaths) (al-new [(slice u8)] a))
+           (store! (field subls readmods) (al-new [(slice u8)] a))
            (store! (field subls imports) (load (field s imports)))
            (store! (field subls exports) (load (field s exports)))
            (match (resolve-program a (mut subls) false true)
@@ -1682,6 +1730,8 @@
                      (store! (field checkls a) a)
                      (store! (field checkls out) (al-new [TaggedForm] a))
                      (store! (field checkls loaded) (al-new [(slice u8)] a))
+                     (store! (field checkls readpaths) (al-new [(slice u8)] a))
+                     (store! (field checkls readmods) (al-new [(slice u8)] a))
                      (store! (field checkls imports) (al-new [ImpEntry] a))
                      (store! (field checkls exports) (al-new [ExpEntry] a))
                      (store! (field checkls check_diags) (box-al [Diag] a (al-new [Diag] a)))
@@ -2179,6 +2229,8 @@
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
     (store! (field s loaded) (al-new [(slice u8)] a))
+    (store! (field s readpaths) (al-new [(slice u8)] a))
+    (store! (field s readmods) (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
     (store! (field s sources) (al-new [Source] a))
@@ -2278,6 +2330,8 @@
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
     (store! (field s loaded) (al-new [(slice u8)] a))
+    (store! (field s readpaths) (al-new [(slice u8)] a))
+    (store! (field s readmods) (al-new [(slice u8)] a))
     (store! (field s imports) (al-new [ImpEntry] a))
     (store! (field s exports) (al-new [ExpEntry] a))
     (store! (field s sources) (al-new [Source] a))

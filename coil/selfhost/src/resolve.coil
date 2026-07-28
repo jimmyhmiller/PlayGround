@@ -384,7 +384,57 @@
         (Ok [(Option (slice u8)) Diag] (load r)))))
 
 ; — kind: 0 callables, 1 types, 2 traits, 3 convs.
+; ── the name-resolution memo ─────────────────────────────────────────────────
+; `resolve` is called once per IDENTIFIER, and the answer costs an allocation before it
+; can be returned: the qualified name is built with sconcat3 every time. Identifiers
+; repeat relentlessly — `load`, `store!`, `al-len`, `icmp-eq` — and within one module the
+; answer is a pure function of (name, kind): the def table, imports and exports are all
+; fixed for the whole resolve pass.
+;
+; So it is memoised per module, with one map per kind so the kind need not be encoded
+; into the key. Only successes are cached: a failure carries a Diag whose message is
+; built for the site that raised it, and reusing one would misreport the second site.
+; The memo is dropped whenever the module changes.
+(defstruct ResMemo
+  [(mod (slice u8)) (valid i64)
+   (k0 (HashMap (slice u8) (slice u8))) (k1 (HashMap (slice u8) (slice u8)))
+   (k2 (HashMap (slice u8) (slice u8))) (k3 (HashMap (slice u8) (slice u8)))
+   (k4 (HashMap (slice u8) (slice u8)))])
+(defn res-memo [] (-> (ptr ResMemo))
+  (alloc-static ResMemo))
+(defn res-memo-map [(rm (ptr ResMemo)) (kind i64)] (-> (ptr (HashMap (slice u8) (slice u8))))
+  (cond (icmp-eq kind 0) (field rm k0)
+        (icmp-eq kind 1) (field rm k1)
+        (icmp-eq kind 2) (field rm k2)
+        (icmp-eq kind 3) (field rm k3)
+        :else (field rm k4)))
+(defn res-memo-reset! [(rm (ptr ResMemo)) (m (slice u8))] (-> i64)
+  (let [a (malloc-allocator)]
+    (store! (field rm k0) (hm-new [(slice u8) (slice u8)] a (str-keyops)))
+    (store! (field rm k1) (hm-new [(slice u8) (slice u8)] a (str-keyops)))
+    (store! (field rm k2) (hm-new [(slice u8) (slice u8)] a (str-keyops)))
+    (store! (field rm k3) (hm-new [(slice u8) (slice u8)] a (str-keyops)))
+    (store! (field rm k4) (hm-new [(slice u8) (slice u8)] a (str-keyops)))
+    (store! (field rm mod) m)
+    (store! (field rm valid) 1)
+    0))
 (defn resolve [(c (ptr Ctx)) (name (slice u8)) (kind i64)] (-> (Result (slice u8) Diag))
+  (let [rm (res-memo)
+        m (load (field c m))]
+    (when (or (icmp-eq (load (field rm valid)) 0) (not (str-eq (load (field rm mod)) m)))
+          (res-memo-reset! rm m))
+    (let [mp (res-memo-map rm kind)]
+      (match (hm-get [(slice u8) (slice u8)] (load mp) name)
+        (Some [hit] (Ok [(slice u8) Diag] hit))
+        (None []
+              (match (resolve-uncached c name kind)
+                (Err [d] (Err [(slice u8) Diag] d))
+                (Ok [q]
+                    (do
+                      (hm-put! [(slice u8) (slice u8)] (mut mp) name q)
+                      (Ok [(slice u8) Diag] q)))))))))
+
+(defn resolve-uncached [(c (ptr Ctx)) (name (slice u8)) (kind i64)] (-> (Result (slice u8) Diag))
   (let [a (load (field c a))
         m (load (field c m))
         imp (load (field c imp))

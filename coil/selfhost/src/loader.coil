@@ -94,6 +94,9 @@
   [(a (ptr Allocator))
    (out (ArrayList TaggedForm))
    (loaded (ArrayList (slice u8)))
+   ; resolved-path -> declared module name, for files already read (see read-memo-find)
+   (readpaths (ArrayList (slice u8)))
+   (readmods (ArrayList (slice u8)))
    (imports (ArrayList ImpEntry))
    (exports (ArrayList ExpEntry))
    (srccount i64)
@@ -463,6 +466,52 @@
                 (store! i (iadd (load i) 1)))))
     (if (load found) false (do (al-push! (mut (field s loaded)) name) true))))
 
+; A module imported by K modules was READ FROM DISK and fully RE-PARSED K times. The
+; already-loaded test above keys on the module NAME, which is only known after parsing,
+; so it could skip the recursive descent but never the work of reaching it. On this
+; compiler that is 540 imports across 65 files: eight times the file I/O and lexing, and
+; 540 entries in the source table where 65 would do.
+;
+; Keyed on the RESOLVED PATH — which `resolve-source` produces before anything is read —
+; each file is read and parsed exactly once. The per-import bookkeeping (alias, :use
+; spec, :reexport) still runs for EVERY import; only the reading is shared, so what any
+; one importer sees is unchanged.
+(defn read-memo-find [(s (mut LS)) (p (slice u8))] (-> (Option (slice u8)))
+  (let [n (al-len [(slice u8)] (load (field s readpaths)))
+        (mut i) 0
+        (mut r) (None [(slice u8)])]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (str-eq (al-get [(slice u8)] (load (field s readpaths)) (load i)) p)
+                      (store! r (Some (al-get [(slice u8)] (load (field s readmods)) (load i))))
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn read-memo-add! [(s (mut LS)) (p (slice u8)) (m (slice u8))] (-> i64)
+  (al-push! (mut (field s readpaths)) p)
+  (al-push! (mut (field s readmods)) m)
+  0)
+
+; The bookkeeping an import performs on its IMPORTER, which is per-import and therefore
+; runs whether or not the file itself had to be read.
+(defn import-record! [(s (mut LS))
+                      (cur (Option (slice u8)))
+                      (alias (Option (slice u8)))
+                      (use-spec (Option UseSpec))
+                      (reexport bool)
+                      (modname (slice u8))] (-> i64)
+  (let [importer (match cur (Some [m] m) (None [] ""))
+        imp (imp-entry (mut s) importer)
+        alias-name (match alias (Some [al] al) (None [] modname))]
+    (mi-add-alias! imp alias-name modname)
+    (match use-spec
+      (Some [spec] (mi-add-use! imp modname spec))
+      (None [] 0))
+    (when reexport (mi-add-reexport! imp modname))
+    0))
+
 (defn handle-export [(s (mut LS)) (f (ptr Sexp)) (cur (Option (slice u8)))] (-> i64)
   (match cur
     (Some [m]
@@ -588,6 +637,10 @@
           rp (alloc-stack Resolved)]
       (store! rp rr)
       (unless (ls-err? (mut s))
+        (match (read-memo-find (mut s) (load (field rp disp)))
+          ; already read for another importer — only this importer's record is new
+          (Some [modname] (import-record! (mut s) cur (load alias) (load use-spec) (load reexport) modname))
+          (None []
               (let [text (load (field rp text))
                     incdir (load (field rp incdir))
                     inc-id (load (field s srccount))
@@ -617,16 +670,10 @@
                                                                              (load (field rp disp))
                                                                              "': file has no (module …) declaration — add (module <name>) as its first form")))
                                         "")))
-                            importer (match cur (Some [m] m) (None [] ""))
-                            imp (imp-entry (mut s) importer)
-                            alias-name (match (load alias) (Some [al] al) (None [] modname))]
-                        (mi-add-alias! imp alias-name modname)
-                        (match (load use-spec)
-                          (Some [spec] (mi-add-use! imp modname spec))
-                          (None [] 0))
-                        (when (load reexport) (mi-add-reexport! imp modname))
+                            _memo (read-memo-add! (mut s) (load (field rp disp)) modname)]
+                        (import-record! (mut s) cur (load alias) (load use-spec) (load reexport) modname)
                         (when (loaded-insert! (mut s) modname) (process-forms (mut s) inc-forms incdir (None [(slice u8)])))
-                        0))))))))
+                        0))))))))))
 
 ; Join the string elements of a `:flags ["-I…" "-D…"]` option into one clang
 ; flags string (each space-prefixed), or "" if absent. Forwarded to clang so

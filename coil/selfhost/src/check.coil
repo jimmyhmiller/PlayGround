@@ -16,6 +16,7 @@
 (import "loader.coil" :use *)
 (import "parser.coil" :use *)
 (import "resolve.coil" :use *)
+(import "hashmap.coil" :use *)  ; the signature-name index (sig-find)
 
 ; the last `.`-separated component of a qualified name (the link/C symbol).
 ; Lives here (not in codegen.coil) so check has no codegen/LLVM dependency and
@@ -71,6 +72,8 @@
 (defstruct Cx
   [(a (ptr Allocator))
    (sigs (ArrayList Sig))
+   ; name -> index into `sigs` of the LAST signature declared under it; see sig-find
+   (sigidx (HashMap (slice u8) i64))
    (structs (ArrayList StructInfo))
    (sums (ArrayList SumInfo))
    (variant_to_sum (ArrayList VtoS))
@@ -91,20 +94,22 @@
   (box-al [EnvEntry] a (al-new [EnvEntry] a)))
 
 ; ---- Cx table lookups (return a live (ptr T) or null) ----------------------
+; Record that the signature just appended is the one `name` now resolves to. Overwriting
+; is the point: on a duplicate name the LAST one declared wins, which is exactly what a
+; map insert does — the behaviour the old scan spelled out by deliberately NOT breaking
+; on a match and running to the end of the list every time.
+(defn sig-index-put! [(cx (ptr Cx)) (name (slice u8))] (-> i64)
+  (hm-put! [(slice u8) i64] (mut (field cx sigidx)) name (isub (al-len [Sig] (load (field cx sigs))) 1))
+  0)
+
+; The signature `name` resolves to, or null. This is asked once per CALL SITE against
+; every signature in the program; as a str-eq scan that ran to completion (see above) it
+; was O(calls × functions) — quadratic in program size, and the largest single cost left
+; in `check`. The index gives the identical answer in one probe.
 (defn sig-find [(cx (ptr Cx)) (name (slice u8))] (-> (ptr Sig))
-  ; HashMap `insert` semantics: on a duplicate function name
-  ; the LAST inserted sig wins, so keep scanning and return the final match.
-  (let [n (al-len [Sig] (load (field cx sigs)))
-        (mut i) 0
-        (mut r) (cast (ptr Sig) 0)]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (al-elem [Sig] (field cx sigs) (load i)) name)) name)
-                      (store! r (al-elem [Sig] (field cx sigs) (load i)))
-                      0)
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+  (match (hm-get [(slice u8) i64] (load (field cx sigidx)) name)
+    (None [] (cast (ptr Sig) 0))
+    (Some [i] (al-elem [Sig] (field cx sigs) i))))
 ; Levenshtein edit distance between two byte slices. Cold path (only computed
 ; when a call is already known-undefined), so a straightforward two-rolling-rows
 ; DP in scratch heap memory is fine.
@@ -763,6 +768,7 @@
 (defn cx-init-tables [(cx (ptr Cx)) (a (ptr Allocator))] (-> i64)
   (store! (field cx a) a)
   (store! (field cx sigs) (al-new [Sig] a))
+  (store! (field cx sigidx) (hm-new [(slice u8) i64] a (str-keyops)))
   (store! (field cx structs) (al-new [StructInfo] a))
   (store! (field cx sums) (al-new [SumInfo] a))
   (store! (field cx variant_to_sum) (al-new [VtoS] a))
@@ -1265,6 +1271,7 @@
     (store! (field sg cc) cc)
     (store! (field sg fnptr_ok) (and native (icmp-eq (al-len [(slice u8)] (load tps)) 0)))
     (al-push! (mut (field cx sigs)) (load sg))
+    (sig-index-put! cx (load (field sg name)))
     0))
 (defn param-ref-types [(a (ptr Allocator))
                        (cx (ptr Cx))
@@ -1345,7 +1352,8 @@
                                       (store! (field sg variadic) (load (field ep variadic)))
                                       (store! (field sg cc) (load (field ep cc)))
                                       (store! (field sg fnptr_ok) true)
-                                      (al-push! (mut (field cx sigs)) (load sg)))))))))
+                                      (al-push! (mut (field cx sigs)) (load sg))
+                                      (sig-index-put! cx (load (field sg name))))))))))
                 (store! i (iadd (load i) 1)))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn opt-type-some? [(o (ptr (Option Type)))] (-> bool)
