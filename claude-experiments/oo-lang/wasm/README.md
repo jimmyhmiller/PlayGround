@@ -109,13 +109,13 @@ SCRY_WASM_ROOT=$PWD/dist node ui-smoke-wasm.mjs        # the files that ship
 SCRY_WASM_BASE=http://127.0.0.1:3999 node ui-smoke-wasm.mjs
 ```
 
-⚠ **On a Hobby plan the production alias is public.** Vercel Authentication protects preview and
-generated deployment URLs, but gating a production domain is a paid feature — so
-`<project>.vercel.app` serves to anyone even with protection "on". To keep a deployment private,
-remove the alias (`vercel alias rm <project>.vercel.app`) and use the SSO-gated deployment URL.
+The demo is deployed and **public**: <https://scry-wasm-demo.vercel.app>
 
-Note `scry.wasm` is gitignored and needs the wasm-capable `coil` to produce, so a
-host-side "build from git" cannot work — deploy the prebuilt directory.
+⚠ **On a Hobby plan, public is the only option for a production alias.** Vercel Authentication
+gates preview and generated deployment URLs, but gating a production domain is a paid feature, so
+`<project>.vercel.app` serves to anyone regardless of the protection setting. To keep a build
+private, remove the alias (`vercel alias rm <project>.vercel.app`) and share the SSO-gated
+deployment URL instead.
 
 ## Green threads
 
