@@ -7562,7 +7562,12 @@ export function unstable_cache(fn, keyParts, options) {{
       if (!store.tags) store.tags = new Set();
       for (const t of tags) store.tags.add(t);
     }}
-    const key = base + "|" + JSON.stringify(args) + "|" + tags.join(",");
+    // Arguments that JSON cannot represent faithfully (a headers/cookies object, a class
+    // instance, a function) MUST NOT share a memo entry: see __isKeyable for the
+    // cross-session leak that produced. Uncacheable arguments run through, uncached.
+    const argsKey = __cacheArgsKey(args);
+    if (argsKey == null) return await fn(...args);
+    const key = base + "|" + argsKey + "|" + tags.join(",");
     const now = Date.now();
     const hit = __unstableCacheMemo.get(key);
     if (hit && (hit.expires == null || hit.expires > now)) return hit.value;
@@ -7645,10 +7650,55 @@ export function cacheLife(profile) {{
       : Math.min(scope.revalidate, revalidate);
 }}
 
-// A stable, throw-free key for a cached export's arguments. Returns null when the arguments
-// cannot be serialized (e.g. a component's React-element children) — the wrapper then skips
-// the memo for that call (never returning a wrong cached value) while STILL collecting tags.
+// Whether `JSON.stringify` represents `value` FAITHFULLY — i.e. two values that differ
+// produce different JSON. It does not for anything JSON silently drops or flattens: a
+// function, a symbol, a Map/Set, a class instance (`Headers`, `URL`, `RequestCookies`), a
+// Proxy over one, a non-enumerable own property, NaN/Infinity. Those all stringify to
+// `{{}}`/`null`, so distinct arguments collapse onto ONE cache key.
+//
+// This is not hypothetical. cal.com's `/event-types` page caches its data loader with
+// `unstable_cache(fn, ["viewer.eventTypes.getUserEventGroups"], {{ revalidate: 3600 }})` and
+// passes `await headers()` and `await cookies()` as arguments — the documented way to give
+// a cached function request data. Both stringify to a constant, so the FIRST signed-in
+// visitor's event types were served to every later visitor for an hour: a different user's
+// name, slugs and links, cross-session. Caught by cal.com's own Playwright suite, where the
+// second test's page rendered the first test's user.
+//
+// `undefined` is deliberately treated as faithful even though JSON turns an array hole into
+// `null`: omitted trailing arguments are pervasive, and Next accepts the same collision in
+// its own key (its source comments the coercion). Everything else fails closed.
+function __isKeyable(value, budget) {{
+  if (budget.n-- < 0) return false;
+  if (value === null || value === undefined) return true;
+  const type = typeof value;
+  if (type === "boolean" || type === "string") return true;
+  if (type === "number") return Number.isFinite(value);
+  if (type !== "object") return false; // function, symbol, bigint
+  if (Array.isArray(value)) {{
+    for (const item of value) {{
+      if (!__isKeyable(item, budget)) return false;
+    }}
+    return true;
+  }}
+  // An object that declares its own serialization is taken at its word.
+  if (typeof value.toJSON === "function") return true;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  // Own properties JSON never writes (non-enumerable, or symbol-keyed) are lost.
+  if (Object.getOwnPropertyNames(value).length !== Object.keys(value).length) return false;
+  if (Object.getOwnPropertySymbols(value).length !== 0) return false;
+  for (const key of Object.keys(value)) {{
+    if (!__isKeyable(value[key], budget)) return false;
+  }}
+  return true;
+}}
+
+// A stable, throw-free key for a cached call's arguments. Returns null when the arguments
+// cannot be serialized (a component's React-element children, a cyclic value) OR when
+// serializing them would be LOSSY (see __isKeyable) — the caller then skips the memo for
+// that call (never returning another caller's value) while STILL collecting tags.
 function __cacheArgsKey(args) {{
+  if (!__isKeyable(args, {{ n: 10000 }})) return null;
   try {{
     return JSON.stringify(args);
   }} catch {{
@@ -10339,6 +10389,76 @@ const STUB_MANIFEST = {
         // revalidateTag purges BOTH local memos (single-worker correctness).
         assert!(shim.contains("__unstableCacheMemo.delete"), "revalidateTag purges the unstable_cache memo");
         assert!(shim.contains("__useCacheMemo.delete"), "revalidateTag purges the use-cache memo");
+    }
+
+    /// REGRESSION, executed by node against the SHIPPED shim source. A cached function's
+    /// arguments are keyed by `JSON.stringify`, which represents a class instance, a Proxy,
+    /// a function-valued property or a Map as `{}` — so two calls with COMPLETELY different
+    /// arguments collapsed onto one memo entry and the first caller's value was returned to
+    /// everyone.
+    ///
+    /// cal.com's `/event-types` page is exactly this shape: `unstable_cache(loader,
+    /// ["viewer.eventTypes.getUserEventGroups"], { revalidate: 3600 })` called with
+    /// `await headers()` and `await cookies()` — the documented way to hand a cached
+    /// function its request data. The first signed-in visitor's event types (their name,
+    /// slugs and booking links) were served to every later visitor for an hour. cal.com's
+    /// own Playwright suite caught it: the second test's `/event-types` HTML carried the
+    /// FIRST test's username, so its "preview" link opened a stranger's booking page.
+    #[test]
+    fn a_cached_call_never_reuses_a_value_across_unserializable_arguments() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = scratch("cache-args-key");
+        // Stand-in for the per-request store module the shim imports.
+        std::fs::write(
+            dir.join("request-context.mjs"),
+            "import { AsyncLocalStorage } from 'node:async_hooks';\n\
+             export const requestAls = new AsyncLocalStorage();\n\
+             export const cacheScopeAls = new AsyncLocalStorage();\n",
+        )
+        .unwrap();
+        let shim = next_cache_shim(&dir.join("request-context.mjs"));
+        std::fs::write(dir.join("cache.mjs"), shim).unwrap();
+        // Two requests, each with its own cookies()-shaped object (a plain object whose
+        // members are FUNCTIONS, exactly what the next/headers shim returns) and its own
+        // Headers instance. Their JSON is `{"size":1}` / `{}` — identical.
+        std::fs::write(
+            dir.join("run.mjs"),
+            r#"import { unstable_cache } from "./cache.mjs";
+const cookiesFor = (token) => ({ get: (n) => ({ name: n, value: token }), size: 1 });
+let calls = 0;
+const load = unstable_cache(
+  async (_headers, _cookies) => { calls += 1; return _cookies.get("session").value; },
+  ["loader"],
+  { revalidate: 3600 },
+);
+const a = await load(new Headers({ cookie: "session=alice" }), cookiesFor("alice"));
+const b = await load(new Headers({ cookie: "session=bob" }), cookiesFor("bob"));
+if (a !== "alice" || b !== "bob") {
+  throw new Error(`cross-request leak: got ${a} / ${b} after ${calls} call(s)`);
+}
+if (calls !== 2) throw new Error(`expected both calls to run, ran ${calls}`);
+// Genuinely serializable arguments still memoize.
+let plainCalls = 0;
+const plain = unstable_cache(async (n) => { plainCalls += 1; return n * 2; }, ["plain"]);
+if ((await plain(21)) !== 42 || (await plain(21)) !== 42) throw new Error("plain value wrong");
+if (plainCalls !== 1) throw new Error(`plain args must memoize, ran ${plainCalls}`);
+if ((await plain(1)) !== 2 || plainCalls !== 2) throw new Error("distinct plain args must not share");
+console.log("OK");
+"#,
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(dir.join("run.mjs"))
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("OK"),
+            "node run failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
     }
 
     /// diffpack's DEFAULT source-map policy is Next's, so that a `diffpack build-app`
