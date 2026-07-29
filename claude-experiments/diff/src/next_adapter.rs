@@ -5751,7 +5751,34 @@ async function fetchFlight(href) {{
         href + ": " + JSON.stringify(payload).slice(0, 200),
     );
   }}
-  const tree = createFromReadableStream(res.body, {{ callServer }});
+  // A soft navigation's flight is read to completion BEFORE it is handed to the Router,
+  // and the resulting tree is awaited, so the Router only ever swaps in a tree that is
+  // already renderable. This mirrors Next's own router, whose `fetchServerResponse`
+  // awaits `createFromFetch` before the reducer applies the navigation.
+  //
+  // Handing the Router a live stream instead is what this replaced, and it made the
+  // navigation's `startTransition` render suspend on rows that had not arrived yet. A
+  // suspended navigation cannot commit ANYTHING — not the new tree, and not the
+  // params/pathname/searchParams the Router provides alongside it — while `pushState`
+  // has already run, so a lost or stalled tail leaves the tab permanently split: the
+  // address bar on the new route, the DOM on the old one, with no error and no retry.
+  // (Observed on cal.com: a second visit to `?tabName=recurring` rendered the previous
+  // tab forever.) Nothing is given up by buffering: the Router renders the flight root
+  // with no Suspense boundary of its own, so React could never commit a partially
+  // arrived tree anyway — every successful navigation already waited for the last row.
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const tree = createFromReadableStream(
+    new ReadableStream({{
+      start(controller) {{
+        controller.enqueue(bytes);
+        controller.close();
+      }},
+    }}),
+    {{ callServer }},
+  );
+  // Settle it here, where a rejection is a rejected navigation the caller can see, rather
+  // than during a render that has no boundary to catch it.
+  await tree;
   return {{ tree, intercept, params }};
 }}
 
@@ -11568,6 +11595,57 @@ console.log(out.join("|"));
             client.contains("percent-encoded JSON (")
                 && client.contains("must decode to an object, got"),
             "a malformed params header throws with a diagnosable message: {client}",
+        );
+    }
+
+    /// A soft navigation must never swap in a flight that is still arriving.
+    ///
+    /// The Router renders the flight root with no Suspense boundary of its own, so a
+    /// tree whose rows have not all landed suspends the navigation's transition — and a
+    /// suspended transition commits NOTHING: not the tree, and not the params/pathname/
+    /// searchParams the Router provides beside it. `pushState` has already run by then,
+    /// so a stalled tail leaves the tab split for good: the address bar on the new
+    /// route, the DOM on the old one, no error, no retry. cal.com hit this on a second
+    /// visit to `/event-types/<id>?tabName=recurring`, which kept rendering the Advanced
+    /// tab forever while the URL said `recurring`.
+    ///
+    /// So `fetchFlight` reads the response to completion and settles the tree before
+    /// returning it, which is also what Next's router does — its `fetchServerResponse`
+    /// awaits `createFromFetch` before the reducer applies the navigation.
+    #[test]
+    fn a_soft_navigation_swaps_in_a_settled_flight_never_a_live_stream() {
+        let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
+        let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+
+        let fetch_flight = {
+            let at = client.find("async function fetchFlight(href) {").unwrap();
+            let rest = &client[at..];
+            &rest[..rest.find("\n}\n").unwrap()]
+        };
+        assert!(
+            fetch_flight.contains("await res.arrayBuffer()"),
+            "the soft-nav flight is read to completion before it is handed to the Router: {fetch_flight}",
+        );
+        assert!(
+            !fetch_flight.contains("createFromReadableStream(res.body"),
+            "the live response body must NOT be what the Router renders: {fetch_flight}",
+        );
+        let create_at = fetch_flight.find("createFromReadableStream(").unwrap();
+        let await_at = fetch_flight.find("\n  await tree;").unwrap();
+        assert!(
+            create_at < await_at,
+            "the tree is settled after it is created and before it is returned: {fetch_flight}",
+        );
+        assert!(
+            fetch_flight[await_at..].contains("return { tree, intercept, params };"),
+            "the settled tree is the one that travels to navigate(): {fetch_flight}",
+        );
+        // The INITIAL document keeps streaming — the SSR HTML is already on screen, so
+        // rows arriving late cost nothing there. Only the soft-nav channel is buffered.
+        assert!(
+            client.contains("function flightStreamFromDF()") && client.contains("controller.enqueue(decodeFlight(entry[1]))"),
+            "hydration still consumes the document's incremental flight stream: {client}",
         );
     }
 
