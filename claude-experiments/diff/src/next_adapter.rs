@@ -2315,6 +2315,34 @@ pub const RSC_CSS_URL: &str = "/rsc.css";
 /// emitted artifact can, and did — a `<link>` to a 404.
 pub const RSC_EMITTED_CSS_FILE: &str = "server.css";
 
+/// The served path of the CLIENT graph's compiled CSS, and the second stylesheet the
+/// adapter links from `<head>`.
+///
+/// The react-server graph does NOT see a `"use client"` module's body — the proxy that
+/// replaces it keeps only that module's OWN direct stylesheet imports (see
+/// `crate::rsc::transform_use_client_server`). So CSS imported by a plain module that
+/// only a client component reaches — cal.com's `packages/ui/components/editor/
+/// Editor.tsx` doing `import "./stylesEditor.css"`, reached from a `"use client"`
+/// wrapper — never enters `server.css`, and the page renders unstyled in exactly that
+/// subtree. The CLIENT graph is complete by construction and already compiles that CSS
+/// into `public/client.css`; it was emitted and served but nothing linked it.
+///
+/// Next does the same thing: the route's document links the Tailwind/app chunk and
+/// then a separate chunk holding the client components' CSS (verified against
+/// cal.com's reference `next start` build, which links exactly three stylesheets on the
+/// event-type route, the last one carrying `.editor-container`/`.toolbar`/`glide`).
+/// Linking it LAST matches that order, so a client component's CSS wins ties against
+/// the app stylesheet on both toolchains.
+pub const CLIENT_CSS_URL: &str = "/client.css";
+
+/// Where the render entry looks for [`CLIENT_CSS_URL`]'s artifact, relative to its own
+/// `import.meta.url`. Same shape as [`RSC_EMITTED_CSS_FILE`]'s guard — the LINK and the
+/// ARTIFACT are one fact, so a `<link>` whose href 404s is not expressible — except the
+/// artifact belongs to a different graph, so it sits in the served `public/` beside the
+/// server dir rather than next to the entry (`src/server_runtime/index.mjs` derives the
+/// orchestrator's `publicDir` from the server dir the same way).
+pub const CLIENT_EMITTED_CSS_PATH: &str = "../public/client.css";
+
 /// The module-level facts one project walk yields for the adapter.
 struct ProjectScan {
     /// Every `"use client"` module, canonical + sorted + deduped: the islands pinned
@@ -4134,10 +4162,22 @@ fn rsc_entry_module(
     // string that merely ends in `.css`) and links a stylesheet that was never emitted.
     let css_const = format!(
         "// Linked only when the react-server build emitted a stylesheet beside this entry.\n\
-         const RSC_CSS_HREF = existsSync(new URL(\"./{RSC_EMITTED_CSS_FILE}\", import.meta.url)) ? {} : null;\n",
+         const RSC_CSS_HREF = existsSync(new URL(\"./{RSC_EMITTED_CSS_FILE}\", import.meta.url)) ? {} : null;\n\
+         // The CLIENT graph's stylesheet (see CLIENT_CSS_URL): CSS a `\"use client\"`\n\
+         // module reaches only THROUGH another module never enters the react-server\n\
+         // graph, so it exists nowhere in RSC_CSS_HREF. Linked last, like Next's\n\
+         // client-component CSS chunk. Same emitted-artifact guard, in the served\n\
+         // `public/` beside this server dir because it belongs to the other graph.\n\
+         const CLIENT_CSS_HREF = existsSync(new URL({}, import.meta.url)) ? {} : null;\n",
         js_str(&format!("{asset_base}{RSC_CSS_URL}")),
+        js_str(CLIENT_EMITTED_CSS_PATH),
+        js_str(&format!("{asset_base}{CLIENT_CSS_URL}")),
     );
     let css_push = "  if (RSC_CSS_HREF) items.push(createElement(\"link\", { rel: \"stylesheet\", href: RSC_CSS_HREF, precedence: \"low\" }));\n".to_string();
+    // Pushed AFTER the font block so React's precedence groups are created in the order
+    // `low` (app) -> `high` (fonts) -> `client`, putting the client graph's CSS last in
+    // <head> — the order the reference build produces.
+    let client_css_push = "  if (CLIENT_CSS_HREF) items.push(createElement(\"link\", { rel: \"stylesheet\", href: CLIENT_CSS_HREF, precedence: \"client\" }));\n".to_string();
     let (font_const, mut font_push) = if fonts.css.trim().is_empty() {
         (String::new(), String::new())
     } else {
@@ -4244,7 +4284,7 @@ const NOT_FOUND_ROUTE = {{ path: "/_not-found", metaChain: [{not_found_meta_chai
 // hoists these into <head> from anywhere in the tree.
 function headItems(meta) {{
   const items = [];
-{css_push}{font_push}{meta_image_push}  if (meta && meta.title) items.push(createElement("title", null, meta.title));
+{css_push}{font_push}{client_css_push}{meta_image_push}  if (meta && meta.title) items.push(createElement("title", null, meta.title));
   if (meta && meta.description) items.push(createElement("meta", {{ name: "description", content: meta.description }}));
   return items;
 }}
@@ -9830,6 +9870,57 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         // Empty asset base keeps the bare `/rsc.css`.
         let plain = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(plain.contains(r#"? "/rsc.css" : null;"#), "no prefix -> bare /rsc.css: {plain}");
+    }
+
+    /// REGRESSION. The react-server graph replaces a `"use client"` module with a proxy
+    /// that keeps only that module's OWN direct stylesheet imports, so CSS the island
+    /// reaches only THROUGH another module (cal.com: a `"use client"` wrapper -> plain
+    /// `Editor.tsx` -> `import "./stylesEditor.css"`) is in NO stylesheet the document
+    /// linked. It was compiled — into the client graph's `public/client.css` — and
+    /// served, and nothing referenced it: the Lexical editor rendered 25px shorter than
+    /// the reference build's, which moved the whole page and broke unrelated
+    /// interactions. The document must link that stylesheet too, last, and under the
+    /// same emitted-artifact guard so the href can never 404.
+    #[test]
+    fn rsc_entry_links_the_client_graphs_stylesheet_last() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("integration/next-app-router");
+        let app = fixture.join("app");
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let boundary = fixture.join(".diffpack-next/error-boundary.tsx");
+        let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
+        let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
+        let reqctx = fixture.join(".diffpack-next/request-context.ts");
+        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        assert!(
+            src.contains(&format!(
+                r#"const CLIENT_CSS_HREF = existsSync(new URL("{CLIENT_EMITTED_CSS_PATH}", import.meta.url)) ? "{CLIENT_CSS_URL}" : null;"#
+            )),
+            "the client stylesheet is guarded by ITS emitted artifact in the served public dir: {src}",
+        );
+        // Exactly one place decides it, and the URL never appears outside that guard.
+        for line in src.lines() {
+            if !line.contains(CLIENT_CSS_URL) {
+                continue;
+            }
+            assert!(
+                line.contains(&format!(
+                    "existsSync(new URL(\"{CLIENT_EMITTED_CSS_PATH}\", import.meta.url))"
+                )),
+                "the client stylesheet URL appears outside the emitted-artifact guard: {line}",
+            );
+        }
+        // Pushed AFTER the app stylesheet, so React's precedence groups order the two
+        // links `low` then `client` — client-component CSS wins ties, as in Next.
+        let rsc_at = src.find("items.push(createElement(\"link\", { rel: \"stylesheet\", href: RSC_CSS_HREF").expect("rsc link push");
+        let client_at = src.find("items.push(createElement(\"link\", { rel: \"stylesheet\", href: CLIENT_CSS_HREF").expect("client link push");
+        assert!(client_at > rsc_at, "the client stylesheet must be linked after the app stylesheet");
+        // An asset base prefixes it exactly like every other static URL.
+        let prefixed = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
+        assert!(
+            prefixed.contains(r#"? "/docs/client.css" : null;"#),
+            "the client stylesheet href carries the asset base: {prefixed}",
+        );
     }
 
     #[test]
