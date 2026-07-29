@@ -7,7 +7,7 @@
 # somewhere and fails here — there is nowhere to hide.
 #
 # Usage: gate-ir.sh <coil-self-binary>
-#   COIL_SELF_ARGS  extra args to pass before `dump-ir` (default none)
+#   COIL_SELF_ARGS  extra args to pass after the file (a leading flag would be read as the subcommand) (default none)
 #   VERBOSE=1       print the first differing hunk for each failure
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
@@ -22,7 +22,7 @@ pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   ref="$REF/$(echo "$f" | tr '/' '_').dump"
-  got=$("$BIN" ${COIL_SELF_ARGS:-} dump-ir "$f" 2>/tmp/coil_self_ir_err); rc=$?
+  got=$("$BIN" dump-ir "$f" ${COIL_SELF_ARGS:-} 2>/tmp/coil_self_ir_err); rc=$?
   if [ $rc -ne 0 ]; then
     fail=$((fail+1)); [ -z "$first_fail" ] && first_fail="$f (exit $rc): $(head -1 /tmp/coil_self_ir_err)"
     [ "${VERBOSE:-}" = 1 ] && echo "FAIL(crash) $f: $(head -1 /tmp/coil_self_ir_err)"

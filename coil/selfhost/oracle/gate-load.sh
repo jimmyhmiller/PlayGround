@@ -6,7 +6,7 @@
 # is nowhere to hide.
 #
 # Usage: gate-load.sh <coil-self-binary>
-#   COIL_SELF_ARGS  extra args to pass before `dump-load` (default none)
+#   COIL_SELF_ARGS  extra args to pass after the file (a leading flag would be read as the subcommand) (default none)
 #   VERBOSE=1       print the first differing line for each failure
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
@@ -20,7 +20,7 @@ LIST=selfhost/oracle/load/corpus.txt
 pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   ref="$REF/$(echo "$f" | tr '/' '_').dump"
-  got=$("$BIN" ${COIL_SELF_ARGS:-} dump-load "$f" 2>/tmp/coil_self_load_err); rc=$?
+  got=$("$BIN" dump-load "$f" ${COIL_SELF_ARGS:-} 2>/tmp/coil_self_load_err); rc=$?
   if [ $rc -ne 0 ]; then
     fail=$((fail+1)); [ -z "$first_fail" ] && first_fail="$f (exit $rc): $(head -1 /tmp/coil_self_load_err)"
     [ "${VERBOSE:-}" = 1 ] && echo "FAIL(crash) $f: $(head -1 /tmp/coil_self_load_err)"

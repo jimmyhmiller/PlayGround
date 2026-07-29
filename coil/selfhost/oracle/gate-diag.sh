@@ -11,7 +11,7 @@
 # ported. The failing set is the 'diagnostics' gap.
 #
 # Usage: gate-diag.sh <coil-self-binary>
-#   COIL_SELF_ARGS  extra args to pass before `emit-ir` (default none)
+#   COIL_SELF_ARGS  extra args to pass after the file (a leading flag would be read as the subcommand) (default none)
 #   VERBOSE=1       print the first differing hunk for each failure
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
@@ -27,7 +27,7 @@ pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   ref="$REF/$(echo "$f" | tr '/' '_').diag"
-  got=$("$BIN" ${COIL_SELF_ARGS:-} emit-ir "$f" 2>&1 | sed "s|$ROOT/||g")
+  got=$("$BIN" emit-ir "$f" ${COIL_SELF_ARGS:-} 2>&1 | sed "s|$ROOT/||g")
   if [ "$got" = "$(cat "$ref")" ]; then
     pass=$((pass+1))
   else
@@ -53,7 +53,7 @@ if [ -f "$BLIST" ]; then
     ref="$REF/$(echo "$f" | tr '/' '_').diag"
     refec="$REF/$(echo "$f" | tr '/' '_').exit"
     o="$TMPD/$(basename "$f" .coil)"
-    "$BIN" ${COIL_SELF_ARGS:-} build "$f" -o "$o" > "$TMPD/raw" 2>&1
+    "$BIN" build "$f" -o "$o" ${COIL_SELF_ARGS:-} > "$TMPD/raw" 2>&1
     code=$?
     got=$(sed "s|$ROOT/||g; s|$TMPD/||g" "$TMPD/raw")
     want=$(cat "$ref")

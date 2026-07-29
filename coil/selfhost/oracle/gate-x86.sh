@@ -9,7 +9,7 @@
 # the Port must teach the self-host codegen the requested target + SysV ABI.
 #
 # Usage: gate-x86.sh <coil-self-binary>
-#   COIL_SELF_ARGS  extra args before `emit-ir` (default none)
+#   COIL_SELF_ARGS  IGNORED here — this gate pins its own --target (see below)
 #   VERBOSE=1       print the first differing hunk for each failure
 set -uo pipefail
 cd "$(dirname "$0")/../.."          # repo root
@@ -25,7 +25,11 @@ pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   ref="$REF/$(echo "$f" | tr '/' '_').dump"
-  got=$("$BIN" ${COIL_SELF_ARGS:-} emit-ir "$f" --target "$TARGET" 2>/tmp/coil_self_x86_err); rc=$?
+  # COIL_SELF_ARGS is deliberately NOT forwarded here: this gate pins its own
+  # --target ($TARGET, the x86 SysV triple), and CI sets COIL_SELF_ARGS to the
+  # snapshot's host triple. Passing both would hand the compiler two conflicting
+  # --target flags for a gate whose entire purpose is the x86 lowering.
+  got=$("$BIN" emit-ir "$f" --target "$TARGET" 2>/tmp/coil_self_x86_err); rc=$?
   if [ $rc -ne 0 ]; then
     fail=$((fail+1)); [ -z "$first_fail" ] && first_fail="$f (exit $rc): $(head -1 /tmp/coil_self_x86_err)"
     [ "${VERBOSE:-}" = 1 ] && echo "FAIL(crash) $f: $(head -1 /tmp/coil_self_x86_err)"
