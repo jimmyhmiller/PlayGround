@@ -28,14 +28,43 @@
 (extern open  :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
 (extern close :cc c [i32]              (-> i32))    ; int close(int fd)
 
-;; open() flags — the darwin/macOS values (the build+gate target). Combine with `|`.
+;; open() flags. Combine with `|`.
+;;
+;; Four of these DIFFER between Linux and macOS, so they cannot be plain
+;; constants: hardcoding the darwin values (as this file used to) makes every
+;; create-or-truncate open fail on Linux, because 512 means O_TRUNC there rather
+;; than O_CREAT. The three that agree stay constants; the rest are functions
+;; that pick per host.
+;;
+;;                    linux   darwin
+;;   O_APPEND          1024        8
+;;   O_CREAT             64      512
+;;   O_TRUNC            512     1024
+;;   O_EXCL             128     2048
+;;
+;; The host probe is the same one metaengine.coil uses: /proc/self/maps exists
+;; on every Linux and never on macOS.
+;;
+;; These are FUNCTIONS, not `const`s, and the call is deliberate. A `const` here
+;; would compile — `(const O_CREAT (if (fs-host-linux?) 64 512))` folds fine —
+;; but it folds against the machine doing the BUILD, and these are syscall
+;; arguments, so the only OS that matters is the one running the binary.
+;; Checked: cross-compiling with `--target aarch64-apple-darwin` on Linux still
+;; folds the probe to the Linux answer, which would hand macOS the wrong flags.
+;; A zero-arg call costs one compare and is always right, so call sites spell
+;; the four portable flags `(O_CREAT)` rather than `O_CREAT`. The three that are
+;; identical on both platforms stay bare constants.
+(extern access :cc c [(ptr i8) i32] (-> i32))   ; int access(const char*, int)
+(defn fs-host-linux? [] (-> bool)
+  (icmp-eq (cast :i64 (access c"/proc/self/maps" 0)) 0))
+
 (const O_RDONLY 0)
 (const O_WRONLY 1)
 (const O_RDWR   2)
-(const O_APPEND 8)      ; 0x0008
-(const O_CREAT  512)    ; 0x0200
-(const O_TRUNC  1024)   ; 0x0400
-(const O_EXCL   2048)   ; 0x0800
+(defn O_APPEND [] (-> :i64) (if (fs-host-linux?) 1024 8))
+(defn O_CREAT  [] (-> :i64) (if (fs-host-linux?) 64 512))
+(defn O_TRUNC  [] (-> :i64) (if (fs-host-linux?) 512 1024))
+(defn O_EXCL   [] (-> :i64) (if (fs-host-linux?) 128 2048))
 ;; a sensible default create mode (rw-r--r--) for the whole-file writer.
 (const FILE_MODE_DEFAULT 420)   ; 0o644
 
@@ -59,12 +88,22 @@
 
 ; ---- streaming: a File as an io Reader / Writer ----------------------------
 ;; Bridge a File to lib/io.coil's capabilities, so every Reader/Writer combinator
-;; (print-str, write-all, read-line, …) works over a file. CAUTION: `fd-reader`/
-;; `fd-writer` hand back a SHARED static (one Reader and one Writer per program, like
-;; `stdin`/`stdout`) — do not hold live streams for two different files at once; they
-;; alias. Read/write one file at a time, or drive the fd directly.
-(defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
-(defn file-writer [(f (ptr File))] (-> (ptr Writer)) (fd-writer (file-fd f)))
+;; (print-str, write-all, read-line, …) works over a file.
+;;
+;; The Reader/Writer is CALLER-OWNED: you pass in the storage, exactly as
+;; `fd-reader`/`fd-writer` require. Instance state must never come from
+;; `alloc-static` — a static here would be one shared Reader and one shared
+;; Writer for the whole program, so two files open at once would silently
+;; alias and writes would land on the wrong fd. (That is not hypothetical:
+;; stdout/stderr sharing a static is what once made `coil emit-ir f > f.ll`
+;; produce an empty file.)
+;;
+;;   (let [out (file-writer (alloc-stack Writer) f)]
+;;     (print-str out "hello\n"))
+(defn file-reader [(r (ptr Reader)) (f (ptr File))] (-> (ptr Reader))
+  (fd-reader r (file-fd f)))
+(defn file-writer [(w (ptr Writer)) (f (ptr File))] (-> (ptr Writer))
+  (fd-writer w (file-fd f)))
 
 ; ---- whole-file helpers over an allocator ----------------------------------
 ;; Read the ENTIRE file at `path` into a freshly-allocated `(slice u8)` the caller owns
@@ -105,10 +144,13 @@
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
         (Err (Errno 0))
-        (let [fd (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
+        (let [fd (open cp (cast i32 (| O_WRONLY (| (O_CREAT) (O_TRUNC)))) FILE_MODE_DEFAULT)
+              ; the Writer is this call's own instance, on its own frame — never
+              ; a static, which would alias with any other stream in flight.
+              w (alloc-stack Writer)
               res (if (icmp-lt fd 0)
                       (Err [:i64 IoError] (Errno (cast :i64 fd)))
-                      (write-all (fd-writer (cast :i64 fd))
+                      (write-all (fd-writer w (cast :i64 fd))
                                  (cast (ptr i8) (slice-data data)) (slice-len data)))]
           (if (icmp-ge fd 0) (close fd) 0)
           (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)

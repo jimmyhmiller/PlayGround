@@ -26,9 +26,9 @@
 (import "elf.coil" :use *)
 
 ; libc file writing, declared here rather than pulled from a module: the
-; compiler's own ffi.coil is not a stdlib module, and lib/fs.coil does not
-; currently compile (its file-reader/file-writer call io.coil's fd-reader/
-; fd-writer with the wrong arity).
+; compiler's own ffi.coil is not a stdlib module, and this selftest is built
+; with the compiler's OWN embedded stdlib, so it keeps its dependencies to the
+; three libc calls it actually needs.
 (extern fopen :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern fwrite :cc c [(ptr i8) i64 i64 (ptr i8)] (-> i64))
 (extern fclose :cc c [(ptr i8)] (-> i32))
@@ -78,9 +78,7 @@
         (eobj-add-func-sym! (mut o) "main" text 0 true (slice-len code)))
 
       ; ---- serialize and write out
-      ; libc fopen/fwrite directly, the same way driver.coil's d-write-file does
-      ; (lib/fs.coil is not usable here: its file-reader/file-writer call
-      ; io.coil's fd-reader/fd-writer with the wrong arity and do not compile).
+      ; libc fopen/fwrite directly, the same way driver.coil's d-write-file does.
       (let [bytes (elf-write (mut o))
             content (al-slice [u8] (load bytes))
             path (if (icmp-gt argc 1) (cstr->str (load (index argv 1))) "/tmp/elf_selftest.o")
