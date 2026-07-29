@@ -18,7 +18,9 @@ BIN="${1:?usage: gate-run.sh <coil-binary>}"
 VERBOSE="${2:-}"
 HERE=selfhost/oracle/arm64
 REF="$HERE/reference"
-ARM64_ONLY="examples/shim.coil examples/everything.coil"
+# One shared list (arm64-only.txt), also read by snapshot-full.sh, gate-full.sh
+# and gate-corpus-coverage.sh.
+ARM64_ONLY=$(grep -v '^[[:space:]]*#' "$(dirname "$0")/arm64-only.txt" | tr '\n' ' ')
 pass=0; fail=0
 while IFS= read -r line; do
   [ -z "$line" ] && continue

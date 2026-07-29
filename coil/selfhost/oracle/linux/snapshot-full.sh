@@ -7,7 +7,9 @@ cd "$(dirname "$0")/../../.."
 BIN=${1:?usage: snapshot-full.sh <coil-binary>}
 REF=selfhost/oracle/linux/full-reference
 LIST=selfhost/oracle/full/corpus.txt
-ARM64_ONLY="examples/shim.coil examples/everything.coil"   # arm64-register shim conventions
+# arm64-register shim conventions — the list lives in arm64-only.txt so that
+# gate-corpus-coverage.sh checks against the SAME exclusions this blesses against.
+ARM64_ONLY=$(grep -v '^[[:space:]]*#' "$(dirname "$0")/arm64-only.txt" | tr '\n' ' ')
 mkdir -p "$REF"
 n=0
 while IFS= read -r f; do

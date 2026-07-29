@@ -64,6 +64,33 @@ echo "  gate-cli:        PASS (argv, exit codes, fmt)"
 ./selfhost/oracle/gate-target-os.sh /tmp/coil-lrb2 >/dev/null 2>&1 || { echo "gate-target-os FAIL"; exit 1; }
 echo "  gate-target-os:  PASS ((target-os) follows --target, consts fold per target)"
 
+# The PER-STAGE gates. These are target-INDEPENDENT (they compare frontend stage
+# output, not machine code), so the same references serve both platforms — but only
+# rebootstrap.sh ran them, which meant work done on a Linux box could leave them red
+# with nothing here to notice. It did: lib/fs.coil changed with its load and expand
+# references re-blessed but the parser reference left stale, and gate.sh sat red
+# until the next macOS bootstrap. A gate only one platform runs is half a gate.
+#
+# gate-ir and gate-diag are deliberately NOT in this list: both are genuinely
+# host-specific. gate-ir's corpus includes apps/chip8/objc.coil (Objective-C, macOS
+# only) and gate-diag asserts linker error text, which GNU ld words differently from
+# macOS ld. They stay macOS-only until they have Linux references of their own.
+for g in gate gate-ast gate-load gate-resolved gate-checked gate-expand gate-mono gate-x86; do
+  ./selfhost/oracle/$g.sh /tmp/coil-lrb2 >/dev/null 2>&1 \
+    || { echo "  $g FAIL — that stage's output drifted from its snapshot."
+         echo "  Run it directly to see which file. If the change was intentional,"
+         echo "  re-bless it: COIL_REF_BIN=<verified coil> ./selfhost/oracle/snapshot${g#gate}.sh"; exit 1; }
+done
+echo "  stage gates:     PASS (read/ast/load/resolve/check/expand/mono/x86 byte-exact)"
+
+# Cheap, compiler-free, and identical on both platforms: every shared-corpus entry
+# must be blessed for macOS AND Linux. This is what would have caught fs_lib.coil
+# being added to the corpus with only a Linux reference, which killed macOS
+# gate-full while every Linux gate stayed green.
+./selfhost/oracle/gate-corpus-coverage.sh >/dev/null \
+  || { echo "gate-corpus-coverage FAIL"; ./selfhost/oracle/gate-corpus-coverage.sh; exit 1; }
+echo "  corpus coverage: PASS (every corpus entry blessed on both platforms)"
+
 DEST="${1:-./coil-linux}"
 cp /tmp/coil-lrb2 "$DEST"
 echo "=== VERIFIED self-host compiler installed -> $DEST ==="

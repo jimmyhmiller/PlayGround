@@ -101,6 +101,12 @@ for g in gate gate-ast gate-load gate-resolved gate-checked gate-expand gate-mon
          exit 1; }
 done
 echo "  stage gates:    PASS (read/ast/load/resolve/check/expand/mono/ir/diag/x86 byte-exact)"
+# Compiler-free consistency check on the SHARED corpus manifest: an entry blessed for
+# only one platform breaks the other platform's gate-full with a missing-file error,
+# which is exactly how fs_lib.coil landed (Linux reference only, macOS gate dead).
+./selfhost/oracle/gate-corpus-coverage.sh >/dev/null \
+  || { echo "gate-corpus-coverage FAIL"; ./selfhost/oracle/gate-corpus-coverage.sh; exit 1; }
+echo "  corpus coverage: PASS (every corpus entry blessed on both platforms)"
 ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-rb2 >/dev/null || { echo "arm64 gate-run FAIL — runtime divergence"; exit 1; }
 echo "  arm64 gate-run: PASS (programs run identically)"
 ./selfhost/oracle/gate-cli.sh /tmp/coil-rb2 >/dev/null      || { echo "gate-cli FAIL — the CLI contract regressed"; exit 1; }

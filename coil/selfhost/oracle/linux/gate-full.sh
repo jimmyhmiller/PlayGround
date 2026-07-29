@@ -16,7 +16,9 @@ LIST=selfhost/oracle/full/corpus.txt
 [ -x "$BIN" ]  || { echo "GATE FAIL: binary not executable: $BIN"; exit 2; }
 [ -d "$REF" ]  || { echo "GATE FAIL: no Linux reference; run selfhost/oracle/linux/snapshot-full.sh first"; exit 2; }
 
-ARM64_ONLY="examples/shim.coil examples/everything.coil"
+# Same list snapshot-full.sh blesses against and gate-corpus-coverage.sh checks
+# against — kept in arm64-only.txt so there is exactly one copy.
+ARM64_ONLY=$(grep -v '^[[:space:]]*#' "$(dirname "$0")/arm64-only.txt" | tr '\n' ' ')
 pass=0; fail=0; first_fail=""
 while IFS= read -r f; do
   [ -z "$f" ] && continue
