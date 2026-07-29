@@ -801,8 +801,14 @@ impl Renderer {
             self.hovered = None;
             self.collapsed_tracks.clear();
             // Aggregated (left-heavy) layout is built per-track; rebuild it for
-            // the new track shape so the AGGREGATED toggle keeps working.
-            let (agg_slices, agg_range, agg_rows) = build_left_heavy_layout(&p);
+            // the new track shape so the AGGREGATED toggle keeps working. In
+            // merged mode it is built from the original tracks so every
+            // thread's stacks fold into one call tree — the merged profile's
+            // own rows are packed bands, not a call tree.
+            let (agg_slices, agg_range, agg_rows) = match (mode, &self.original_profile) {
+                (MergeMode::Single, Some(orig)) => build_left_heavy_merged(orig),
+                _ => build_left_heavy_layout(&p),
+            };
             self.aggregated_slices = Some(Arc::new(agg_slices));
             self.aggregated_time_range = agg_range;
             self.aggregated_track_rows = agg_rows;
@@ -3455,6 +3461,17 @@ struct AggNode {
     children: Vec<usize>,
 }
 
+/// The six parallel output columns an aggregated layout accumulates into.
+#[derive(Default)]
+struct LeftHeavyOut {
+    track: Vec<TrackId>,
+    depth: Vec<u16>,
+    start: Vec<u64>,
+    dur: Vec<u64>,
+    name: Vec<StringId>,
+    cat: Vec<flame_core::CategoryId>,
+}
+
 /// Build a left-heavy / aggregated SliceTable from the time-ordered profile.
 /// For each track, identical (parent_chain → frame) paths collapse into one
 /// wide bar; siblings sort by total duration desc. The new x-axis represents
@@ -3466,47 +3483,84 @@ pub fn build_left_heavy_layout(
     let n_tracks = profile.tracks.len();
     let mut row_counts = vec![0u16; n_tracks];
     let mut max_total: u64 = 0;
-
-    let mut out_track: Vec<TrackId> = Vec::new();
-    let mut out_depth: Vec<u16> = Vec::new();
-    let mut out_start: Vec<u64> = Vec::new();
-    let mut out_dur: Vec<u64> = Vec::new();
-    let mut out_name: Vec<StringId> = Vec::new();
-    let mut out_cat: Vec<flame_core::CategoryId> = Vec::new();
+    let mut out = LeftHeavyOut::default();
 
     for t_idx in 0..n_tracks {
         let track_id = TrackId(t_idx as u32);
-        let mut nodes: Vec<AggNode> = Vec::new();
-        let row_0 = profile
-            .slices
-            .rows
-            .get(&(track_id, 0))
-            .cloned()
-            .unwrap_or(0..0);
-        let roots: Vec<u32> = (row_0.start..row_0.end).collect();
-        let root_nodes = aggregate_children_lh(profile, track_id, 0, &roots, &mut nodes);
-
-        let mut max_depth = 0u16;
-        let total = lay_out_lh(
-            &nodes,
-            &root_nodes,
-            track_id,
-            0,
-            0,
-            &mut out_track,
-            &mut out_depth,
-            &mut out_start,
-            &mut out_dur,
-            &mut out_name,
-            &mut out_cat,
-            &mut max_depth,
-        );
-        row_counts[t_idx] = if root_nodes.is_empty() { 0 } else { max_depth + 1 };
+        let roots = root_slices(profile, track_id);
+        let (rows, total) = aggregate_and_lay_out(profile, &roots, track_id, &mut out);
+        row_counts[t_idx] = rows;
         max_total = max_total.max(total);
     }
+    finish_left_heavy(out, max_total, row_counts)
+}
 
-    // Sort all collected slices into the canonical (track, depth, start) order
-    // and build the SliceTable + rows index.
+/// The aggregated layout for merged mode: one call tree built from *every*
+/// track's roots, emitted on the single synthetic track. Aggregating the
+/// merged profile instead would only reach the stacks that happened to land in
+/// its bottom band — every other thread would vanish from the view.
+pub fn build_left_heavy_merged(
+    profile: &Profile,
+) -> (flame_core::SliceTable, (u64, u64), Vec<u16>) {
+    let mut roots: Vec<u32> = Vec::new();
+    for t_idx in 0..profile.tracks.len() {
+        roots.extend(root_slices(profile, TrackId(t_idx as u32)));
+    }
+    let mut out = LeftHeavyOut::default();
+    let (rows, total) = aggregate_and_lay_out(profile, &roots, TrackId(0), &mut out);
+    finish_left_heavy(out, total, vec![rows])
+}
+
+/// Indices of a track's depth-0 slices.
+fn root_slices(profile: &Profile, track: TrackId) -> Vec<u32> {
+    let row = profile.slices.rows.get(&(track, 0)).cloned().unwrap_or(0..0);
+    (row.start..row.end).collect()
+}
+
+/// Collapse `roots` (and everything under them) into one call tree and lay it
+/// out left-heavy on `out_track`. Returns `(row count, total duration)`.
+fn aggregate_and_lay_out(
+    profile: &Profile,
+    roots: &[u32],
+    out_track: TrackId,
+    out: &mut LeftHeavyOut,
+) -> (u16, u64) {
+    let mut nodes: Vec<AggNode> = Vec::new();
+    let root_nodes = aggregate_children_lh(profile, roots, &mut nodes);
+    let mut max_depth = 0u16;
+    let total = lay_out_lh(
+        &nodes,
+        &root_nodes,
+        out_track,
+        0,
+        0,
+        &mut out.track,
+        &mut out.depth,
+        &mut out.start,
+        &mut out.dur,
+        &mut out.name,
+        &mut out.cat,
+        &mut max_depth,
+    );
+    let rows = if root_nodes.is_empty() { 0 } else { max_depth + 1 };
+    (rows, total)
+}
+
+/// Sort the collected slices into the canonical (track, depth, start) order
+/// and build the SliceTable + rows index.
+fn finish_left_heavy(
+    out: LeftHeavyOut,
+    max_total: u64,
+    row_counts: Vec<u16>,
+) -> (flame_core::SliceTable, (u64, u64), Vec<u16>) {
+    let LeftHeavyOut {
+        track: out_track,
+        depth: out_depth,
+        start: out_start,
+        dur: out_dur,
+        name: out_name,
+        cat: out_cat,
+    } = out;
     let n = out_start.len();
     let mut idx: Vec<usize> = (0..n).collect();
     idx.sort_by_key(|&i| (out_track[i].0, out_depth[i], out_start[i]));
@@ -3548,10 +3602,12 @@ pub fn build_left_heavy_layout(
     (table, (0, max_total), row_counts)
 }
 
+/// Collapse `slice_indices` by frame name into `nodes`, recursing into their
+/// children. The indices need not come from one track or one depth — merged
+/// mode feeds it every thread's roots at once — so each slice's own track and
+/// depth are read back from the table.
 fn aggregate_children_lh(
     profile: &Profile,
-    track_id: TrackId,
-    depth: u16,
     slice_indices: &[u32],
     nodes: &mut Vec<AggNode>,
 ) -> Vec<usize> {
@@ -3585,7 +3641,12 @@ fn aggregate_children_lh(
         // Gather direct children of this slice into the merged children pool.
         let s = profile.slices.start_ns[i];
         let end = s + dur;
-        let row = profile.slices.visible_in_row(track_id, depth + 1, s, end);
+        let row = profile.slices.visible_in_row(
+            profile.slices.track[i],
+            profile.slices.depth[i] + 1,
+            s,
+            end,
+        );
         let cv = children_per_frame.entry(frame).or_default();
         for c in row.start..row.end {
             let cs = profile.slices.start_ns[c as usize];
@@ -3601,7 +3662,7 @@ fn aggregate_children_lh(
         let frame = nodes[node_idx].frame;
         let kids = children_per_frame.remove(&frame).unwrap_or_default();
         if !kids.is_empty() {
-            let cn = aggregate_children_lh(profile, track_id, depth + 1, &kids, nodes);
+            let cn = aggregate_children_lh(profile, &kids, nodes);
             nodes[node_idx].children = cn;
         }
     }
@@ -3768,46 +3829,147 @@ fn visible_depth_range(
     }
 }
 
-/// Build a single-track view of a profile. Strings, categories, processes,
-/// threads, stacks, and samples are cloned verbatim. The track list is
-/// replaced with one synthetic "all spans" track; every slice is repacked
-/// onto it with greedy first-fit row assignment so no two slices overlap
-/// in the same row.
-fn build_single_track_profile(orig: &Profile) -> Profile {
-    let n = orig.slices.len();
+/// One root stack: a depth-0 slice plus every slice nested under it, as a
+/// rectangle of `height` rows spanning `start..end`.
+struct StackSpan {
+    start: u64,
+    end: u64,
+    height: u16,
+}
 
-    // Greedy first-fit row pack. `row_end[r]` is the last end_ns assigned to
-    // row r. Walk spans in start-order; pick the smallest-indexed row whose
-    // last-end is <= this start, else open a new row.
-    let mut visit: Vec<u32> = (0..n as u32).collect();
-    visit.sort_by_key(|&i| orig.slices.start_ns[i as usize]);
+/// Partition every slice into the root stack it belongs to, and record its
+/// depth *within* that stack. Returns `(stack index per slice, depth within
+/// the stack per slice, the stacks)`.
+///
+/// A slice's parent is the slice one row up, on the same track, whose interval
+/// contains it. Walking rows top-down means a parent is always assigned before
+/// its children. A slice with no such parent — a depth-0 slice, or a stray one
+/// in a profile that doesn't nest — starts a stack of its own.
+fn group_into_stacks(p: &Profile) -> (Vec<u32>, Vec<u16>, Vec<StackSpan>) {
+    let n = p.slices.len();
+    let mut stack_of: Vec<u32> = vec![0; n];
+    let mut rel_depth: Vec<u16> = vec![0; n];
+    let mut stacks: Vec<StackSpan> = Vec::new();
 
-    let mut row_end: Vec<u64> = Vec::new();
-    let mut new_depth: Vec<u16> = vec![0; n];
-    for &i in &visit {
-        let i = i as usize;
-        let start = orig.slices.start_ns[i];
-        let end = start.saturating_add(orig.slices.dur_ns[i]);
-        let mut chose: Option<usize> = None;
-        for (r, &e) in row_end.iter().enumerate() {
-            if e <= start {
-                chose = Some(r);
-                break;
+    // Rows are indexed by (track, depth); find how deep each track goes.
+    let mut track_depth: Vec<u16> = vec![0; p.tracks.len()];
+    for i in 0..n {
+        let t = p.slices.track[i].0 as usize;
+        if t < track_depth.len() {
+            track_depth[t] = track_depth[t].max(p.slices.depth[i]);
+        }
+    }
+
+    for (t_idx, &max_depth) in track_depth.iter().enumerate() {
+        let track = TrackId(t_idx as u32);
+        for depth in 0..=max_depth {
+            let row = match p.slices.rows.get(&(track, depth)) {
+                Some(r) => r.clone(),
+                None => continue,
+            };
+            for i in row.start..row.end {
+                let i = i as usize;
+                let start = p.slices.start_ns[i];
+                let end = start.saturating_add(p.slices.dur_ns[i]);
+                let parent = if depth == 0 {
+                    None
+                } else {
+                    containing_parent(p, track, depth, start, end)
+                };
+                match parent {
+                    Some(pi) => {
+                        let id = stack_of[pi];
+                        stack_of[i] = id;
+                        rel_depth[i] = rel_depth[pi].saturating_add(1);
+                        let s = &mut stacks[id as usize];
+                        s.start = s.start.min(start);
+                        s.end = s.end.max(end);
+                        s.height = s.height.max(rel_depth[i] + 1);
+                    }
+                    None => {
+                        stack_of[i] = stacks.len() as u32;
+                        rel_depth[i] = 0;
+                        stacks.push(StackSpan { start, end, height: 1 });
+                    }
+                }
             }
         }
-        let d = match chose {
-            Some(r) => {
-                row_end[r] = end;
-                r
-            }
-            None => {
-                row_end.push(end);
-                row_end.len() - 1
-            }
-        };
-        new_depth[i] = d as u16;
     }
-    let row_count = row_end.len() as u16;
+    (stack_of, rel_depth, stacks)
+}
+
+/// The slice at `depth - 1` on `track` whose interval contains `[start, end)`.
+fn containing_parent(
+    p: &Profile,
+    track: TrackId,
+    depth: u16,
+    start: u64,
+    end: u64,
+) -> Option<usize> {
+    let row = p
+        .slices
+        .visible_in_row(track, depth - 1, start, end.max(start + 1));
+    (row.start..row.end).map(|i| i as usize).find(|&i| {
+        let ps = p.slices.start_ns[i];
+        let pe = ps.saturating_add(p.slices.dur_ns[i]);
+        ps <= start && end <= pe
+    })
+}
+
+/// Build a single-track view of a profile. Strings, categories, processes,
+/// threads, stacks, and samples are cloned verbatim. The track list is
+/// replaced with one synthetic "all spans" track and every slice is repacked
+/// onto it.
+///
+/// Packing is per *stack*, not per slice: a depth-0 slice and everything
+/// nested under it move together into the lowest band of rows that is free for
+/// the stack's whole lifetime, keeping each slice directly under its parent.
+/// Packing slice by slice — first row free at that slice's own start — is what
+/// used to scatter one thread's frames across another's and leave rows empty
+/// underneath occupied ones.
+pub fn build_single_track_profile(orig: &Profile) -> Profile {
+    let n = orig.slices.len();
+
+    let (stack_of, rel_depth, stacks) = group_into_stacks(orig);
+
+    // Place stacks in start order, longest-lived and tallest first on a tie,
+    // so a stack that runs for the whole trace claims the bottom rows instead
+    // of a short one that would leave a hole behind when it ends.
+    let mut order: Vec<u32> = (0..stacks.len() as u32).collect();
+    order.sort_by_key(|&i| {
+        let s = &stacks[i as usize];
+        (s.start, std::cmp::Reverse(s.end), std::cmp::Reverse(s.height))
+    });
+
+    // `row_end[r]` is the last end_ns placed in row r. A stack of height h can
+    // go at band b when rows b..b+h are all free at its start.
+    let mut row_end: Vec<u64> = Vec::new();
+    let mut base_of: Vec<u16> = vec![0; stacks.len()];
+    let mut row_count: u16 = 0;
+    for &si in &order {
+        let s = &stacks[si as usize];
+        let h = s.height as usize;
+        let mut band = 0usize;
+        loop {
+            if row_end.len() < band + h {
+                row_end.resize(band + h, 0);
+            }
+            if row_end[band..band + h].iter().all(|&e| e <= s.start) {
+                break;
+            }
+            band += 1;
+        }
+        for e in &mut row_end[band..band + h] {
+            *e = (*e).max(s.end);
+        }
+        base_of[si as usize] = band as u16;
+        row_count = row_count.max((band + h) as u16);
+    }
+
+    let mut new_depth: Vec<u16> = vec![0; n];
+    for i in 0..n {
+        new_depth[i] = base_of[stack_of[i] as usize] + rel_depth[i];
+    }
 
     // Sort entries into (depth, start_ns) order so the SoA respects the
     // flame-graph invariant (sorted by track, depth, start_ns) and the
