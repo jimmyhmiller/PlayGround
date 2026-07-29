@@ -66,6 +66,55 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
+### 7. The dev browser bundle is one 17.8 MB file: islands are pinned with static `require`
+
+Every page in dev downloads every `"use client"` island in the app. On cal.com's
+`/auth/login` that is the app store, the booker, all of settings and every payment
+component — 17.8 MB of JS for a login form.
+
+The cause is one line. `island_pins` (`src/next_adapter.rs`) records each island's
+reachability edge as `() => require(path)` inside a never-called closure. `require` is a
+STATIC edge, and `Bundler::chunk_plan` splits only on dynamic-import roots, so all 229
+lazy islands and their transitive dependencies land in the main chunk. Nothing else is
+missing: `client_references_manifest` already fills each entry's `chunks` from the same
+chunk plan, the browser seam already installs a real `__webpack_chunk_load__`, and split
+chunks already self-register into the runtime. The pins simply never ask for a split.
+
+Measured, with the pins flipped to `import()` (`PinKind::DynamicChunk`, cal.com,
+`/auth/login`, cold cache, gzip on both sides):
+
+| | static pins (today) | per-island chunks | Turbopack |
+|---|---:|---:|---:|
+| main chunk | 17.8 MB | **1.2 MB** | n/a |
+| on the wire | 5.16 MB | **1.55 MB** | 1.69 MB |
+| decoded | 18.35 MB | **3.75 MB** | 9.20 MB |
+| manifest entries carrying chunks | 2 of 469 | 468 of 469 | n/a |
+
+So the split is byte-for-byte better than Turbopack on the same page. It is NOT enabled
+because hydration then breaks: the browser leaves each client reference's module chunk
+BLOCKED and the render reads it as an element type, dying with "Element type is invalid.
+Received a promise that resolves to: undefined. Lazy element type must resolve to a class
+or function." Only 3 of the route's references (the error boundaries) ever reach
+`requireModule`; chunk loads all succeed (4 issued, 0 failed) and a manual
+`__webpack_chunk_load__(chunk)` then `__webpack_require__(id)` in the page resolves the
+island correctly — so the seam works and the sequencing does not.
+
+- `await`ing the flight decode before `hydrateRoot` does NOT fix it (tried, reverted).
+- The reference does not rely on sequencing at all: `next dev` emits a `<script>` tag per
+  route chunk in the document, so every reference is registered before hydration starts.
+  The likely fix is the same shape — have the render inject the route's chunk list and
+  load it before `hydrateRoot`, rather than depending on React's blocked-chunk path.
+- Bisected: with `PinKind::StaticRequire` both `/auth/login` and `/pro/30min` hydrate and
+  are interactive; with `DynamicChunk` neither is. Evidence in this session's transcript.
+
+### 8. Dev responses were uncompressed (fixed for assets, open for the document)
+
+Assets now carry gzip and a validator, which took `/auth/login` from 18.86 MB to 5.16 MB
+on the wire. Two leaks remain: the Node-forwarded HTML document is still sent
+uncompressed (487 KB, against Turbopack's 97 KB gzipped) because it is proxied as a raw
+response buffer rather than re-framed, and `write_js` (the Fast Refresh runtime, 21 KB)
+has no compression either.
+
 ## Reference-side failures (NOT diffpack bugs — do not spend time here)
 
 - `cannot book same slot multiple times`: fails identically on `next start`; the

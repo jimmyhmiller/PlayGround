@@ -5322,9 +5322,34 @@ if (!__diffpackStarted.has(import.meta.url)) {{
     )
 }
 
+/// How a graph records its reachability pin to a lazy island.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinKind {
+    /// `require(path)` inside a never-called closure: a STATIC edge, so the island's
+    /// factory lands in this graph's main chunk. Right for the SSR-of-flight bundle,
+    /// which is one Node file the seam requires synchronously with
+    /// `__webpack_chunk_load__` stubbed to `Promise.resolve()`.
+    StaticRequire,
+    /// `import(path)` inside a never-called closure: a DYNAMIC root, so the chunk
+    /// planner gives the island its own chunk and the client-references manifest
+    /// carries that chunk for `__webpack_chunk_load__`.
+    ///
+    /// This is what the browser entry wants and what the reference does. With static
+    /// requires every island in the app was in `client.js`, so cal.com's login page
+    /// downloaded the app store, the booker, every settings screen and all the payment
+    /// components: 17.8 MB of JS on a page that needs a fraction of it, re-parsed on
+    /// every full navigation.
+    DynamicChunk,
+}
+
 /// Imports every `"use client"` island so the graph bundles + registers it under a
 /// runtime id (pinned to a global so DCE keeps it).
-fn island_pins(adapter_dir: &Path, islands: &[PathBuf], eager: &BTreeSet<String>) -> String {
+fn island_pins(
+    adapter_dir: &Path,
+    islands: &[PathBuf],
+    eager: &BTreeSet<String>,
+    kind: PinKind,
+) -> String {
     let _ = adapter_dir;
     // Reachability pins. Each island must be bundled and REGISTERED in this graph
     // so the RSC seam (`runtime.require(id)`) can resolve it while consuming a
@@ -5361,10 +5386,11 @@ fn island_pins(adapter_dir: &Path, islands: &[PathBuf], eager: &BTreeSet<String>
     // edges) alive under export shaking.
     out.push_str("const __diffpackIslandPins = [\n");
     for island in lazy {
-        out.push_str(&format!(
-            "  () => require({}),\n",
-            js_str(&island.to_string_lossy()),
-        ));
+        let specifier = js_str(&island.to_string_lossy());
+        match kind {
+            PinKind::StaticRequire => out.push_str(&format!("  () => require({specifier}),\n")),
+            PinKind::DynamicChunk => out.push_str(&format!("  () => import({specifier}),\n")),
+        }
     }
     out.push_str("];\n(globalThis).__diffpack_next_island_pins = __diffpackIslandPins;\n");
     out
@@ -5383,7 +5409,7 @@ fn ssr_entry_module(
     asset_base: &str,
     pages_api: &[PagesApiRoute],
 ) -> String {
-    let pins = island_pins(adapter_dir, islands, eager_islands);
+    let pins = island_pins(adapter_dir, islands, eager_islands, PinKind::StaticRequire);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The browser fetches the client bootstrap under the app's basePath/assetPrefix (the
@@ -5696,7 +5722,18 @@ fn client_entry_module(
     eager_islands: &BTreeSet<String>,
     hooks_context: &Path,
 ) -> String {
-    let pins = island_pins(adapter_dir, islands, eager_islands);
+    // KNOWN COST, measured: static pins put every island in the app into `client.js`
+    // (17.8 MB on cal.com, so /auth/login downloads the app store, the booker, settings
+    // and every payment component). `PinKind::DynamicChunk` splits them per island and
+    // is byte-for-byte the right answer — main chunk 17.8 MB -> 1.2 MB, wire 18.9 MB ->
+    // 1.55 MB, decoded 18.35 MB -> 3.75 MB, all better than Turbopack on the same page.
+    // It is NOT enabled yet because the browser's client-reference chunk path then has
+    // to load a chunk before the reference renders, and today it does not: React leaves
+    // the module chunk BLOCKED and the render reads it as an element type, failing with
+    // "Element type is invalid. Received a promise that resolves to: undefined". Only 3
+    // of the route's references ever reach `requireModule`. Awaiting the flight decode
+    // before `hydrateRoot` does not fix it. See KNOWN_ISSUES.md.
+    let pins = island_pins(adapter_dir, islands, eager_islands, PinKind::StaticRequire);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The ONE control-flow predicate, shared with the error boundary (see

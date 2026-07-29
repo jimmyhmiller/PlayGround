@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
@@ -1167,7 +1167,12 @@ fn handle_connection(
         .filter(|_| method == "GET")
         .and_then(|dir| resolve_static_file(dir, path))
     {
-        write_file(&mut stream, &file)?;
+        write_file(
+            &mut stream,
+            &file,
+            if_none_match(&headers),
+            accepts_gzip(&headers),
+        )?;
         return Ok(());
     }
 
@@ -1182,7 +1187,7 @@ fn handle_connection(
     Ok(())
 }
 
-/// Write a JavaScript module response (dev; no caching).
+/// Write a JavaScript module response (dev; revalidated, never blindly reused).
 fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1193,6 +1198,155 @@ fn write_js(stream: &mut TcpStream, body: &str) -> Result<(), String> {
         .and_then(|()| stream.write_all(body.as_bytes()))
         .and_then(|()| stream.flush())
         .map_err(|error| format!("cannot write js response: {error}"))
+}
+
+/// The `If-None-Match` a request carries, if any.
+fn if_none_match(headers: &[(String, String)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
+        .map(|(_, value)| value.as_str())
+}
+
+/// A validator for an emitted file: its length and modification time.
+///
+/// Every dev emit rewrites these files, so mtime moving is exactly the signal a
+/// browser needs, and unlike hashing the bytes it costs nothing on the multi-megabyte
+/// dev chunk. It is a weak tag because mtime is not a content digest — which is the
+/// comparison `If-None-Match` is defined to use anyway.
+fn file_validator(meta: &std::fs::Metadata) -> Option<String> {
+    let nanos = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("W/\"{:x}-{nanos:x}\"", meta.len()))
+}
+
+/// Whether an `If-None-Match` list matches this entity tag. Weak comparison: the
+/// `W/` prefix is ignored on both sides, and `*` matches any existing entity.
+fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    let strip = |tag: &str| tag.trim().trim_start_matches("W/").trim().to_string();
+    let want = strip(etag);
+    if_none_match
+        .split(',')
+        .any(|candidate| candidate.trim() == "*" || strip(candidate) == want)
+}
+
+/// Whether a request will accept a gzip-encoded response.
+fn accepts_gzip(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
+        .is_some_and(|(_, value)| {
+            value.split(',').any(|token| {
+                let token = token.trim();
+                let name = token.split(';').next().unwrap_or("").trim();
+                // `gzip;q=0` is a refusal, not an offer.
+                name.eq_ignore_ascii_case("gzip")
+                    && !token
+                        .split(';')
+                        .any(|part| part.trim().replace(' ', "") == "q=0")
+            })
+        })
+}
+
+/// Whether a content type is worth compressing. Text compresses 5-8x; the image,
+/// font and wasm formats served here are already compressed, and running deflate
+/// over them costs time and saves nothing.
+fn compressible(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    base.starts_with("text/")
+        || matches!(
+            base,
+            "application/javascript"
+                | "application/json"
+                | "application/manifest+json"
+                | "image/svg+xml"
+        )
+}
+
+/// gzip bytes at the fastest level.
+///
+/// Dev serves a multi-megabyte client bundle, so this runs on the hot path of every
+/// full page load: level 1 gets most of the ratio (the cal.com dev bundle goes 17.8 MB
+/// -> under 3 MB) for a fraction of the CPU of the default level, and the result is
+/// memoised per (path, size, mtime) so a repeat request re-sends bytes it already has.
+fn gzip_fast(bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
+}
+
+/// Compressed copies of emitted text assets, keyed by path and invalidated by the
+/// same (size, mtime) validator the ETag uses — so an edit is never served stale, and
+/// an unchanged bundle is only ever compressed once.
+///
+/// Bounded on both axes: a single entry over `MAX_ENTRY` is not worth holding, and the
+/// map is cleared once it exceeds `MAX_TOTAL` rather than growing for the life of a
+/// dev session.
+struct GzipCache {
+    entries: HashMap<PathBuf, (u64, u128, Arc<Vec<u8>>)>,
+    total: usize,
+}
+
+impl GzipCache {
+    const MAX_ENTRY: usize = 64 * 1024 * 1024;
+    const MAX_TOTAL: usize = 256 * 1024 * 1024;
+
+    fn global() -> &'static Mutex<GzipCache> {
+        static CACHE: OnceLock<Mutex<GzipCache>> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            Mutex::new(GzipCache {
+                entries: HashMap::new(),
+                total: 0,
+            })
+        })
+    }
+
+    /// The gzip of `bytes`, from the cache when the file has not changed since it was
+    /// compressed. A poisoned lock or an oversized entry falls back to compressing
+    /// without caching, never to sending nothing.
+    fn get(path: &Path, len: u64, mtime: u128, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
+        if let Ok(cache) = Self::global().lock() {
+            if let Some((cached_len, cached_mtime, gz)) = cache.entries.get(path) {
+                if *cached_len == len && *cached_mtime == mtime {
+                    return Some(Arc::clone(gz));
+                }
+            }
+        }
+        let gz = Arc::new(gzip_fast(bytes)?);
+        if gz.len() <= Self::MAX_ENTRY {
+            if let Ok(mut cache) = Self::global().lock() {
+                if cache.total + gz.len() > Self::MAX_TOTAL {
+                    cache.entries.clear();
+                    cache.total = 0;
+                }
+                if let Some((_, _, old)) = cache
+                    .entries
+                    .insert(path.to_path_buf(), (len, mtime, Arc::clone(&gz)))
+                {
+                    cache.total = cache.total.saturating_sub(old.len());
+                }
+                cache.total += gz.len();
+            }
+        }
+        Some(gz)
+    }
+}
+
+/// A `304 Not Modified` for a request whose `If-None-Match` still matches. A 304
+/// carries no body and no `Content-Length`.
+fn write_not_modified(stream: &mut TcpStream, etag: &str) -> Result<(), String> {
+    let header = format!(
+        "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(header.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("cannot write 304 response: {error}"))
 }
 
 /// Resolve a URL path to an existing regular file under `dir`, or `None`. Guards
@@ -1207,8 +1361,26 @@ fn resolve_static_file(dir: &Path, url_path: &str) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// Serve a file off disk as a dev HTTP response (no caching, `Connection: close`).
-fn write_file(stream: &mut TcpStream, file: &Path) -> Result<(), String> {
+/// Serve a file off disk as a dev HTTP response (`Connection: close`).
+///
+/// The response carries a validator and `Cache-Control: no-cache`: the browser must
+/// ask every time, but when nothing changed it gets a 304 and reuses what it already
+/// has — including V8's compiled-code cache for that script. Without this the dev
+/// client bundle was re-sent and re-compiled on every full navigation, which on
+/// cal.com meant 18 MB per page load and made a warm route slower than it is.
+fn write_file(
+    stream: &mut TcpStream,
+    file: &Path,
+    if_none_match: Option<&str>,
+    gzip: bool,
+) -> Result<(), String> {
+    let meta = std::fs::metadata(file).ok();
+    let etag = meta.as_ref().and_then(file_validator);
+    if let (Some(etag), Some(sent)) = (&etag, if_none_match) {
+        if etag_matches(sent, etag) {
+            return write_not_modified(stream, etag);
+        }
+    }
     let bytes =
         std::fs::read(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
     let content_type = match file.extension().and_then(|value| value.to_str()) {
@@ -1231,13 +1403,38 @@ fn write_file(stream: &mut TcpStream, file: &Path) -> Result<(), String> {
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
+    let validator = etag
+        .map(|etag| format!("ETag: {etag}\r\n"))
+        .unwrap_or_default();
+    // The dev client bundle is megabytes of text. Uncompressed it dominated every
+    // full page load on the wire; gzip takes cal.com's 17.8 MB bundle under 3 MB, and
+    // the compressed copy is memoised so only the first request after an edit pays.
+    let encoded = if gzip && compressible(content_type) {
+        meta.as_ref()
+            .and_then(|meta| {
+                let mtime = meta
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos();
+                GzipCache::get(file, meta.len(), mtime, &bytes)
+            })
+            .filter(|gz| gz.len() < bytes.len())
+    } else {
+        None
+    };
+    let (body, encoding) = match &encoded {
+        Some(gz) => (gz.as_slice(), "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n"),
+        None => (bytes.as_slice(), ""),
+    };
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        bytes.len()
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{validator}{encoding}Cache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     stream
         .write_all(header.as_bytes())
-        .and_then(|()| stream.write_all(&bytes))
+        .and_then(|()| stream.write_all(body))
         .and_then(|()| stream.flush())
         .map_err(|error| format!("cannot write file response: {error}"))
 }
@@ -2584,9 +2781,24 @@ mod spa {
         // public/ files). Base-prefix stripped; path traversal rejected.
         if let Some(file) = resolve_static(output_root, base, path) {
             if file.is_file() {
+                // Same validator as the Next dev path: revalidate every time, but let
+                // an unchanged chunk be reused instead of re-sent and re-compiled.
+                let etag = fs::metadata(&file).ok().as_ref().and_then(file_validator);
+                if let (Some(etag), Some(sent)) = (&etag, if_none_match(&headers)) {
+                    if etag_matches(sent, etag) {
+                        return write_not_modified(&mut stream, etag);
+                    }
+                }
                 let bytes = fs::read(&file)
                     .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-                return write_response(&mut stream, "200 OK", content_type(&file), &bytes, head_only);
+                return write_static_response(
+                    &mut stream,
+                    content_type(&file),
+                    &bytes,
+                    head_only,
+                    etag.as_deref(),
+                    accepts_gzip(&headers).then(|| file.as_path()),
+                );
             }
             // A path that names a concrete file (has an extension) but is missing is
             // a real 404 — not the SPA document.
@@ -2665,6 +2877,58 @@ mod spa {
             Some("txt") => "text/plain; charset=utf-8",
             _ => "application/octet-stream",
         }
+    }
+
+    /// Write an emitted static file as a `200 OK` carrying its validator, so the next
+    /// navigation can revalidate into a 304 instead of re-downloading the chunk.
+    /// `gzip_for` is the file's path when the client accepts gzip; passing it opts the
+    /// response into the same memoised compression the Next dev path uses.
+    fn write_static_response(
+        stream: &mut TcpStream,
+        content_type: &str,
+        body: &[u8],
+        head_only: bool,
+        etag: Option<&str>,
+        gzip_for: Option<&Path>,
+    ) -> Result<(), String> {
+        let validator = etag
+            .map(|etag| format!("ETag: {etag}\r\n"))
+            .unwrap_or_default();
+        let encoded = gzip_for
+            .filter(|_| compressible(content_type))
+            .and_then(|file| {
+                let meta = fs::metadata(file).ok()?;
+                let mtime = meta
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos();
+                GzipCache::get(file, meta.len(), mtime, body)
+            })
+            .filter(|gz| gz.len() < body.len());
+        let (body, encoding) = match &encoded {
+            Some(gz) => (
+                gz.as_slice(),
+                "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
+            ),
+            None => (body, ""),
+        };
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{validator}{encoding}Cache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .map_err(|error| format!("cannot write response head: {error}"))?;
+        if !head_only {
+            stream
+                .write_all(body)
+                .map_err(|error| format!("cannot write response body: {error}"))?;
+        }
+        stream
+            .flush()
+            .map_err(|error| format!("cannot flush response: {error}"))
     }
 
     /// Write a complete HTTP/1.1 response (dev; no caching, `Connection: close`).
@@ -4739,6 +5003,90 @@ mod next {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etag_comparison_is_weak_and_handles_lists() {
+        let tag = "W/\"1f-2a\"";
+        assert!(etag_matches(tag, tag));
+        // Weak comparison: the `W/` prefix is not part of the identity.
+        assert!(etag_matches("\"1f-2a\"", tag));
+        assert!(etag_matches("W/\"1f-2a\"", "\"1f-2a\""));
+        // A list, and the wildcard.
+        assert!(etag_matches("W/\"aa-bb\", W/\"1f-2a\"", tag));
+        assert!(etag_matches("*", tag));
+        // A different entity must not match, or an edit would be served stale.
+        assert!(!etag_matches("W/\"1f-2b\"", tag));
+        assert!(!etag_matches("", tag));
+    }
+
+    #[test]
+    fn file_validator_changes_when_the_file_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("client.js");
+        std::fs::write(&file, "a").unwrap();
+        let first = file_validator(&std::fs::metadata(&file).unwrap()).unwrap();
+        // A rewrite with different content must produce a different validator, which is
+        // what makes an edit reach the browser instead of revalidating into a 304.
+        std::fs::write(&file, "abcd").unwrap();
+        let second = file_validator(&std::fs::metadata(&file).unwrap()).unwrap();
+        assert_ne!(first, second, "length change must move the validator");
+    }
+
+    #[test]
+    fn gzip_is_offered_only_when_accepted_and_only_for_text() {
+        let header = |value: &str| vec![("Accept-Encoding".to_string(), value.to_string())];
+        assert!(accepts_gzip(&header("gzip, deflate, br")));
+        assert!(accepts_gzip(&header("br;q=1.0, gzip;q=0.8")));
+        assert!(!accepts_gzip(&header("br, deflate")));
+        assert!(!accepts_gzip(&[]));
+        // `gzip;q=0` is a refusal, not an offer.
+        assert!(!accepts_gzip(&header("gzip;q=0")));
+
+        assert!(compressible("application/javascript; charset=utf-8"));
+        assert!(compressible("text/css; charset=utf-8"));
+        assert!(compressible("image/svg+xml"));
+        // Already-compressed payloads: deflating them costs time and saves nothing.
+        assert!(!compressible("image/png"));
+        assert!(!compressible("font/woff2"));
+        assert!(!compressible("application/octet-stream"));
+    }
+
+    #[test]
+    fn gzip_round_trips_and_is_memoised_per_file_version() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chunk.js");
+        let body = "export const x = 1;\n".repeat(400);
+        std::fs::write(&file, &body).unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let gz = GzipCache::get(&file, meta.len(), mtime, body.as_bytes()).unwrap();
+        assert!(gz.len() < body.len(), "repetitive text must compress");
+        let mut out = String::new();
+        flate2::read::GzDecoder::new(gz.as_slice())
+            .read_to_string(&mut out)
+            .unwrap();
+        assert_eq!(out, body, "the browser must decode exactly what was emitted");
+
+        // Same version -> the identical Arc, no recompression.
+        let again = GzipCache::get(&file, meta.len(), mtime, body.as_bytes()).unwrap();
+        assert!(Arc::ptr_eq(&gz, &again));
+
+        // A new version must NOT serve the old bytes.
+        let edited = format!("{body}// edit\n");
+        let fresh = GzipCache::get(&file, edited.len() as u64, mtime + 1, edited.as_bytes()).unwrap();
+        let mut out2 = String::new();
+        flate2::read::GzDecoder::new(fresh.as_slice())
+            .read_to_string(&mut out2)
+            .unwrap();
+        assert_eq!(out2, edited);
+    }
 
     #[test]
     fn injects_hmr_client_into_head() {
