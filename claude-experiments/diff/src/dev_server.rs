@@ -2357,7 +2357,7 @@ mod spa {
 
     /// Broadcast a CSS hot-swap for the given stylesheet hrefs (the browser replaces
     /// each matching `<link>` in place, preserving all component state).
-    fn push_css(hrefs: &[String], hub: &HmrHub) {
+    pub(super) fn push_css(hrefs: &[String], hub: &HmrHub) {
         let list = hrefs
             .iter()
             .map(|href| json_string(href))
@@ -3318,10 +3318,21 @@ mod next {
     }
 
     /// How long the watch loop waits for another file event before flushing the full
-    /// chunk re-emit it owes disk. Short enough that a developer who stops typing and
-    /// reaches for the reload button finds disk already current; long enough that a
-    /// burst of keystrokes coalesces into ONE re-emit instead of one per keystroke.
-    const SETTLE_MS: u64 = 150;
+    /// chunk re-emit it owes disk.
+    ///
+    /// This must be LONGER than a human's typical between-edits pause, not shorter.
+    /// The re-emit takes ~1-1.6s per graph set on cal.com, and while it runs the loop
+    /// thread cannot serve a hot push — so a 150ms window meant an edit cadence of
+    /// ~1/second put every second edit BEHIND an in-flight re-emit, turning a 50ms
+    /// edit-to-DOM into ~1s (measured; KNOWN_ISSUES #8). At 2s, sustained editing
+    /// keeps deferring the flush and every edit stays on the ~50ms hot path; the
+    /// flush runs when the developer actually pauses. Nothing correctness-bearing
+    /// reads disk in that window: SSR renders from the hot-patched worker, and a
+    /// respawned worker replays `pendingHot`. A full browser reload during the window
+    /// reads chunks up to 2s + one graph emit stale — the same class of staleness the
+    /// old 150ms window already accepted, slightly longer, in exchange for the hot
+    /// path never blocking.
+    const SETTLE_MS: u64 = 2_000;
 
     /// Stage-by-stage timing of one edit, appended to the `[dev]` summary line when
     /// `DIFFPACK_DEV_PROFILE=1`. The headline edit number is a single total; when it
@@ -3419,29 +3430,56 @@ mod next {
     /// Re-render the full chunks of every graph that owes disk one, so `public/` and
     /// `rsc-render/` match what the live processes are already running. Clears the debt
     /// only for graphs that succeeded, so a failing emit is retried rather than lost.
-    fn flush_owed(
+    /// Flushes ONE owed graph per call, so the loop returns to its event channel
+    /// between graphs: an edit that lands mid-flush waits for at most a single
+    /// graph's emit, not the whole set. The caller keeps invoking on quiet settle
+    /// timeouts until `owed.any()` is false. Returns `(which graph, rendered)`.
+    fn flush_owed_step(
         owed: &mut OwedEmits,
         output_root: &Path,
         rsc_root: &Path,
         client: &EnvBuild,
         react_server: &EnvBuild,
         ssr: &EnvBuild,
-    ) -> Result<usize, String> {
-        let mut rendered_chunks = 0;
+    ) -> Result<(&'static str, usize), String> {
         if owed.client {
-            rendered_chunks += emit_next_client_hmr(client, output_root)?;
+            let rendered = emit_next_client_hmr(client, output_root)?;
             owed.client = false;
+            return Ok(("client", rendered));
         }
         if owed.ssr {
-            rendered_chunks += emit_next_ssr(ssr, output_root)?.rendered_chunks;
+            let rendered = emit_next_ssr(ssr, output_root)?.rendered_chunks;
             owed.ssr = false;
+            return Ok(("ssr", rendered));
         }
         if owed.react_server {
-            rendered_chunks +=
+            let rendered =
                 emit_next_react_server(react_server, output_root, rsc_root)?.rendered_chunks;
             owed.react_server = false;
+            return Ok(("react-server", rendered));
         }
-        Ok(rendered_chunks)
+        Ok(("nothing", 0))
+    }
+
+    /// Content fingerprints of the stylesheets the served document links, keyed by
+    /// their public hrefs. Compared across settles: a changed sheet is delivered to
+    /// open browsers via the HMR client's in-place `<link>` swap (`push_css`) — the
+    /// Next topology previously rebuilt these sheets on a css edit and then never
+    /// told anyone (KNOWN_ISSUES #7).
+    fn next_stylesheet_fingerprints(output_root: &Path) -> Vec<(String, Option<u64>)> {
+        ["/rsc.css", "/client.css"]
+            .iter()
+            .map(|href| {
+                let file = output_root.join("public").join(href.trim_start_matches('/'));
+                let print = fs::read(&file).ok().map(|bytes| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    bytes.hash(&mut hasher);
+                    hasher.finish()
+                });
+                (href.to_string(), print)
+            })
+            .collect()
     }
 
     /// The incremental rebuild loop. Classifies each coalesced batch and applies the
@@ -3490,29 +3528,54 @@ mod next {
         // reads the CURRENT graph state, so one run after the burst covers every edit
         // in it.
         let mut owed = OwedEmits::default();
+        // The served stylesheets as browsers last saw them; refreshed after each
+        // fully-cleared flush so a css-bearing edit hot-swaps the changed sheets.
+        let mut css_prints = next_stylesheet_fingerprints(output_root);
         loop {
             let first = if owed.any() {
-                // Deferred work outstanding: wait only for the settle window. Nothing
-                // new means typing stopped — flush disk now.
+                // Deferred work outstanding: wait only for the settle window, and
+                // flush ONE graph per quiet timeout — the loop touches its channel
+                // between graphs, so an edit landing mid-flush waits for at most a
+                // single graph's emit (see SETTLE_MS for why it rarely waits at all).
                 match receiver.recv_timeout(Duration::from_millis(SETTLE_MS)) {
                     Ok(event) => event,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let started = Instant::now();
-                        let flushed = owed;
-                        match flush_owed(&mut owed, output_root, rsc_root, client, react_server, ssr)
-                        {
-                            Ok(rendered_chunks) => {
+                        match flush_owed_step(
+                            &mut owed, output_root, rsc_root, client, react_server, ssr,
+                        ) {
+                            Ok((which, rendered_chunks)) => {
                                 // Disk now matches the live processes for the
                                 // react-server graph, so a worker respawned from here
                                 // on needs no replay.
-                                if flushed.react_server {
+                                if which == "react-server" {
                                     hot.mark_react_server_on_disk();
                                 }
                                 println!(
-                                    "[dev] next settled: full re-emit of {} in {:.1}ms | rendered_chunks={rendered_chunks}",
-                                    flushed.label(),
+                                    "[dev] next settled: full re-emit of {which} in {:.1}ms | rendered_chunks={rendered_chunks}{}",
                                     started.elapsed().as_secs_f64() * 1_000.0,
+                                    if owed.any() { " | more owed" } else { "" },
                                 );
+                                if !owed.any() {
+                                    // The flush is fully caught up: deliver any
+                                    // stylesheet changes to open browsers in place.
+                                    let now = next_stylesheet_fingerprints(output_root);
+                                    let changed: Vec<String> = now
+                                        .iter()
+                                        .zip(css_prints.iter())
+                                        .filter(|(new, old)| new.1.is_some() && new.1 != old.1)
+                                        .map(|(new, _)| new.0.clone())
+                                        .collect();
+                                    if !changed.is_empty() {
+                                        super::spa::push_css(&changed, hub);
+                                        println!(
+                                            "[dev] css hot-swap -> {} sheet(s), {} browser(s)",
+                                            changed.len(),
+                                            hub.client_count()
+                                        );
+                                    }
+                                    css_prints = now;
+                                }
                             }
                             Err(error) => {
                                 eprintln!("[dev] build error (kept serving): {error}");
