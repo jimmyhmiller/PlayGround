@@ -3194,6 +3194,12 @@ mod next {
             self.pending_react_server.clear();
         }
 
+        /// The sequence number of the most recent push — names its micro-chunks
+        /// (`.hot/ssr.<seq>.mjs`, `.hot/rsc.<seq>.mjs`) for the disk patcher.
+        fn last_seq(&self) -> u64 {
+            self.seq
+        }
+
         /// Render a micro-chunk per changed server graph and apply them to the live
         /// Node processes, returning a log fragment. Returns `Err` — never a quiet
         /// no-op — if the orchestrator could not apply one: the alternative is serving
@@ -3317,22 +3323,19 @@ mod next {
         }
     }
 
-    /// How long the watch loop waits for another file event before flushing the full
-    /// chunk re-emit it owes disk.
+    /// How long the watch loop waits for another file event before running one step
+    /// of chunk COMPACTION (the full re-emit of a touched graph).
     ///
-    /// This must be LONGER than a human's typical between-edits pause, not shorter.
-    /// The re-emit takes ~1-1.6s per graph set on cal.com, and while it runs the loop
-    /// thread cannot serve a hot push — so a 150ms window meant an edit cadence of
-    /// ~1/second put every second edit BEHIND an in-flight re-emit, turning a 50ms
-    /// edit-to-DOM into ~1s (measured; KNOWN_ISSUES #8). At 2s, sustained editing
-    /// keeps deferring the flush and every edit stays on the ~50ms hot path; the
-    /// flush runs when the developer actually pauses. Nothing correctness-bearing
-    /// reads disk in that window: SSR renders from the hot-patched worker, and a
-    /// respawned worker replays `pendingHot`. A full browser reload during the window
-    /// reads chunks up to 2s + one graph emit stale — the same class of staleness the
-    /// old 150ms window already accepted, slightly longer, in exchange for the hot
-    /// path never blocking.
-    const SETTLE_MS: u64 = 2_000;
+    /// Compaction is housekeeping, not correctness: after every edit the on-disk
+    /// chunks are already patched in place with the edit's own micro-chunk (see
+    /// [`ChunkPatcher`]), so a full reload or a respawned worker reads CURRENT code
+    /// at all times. Compaction only rewrites the accumulated patch tail into a
+    /// pristine chunk (restoring real source maps for patched regions and bounding
+    /// file growth). It costs ~0.5-1s of loop-thread time per graph on cal.com,
+    /// during which a hot push would wait — so it is scheduled at a long idle where
+    /// colliding with an edit is unlikely, and it runs one graph per quiet interval
+    /// so a collision costs at most one graph's emit.
+    const SETTLE_MS: u64 = 10_000;
 
     /// Stage-by-stage timing of one edit, appended to the `[dev]` summary line when
     /// `DIFFPACK_DEV_PROFILE=1`. The headline edit number is a single total; when it
@@ -3430,6 +3433,207 @@ mod next {
     /// Re-render the full chunks of every graph that owes disk one, so `public/` and
     /// `rsc-render/` match what the live processes are already running. Clears the debt
     /// only for graphs that succeeded, so a failing emit is retried rather than lost.
+    /// Millisecond-cost patching of the big on-disk chunks after a hot update, so
+    /// disk is never stale between edits and the deferred full re-emit becomes pure
+    /// COMPACTION rather than a correctness requirement.
+    ///
+    /// Every dev chunk (main and split, all three graphs) has the same shape: one
+    /// IIFE that registers its module factories into the globalThis-keyed registry
+    /// and ends with a fixed tail —
+    /// `if(import.meta...__diffpack_hmr...)return __runtime; return __runtime.require(N); })(); export default ...` —
+    /// and registration is last-wins (`Object.assign` in `__register`). A hot
+    /// micro-chunk is itself such an IIFE over ONLY the changed modules, with its
+    /// own scope-isolated consts. So splicing the micro-chunk's IIFE into a chunk
+    /// file immediately BEFORE the tail makes a fresh evaluation of that file run
+    /// base registrations, then the patch registrations (overriding the stale
+    /// factories), then the entry — byte-cheap (a few KB write) and semantically
+    /// the same replay the live runtime already performed. A full page reload or a
+    /// respawned worker then reads current code straight from disk.
+    ///
+    /// The sidecar map gets one explicit UNMAPPED (single-field) segment per
+    /// appended line, inserted at the splice line's position in `mappings` — never
+    /// omitted, because a consumer resolves an omitted position to the previous
+    /// mapping and would attribute patched code to some unrelated module (the
+    /// doctrine of `compose_source_map`). Single-field segments carry no source
+    /// index, so nothing downstream in the delta chain needs re-basing. Real maps
+    /// for the patched region come back at compaction; live debugging of the
+    /// edited module meanwhile uses the micro-chunk's own map, which is the one
+    /// the running page actually loaded.
+    struct ChunkPatcher {
+        path: PathBuf,
+        map_path: PathBuf,
+        /// Byte offset where the next patch inserts (start of the sentinel tail).
+        splice: u64,
+        tail: Vec<u8>,
+        /// Line index of the splice point (number of `\n` before it).
+        splice_line: usize,
+        /// Byte offset in the MAP file where the next `A;` markers insert, or None
+        /// when map patching is unavailable (map missing/unparseable — chunk
+        /// patching still proceeds; the map is then stale-but-unshifted only for
+        /// the tail lines, which are unmapped anyway).
+        map_splice: Option<u64>,
+    }
+
+    impl ChunkPatcher {
+        const SENTINEL: &'static [u8] =
+            b"\nif(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")";
+
+        fn open(path: &Path) -> Result<Self, String> {
+            let bytes = fs::read(path)
+                .map_err(|error| format!("cannot read {} for patching: {error}", path.display()))?;
+            let splice = find_last(&bytes, Self::SENTINEL)
+                .ok_or_else(|| {
+                    format!(
+                        "{} has no hmr sentinel tail; is this a dev (hmr) chunk?",
+                        path.display()
+                    )
+                })?
+                + 1; // keep the preceding newline with the base
+            let tail = bytes[splice..].to_vec();
+            let splice_line = bytes[..splice].iter().filter(|&&b| b == b'\n').count();
+            let map_path = path_with_suffix_local(path, ".map");
+            let map_splice = Self::map_offset(&map_path, splice_line);
+            Ok(Self {
+                path: path.to_path_buf(),
+                map_path,
+                splice: splice as u64,
+                tail,
+                splice_line,
+                map_splice,
+            })
+        }
+
+        /// The byte offset in the map file right after `splice_line` semicolons of
+        /// its `mappings` string — where per-appended-line unmapped markers insert.
+        fn map_offset(map_path: &Path, splice_line: usize) -> Option<u64> {
+            let bytes = fs::read(map_path).ok()?;
+            let key = b"\"mappings\":\"";
+            let start = find_last(&bytes, key)? + key.len();
+            let mut seen = 0usize;
+            let mut at = start;
+            while at < bytes.len() && seen < splice_line {
+                match bytes[at] {
+                    b';' => seen += 1,
+                    b'"' => break, // mappings ended before the splice line: insert here
+                    _ => {}
+                }
+                at += 1;
+            }
+            Some(at as u64)
+        }
+
+        /// Extract the registration IIFE from a micro-chunk's source: everything
+        /// from its `const __diffpackEntry=(()=>{` (the file prelude above it is
+        /// import statements, illegal mid-file) through the end, minus the
+        /// `//# sourceMappingURL=` line (the base chunk has its own).
+        fn patch_body(micro_chunk_source: &str) -> Result<String, String> {
+            let start = micro_chunk_source
+                .find("const __diffpackEntry=(()=>{")
+                .ok_or_else(|| "micro-chunk has no registration IIFE".to_string())?;
+            let body = &micro_chunk_source[start..];
+            // Cut at the IIFE's own close. The micro-chunk's trailing
+            // `export default __diffpackEntry;` and sourceMappingURL comment must
+            // NOT be carried along: an `export` statement spliced inside the base
+            // chunk's IIFE is a SyntaxError that would corrupt the whole file.
+            let close = body
+                .rfind("})();")
+                .ok_or_else(|| "micro-chunk registration IIFE never closes".to_string())?;
+            let mut body = body[..close + "})();".len()].to_string();
+            body.push('\n');
+            Ok(body)
+        }
+
+        fn append(&mut self, micro_chunk_source: &str) -> Result<(), String> {
+            use std::io::{Seek, SeekFrom, Write};
+            let body = Self::patch_body(micro_chunk_source)?;
+            let lines = body.bytes().filter(|&b| b == b'\n').count();
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&self.path)
+                .map_err(|error| format!("cannot open {}: {error}", self.path.display()))?;
+            file.seek(SeekFrom::Start(self.splice))
+                .and_then(|_| file.write_all(body.as_bytes()))
+                .and_then(|_| file.write_all(&self.tail))
+                .and_then(|_| file.set_len(self.splice + (body.len() + self.tail.len()) as u64))
+                .map_err(|error| format!("cannot patch {}: {error}", self.path.display()))?;
+            self.splice += body.len() as u64;
+            self.splice_line += lines;
+            if let Some(map_at) = self.map_splice {
+                // `A` = one explicit unmapped segment per appended line.
+                let markers = "A;".repeat(lines);
+                let patched = (|| -> std::io::Result<()> {
+                    let mut map = fs::OpenOptions::new().read(true).write(true).open(&self.map_path)?;
+                    map.seek(SeekFrom::Start(map_at))?;
+                    let mut rest = Vec::new();
+                    std::io::Read::read_to_end(&mut map, &mut rest)?;
+                    map.seek(SeekFrom::Start(map_at))?;
+                    map.write_all(markers.as_bytes())?;
+                    map.write_all(&rest)?;
+                    Ok(())
+                })();
+                match patched {
+                    Ok(()) => self.map_splice = Some(map_at + markers.len() as u64),
+                    Err(error) => {
+                        // The chunk is patched; losing map markers only mis-shifts
+                        // the (unmapped) tail lines. Do not fail the edit for it.
+                        eprintln!(
+                            "[dev] map patch failed for {} ({error}); disabling map patching until compaction",
+                            self.map_path.display()
+                        );
+                        self.map_splice = None;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return None;
+        }
+        (0..=haystack.len() - needle.len()).rev().find(|&i| &haystack[i..i + needle.len()] == needle)
+    }
+
+    fn path_with_suffix_local(path: &Path, suffix: &str) -> PathBuf {
+        let mut s = path.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    }
+
+    /// Apply one micro-chunk to every on-disk chunk that HOSTS one of the changed
+    /// modules (last-wins registration makes the patch authoritative wherever the
+    /// module's home chunk is evaluated — main, prerequisite, or lazily loaded).
+    /// Patchers are cached per file and dropped when the graph re-emits.
+    #[allow(clippy::too_many_arguments)]
+    fn append_hot_patch(
+        patchers: &mut HashMap<PathBuf, ChunkPatcher>,
+        env: &EnvBuild,
+        changed_ids: &BTreeSet<String>,
+        entry_name: &str,
+        chunk_dir: &Path,
+        micro_chunk_path: &Path,
+    ) -> Result<usize, String> {
+        let source = fs::read_to_string(micro_chunk_path).map_err(|error| {
+            format!("cannot read micro-chunk {}: {error}", micro_chunk_path.display())
+        })?;
+        let located = env
+            .bundler
+            .hmr_locate(&reachable_ids(env), changed_ids, entry_name)?;
+        let files: BTreeSet<PathBuf> =
+            located.iter().map(|l| chunk_dir.join(&l.chunk_file)).collect();
+        for file in &files {
+            if !patchers.contains_key(file) {
+                patchers.insert(file.clone(), ChunkPatcher::open(file)?);
+            }
+            patchers
+                .get_mut(file)
+                .expect("just inserted")
+                .append(&source)?;
+        }
+        Ok(files.len())
+    }
+
     /// Flushes ONE owed graph per call, so the loop returns to its event channel
     /// between graphs: an edit that lands mid-flush waits for at most a single
     /// graph's emit, not the whole set. The caller keeps invoking on quiet settle
@@ -3518,6 +3722,22 @@ mod next {
         // Constructing it clears `<out>/.hot` — the three graphs were just emitted from
         // scratch, so any micro-chunk left by a previous session is already superseded.
         let mut hot = HotChannel::new(output_root)?;
+        // Per-chunk-file disk patchers (see ChunkPatcher). Dropped for a graph's
+        // files whenever that graph re-emits (compaction or structural rebuild),
+        // because a fresh emit rewrites the file under them.
+        let mut patchers: HashMap<PathBuf, ChunkPatcher> = HashMap::new();
+        // Pre-open patchers for the three main chunks so the first edit does not
+        // pay their one-time init (a read+scan of ~60MB of chunk+map, ~0.7s
+        // measured on cal.com). Failures are fine — the edit path re-opens lazily.
+        for main in [
+            output_root.join("public/client.js"),
+            output_root.join("server/server.mjs"),
+            output_root.join("rsc-render/server.mjs"),
+        ] {
+            if let Ok(patcher) = ChunkPatcher::open(&main) {
+                patchers.insert(main, patcher);
+            }
+        }
         // Which graphs owe disk a full chunk re-emit. STICKY across iterations: the
         // re-emit is what makes a browser FULL RELOAD and a respawned react-server
         // worker correct, and nothing in a hot update needs it, so it runs when typing
@@ -3550,6 +3770,17 @@ mod next {
                                 // on needs no replay.
                                 if which == "react-server" {
                                     hot.mark_react_server_on_disk();
+                                }
+                                // The compacted emit rewrote this graph's chunk files
+                                // out from under their patchers.
+                                let dir = match which {
+                                    "client" => Some(output_root.join("public")),
+                                    "ssr" => Some(output_root.join("server")),
+                                    "react-server" => Some(output_root.join("rsc-render")),
+                                    _ => None,
+                                };
+                                if let Some(dir) = dir {
+                                    patchers.retain(|path, _| !path.starts_with(&dir));
                                 }
                                 println!(
                                     "[dev] next settled: full re-emit of {which} in {:.1}ms | rendered_chunks={rendered_chunks}{}",
@@ -3763,9 +3994,11 @@ mod next {
                     emit_options,
                 )?;
                 // Every graph was just emitted from scratch: disk IS the truth, so the
-                // deferred debt and the worker replay list are both discharged.
+                // deferred debt, the worker replay list, and every chunk patcher are
+                // all discharged.
                 owed = OwedEmits::default();
                 hot.reset(output_root)?;
+                patchers.clear();
                 restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
@@ -3813,9 +4046,24 @@ mod next {
                 // State-preserving React Fast Refresh (no reload). Push a MICRO-CHUNK
                 // (only the changed modules) so the browser re-parses ~1 KB, not the
                 // ~1 MB entry chunk; served directly off disk by the proxy.
-                profile.stage("push-client", || {
+                let pushed = profile.stage("push-client", || {
                     hmr_push_client(client, &island_ids, hub, Some(output_root))
-                })
+                });
+                // And splice the same micro-chunk into the browser chunks on disk,
+                // so a full reload loads current code without waiting for compaction.
+                profile.stage("patch-disk-client", || {
+                    if let Err(error) = append_hot_patch(
+                        &mut patchers,
+                        client,
+                        &island_ids,
+                        "client.js",
+                        &output_root.join("public"),
+                        &output_root.join("public/client.hmr.js"),
+                    ) {
+                        eprintln!("[dev] client disk patch skipped: {error}");
+                    }
+                });
+                pushed
             } else if server_reload {
                 // Server-component edit: an in-place RSC refresh (no full page reload).
                 // The client refetches the current route's flight and diff-renders it;
@@ -3826,6 +4074,46 @@ mod next {
             } else {
                 "no visible change".to_string()
             };
+            // DISK, right after the pushes and byte-cheaply: splice the same
+            // micro-chunks into
+            // the on-disk chunks that host the changed modules (see ChunkPatcher).
+            // After this, a full reload or worker respawn reads CURRENT code from
+            // disk, and the deferred re-emit below is pure compaction. A patch
+            // failure is not an edit failure: it just means disk is as stale as it
+            // always was pre-patching, and compaction restores it.
+            profile.stage("patch-disk", || {
+                let seq = hot.last_seq();
+                let mut patched = 0usize;
+                if !ssr_ids.is_empty() {
+                    match append_hot_patch(
+                        &mut patchers,
+                        ssr,
+                        &ssr_ids,
+                        "server.mjs",
+                        &output_root.join("server"),
+                        &output_root.join(HOT_DIR).join(format!("ssr.{seq}.mjs")),
+                    ) {
+                        Ok(n) => patched += n,
+                        Err(error) => eprintln!("[dev] ssr disk patch skipped: {error}"),
+                    }
+                }
+                if !react_server_ids.is_empty() {
+                    match append_hot_patch(
+                        &mut patchers,
+                        react_server,
+                        &react_server_ids,
+                        "server.mjs",
+                        &output_root.join("rsc-render"),
+                        &output_root.join(HOT_DIR).join(format!("rsc.{seq}.mjs")),
+                    ) {
+                        Ok(n) => patched += n,
+                        Err(error) => eprintln!("[dev] rsc disk patch skipped: {error}"),
+                    }
+                }
+                patched
+            });
+
+
             let update_ms = started.elapsed().as_secs_f64() * 1_000.0;
 
             // The full chunk re-emit each touched graph now owes DISK is NOT run here.
@@ -3982,6 +4270,72 @@ mod next {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// A chunk patch must land BEFORE the sentinel tail (so the entry invoke
+        /// still runs last), preserve the tail byte-for-byte, stack across multiple
+        /// appends in edit order, and mark every appended line explicitly unmapped
+        /// in the sidecar map at the splice line's position — never omitted, or a
+        /// consumer would attribute patched code to the previous module's mapping.
+        #[test]
+        fn chunk_patcher_splices_before_the_tail_and_marks_the_map() {
+            let dir = tempfile::tempdir().unwrap();
+            let chunk = dir.path().join("client.js");
+            let base = "const __diffpackEntry=(()=>{\n\
+                        const __newModules={1:function(){}};\n\
+                        __runtime.register(__newModules,__newMaps,__newChunks);\n\
+                        if(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")>=0)return __runtime;\n\
+                        return __runtime.require(1);\n\
+                        })();\n\
+                        export default __diffpackEntry;\n";
+            fs::write(&chunk, base).unwrap();
+            // Map with one entry per line of the chunk (7 lines) — all "A" markers.
+            let map = format!("{}.map", chunk.display());
+            fs::write(&map, r#"{"version":3,"file":"client.js","names":[],"sources":[],"sourcesContent":[],"mappings":"A;A;A;A;A;A;A"}"#).unwrap();
+
+            let micro = "import { x } from \"node:url\";\n\
+                         const __diffpackEntry=(()=>{\n\
+                         const __newModules={1:function(){/*patched*/}};\n\
+                         __runtime.register(__newModules,__newMaps,__newChunks);\n\
+                         if(import.meta&&import.meta.url&&import.meta.url.indexOf(\"__diffpack_hmr\")>=0)return __runtime;\n\
+                         return __runtime.require(1);\n\
+                         })();\n\
+                         export default __diffpackEntry;\n\
+                         //# sourceMappingURL=hot.mjs.map\n";
+
+            let mut patcher = ChunkPatcher::open(&chunk).unwrap();
+            patcher.append(micro).unwrap();
+            patcher.append(&micro.replace("patched", "patched-again")).unwrap();
+
+            let out = fs::read_to_string(&chunk).unwrap();
+            // Both patches present, in order, and before the sentinel tail.
+            let first = out.find("/*patched*/").expect("first patch");
+            let second = out.find("patched-again").expect("second patch");
+            let tail = out.rfind("if(import.meta&&import.meta.url").unwrap();
+            assert!(first < second && second < tail, "order: {out}");
+            // The file prelude of the micro-chunk (an import statement, illegal
+            // mid-file) must have been stripped.
+            assert!(!out.contains("node:url"), "{out}");
+            // The original tail survives byte-for-byte at the end.
+            assert!(out.ends_with("export default __diffpackEntry;\n"), "{out}");
+            // Each patch is a nested IIFE, so its consts cannot collide.
+            assert_eq!(out.matches("const __diffpackEntry=(()=>{").count(), 3);
+            // The micro-chunk's own `export default` must NOT be spliced in: an
+            // export inside the base IIFE is a SyntaxError (caught live on
+            // cal.com's server.mjs before this assertion existed). Exactly the
+            // base's one export survives.
+            assert_eq!(out.matches("export default").count(), 1, "{out}");
+
+            // The map gained one explicit unmapped marker per appended line, at the
+            // splice line (line 3 = index of the sentinel line), not at the end.
+            let mapped = fs::read_to_string(&map).unwrap();
+            let mappings = mapped.split("\"mappings\":\"").nth(1).unwrap().split('"').next().unwrap();
+            let base_lines = 3; // lines before the sentinel in the base
+            let patch_lines: usize = out.lines().count() - base.lines().count();
+            let entries: Vec<&str> = mappings.split(';').collect();
+            assert_eq!(entries.len(), 7 + patch_lines, "one entry per line: {mappings}");
+            assert!(entries[base_lines..base_lines + patch_lines].iter().all(|e| *e == "A"),
+                "appended lines are explicit unmapped markers: {mappings}");
+        }
 
         /// The embedded orchestrator must take its dev freshness from the hot-update
         /// channel and NOT from polling a bundle's mtime.
