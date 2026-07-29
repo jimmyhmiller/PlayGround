@@ -6,7 +6,7 @@ This document specifies what a host has to provide.
 
 ## Running it
 
-```sh
+```bash
 cargo build --release
 
 # Run a script, node-style.
@@ -26,7 +26,7 @@ PORTABLE_NODE_PROJECT=/path/to/project ./target/release/portable-node /path/to/p
 
 ## The layering
 
-```
+```text
   user code, npm packages          app.js, express, body-parser, ...
   ────────────────────────────────────────────────────────────────────
   Node's real lib sources          js/node-src/*.js  (verbatim upstream)
@@ -65,7 +65,7 @@ Functions: `cwd()`, `chdir(path) -> bool`, `exit(code)`, `hrtime_ns()` (monotoni
 
 Synchronous POSIX-shaped file I/O. `node:fs`'s sync API is built directly on this; the async API is the sync one deferred onto the microtask queue.
 
-```
+```js
 open(path, flags, mode) -> fd
 close(fd)
 read(fd, buf, offset, length, position) -> bytesRead      // position < 0 means "current"
@@ -90,7 +90,7 @@ The three non-throwing predicates (`exists`, `is_file`, `is_dir`) exist for the 
 
 This is the interesting one. The design is **completion-based, not readiness-based**, so a host can implement it over epoll/kqueue (as the Rust one does, via mio), and equally over IOCP, io_uring, or a language runtime's own async primitives.
 
-```
+```js
 create_tcp() -> handle                              // reserves an opaque id
 listen(handle, ip, port, backlog) -> 0 | -errno     // sync: bind and listen together
 connect(handle, ip, port) -> op_id                  // async
@@ -131,7 +131,7 @@ Invariants a host must preserve:
 
 HTTP/1.x parsing is a host primitive rather than JS, because every ecosystem already has a hardened parser and a hand-rolled JS one is a liability. Rust uses `httparse` plus a body-framing state machine; the equivalents are `llhttp` in C, `net/http` in Go, `h11` in Python.
 
-```
+```js
 create(kind) -> handle                    // kind: 'request' | 'response'
 execute(handle, buf, off, len) -> { nread, events: [...], error? }
 finish(handle) -> { events: [...], error? }   // signals EOF for identity bodies / HTTP/1.0
@@ -141,7 +141,7 @@ free(handle)
 
 Events:
 
-```
+```js
 { kind: 'headers', method, url, status_code, status_message,
   http_major, http_minor, headers: [name, value, name, value, ...],
   upgrade, should_keep_alive }
@@ -155,7 +155,7 @@ The JS side (`__binding/http_parser`) is a thin translation from these events in
 
 ### `__host.crypto`
 
-```
+```js
 random_bytes(n) -> Uint8Array           // CSPRNG, must not be seedable or predictable
 hash(algorithm, data) -> Uint8Array
 hmac(algorithm, key, data) -> Uint8Array
@@ -167,7 +167,7 @@ Algorithms currently: `sha1`, `sha224`, `sha256`, `sha384`, `sha512`, `md5`. Eve
 
 ### `__host.zlib`
 
-```
+```js
 deflate_raw(bytes, level) / inflate_raw(bytes)
 deflate(bytes, level) / inflate(bytes)      // RFC 1950, zlib-wrapped
 gzip(bytes, level) / gunzip(bytes)          // RFC 1952
