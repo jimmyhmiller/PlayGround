@@ -453,8 +453,18 @@ function printTable(r, outPath) {
       if (!a || !z) continue;
       row(k.name, fmtCell(a), fmtCell(z), ratio(median(ok(a.samples)), median(ok(z.samples))));
     }
-    const warm = (side) => ["island", "shared", "server"].map((k) => (side.hmr[k]?.warmupMs ?? "n/a")).join(" / ");
-    row("First-edit warmup (island / shared / server)", `${warm(dd)} ms`, `${warm(dt)} ms`, "");
+    // Three edit classes in one row, so the advantage is three ratios in the same
+    // order — a triple has no single multiplier, and leaving the cell blank made it
+    // look like the axis had not been compared.
+    const WARMUP_CLASSES = ["island", "shared", "server"];
+    const warm = (side) => WARMUP_CLASSES.map((k) => side.hmr[k]?.warmupMs ?? null);
+    const warmCell = (side) => `${warm(side).map((ms) => ms ?? "n/a").join(" / ")} ms`;
+    row(
+      "First-edit warmup (island / shared / server)",
+      warmCell(dd),
+      warmCell(dt),
+      WARMUP_CLASSES.map((_, i) => ratio(warm(dd)[i], warm(dt)[i]) || "n/a").join(" / "),
+    );
 
     section(`Edit -> freshly served document (curl-equivalent, ${plural(SAMPLES, "sample")}, medians)`);
     for (const k of FRESH_KINDS) {
