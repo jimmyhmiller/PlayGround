@@ -53,7 +53,17 @@ if [ -f "$BLIST" ]; then
     ref="$REF/$(echo "$f" | tr '/' '_').diag"
     refec="$REF/$(echo "$f" | tr '/' '_').exit"
     o="$TMPD/$(basename "$f" .coil)"
-    "$BIN" build "$f" -o "$o" ${COIL_SELF_ARGS:-} > "$TMPD/raw" 2>&1
+    # COIL_SELF_ARGS is deliberately NOT forwarded to this path. It exists to pin
+    # emit-ir to the SNAPSHOT's triple so textual IR compares host-independently
+    # (see the CI workflow) — but these fixtures actually LINK, and cross-tagging
+    # an object for a macOS newer than the linking SDK makes ld emit
+    #   ld: warning: object file (...) was built for newer 'macOS' version (26.0)
+    #       than being linked (15.0)
+    # straight into the stderr this gate compares byte-for-byte. That failed all 5
+    # build fixtures on the macos-15 runner while passing on a macOS 26 laptop,
+    # where host and snapshot triple happen to coincide. A real link must use the
+    # real host target.
+    "$BIN" build "$f" -o "$o" > "$TMPD/raw" 2>&1
     code=$?
     got=$(sed "s|$ROOT/||g; s|$TMPD/||g" "$TMPD/raw")
     want=$(cat "$ref")
