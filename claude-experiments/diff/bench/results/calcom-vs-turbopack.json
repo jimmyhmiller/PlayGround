@@ -1,0 +1,227 @@
+{
+  "meta": {
+    "date": "2026-07-29T19:03:33.422Z",
+    "app": "/tmp/dpe2e/calcom",
+    "appCommit": "3894f37",
+    "diffpackCommit": "72dd1e7b1",
+    "node": "v26.5.0",
+    "next": "16.2.3",
+    "port": 3000,
+    "buildPairs": 2,
+    "hmrSamples": 5,
+    "gapMs": 4200,
+    "cadenceGapMs": 800,
+    "loadAtStart": [
+      30.9,
+      31.3,
+      31.4
+    ],
+    "loadAtEnd": [
+      32.7,
+      32.4,
+      32.1
+    ]
+  },
+  "build": {
+    "diffpack": {
+      "wallMs": [
+        9226,
+        8686
+      ],
+      "cpuUserS": [
+        29.02,
+        28.85
+      ],
+      "peakRssMb": [
+        1948.71875,
+        1914.21875
+      ]
+    },
+    "turbopack": {
+      "wallMs": [
+        26371,
+        27194
+      ],
+      "cpuUserS": [
+        161.9,
+        164.05
+      ],
+      "peakRssMb": [
+        5967.078125,
+        6046.78125
+      ]
+    }
+  },
+  "dev": {
+    "diffpack": {
+      "startup": 6470,
+      "secondRouteMs": 195,
+      "hmr": {
+        "island": {
+          "name": "island (leaf client component)",
+          "warmupMs": 44,
+          "samples": [
+            49,
+            50,
+            48,
+            51,
+            56
+          ]
+        },
+        "shared": {
+          "name": "shared client component",
+          "warmupMs": 128,
+          "samples": [
+            127,
+            138,
+            114,
+            113,
+            118
+          ]
+        },
+        "server": {
+          "name": "server component",
+          "warmupMs": 90,
+          "samples": [
+            81,
+            77,
+            75,
+            76,
+            74
+          ]
+        },
+        "css": {
+          "name": "global CSS",
+          "warmupMs": 32989,
+          "samples": [
+            11508,
+            11491,
+            11345,
+            11472,
+            11578
+          ]
+        },
+        "cadence": {
+          "name": "sustained edits @ ~1/sec",
+          "warmupMs": null,
+          "samples": [
+            53,
+            49,
+            49,
+            48,
+            50
+          ]
+        }
+      },
+      "fresh": {
+        "fresh-island": {
+          "name": "island edit",
+          "warmupMs": 83,
+          "samples": [
+            93,
+            94,
+            82,
+            82,
+            91
+          ]
+        },
+        "fresh-server": {
+          "name": "server-component edit",
+          "warmupMs": 76,
+          "samples": [
+            84,
+            76,
+            106,
+            76,
+            106
+          ]
+        }
+      }
+    },
+    "turbopack": {
+      "startup": 13759,
+      "secondRouteMs": 5508,
+      "hmr": {
+        "island": {
+          "name": "island (leaf client component)",
+          "warmupMs": 510,
+          "samples": [
+            440,
+            427,
+            418,
+            444,
+            421
+          ]
+        },
+        "shared": {
+          "name": "shared client component",
+          "warmupMs": 608,
+          "samples": [
+            532,
+            519,
+            493,
+            486,
+            515
+          ]
+        },
+        "server": {
+          "name": "server component",
+          "warmupMs": 511,
+          "samples": [
+            488,
+            467,
+            474,
+            468,
+            476
+          ]
+        },
+        "css": {
+          "name": "global CSS",
+          "warmupMs": 7729,
+          "samples": [
+            7612,
+            7561,
+            7419,
+            7705,
+            7549
+          ]
+        },
+        "cadence": {
+          "name": "sustained edits @ ~1/sec",
+          "warmupMs": null,
+          "samples": [
+            417,
+            420,
+            413,
+            428,
+            412
+          ]
+        }
+      },
+      "fresh": {
+        "fresh-island": {
+          "name": "island edit",
+          "warmupMs": 458,
+          "samples": [
+            489,
+            471,
+            485,
+            475,
+            474
+          ]
+        },
+        "fresh-server": {
+          "name": "server-component edit",
+          "warmupMs": 595,
+          "samples": [
+            571,
+            587,
+            566,
+            566,
+            565
+          ]
+        }
+      }
+    }
+  }
+}
