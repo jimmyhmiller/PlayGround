@@ -30,11 +30,10 @@
 
 ;; open() flags. Combine with `|`.
 ;;
-;; Four of these DIFFER between Linux and macOS, so they cannot be plain
-;; constants: hardcoding the darwin values (as this file used to) makes every
-;; create-or-truncate open fail on Linux, because 512 means O_TRUNC there rather
-;; than O_CREAT. The three that agree stay constants; the rest are functions
-;; that pick per host.
+;; Four of these DIFFER between Linux and macOS, so they cannot be written as
+;; plain literals: hardcoding the darwin values (as this file used to) makes
+;; every create-or-truncate open fail on Linux, because 512 means O_TRUNC there
+;; rather than O_CREAT.
 ;;
 ;;                    linux   darwin
 ;;   O_APPEND          1024        8
@@ -42,29 +41,26 @@
 ;;   O_TRUNC            512     1024
 ;;   O_EXCL             128     2048
 ;;
-;; The host probe is the same one metaengine.coil uses: /proc/self/maps exists
-;; on every Linux and never on macOS.
-;;
-;; These are FUNCTIONS, not `const`s, and the call is deliberate. A `const` here
-;; would compile — `(const O_CREAT (if (fs-host-linux?) 64 512))` folds fine —
-;; but it folds against the machine doing the BUILD, and these are syscall
-;; arguments, so the only OS that matters is the one running the binary.
-;; Checked: cross-compiling with `--target aarch64-apple-darwin` on Linux still
-;; folds the probe to the Linux answer, which would hand macOS the wrong flags.
-;; A zero-arg call costs one compare and is always right, so call sites spell
-;; the four portable flags `(O_CREAT)` rather than `O_CREAT`. The three that are
-;; identical on both platforms stay bare constants.
-(extern access :cc c [(ptr i8) i32] (-> i32))   ; int access(const char*, int)
-(defn fs-host-linux? [] (-> bool)
-  (icmp-eq (cast :i64 (access c"/proc/self/maps" 0)) 0))
+;; `(target-os)` is a comptime code op — a builtin like `target-arch`/`gensym`,
+;; so it needs no import — and it answers for the platform being COMPILED FOR,
+;; read from the resolved --target triple. That is the whole point: these are
+;; syscall arguments, so the only OS that matters is the one that will run the
+;; binary. Selecting on it inside a `const` keeps the flags true compile-time
+;; constants (one folded literal at each use, no runtime branch) while still
+;; being correct under cross-compilation.
+(defn os-pick [(linux Code) (darwin Code)] (-> Code)
+  (if (code-eq (target-os) `linux) linux darwin))
+(defn gen-open-flags [] (-> Code)
+  `(do
+     (const O_APPEND ~(os-pick `1024 `8))
+     (const O_CREAT  ~(os-pick `64   `512))
+     (const O_TRUNC  ~(os-pick `512  `1024))
+     (const O_EXCL   ~(os-pick `128  `2048))))
 
 (const O_RDONLY 0)
 (const O_WRONLY 1)
 (const O_RDWR   2)
-(defn O_APPEND [] (-> :i64) (if (fs-host-linux?) 1024 8))
-(defn O_CREAT  [] (-> :i64) (if (fs-host-linux?) 64 512))
-(defn O_TRUNC  [] (-> :i64) (if (fs-host-linux?) 512 1024))
-(defn O_EXCL   [] (-> :i64) (if (fs-host-linux?) 128 2048))
+(meta (gen-open-flags))
 ;; a sensible default create mode (rw-r--r--) for the whole-file writer.
 (const FILE_MODE_DEFAULT 420)   ; 0o644
 
@@ -144,7 +140,7 @@
   (let [cp (str->cstr a path)]
     (if (icmp-eq (cast :i64 cp) 0)
         (Err (Errno 0))
-        (let [fd (open cp (cast i32 (| O_WRONLY (| (O_CREAT) (O_TRUNC)))) FILE_MODE_DEFAULT)
+        (let [fd (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
               ; the Writer is this call's own instance, on its own frame — never
               ; a static, which would alias with any other stream in flight.
               w (alloc-stack Writer)

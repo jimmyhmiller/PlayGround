@@ -6,7 +6,9 @@
 ; that was fixed it still did not WORK on Linux, because its open() flags were
 ; hardcoded to the darwin values — 512 is O_CREAT on macOS but O_TRUNC on Linux,
 ; so every create-or-truncate open failed. A compile check would have caught the
-; first bug and not the second, so this runs the library for real.
+; first bug and not the second, so this runs the library for real. (The flags now
+; select on `(target-os)` at comptime, so they stay literals and are right under
+; cross-compilation too.)
 ;
 ; The paths below are unlinked FIRST, so every check exercises the create path.
 ; That matters: with the old darwin-only flags, 512|1024 happens to decode on
@@ -66,7 +68,7 @@
 
     ; ---- 4-5. the Reader/Writer bridge: stream through file-writer
     (match (file-open (str->cstr a "/tmp/coil_fs_gate_b.txt")
-                      (| O_WRONLY (| (O_CREAT) (O_TRUNC))) FILE_MODE_DEFAULT)
+                      (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
       (Ok [f] (let [fp (alloc-stack File)]
                 (store! fp f)
                 (let [out (file-writer (alloc-stack Writer) fp)]
@@ -84,9 +86,9 @@
     ; and both lines landed on one fd. Interleave the writes so a shared
     ; instance cannot accidentally produce the right answer.
     (match (file-open (str->cstr a "/tmp/coil_fs_gate_c1.txt")
-                      (| O_WRONLY (| (O_CREAT) (O_TRUNC))) FILE_MODE_DEFAULT)
+                      (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
       (Ok [f1] (match (file-open (str->cstr a "/tmp/coil_fs_gate_c2.txt")
-                                 (| O_WRONLY (| (O_CREAT) (O_TRUNC))) FILE_MODE_DEFAULT)
+                                 (| O_WRONLY (| O_CREAT O_TRUNC)) FILE_MODE_DEFAULT)
                  (Ok [f2]
                      (let [p1 (alloc-stack File)
                            p2 (alloc-stack File)]

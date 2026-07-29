@@ -61,6 +61,8 @@ echo "  linux gate-full: PASS (IR byte-exact vs the Linux snapshot)"
 echo "  linux gate-run:  PASS (programs run identically)"
 ./selfhost/oracle/gate-cli.sh /tmp/coil-lrb2 >/dev/null        || { echo "gate-cli FAIL"; exit 1; }
 echo "  gate-cli:        PASS (argv, exit codes, fmt)"
+./selfhost/oracle/gate-target-os.sh /tmp/coil-lrb2 >/dev/null 2>&1 || { echo "gate-target-os FAIL"; exit 1; }
+echo "  gate-target-os:  PASS ((target-os) follows --target, consts fold per target)"
 
 DEST="${1:-./coil-linux}"
 cp /tmp/coil-lrb2 "$DEST"

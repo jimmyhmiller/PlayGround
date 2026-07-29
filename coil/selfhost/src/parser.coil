@@ -1367,6 +1367,20 @@
                                                       (al-new [Expr]
                                                               a)))))
                            (str-eq head
+                                   "target-os")
+                             (if (not (icmp-eq nargs
+                                               0))
+                                 (Err [ExprKind
+                                       Diag]
+                                      (derr-at slo
+                                               shi
+                                               "target-os: expects (target-os)"))
+                                 (Ok (ECodeOp 46
+                                              (box-al [Expr]
+                                                      a
+                                                      (al-new [Expr]
+                                                              a)))))
+                           (str-eq head
                                    "debug-checks?")
                              (if (not (icmp-eq nargs
                                                0))

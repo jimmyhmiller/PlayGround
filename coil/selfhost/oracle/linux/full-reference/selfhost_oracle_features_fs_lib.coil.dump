@@ -45,21 +45,19 @@ target triple = "x86_64-pc-linux-gnu"
 
 @cstr.1 = private constant [22 x i8] c"arraylist al-reserve!\00"
 
-@cstr.2 = private constant [16 x i8] c"/proc/self/maps\00"
+@cstr.2 = private constant [14 x i8] c"an allocation\00"
 
-@cstr.3 = private constant [14 x i8] c"an allocation\00"
+@cstr.3 = private constant [16 x i8] c"out of memory: \00"
 
-@cstr.4 = private constant [16 x i8] c"out of memory: \00"
+@cstr.4 = private constant [20 x i8] c" failed to allocate\00"
 
-@cstr.5 = private constant [20 x i8] c" failed to allocate\00"
+@cstr.5 = private constant [2 x i8] c" \00"
 
-@cstr.6 = private constant [2 x i8] c" \00"
+@cstr.6 = private constant [7 x i8] c" bytes\00"
 
-@cstr.7 = private constant [7 x i8] c" bytes\00"
+@cstr.7 = private constant [30 x i8] c"; the allocator is exhausted\0A\00"
 
-@cstr.8 = private constant [30 x i8] c"; the allocator is exhausted\0A\00"
-
-@cstr.9 = private constant [13 x i8] c"str-key-copy\00"
+@cstr.8 = private constant [13 x i8] c"str-key-copy\00"
 
 @g.0 = global %alloc.Allocator zeroinitializer
 
@@ -162,8 +160,6 @@ target triple = "x86_64-pc-linux-gnu"
 @str.9 = private constant [25 x i8] c"/tmp/coil_fs_gate_c2.txt\00"
 
 declare i64 @abort()
-
-declare i32 @access(ptr, i32)
 
 declare i32 @close(i32)
 
@@ -826,14 +822,6 @@ entry:
   ret i64 %sub
 }
 
-define internal i1 @"fs.fs-host-linux?"() {
-entry:
-  %call = call i32 @access(ptr @cstr.2, i32 0)
-  %sext = sext i32 %call to i64
-  %cmp = icmp eq i64 %sext, 0
-  ret i1 %cmp
-}
-
 define internal i64 @"fslib.note!"(ptr %fb, i64 %n, i1 %ok) {
 entry:
   %ifc = icmp ne i1 %ok, false
@@ -1295,23 +1283,23 @@ entry:
 
 define internal i64 @alloc.oom() {
 entry:
-  %call = call i64 @alloc.oom-at(ptr @cstr.3, i64 -1)
+  %call = call i64 @alloc.oom-at(ptr @cstr.2, i64 -1)
   ret i64 %call
 }
 
 define internal i64 @alloc.oom-at(ptr %site, i64 %bytes) {
 entry:
-  %call = call i64 @alloc.oom-puts(ptr @cstr.4)
+  %call = call i64 @alloc.oom-puts(ptr @cstr.3)
   %call1 = call i64 @alloc.oom-puts(ptr %site)
-  %call2 = call i64 @alloc.oom-puts(ptr @cstr.5)
+  %call2 = call i64 @alloc.oom-puts(ptr @cstr.4)
   %cmp = icmp sge i64 %bytes, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %call3 = call i64 @alloc.oom-puts(ptr @cstr.6)
+  %call3 = call i64 @alloc.oom-puts(ptr @cstr.5)
   %call4 = call i64 @alloc.oom-putd(i64 %bytes)
-  %call5 = call i64 @alloc.oom-puts(ptr @cstr.7)
+  %call5 = call i64 @alloc.oom-puts(ptr @cstr.6)
   br label %ifcont
 
 else:                                             ; preds = %entry
@@ -1319,7 +1307,7 @@ else:                                             ; preds = %entry
 
 ifcont:                                           ; preds = %else, %then
   %ifval = phi i64 [ %call5, %then ], [ 0, %else ]
-  %call6 = call i64 @alloc.oom-puts(ptr @cstr.8)
+  %call6 = call i64 @alloc.oom-puts(ptr @cstr.7)
   %call7 = call i64 @abort()
   ret i64 0
 }
@@ -2152,58 +2140,6 @@ ifcont:                                           ; preds = %else15, %then14
   ret %coil.core.Result__i64__io.IoError %call17
 }
 
-define internal i64 @fs.O_APPEND() {
-entry:
-  %call = call i1 @"fs.fs-host-linux?"()
-  %ifc = icmp ne i1 %call, false
-  br i1 %ifc, label %then, label %else
-
-then:                                             ; preds = %entry
-  ret i64 1024
-
-else:                                             ; preds = %entry
-  ret i64 8
-}
-
-define internal i64 @fs.O_CREAT() {
-entry:
-  %call = call i1 @"fs.fs-host-linux?"()
-  %ifc = icmp ne i1 %call, false
-  br i1 %ifc, label %then, label %else
-
-then:                                             ; preds = %entry
-  ret i64 64
-
-else:                                             ; preds = %entry
-  ret i64 512
-}
-
-define internal i64 @fs.O_EXCL() {
-entry:
-  %call = call i1 @"fs.fs-host-linux?"()
-  %ifc = icmp ne i1 %call, false
-  br i1 %ifc, label %then, label %else
-
-then:                                             ; preds = %entry
-  ret i64 128
-
-else:                                             ; preds = %entry
-  ret i64 2048
-}
-
-define internal i64 @fs.O_TRUNC() {
-entry:
-  %call = call i1 @"fs.fs-host-linux?"()
-  %ifc = icmp ne i1 %call, false
-  br i1 %ifc, label %then, label %else
-
-then:                                             ; preds = %entry
-  ret i64 512
-
-else:                                             ; preds = %entry
-  ret i64 1024
-}
-
 define internal %coil.core.Result__i64__io.IoError @fs.file-close(ptr %f) {
 entry:
   %sum.tmp7 = alloca %coil.core.Result__i64__io.IoError, align 8
@@ -2466,8 +2402,8 @@ else52:                                           ; preds = %loop.body47
 
 define internal %coil.core.Result__i64__io.IoError @fs.write-file(ptr %a, { ptr, i64 } %path, { ptr, i64 } %data) {
 entry:
-  %sum.tmp18 = alloca %io.IoError, align 8
-  %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp16 = alloca %io.IoError, align 8
+  %sum.tmp13 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp1 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
   %call = call ptr @"str.str->cstr"(ptr %a, { ptr, i64 } %path)
@@ -2492,59 +2428,57 @@ then:                                             ; preds = %entry
   ret %coil.core.Result__i64__io.IoError %sum5
 
 else:                                             ; preds = %entry
-  %call6 = call i64 @fs.O_CREAT()
-  %call7 = call i64 @fs.O_TRUNC()
-  %call8 = call i64 @"coil.core.BitOr$i64$|"(i64 %call6, i64 %call7)
-  %call9 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call8)
-  %trunc = trunc i64 %call9 to i32
-  %call10 = call i32 (ptr, i32, ...) @open(ptr %call, i32 %trunc, i64 420)
+  %call6 = call i64 @"coil.core.BitOr$i64$|"(i64 64, i64 512)
+  %call7 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call6)
+  %trunc = trunc i64 %call7 to i32
+  %call8 = call i32 (ptr, i32, ...) @open(ptr %call, i32 %trunc, i64 420)
   %stack.slot = alloca %io.Writer, align 8
-  %cmp11 = icmp slt i32 %call10, 0
-  %ifc12 = icmp ne i1 %cmp11, false
-  br i1 %ifc12, label %then13, label %else14
+  %cmp9 = icmp slt i32 %call8, 0
+  %ifc10 = icmp ne i1 %cmp9, false
+  br i1 %ifc10, label %then11, label %else12
 
-then13:                                           ; preds = %else
-  %tag16 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 0
-  store i32 1, ptr %tag16, align 4
-  %payload17 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, i32 0, i32 1
-  %tag19 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp18, i32 0, i32 0
-  store i32 1, ptr %tag19, align 4
-  %payload20 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp18, i32 0, i32 1
-  %sext = sext i32 %call10 to i64
-  %vf21 = getelementptr inbounds nuw { i64 }, ptr %payload20, i32 0, i32 0
-  store i64 %sext, ptr %vf21, align 8
-  %sum22 = load %io.IoError, ptr %sum.tmp18, align 8
-  %vf23 = getelementptr inbounds nuw { %io.IoError }, ptr %payload17, i32 0, i32 0
-  store %io.IoError %sum22, ptr %vf23, align 8
-  %sum24 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp15, align 8
+then11:                                           ; preds = %else
+  %tag14 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp13, i32 0, i32 0
+  store i32 1, ptr %tag14, align 4
+  %payload15 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp13, i32 0, i32 1
+  %tag17 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp16, i32 0, i32 0
+  store i32 1, ptr %tag17, align 4
+  %payload18 = getelementptr inbounds nuw %io.IoError, ptr %sum.tmp16, i32 0, i32 1
+  %sext = sext i32 %call8 to i64
+  %vf19 = getelementptr inbounds nuw { i64 }, ptr %payload18, i32 0, i32 0
+  store i64 %sext, ptr %vf19, align 8
+  %sum20 = load %io.IoError, ptr %sum.tmp16, align 8
+  %vf21 = getelementptr inbounds nuw { %io.IoError }, ptr %payload15, i32 0, i32 0
+  store %io.IoError %sum20, ptr %vf21, align 8
+  %sum22 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp13, align 8
   br label %ifcont
 
-else14:                                           ; preds = %else
-  %sext25 = sext i32 %call10 to i64
-  %call26 = call ptr @io.fd-writer(ptr %stack.slot, i64 %sext25)
-  %call27 = call ptr @slice.slice-data__u8({ ptr, i64 } %data)
-  %call28 = call i64 @slice.slice-len__u8({ ptr, i64 } %data)
-  %call29 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %call26, ptr %call27, i64 %call28)
+else12:                                           ; preds = %else
+  %sext23 = sext i32 %call8 to i64
+  %call24 = call ptr @io.fd-writer(ptr %stack.slot, i64 %sext23)
+  %call25 = call ptr @slice.slice-data__u8({ ptr, i64 } %data)
+  %call26 = call i64 @slice.slice-len__u8({ ptr, i64 } %data)
+  %call27 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %call24, ptr %call25, i64 %call26)
   br label %ifcont
 
-ifcont:                                           ; preds = %else14, %then13
-  %ifval = phi %coil.core.Result__i64__io.IoError [ %sum24, %then13 ], [ %call29, %else14 ]
-  %cmp30 = icmp sge i32 %call10, 0
-  %ifc31 = icmp ne i1 %cmp30, false
-  br i1 %ifc31, label %then32, label %else33
+ifcont:                                           ; preds = %else12, %then11
+  %ifval = phi %coil.core.Result__i64__io.IoError [ %sum22, %then11 ], [ %call27, %else12 ]
+  %cmp28 = icmp sge i32 %call8, 0
+  %ifc29 = icmp ne i1 %cmp28, false
+  br i1 %ifc29, label %then30, label %else31
 
-then32:                                           ; preds = %ifcont
-  %call34 = call i32 @close(i32 %call10)
-  br label %ifcont35
+then30:                                           ; preds = %ifcont
+  %call32 = call i32 @close(i32 %call8)
+  br label %ifcont33
 
-else33:                                           ; preds = %ifcont
-  br label %ifcont35
+else31:                                           ; preds = %ifcont
+  br label %ifcont33
 
-ifcont35:                                         ; preds = %else33, %then32
-  %ifval36 = phi i32 [ %call34, %then32 ], [ 0, %else33 ]
-  %call37 = call i64 @slice.slice-len__u8({ ptr, i64 } %path)
-  %add = add i64 %call37, 1
-  %call38 = call i64 @alloc.raw-free(ptr %a, ptr %call, i64 %add, i64 1)
+ifcont33:                                         ; preds = %else31, %then30
+  %ifval34 = phi i32 [ %call32, %then30 ], [ 0, %else31 ]
+  %call35 = call i64 @slice.slice-len__u8({ ptr, i64 } %path)
+  %add = add i64 %call35, 1
+  %call36 = call i64 @alloc.raw-free(ptr %a, ptr %call, i64 %add, i64 1)
   ret %coil.core.Result__i64__io.IoError %ifval
 }
 
@@ -3302,17 +3236,17 @@ entry:
 
 define i64 @main() {
 entry:
-  %match.tmp226 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp220 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
   %spill = alloca %str.StrBuf, align 8
   %abi.sret = alloca %str.StrBuf, align 8
-  %match.tmp200 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
-  %match.tmp182 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
-  %match.tmp163 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
-  %match.tmp146 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
-  %match.tmp117 = alloca %coil.core.Result__fs.File__io.IoError, align 8
-  %match.tmp102 = alloca %coil.core.Result__fs.File__io.IoError, align 8
-  %match.tmp80 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
-  %match.tmp60 = alloca %coil.core.Result__fs.File__io.IoError, align 8
+  %match.tmp194 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp176 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp157 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp140 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp111 = alloca %coil.core.Result__fs.File__io.IoError, align 8
+  %match.tmp98 = alloca %coil.core.Result__fs.File__io.IoError, align 8
+  %match.tmp78 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
+  %match.tmp58 = alloca %coil.core.Result__fs.File__io.IoError, align 8
   %match.tmp39 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
   %match.tmp23 = alloca %coil.core.Result__slice_u8__io.IoError, align 8
   %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
@@ -3418,345 +3352,339 @@ match.default45:                                  ; preds = %match.end30
 match.end46:                                      ; preds = %arm44, %arm43
   %match.val53 = phi i64 [ %call49, %arm43 ], [ %call52, %arm44 ]
   %call54 = call ptr @"str.str->cstr"(ptr %call, { ptr, i64 } { ptr @str.18, i64 23 })
-  %call55 = call i64 @fs.O_CREAT()
-  %call56 = call i64 @fs.O_TRUNC()
-  %call57 = call i64 @"coil.core.BitOr$i64$|"(i64 %call55, i64 %call56)
-  %call58 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call57)
-  %call59 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call54, i64 %call58, i64 420)
-  store %coil.core.Result__fs.File__io.IoError %call59, ptr %match.tmp60, align 8
-  %tag61 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp60, i32 0, i32 0
-  %tag62 = load i32, ptr %tag61, align 4
-  %payload63 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp60, i32 0, i32 1
-  switch i32 %tag62, label %match.default66 [
-    i32 0, label %arm64
-    i32 1, label %arm65
+  %call55 = call i64 @"coil.core.BitOr$i64$|"(i64 64, i64 512)
+  %call56 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call55)
+  %call57 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call54, i64 %call56, i64 420)
+  store %coil.core.Result__fs.File__io.IoError %call57, ptr %match.tmp58, align 8
+  %tag59 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp58, i32 0, i32 0
+  %tag60 = load i32, ptr %tag59, align 4
+  %payload61 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp58, i32 0, i32 1
+  switch i32 %tag60, label %match.default64 [
+    i32 0, label %arm62
+    i32 1, label %arm63
   ]
 
-arm64:                                            ; preds = %match.end46
-  %vf68 = getelementptr inbounds nuw { %fs.File }, ptr %payload63, i32 0, i32 0
-  %f = load %fs.File, ptr %vf68, align 8
-  %stack.slot69 = alloca %fs.File, align 8
-  store %fs.File %f, ptr %stack.slot69, align 8
-  %stack.slot70 = alloca %io.Writer, align 8
-  %call71 = call ptr @fs.file-writer(ptr %stack.slot70, ptr %stack.slot69)
-  %call72 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call71, { ptr, i64 } { ptr @str.19, i64 9 })
-  %call73 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot69)
-  %call74 = call i64 @"fslib.note!"(ptr %stack.slot, i64 4, i1 true)
-  br label %match.end67
+arm62:                                            ; preds = %match.end46
+  %vf66 = getelementptr inbounds nuw { %fs.File }, ptr %payload61, i32 0, i32 0
+  %f = load %fs.File, ptr %vf66, align 8
+  %stack.slot67 = alloca %fs.File, align 8
+  store %fs.File %f, ptr %stack.slot67, align 8
+  %stack.slot68 = alloca %io.Writer, align 8
+  %call69 = call ptr @fs.file-writer(ptr %stack.slot68, ptr %stack.slot67)
+  %call70 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call69, { ptr, i64 } { ptr @str.19, i64 9 })
+  %call71 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot67)
+  %call72 = call i64 @"fslib.note!"(ptr %stack.slot, i64 4, i1 true)
+  br label %match.end65
 
-arm65:                                            ; preds = %match.end46
-  %vf75 = getelementptr inbounds nuw { %io.IoError }, ptr %payload63, i32 0, i32 0
-  %e76 = load %io.IoError, ptr %vf75, align 8
-  %call77 = call i64 @"fslib.note!"(ptr %stack.slot, i64 4, i1 false)
-  br label %match.end67
+arm63:                                            ; preds = %match.end46
+  %vf73 = getelementptr inbounds nuw { %io.IoError }, ptr %payload61, i32 0, i32 0
+  %e74 = load %io.IoError, ptr %vf73, align 8
+  %call75 = call i64 @"fslib.note!"(ptr %stack.slot, i64 4, i1 false)
+  br label %match.end65
 
-match.default66:                                  ; preds = %match.end46
+match.default64:                                  ; preds = %match.end46
   unreachable
 
-match.end67:                                      ; preds = %arm65, %arm64
-  %match.val78 = phi i64 [ %call74, %arm64 ], [ %call77, %arm65 ]
-  %call79 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.20, i64 23 })
-  store %coil.core.Result__slice_u8__io.IoError %call79, ptr %match.tmp80, align 8
-  %tag81 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp80, i32 0, i32 0
-  %tag82 = load i32, ptr %tag81, align 4
-  %payload83 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp80, i32 0, i32 1
-  switch i32 %tag82, label %match.default86 [
-    i32 0, label %arm84
-    i32 1, label %arm85
+match.end65:                                      ; preds = %arm63, %arm62
+  %match.val76 = phi i64 [ %call72, %arm62 ], [ %call75, %arm63 ]
+  %call77 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.20, i64 23 })
+  store %coil.core.Result__slice_u8__io.IoError %call77, ptr %match.tmp78, align 8
+  %tag79 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp78, i32 0, i32 0
+  %tag80 = load i32, ptr %tag79, align 4
+  %payload81 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp78, i32 0, i32 1
+  switch i32 %tag80, label %match.default84 [
+    i32 0, label %arm82
+    i32 1, label %arm83
   ]
 
-arm84:                                            ; preds = %match.end67
-  %vf88 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload83, i32 0, i32 0
-  %s89 = load { ptr, i64 }, ptr %vf88, align 8
-  %call90 = call i1 @str.str-eq({ ptr, i64 } %s89, { ptr, i64 } { ptr @str.21, i64 9 })
-  %call91 = call i64 @"fslib.note!"(ptr %stack.slot, i64 5, i1 %call90)
-  br label %match.end87
+arm82:                                            ; preds = %match.end65
+  %vf86 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload81, i32 0, i32 0
+  %s87 = load { ptr, i64 }, ptr %vf86, align 8
+  %call88 = call i1 @str.str-eq({ ptr, i64 } %s87, { ptr, i64 } { ptr @str.21, i64 9 })
+  %call89 = call i64 @"fslib.note!"(ptr %stack.slot, i64 5, i1 %call88)
+  br label %match.end85
 
-arm85:                                            ; preds = %match.end67
-  %vf92 = getelementptr inbounds nuw { %io.IoError }, ptr %payload83, i32 0, i32 0
-  %e93 = load %io.IoError, ptr %vf92, align 8
-  %call94 = call i64 @"fslib.note!"(ptr %stack.slot, i64 5, i1 false)
-  br label %match.end87
+arm83:                                            ; preds = %match.end65
+  %vf90 = getelementptr inbounds nuw { %io.IoError }, ptr %payload81, i32 0, i32 0
+  %e91 = load %io.IoError, ptr %vf90, align 8
+  %call92 = call i64 @"fslib.note!"(ptr %stack.slot, i64 5, i1 false)
+  br label %match.end85
 
-match.default86:                                  ; preds = %match.end67
+match.default84:                                  ; preds = %match.end65
   unreachable
 
-match.end87:                                      ; preds = %arm85, %arm84
-  %match.val95 = phi i64 [ %call91, %arm84 ], [ %call94, %arm85 ]
-  %call96 = call ptr @"str.str->cstr"(ptr %call, { ptr, i64 } { ptr @str.22, i64 24 })
-  %call97 = call i64 @fs.O_CREAT()
-  %call98 = call i64 @fs.O_TRUNC()
-  %call99 = call i64 @"coil.core.BitOr$i64$|"(i64 %call97, i64 %call98)
-  %call100 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call99)
-  %call101 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call96, i64 %call100, i64 420)
-  store %coil.core.Result__fs.File__io.IoError %call101, ptr %match.tmp102, align 8
-  %tag103 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp102, i32 0, i32 0
-  %tag104 = load i32, ptr %tag103, align 4
-  %payload105 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp102, i32 0, i32 1
-  switch i32 %tag104, label %match.default108 [
-    i32 0, label %arm106
-    i32 1, label %arm107
+match.end85:                                      ; preds = %arm83, %arm82
+  %match.val93 = phi i64 [ %call89, %arm82 ], [ %call92, %arm83 ]
+  %call94 = call ptr @"str.str->cstr"(ptr %call, { ptr, i64 } { ptr @str.22, i64 24 })
+  %call95 = call i64 @"coil.core.BitOr$i64$|"(i64 64, i64 512)
+  %call96 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call95)
+  %call97 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call94, i64 %call96, i64 420)
+  store %coil.core.Result__fs.File__io.IoError %call97, ptr %match.tmp98, align 8
+  %tag99 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp98, i32 0, i32 0
+  %tag100 = load i32, ptr %tag99, align 4
+  %payload101 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp98, i32 0, i32 1
+  switch i32 %tag100, label %match.default104 [
+    i32 0, label %arm102
+    i32 1, label %arm103
   ]
 
-arm106:                                           ; preds = %match.end87
-  %vf110 = getelementptr inbounds nuw { %fs.File }, ptr %payload105, i32 0, i32 0
-  %f1 = load %fs.File, ptr %vf110, align 8
-  %call111 = call ptr @"str.str->cstr"(ptr %call, { ptr, i64 } { ptr @str.23, i64 24 })
-  %call112 = call i64 @fs.O_CREAT()
-  %call113 = call i64 @fs.O_TRUNC()
-  %call114 = call i64 @"coil.core.BitOr$i64$|"(i64 %call112, i64 %call113)
-  %call115 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call114)
-  %call116 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call111, i64 %call115, i64 420)
-  store %coil.core.Result__fs.File__io.IoError %call116, ptr %match.tmp117, align 8
-  %tag118 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp117, i32 0, i32 0
-  %tag119 = load i32, ptr %tag118, align 4
-  %payload120 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp117, i32 0, i32 1
-  switch i32 %tag119, label %match.default123 [
-    i32 0, label %arm121
-    i32 1, label %arm122
+arm102:                                           ; preds = %match.end85
+  %vf106 = getelementptr inbounds nuw { %fs.File }, ptr %payload101, i32 0, i32 0
+  %f1 = load %fs.File, ptr %vf106, align 8
+  %call107 = call ptr @"str.str->cstr"(ptr %call, { ptr, i64 } { ptr @str.23, i64 24 })
+  %call108 = call i64 @"coil.core.BitOr$i64$|"(i64 64, i64 512)
+  %call109 = call i64 @"coil.core.BitOr$i64$|"(i64 1, i64 %call108)
+  %call110 = call %coil.core.Result__fs.File__io.IoError @fs.file-open(ptr %call107, i64 %call109, i64 420)
+  store %coil.core.Result__fs.File__io.IoError %call110, ptr %match.tmp111, align 8
+  %tag112 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp111, i32 0, i32 0
+  %tag113 = load i32, ptr %tag112, align 4
+  %payload114 = getelementptr inbounds nuw %coil.core.Result__fs.File__io.IoError, ptr %match.tmp111, i32 0, i32 1
+  switch i32 %tag113, label %match.default117 [
+    i32 0, label %arm115
+    i32 1, label %arm116
   ]
 
-arm107:                                           ; preds = %match.end87
-  %vf141 = getelementptr inbounds nuw { %io.IoError }, ptr %payload105, i32 0, i32 0
-  %e142 = load %io.IoError, ptr %vf141, align 8
-  %call143 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 false)
-  br label %match.end109
+arm103:                                           ; preds = %match.end85
+  %vf135 = getelementptr inbounds nuw { %io.IoError }, ptr %payload101, i32 0, i32 0
+  %e136 = load %io.IoError, ptr %vf135, align 8
+  %call137 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 false)
+  br label %match.end105
 
-match.default108:                                 ; preds = %match.end87
+match.default104:                                 ; preds = %match.end85
   unreachable
 
-match.end109:                                     ; preds = %arm107, %match.end124
-  %match.val144 = phi i64 [ %match.val140, %match.end124 ], [ %call143, %arm107 ]
-  %call145 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.24, i64 24 })
-  store %coil.core.Result__slice_u8__io.IoError %call145, ptr %match.tmp146, align 8
-  %tag147 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp146, i32 0, i32 0
-  %tag148 = load i32, ptr %tag147, align 4
-  %payload149 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp146, i32 0, i32 1
-  switch i32 %tag148, label %match.default152 [
-    i32 0, label %arm150
-    i32 1, label %arm151
+match.end105:                                     ; preds = %arm103, %match.end118
+  %match.val138 = phi i64 [ %match.val134, %match.end118 ], [ %call137, %arm103 ]
+  %call139 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.24, i64 24 })
+  store %coil.core.Result__slice_u8__io.IoError %call139, ptr %match.tmp140, align 8
+  %tag141 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp140, i32 0, i32 0
+  %tag142 = load i32, ptr %tag141, align 4
+  %payload143 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp140, i32 0, i32 1
+  switch i32 %tag142, label %match.default146 [
+    i32 0, label %arm144
+    i32 1, label %arm145
   ]
 
-arm121:                                           ; preds = %arm106
-  %vf125 = getelementptr inbounds nuw { %fs.File }, ptr %payload120, i32 0, i32 0
-  %f2 = load %fs.File, ptr %vf125, align 8
-  %stack.slot126 = alloca %fs.File, align 8
-  %stack.slot127 = alloca %fs.File, align 8
-  store %fs.File %f1, ptr %stack.slot126, align 8
-  store %fs.File %f2, ptr %stack.slot127, align 8
-  %stack.slot128 = alloca %io.Writer, align 8
-  %call129 = call ptr @fs.file-writer(ptr %stack.slot128, ptr %stack.slot126)
-  %stack.slot130 = alloca %io.Writer, align 8
-  %call131 = call ptr @fs.file-writer(ptr %stack.slot130, ptr %stack.slot127)
-  %call132 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call129, { ptr, i64 } { ptr @str.25, i64 4 })
-  %call133 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call131, { ptr, i64 } { ptr @str.26, i64 4 })
-  %call134 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot126)
-  %call135 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot127)
-  %call136 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 true)
-  br label %match.end124
+arm115:                                           ; preds = %arm102
+  %vf119 = getelementptr inbounds nuw { %fs.File }, ptr %payload114, i32 0, i32 0
+  %f2 = load %fs.File, ptr %vf119, align 8
+  %stack.slot120 = alloca %fs.File, align 8
+  %stack.slot121 = alloca %fs.File, align 8
+  store %fs.File %f1, ptr %stack.slot120, align 8
+  store %fs.File %f2, ptr %stack.slot121, align 8
+  %stack.slot122 = alloca %io.Writer, align 8
+  %call123 = call ptr @fs.file-writer(ptr %stack.slot122, ptr %stack.slot120)
+  %stack.slot124 = alloca %io.Writer, align 8
+  %call125 = call ptr @fs.file-writer(ptr %stack.slot124, ptr %stack.slot121)
+  %call126 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call123, { ptr, i64 } { ptr @str.25, i64 4 })
+  %call127 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call125, { ptr, i64 } { ptr @str.26, i64 4 })
+  %call128 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot120)
+  %call129 = call %coil.core.Result__i64__io.IoError @fs.file-close(ptr %stack.slot121)
+  %call130 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 true)
+  br label %match.end118
 
-arm122:                                           ; preds = %arm106
-  %vf137 = getelementptr inbounds nuw { %io.IoError }, ptr %payload120, i32 0, i32 0
-  %e138 = load %io.IoError, ptr %vf137, align 8
-  %call139 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 false)
-  br label %match.end124
+arm116:                                           ; preds = %arm102
+  %vf131 = getelementptr inbounds nuw { %io.IoError }, ptr %payload114, i32 0, i32 0
+  %e132 = load %io.IoError, ptr %vf131, align 8
+  %call133 = call i64 @"fslib.note!"(ptr %stack.slot, i64 6, i1 false)
+  br label %match.end118
 
-match.default123:                                 ; preds = %arm106
+match.default117:                                 ; preds = %arm102
   unreachable
 
-match.end124:                                     ; preds = %arm122, %arm121
-  %match.val140 = phi i64 [ %call136, %arm121 ], [ %call139, %arm122 ]
-  br label %match.end109
+match.end118:                                     ; preds = %arm116, %arm115
+  %match.val134 = phi i64 [ %call130, %arm115 ], [ %call133, %arm116 ]
+  br label %match.end105
 
-arm150:                                           ; preds = %match.end109
-  %vf154 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload149, i32 0, i32 0
-  %s155 = load { ptr, i64 }, ptr %vf154, align 8
-  %call156 = call i1 @str.str-eq({ ptr, i64 } %s155, { ptr, i64 } { ptr @str.27, i64 4 })
-  %call157 = call i64 @"fslib.note!"(ptr %stack.slot, i64 7, i1 %call156)
-  br label %match.end153
+arm144:                                           ; preds = %match.end105
+  %vf148 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload143, i32 0, i32 0
+  %s149 = load { ptr, i64 }, ptr %vf148, align 8
+  %call150 = call i1 @str.str-eq({ ptr, i64 } %s149, { ptr, i64 } { ptr @str.27, i64 4 })
+  %call151 = call i64 @"fslib.note!"(ptr %stack.slot, i64 7, i1 %call150)
+  br label %match.end147
 
-arm151:                                           ; preds = %match.end109
-  %vf158 = getelementptr inbounds nuw { %io.IoError }, ptr %payload149, i32 0, i32 0
-  %e159 = load %io.IoError, ptr %vf158, align 8
-  %call160 = call i64 @"fslib.note!"(ptr %stack.slot, i64 7, i1 false)
-  br label %match.end153
+arm145:                                           ; preds = %match.end105
+  %vf152 = getelementptr inbounds nuw { %io.IoError }, ptr %payload143, i32 0, i32 0
+  %e153 = load %io.IoError, ptr %vf152, align 8
+  %call154 = call i64 @"fslib.note!"(ptr %stack.slot, i64 7, i1 false)
+  br label %match.end147
 
-match.default152:                                 ; preds = %match.end109
+match.default146:                                 ; preds = %match.end105
   unreachable
 
-match.end153:                                     ; preds = %arm151, %arm150
-  %match.val161 = phi i64 [ %call157, %arm150 ], [ %call160, %arm151 ]
-  %call162 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.28, i64 24 })
-  store %coil.core.Result__slice_u8__io.IoError %call162, ptr %match.tmp163, align 8
-  %tag164 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp163, i32 0, i32 0
-  %tag165 = load i32, ptr %tag164, align 4
-  %payload166 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp163, i32 0, i32 1
-  switch i32 %tag165, label %match.default169 [
-    i32 0, label %arm167
-    i32 1, label %arm168
+match.end147:                                     ; preds = %arm145, %arm144
+  %match.val155 = phi i64 [ %call151, %arm144 ], [ %call154, %arm145 ]
+  %call156 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.28, i64 24 })
+  store %coil.core.Result__slice_u8__io.IoError %call156, ptr %match.tmp157, align 8
+  %tag158 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp157, i32 0, i32 0
+  %tag159 = load i32, ptr %tag158, align 4
+  %payload160 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp157, i32 0, i32 1
+  switch i32 %tag159, label %match.default163 [
+    i32 0, label %arm161
+    i32 1, label %arm162
   ]
 
-arm167:                                           ; preds = %match.end153
-  %vf171 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload166, i32 0, i32 0
-  %s172 = load { ptr, i64 }, ptr %vf171, align 8
-  %call173 = call i1 @str.str-eq({ ptr, i64 } %s172, { ptr, i64 } { ptr @str.29, i64 4 })
-  %call174 = call i64 @"fslib.note!"(ptr %stack.slot, i64 8, i1 %call173)
-  br label %match.end170
+arm161:                                           ; preds = %match.end147
+  %vf165 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload160, i32 0, i32 0
+  %s166 = load { ptr, i64 }, ptr %vf165, align 8
+  %call167 = call i1 @str.str-eq({ ptr, i64 } %s166, { ptr, i64 } { ptr @str.29, i64 4 })
+  %call168 = call i64 @"fslib.note!"(ptr %stack.slot, i64 8, i1 %call167)
+  br label %match.end164
 
-arm168:                                           ; preds = %match.end153
-  %vf175 = getelementptr inbounds nuw { %io.IoError }, ptr %payload166, i32 0, i32 0
-  %e176 = load %io.IoError, ptr %vf175, align 8
-  %call177 = call i64 @"fslib.note!"(ptr %stack.slot, i64 8, i1 false)
-  br label %match.end170
+arm162:                                           ; preds = %match.end147
+  %vf169 = getelementptr inbounds nuw { %io.IoError }, ptr %payload160, i32 0, i32 0
+  %e170 = load %io.IoError, ptr %vf169, align 8
+  %call171 = call i64 @"fslib.note!"(ptr %stack.slot, i64 8, i1 false)
+  br label %match.end164
 
-match.default169:                                 ; preds = %match.end153
+match.default163:                                 ; preds = %match.end147
   unreachable
 
-match.end170:                                     ; preds = %arm168, %arm167
-  %match.val178 = phi i64 [ %call174, %arm167 ], [ %call177, %arm168 ]
-  %call179 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.30, i64 23 }, { ptr, i64 } { ptr @str.31, i64 16 })
-  %call180 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.32, i64 23 }, { ptr, i64 } { ptr @str.33, i64 2 })
-  %call181 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.34, i64 23 })
-  store %coil.core.Result__slice_u8__io.IoError %call181, ptr %match.tmp182, align 8
-  %tag183 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp182, i32 0, i32 0
-  %tag184 = load i32, ptr %tag183, align 4
-  %payload185 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp182, i32 0, i32 1
-  switch i32 %tag184, label %match.default188 [
-    i32 0, label %arm186
-    i32 1, label %arm187
+match.end164:                                     ; preds = %arm162, %arm161
+  %match.val172 = phi i64 [ %call168, %arm161 ], [ %call171, %arm162 ]
+  %call173 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.30, i64 23 }, { ptr, i64 } { ptr @str.31, i64 16 })
+  %call174 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.32, i64 23 }, { ptr, i64 } { ptr @str.33, i64 2 })
+  %call175 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.34, i64 23 })
+  store %coil.core.Result__slice_u8__io.IoError %call175, ptr %match.tmp176, align 8
+  %tag177 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp176, i32 0, i32 0
+  %tag178 = load i32, ptr %tag177, align 4
+  %payload179 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp176, i32 0, i32 1
+  switch i32 %tag178, label %match.default182 [
+    i32 0, label %arm180
+    i32 1, label %arm181
   ]
 
-arm186:                                           ; preds = %match.end170
-  %vf190 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload185, i32 0, i32 0
-  %s191 = load { ptr, i64 }, ptr %vf190, align 8
-  %call192 = call i1 @str.str-eq({ ptr, i64 } %s191, { ptr, i64 } { ptr @str.35, i64 2 })
-  %call193 = call i64 @"fslib.note!"(ptr %stack.slot, i64 9, i1 %call192)
-  br label %match.end189
+arm180:                                           ; preds = %match.end164
+  %vf184 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload179, i32 0, i32 0
+  %s185 = load { ptr, i64 }, ptr %vf184, align 8
+  %call186 = call i1 @str.str-eq({ ptr, i64 } %s185, { ptr, i64 } { ptr @str.35, i64 2 })
+  %call187 = call i64 @"fslib.note!"(ptr %stack.slot, i64 9, i1 %call186)
+  br label %match.end183
 
-arm187:                                           ; preds = %match.end170
-  %vf194 = getelementptr inbounds nuw { %io.IoError }, ptr %payload185, i32 0, i32 0
-  %e195 = load %io.IoError, ptr %vf194, align 8
-  %call196 = call i64 @"fslib.note!"(ptr %stack.slot, i64 9, i1 false)
-  br label %match.end189
+arm181:                                           ; preds = %match.end164
+  %vf188 = getelementptr inbounds nuw { %io.IoError }, ptr %payload179, i32 0, i32 0
+  %e189 = load %io.IoError, ptr %vf188, align 8
+  %call190 = call i64 @"fslib.note!"(ptr %stack.slot, i64 9, i1 false)
+  br label %match.end183
 
-match.default188:                                 ; preds = %match.end170
+match.default182:                                 ; preds = %match.end164
   unreachable
 
-match.end189:                                     ; preds = %arm187, %arm186
-  %match.val197 = phi i64 [ %call193, %arm186 ], [ %call196, %arm187 ]
-  %call198 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.36, i64 23 }, { ptr, i64 } { ptr @str.37, i64 0 })
-  %call199 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.38, i64 23 })
-  store %coil.core.Result__slice_u8__io.IoError %call199, ptr %match.tmp200, align 8
-  %tag201 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp200, i32 0, i32 0
-  %tag202 = load i32, ptr %tag201, align 4
-  %payload203 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp200, i32 0, i32 1
-  switch i32 %tag202, label %match.default206 [
-    i32 0, label %arm204
-    i32 1, label %arm205
+match.end183:                                     ; preds = %arm181, %arm180
+  %match.val191 = phi i64 [ %call187, %arm180 ], [ %call190, %arm181 ]
+  %call192 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.36, i64 23 }, { ptr, i64 } { ptr @str.37, i64 0 })
+  %call193 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.38, i64 23 })
+  store %coil.core.Result__slice_u8__io.IoError %call193, ptr %match.tmp194, align 8
+  %tag195 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp194, i32 0, i32 0
+  %tag196 = load i32, ptr %tag195, align 4
+  %payload197 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp194, i32 0, i32 1
+  switch i32 %tag196, label %match.default200 [
+    i32 0, label %arm198
+    i32 1, label %arm199
   ]
 
-arm204:                                           ; preds = %match.end189
-  %vf208 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload203, i32 0, i32 0
-  %s209 = load { ptr, i64 }, ptr %vf208, align 8
-  %call210 = call i64 @slice.slice-len__u8({ ptr, i64 } %s209)
-  %cmp211 = icmp eq i64 %call210, 0
-  %call212 = call i64 @"fslib.note!"(ptr %stack.slot, i64 10, i1 %cmp211)
-  br label %match.end207
+arm198:                                           ; preds = %match.end183
+  %vf202 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload197, i32 0, i32 0
+  %s203 = load { ptr, i64 }, ptr %vf202, align 8
+  %call204 = call i64 @slice.slice-len__u8({ ptr, i64 } %s203)
+  %cmp205 = icmp eq i64 %call204, 0
+  %call206 = call i64 @"fslib.note!"(ptr %stack.slot, i64 10, i1 %cmp205)
+  br label %match.end201
 
-arm205:                                           ; preds = %match.end189
-  %vf213 = getelementptr inbounds nuw { %io.IoError }, ptr %payload203, i32 0, i32 0
-  %e214 = load %io.IoError, ptr %vf213, align 8
-  %call215 = call i64 @"fslib.note!"(ptr %stack.slot, i64 10, i1 false)
-  br label %match.end207
+arm199:                                           ; preds = %match.end183
+  %vf207 = getelementptr inbounds nuw { %io.IoError }, ptr %payload197, i32 0, i32 0
+  %e208 = load %io.IoError, ptr %vf207, align 8
+  %call209 = call i64 @"fslib.note!"(ptr %stack.slot, i64 10, i1 false)
+  br label %match.end201
 
-match.default206:                                 ; preds = %match.end189
+match.default200:                                 ; preds = %match.end183
   unreachable
 
-match.end207:                                     ; preds = %arm205, %arm204
-  %match.val216 = phi i64 [ %call212, %arm204 ], [ %call215, %arm205 ]
-  %stack.slot217 = alloca %str.StrBuf, align 8
+match.end201:                                     ; preds = %arm199, %arm198
+  %match.val210 = phi i64 [ %call206, %arm198 ], [ %call209, %arm199 ]
+  %stack.slot211 = alloca %str.StrBuf, align 8
   call void @str.sb-new(ptr sret(%str.StrBuf) align 8 %abi.sret, ptr %call)
   %abi.ret = load %str.StrBuf, ptr %abi.sret, align 8
-  store %str.StrBuf %abi.ret, ptr %stack.slot217, align 8
-  %stack.slot218 = alloca i64, align 8
-  store i64 0, ptr %stack.slot218, align 8
+  store %str.StrBuf %abi.ret, ptr %stack.slot211, align 8
+  %stack.slot212 = alloca i64, align 8
+  store i64 0, ptr %stack.slot212, align 8
   br label %loop.body
 
-loop.body:                                        ; preds = %else, %match.end207
-  %load = load i64, ptr %stack.slot218, align 8
-  %cmp219 = icmp sge i64 %load, 5000
-  %ifc = icmp ne i1 %cmp219, false
+loop.body:                                        ; preds = %else, %match.end201
+  %load = load i64, ptr %stack.slot212, align 8
+  %cmp213 = icmp sge i64 %load, 5000
+  %ifc = icmp ne i1 %cmp213, false
   br i1 %ifc, label %then, label %else
 
 loop.after:                                       ; preds = %then
   %loop.val = phi i64 [ 0, %then ]
-  %load222 = load %str.StrBuf, ptr %stack.slot217, align 8
-  store %str.StrBuf %load222, ptr %spill, align 8
-  %call223 = call { ptr, i64 } @str.sb-str(ptr %spill)
-  %call224 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.39, i64 25 }, { ptr, i64 } %call223)
-  %call225 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.40, i64 25 })
-  store %coil.core.Result__slice_u8__io.IoError %call225, ptr %match.tmp226, align 8
-  %tag227 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp226, i32 0, i32 0
-  %tag228 = load i32, ptr %tag227, align 4
-  %payload229 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp226, i32 0, i32 1
-  switch i32 %tag228, label %match.default232 [
-    i32 0, label %arm230
-    i32 1, label %arm231
+  %load216 = load %str.StrBuf, ptr %stack.slot211, align 8
+  store %str.StrBuf %load216, ptr %spill, align 8
+  %call217 = call { ptr, i64 } @str.sb-str(ptr %spill)
+  %call218 = call %coil.core.Result__i64__io.IoError @fs.write-file(ptr %call, { ptr, i64 } { ptr @str.39, i64 25 }, { ptr, i64 } %call217)
+  %call219 = call %coil.core.Result__slice_u8__io.IoError @fs.read-file(ptr %call, { ptr, i64 } { ptr @str.40, i64 25 })
+  store %coil.core.Result__slice_u8__io.IoError %call219, ptr %match.tmp220, align 8
+  %tag221 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp220, i32 0, i32 0
+  %tag222 = load i32, ptr %tag221, align 4
+  %payload223 = getelementptr inbounds nuw %coil.core.Result__slice_u8__io.IoError, ptr %match.tmp220, i32 0, i32 1
+  switch i32 %tag222, label %match.default226 [
+    i32 0, label %arm224
+    i32 1, label %arm225
   ]
 
 then:                                             ; preds = %loop.body
   br label %loop.after
 
 else:                                             ; preds = %loop.body
-  %call220 = call i64 @"str.sb-push-byte!"(ptr %stack.slot217, i8 120)
-  %load221 = load i64, ptr %stack.slot218, align 8
-  %add = add i64 %load221, 1
-  store i64 %add, ptr %stack.slot218, align 8
+  %call214 = call i64 @"str.sb-push-byte!"(ptr %stack.slot211, i8 120)
+  %load215 = load i64, ptr %stack.slot212, align 8
+  %add = add i64 %load215, 1
+  store i64 %add, ptr %stack.slot212, align 8
   br label %loop.body
 
-arm230:                                           ; preds = %loop.after
-  %vf234 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload229, i32 0, i32 0
-  %s235 = load { ptr, i64 }, ptr %vf234, align 8
-  %call236 = call i64 @slice.slice-len__u8({ ptr, i64 } %s235)
-  %cmp237 = icmp eq i64 %call236, 5000
-  %ifc238 = icmp ne i1 %cmp237, false
-  br i1 %ifc238, label %then239, label %else240
+arm224:                                           ; preds = %loop.after
+  %vf228 = getelementptr inbounds nuw { { ptr, i64 } }, ptr %payload223, i32 0, i32 0
+  %s229 = load { ptr, i64 }, ptr %vf228, align 8
+  %call230 = call i64 @slice.slice-len__u8({ ptr, i64 } %s229)
+  %cmp231 = icmp eq i64 %call230, 5000
+  %ifc232 = icmp ne i1 %cmp231, false
+  br i1 %ifc232, label %then233, label %else234
 
-arm231:                                           ; preds = %loop.after
-  %vf243 = getelementptr inbounds nuw { %io.IoError }, ptr %payload229, i32 0, i32 0
-  %e244 = load %io.IoError, ptr %vf243, align 8
-  %call245 = call i64 @"fslib.note!"(ptr %stack.slot, i64 11, i1 false)
-  br label %match.end233
+arm225:                                           ; preds = %loop.after
+  %vf237 = getelementptr inbounds nuw { %io.IoError }, ptr %payload223, i32 0, i32 0
+  %e238 = load %io.IoError, ptr %vf237, align 8
+  %call239 = call i64 @"fslib.note!"(ptr %stack.slot, i64 11, i1 false)
+  br label %match.end227
 
-match.default232:                                 ; preds = %loop.after
+match.default226:                                 ; preds = %loop.after
   unreachable
 
-match.end233:                                     ; preds = %arm231, %ifcont
-  %match.val246 = phi i64 [ %call242, %ifcont ], [ %call245, %arm231 ]
-  %load247 = load i64, ptr %stack.slot, align 8
-  %cmp248 = icmp eq i64 %load247, 0
-  %ifc249 = icmp ne i1 %cmp248, false
-  br i1 %ifc249, label %then250, label %else251
+match.end227:                                     ; preds = %arm225, %ifcont
+  %match.val240 = phi i64 [ %call236, %ifcont ], [ %call239, %arm225 ]
+  %load241 = load i64, ptr %stack.slot, align 8
+  %cmp242 = icmp eq i64 %load241, 0
+  %ifc243 = icmp ne i1 %cmp242, false
+  br i1 %ifc243, label %then244, label %else245
 
-then239:                                          ; preds = %arm230
-  %call241 = call i1 @str.str-eq({ ptr, i64 } %s235, { ptr, i64 } %call223)
+then233:                                          ; preds = %arm224
+  %call235 = call i1 @str.str-eq({ ptr, i64 } %s229, { ptr, i64 } %call217)
   br label %ifcont
 
-else240:                                          ; preds = %arm230
+else234:                                          ; preds = %arm224
   br label %ifcont
 
-ifcont:                                           ; preds = %else240, %then239
-  %ifval = phi i1 [ %call241, %then239 ], [ false, %else240 ]
-  %call242 = call i64 @"fslib.note!"(ptr %stack.slot, i64 11, i1 %ifval)
-  br label %match.end233
+ifcont:                                           ; preds = %else234, %then233
+  %ifval = phi i1 [ %call235, %then233 ], [ false, %else234 ]
+  %call236 = call i64 @"fslib.note!"(ptr %stack.slot, i64 11, i1 %ifval)
+  br label %match.end227
 
-then250:                                          ; preds = %match.end233
-  %call252 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call1, { ptr, i64 } { ptr @str.41, i64 22 })
+then244:                                          ; preds = %match.end227
+  %call246 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call1, { ptr, i64 } { ptr @str.41, i64 22 })
   ret i64 0
 
-else251:                                          ; preds = %match.end233
-  %load253 = load i64, ptr %stack.slot, align 8
-  ret i64 %load253
+else245:                                          ; preds = %match.end227
+  %load247 = load i64, ptr %stack.slot, align 8
+  ret i64 %load247
 }
 
 define internal i64 @mem.mem-copy__u8(ptr %dst, ptr %src, i64 %n) {
@@ -4133,7 +4061,7 @@ else:                                             ; preds = %entry
   br label %ifcont11
 
 then5:                                            ; preds = %then
-  %call7 = call i64 @alloc.oom-at(ptr @cstr.9, i64 %call)
+  %call7 = call i64 @alloc.oom-at(ptr @cstr.8, i64 %call)
   br label %ifcont
 
 else6:                                            ; preds = %then

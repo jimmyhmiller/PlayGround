@@ -82,6 +82,11 @@ jobs:
           rc=0; /tmp/coil-ci-linux run selfhost/oracle/features/meta_stage3.coil || rc=$?
           test "$rc" = 42
 
+      - name: gate-target-os ((target-os) follows --target, not the build host)
+        # Cross-compilation correctness for comptime constants: only visible in
+        # the emitted IR, since a cross-built binary never runs on the builder.
+        run: ./selfhost/oracle/gate-target-os.sh /tmp/coil-ci-linux
+
       # ---- the native x86-64 backend (docs/X64_BACKEND.md) ----
       # These run on the compiler the step above just verified, so a failure here
       # is the x64 backend's fault and not a bad stage0.
