@@ -58,6 +58,17 @@ jobs:
           ./selfhost/seed/coil-seed build selfhost/src/main.coil -o /tmp/coil-diag $LF >/dev/null
           ./selfhost/oracle/arm64/gate-run.sh /tmp/coil-diag --verbose 2>&1 | grep -B1 -A8 "FAIL" | head -80 || true
           ./selfhost/oracle/gate-cli.sh /tmp/coil-diag 2>&1 | grep -B1 -A3 "FAIL" | head -40 || true
+          # The per-stage gates run under the same COIL_SELF_ARGS the real step exports,
+          # or the reproduction is not faithful. VERBOSE=1 prints the differing hunk,
+          # which is the only way to tell a real regression from host-toolchain drift
+          # (gate-diag compares the linker's own stderr, which varies by Xcode).
+          REF_TRIPLE=$(grep -m1 -h 'target triple' selfhost/oracle/full/reference/*.dump | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          export COIL_SELF_ARGS="--target $REF_TRIPLE"
+          for g in gate gate-ast gate-load gate-resolved gate-checked gate-expand gate-mono gate-ir gate-diag gate-x86; do
+            VERBOSE=1 ./selfhost/oracle/$g.sh /tmp/coil-diag 2>&1 | grep -A20 "FAIL" | head -40 || true
+          done
+          echo "--- toolchain (gate-diag bakes cc/ld wording into its reference) ---"
+          cc --version | head -2; ld -v 2>&1 | head -2
       - name: meta_stage3 (compiled (meta …) elaboration)
         # exit 42 is the feature test's SUCCESS code; capture it around bash -e
         run: |
