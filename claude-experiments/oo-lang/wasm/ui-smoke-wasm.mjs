@@ -37,8 +37,12 @@ async function main() {
   const chrome = findChrome();
   if (!chrome) { console.log("SKIPPED ui-smoke-wasm: no Chrome/Chromium binary found"); process.exit(0); }
 
-  // 1. static server over the repo root (so ../viewer/* resolves from /wasm/index.html)
-  const server = createServer(async (req, res) => {
+  // 1. static server over the repo root (so ../viewer/* resolves from /wasm/index.html).
+  //    SCRY_WASM_BASE points the test at a server we did NOT write instead — `vercel dev`, or a
+  //    real deployment — which is the only way the host's own routing gets tested. A local server
+  //    that serves the tree verbatim can't catch a redirect/rewrite mistake in vercel.json.
+  const BASE = process.env.SCRY_WASM_BASE?.replace(/\/+$/, "") || null;
+  const server = BASE ? null : createServer(async (req, res) => {
     try {
       const path = join(ROOT, decodeURIComponent(req.url.split("?")[0]));
       const body = await readFile(path);
@@ -46,8 +50,11 @@ async function main() {
       res.end(body);
     } catch { res.writeHead(404); res.end("not found"); }
   });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const port = server.address().port;
+  if (server) await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const origin = BASE || `http://127.0.0.1:${server.address().port}`;
+  // Against a real host the demo's entry point is `/` (vercel.json redirects it), not the file
+  // path — and `/` is exactly what a same-tree local server can never get wrong.
+  const demoUrl = BASE ? `${origin}/` : `${origin}/wasm/demo.html`;
 
   const profile = mkdtempSync(join(tmpdir(), "scry-wasm-ui-"));
   const dport = 9333 + Math.floor(Math.random() * 400);
@@ -55,7 +62,7 @@ async function main() {
     "--no-default-browser-check", `--remote-debugging-port=${dport}`,
     `--user-data-dir=${profile}`, "about:blank"], { stdio: ["ignore", "pipe", "pipe"] });
 
-  const cleanup = () => { try { cproc.kill("SIGKILL"); } catch {} server.close(); };
+  const cleanup = () => { try { cproc.kill("SIGKILL"); } catch {} server?.close(); };
   const fail = (m) => { console.log("FAIL " + m); cleanup(); process.exit(1); };
 
   try {
@@ -96,7 +103,7 @@ async function main() {
 
     // 2. open the in-browser viewer
     await send("Page.enable");
-    await send("Page.navigate", { url: `http://127.0.0.1:${port}/wasm/index.html` });
+    await send("Page.navigate", { url: `${origin}/wasm/index.html` });
 
     // 3. wait for the VM to boot inside the page
     let status = "";
@@ -197,7 +204,7 @@ async function main() {
     console.log(`  ok  invoke result renders as an expandable tree (${resRows} rows)`);
 
     // ---- phase 2: the agent demo page (xterm terminal + viewer, all in-page) ----
-    await send("Page.navigate", { url: `http://127.0.0.1:${port}/wasm/demo.html` });
+    await send("Page.navigate", { url: demoUrl });
     let dstatus = "";
     for (let i = 0; i < 120; i++) {
       dstatus = await evalPage(`document.getElementById("status")?.textContent || ""`);

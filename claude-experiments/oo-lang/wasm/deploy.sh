@@ -13,8 +13,15 @@ DIST=wasm/dist
 
 [ -f wasm/scry.wasm ] || { echo "wasm/scry.wasm missing — run wasm/build.sh first" >&2; exit 1; }
 
+# The project link lives in dist/.vercel, but dist is rebuilt from scratch every run — keep it
+# across the wipe so re-assembling doesn't orphan the Vercel project and create a second one.
+LINK=$(mktemp -d)
+[ -d "$DIST/.vercel" ] && cp -R "$DIST/.vercel" "$LINK/"
+
 rm -rf "$DIST"
 mkdir -p "$DIST/wasm/vendor" "$DIST/viewer/vendor" "$DIST/examples" "$DIST/agent" "$DIST/std"
+[ -d "$LINK/.vercel" ] && cp -R "$LINK/.vercel" "$DIST/"
+rm -rf "$LINK"
 
 # the VM + the two pages
 cp wasm/scry.wasm wasm/scry-wasm.js wasm/demo.html wasm/index.html wasm/demo.scry "$DIST/wasm/"
@@ -30,17 +37,19 @@ cp examples/*.scry "$DIST/examples/"
 cp agent/core.scry "$DIST/agent/"
 cp std/json.scry "$DIST/std/"
 
+# `/` must REDIRECT, not rewrite: a rewrite serves demo.html while the URL stays `/`, so the
+# page's own relative imports (./scry-wasm.js, ./scry.wasm, vendor/xterm.js) resolve against the
+# root and 404. The browser has to actually land on /wasm/demo.html.
+# No Content-Type rules here: Vercel already serves .wasm as application/wasm, and a `headers`
+# entry can NOT override the content type of a static file anyway — verified against `vercel dev`,
+# where the rule demonstrably matches (a marker header lands) while Content-Type stays put. So
+# .scry files are served application/octet-stream; harmless, since the pages read them with
+# response.text(), which decodes UTF-8 regardless.
 cat > "$DIST/vercel.json" <<'JSON'
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": false,
-  "rewrites": [{ "source": "/", "destination": "/wasm/demo.html" }],
-  "headers": [
-    { "source": "/(.*).wasm",
-      "headers": [{ "key": "Content-Type", "value": "application/wasm" }] },
-    { "source": "/(.*).scry",
-      "headers": [{ "key": "Content-Type", "value": "text/plain; charset=utf-8" }] }
-  ]
+  "redirects": [{ "source": "/", "destination": "/wasm/demo.html", "permanent": false }]
 }
 JSON
 
