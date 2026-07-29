@@ -15,7 +15,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(HERE, "..");
+// Normally the repo itself. SCRY_WASM_ROOT points the same test at an assembled deployment
+// (wasm/dist), so what ships to a static host is verified by exactly this smoke, not by eye.
+const ROOT = process.env.SCRY_WASM_ROOT || join(HERE, "..");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function findChrome() {

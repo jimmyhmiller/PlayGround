@@ -77,6 +77,34 @@ imports over it:
 - `index.html` — just the viewer, over `demo.scry`.
 - `node ui-smoke-wasm.mjs` — drives the whole thing in real headless Chrome.
 
+## Deploy it (static host / Vercel)
+
+```sh
+./build.sh && ./deploy.sh          # -> wasm/dist (gitignored), ~2.3 MB
+cd dist && vercel deploy --prod
+```
+
+Nothing runs on the host — `deploy.sh` copies the module, the two pages, the viewer and the
+three `.scry` sources into a directory whose layout **mirrors the repo**, because the pages
+fetch `../viewer/*`, `../examples/*`, `../agent/core.scry` and `../std/json.scry`. Same shape
+as `serve.sh` serves, so the deployed pages are byte-identical to the local ones and there is
+no path rewriting to drift. `vercel.json` rewrites `/` to the demo and pins the `.wasm` and
+`.scry` content types.
+
+Two things a host has to get right, and Vercel does: `application/wasm` (for
+`instantiateStreaming`) and no interference with `Range`/compression on the module. Cross-origin
+isolation is **not** needed — the green-thread scheduler means no pthreads and no
+`SharedArrayBuffer`, so no COOP/COEP headers.
+
+Verify the assembled directory the same way the repo is verified, in real headless Chrome:
+
+```sh
+SCRY_WASM_ROOT=$PWD/dist node ui-smoke-wasm.mjs
+```
+
+Note `scry.wasm` is gitignored and needs the wasm-capable `coil` to produce, so a
+host-side "build from git" cannot work — deploy the prebuilt directory.
+
 ## Green threads
 
 `Thread.spawn` works, without pthreads. The VMThread is registered with its `run()` frame
@@ -92,11 +120,8 @@ a compile-time macro that emits *nothing* off wasm32. Native keeps real OS threa
 
 ## Not yet
 
-- **`readLine` is non-blocking** (returns `None` when no input is buffered) rather than
-  suspending, so a program written as a blocking REPL loop exits at EOF instead of waiting.
-  The browser demo therefore drives turns through the eval channel. Making a blocking
-  `readLine` suspend and resume would need the same yield seam the scheduler already has.
-- Packaging as a single self-contained file (P6) — today it is a directory of static assets.
+- Packaging as a single self-contained file — today it is a directory of static assets
+  (which `deploy.sh` assembles, so hosting it is solved; inlining it into one HTML file is not).
 
 ## Gotcha worth knowing
 
