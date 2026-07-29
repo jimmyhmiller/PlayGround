@@ -6259,16 +6259,29 @@ fn next_script_shim() -> &'static str {
     include_str!("next_runtime/next_script_shim.tsx")
 }
 
-/// `next/dynamic` shim (`shims/dynamic.ts`). A lean reimplementation of Next's `dynamic()`
-/// keyed on its public option shape (`{ loading, ssr }`), backed by `React.lazy`. `ssr:true`
-/// (the default) wraps the lazy chunk in a `Suspense` with the `loading` fallback — valid in
-/// the react-server, SSR, and client graphs. `ssr:false` renders the `loading` fallback on
-/// the server AND the first client paint (a mounted-gate: `useState(false)` + `useEffect`), so
-/// the SSR HTML and first hydration match, then swaps in the real chunk after mount — exactly
-/// as Next requires (and, like Next, `ssr:false` inside a Server Component surfaces React's
-/// react-server hook error). React is namespace-imported so the client hooks are not named
-/// bindings that would fail to resolve under the `react-server` export condition; they are
-/// only ever CALLED on the client `ssr:false` path.
+/// `next/dynamic` shim (`shims/dynamic.ts`). A reimplementation of Next's app-router
+/// `dynamic()` keyed on its public option shape (`{ loading, ssr }`), backed by `React.lazy`.
+///
+/// The load-bearing detail is WHEN a Suspense boundary is placed around the lazy chunk,
+/// which diffpack now takes verbatim from Next's own `Loadable`
+/// (`next/dist/shared/lib/lazy-dynamic/loadable.js`):
+///
+/// ```js
+/// const hasSuspenseBoundary = !opts.ssr || !!opts.loading
+/// const Wrap = hasSuspenseBoundary ? Suspense : Fragment
+/// ```
+///
+/// So the DEFAULT (`ssr: true`, no `loading`) gets **no boundary at all** — see
+/// `next_dynamic_matches_next_suspense_boundary_rule` for why that is a correctness rule
+/// and not a detail. `ssr:false` renders the `loading` fallback on the server AND the first
+/// client paint (a mounted-gate: `useState(false)` + `useEffect`), so the SSR HTML and first
+/// hydration match, then swaps in the real chunk after mount — Next reaches the same
+/// observable place by throwing `BailoutToCSR` under its own Suspense boundary (and, like
+/// Next, `ssr:false` inside a Server Component surfaces React's react-server hook error).
+///
+/// React is namespace-imported so the client hooks are not named bindings that would fail to
+/// resolve under the `react-server` export condition; they are only ever CALLED on the client
+/// `ssr:false` path.
 fn next_dynamic_shim() -> &'static str {
     r#"// `next/dynamic` shim (diffpack next app-router adapter). dynamic(loader, { loading, ssr }).
 import * as React from "react";
@@ -6295,7 +6308,8 @@ export default function dynamic(loader, options) {
   const LazyComponent = lazy(toLoadable(loader));
   if (opts.ssr === false) {
     // Client-only: gate on mount so server + first client paint both render `fallback`
-    // (no hydration mismatch), then load the real chunk.
+    // (no hydration mismatch), then load the real chunk. Next's own `ssr:false` path is
+    // likewise inside a Suspense boundary (`hasSuspenseBoundary = !opts.ssr || ...`).
     return function DynamicClientOnly(props) {
       const [mounted, setMounted] = useState(false);
       useEffect(() => { setMounted(true); }, []);
@@ -6303,7 +6317,35 @@ export default function dynamic(loader, options) {
       return createElement(Suspense, { fallback: fallback }, createElement(LazyComponent, props));
     };
   }
+  // NEXT'S RULE, verbatim: `hasSuspenseBoundary = !opts.ssr || !!opts.loading`. With the
+  // default `{ ssr: true }` and no `loading`, a dynamic component gets NO boundary of its
+  // own — the lazy chunk suspends whatever update is rendering it, all the way up to
+  // whatever real boundary the app put there.
+  //
+  // This is not cosmetic; it decides how many React COMMITS it takes to swap one dynamic
+  // component for another, which the DOM can see. With no boundary, a transition that
+  // swaps A for B cannot commit until B's chunk has loaded, so A's removal and B's
+  // insertion land in ONE commit. Add a boundary and the same swap becomes TWO: A is
+  // deleted and the `null` fallback committed at once, then B is inserted milliseconds
+  // later — leaving the container observably EMPTY in between.
+  //
+  // cal.com is the proof. Its event-type tabs are `dynamic()` with no `loading`, rendered
+  // into a `@formkit/auto-animate` container, and auto-animate answers a removal by
+  // re-attaching the removed node as a ~250 ms exit-ghost. Under a boundary, a
+  // MutationObserver on that container saw the tab swap as THREE batches — old panel out
+  // (container left holding no live React child at all), then the new panel in ~290 ms
+  // later, once the tab's chunk had arrived — and `data-testid`s from a ghost still
+  // animating out coexisted with the same ids in a freshly inserted panel: Playwright's
+  // strict-mode locator for `[data-testid=offer-seats-toggle]` resolved to 2 elements and
+  // the run failed. Without the boundary the same swap is ONE batch, removal and insertion
+  // together, and the container is never empty. (`EventSetupTab`, the one tab cal.com
+  // declares WITH `loading: () => null`, keeps its boundary on both sides — the rule is
+  // per-call, not global.)
+  //
+  // Next wraps in a `Fragment` here; a top-level unkeyed fragment is unwrapped by the
+  // reconciler, so returning the element directly is the same tree.
   return function DynamicComponent(props) {
+    if (!Loading) return createElement(LazyComponent, props);
     return createElement(Suspense, { fallback: fallback }, createElement(LazyComponent, props));
   };
 }
@@ -7898,6 +7940,96 @@ console.log(JSON.stringify({{
             "a changed query string produces a NEW object (stability must not become staleness): {got}"
         );
         assert_eq!(got["readonly"], serde_json::json!(true), "the memoized object still refuses mutation: {got}");
+    }
+
+    /// `next/dynamic` must place a Suspense boundary EXACTLY where Next places one, and
+    /// nowhere else. Next's app-router `Loadable`
+    /// (`next/dist/shared/lib/lazy-dynamic/loadable.js`) decides with
+    /// `hasSuspenseBoundary = !opts.ssr || !!opts.loading`, so the DEFAULT call —
+    /// `dynamic(() => import(...))`, `ssr:true` and no `loading` — gets none.
+    ///
+    /// That is a correctness rule, not a styling one. Without a boundary, a not-yet-loaded
+    /// chunk suspends the update that renders it, so a transition swapping dynamic A for
+    /// dynamic B keeps A on screen and lands A's removal + B's insertion in ONE React
+    /// commit. Wrap it in a boundary and the same swap takes TWO: A deleted and the `null`
+    /// fallback committed immediately, B inserted milliseconds later, with the container
+    /// observably EMPTY in between. cal.com renders its event-type tabs (plain `dynamic()`
+    /// calls) into a `@formkit/auto-animate` container, which reacted to that gap by
+    /// re-attaching the removed panel as a ~250 ms exit-ghost — duplicating every
+    /// `data-testid` in the tab and hard-failing Playwright's strict-mode locators.
+    ///
+    /// Executed, not grepped: the shim's real body runs against a React stand-in.
+    #[test]
+    fn next_dynamic_matches_next_suspense_boundary_rule() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = scratch("next-dynamic-boundary");
+        let body = next_dynamic_shim().replace("import * as React from \"react\";", "");
+        assert!(!body.contains("from \"react\""), "the react import was replaced: {body}");
+        let harness = format!(
+            r##"const SUSPENSE = {{ tag: "Suspense" }};
+// The ssr:false path is the only one that calls hooks; mount it straight away so the
+// post-mount tree is what we inspect.
+const React = {{
+  createElement: (type, props, ...children) => ({{ type, props: props || {{}}, children }}),
+  lazy: (load) => ({{ tag: "lazy", load }}),
+  Suspense: SUSPENSE,
+  useState: () => [true, () => {{}}],
+  useEffect: () => {{}},
+}};
+{body}
+const loader = () => Promise.resolve({{ default: () => null }});
+const shape = (el) => {{
+  if (el === null) return "null";
+  if (el.type === SUSPENSE) {{
+    return "Suspense(" + (el.props.fallback === null ? "null" : "loading") + ")>" + shape(el.props.children === undefined ? el.children[0] : el.props.children);
+  }}
+  if (el.type && el.type.tag === "lazy") return "lazy";
+  return "other";
+}};
+const Plain = dynamic(loader);
+const WithLoading = dynamic(loader, {{ loading: () => null }});
+const NoSsr = dynamic(loader, {{ ssr: false }});
+const SsrTrueExplicit = dynamic(loader, {{ ssr: true }});
+console.log(JSON.stringify({{
+  plain: shape(Plain({{}})),
+  withLoading: shape(WithLoading({{}})),
+  noSsr: shape(NoSsr({{}})),
+  ssrTrueExplicit: shape(SsrTrueExplicit({{}})),
+}}));
+"##
+        );
+        let file = dir.join("next-dynamic-boundary.mjs");
+        std::fs::write(&file, harness).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "next/dynamic harness failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            got["plain"],
+            serde_json::json!("lazy"),
+            "dynamic(loader) — Next's `!opts.ssr || !!opts.loading` is false — gets NO Suspense boundary, \
+             so a swap between two of them is one commit, not two: {got}"
+        );
+        assert_eq!(
+            got["ssrTrueExplicit"],
+            serde_json::json!("lazy"),
+            "an explicit ssr:true with no loading is the same case: {got}"
+        );
+        assert_eq!(
+            got["withLoading"],
+            serde_json::json!("Suspense(loading)>lazy"),
+            "a `loading` component is what asks for a boundary, and it is the fallback: {got}"
+        );
+        assert_eq!(
+            got["noSsr"],
+            serde_json::json!("Suspense(null)>lazy"),
+            "ssr:false is client-only and keeps its boundary: {got}"
+        );
     }
 
     #[test]
