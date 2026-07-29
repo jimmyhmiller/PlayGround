@@ -469,6 +469,14 @@ impl ResolutionCache {
         target: Target,
     ) -> Result<Cow<'s, str>, String> {
         let mut current = Cow::Borrowed(source);
+        // `import()` with a variable in the specifier, expanded to a request -> module
+        // map exactly as webpack (context module) and Rollup/Vite (dynamic import
+        // vars) do. NOT opt-in: both major toolchains implement it, and a relative
+        // specifier computed at runtime cannot possibly resolve from the output
+        // directory. See [`crate::dynamic_import_context`].
+        if let Some(rewritten) = crate::dynamic_import_context::transform(path, &current) {
+            current = Cow::Owned(rewritten);
+        }
         // Glob expansion first: it emits imports the rest of the pipeline (and the
         // format-sensitive `import.meta` scan) must see as ordinary graph edges.
         // A malformed call is a hard build error, never a silently empty object.

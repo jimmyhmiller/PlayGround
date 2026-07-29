@@ -5,6 +5,7 @@ pub mod config;
 pub mod css;
 pub mod dead_branch;
 pub mod dev_server;
+pub mod dynamic_import_context;
 pub mod env_file;
 pub mod font_file;
 pub mod html_entry;
