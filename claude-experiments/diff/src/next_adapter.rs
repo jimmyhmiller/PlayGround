@@ -2865,7 +2865,19 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     )?;
     write_if_changed(
         &adapter_dir.join("client.tsx"),
-        &client_entry_module(&adapter_dir, &islands, &eager_islands, &hooks_context_canon),
+        &client_entry_module(
+            &adapter_dir,
+            &islands,
+            &eager_islands,
+            &hooks_context_canon,
+            // DEV splits the islands into per-island chunks so a page downloads the
+            // islands it renders instead of every island in the app: cal.com's dev
+            // `client.js` is 17.8 MB of which /auth/login needs a fraction. Production
+            // keeps the static requires, where whole-graph DCE already shrinks the one
+            // chunk (554 KB on cal.com) and the streaming document has no place to put
+            // a chunk list yet.
+            if dev { PinKind::DynamicChunk } else { PinKind::StaticRequire },
+        ),
     )?;
     // --- per-environment config --------------------------------------------------
     let (entry, target, conditions): (PathBuf, Target, Vec<&str>) = match environment {
@@ -4842,10 +4854,35 @@ function renderStore(pathname, reqCtx, params) {{
   }};
 }}
 
+// WHICH CLIENT-REFERENCE CHUNKS THIS ROUTE USES.
+//
+// React resolves every client reference it serializes through `bundlerConfig[modulePath]`
+// (`resolveClientReferenceMetadata`), so a proxy over the manifest is an EXACT record of
+// the references a render reached — no flight-wire parsing and no guessing from the route
+// table. The browser needs it because the seam's `__webpack_require__` is synchronous:
+// a reference whose module sits in a split chunk has to be registered before hydration
+// renders it, and React's own blocked-module-chunk path does not get there in time (it
+// surfaces as "Element type is invalid. Received a promise that resolves to: undefined").
+//
+// `chunks` is React's flat `[chunkId, chunkFile, ...]`; the loader takes the id.
+function recordUsedChunks(bundlerConfig, used) {{
+  return new Proxy(bundlerConfig, {{
+    get(target, key) {{
+      const entry = target[key];
+      if (entry && Array.isArray(entry.chunks)) {{
+        for (let i = 0; i < entry.chunks.length; i += 2) used.add(entry.chunks[i]);
+      }}
+      return entry;
+    }},
+  }});
+}}
+
 // Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
 // `render` op AND the persistent `serve` worker, so both paths render identically.
 export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
   const control = {{}};
+  const usedChunks = new Set();
+  bundlerConfig = recordUsedChunks(bundlerConfig, usedChunks);
   // `documentTree` awaits the matched page (see `resolvePage`), and the page reads
   // request state through the ALS store — so the store has to be established around the
   // composition, not just around the flight render.
@@ -4862,6 +4899,8 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
   }});
   return {{
     flight,
+    // The chunks the browser must have registered before it hydrates this document.
+    chunks: [...usedChunks],
     status: control.status || status || 200,
     params,
     redirect: control.redirect,
@@ -4891,6 +4930,8 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
 // reported on `sink.end` and the orchestrator logs it loudly (never silently dropped).
 export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink) {{
   const control = {{}};
+  const usedChunks = new Set();
+  bundlerConfig = recordUsedChunks(bundlerConfig, usedChunks);
   // See `renderRequest`: composing the tree now RUNS the page, which reads request state.
   const store = renderStore(pathname, reqCtx, matchParams(pathname, renderOpts(reqCtx)));
   const {{ tree, status, params, intercept }} = await requestAls.run(store, () =>
@@ -4937,7 +4978,10 @@ export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink)
     // cannot change the response and the orchestrator reports it. A redirect/notFound the
     // meta already carried was acted on and must NOT be reported.
     const lateControl = !!((control.redirect && !metaControl.redirect) || (control.notFound && !metaControl.notFound));
-    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, lateControl, tags: [...store.tags], setCookies: store.responseCookies.slice() }});
+    // `chunks` rides on `end`, not `meta`: client references are discovered as React
+    // serializes the tree, so the full set only exists once the flight does. The buffered
+    // document path drains the flight before it renders, so it has them in time.
+    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, lateControl, chunks: [...usedChunks], tags: [...store.tags], setCookies: store.responseCookies.slice() }});
   }});
 }}
 
@@ -5216,7 +5260,7 @@ async function serveLoop() {{
         manifestCache.delete(req.manifestPath);
         if (req.op === "render") {{
           const r = await mod.renderRequest(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}});
-          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, tags: r.tags || [], setCookies: r.setCookies || [] }});
+          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, chunks: r.chunks || [], tags: r.tags || [], setCookies: r.setCookies || [] }});
         }} else if (req.op === "render-stream") {{
           // Streaming render: one `streamMeta` line, then N `streamChunk` lines, then a
           // single `streamEnd` line — all sharing this request id. The orchestrator
@@ -5498,7 +5542,7 @@ function installSeam() {{
 // client bootstrap module (`/client.js`) and the inlined flight are injected via
 // react-dom's bootstrap options, so the served DOM (scripts included) is exactly
 // what hydration on the browser expects — no mismatch.
-export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce) {{
+export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce, routeChunks) {{
   installSeam();
   const bytes = new Uint8Array(flightBytes);
   const stream = new ReadableStream({{
@@ -5563,6 +5607,10 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       bootstrapScriptContent:
         "window.__DIFFPACK_FLIGHT__ = " + JSON.stringify(flightBase64) + ";" +
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
+        // The split chunks carrying this route's client references. The browser entry
+        // loads them BEFORE it hydrates, because the RSC seam's require is synchronous
+        // (see `recordUsedChunks` in the react-server entry).
+        "window.__DIFFPACK_ROUTE_CHUNKS__ = " + JSON.stringify(routeChunks || []) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onAllReady() {{
         pipe(sink);
@@ -5721,19 +5769,9 @@ fn client_entry_module(
     islands: &[PathBuf],
     eager_islands: &BTreeSet<String>,
     hooks_context: &Path,
+    pins_kind: PinKind,
 ) -> String {
-    // KNOWN COST, measured: static pins put every island in the app into `client.js`
-    // (17.8 MB on cal.com, so /auth/login downloads the app store, the booker, settings
-    // and every payment component). `PinKind::DynamicChunk` splits them per island and
-    // is byte-for-byte the right answer — main chunk 17.8 MB -> 1.2 MB, wire 18.9 MB ->
-    // 1.55 MB, decoded 18.35 MB -> 3.75 MB, all better than Turbopack on the same page.
-    // It is NOT enabled yet because the browser's client-reference chunk path then has
-    // to load a chunk before the reference renders, and today it does not: React leaves
-    // the module chunk BLOCKED and the render reads it as an element type, failing with
-    // "Element type is invalid. Received a promise that resolves to: undefined". Only 3
-    // of the route's references ever reach `requireModule`. Awaiting the flight decode
-    // before `hydrateRoot` does not fix it. See KNOWN_ISSUES.md.
-    let pins = island_pins(adapter_dir, islands, eager_islands, PinKind::StaticRequire);
+    let pins = island_pins(adapter_dir, islands, eager_islands, pins_kind);
     let lazy = js_str(&adapter_dir.join("lazy.js").to_string_lossy());
     let hooks_import = js_str(&hooks_context.to_string_lossy());
     // The ONE control-flow predicate, shared with the error boundary (see
@@ -5804,6 +5842,12 @@ async function fetchFlight(href) {{
   // with no Suspense boundary of its own, so React could never commit a partially
   // arrived tree anyway — every successful navigation already waited for the last row.
   const bytes = new Uint8Array(await res.arrayBuffer());
+  // The split chunks THIS route's client references live in, which the loaded page may
+  // never have needed. They are loaded before the flight is decoded, because the RSC
+  // seam's `__webpack_require__` is synchronous: a reference whose module is not
+  // registered yet cannot be rendered, and React's blocked-chunk path does not cover a
+  // navigation render. Absent header = nothing to load (production ships one chunk).
+  await loadRouteChunks(res.headers.get("x-diffpack-chunks"), href);
   const tree = createFromReadableStream(
     new ReadableStream({{
       start(controller) {{
@@ -5817,6 +5861,32 @@ async function fetchFlight(href) {{
   // than during a render that has no boundary to catch it.
   await tree;
   return {{ tree, intercept, params }};
+}}
+
+// Load the chunks named by `x-diffpack-chunks` (percent-encoded JSON array). A PRESENT
+// but malformed value is a server bug and throws rather than being ignored: silently
+// skipping the load would fail later, inside a render, on a reference whose module never
+// registered — with nothing left to name the chunk that was missed.
+async function loadRouteChunks(header, href) {{
+  if (!header) return;
+  let list;
+  try {{
+    list = JSON.parse(decodeURIComponent(header));
+  }} catch (error) {{
+    throw new Error(
+      "diffpack next client: malformed x-diffpack-chunks for " + href + ": " + String(error.message),
+    );
+  }}
+  if (!Array.isArray(list)) {{
+    throw new Error("diffpack next client: x-diffpack-chunks for " + href + " is not an array");
+  }}
+  if (!list.length) return;
+  if (typeof globalThis.__webpack_chunk_load__ !== "function") {{
+    throw new Error(
+      "diffpack next client: x-diffpack-chunks arrived but the RSC seam installed no __webpack_chunk_load__",
+    );
+  }}
+  await Promise.all(list.map((chunk) => globalThis.__webpack_chunk_load__(chunk)));
 }}
 
 // Decode the `x-diffpack-params` header the orchestrator stamps on a soft-navigation
@@ -6057,7 +6127,27 @@ function flightStreamFromDF() {{
   }});
 }}
 
-function boot() {{
+async function boot() {{
+  // EVERY SPLIT CHUNK THIS ROUTE'S CLIENT REFERENCES LIVE IN, BEFORE ANYTHING RENDERS.
+  //
+  // The RSC seam's `__webpack_require__` is synchronous, so a reference whose module sits
+  // in a split chunk has to be registered before the render asks for it. React's own
+  // blocked-module-chunk path does not get there in time under document hydration — it
+  // surfaces as "Element type is invalid. Received a promise that resolves to: undefined".
+  // The react-server render recorded the exact set (`recordUsedChunks`) and the document
+  // injected it, so this is one parallel wave of fetches, not a per-reference waterfall.
+  //
+  // A chunk that fails to load is a HARD failure: hydration would otherwise die further
+  // in, on a reference whose module never registered, with nothing naming the chunk.
+  const routeChunks = window.__DIFFPACK_ROUTE_CHUNKS__;
+  if (Array.isArray(routeChunks) && routeChunks.length) {{
+    if (typeof globalThis.__webpack_chunk_load__ !== "function") {{
+      throw new Error(
+        "diffpack next client: the document lists route chunks but the RSC seam installed no __webpack_chunk_load__",
+      );
+    }}
+    await Promise.all(routeChunks.map((chunk) => globalThis.__webpack_chunk_load__(chunk)));
+  }}
   // Streaming render inlines the flight incrementally as __DF_FLIGHT; the buffered
   // render (notFound / error docs) inlines the whole flight as __DIFFPACK_FLIGHT__.
   let stream;
@@ -8637,7 +8727,7 @@ console.log(JSON.stringify({{
 
         let islands = [app.join("Counter.tsx")];
         let hooks = fixture.join(".diffpack-next/hooks-context.ts");
-        let client_src = client_entry_module(&fixture.join(".diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let client_src = client_entry_module(&fixture.join(".diffpack-next"), &islands, &BTreeSet::new(), &hooks, PinKind::StaticRequire);
         assert!(client_src.contains("x-diffpack-intercept"), "client reads the intercept header");
         assert!(client_src.contains("createPortal"), "client portals the overlay over the page");
         assert!(client_src.contains("__diffpackModal"), "client masks the URL for the overlay");
@@ -11472,7 +11562,7 @@ console.log(out.join("|"));
         // resolves to nothing at render time.
         let islands = [PathBuf::from("/app/.diffpack-next/shims/script.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, PinKind::StaticRequire);
         let ssr = ssr_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, "", &[]);
         for (label, source) in [("client", &client), ("ssr", &ssr)] {
             assert!(
@@ -11697,7 +11787,7 @@ console.log(out.join("|"));
     fn a_soft_navigation_reprovides_the_route_identity_hooks() {
         let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, PinKind::StaticRequire);
 
         // The producer: BOTH orchestrator paths that can answer `?__rsc=1` stamp the
         // header — the live render and the prerendered `.rsc` served straight off disk.
@@ -11785,7 +11875,7 @@ console.log(out.join("|"));
     fn a_soft_navigation_swaps_in_a_settled_flight_never_a_live_stream() {
         let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, PinKind::StaticRequire);
 
         let fetch_flight = {
             let at = client.find("async function fetchFlight(href) {").unwrap();
@@ -11828,7 +11918,7 @@ console.log(out.join("|"));
     fn the_client_router_follows_a_soft_navigation_redirect() {
         let islands = [PathBuf::from("/app/.diffpack-next/shims/link.tsx")];
         let hooks = PathBuf::from("/app/.diffpack-next/hooks-context.ts");
-        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks);
+        let client = client_entry_module(Path::new("/app/.diffpack-next"), &islands, &BTreeSet::new(), &hooks, PinKind::StaticRequire);
         // The producer side must still be the JSON contract this consumer reads.
         const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
         assert!(
@@ -12625,7 +12715,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
     fn a_control_flow_error_recovered_by_react_is_not_reported_as_a_page_error() {
         let dir = scratch("recoverable-control-flow");
         let hooks = dir.join("hooks-context.ts");
-        let client = client_entry_module(&dir, &[dir.join("Island.tsx")], &BTreeSet::new(), &hooks);
+        let client = client_entry_module(&dir, &[dir.join("Island.tsx")], &BTreeSet::new(), &hooks, PinKind::StaticRequire);
         assert!(
             client.contains("onRecoverableError(error, errorInfo) {")
                 && client.contains("if (isControlFlowError(error) || isControlFlowError(errorInfo)) return;")
