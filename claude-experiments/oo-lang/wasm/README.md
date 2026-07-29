@@ -88,19 +88,31 @@ Nothing runs on the host — `deploy.sh` copies the module, the two pages, the v
 three `.scry` sources into a directory whose layout **mirrors the repo**, because the pages
 fetch `../viewer/*`, `../examples/*`, `../agent/core.scry` and `../std/json.scry`. Same shape
 as `serve.sh` serves, so the deployed pages are byte-identical to the local ones and there is
-no path rewriting to drift. `vercel.json` rewrites `/` to the demo and pins the `.wasm` and
-`.scry` content types.
+no path rewriting to drift. `vercel.json` **redirects** `/` to `/wasm/demo.html` — a *rewrite*
+would serve the page while leaving the URL at `/`, and the page's own relative imports
+(`./scry-wasm.js`, `./scry.wasm`, `vendor/xterm.js`) would then resolve against the root and
+404. The browser has to actually land in `/wasm/`.
 
-Two things a host has to get right, and Vercel does: `application/wasm` (for
-`instantiateStreaming`) and no interference with `Range`/compression on the module. Cross-origin
-isolation is **not** needed — the green-thread scheduler means no pthreads and no
+Vercel serves `.wasm` as `application/wasm` on its own; a `headers` entry can *not* override a
+static file's content type (the rule matches — a marker header lands — but the type stays), so
+`.scry` arrives as `application/octet-stream`. Harmless: the pages read it with `.text()`.
+Cross-origin isolation is **not** needed — green threads mean no pthreads and no
 `SharedArrayBuffer`, so no COOP/COEP headers.
 
-Verify the assembled directory the same way the repo is verified, in real headless Chrome:
+Verify in real headless Chrome. `SCRY_WASM_ROOT` checks the assembled files; `SCRY_WASM_BASE`
+checks them *through the host's routing*, entering at `/` — the local server serves the tree
+verbatim, so only the second form can catch a `vercel.json` mistake:
 
 ```sh
-SCRY_WASM_ROOT=$PWD/dist node ui-smoke-wasm.mjs
+SCRY_WASM_ROOT=$PWD/dist node ui-smoke-wasm.mjs        # the files that ship
+(cd dist && vercel dev --listen 3999) &                 # the routing that ships
+SCRY_WASM_BASE=http://127.0.0.1:3999 node ui-smoke-wasm.mjs
 ```
+
+⚠ **On a Hobby plan the production alias is public.** Vercel Authentication protects preview and
+generated deployment URLs, but gating a production domain is a paid feature — so
+`<project>.vercel.app` serves to anyone even with protection "on". To keep a deployment private,
+remove the alias (`vercel alias rm <project>.vercel.app`) and use the SSO-gated deployment URL.
 
 Note `scry.wasm` is gitignored and needs the wasm-capable `coil` to produce, so a
 host-side "build from git" cannot work — deploy the prebuilt directory.
