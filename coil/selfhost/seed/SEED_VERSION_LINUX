@@ -1,3 +1,13 @@
-linux-x86_64 seed built from source at the commit that adds this file; verified by rebootstrap-linux.sh (LLVM-backend fixpoint + linux gate-full/gate-run + gate-cli + gate-target-os). Needs libLLVM.so 21 (apt.llvm.org).
-commit: f63141cc18b9e1dfa880c8af79e21e6a4bdd8aa9
-built:  2026-07-29T00:50:46Z
+linux-x86_64 seed, built from source at the commit named below (NOT the commit that
+ships this file — the seed necessarily predates its own commit). Verified by
+rebootstrap-linux.sh: LLVM-backend fixpoint + linux gate-full/gate-run + gate-cli +
+gate-target-os. Needs libLLVM.so 21 (apt.llvm.org).
+
+The seed embeds lib/*.coil via include-str at ITS build time, so a seed older than a
+stdlib change cannot compile source that uses the new stdlib. Re-bless the seed in the
+same commit as any lib/ change the compiler itself depends on, or the next clean
+bootstrap breaks. (Bridge for a stale seed: COIL_STDLIB_DIR=$PWD, which makes the
+loader prefer live source over the embedded copies.)
+
+commit: 9d6c8ef17fce230d133d3bcc11a2c53a58cf0878
+built:  2026-07-29T03:27:09Z
