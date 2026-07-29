@@ -275,9 +275,22 @@ impl LiveSession {
             .arg("-P")
             .arg(samply_port.to_string())
             .arg("-o")
-            .arg(&output_profile)
-            .arg("--")
-            .args(&target_cmd);
+            .arg(&output_profile);
+        // `--save-only` means samply never runs its symbol server, so the
+        // profile it writes holds hex addresses and nothing else. Ask for the
+        // `.syms.json` sidecar so the promoted-to-final profile has names —
+        // otherwise it is *less* readable than the live view, which
+        // symbolicates from the binaries itself.
+        if samply_supports_presymbolicate(&samply_bin) {
+            cmd.arg("--unstable-presymbolicate");
+        } else {
+            log::warn!(
+                "flame-live: {} has no --unstable-presymbolicate; the final \
+                 profile will show raw addresses",
+                samply_bin.display()
+            );
+        }
+        cmd.arg("--").args(&target_cmd);
         // Forward samply's stdout/stderr so the user sees its messages.
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         log::info!(
@@ -417,6 +430,21 @@ impl Drop for LiveSession {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Whether this samply build accepts `--unstable-presymbolicate`. clap aborts
+/// on an unknown flag, so a blind `--unstable-presymbolicate` would break
+/// recording against older builds; ask `record --help` instead.
+fn samply_supports_presymbolicate(samply_bin: &Path) -> bool {
+    let output = match Command::new(samply_bin).arg("record").arg("--help").output() {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("flame-live: could not run {} --help: {e}", samply_bin.display());
+            return false;
+        }
+    };
+    let help = String::from_utf8_lossy(&output.stdout);
+    help.contains("--unstable-presymbolicate")
 }
 
 fn connect_with_retry(path: &Path) -> std::io::Result<UnixStream> {
