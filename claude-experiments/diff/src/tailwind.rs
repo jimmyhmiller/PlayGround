@@ -915,6 +915,7 @@ pub fn scan_class_candidates_multi<S: AsRef<str> + Sync>(
             let mut idents = BTreeSet::new();
             scan_class_positions(source.as_ref(), &mut found, &mut idents);
             scan_safelist_arrays(source.as_ref(), &mut found, &mut idents);
+            scan_class_helper_calls(source.as_ref(), &mut found, &mut idents);
             (found, idents)
         })
         .collect::<Vec<_>>();
@@ -1005,6 +1006,64 @@ fn scan_safelist_arrays(source: &str, out: &mut BTreeSet<String>, idents: &mut B
         };
         collect_class_expression(&source[j + 1..end], out, idents);
         i = end + 1;
+    }
+}
+
+/// The class-composition helpers whose ARGUMENTS are class positions by
+/// definition. Calling one of these is the idiomatic way to build a class string,
+/// and the call routinely sits somewhere no class-valued position scan reaches —
+/// cal.com's embed button is `className = classNames("hidden lg:inline-flex",
+/// className)`, a reassignment of a destructured parameter, so neither the JSX
+/// attribute (it holds a bare identifier) nor the binding index (there is no
+/// declaration) leads back to the literal. `lg:inline-flex` was therefore the one
+/// utility in the whole app the reference build emitted and this one did not, and
+/// the button rendered `hidden` at every viewport.
+///
+/// Tailwind's own scanner has no such gap because it is a raw text scan: every
+/// candidate-shaped token in the file is a candidate, wherever it sits. Matching
+/// that wholesale would trade this class of miss for a large over-generation, so
+/// the narrower rule is the one Tailwind codebases actually rely on — these
+/// helpers' arguments — and it costs nothing to be wrong about a call that merely
+/// shares a name, because compilation is lenient: a candidate that resolves to no
+/// utility is skipped, not emitted and not an error.
+const CLASS_COMPOSITION_HELPERS: [&str; 9] = [
+    "classNames", "classnames", "clsx", "cn", "cx", "twMerge", "twJoin", "cva", "tv",
+];
+
+/// Collects candidates from the arguments of every [`CLASS_COMPOSITION_HELPERS`]
+/// call in `source`, wherever it appears.
+fn scan_class_helper_calls(source: &str, out: &mut BTreeSet<String>, idents: &mut BTreeSet<String>) {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !is_ident_byte(bytes[i]) || bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        // A whole identifier token: the byte before it must not be one, or this is
+        // the tail of a longer name (`myCn`) and not a call to the helper.
+        if i > 0 && is_ident_byte(bytes[i - 1]) {
+            while i < bytes.len() && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            continue;
+        }
+        let mut j = i;
+        while j < bytes.len() && is_ident_byte(bytes[j]) {
+            j += 1;
+        }
+        let name = &source[i..j];
+        let after = skip_ws(bytes, j);
+        if CLASS_COMPOSITION_HELPERS.contains(&name)
+            && after < bytes.len()
+            && bytes[after] == b'('
+            && let Some(end) = find_balanced(source, after, b'(', b')')
+        {
+            collect_class_expression(&source[after + 1..end], out, idents);
+            i = end + 1;
+            continue;
+        }
+        i = j;
     }
 }
 
@@ -9853,6 +9912,49 @@ mod tests {
         );
         assert!(out.contains("grid-cols-7"));
         assert!(out.contains("grid-rows-7"));
+    }
+
+    /// REGRESSION. A class-composition helper's arguments are class positions even
+    /// when the call reaches `className` through a path no scan follows: cal.com's
+    /// embed button reassigns a destructured PARAMETER
+    /// (`className = classNames("hidden lg:inline-flex", className)`), so the JSX
+    /// attribute holds a bare identifier and the binding index has no declaration
+    /// to resolve it against. `lg:inline-flex` was the single utility the reference
+    /// Tailwind build emitted that this one did not, and the button was `hidden` at
+    /// every viewport (36px missing from the event-type header, caught by an
+    /// element-by-element geometry diff against `next start`).
+    #[test]
+    fn scans_class_helper_call_arguments_anywhere_in_the_file() {
+        let mut out = BTreeSet::new();
+        scan_class_candidates(
+            r#"
+            export const EmbedButton = ({ className = "", ...props }) => {
+              className = classNames("hidden lg:inline-flex", className);
+              return <Component {...props} className={className} />;
+            };
+            function other({ style }) {
+              const s = cn('flex-1', style && 'ring-2');
+              const t = twMerge(`px-2 ${style}`, cva({ variants: { size: { sm: "text-xs" } } }));
+              return s + t;
+            }
+            "#,
+            &mut out,
+        );
+        assert!(out.contains("lg:inline-flex"), "{out:?}");
+        assert!(out.contains("hidden"), "{out:?}");
+        assert!(out.contains("flex-1"), "{out:?}");
+        assert!(out.contains("ring-2"), "{out:?}");
+        assert!(out.contains("px-2"), "{out:?}");
+        assert!(out.contains("text-xs"), "{out:?}");
+    }
+
+    /// The helper name must be a WHOLE identifier: a call to something that merely
+    /// ends in one of the names contributes nothing.
+    #[test]
+    fn a_name_ending_in_a_helper_name_is_not_a_class_helper() {
+        let mut out = BTreeSet::new();
+        scan_class_candidates(r#"const x = myCn("not-a-class-source");"#, &mut out);
+        assert!(!out.contains("not-a-class-source"), "{out:?}");
     }
 
     #[test]
