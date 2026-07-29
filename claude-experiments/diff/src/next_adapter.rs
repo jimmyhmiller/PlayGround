@@ -9681,6 +9681,121 @@ console.log(JSON.stringify({{
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A static asset must carry validators, so a repeat navigation revalidates into a
+    /// bodiless `304` instead of re-downloading the whole client bundle, and must be
+    /// gzipped when it is compressible and the client asked — the contract `next start`
+    /// gives a `public/` file (`cache-control: public, max-age=0` + `ETag` +
+    /// `Last-Modified`, gzip over 1 KB). Runs the orchestrator's REAL
+    /// `serveStaticAsset` (sliced out of `next-server.mjs`) against a stub filesystem.
+    #[test]
+    fn next_server_serves_a_static_asset_with_validators_and_gzip() {
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        const SERVER: &str = include_str!("../scripts/rsc/next-server.mjs");
+        let slice = |from: &str, to: &str| -> String {
+            let start = SERVER.find(from).unwrap_or_else(|| panic!("next-server.mjs still contains {from:?}"));
+            let end = SERVER[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("next-server.mjs still contains {to:?} after {from:?}"))
+                + start;
+            SERVER[start..end].to_string()
+        };
+        let policy = slice("const STATIC_CACHE_CONTROL", "// Append Set-Cookie strings");
+        let serve = slice("function serveStaticAsset(", "// Which KIND of endpoint owns this path");
+        assert!(policy.contains("function acceptsGzip"), "sliced the policy block: {policy}");
+
+        let prelude = r#"import { createGzip, gunzipSync } from "node:zlib";
+import { pipeline } from "node:stream";
+import { Readable, Writable } from "node:stream";
+import { extname } from "node:path";
+const MIME = { ".js": "text/javascript", ".png": "image/png" };
+const BODIES = {
+  "/out/public/client.js": "console.log(1);".repeat(1000),
+  "/out/public/tiny.js": "x",
+  "/out/public/logo.png": "P".repeat(5000),
+};
+const MTIME = 1700000000123;
+function statSync(p) {
+  if (!(p in BODIES)) throw new Error("ENOENT " + p);
+  return { size: Buffer.byteLength(BODIES[p]), mtimeMs: MTIME, isFile: () => true };
+}
+function createReadStream(p) { return Readable.from([Buffer.from(BODIES[p])]); }
+function makeRes() {
+  const chunks = [];
+  const res = new Writable({ write(c, e, cb) { chunks.push(Buffer.from(c)); cb(); } });
+  res.writeHead = (status, headers) => { res.status = status; res.headers = headers || {}; return res; };
+  res.done = new Promise((resolve) => res.on("finish", resolve));
+  res.body = () => Buffer.concat(chunks);
+  return res;
+}
+async function run(file, headers) {
+  const res = makeRes();
+  serveStaticAsset({ headers }, res, file);
+  await res.done;
+  const h = res.headers;
+  const raw = res.body();
+  return {
+    status: res.status,
+    cacheControl: h["cache-control"] ?? null,
+    etag: h.etag ?? null,
+    lastModified: h["last-modified"] ?? null,
+    encoding: h["content-encoding"] ?? null,
+    vary: h.vary ?? null,
+    contentLength: h["content-length"] ?? null,
+    bodyBytes: raw.length,
+    text: h["content-encoding"] === "gzip" ? gunzipSync(raw).toString() : raw.toString(),
+  };
+}
+"#;
+        let driver = r#"
+const gz = await run("/out/public/client.js", { "accept-encoding": "gzip, deflate, br" });
+const plain = await run("/out/public/client.js", {});
+const fresh = await run("/out/public/client.js", { "if-none-match": gz.etag });
+const stale = await run("/out/public/client.js", { "if-none-match": 'W/"deadbeef-1"' });
+const tiny = await run("/out/public/tiny.js", { "accept-encoding": "gzip" });
+const png = await run("/out/public/logo.png", { "accept-encoding": "gzip" });
+console.log(JSON.stringify({ gz, plain, fresh, stale, tiny, png }));
+"#;
+        let file = scratch("next-server-static-asset").join("serve.mjs");
+        std::fs::write(&file, format!("{prelude}{policy}{serve}{driver}")).unwrap();
+        let out = std::process::Command::new("node").arg(&file).output().unwrap();
+        assert!(
+            out.status.success(),
+            "static-asset serve failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+        // Compressible + accepted -> gzip, and the bytes still decode to the file.
+        assert_eq!(got["gz"]["status"], 200);
+        assert_eq!(got["gz"]["encoding"], "gzip");
+        assert_eq!(got["gz"]["vary"], "Accept-Encoding");
+        assert_eq!(got["gz"]["cacheControl"], "public, max-age=0");
+        assert_eq!(got["gz"]["text"], "console.log(1);".repeat(1000));
+        assert!(
+            got["gz"]["bodyBytes"].as_u64().unwrap() < got["plain"]["bodyBytes"].as_u64().unwrap(),
+            "gzip is smaller than identity: {got}",
+        );
+        // A validator is always present, and the identity response declares its length.
+        assert_eq!(got["plain"]["encoding"], serde_json::Value::Null);
+        assert_eq!(got["plain"]["contentLength"], 15000);
+        assert_eq!(got["plain"]["etag"], got["gz"]["etag"]);
+        assert_eq!(got["plain"]["etag"], "W/\"3a98-18bcfe5687b\"");
+        assert_eq!(got["plain"]["lastModified"], "Tue, 14 Nov 2023 22:13:20 GMT");
+        // The whole point: a matching validator costs no body at all.
+        assert_eq!(got["fresh"]["status"], 304);
+        assert_eq!(got["fresh"]["bodyBytes"], 0);
+        assert_eq!(got["fresh"]["etag"], got["gz"]["etag"]);
+        assert_eq!(got["stale"]["status"], 200, "a stale validator still gets the body: {got}");
+        // Below the threshold, and an already-compressed type, are sent as-is.
+        assert_eq!(got["tiny"]["encoding"], serde_json::Value::Null);
+        assert_eq!(got["tiny"]["vary"], serde_json::Value::Null);
+        assert_eq!(got["png"]["encoding"], serde_json::Value::Null);
+        assert_eq!(got["png"]["contentLength"], 5000);
+        std::fs::remove_file(&file).ok();
+    }
+
     /// Regression: `/_next/image?url=…&w=…` must be answered from a build-emitted
     /// variant whenever one exists — that is what keeps Next's URL shape from costing a
     /// runtime re-encode on every prerendered page. Runs the orchestrator's real

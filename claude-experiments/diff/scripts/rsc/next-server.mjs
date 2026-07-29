@@ -22,7 +22,18 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  existsSync,
+  statSync,
+  writeFileSync,
+  renameSync,
+  mkdirSync,
+  createReadStream,
+} from "node:fs";
+import { pipeline } from "node:stream";
+import { createGzip } from "node:zlib";
 import { createHash } from "node:crypto";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -549,6 +560,58 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// Static-asset response policy, matching what `next start` puts on a `public/` file:
+//
+//   Cache-Control: public, max-age=0
+//   Last-Modified: <mtime>
+//   ETag: W/"<size-hex>-<mtime-ms-hex>"          (the `send` package's format)
+//
+// `max-age=0` is NOT "do not cache" — it is "cache it, then revalidate", which is the
+// only correct policy for diffpack's client build, whose URLs (`/client.js`,
+// `/client.chunk-7.js`) are NOT content-hashed: a rebuild changes the bytes behind the
+// same URL, so `immutable` would serve stale code. With a validator the browser keeps
+// the body and each later navigation costs one conditional request answered `304` with
+// no body. Without one (what this server used to send) EVERY navigation re-downloaded
+// the whole client bundle — 8.3 MB per document on cal.com.
+const STATIC_CACHE_CONTROL = "public, max-age=0";
+
+function staticValidators(info) {
+  const mtimeMs = Math.floor(info.mtimeMs);
+  return {
+    etag: `W/"${info.size.toString(16)}-${mtimeMs.toString(16)}"`,
+    lastModified: new Date(mtimeMs).toUTCString(),
+    mtimeMs,
+  };
+}
+
+// Whether the request's validators still match the file, i.e. a `304` is owed.
+// `If-None-Match` wins outright when present (per RFC 9110); otherwise
+// `If-Modified-Since` is compared at second granularity, since that header carries none.
+function staticIsFresh(req, validators) {
+  const noneMatch = req.headers["if-none-match"];
+  if (noneMatch) {
+    return noneMatch
+      .split(",")
+      .some((candidate) => candidate.trim().replace(/^W\//, "") === validators.etag.replace(/^W\//, ""));
+  }
+  const modifiedSince = req.headers["if-modified-since"];
+  if (!modifiedSince) return false;
+  const since = Date.parse(modifiedSince);
+  return Number.isFinite(since) && Math.floor(validators.mtimeMs / 1000) * 1000 <= since;
+}
+
+// Text-ish types worth gzipping. Images/fonts/wasm are already compressed, and gzipping
+// them burns CPU for nothing — the same set `next start`'s compression middleware skips.
+const COMPRESSIBLE = /^(text\/|application\/(javascript|json|manifest\+json)|image\/svg\+xml)/;
+
+// Below this, a gzip frame's own overhead swamps the saving. Next's threshold too.
+const COMPRESS_MIN_BYTES = 1024;
+
+function acceptsGzip(req) {
+  const accept = req.headers["accept-encoding"];
+  return typeof accept === "string" && /(^|,)\s*gzip\s*(;|,|$)/.test(accept);
+}
+
 // Append Set-Cookie strings to a response-headers object WITHOUT clobbering any already
 // there (e.g. middleware set-cookies). node's writeHead accepts an array for set-cookie,
 // so we normalize to an array and concat. A render/action/route can add cookies via
@@ -865,6 +928,53 @@ function isStaticFile(filePath) {
   } catch {
     return false;
   }
+}
+
+// Answer a static asset with the same cache contract `next start` gives a `public/`
+// file: validators + `max-age=0` (so a repeat navigation revalidates into a bodiless
+// `304` instead of re-downloading), gzip for compressible types, and a STREAM rather
+// than `readFileSync` — this is the single-threaded orchestrator, and reading 8 MB
+// synchronously per request stalls every concurrent render behind it.
+function serveStaticAsset(req, res, filePath) {
+  let info;
+  try {
+    info = statSync(filePath);
+  } catch {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+  const validators = staticValidators(info);
+  const type = MIME[extname(filePath)] || "application/octet-stream";
+  if (staticIsFresh(req, validators)) {
+    res.writeHead(304, {
+      "cache-control": STATIC_CACHE_CONTROL,
+      "last-modified": validators.lastModified,
+      etag: validators.etag,
+    });
+    res.end();
+    return;
+  }
+  const headers = {
+    "content-type": type,
+    "cache-control": STATIC_CACHE_CONTROL,
+    "last-modified": validators.lastModified,
+    etag: validators.etag,
+  };
+  const compressible = COMPRESSIBLE.test(type) && info.size >= COMPRESS_MIN_BYTES;
+  if (compressible) headers.vary = "Accept-Encoding";
+  const gzip = compressible && acceptsGzip(req);
+  // A gzip frame's length is not known before it is produced, so only the identity
+  // response can declare one.
+  if (gzip) headers["content-encoding"] = "gzip";
+  else headers["content-length"] = info.size;
+  res.writeHead(200, headers);
+  const source = createReadStream(filePath);
+  const stages = gzip ? [source, createGzip(), res] : [source, res];
+  pipeline(...stages, () => {
+    // A client that navigated away mid-transfer aborts the socket; that is not a
+    // server fault and must not take the process down.
+  });
 }
 
 // Which KIND of endpoint owns this path, or null when none does. The two kinds are
@@ -1588,8 +1698,7 @@ const server = createServer(async (req, res) => {
       // ended — an empty body under a 200, with the page never rendered. cal.com ships
       // `public/apps/`, so `/apps` (a real page) answered exactly that.
       if (name && filePath.startsWith(publicDir) && isStaticFile(filePath)) {
-        res.writeHead(200, { "content-type": MIME[extname(filePath)] || "application/octet-stream" });
-        res.end(readFileSync(filePath));
+        serveStaticAsset(req, res, filePath);
         return;
       }
     }
