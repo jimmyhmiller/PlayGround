@@ -55,7 +55,34 @@ Rust-like ownership dialect, a Scheme frontend).
   Kind tags: `0=int 1=float 2=bool 3=struct 4=sum 5=ptr 6=array 7=slice 8=other`.
 - **Compute:** the compiled engine runs arbitrary Coil — including generics,
   collections, allocation and FFI.
-- **Fail / branch:** `error` (abort expansion with a message), `target-arch`.
+- **Fail / branch:** `error` (abort expansion with a message), `target-arch`,
+  `target-os`.
+
+`(target-arch)` and `(target-os)` are nullary code ops that answer for the
+platform being **compiled for** — read from the resolved `--target` triple, not
+probed from the machine running the compiler. `target-arch` yields
+`aarch64`/`x86_64`/`wasm32`/`wasm64`; `target-os` yields `linux`/`darwin`/`wasm`.
+Both fall back to the host when no `--target` is given.
+
+That distinction is the whole point, and it is easy to get wrong: a platform
+constant folded at compile time from a *runtime* probe silently records the
+build host, so cross-compiling bakes in the wrong answer. `lib/fs.coil` is the
+worked example — its `open()` flags differ per OS (512 is `O_CREAT` on darwin
+and `O_TRUNC` on Linux), and it selects them with
+
+```coil
+(defn os-pick [(linux Code) (darwin Code)] (-> Code)
+  (if (code-eq (target-os) `linux) linux darwin))
+(defn gen-open-flags [] (-> Code)
+  `(do (const O_CREAT ~(os-pick `64 `512))
+       (const O_TRUNC ~(os-pick `512 `1024))))
+(meta (gen-open-flags))
+```
+
+so the flags stay true compile-time literals (no runtime branch at any use) and
+are still right under cross-compilation. `selfhost/oracle/gate-target-os.sh`
+pins this by diffing `emit-ir` across `--target` values, which is the only place
+the property is observable — a cross-built binary never runs on the builder.
 
 New API this project added (all shipped):
 

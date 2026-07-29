@@ -46,6 +46,7 @@ SEEDS=(
   selfhost/oracle/features/meta_stage3.coil   # (meta …) Stage-3 staged macros
   selfhost/oracle/features/export_c.coil      # (export-c …) C ABI export thunks
   selfhost/oracle/features/x86_sysv_abi.coil  # struct-by-value (host lowering; x86 gate below)
+  selfhost/oracle/features/fs_lib.coil        # lib/fs.coil surface (open/read/write/stat)
   examples/conventions.coil                    # custom calling convention -> LLVM fastcc
   examples/per-arch.coil                       # per-arch defcc (fastcc, informational regs)
   examples/shim.coil                           # :shim convention (naked trampoline + inline asm)

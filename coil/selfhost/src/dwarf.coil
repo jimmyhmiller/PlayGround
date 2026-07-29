@@ -2,7 +2,8 @@
 ; Zero dependencies: builds __debug_abbrev / __debug_info / __debug_str /
 ; __debug_line section bytes directly. The spec:
 ; DWARF v4, language C, one DW_TAG_subprogram per function at its defn line,
-; per-expression line rows, params/locals as DW_OP_fbreg over x29, and DI
+; per-expression line rows, params/locals as DW_OP_fbreg over the frame-base
+; register the backend names (x29 on arm64, rbp on x86-64), and DI
 ; types for scalars/pointers/structs/slices/arrays (sums/fnptrs omitted —
 ; never a wrong type).
 (module dwarf)
@@ -324,7 +325,14 @@
                  (vars (ptr (ArrayList DwVar)))
                  (evs (ptr (ArrayList DwLineEv)))
                  (textlen i64)
-                 (ltmpsym i64)] (-> (ptr DwOut))
+                 (ltmpsym i64)
+                 ; The frame base differs per backend, so it is passed in rather
+                 ; than hardcoded: `fbreg` is the DWARF register number the
+                 ; DW_AT_frame_base expression names (29 = x29 on arm64, 6 = rbp
+                 ; on x86-64), and `fbbias` is what to subtract from a slot
+                 ; offset to express it relative to that register.
+                 (fbreg i64)
+                 (fbbias i64)] (-> (ptr DwOut))
   (let [strs (alloc-stack DwStrs)
         (mut info) (al-new [u8] a)
         (mut line) (al-new [u8] a)
@@ -443,9 +451,10 @@
                         (dw-reloc! (mut relocs) 1 (al-len [u8] (load info)) 0)
                         (b-u64! (mut info) (load (field f textoff)))
                         (b-u64! (mut info) (load (field f len)))
-                        ; frame_base: DW_OP_reg29
+                        ; frame_base: DW_OP_regN (109 = DW_OP_reg0 + 29 = x29;
+                        ; 86 = DW_OP_reg0 + 6 = rbp)
                         (uleb! (mut info) 1)
-                        (b-u8! (mut info) 109)
+                        (b-u8! (mut info) (iadd 80 fbreg))
                         ; vars
                         (let [(mut v) (load (field f varlo))]
                           (loop (if (icmp-ge (load v) (load (field f varhi)))
@@ -454,7 +463,8 @@
                                       (let [vp (al-at [DwVar] vars (load v))
                                             vls (al-get [(ptr (ArrayList i64))] (load lstarts) (load (field vp source)))
                                             vlc (dw-linecol vls (load (field vp lo)))
-                                            fboff (isub (load (field vp slot)) (iadd 16 (load (field f slotbytes))))]
+                                            fboff (isub (load (field vp slot))
+                                                        (iadd fbbias (load (field f slotbytes))))]
                                         (uleb! (mut info) (if (load (field vp param)) 6 7))
                                         (b-u32! (mut info) (dwstr! strs (load (field vp name))))
                                         (uleb! (mut info) (iadd (load (field vp source)) 1))

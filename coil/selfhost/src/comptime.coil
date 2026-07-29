@@ -1213,7 +1213,10 @@
 ; into a wasm build, silently. The arch is one value per compile, set from the resolved
 ; --target triple before expansion runs (like the nid/gensym counters, it is a
 ; per-process global — the compiler builds one target per invocation).
-(defstruct TargetArchCell [(set i64) (arch (slice u8))])
+; C `access(path, 0)` — F_OK. Module-qualified so the name cannot collide;
+; the backends link the LAST dot component, i.e. the C symbol `access`.
+(extern comptime.access :cc c [(ptr i8) i64] (-> i32))
+(defstruct TargetArchCell [(set i64) (arch (slice u8)) (os (slice u8))])
 (defn target-arch-cell [] (-> (ptr TargetArchCell))
   (alloc-static TargetArchCell))
 
@@ -1228,15 +1231,50 @@
               (starts-with t "arm64") "aarch64"
               "aarch64"))))  ; unknown → host default
 
+; The OS half of the same story, and it exists for the same reason the arch does:
+; a library that branches on the platform — open() flags, dylib suffixes, syscall
+; numbers — must branch on the platform being COMPILED FOR, not the one running
+; the compiler. Without this a `const` folded at compile time silently records
+; the build host, so cross-compiling to darwin from Linux bakes in Linux answers.
+; (lib/fs.coil hit exactly that: 512 is O_CREAT on darwin and O_TRUNC on Linux.)
+;
+; Kept in the same cell as the arch: one target per compiler invocation, set from
+; the resolved --target triple before expansion runs.
+(defn has-sub? [(hay (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find hay needle) (Some [i] true) (None [] false)))
+
+(defn os-of-triple [(triple (ptr i8))] (-> (slice u8))
+  (if (icmp-eq (cast i64 triple) 0)
+      (host-os-str)  ; null = "no --target", i.e. build for the host
+      (let [t (cstr->slice triple)]
+        ; match on the triple's os field, which is the component after the vendor
+        ; ("x86_64-pc-linux-gnu", "aarch64-apple-darwin24.0.0", "wasm64-unknown-unknown").
+        (cond (has-sub? t "linux") "linux"
+              (has-sub? t "darwin") "darwin"
+              (has-sub? t "macos") "darwin"
+              (starts-with t "wasm") "wasm"
+              (host-os-str)))))  ; unknown → assume the host
+
+; The HOST os, for when no --target was given. /proc/self/maps exists on every
+; Linux and never on macOS — the same probe metaengine.coil uses to pick the
+; dylib extension and link command.
+(defn host-os-str [] (-> (slice u8))
+  (if (icmp-eq (cast i64 (comptime.access c"/proc/self/maps" 0)) 0) "linux" "darwin"))
+
 (defn set-target-arch! [(triple (ptr i8))] (-> i64)
   (let [c (target-arch-cell)]
     (store! (field c arch) (arch-of-triple triple))
+    (store! (field c os) (os-of-triple triple))
     (store! (field c set) 1)
     0))
 
 (defn target-arch-str [] (-> (slice u8))
   (let [c (target-arch-cell)]
     (if (icmp-eq (load (field c set)) 0) "aarch64" (load (field c arch)))))
+
+(defn target-os-str [] (-> (slice u8))
+  (let [c (target-arch-cell)]
+    (if (icmp-eq (load (field c set)) 0) (host-os-str) (load (field c os)))))
 
 ; `(debug-checks?)` — the --debug-checks build-mode predicate (mem-2/6/7/8), a code op
 ; (39) so it works in BOTH engines with no seed refresh: the interpreter answers it here
@@ -2499,6 +2537,7 @@
       (let [a (load (field cx a))]
         (cond (icmp-eq op 8) (Ok [CtVal Diag] (CCode (sx-sym (sconcat a "$g" (dec->str a (next-gensym))))))
               (icmp-eq op 30) (Ok [CtVal Diag] (CCode (sx-sym (target-arch-str))))
+              (icmp-eq op 46) (Ok [CtVal Diag] (CCode (sx-sym (target-os-str))))
               (icmp-eq op 39) (Ok [CtVal Diag] (CBool (debug-checks-on?)))
               (icmp-eq op 9)
                 (match (cv-get args 0)

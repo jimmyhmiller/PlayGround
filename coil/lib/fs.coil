@@ -28,14 +28,39 @@
 (extern open  :cc c [(ptr i8) i32 ...] (-> i32))    ; int open(path, int flags, mode)
 (extern close :cc c [i32]              (-> i32))    ; int close(int fd)
 
-;; open() flags — the darwin/macOS values (the build+gate target). Combine with `|`.
+;; open() flags. Combine with `|`.
+;;
+;; Four of these DIFFER between Linux and macOS, so they cannot be written as
+;; plain literals: hardcoding the darwin values (as this file used to) makes
+;; every create-or-truncate open fail on Linux, because 512 means O_TRUNC there
+;; rather than O_CREAT.
+;;
+;;                    linux   darwin
+;;   O_APPEND          1024        8
+;;   O_CREAT             64      512
+;;   O_TRUNC            512     1024
+;;   O_EXCL             128     2048
+;;
+;; `(target-os)` is a comptime code op — a builtin like `target-arch`/`gensym`,
+;; so it needs no import — and it answers for the platform being COMPILED FOR,
+;; read from the resolved --target triple. That is the whole point: these are
+;; syscall arguments, so the only OS that matters is the one that will run the
+;; binary. Selecting on it inside a `const` keeps the flags true compile-time
+;; constants (one folded literal at each use, no runtime branch) while still
+;; being correct under cross-compilation.
+(defn os-pick [(linux Code) (darwin Code)] (-> Code)
+  (if (code-eq (target-os) `linux) linux darwin))
+(defn gen-open-flags [] (-> Code)
+  `(do
+     (const O_APPEND ~(os-pick `1024 `8))
+     (const O_CREAT  ~(os-pick `64   `512))
+     (const O_TRUNC  ~(os-pick `512  `1024))
+     (const O_EXCL   ~(os-pick `128  `2048))))
+
 (const O_RDONLY 0)
 (const O_WRONLY 1)
 (const O_RDWR   2)
-(const O_APPEND 8)      ; 0x0008
-(const O_CREAT  512)    ; 0x0200
-(const O_TRUNC  1024)   ; 0x0400
-(const O_EXCL   2048)   ; 0x0800
+(meta (gen-open-flags))
 ;; a sensible default create mode (rw-r--r--) for the whole-file writer.
 (const FILE_MODE_DEFAULT 420)   ; 0o644
 
@@ -59,12 +84,22 @@
 
 ; ---- streaming: a File as an io Reader / Writer ----------------------------
 ;; Bridge a File to lib/io.coil's capabilities, so every Reader/Writer combinator
-;; (print-str, write-all, read-line, …) works over a file. CAUTION: `fd-reader`/
-;; `fd-writer` hand back a SHARED static (one Reader and one Writer per program, like
-;; `stdin`/`stdout`) — do not hold live streams for two different files at once; they
-;; alias. Read/write one file at a time, or drive the fd directly.
-(defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
-(defn file-writer [(f (ptr File))] (-> (ptr Writer)) (fd-writer (file-fd f)))
+;; (print-str, write-all, read-line, …) works over a file.
+;;
+;; The Reader/Writer is CALLER-OWNED: you pass in the storage, exactly as
+;; `fd-reader`/`fd-writer` require. Instance state must never come from
+;; `alloc-static` — a static here would be one shared Reader and one shared
+;; Writer for the whole program, so two files open at once would silently
+;; alias and writes would land on the wrong fd. (That is not hypothetical:
+;; stdout/stderr sharing a static is what once made `coil emit-ir f > f.ll`
+;; produce an empty file.)
+;;
+;;   (let [out (file-writer (alloc-stack Writer) f)]
+;;     (print-str out "hello\n"))
+(defn file-reader [(r (ptr Reader)) (f (ptr File))] (-> (ptr Reader))
+  (fd-reader r (file-fd f)))
+(defn file-writer [(w (ptr Writer)) (f (ptr File))] (-> (ptr Writer))
+  (fd-writer w (file-fd f)))
 
 ; ---- whole-file helpers over an allocator ----------------------------------
 ;; Read the ENTIRE file at `path` into a freshly-allocated `(slice u8)` the caller owns
@@ -106,9 +141,12 @@
     (if (icmp-eq (cast :i64 cp) 0)
         (Err (Errno 0))
         (let [fd (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
+              ; the Writer is this call's own instance, on its own frame — never
+              ; a static, which would alias with any other stream in flight.
+              w (alloc-stack Writer)
               res (if (icmp-lt fd 0)
                       (Err [:i64 IoError] (Errno (cast :i64 fd)))
-                      (write-all (fd-writer (cast :i64 fd))
+                      (write-all (fd-writer w (cast :i64 fd))
                                  (cast (ptr i8) (slice-data data)) (slice-len data)))]
           (if (icmp-ge fd 0) (close fd) 0)
           (raw-free a (cast (ptr i8) cp) (iadd (slice-len path) 1) 1)
