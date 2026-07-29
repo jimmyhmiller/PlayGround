@@ -59,6 +59,17 @@ MIX  c_mix_ret(double v, long n)        { MIX r = {v, n}; return r; }
 /* variadic: al must carry the SSE count or glibc reads the wrong registers */
 long c_variadic(long n, ...)            { return n; }
 
+/* register-exhaustion matrix: each of these must be demoted to byval, and the
+   `_fits` variants must NOT be (they land exactly in the last free registers).
+   The boundary is where the demotion logic is easiest to get off by one. */
+long c_p2_fits(long a,long b,long c,long d,P2 p)      { return a+b*2+c*3+d*5 + p.a*7 + p.b*11; }
+long c_p2_over(long a,long b,long c,long d,long e,P2 p){ return a+b*2+c*3+d*5+e*7 + p.a*11 + p.b*13; }
+double c_f2_fits(double a,double b,double c,double d,double e,double f,F2 q)
+                                                      { return a+b*2+c*3+d*5+e*7+f*11 + q.x*13 + q.y*17; }
+long c_mix_over(double a,double b,double c,double d,double e,double f,double g,
+                long h,long i,long j,long k,long l,long m, MIX x)
+                                                      { return (long)x.x*3 + x.n*5; }
+
 /* NOTE: this gate checks the CALLER side only (coil calls gcc). Two reasons the
    callee side is not here: the metaprogram dylib inherits the program's
    --link-flag list, so a C object with an undefined symbol fails that dylib's
@@ -95,6 +106,10 @@ cat > "$WORK/cabi.coil" <<'KEOF'
 (extern c_p2_ret     :cc c [i64] (-> P2))
 (extern c_f2_ret     :cc c [f64] (-> F2))
 (extern c_mix_ret    :cc c [f64 i64] (-> MIX))
+(extern c_p2_fits    :cc c [i64 i64 i64 i64 P2] (-> i64))
+(extern c_p2_over    :cc c [i64 i64 i64 i64 i64 P2] (-> i64))
+(extern c_f2_fits    :cc c [f64 f64 f64 f64 f64 f64 F2] (-> f64))
+(extern c_mix_over   :cc c [f64 f64 f64 f64 f64 f64 f64 i64 i64 i64 i64 i64 i64 MIX] (-> i64))
 
 (defn note! [(fb (ptr i64)) (n i64) (got i64) (want i64)] (-> i64)
   (unless (icmp-eq got want)
@@ -145,6 +160,20 @@ cat > "$WORK/cabi.coil" <<'KEOF'
       (note! fb 10 (cast i64 (fadd (load (field r x)) (fmul (load (field r y)) 7.0))) 22))
     (let [r (c_mix_ret 4.0 6)]
       (note! fb 11 (iadd (cast i64 (load (field r x))) (imul (load (field r n)) 7)) 46))
+    ; ---- the register-exhaustion boundary, both sides of it ----
+    ; 4 ints leave rdi..rcx used, so P2 fits EXACTLY in r8:r9 -> stays in regs.
+    ; 1+4+9+20 = 34; 100*7 + 200*11 = 700+2200 = 2900 -> 2934
+    (note! fb 13 (c_p2_fits 1 2 3 4 (load p)) 2934)
+    ; 5 ints leave only r9 free, so P2 cannot fit and must go byval.
+    ; 1+4+9+20+35 = 69; 100*11 + 200*13 = 1100+2600 = 3700 -> 3769
+    (note! fb 14 (c_p2_over 1 2 3 4 5 (load p)) 3769)
+    ; 6 doubles leave xmm6:xmm7 free, so F2 fits EXACTLY -> stays in regs.
+    ; 1+4+9+20+35+66 = 135; 3*13 + 5*17 = 39+85 = 124 -> 259
+    (note! fb 15 (cast i64 (c_f2_fits 1.0 2.0 3.0 4.0 5.0 6.0 (load q))) 259)
+    ; 7 doubles + 6 ints: one xmm free, no GPR free -> MIX must go byval.
+    ; 2*3 + 5*5 = 6 + 25 = 31
+    (note! fb 16 (c_mix_over 1.0 2.0 3.0 4.0 5.0 6.0 7.0 1 2 3 4 5 6 (load m)) 31)
+
     (if (icmp-eq (load fb) 0)
         (do (print-str w "cabi: all checks passed\n") 0)
         (load fb))))

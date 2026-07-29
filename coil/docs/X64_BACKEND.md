@@ -140,14 +140,28 @@ Small programs are bound by the shared `cc`-link and process floor.
   dyn-dispatch signatures also declare aggregate params by value while passing
   references, so the two cases cannot be told apart from the types alone.
 
-## A pre-existing LLVM-backend bug this work surfaced
-`gate-cabi.sh` runs the LLVM backend as a control, and it fails one case.
-`codegen.coil` flattens a by-value `{double,double}` into two separate `double`
-parameters (visible in `emit-ir` as `double %abi.slot, double %abi.slot2`).
-SysV says such a struct spills to the stack **as a unit** once both eightbytes
-cannot fit, but two independent doubles put the first in the last free xmm and
-spill only the second. With seven doubles ahead of it the callee then reads
-`qx=5, qy=0` instead of `qx=3, qy=5`. Verified three ways: gcc alone says 418,
-the coil LLVM path says 357, the x64 backend says 418. The gate reports this as
-`known` rather than failing; remove that allowance when `codegen.coil` stops
-flattening aggregates at the C boundary.
+## An LLVM-backend bug this work surfaced — and fixed
+Writing `gate-cabi.sh` exposed a real bug in the OTHER backend. `codegen.coil`
+classified a by-value aggregate purely from its type, so a `{double,double}`
+always became two separate `double` parameters. SysV does not work that way:
+an aggregate is passed in registers only if enough are still free at its
+position, and otherwise the WHOLE thing goes in memory — it never half-spills.
+With seven doubles ahead of it the callee read `qx=5, qy=0` instead of
+`qx=3, qy=5`. Verified three ways: gcc alone said 418, the coil LLVM path said
+357, the x64 backend said 418.
+
+`c-signature` now tracks integer and SSE register consumption across the
+parameter list (counting the sret pointer, scalars, and each aggregate's
+eightbytes) and demotes an `ACDirect` aggregate to `byval` when either file
+would overflow — which is exactly what clang emits. The accounting is x86-only:
+AArch64's `ACDirect` coercion is a single slot whose HFA/size rules the
+classifier already handles, and cross-compiled arm64 IR is unchanged
+(`[2 x double]`, as before).
+
+The fix changed no existing program's output: `gate-full` is still byte-exact
+across all 60 IR snapshots, because the demotion only triggers in the
+register-exhausted case that nothing in the corpus reached. `gate-cabi.sh` now
+covers both sides of that boundary — `c_p2_fits`/`c_f2_fits` land exactly in
+the last free registers and must stay in them, while `c_p2_over`/`c_mix_over`
+must demote. Reverting the fix trips checks 4, 14 and 16 (SSE, INTEGER and
+mixed-class exhaustion) while the `_fits` cases stay green.
