@@ -66,27 +66,6 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
-### 7. Global CSS edits rebuild but never reach open browsers (Next dev topology)
-
-Editing `styles/globals.css` under `diffpack dev` recompiles the sheet (the marker
-appears in the served `/rsc.css` on the next request) but no cache-busted link swap or
-reload is pushed, so an open page keeps the stale stylesheet forever. Measured: marker
-never applied in 30s, twice; the served sheet had it. Turbopack delivers the same edit
-in ~7.4s (its own Tailwind recompile dominates). The SPA/Vite dev path HAS a css
-hot-swap (`push_css`); the Next topology never wires it. Fix shape: fingerprint the
-emitted sheets after each settle and push the swap (or a reload) when they change.
-
-### 8. Edits within ~1.6s of a previous edit contend with the deferred full re-emit
-
-Clean-path edit-to-DOM is ~50ms (island) / ~50ms (server component) / ~69ms (shared
-client component). But an edit arriving while the PREVIOUS edit's deferred full
-re-emit is still running (client+ssr ~1.6s, react-server ~1.0s on cal.com) measures
-~1.0s to the DOM — a 20x penalty at a ~1-edit-per-second cadence (measured: 112ms
-first edit, then 986-1068ms steady). The §2.3 coalescing handles bursts *within* the
-150ms settle window; the gap is edits landing *during* the re-emit itself. Turbopack
-has no equivalent cliff (flat ~420ms at the same cadence). Fix shape: let hot pushes
-preempt/interleave with the background re-emit instead of queueing behind it.
-
 ## Reference-side failures (NOT diffpack bugs — do not spend time here)
 
 - `cannot book same slot multiple times`: fails identically on `next start`; the
@@ -102,6 +81,8 @@ preempt/interleave with the background re-emit instead of queueing behind it.
 
 | Commit | Issue |
 |---|---|
+| `b0df5053f` | Dev: hot pushes queued behind the deferred full re-emit (~1s edit-to-DOM at 1Hz cadence; now flat ~50ms — settle window 2s + one-graph-per-step flush; residual: an edit landing inside a single graph's emit window ~2.0-3.0s after the previous edit still waits for that one emit, ~0.6s bounded) |
+| `b0df5053f` | Dev: global CSS edits rebuilt but never reached open browsers in the Next topology (now fingerprinted at settle and delivered via the HMR client's in-place link swap; measured ~3.4s edit-to-applied vs Turbopack's ~7.4s) |
 | `75a2a630f` | `next/dynamic` wrapped every call in `<Suspense>`; Next's `Loadable` rule (`!ssr \|\| !!loading`) gives the default call NO boundary — the extra fallback commit made tab swaps two commits and minted auto-animate ghosts (the deterministic variant) |
 | `0c180b351` | Soft navigation swapped in a still-streaming flight; a suspended transition commits nothing — stalled navigations presented as flaky tests |
 | `c3af226ac` | Tailwind class-composition helper arguments not treated as class positions |
