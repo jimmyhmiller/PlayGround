@@ -612,6 +612,35 @@ function acceptsGzip(req) {
   return typeof accept === "string" && /(^|,)\s*gzip\s*(;|,|$)/.test(accept);
 }
 
+// Compressing the client bundle costs ~300 ms of CPU, and this orchestrator is ONE
+// event loop serving every render — paying that per request (12 Playwright workers each
+// opening a fresh browser) is far worse than the bytes it saves. A build output does not
+// change while the server runs, so each asset is compressed at most once and the frame
+// is kept, keyed by the same (size, mtime) pair the ETag is derived from: a rebuild
+// changes the key and the stale frame is simply never read again.
+const GZIP_CACHE = new Map();
+// Enough for a whole client build's text assets; past it, later files stream through a
+// per-request gzip rather than evicting (no asset is ever served WRONG, only slower).
+const GZIP_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+let gzipCacheBytes = 0;
+
+function cachedGzip(filePath, validators) {
+  const hit = GZIP_CACHE.get(filePath);
+  if (hit && hit.etag === validators.etag) return hit.body;
+  return null;
+}
+
+function rememberGzip(filePath, validators, body) {
+  const previous = GZIP_CACHE.get(filePath);
+  if (previous) gzipCacheBytes -= previous.body.length;
+  if (gzipCacheBytes + body.length > GZIP_CACHE_MAX_BYTES) {
+    if (previous) GZIP_CACHE.delete(filePath);
+    return;
+  }
+  GZIP_CACHE.set(filePath, { etag: validators.etag, body });
+  gzipCacheBytes += body.length;
+}
+
 // Append Set-Cookie strings to a response-headers object WITHOUT clobbering any already
 // there (e.g. middleware set-cookies). node's writeHead accepts an array for set-cookie,
 // so we normalize to an array and concat. A render/action/route can add cookies via
@@ -964,18 +993,34 @@ function serveStaticAsset(req, res, filePath) {
   const compressible = COMPRESSIBLE.test(type) && info.size >= COMPRESS_MIN_BYTES;
   if (compressible) headers.vary = "Accept-Encoding";
   const gzip = compressible && acceptsGzip(req);
-  // A gzip frame's length is not known before it is produced, so only the identity
-  // response can declare one.
-  if (gzip) headers["content-encoding"] = "gzip";
-  else headers["content-length"] = info.size;
+  if (!gzip) {
+    headers["content-length"] = info.size;
+    res.writeHead(200, headers);
+    pipeline(createReadStream(filePath), res, ignoreAbortedTransfer);
+    return;
+  }
+  headers["content-encoding"] = "gzip";
+  const cached = cachedGzip(filePath, validators);
+  if (cached) {
+    headers["content-length"] = cached.length;
+    res.writeHead(200, headers);
+    res.end(cached);
+    return;
+  }
+  // First request for this asset: compress once, answer from the frame, and keep it so
+  // no later request pays the CPU again. A gzip frame's length is not known before it
+  // exists, so this one response is chunked; every later one declares a length.
   res.writeHead(200, headers);
-  const source = createReadStream(filePath);
-  const stages = gzip ? [source, createGzip(), res] : [source, res];
-  pipeline(...stages, () => {
-    // A client that navigated away mid-transfer aborts the socket; that is not a
-    // server fault and must not take the process down.
-  });
+  const frames = [];
+  const compressor = createGzip();
+  compressor.on("data", (chunk) => frames.push(Buffer.from(chunk)));
+  compressor.on("end", () => rememberGzip(filePath, validators, Buffer.concat(frames)));
+  pipeline(createReadStream(filePath), compressor, res, ignoreAbortedTransfer);
 }
+
+// A client that navigated away mid-transfer aborts the socket; that is not a server
+// fault and must not take the process down.
+function ignoreAbortedTransfer() {}
 
 // Which KIND of endpoint owns this path, or null when none does. The two kinds are
 // served by DIFFERENT GRAPHS, which is why this cannot collapse to a boolean:

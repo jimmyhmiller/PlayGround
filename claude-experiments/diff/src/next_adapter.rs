@@ -9750,12 +9750,15 @@ async function run(file, headers) {
 "#;
         let driver = r#"
 const gz = await run("/out/public/client.js", { "accept-encoding": "gzip, deflate, br" });
+// The SECOND request for the same asset must be answered from the kept frame — same
+// bytes, and now with a declared length because the frame's size is known.
+const gz2 = await run("/out/public/client.js", { "accept-encoding": "gzip" });
 const plain = await run("/out/public/client.js", {});
 const fresh = await run("/out/public/client.js", { "if-none-match": gz.etag });
 const stale = await run("/out/public/client.js", { "if-none-match": 'W/"deadbeef-1"' });
 const tiny = await run("/out/public/tiny.js", { "accept-encoding": "gzip" });
 const png = await run("/out/public/logo.png", { "accept-encoding": "gzip" });
-console.log(JSON.stringify({ gz, plain, fresh, stale, tiny, png }));
+console.log(JSON.stringify({ gz, gz2, plain, fresh, stale, tiny, png }));
 "#;
         let file = scratch("next-server-static-asset").join("serve.mjs");
         std::fs::write(&file, format!("{prelude}{policy}{serve}{driver}")).unwrap();
@@ -9776,6 +9779,14 @@ console.log(JSON.stringify({ gz, plain, fresh, stale, tiny, png }));
         assert!(
             got["gz"]["bodyBytes"].as_u64().unwrap() < got["plain"]["bodyBytes"].as_u64().unwrap(),
             "gzip is smaller than identity: {got}",
+        );
+        // Compressed at most once: the second request replays the kept frame verbatim,
+        // which is the whole reason gzip is affordable on a single-event-loop server.
+        assert_eq!(got["gz2"]["bodyBytes"], got["gz"]["bodyBytes"]);
+        assert_eq!(got["gz2"]["text"], got["gz"]["text"]);
+        assert_eq!(
+            got["gz2"]["contentLength"], got["gz"]["bodyBytes"],
+            "the replayed frame declares its length: {got}",
         );
         // A validator is always present, and the identity response declares its length.
         assert_eq!(got["plain"]["encoding"], serde_json::Value::Null);
