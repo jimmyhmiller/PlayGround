@@ -1,16 +1,19 @@
 // SCENARIO 6 — repair the frozen program; it resumes exactly where it stopped.
 //
-// Adding the missing arm publishes a valid `radius`, which un-breaks `on_frame`
+// Adding the missing arm publishes a valid `draw`, which un-breaks `on_frame`
 // with it. The frozen computation is not restarted and its frame is not
 // rebuilt: the same suspended `main` resumes at the precise instruction that
 // trapped — the call it could not make — and simply makes it. The particles
 // pick up exactly where they were, because they never stopped being the same
 // objects.
+//
+// The far right of the canvas is now drawn by a third foreign function, so the
+// repair is visible as bars appearing, not as a size change.
 
-fn radius(p: Particle) -> i64 {
+fn draw(p: Particle) -> () {
     match kind_of(p) {
-        Dot => 10,
-        Ring => 24,
-        Bar => 34,
+        Dot => { circle(cv, p.x, p.y, radius(p), tint(p)); }
+        Ring => { ring(cv, p.x, p.y, radius(p) + 6, tint(p)); }
+        Bar => { bar(cv, p.x, p.y, radius(p) * 3, radius(p), tint(p)); }
     }
 }

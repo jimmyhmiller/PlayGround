@@ -1,9 +1,9 @@
 // SCENARIO 5 — add a variant; the stale match is marked Broken AT INSTALL.
 //
-// `Kind` gains `Bar`, so `radius`'s two-arm match no longer covers the enum.
+// `Kind` gains `Bar`, so `draw`'s two-arm match no longer covers the enum.
 // It is not left to fail later and it does not silently fall through: the
 // engine re-verifies every function whose match covers `Kind` and publishes
-// `radius` as Broken — and brokenness propagates to its callers, so `on_frame`
+// `draw` as Broken — and brokenness propagates to its callers, so `on_frame`
 // is published Broken too.
 //
 // The running animation therefore FREEZES at `main`'s next call to `on_frame`:

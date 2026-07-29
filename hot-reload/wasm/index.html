@@ -234,7 +234,7 @@
         <dl class="stats">
           <div><dt>Frames</dt><dd id="stat-frames">0</dd></div>
           <div><dt>Canvas opened</dt><dd id="stat-canvas" class="pinned">0</dd></div>
-          <div><dt>Circles drawn</dt><dd id="stat-circles">0</dd></div>
+          <div><dt>Shapes drawn</dt><dd id="stat-shapes">0</dd></div>
           <div><dt>Status</dt><dd id="stat-status">booting</dd></div>
         </dl>
       </div>
@@ -319,15 +319,33 @@ await init();
 let demo = new Demo();
 
 // ── painting ───────────────────────────────────────────────────────────────
+// One op is six ints: [tag, x, y, a, b, hue]. The tag is which foreign
+// function the guest called, so which shape appears is the guest's decision,
+// not this painter's — that is the whole point of dispatching on an enum.
+const OP_CIRCLE = 0, OP_RING = 1, OP_BAR = 2;
+
 function paint(ops) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (let i = 0; i < ops.length; i += 4) {
-    const [x, y, r, hue] = [ops[i], ops[i + 1], ops[i + 2], ops[i + 3]];
-    const h = ((hue % 360) + 360) % 360;
+  for (let i = 0; i < ops.length; i += 6) {
+    const [tag, x, y, a, b, hue] =
+      [ops[i], ops[i + 1], ops[i + 2], ops[i + 3], ops[i + 4], ops[i + 5]];
+    const colour = `hsl(${((hue % 360) + 360) % 360} 72% 62% / 0.85)`;
+    if (tag === OP_BAR) {
+      const w = Math.max(1, a), h = Math.max(1, b);
+      ctx.fillStyle = colour;
+      ctx.fillRect(x - w / 2, y - h / 2, w, h);
+      continue;
+    }
     ctx.beginPath();
-    ctx.arc(x, y, Math.max(1, r), 0, Math.PI * 2);
-    ctx.fillStyle = `hsl(${h} 72% 62% / 0.85)`;
-    ctx.fill();
+    ctx.arc(x, y, Math.max(1, a), 0, Math.PI * 2);
+    if (tag === OP_RING) {
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = colour;
+      ctx.fill();
+    }
   }
 }
 
@@ -369,7 +387,7 @@ function refreshStats() {
     demo.frozen && step === STEP_COUNT - 1 ? "" : "none";
   $("stat-frames").textContent = demo.frames;
   $("stat-canvas").textContent = demo.canvases_opened;
-  $("stat-circles").textContent = demo.circles_drawn.toLocaleString();
+  $("stat-shapes").textContent = demo.shapes_drawn.toLocaleString();
 
   // The inspector is read out of the engine; only redraw it when it changes.
   const world = demo.world_json();
@@ -816,9 +834,9 @@ const WATCH = [
   "The particles resize on the very next frame. Frames keep climbing and the canvas is never reopened — the loop is not restarted.",
   "The same particles gain colour. `Particle` becomes v2 in the live world and the objects already on screen migrate as they are read. No reseeding.",
   "The edit is refused and the animation carries on with the last good `tint`. A bad edit cannot take down a running program.",
-  "Particles on the right half become rings: a `match` on `Kind` now chooses the size.",
-  "`radius` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
-  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped.",
+  "Particles on the right half become actual rings: a `match` on `Kind` picks which foreign function draws them, so the arms differ in shape, not just in size.",
+  "`draw` is published Broken at install, and it takes `on_frame` and `main` with it. The animation freezes on its last good frame — watch the live world panel go red.",
+  "Only the root cause is repaired, and the whole chain revives. Resume, and the suspended program continues at the instruction that trapped — the far right fills in with bars.",
 ];
 
 const STEP_COUNT = Demo.scenario_count();

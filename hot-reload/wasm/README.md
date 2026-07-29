@@ -21,6 +21,12 @@ resources, then run it. The only difference is that the "native toolkit" is a
 command buffer JavaScript paints onto a `<canvas>` instead of a windowing
 library.
 
+The toolkit draws three shapes — `circle`, `ring`, `bar` — and which one
+appears is the guest's decision, made by dispatching on its own enum. With a
+single `circle` primitive the enum could only vary a radius, so a variant named
+`Ring` rendered as a slightly larger dot and the type distinction was invisible
+on screen. Steps 4 to 6 are the ones that depend on this.
+
 The guest program and every scripted edit are real source files in `demo/`,
 embedded with `include_str!`. `tests/demo_scene.rs` drives those same files
 headlessly, so the behaviour the page shows is pinned by the test suite rather
@@ -45,9 +51,9 @@ difference.
 | 1 | `edit_1_radius.lt` | Redefining a function takes effect at the next call. The loop is never restarted. |
 | 2 | `edit_2_migrate.lt` | A struct gains a defaulted field; the particles already on screen migrate lazily at their next field read. Same objects, no reseed. |
 | 3 | `edit_3_rejected.lt` | An ill-typed edit is refused at install. The running program keeps executing the last good version. |
-| 4 | `edit_4_enum.lt` | An enum is introduced and dispatched on. |
-| 5 | `edit_5_break.lt` | Adding a variant makes a `match` non-exhaustive. It is published Broken *at install*, brokenness propagates to callers, and the program freezes at the boundary — before the frame performs a single effect. The last good frame stays on screen. |
-| 6 | `edit_6_repair.lt` | Repairing only the *root cause* revives the whole broken chain, and the suspended computation resumes at the instruction that trapped. |
+| 4 | `edit_4_enum.lt` | An enum is introduced and dispatched on: `draw`'s arms call different foreign functions, so the right half becomes stroked rings. `radius` is untouched and still sizes both arms. |
+| 5 | `edit_5_break.lt` | Adding a variant makes `draw`'s `match` non-exhaustive. It is published Broken *at install*, brokenness propagates to callers, and the program freezes at the boundary — before the frame performs a single effect. The last good frame stays on screen. |
+| 6 | `edit_6_repair.lt` | Repairing only the *root cause* revives the whole broken chain, and the suspended computation resumes at the instruction that trapped. Bars appear on the far right. |
 
 Throughout, the "canvas opened" counter stays at 1: `letonce` holds the native
 resource, so edits change code and never the running world.

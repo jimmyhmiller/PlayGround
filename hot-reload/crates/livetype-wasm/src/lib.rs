@@ -39,6 +39,14 @@ const SCENARIOS: &[(&str, &str)] = &[
 /// an unbounded loop, in which case the demo says so rather than hanging the tab.
 const FRAME_INSTRUCTION_CAP: usize = 2_000_000;
 
+/// Shape tags in the op stream. Every op is six `i32`s — `[tag, x, y, a, b,
+/// hue]` — so a frame stays one flat array however many shapes the toolkit
+/// grows. `a`/`b` are the radius and an unused 0 for the round shapes, and the
+/// width and height for a bar.
+const OP_CIRCLE: i32 = 0;
+const OP_RING: i32 = 1;
+const OP_BAR: i32 = 2;
+
 /// The "native toolkit": what the guest drew. `pending` accumulates the frame
 /// being rendered; `committed` is the last frame that ran to completion. A
 /// frozen program therefore leaves the last good frame on screen instead of a
@@ -47,9 +55,17 @@ const FRAME_INSTRUCTION_CAP: usize = 2_000_000;
 struct Toolkit {
     canvases_opened: u64,
     frames_cleared: u64,
-    circles_drawn: u64,
+    shapes_drawn: u64,
     pending: Vec<i32>,
     committed: Vec<i32>,
+}
+
+impl Toolkit {
+    fn push(&mut self, tag: i32, x: i64, y: i64, a: i64, b: i64, hue: i64) {
+        self.shapes_drawn += 1;
+        self.pending
+            .extend_from_slice(&[tag, x as i32, y as i32, a as i32, b as i32, hue as i32]);
+    }
 }
 
 /// Status of the last `step_frame`, mirrored into JS as a small integer.
@@ -126,11 +142,13 @@ impl Demo {
                 )
                 .map_err(|e| JsError::new(&e))?;
         }
-        {
+        // The two round shapes share an arity, so they share a binding shape;
+        // `bar` takes a width and a height instead of a radius.
+        for (name, tag) in [("circle", OP_CIRCLE), ("ring", OP_RING)] {
             let tk = Arc::clone(&toolkit);
             session
                 .register_foreign(
-                    "circle",
+                    name,
                     Box::new(move |args| {
                         // The verifier has already checked this call against the
                         // declared signature, so a mismatch here is a host bug.
@@ -139,11 +157,30 @@ impl Demo {
                         else {
                             return Value::Unit;
                         };
-                        let mut t = tk.lock().unwrap();
-                        t.circles_drawn += 1;
-                        t.pending.extend_from_slice(&[
-                            *x as i32, *y as i32, *r as i32, *hue as i32,
-                        ]);
+                        tk.lock().unwrap().push(tag, *x, *y, *r, 0, *hue);
+                        Value::Unit
+                    }),
+                )
+                .map_err(|e| JsError::new(&e))?;
+        }
+        {
+            let tk = Arc::clone(&toolkit);
+            session
+                .register_foreign(
+                    "bar",
+                    Box::new(move |args| {
+                        let [
+                            _,
+                            Value::I64(x),
+                            Value::I64(y),
+                            Value::I64(w),
+                            Value::I64(h),
+                            Value::I64(hue),
+                        ] = args
+                        else {
+                            return Value::Unit;
+                        };
+                        tk.lock().unwrap().push(OP_BAR, *x, *y, *w, *h, *hue);
                         Value::Unit
                     }),
                 )
@@ -197,7 +234,7 @@ impl Demo {
         STATUS_CAPPED
     }
 
-    /// The last completed frame, as flat `[x, y, r, hue]` quads.
+    /// The last completed frame, as flat `[tag, x, y, a, b, hue]` ops.
     pub fn draw_ops(&self) -> Vec<i32> {
         self.toolkit.lock().unwrap().committed.clone()
     }
@@ -386,8 +423,8 @@ impl Demo {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn circles_drawn(&self) -> u64 {
-        self.toolkit.lock().unwrap().circles_drawn
+    pub fn shapes_drawn(&self) -> u64 {
+        self.toolkit.lock().unwrap().shapes_drawn
     }
 
     /// The live world, for the inspector: every current definition with its
