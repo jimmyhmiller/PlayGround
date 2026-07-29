@@ -895,40 +895,55 @@ pub fn scan_class_candidates(source: &str, out: &mut BTreeSet<String>) {
     scan_class_candidates_multi(std::slice::from_ref(&source), out);
 }
 
-/// Multi-file variant of [`scan_class_candidates`]: identifiers referenced
-/// from one file's class positions resolve against `const` bindings in ANY of
-/// the files (`import { COLOR } from './colors'` + `className={COLOR[kind]}`),
-/// iterated to a fixpoint so chains across files resolve too.
-pub fn scan_class_candidates_multi<S: AsRef<str> + Sync>(
-    sources: &[S],
-    out: &mut BTreeSet<String>,
-) {
-    // Pass 1: every file's class-valued positions. Per-file independent, so it fans
-    // out across the pool and the per-file results are merged in `sources` order —
-    // the sets are order-independent anyway, but merging deterministically keeps the
-    // emitted stylesheet byte-identical run to run.
-    let positions_stage = crate::build_profile::stage("css/tailwind-scan-positions");
-    let scanned = sources
-        .par_iter()
-        .map(|source| {
-            let mut found = BTreeSet::new();
-            let mut idents = BTreeSet::new();
-            scan_class_positions(source.as_ref(), &mut found, &mut idents);
-            scan_safelist_arrays(source.as_ref(), &mut found, &mut idents);
-            scan_class_helper_calls(source.as_ref(), &mut found, &mut idents);
-            (found, idents)
-        })
-        .collect::<Vec<_>>();
-    let mut idents: BTreeSet<String> = BTreeSet::new();
-    for (found, file_idents) in scanned {
-        out.extend(found);
-        idents.extend(file_idents);
-    }
-    drop(positions_stage);
+/// One file's contribution to the candidate scan, kept so a scan can be updated for
+/// a single changed file instead of re-read and re-tokenized whole (the dev loop does
+/// exactly that; see `Bundler::refresh_tailwind_scan_path`).
+///
+/// The three pieces are what the cross-file passes consume: the classes this file
+/// states outright, the identifiers its class positions referenced, and the string
+/// bindings it declares for those identifiers to resolve against.
+#[derive(Clone)]
+pub struct SourceScan {
+    found: BTreeSet<String>,
+    idents: BTreeSet<String>,
+    bindings: Vec<(String, String)>,
+}
 
-    // Pass 2: resolve the identifiers those positions referenced against `const`/
-    // `let`/`var` string bindings anywhere in the source set, to a fixpoint.
-    //
+/// Scan ONE file into its cacheable parts. Pass 1 of
+/// [`scan_class_candidates_multi`], for one file, plus that file's binding
+/// declarations.
+pub fn scan_source_parts(source: &str) -> SourceScan {
+    let mut found = BTreeSet::new();
+    let mut idents = BTreeSet::new();
+    scan_class_positions(source, &mut found, &mut idents);
+    scan_safelist_arrays(source, &mut found, &mut idents);
+    scan_class_helper_calls(source, &mut found, &mut idents);
+    SourceScan {
+        found,
+        idents,
+        bindings: binding_initializers(source)
+            .into_iter()
+            .map(|(name, init)| (name.to_string(), init.to_string()))
+            .collect(),
+    }
+}
+
+/// The candidate set a group of scanned files produces: their stated classes, plus
+/// every identifier their class positions referenced resolved against `const`/`let`/
+/// `var` string bindings declared in ANY of them (`import { COLOR } from './colors'` +
+/// `className={COLOR[kind]}`), iterated to a fixpoint so chains across files resolve.
+///
+/// This is the CROSS-FILE half of the scan, and it is why a scan cannot be cached as a
+/// per-file union: a class only one file mentions can be reachable only through another
+/// file's binding. Keeping the per-file parts and re-running this over them is both
+/// exact and cheap — it re-reads nothing and re-tokenizes nothing.
+pub fn resolve_scans<'a>(scans: impl Iterator<Item = &'a SourceScan>, out: &mut BTreeSet<String>) {
+    let scans = scans.collect::<Vec<_>>();
+    let mut idents: BTreeSet<String> = BTreeSet::new();
+    for scan in &scans {
+        out.extend(scan.found.iter().cloned());
+        idents.extend(scan.idents.iter().cloned());
+    }
     // Driven by an INDEX built in one pass over every file, not by re-scanning every
     // file for every identifier. Both find exactly the same bindings — the index is
     // the same predicate read from the declaration keyword instead of from the name —
@@ -937,17 +952,41 @@ pub fn scan_class_candidates_multi<S: AsRef<str> + Sync>(
     // identifiers) was the single largest phase of a production build.
     let index_stage = crate::build_profile::stage("css/tailwind-binding-index");
     let mut bindings: HashMap<&str, Vec<&str>> = HashMap::new();
-    for per_file in sources
-        .par_iter()
-        .map(|source| binding_initializers(source.as_ref()))
-        .collect::<Vec<_>>()
-    {
-        for (name, init) in per_file {
-            bindings.entry(name).or_default().push(init);
+    for scan in &scans {
+        for (name, init) in &scan.bindings {
+            bindings.entry(name.as_str()).or_default().push(init.as_str());
         }
     }
     drop(index_stage);
+    resolve_idents(idents, &bindings, out);
+}
 
+/// Multi-file variant of [`scan_class_candidates`]: identifiers referenced
+/// from one file's class positions resolve against `const` bindings in ANY of
+/// the files (`import { COLOR } from './colors'` + `className={COLOR[kind]}`),
+/// iterated to a fixpoint so chains across files resolve too.
+pub fn scan_class_candidates_multi<S: AsRef<str> + Sync>(
+    sources: &[S],
+    out: &mut BTreeSet<String>,
+) {
+    // Pass 1: every file's class-valued positions and binding declarations.
+    // Per-file independent, so it fans out across the pool.
+    let positions_stage = crate::build_profile::stage("css/tailwind-scan-positions");
+    let scanned = sources
+        .par_iter()
+        .map(|source| scan_source_parts(source.as_ref()))
+        .collect::<Vec<_>>();
+    drop(positions_stage);
+    // Pass 2: the cross-file resolve, shared verbatim with the incremental path.
+    resolve_scans(scanned.iter(), out);
+}
+
+/// Pass 2's fixpoint: every referenced identifier resolved against the binding index.
+fn resolve_idents(
+    idents: BTreeSet<String>,
+    bindings: &HashMap<&str, Vec<&str>>,
+    out: &mut BTreeSet<String>,
+) {
     let _resolve_stage = crate::build_profile::stage("css/tailwind-resolve-idents");
     let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut worklist: Vec<String> = idents.into_iter().collect();

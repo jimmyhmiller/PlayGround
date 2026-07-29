@@ -1219,6 +1219,66 @@ pub struct Bundler {
     /// answer for every chunk — a `sources` URL is a module's identity across the
     /// whole build — so it is computed once and cached, never per map.
     map_root: OnceLock<Option<PathBuf>>,
+    /// The Tailwind class candidates last scanned, keyed by the inputs that produce
+    /// them: the scan root, the output root it excludes, and the entry sheet's own
+    /// text (which carries the `@source` include/exclude set). Interior-mutable so
+    /// emit stays `&self`.
+    ///
+    /// The scan reads every source file under the root — on a monorepo app that is the
+    /// dominant cost of compiling the sheet — and its result depends on those files,
+    /// NOT on this graph. So it stays valid exactly as long as those files do, which is
+    /// a fact only the caller knows: the dev loop calls
+    /// [`Self::refresh_tailwind_scan_path`] for each file it rebuilds (re-tokenizing
+    /// just that file) and [`Self::invalidate_tailwind_scan`] when the module set
+    /// itself changed, so files may have appeared or vanished. Nothing invalidates it
+    /// implicitly; a stale entry would compile the wrong utilities.
+    tailwind_scan_cache: Mutex<HashMap<(PathBuf, PathBuf, String), TailwindScan>>,
+    /// The last few COMPILED Tailwind sheets, keyed by everything the compile is a
+    /// function of: the entry text, the candidate set and the app's theme. A
+    /// compile is pure in those inputs, and for a sheet that delegates to the app's
+    /// own Tailwind it costs a Node process (~250 ms on cal.com), so repeating it
+    /// for the same inputs is pure waste — which is what the dev loop's deferred
+    /// chunk compaction used to do to every edit's sheet, one full delegate per
+    /// compaction pass.
+    ///
+    /// Small and LRU-by-insertion (a dev session edits one sheet over and over, so
+    /// only the newest entries can hit); a compiled sheet is hundreds of KB, so this
+    /// is deliberately not allowed to grow with the session.
+    tailwind_sheet_cache: Mutex<Vec<(TailwindSheetKey, Arc<String>)>>,
+}
+
+/// A Tailwind candidate scan, kept PER FILE so an edit costs one file read.
+///
+/// The scan is what makes compiling a monorepo's stylesheet expensive: it reads and
+/// tokenizes every source file under the root (~660 ms on cal.com). Dropping all of it
+/// whenever any source changed meant paying that again after every keystroke, on the
+/// thread that answers file events.
+///
+/// Only the per-file halves are cached. The candidate set is NOT a union of them — an
+/// identifier referenced in one file resolves against a binding declared in another —
+/// so it is recomputed by re-running the cross-file resolve
+/// ([`crate::tailwind::resolve_scans`]) over the cached parts, which reads no files and
+/// tokenizes nothing. Same algorithm as a from-scratch scan, same bytes out.
+struct TailwindScan {
+    per_file: HashMap<PathBuf, crate::tailwind::SourceScan>,
+}
+
+impl TailwindScan {
+    fn candidates(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        crate::tailwind::resolve_scans(self.per_file.values(), &mut out);
+        out
+    }
+}
+
+/// What a compiled Tailwind sheet is a function of. The candidate set and theme are
+/// hashed rather than stored: they are large, and a mismatch only needs to be
+/// DETECTED, never explained.
+#[derive(PartialEq, Eq, Clone)]
+struct TailwindSheetKey {
+    css: String,
+    candidates: u64,
+    theme: u64,
 }
 
 impl Bundler {
@@ -1295,6 +1355,8 @@ impl Bundler {
             render_cache: Mutex::new(RenderCache::default()),
             emit_plans: Mutex::new(HashMap::new()),
             map_root: OnceLock::new(),
+            tailwind_scan_cache: Mutex::new(HashMap::new()),
+            tailwind_sheet_cache: Mutex::new(Vec::new()),
         };
         bundler.entry = bundler.intern(entry_id.clone());
 
@@ -1509,11 +1571,76 @@ impl Bundler {
         self.emit_with_options(reachable, output, EmitOptions::default())
     }
 
+    /// [`Self::emit_public_incremental`] that can be STOPPED part-way. Returns
+    /// `(rendered chunks, cancelled)`.
+    ///
+    /// See [`EmitCancel`]. Only the dev loop's deferred compaction passes a real
+    /// signal: it runs on the same thread that answers file events, and a chunk
+    /// render on a large app takes hundreds of milliseconds, so without this an edit
+    /// arriving mid-compaction waited it out.
+    pub fn emit_public_incremental_cancellable(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_root: &Path,
+        options: EmitOptions,
+        cancel: EmitCancel<'_>,
+    ) -> Result<(usize, bool), String> {
+        let options = EmitOptions {
+            format: ModuleFormat::BrowserEsm,
+            ..options
+        };
+        let public_dir = output_root.join("public");
+        let stats = self.emit_inner(reachable, &public_dir.join("client.js"), options, cancel)?;
+        Ok((stats.rendered_chunks, stats.cancelled))
+    }
+
+    /// [`Self::emit_server_into`] that can be STOPPED part-way. Returns
+    /// `(summary, cancelled)`, and when cancelled it does NOT prune: a partial emit's
+    /// written set does not describe the tree, so pruning against it would delete
+    /// live chunks.
+    pub fn emit_server_into_cancellable(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        server_dir: &Path,
+        options: EmitOptions,
+        cancel: EmitCancel<'_>,
+    ) -> Result<(EmitSummary, bool), String> {
+        let options = EmitOptions {
+            format: ModuleFormat::Esm,
+            ..options
+        };
+        let server_dir = server_dir.to_path_buf();
+        let mut stats =
+            self.emit_inner(reachable, &server_dir.join("server.mjs"), options, cancel)?;
+        if stats.cancelled {
+            let mut summary = EmitSummary::of(&server_dir)?;
+            summary.rendered_chunks = stats.rendered_chunks;
+            return Ok((summary, true));
+        }
+        stats.written.extend(write_server_runtime_entry(&server_dir, options.hmr)?);
+        prune_stale_files(&server_dir, &stats.written)?;
+        let mut summary = EmitSummary::of(&server_dir)?;
+        summary.rendered_chunks = stats.rendered_chunks;
+        Ok((summary, false))
+    }
+
     /// The number of chunk renders currently cached. Bounded to the live chunk
     /// set by per-emit eviction, so it stays flat across a long edit sequence;
     /// exposed for the memory guards in `docs/THESIS_GUARDS.md`.
     pub fn render_cache_len(&self) -> usize {
         self.render_cache.lock().unwrap().entries.len()
+    }
+
+    /// Drop the cached Tailwind candidate scan entirely: the module set changed, so
+    /// files this graph compiles against may have been added or removed and the scan's
+    /// file list is no longer the truth. A CHANGED file is handled without this, by
+    /// [`Self::refresh_tailwind_scan_path`].
+    ///
+    /// The dev loop calls this for every non-stylesheet rebuild. It is deliberately
+    /// explicit — the scan reads the file system rather than this graph, so nothing
+    /// inside the bundler can observe that its inputs moved.
+    pub fn invalidate_tailwind_scan(&self) {
+        self.tailwind_scan_cache.lock().unwrap().clear();
     }
 
     /// Emits the client browser build into `<output_root>/public/`: the entry
@@ -1569,6 +1696,50 @@ impl Bundler {
         let public_dir = output_root.join("public");
         let stats = self.emit_environment(reachable, &public_dir, "client.js", options)?;
         Ok(stats.rendered_chunks)
+    }
+
+    /// Compile and write ONLY this graph's stylesheet (`<entry-stem>.css` beside
+    /// `output`), rendering no JS chunk and touching no manifest or asset.
+    ///
+    /// A stylesheet edit changes exactly one artifact the browser needs, and it can
+    /// be delivered by swapping one `<link>` — but the sheet is produced as a
+    /// side-product of the full environment emit, which on a real app costs ~1.2 s
+    /// of chunk rendering that a css edit does not need. That coupling is why a css
+    /// edit used to wait for the deferred compaction pass: it was the next time
+    /// anything wrote the sheet. This is the same stylesheet pipeline
+    /// ([`Self::emit_css`]: candidate scan, Tailwind compile, concatenation in
+    /// static execution order) with the chunk half left out, so the dev loop can run
+    /// it on the edit itself.
+    ///
+    /// Returns the path written, or `None` when this graph compiles no CSS at all.
+    /// The bytes are written only if they differ, so an edit that does not move the
+    /// stylesheet leaves its mtime — and any conditional-request cache — alone.
+    pub fn emit_stylesheet_only(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output: &Path,
+        cancel: EmitCancel<'_>,
+    ) -> Result<StylesheetEmit, String> {
+        let parent = output
+            .parent()
+            .ok_or_else(|| format!("output has no parent: {}", output.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        // The same live set the full emit derives, so the sheet contains exactly the
+        // modules the emitted bundle would have contributed — no more, no less.
+        let reachable = self.live_modules(reachable);
+        let allowed = reachable
+            .iter()
+            .filter_map(|id| self.indices.get(id.as_str()).copied())
+            .collect::<HashSet<_>>();
+        let mut written = BTreeSet::new();
+        if self.emit_css(&allowed, output, &mut written, cancel)? {
+            return Ok(StylesheetEmit::Cancelled);
+        }
+        match written.into_iter().next() {
+            Some(sheet) => Ok(StylesheetEmit::Written(sheet)),
+            None => Ok(StylesheetEmit::NoStylesheet),
+        }
     }
 
     /// Emits a generic web build directly into `output_dir`: the browser-ESM
@@ -1695,6 +1866,20 @@ impl Bundler {
         output: &Path,
         options: EmitOptions,
     ) -> Result<EmitStats, String> {
+        self.emit_inner(reachable, output, options, EmitCancel::never())
+    }
+
+    /// [`Self::emit_with_options`], plus the [`EmitCancel`] the dev loop's deferred
+    /// compaction hands in. Checked before each expensive phase and inside the
+    /// per-module render fan-out; on cancellation nothing further is written and
+    /// `stats.cancelled` says so.
+    fn emit_inner(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output: &Path,
+        options: EmitOptions,
+        cancel: EmitCancel<'_>,
+    ) -> Result<EmitStats, String> {
         // A truthful source map can only come from the per-module maps the
         // TRANSFORM produced, and those are produced only when the bundler was
         // built with `BuildConfig::source_maps`. Emitting maps from a bundler that
@@ -1716,6 +1901,13 @@ impl Bundler {
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         let mut stats = EmitStats::default();
+        // Set by any check point that saw the cancel signal, including from inside
+        // the rayon fan-out below.
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        if cancel.cancelled() {
+            stats.cancelled = true;
+            return Ok(stats);
+        }
         // Keys of every chunk this emit renders or reuses; entries not among them
         // are evicted at the end so the cache stays bounded to the live chunk set.
         let mut live_keys = HashSet::new();
@@ -1732,8 +1924,12 @@ impl Bundler {
             .filter_map(|id| self.indices.get(id.as_str()).copied())
             .collect::<Vec<_>>();
         let allowed = reachable_dense.iter().copied().collect::<HashSet<_>>();
+        if cancel.cancelled() {
+            stats.cancelled = true;
+            return Ok(stats);
+        }
         let assets_stage = crate::build_profile::stage("emit/assets");
-        self.emit_assets(&allowed, parent, &mut stats.written)?;
+        self.emit_assets(&allowed, parent, &mut stats.written, cancel)?;
         drop(assets_stage);
         let mut runtime_ids = vec![None; self.ids.len()];
         for (runtime_id, &dense_id) in reachable_dense.iter().enumerate() {
@@ -1752,6 +1948,10 @@ impl Bundler {
         // membership, file names and load order all come from here, so the files
         // on disk and the `import()` references rewritten into them agree by
         // construction.
+        if cancel.cancelled() {
+            stats.cancelled = true;
+            return Ok(stats);
+        }
         let plan_stage = crate::build_profile::stage("emit/chunk-plan");
         let plans = self.chunk_plan(&allowed, entry_name)?;
         drop(plan_stage);
@@ -1929,9 +2129,15 @@ impl Bundler {
         // before the caller's stale-file prune ever looks at it.
         let (css_written, render_result) = rayon::join(
             || -> Result<BTreeSet<PathBuf>, String> {
+                if cancel.cancelled() {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(BTreeSet::new());
+                }
                 let css_stage = crate::build_profile::stage("emit/css");
                 let mut written = BTreeSet::new();
-                self.emit_css(&allowed, output, &mut written)?;
+                if self.emit_css(&allowed, output, &mut written, cancel)? {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 drop(css_stage);
                 Ok(written)
             },
@@ -1947,6 +2153,16 @@ impl Bundler {
                     plans
                         .par_iter()
                         .map(|plan| -> Result<(u64, bool, BTreeSet<PathBuf>), String> {
+                            // Checked per chunk, not only inside a render: most of a
+                            // compaction pass is cache hits and file writes over a
+                            // thousand chunks, and a pass made entirely of those must
+                            // still stop when the developer types.
+                            if cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                                || cancel.cancelled()
+                            {
+                                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Ok((0, false, BTreeSet::new()));
+                            }
                             let chunk_path = parent.join(&plan.file_name);
                             let prerequisites = plan
                                 .prerequisites
@@ -1968,7 +2184,15 @@ impl Bundler {
                                 options.source_map,
                                 options.hmr,
                                 &plan.file_name,
+                                cancel,
                             )?;
+                            // Cancelled mid-render: this chunk is simply not written.
+                            // What is already on disk stays valid, and the caller keeps
+                            // the graph's debt so a later quiet moment finishes the job.
+                            let Some(rendered) = rendered else {
+                                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Ok((key, false, BTreeSet::new()));
+                            };
                             let rendered = substitute_workers(rendered);
                             let mut written = BTreeSet::new();
                             self.write_rendered(rendered, &chunk_path, options, &mut written)?;
@@ -1984,6 +2208,10 @@ impl Bundler {
                     stats.written.extend(written);
                 }
                 drop(split_stage);
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) || cancel.cancelled() {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(());
+                }
                 let main_stage = crate::build_profile::stage("emit/render-main-chunk");
                 let (rendered, main_key, main_fresh) = self.render_chunk_cached(
                     &main_modules,
@@ -2000,8 +2228,14 @@ impl Bundler {
                     options.source_map,
                     options.hmr,
                     entry_name,
+                    cancel,
                 )?;
                 live_keys.insert(main_key);
+                let Some(rendered) = rendered else {
+                    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    drop(main_stage);
+                    return Ok(());
+                };
                 if main_fresh {
                     stats.rendered_chunks += 1;
                 }
@@ -2013,7 +2247,14 @@ impl Bundler {
         );
         stats.written.extend(css_written?);
         render_result?;
-        self.evict_render_cache(&live_keys);
+        stats.cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
+        // A cancelled emit rendered a SUBSET of the live chunks, so its `live_keys` is
+        // not the live set — evicting against it would throw away cache entries the
+        // next attempt needs and make that attempt slower, which is the opposite of
+        // what abandoning this one was for.
+        if !stats.cancelled {
+            self.evict_render_cache(&live_keys);
+        }
         Ok(stats)
     }
 
@@ -2213,7 +2454,8 @@ impl Bundler {
         source_map: bool,
         hmr: bool,
         chunk_name: &str,
-    ) -> Result<(RenderedBundle, u64, bool), String> {
+        cancel: EmitCancel<'_>,
+    ) -> Result<(Option<RenderedBundle>, u64, bool), String> {
         let key = self.chunk_render_key(
             modules,
             roots,
@@ -2229,11 +2471,13 @@ impl Bundler {
             source_map,
             hmr,
         );
+        // A cache hit is free and always honoured: the bytes exist, so handing them
+        // back cannot delay anyone. Only a real render is abandoned.
         if let Some(hit) = self.render_cache.lock().unwrap().entries.get(&key) {
-            return Ok((hit.clone(), key, false));
+            return Ok((Some(hit.clone()), key, false));
         }
         let best_stage = crate::build_profile::stage("emit/render-best");
-        let mut bundle = self.render_best(
+        let rendered = self.render_best(
             modules,
             roots,
             chunk_names,
@@ -2245,8 +2489,12 @@ impl Bundler {
             async_modules,
             format,
             hmr,
+            cancel,
         )?;
         drop(best_stage);
+        let Some(mut bundle) = rendered else {
+            return Ok((None, key, false));
+        };
         // The readable mappings are what BOTH output shapes' maps are built from
         // (a minified chunk's map is composed from them), so this is the one place
         // to prove they describe the bytes that were actually rendered.
@@ -2298,7 +2546,7 @@ impl Bundler {
             .unwrap()
             .entries
             .insert(key, bundle.clone());
-        Ok((bundle, key, true))
+        Ok((Some(bundle), key, true))
     }
 
     /// Evicts every cached chunk render whose key was not used in the emit that
@@ -2953,8 +3201,11 @@ impl Bundler {
             &async_modules,
             format,
             options.hmr,
+            // A hot micro-chunk IS the edit's payload, never deferred housekeeping:
+            // there is nothing it could usefully be abandoned for.
+            EmitCancel::never(),
         )?;
-        Ok(Some(bundle))
+        Ok(bundle)
     }
 
     /// Copies every content-hashed asset referenced by a reachable module into
@@ -2965,6 +3216,7 @@ impl Bundler {
         allowed: &HashSet<DenseModuleId>,
         parent: &Path,
         written: &mut BTreeSet<PathBuf>,
+        cancel: EmitCancel<'_>,
     ) -> Result<(), String> {
         let mut seen = HashSet::new();
         let mut assets_dir_ready = false;
@@ -2990,7 +3242,13 @@ impl Bundler {
                     // declares via `source(...)`). This is a build-emit step, off
                     // the incremental transform hot path.
                     let compiled =
-                        self.compile_tailwind_entry(&asset.source, source_css, parent)?;
+                        self.compile_tailwind_entry(&asset.source, source_css, parent, cancel)?;
+                    // A `?url` sheet is part of the emit's asset pass, which the caller
+                    // has already gated on the same signal; an abandoned compile here
+                    // simply leaves the previous file in place.
+                    let Some(compiled) = compiled else {
+                        return Ok(());
+                    };
                     write_if_changed(&destination, compiled.as_bytes())?;
                 } else if !destination.exists() {
                     // The public name is content-hashed, so a destination that
@@ -3059,18 +3317,95 @@ impl Bundler {
         css_path: &Path,
         css: &str,
         out_root: &Path,
-    ) -> Result<String, String> {
+        cancel: EmitCancel<'_>,
+    ) -> Result<Option<String>, String> {
         let scan_root = tailwind_scan_root(css_path, css);
         let candidates_stage = crate::build_profile::stage("css/tailwind-candidate-scan");
-        let candidates = self.tailwind_candidates(&scan_root, out_root, css)?;
+        // What the scan actually depends on: where it walks and what it skips. The
+        // entry's remaining text (rules, theme, `@plugin`) does not enter it, so an
+        // edit to the sheet keeps the scan — which is the whole point, since that walk
+        // is the expensive half of compiling a monorepo's stylesheet.
+        let globs = tailwind_source_globs(css)?;
+        let key = (scan_root.clone(), out_root.to_path_buf(), format!("{globs:?}"));
+        let cached = self
+            .tailwind_scan_cache
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(TailwindScan::candidates);
+        let candidates = match cached {
+            Some(hit) => hit,
+            None => {
+                let Some(per_file) =
+                    self.tailwind_scan_files(&scan_root, out_root, &globs, cancel)?
+                else {
+                    return Ok(None);
+                };
+                let scan = TailwindScan { per_file };
+                let candidates = scan.candidates();
+                self.tailwind_scan_cache.lock().unwrap().insert(key, scan);
+                candidates
+            }
+        };
         drop(candidates_stage);
         let theme_stage = crate::build_profile::stage("css/tailwind-app-theme");
         let app_theme = app_tailwind_theme_full(&scan_root, css, css_path);
         drop(theme_stage);
+        // The compile is a pure function of (entry text, candidates, theme), so an
+        // identical request is answered from the last few results instead of spawning
+        // the app's Tailwind again. This is what keeps the dev loop's deferred chunk
+        // compaction from recompiling the sheet the edit already compiled.
+        let sheet_key = TailwindSheetKey {
+            css: css.to_string(),
+            candidates: hash_of(&candidates),
+            theme: hash_of(&app_theme),
+        };
+        if let Some((_, hit)) = self
+            .tailwind_sheet_cache
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| *key == sheet_key)
+        {
+            return Ok(Some(hit.to_string()));
+        }
+        let Some(compiled) =
+            self.compile_tailwind_uncached(css_path, css, &candidates, app_theme, cancel)?
+        else {
+            return Ok(None);
+        };
+        {
+            /// How many compiled sheets to keep. A dev session recompiles ONE entry as
+            /// it is edited, so the useful window is the newest few; each sheet is
+            /// hundreds of KB, so the window is small on purpose.
+            const KEEP: usize = 4;
+            let mut cache = self.tailwind_sheet_cache.lock().unwrap();
+            cache.push((sheet_key, Arc::new(compiled.clone())));
+            let excess = cache.len().saturating_sub(KEEP);
+            cache.drain(..excess);
+        }
+        Ok(Some(compiled))
+    }
+
+    /// The Tailwind compile itself: pick the engine and run it. Separated from
+    /// [`Self::compile_tailwind_entry`] only so the cache in that function wraps one
+    /// call rather than two engine branches.
+    fn compile_tailwind_uncached(
+        &self,
+        css_path: &Path,
+        css: &str,
+        candidates: &BTreeSet<String>,
+        app_theme: Option<String>,
+        cancel: EmitCancel<'_>,
+    ) -> Result<Option<String>, String> {
         let _compile_stage = crate::build_profile::stage("css/tailwind-compile");
         match crate::tailwind::native_gap(css, app_theme.as_deref()) {
             Some(gap) => {
-                let sheet = crate::tailwind_delegate::compile(css_path, css, &candidates, &gap)?;
+                let Some(sheet) =
+                    crate::tailwind_delegate::compile(css_path, css, candidates, &gap, cancel)?
+                else {
+                    return Ok(None);
+                };
                 report_tailwind_engine(
                     css_path,
                     &format!(
@@ -3082,7 +3417,7 @@ impl Bundler {
                         crate::tailwind::VERSION,
                     ),
                 );
-                Ok(sheet.css)
+                Ok(Some(sheet.css))
             }
             None => {
                 // Only a NATIVE compile mixes the app's installed theme with
@@ -3097,7 +3432,8 @@ impl Bundler {
                         crate::tailwind::VERSION
                     ),
                 );
-                crate::tailwind::compile_with_theme_lenient(css, &candidates, app_theme.as_deref())
+                crate::tailwind::compile_with_theme_lenient(css, candidates, app_theme.as_deref())
+                    .map(Some)
             }
         }
     }
@@ -3107,18 +3443,20 @@ impl Bundler {
     /// resolved relative to the entry file); every JS/TS/JSX file under it
     /// contributes its `className`/`class` tokens. Falls back to the entry's own
     /// directory when no `source(...)` is given.
-    fn tailwind_candidates(
+    fn tailwind_scan_files(
         &self,
         scan_root: &Path,
         out_root: &Path,
-        css: &str,
-    ) -> Result<BTreeSet<String>, String> {
-        let mut skip = ScanSkip::for_root(scan_root, out_root);
         // `@source` widens the scan beyond the project root — the way a monorepo
         // app declares that its classes also live in sibling workspace packages —
-        // and `@source not` narrows it. Both are inputs to THIS scan, so they are
-        // read off the (already import-spliced, path-absolutized) entry text.
-        let (included, excluded) = tailwind_source_globs(css)?;
+        // and `@source not` narrows it. Both are inputs to THIS scan, read off the
+        // (already import-spliced, path-absolutized) entry text by the caller, which
+        // also keys its scan cache on them.
+        globs: &(Vec<String>, Vec<String>),
+        cancel: EmitCancel<'_>,
+    ) -> Result<Option<HashMap<PathBuf, crate::tailwind::SourceScan>>, String> {
+        let mut skip = ScanSkip::for_root(scan_root, out_root);
+        let (included, excluded) = globs;
         skip.excluded = excluded
             .iter()
             .flat_map(|pattern| expand_braces(pattern))
@@ -3126,16 +3464,55 @@ impl Bundler {
             .collect();
         let read_stage = crate::build_profile::stage("css/tailwind-read-sources");
         let mut sources = Vec::new();
-        collect_scan_sources(scan_root, &mut sources, &skip);
-        for pattern in &included {
+        // The walk reads every source file under the root — hundreds of milliseconds on
+        // a monorepo — so it asks between directories whether it is still wanted.
+        if !collect_scan_sources(scan_root, &mut sources, &skip, &cancel) {
+            return Ok(None);
+        }
+        for pattern in included {
             collect_glob_sources(pattern, &mut sources, &skip);
+            if cancel.cancelled() {
+                return Ok(None);
+            }
         }
         drop(read_stage);
         let scan_stage = crate::build_profile::stage("css/tailwind-scan-candidates");
-        let mut candidates = BTreeSet::new();
-        crate::tailwind::scan_class_candidates_multi(&sources, &mut candidates);
+        // Tokenized per file and KEPT per file: an edit then re-tokenizes one file
+        // instead of the tree (see [`TailwindScan`]). Batched with a yield point
+        // between batches, because tokenizing thousands of files is ~150 ms.
+        let mut per_file = HashMap::new();
+        for batch in sources.chunks(128) {
+            if cancel.cancelled() {
+                return Ok(None);
+            }
+            for (path, source) in batch {
+                per_file.insert(path.clone(), crate::tailwind::scan_source_parts(source));
+            }
+        }
         drop(scan_stage);
-        Ok(candidates)
+        Ok(Some(per_file))
+    }
+
+    /// Re-tokenize ONE file in every cached scan that covers it, and update the union.
+    /// Called by the dev loop for each changed source file, in place of dropping the
+    /// whole scan.
+    pub fn refresh_tailwind_scan_path(&self, path: &Path) {
+        let mut cache = self.tailwind_scan_cache.lock().unwrap();
+        for scan in cache.values_mut() {
+            if !scan.per_file.contains_key(path) {
+                continue;
+            }
+            match fs::read_to_string(path) {
+                Ok(source) => {
+                    scan.per_file
+                        .insert(path.to_path_buf(), crate::tailwind::scan_source_parts(&source));
+                }
+                // Gone: it contributes nothing now.
+                Err(_) => {
+                    scan.per_file.remove(path);
+                }
+            }
+        }
     }
 
     /// Extracts the stylesheet: concatenates every reachable global CSS module's
@@ -3159,7 +3536,8 @@ impl Bundler {
         allowed: &HashSet<DenseModuleId>,
         output: &Path,
         written: &mut BTreeSet<PathBuf>,
-    ) -> Result<(), String> {
+        cancel: EmitCancel<'_>,
+    ) -> Result<bool, String> {
         let order = self.static_execution_order(self.entry, allowed).unwrap_or_else(|| {
             let mut ids = allowed.iter().copied().collect::<Vec<_>>();
             ids.sort_by(|left, right| self.ids[*left].cmp(&self.ids[*right]));
@@ -3194,7 +3572,14 @@ impl Bundler {
                 if crate::tailwind::needs_native_tailwind_compile(css) {
                     let css_path = Path::new(self.ids[dense].as_ref());
                     let out_root = output.parent().unwrap_or_else(|| Path::new("."));
-                    stylesheet.push_str(&self.compile_tailwind_entry(css_path, css, out_root)?);
+                    let Some(compiled) =
+                        self.compile_tailwind_entry(css_path, css, out_root, cancel)?
+                    else {
+                        // Abandoned: a partial sheet must never be written — it would
+                        // serve a page with most of its utilities missing.
+                        return Ok(true);
+                    };
+                    stylesheet.push_str(&compiled);
                 } else {
                     stylesheet.push_str(css);
                 }
@@ -3203,12 +3588,12 @@ impl Bundler {
         if stylesheet.is_empty() {
             // No stylesheet this emit; leaving it out of `written` lets the caller
             // prune a stale `.css` left by a previous build.
-            return Ok(());
+            return Ok(false);
         }
         let css_path = output.with_extension("css");
         write_if_changed(&css_path, stylesheet.as_bytes())?;
         written.insert(css_path);
-        Ok(())
+        Ok(false)
     }
 
     /// The map file a chunk's map goes in, its contents, and the trailing comment
@@ -3838,7 +4223,8 @@ impl Bundler {
         async_modules: &AsyncModules,
         format: ModuleFormat,
         hmr: bool,
-    ) -> Result<RenderedBundle, String> {
+        cancel: EmitCancel<'_>,
+    ) -> Result<Option<RenderedBundle>, String> {
         // The flat path emits a plain concatenation with no per-module factory
         // registry, so it has no place to install `module.hot`; a dev (hmr) build
         // always renders through the registry runtime so every module is HMR-capable.
@@ -3849,7 +4235,7 @@ impl Bundler {
             && let Some(flat) =
                 self.render_flat(reachable, roots, chunk_names, global_demands, is_main, format)
         {
-            return Ok(flat);
+            return Ok(Some(flat));
         }
         // A top-level `await` that reaches the registry runtime is rendered as an
         // `async` factory (see `render_runtime`); `async_module_closure` has already
@@ -3865,6 +4251,7 @@ impl Bundler {
             async_modules,
             format,
             hmr,
+            cancel,
         ))
     }
 
@@ -4245,7 +4632,8 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         async_modules: &AsyncModules,
         format: ModuleFormat,
         hmr: bool,
-    ) -> RenderedBundle {
+        cancel: EmitCancel<'_>,
+    ) -> Option<RenderedBundle> {
         // See `render_flat`: demand is aggregated globally across chunks. Each of
         // this chunk's entry points keeps its full namespace (the main entry is
         // required by the outer wrapper; a dynamic root is read as a namespace
@@ -4255,9 +4643,22 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
         for &root in roots {
             export_demands[root].all = true;
         }
+        // The per-module render fan-out is where a big chunk spends its time, so it
+        // is also where an abandoned pass has to notice: each module checks the
+        // signal first, and once one has seen it every remaining module returns
+        // immediately, so the whole render unwinds in a millisecond or two instead of
+        // holding the dev loop for the length of an 18 MB entry chunk.
+        let stop = std::sync::atomic::AtomicBool::new(false);
         let fragments = reachable
             .par_iter()
             .filter_map(|&dense_index| {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return None;
+                }
+                if cancel.cancelled() {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
                 let module = self.modules[dense_index].as_ref()?;
                 let runtime_id = runtime_ids[dense_index]
                     .expect("a rendered module must have a deterministic runtime ID");
@@ -4399,6 +4800,11 @@ globalThis.__webpack_chunk_load__=function(c){{var f=globalThis.__diffpack_chunk
                 ))
             })
             .collect::<Vec<_>>();
+        // Abandoned part-way: the fragment set is incomplete, so no bundle can be
+        // built from it. The caller writes nothing and keeps its debt.
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         // A split chunk's members can statically depend on modules that landed in
         // a SIBLING chunk (shared code extracted out of both). Those factories
         // must already be registered before this chunk's are used, so the chunk
@@ -4869,11 +5275,11 @@ const __newChunks={{{chunks}}};
 "#
             )
         };
-        RenderedBundle {
+        Some(RenderedBundle {
             code,
             mappings,
             map_json: None,
-        }
+        })
     }
 
     /// The source map for a READABLE (un-minified) chunk.
@@ -8126,6 +8532,15 @@ fn is_css_path(path: &Path) -> bool {
 /// otherwise walk up to the nearest `package.json` (found live: wall-go keeps
 /// its entry in `src/assets/`, and scanning only that directory yielded zero
 /// utility candidates — an entirely unstyled app).
+/// A content hash of anything hashable, for cache keys whose inputs are too large to
+/// keep but must be compared exactly.
+fn hash_of(value: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn tailwind_scan_root(css_path: &Path, source_css: &str) -> PathBuf {
     let css_dir = css_path.parent().unwrap_or_else(|| Path::new("."));
     tailwind_source_root(source_css)
@@ -8546,16 +8961,19 @@ fn is_glob_segment(segment: &str) -> bool {
 /// Reads every source file an `@source` pattern selects. A pattern with no glob
 /// metacharacters names a file (read directly) or a directory (walked whole,
 /// exactly as Tailwind treats a bare `@source "./dir"`).
-fn collect_glob_sources(pattern: &str, out: &mut Vec<String>, skip: &ScanSkip) {
+fn collect_glob_sources(pattern: &str, out: &mut Vec<(PathBuf, String)>, skip: &ScanSkip) {
     for expanded in expand_braces(pattern) {
         let segments = path_segments(Path::new(&expanded));
         let literal = segments.iter().take_while(|s| !is_glob_segment(s)).count();
         let root: PathBuf = segments[..literal].iter().collect();
         if literal == segments.len() {
             if root.is_dir() {
-                collect_scan_sources(&root, out, skip);
+                // An `@source` directory walk is not cancellable: the caller checks
+                // between patterns, which is granular enough for the handful an app
+                // declares.
+                collect_scan_sources(&root, out, skip, &EmitCancel::never());
             } else if let Ok(source) = fs::read_to_string(&root) {
-                out.push(source);
+                out.push((root.clone(), source));
             }
             continue;
         }
@@ -8567,7 +8985,7 @@ fn collect_glob_sources(pattern: &str, out: &mut Vec<String>, skip: &ScanSkip) {
 fn collect_matching_sources(
     directory: &Path,
     pattern: &[String],
-    out: &mut Vec<String>,
+    out: &mut Vec<(PathBuf, String)>,
     skip: &ScanSkip,
 ) {
     let Ok(entries) = fs::read_dir(directory) else {
@@ -8585,7 +9003,7 @@ fn collect_matching_sources(
         } else if glob_matches(pattern, &path_segments(&path))
             && let Ok(source) = fs::read_to_string(&path)
         {
-            out.push(source);
+            out.push((path, source));
         }
     }
 }
@@ -8596,11 +9014,21 @@ fn collect_matching_sources(
 /// own output directory, so only the app's own classes are scanned. The files
 /// are scanned together (`scan_class_candidates_multi`) so identifiers resolve
 /// across module boundaries.
-fn collect_scan_sources(root: &Path, out: &mut Vec<String>, skip: &ScanSkip) {
+/// Reads every scannable source under `root` into `out`. Returns false if `cancel`
+/// fired part-way, in which case `out` is incomplete and must not be scanned.
+fn collect_scan_sources(
+    root: &Path,
+    out: &mut Vec<(PathBuf, String)>,
+    skip: &ScanSkip,
+    cancel: &EmitCancel<'_>,
+) -> bool {
     let Ok(entries) = fs::read_dir(root) else {
-        return;
+        return true;
     };
     for entry in entries.flatten() {
+        if cancel.cancelled() {
+            return false;
+        }
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -8608,15 +9036,18 @@ fn collect_scan_sources(root: &Path, out: &mut Vec<String>, skip: &ScanSkip) {
             continue;
         }
         if path.is_dir() {
-            collect_scan_sources(&path, out, skip);
+            if !collect_scan_sources(&path, out, skip, cancel) {
+                return false;
+            }
         } else if matches!(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "html")
         ) && let Ok(source) = fs::read_to_string(&path)
         {
-            out.push(source);
+            out.push((path, source));
         }
     }
+    true
 }
 
 /// Whether a resolved path is a static asset imported for its URL by default
@@ -9399,6 +9830,57 @@ struct RenderCache {
 pub struct EmitStats {
     pub rendered_chunks: usize,
     written: BTreeSet<PathBuf>,
+    /// Set when the emit stopped early because its [`EmitCancel`] fired. Whatever
+    /// was written is complete and valid (chunks are written whole); what was not
+    /// written is simply not there yet, so the caller must neither prune against
+    /// this emit's written set nor consider the graph's debt discharged.
+    pub cancelled: bool,
+}
+
+/// What a stylesheet-only emit did.
+pub enum StylesheetEmit {
+    /// The sheet was compiled; this is the file it was written to (unchanged bytes are
+    /// not rewritten, so the path may be untouched on disk).
+    Written(PathBuf),
+    /// This graph compiles no CSS at all.
+    NoStylesheet,
+    /// Abandoned before finishing — see [`EmitCancel`]. Nothing was written, and the
+    /// caller must keep the work owed.
+    Cancelled,
+}
+
+/// A "stop as soon as you can" signal for an emit.
+///
+/// The dev loop's chunk compaction is housekeeping that runs on the same thread that
+/// answers file events, and on a large app one chunk render is hundreds of
+/// milliseconds. Without a way to abandon it, an edit that lands mid-compaction waits
+/// it out — the contention cliff that a long fixed idle only made rarer, never
+/// impossible. With this, the loop asks "has a file event arrived?" between renders
+/// and inside the per-module render fan-out, and drops the pass within a millisecond
+/// or two, keeping its debt for the next quiet moment.
+///
+/// Every other caller passes [`EmitCancel::never`], which compiles to one `Option`
+/// test per check.
+#[derive(Copy, Clone)]
+pub struct EmitCancel<'a>(Option<&'a (dyn Fn() -> bool + Send + Sync)>);
+
+impl<'a> EmitCancel<'a> {
+    /// An emit that always runs to completion. Every production build path.
+    pub fn never() -> Self {
+        Self(None)
+    }
+
+    /// Stop when `signal` returns true. It is called often, from rayon worker
+    /// threads, so it must be cheap (an atomic load) and must not block.
+    pub fn when(signal: &'a (dyn Fn() -> bool + Send + Sync)) -> Self {
+        Self(Some(signal))
+    }
+
+    /// Whether the work should stop. Called from the emit's own phases and from the
+    /// Tailwind delegate, which polls it while the app's compiler runs.
+    pub fn cancelled(&self) -> bool {
+        self.0.is_some_and(|signal| signal())
+    }
 }
 
 fn display_fold_expression(expression: &FoldExpression) -> String {

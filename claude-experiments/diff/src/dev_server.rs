@@ -58,6 +58,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -1586,6 +1587,54 @@ fn rfind_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 
 // --- watch helpers ------------------------------------------------------------
 
+/// Every filesystem event either watch source delivered that the watch loop would
+/// ACT on, counted.
+///
+/// The channel tells the watch loop WHAT changed; this tells anything else in the
+/// process THAT something changed, without owning the receiver. Deferred work (chunk
+/// compaction, the stylesheet recompile) samples it before it starts and polls it while
+/// it runs, so an edit landing mid-pass abandons that pass instead of queueing behind
+/// it.
+///
+/// It counts only paths that pass the loop's own filter, and that is load-bearing
+/// rather than an optimisation: the watch roots contain `node_modules` and diffpack's
+/// own output directory, so an unfiltered count is bumped by the emit's own writes —
+/// deferred work would then cancel itself, every time, and never finish.
+static WATCH_EVENTS_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// The tree the watch loop judges paths against (see `is_dependency_or_generated`).
+/// Set once when a dev server starts; a process runs one.
+static WATCH_BASE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Count `paths` if any of them is a source file the loop would rebuild for.
+fn note_watch_paths(paths: &[PathBuf]) {
+    let base = WATCH_BASE.lock().unwrap().clone();
+    let relevant = paths.iter().any(|path| {
+        is_module_path(path)
+            && base
+                .as_deref()
+                .is_none_or(|base| !is_dependency_or_generated(path, base))
+    });
+    if relevant {
+        WATCH_EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A snapshot of [`WATCH_EVENTS_SEEN`] and the question deferred work asks of it.
+#[derive(Copy, Clone)]
+struct EventEpoch(u64);
+
+impl EventEpoch {
+    fn now() -> Self {
+        Self(WATCH_EVENTS_SEEN.load(Ordering::Relaxed))
+    }
+
+    /// Whether any file event has arrived since this epoch was taken.
+    fn superseded(&self) -> bool {
+        WATCH_EVENTS_SEEN.load(Ordering::Relaxed) != self.0
+    }
+}
+
 fn start_watcher(root: &Path) -> Result<Receiver<notify::Result<notify::Event>>, String> {
     start_watcher_paths(&[(root.to_path_buf(), RecursiveMode::Recursive)])
 }
@@ -1719,7 +1768,10 @@ fn start_watcher_paths(
     // double-detection never causes a second rebuild.
     let mut watcher = notify::recommended_watcher({
         let events = events.clone();
-        move |event| {
+        move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = &event {
+                note_watch_paths(&event.paths);
+            }
             let _ = events.send(event);
         }
     })
@@ -1764,6 +1816,7 @@ fn spawn_supplement_poller(
                                 notify::event::ModifyKind::Any,
                             ))
                             .add_path(path.clone());
+                            note_watch_paths(&event.paths);
                             if events.send(Ok(event)).is_err() {
                                 return; // receiver gone: dev server shutting down.
                             }
@@ -1881,6 +1934,16 @@ fn is_module_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|extension| extension.to_str()),
         Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "json" | "css" | "scss" | "sass" | "less")
+    )
+}
+
+/// Whether a path is a stylesheet source. Such an edit's visible result IS the
+/// generated sheet, so the dev loop recompiles and delivers it on the edit rather
+/// than waiting for any idle.
+fn is_stylesheet_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("css" | "scss" | "sass" | "less" | "styl")
     )
 }
 
@@ -2942,7 +3005,7 @@ mod next {
         let mut config = next_config_dev(project_root, "react-server")?;
         register_server_virtual_modules(&mut config, project_root, output_root)?;
         let build = discover_next_env(config, "react-server", options)?;
-        emit_next_react_server(&build, output_root, rsc_root)?;
+        emit_next_react_server(&build, output_root, rsc_root, crate::bundler::EmitCancel::never())?;
         Ok(build)
     }
 
@@ -2955,7 +3018,7 @@ mod next {
         let build = discover_next_env_reconciled(project_root, "ssr", options, &|config| {
             register_server_virtual_modules(config, project_root, output_root)
         })?;
-        emit_next_ssr(&build, output_root)?;
+        emit_next_ssr(&build, output_root, crate::bundler::EmitCancel::never())?;
         Ok(build)
     }
 
@@ -3043,11 +3106,18 @@ mod next {
     /// makes the edit-to-update latency competitive; the full emit (`emit_next_client`)
     /// still runs afterward, off the critical path, so a subsequent full document load
     /// remains correct.
-    fn emit_next_client_hmr(client: &EnvBuild, output_root: &Path) -> Result<usize, String> {
+    fn emit_next_client_hmr(
+        client: &EnvBuild,
+        output_root: &Path,
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(usize, bool), String> {
         let reachable = reachable_ids(client);
-        client
-            .bundler
-            .emit_public_incremental(&reachable, output_root, client.options)
+        client.bundler.emit_public_incremental_cancellable(
+            &reachable,
+            output_root,
+            client.options,
+            cancel,
+        )
     }
 
     /// Emit the react-server graph into `<rsc_root>/server`, preserve its compiled CSS
@@ -3057,9 +3127,22 @@ mod next {
         env: &EnvBuild,
         output_root: &Path,
         rsc_root: &Path,
-    ) -> Result<EmitSummary, String> {
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(EmitSummary, bool), String> {
         let reachable = reachable_ids(env);
-        let summary = env.bundler.emit_server(&reachable, rsc_root, env.options)?;
+        let (summary, cancelled) = env.bundler.emit_server_into_cancellable(
+            &reachable,
+            &rsc_root.join("server"),
+            env.options,
+            cancel,
+        )?;
+        // Abandoned: the emitted tree is a partial rewrite of chunks whose patched
+        // versions on disk are already current, so nothing downstream of it runs —
+        // no CSS preserve, no manifest, and above all no copy of a half-written
+        // bundle over the one the render worker loads.
+        if cancelled {
+            return Ok((summary, true));
+        }
         // The react-server graph is authoritative for CSS; preserve it to the served,
         // non-pruned public/rsc.css. The render entry links it iff this same
         // `RSC_EMITTED_CSS_FILE` sits beside it (it is copied to `rsc-render/` with the
@@ -3092,20 +3175,32 @@ mod next {
             .write(&output_root.join(crate::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE))?;
         // Copy the fresh bundle to rsc-render (the orchestrator's per-request child).
         replace_dir(&rsc_root.join("server"), &output_root.join("rsc-render"))?;
-        Ok(summary)
+        Ok((summary, false))
     }
 
     /// Emit the ssr-of-flight graph into `<out>/server` and write ITS client-references
     /// manifest (its ids) to `<out>` — the manifest the orchestrator reads as the SSR
     /// half of the divergent-id module map.
-    fn emit_next_ssr(env: &EnvBuild, output_root: &Path) -> Result<EmitSummary, String> {
+    fn emit_next_ssr(
+        env: &EnvBuild,
+        output_root: &Path,
+        cancel: crate::bundler::EmitCancel<'_>,
+    ) -> Result<(EmitSummary, bool), String> {
         let reachable = reachable_ids(env);
-        let summary = env.bundler.emit_server(&reachable, output_root, env.options)?;
+        let (summary, cancelled) = env.bundler.emit_server_into_cancellable(
+            &reachable,
+            &output_root.join("server"),
+            env.options,
+            cancel,
+        )?;
+        if cancelled {
+            return Ok((summary, true));
+        }
         let server_references = env
             .bundler
             .client_references_manifest(&reachable, "server.mjs")?;
         server_references.write(&output_root.join(crate::rsc::SERVER_REFERENCES_MANIFEST_FILE))?;
-        Ok(summary)
+        Ok((summary, false))
     }
 
     /// Where per-edit server micro-chunks are written, under the output dir so the
@@ -3328,14 +3423,22 @@ mod next {
     ///
     /// Compaction is housekeeping, not correctness: after every edit the on-disk
     /// chunks are already patched in place with the edit's own micro-chunk (see
-    /// [`ChunkPatcher`]), so a full reload or a respawned worker reads CURRENT code
-    /// at all times. Compaction only rewrites the accumulated patch tail into a
-    /// pristine chunk (restoring real source maps for patched regions and bounding
-    /// file growth). It costs ~0.5-1s of loop-thread time per graph on cal.com,
-    /// during which a hot push would wait — so it is scheduled at a long idle where
-    /// colliding with an edit is unlikely, and it runs one graph per quiet interval
-    /// so a collision costs at most one graph's emit.
-    const SETTLE_MS: u64 = 10_000;
+    /// [`ChunkPatcher`]), so a full reload or a respawned worker reads CURRENT code at
+    /// all times. Compaction only rewrites the accumulated patch tail into a pristine
+    /// chunk (restoring real source maps for patched regions and bounding file
+    /// growth).
+    ///
+    /// It used to wait TEN SECONDS, because it cost ~0.7s of loop-thread time per
+    /// graph and an edit landing inside that window had to wait it out. A long idle
+    /// only makes that collision rarer — at any steady typing cadence slower than the
+    /// idle it happens on every edit, which is exactly the cliff that was measured
+    /// (an edit at a ~1/sec cadence taking ~1s instead of 50ms). The fix is not a
+    /// bigger number: the pass now carries an [`EventEpoch`] and is ABANDONED within
+    /// a millisecond or two of a file event (see [`crate::bundler::EmitCancel`]),
+    /// keeping its debt for the next quiet moment. With the collision cost gone, the
+    /// idle can be short — disk catches up right after a pause instead of ten seconds
+    /// later — and it is short.
+    const SETTLE_MS: u64 = 750;
 
     /// Stage-by-stage timing of one edit, appended to the `[dev]` summary line when
     /// `DIFFPACK_DEV_PROFILE=1`. The headline edit number is a single total; when it
@@ -3645,28 +3748,151 @@ mod next {
         client: &EnvBuild,
         react_server: &EnvBuild,
         ssr: &EnvBuild,
-    ) -> Result<(&'static str, usize), String> {
+        // Abandoned the moment a file event arrives: this is housekeeping, and the
+        // developer's next keystroke outranks it. A graph whose pass was abandoned
+        // stays owed, so the next quiet moment picks it up again.
+        epoch: EventEpoch,
+    ) -> Result<FlushStep, String> {
+        let signal = move || epoch.superseded();
+        let cancel = crate::bundler::EmitCancel::when(&signal);
         if owed.client {
-            let rendered = emit_next_client_hmr(client, output_root)?;
-            owed.client = false;
-            return Ok(("client", rendered));
+            let (rendered, cancelled) = emit_next_client_hmr(client, output_root, cancel)?;
+            owed.client = cancelled;
+            return Ok(FlushStep { which: "client", rendered, cancelled });
         }
         if owed.ssr {
-            let rendered = emit_next_ssr(ssr, output_root)?.rendered_chunks;
-            owed.ssr = false;
-            return Ok(("ssr", rendered));
+            let (summary, cancelled) = emit_next_ssr(ssr, output_root, cancel)?;
+            owed.ssr = cancelled;
+            return Ok(FlushStep {
+                which: "ssr",
+                rendered: summary.rendered_chunks,
+                cancelled,
+            });
         }
         if owed.react_server {
-            let rendered =
-                emit_next_react_server(react_server, output_root, rsc_root)?.rendered_chunks;
-            owed.react_server = false;
-            return Ok(("react-server", rendered));
+            let (summary, cancelled) =
+                emit_next_react_server(react_server, output_root, rsc_root, cancel)?;
+            owed.react_server = cancelled;
+            return Ok(FlushStep {
+                which: "react-server",
+                rendered: summary.rendered_chunks,
+                cancelled,
+            });
         }
-        Ok(("nothing", 0))
+        Ok(FlushStep { which: "nothing", rendered: 0, cancelled: false })
+    }
+
+    /// One compaction step's outcome: which graph it was for, how many chunks it
+    /// re-rendered, and whether it was abandoned before finishing.
+    struct FlushStep {
+        which: &'static str,
+        rendered: usize,
+        cancelled: bool,
+    }
+
+    /// How long the loop waits for another file event before recompiling the
+    /// STYLESHEETS (see [`refresh_next_stylesheets`]).
+    ///
+    /// A stylesheet edit does not wait for this at all — it is delivered inline on
+    /// the edit, because the sheet IS that edit's visible result. This idle covers
+    /// the other direction: under Tailwind, editing a component's class names
+    /// changes the generated sheet even though no `.css` file was touched, and
+    /// scanning candidates + recompiling costs real loop time. Waiting out a short
+    /// typing pause keeps that off a burst of keystrokes while still restyling well
+    /// inside a second of the last one.
+    const CSS_SETTLE_MS: u64 = 400;
+
+    /// Recompile ONLY the stylesheets and hand any that moved to open browsers as an
+    /// in-place `<link>` swap.
+    ///
+    /// The sheets used to be written solely by the full environment re-emit, so a css
+    /// edit inherited that pass's schedule: when compaction moved to a 10 s idle
+    /// (chunk patching made it housekeeping), a css edit went with it and took 11.5 s
+    /// to reach the browser. Nothing about a stylesheet needs a chunk render, so this
+    /// runs the stylesheet pipeline on its own — the react-server graph is
+    /// authoritative for the app's CSS and its sheet is preserved to the served
+    /// `public/rsc.css` (and mirrored beside the `rsc-render` bundle, whose entry
+    /// links it iff that file sits beside it), while the client graph writes its sheet
+    /// straight into `public/`.
+    ///
+    /// Abandoned — and reported as such, so the caller keeps it owed — as soon as a
+    /// file event arrives: recompiling a monorepo's sheet means rescanning its class
+    /// candidates and running the app's own Tailwind, which is real loop time, and a
+    /// result computed from superseded sources is worth nothing anyway.
+    fn refresh_next_stylesheets(
+        output_root: &Path,
+        rsc_root: &Path,
+        client: &EnvBuild,
+        react_server: &EnvBuild,
+        css_prints: &mut Vec<(String, Option<u64>)>,
+        hub: &HmrHub,
+        epoch: EventEpoch,
+    ) -> Result<StylesheetRefresh, String> {
+        let signal = move || epoch.superseded();
+        let cancel = crate::bundler::EmitCancel::when(&signal);
+        if matches!(
+            client.bundler.emit_stylesheet_only(
+                &reachable_ids(client),
+                &output_root.join("public").join("client.js"),
+                cancel,
+            )?,
+            crate::bundler::StylesheetEmit::Cancelled
+        ) {
+            return Ok(StylesheetRefresh::Abandoned);
+        }
+        let react_server_sheet = react_server.bundler.emit_stylesheet_only(
+            &reachable_ids(react_server),
+            &rsc_root.join("server").join("server.mjs"),
+            cancel,
+        )?;
+        if matches!(react_server_sheet, crate::bundler::StylesheetEmit::Cancelled) {
+            return Ok(StylesheetRefresh::Abandoned);
+        }
+        if let crate::bundler::StylesheetEmit::Written(sheet) = react_server_sheet {
+            let served = output_root
+                .join("public")
+                .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/'));
+            if let Some(parent) = served.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+            }
+            copy_file_if_changed(&sheet, &served).map_err(|error| {
+                format!("cannot preserve react-server CSS to {}: {error}", served.display())
+            })?;
+            // Keep the copy the per-request worker loads in step with the served one,
+            // so a respawn in this window links a sheet whose bytes are current.
+            let beside_render = output_root
+                .join("rsc-render")
+                .join(crate::next_adapter::RSC_EMITTED_CSS_FILE);
+            if beside_render.exists() {
+                copy_file_if_changed(&sheet, &beside_render).map_err(|error| {
+                    format!("cannot mirror react-server CSS to {}: {error}", beside_render.display())
+                })?;
+            }
+        }
+        let now = next_stylesheet_fingerprints(output_root);
+        let changed: Vec<String> = now
+            .iter()
+            .zip(css_prints.iter())
+            .filter(|(new, old)| new.1.is_some() && new.1 != old.1)
+            .map(|(new, _)| new.0.clone())
+            .collect();
+        *css_prints = now;
+        if !changed.is_empty() {
+            super::spa::push_css(&changed, hub);
+        }
+        Ok(StylesheetRefresh::Done(changed.len()))
+    }
+
+    /// What a stylesheet refresh did: how many sheets it pushed, or that it gave way
+    /// to an edit and is still owed.
+    enum StylesheetRefresh {
+        Done(usize),
+        Abandoned,
     }
 
     /// Content fingerprints of the stylesheets the served document links, keyed by
-    /// their public hrefs. Compared across settles: a changed sheet is delivered to
+    /// their public hrefs. Compared across refreshes: a changed sheet is delivered to
     /// open browsers via the HMR client's in-place `<link>` swap (`push_css`) — the
     /// Next topology previously rebuilt these sheets on a css edit and then never
     /// told anyone (KNOWN_ISSUES #7).
@@ -3710,6 +3936,9 @@ mod next {
         // judged relative to it (see `is_dependency_or_generated`).
         watch_base: &Path,
     ) -> Result<(), String> {
+        // Publish the base the watch sources judge relevance against, so their event
+        // COUNT (what deferred work cancels on) matches what this loop rebuilds for.
+        *WATCH_BASE.lock().unwrap() = Some(watch_base.to_path_buf());
         // Last processed `(mtime, len)` per path, so the FSEvents + fast-poller pair
         // (see `start_watcher_paths`) never rebuilds twice for one edit: whichever
         // source fires first is handled and recorded; the other's later echo reads the
@@ -3748,32 +3977,81 @@ mod next {
         // reads the CURRENT graph state, so one run after the burst covers every edit
         // in it.
         let mut owed = OwedEmits::default();
-        // The served stylesheets as browsers last saw them; refreshed after each
-        // fully-cleared flush so a css-bearing edit hot-swaps the changed sheets.
+        // The served stylesheets as browsers last saw them.
         let mut css_prints = next_stylesheet_fingerprints(output_root);
+        // Whether an edit may have moved the generated stylesheet WITHOUT touching a
+        // `.css` file (a Tailwind class name added to a component). Cleared by the
+        // short-idle recompile below; a real stylesheet edit never sets it, because
+        // that one is delivered inline on the edit.
+        let mut css_owed = false;
         loop {
-            let first = if owed.any() {
-                // Deferred work outstanding: wait only for the settle window, and
-                // flush ONE graph per quiet timeout — the loop touches its channel
-                // between graphs, so an edit landing mid-flush waits for at most a
-                // single graph's emit (see SETTLE_MS for why it rarely waits at all).
-                match receiver.recv_timeout(Duration::from_millis(SETTLE_MS)) {
+            let first = if css_owed || owed.any() {
+                // Two pending kinds of work, two very different idles: a stylesheet
+                // that may have moved is recompiled after a short typing pause (the
+                // browser is showing stale styling until it lands), while chunk
+                // compaction waits for a long one (it is housekeeping, and costs ~1s
+                // of loop time during which an edit would queue). Whichever is
+                // pending picks this wait; both flush ONE step per quiet timeout, so
+                // the loop returns to its channel between them.
+                let idle = if css_owed { CSS_SETTLE_MS } else { SETTLE_MS };
+                match receiver.recv_timeout(Duration::from_millis(idle)) {
                     Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) if css_owed => {
+                        let started = Instant::now();
+                        match refresh_next_stylesheets(
+                            output_root, rsc_root, client, react_server, &mut css_prints, hub,
+                            EventEpoch::now(),
+                        ) {
+                            // Gave way to an edit: still owed, so the next quiet moment
+                            // tries again against the newer sources. Logged under
+                            // `DIFFPACK_DEV_PROFILE`, because "the sheet did not update
+                            // and nothing was said" is otherwise indistinguishable from
+                            // a bug.
+                            Ok(StylesheetRefresh::Abandoned) => {
+                                if std::env::var_os("DIFFPACK_DEV_PROFILE").is_some() {
+                                    println!(
+                                        "[dev] css refresh gave way to an edit after {:.1}ms (still owed)",
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                    );
+                                }
+                            }
+                            Ok(StylesheetRefresh::Done(0)) => css_owed = false,
+                            Ok(StylesheetRefresh::Done(sheets)) => {
+                                css_owed = false;
+                                println!(
+                                    "[dev] css hot-swap -> {sheets} sheet(s), {} browser(s) in {:.1}ms",
+                                    hub.client_count(),
+                                    started.elapsed().as_secs_f64() * 1_000.0,
+                                );
+                            }
+                            Err(error) => {
+                                css_owed = false;
+                                eprintln!("[dev] stylesheet refresh failed: {error}");
+                            }
+                        }
+                        continue;
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let started = Instant::now();
                         match flush_owed_step(
                             &mut owed, output_root, rsc_root, client, react_server, ssr,
+                            EventEpoch::now(),
                         ) {
-                            Ok((which, rendered_chunks)) => {
+                            Ok(step) => {
                                 // Disk now matches the live processes for the
                                 // react-server graph, so a worker respawned from here
-                                // on needs no replay.
-                                if which == "react-server" {
+                                // on needs no replay. Only a pass that FINISHED can say
+                                // that: an abandoned one wrote a subset of the chunks.
+                                if step.which == "react-server" && !step.cancelled {
                                     hot.mark_react_server_on_disk();
                                 }
-                                // The compacted emit rewrote this graph's chunk files
-                                // out from under their patchers.
-                                let dir = match which {
+                                // The compacted emit rewrote chunk files out from under
+                                // their patchers. Dropping a patcher only drops a cached
+                                // file offset — the next patch reopens the file as it now
+                                // stands — so doing it for the whole graph directory is
+                                // correct whether the pass finished or was abandoned
+                                // part-way through it.
+                                let dir = match step.which {
                                     "client" => Some(output_root.join("public")),
                                     "ssr" => Some(output_root.join("server")),
                                     "react-server" => Some(output_root.join("rsc-render")),
@@ -3782,31 +4060,28 @@ mod next {
                                 if let Some(dir) = dir {
                                     patchers.retain(|path, _| !path.starts_with(&dir));
                                 }
-                                println!(
-                                    "[dev] next settled: full re-emit of {which} in {:.1}ms | rendered_chunks={rendered_chunks}{}",
-                                    started.elapsed().as_secs_f64() * 1_000.0,
-                                    if owed.any() { " | more owed" } else { "" },
-                                );
-                                if !owed.any() {
-                                    // The flush is fully caught up: deliver any
-                                    // stylesheet changes to open browsers in place.
-                                    let now = next_stylesheet_fingerprints(output_root);
-                                    let changed: Vec<String> = now
-                                        .iter()
-                                        .zip(css_prints.iter())
-                                        .filter(|(new, old)| new.1.is_some() && new.1 != old.1)
-                                        .map(|(new, _)| new.0.clone())
-                                        .collect();
-                                    if !changed.is_empty() {
-                                        super::spa::push_css(&changed, hub);
-                                        println!(
-                                            "[dev] css hot-swap -> {} sheet(s), {} browser(s)",
-                                            changed.len(),
-                                            hub.client_count()
-                                        );
-                                    }
-                                    css_prints = now;
+                                if step.cancelled {
+                                    println!(
+                                        "[dev] compaction of {} dropped after {:.1}ms — an edit arrived; still owed: {}",
+                                        step.which,
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                        owed.label(),
+                                    );
+                                } else {
+                                    println!(
+                                        "[dev] compacted {} in {:.1}ms | rendered_chunks={}{}",
+                                        step.which,
+                                        started.elapsed().as_secs_f64() * 1_000.0,
+                                        step.rendered,
+                                        if owed.any() { " | more owed" } else { "" },
+                                    );
                                 }
+                                // Compaction does not deliver CSS: it re-renders chunks
+                                // from graph state the stylesheet pass already read, so
+                                // the sheets it writes are the bytes browsers were sent
+                                // on the edit itself. Delivery lives on the edit path
+                                // and the short css idle above.
+                                css_prints = next_stylesheet_fingerprints(output_root);
                             }
                             Err(error) => {
                                 eprintln!("[dev] build error (kept serving): {error}");
@@ -3892,6 +4167,16 @@ mod next {
                 // contain) is discharged.
                 owed = OwedEmits::default();
                 hot.reset(output_root)?;
+                // A structural change means files appeared or vanished, so each graph's
+                // per-file candidate scan no longer describes the tree.
+                client.bundler.invalidate_tailwind_scan();
+                react_server.bundler.invalidate_tailwind_scan();
+                ssr.bundler.invalidate_tailwind_scan();
+                // The rebuild wrote the sheets and the browser is reloading onto them,
+                // so nothing is owed and the baseline moves with it — otherwise the
+                // next idle pass would push a sheet the reload already fetched.
+                css_owed = false;
+                css_prints = next_stylesheet_fingerprints(output_root);
                 restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
@@ -3923,6 +4208,18 @@ mod next {
             // server component) and surface them in the browser overlay instead of
             // killing the dev server; keep serving and clear the overlay on the next
             // good rebuild. The full rebuilds (`rebuild_all`) stay hard errors.
+            // A non-stylesheet edit can add or remove a Tailwind class, which changes
+            // what EVERY graph's sheet compiles to — the scan reads the source tree,
+            // not the graph, so the file's owning graph is irrelevant. Only the edited
+            // file is re-tokenized (~1 ms), not the tree (~660 ms on this app), because
+            // a full rescan on the loop thread is exactly what made a JS edit collide
+            // with the stylesheet pass.
+            for path in changed.iter().filter(|path| !is_stylesheet_path(path)) {
+                client.bundler.refresh_tailwind_scan_path(path);
+                react_server.bundler.refresh_tailwind_scan_path(path);
+                ssr.bundler.refresh_tailwind_scan_path(path);
+            }
+
             let batch = (|| -> Result<(), String> {
                 for path in &changed {
                     let is_island = profile.stage("classify", || {
@@ -3999,6 +4296,13 @@ mod next {
                 owed = OwedEmits::default();
                 hot.reset(output_root)?;
                 patchers.clear();
+                client.bundler.invalidate_tailwind_scan();
+                react_server.bundler.invalidate_tailwind_scan();
+                ssr.bundler.invalidate_tailwind_scan();
+                // Same as the structural path: the sheets are on disk and the reload
+                // will fetch them, so the baseline moves and nothing stays owed.
+                css_owed = false;
+                css_prints = next_stylesheet_fingerprints(output_root);
                 restart_next_node(node, next_server_script, project_root, output_root, node_port)?;
                 hub.broadcast_reload();
                 println!(
@@ -4039,6 +4343,52 @@ mod next {
                     build_error_showing = true;
                     continue;
                 }
+            };
+
+            // STYLESHEETS, still on the critical path: when a `.css` source was
+            // edited, its recompiled sheet IS this edit's visible result, so it is
+            // compiled and pushed here rather than waiting for any idle — the sheet
+            // used to be a side-product of the deferred full re-emit, which put a css
+            // edit 10s behind the keystroke. Every other edit only MIGHT have moved
+            // the sheet (a Tailwind class name added to a component): worth a
+            // candidate rescan, not worth it on a keystroke, so it is owed to the
+            // short css idle at the top of the loop instead.
+            let (css_note, css_failed) = if changed.iter().any(|path| is_stylesheet_path(path)) {
+                let epoch = EventEpoch::now();
+                match profile.stage("css-emit", || {
+                    refresh_next_stylesheets(
+                        output_root, rsc_root, client, react_server, &mut css_prints, hub, epoch,
+                    )
+                }) {
+                    // A newer edit landed while this sheet was compiling, so this
+                    // result describes sources nobody has any more. The newer edit
+                    // owns the sheet now; if it was not itself a stylesheet edit, the
+                    // short css idle picks the work up.
+                    Ok(StylesheetRefresh::Abandoned) => {
+                        css_owed = true;
+                        (" | stylesheet superseded by a newer edit".to_string(), false)
+                    }
+                    Ok(StylesheetRefresh::Done(0)) => (" | stylesheet unchanged".to_string(), false),
+                    Ok(StylesheetRefresh::Done(sheets)) => (
+                        format!(
+                            " | css hot-swap -> {sheets} sheet(s), {} browser(s)",
+                            hub.client_count()
+                        ),
+                        false,
+                    ),
+                    Err(error) => {
+                        // The browser would otherwise keep showing the old styling with
+                        // nothing said. Surface it in the overlay; a later good edit
+                        // clears it.
+                        eprintln!("[dev] stylesheet refresh failed: {error}");
+                        hub.broadcast_build_error(&error);
+                        build_error_showing = true;
+                        (" | STYLESHEET REFRESH FAILED".to_string(), true)
+                    }
+                }
+            } else {
+                css_owed = true;
+                (String::new(), false)
             };
 
             // Then the browser push — the user-visible edit-to-update event.
@@ -4125,13 +4475,13 @@ mod next {
             // Until it lands, `hot.pending_react_server` keeps the worker replay list
             // non-empty, so a react-server worker respawned in that window is still
             // caught up from the micro-chunks.
-            if build_error_showing {
+            if build_error_showing && !css_failed {
                 hub.broadcast_build_ok();
                 build_error_showing = false;
             }
 
             println!(
-                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms | client transformed={} changed={} | server transformed={} changed={} | {hot_note} | {update} | disk re-emit owed: {}{}",
+                "[dev] next rebuilt {} file(s) | update in {update_ms:.1}ms | client transformed={} changed={} | server transformed={} changed={} | {hot_note} | {update}{css_note} | disk re-emit owed: {}{}",
                 changed.len(),
                 client_c.transformed,
                 client_c.changed,

@@ -46,12 +46,18 @@ pub struct DelegatedSheet {
 /// `gap` is the reason the native engine could not serve the sheet; it is carried
 /// into every error message so a failure here always says what made diffpack leave
 /// the native path.
+/// `cancel` lets a DEFERRED compile be abandoned: the dev loop recompiles the sheet
+/// after an edit, and if the developer types again while the app's Tailwind is running
+/// this compile's result is already stale. The child is then killed rather than waited
+/// out, and `None` is returned. Production builds pass
+/// [`crate::bundler::EmitCancel::never`] and always run to completion.
 pub fn compile(
     entry: &Path,
     css: &str,
     candidates: &BTreeSet<String>,
     gap: &crate::tailwind::NativeGap,
-) -> Result<DelegatedSheet, String> {
+    cancel: crate::bundler::EmitCancel<'_>,
+) -> Result<Option<DelegatedSheet>, String> {
     let _stage = crate::build_profile::stage("css/tailwind-delegate");
     let context = format!(
         "Tailwind {}: {gap}, so the sheet is compiled with the app's own tailwindcss",
@@ -86,26 +92,69 @@ pub fn compile(
         .ok_or_else(|| format!("{context} — node stdin unavailable"))?
         .write_all(request.as_bytes())
         .map_err(|error| format!("{context} — cannot write to node: {error}"))?;
-    let out = child
-        .wait_with_output()
-        .map_err(|error| format!("{context} — node failed: {error}"))?;
-    if !out.status.success() {
+    // The compiled sheet is far bigger than a pipe buffer, so BOTH streams are drained
+    // by their own threads while this one polls: a reader-less poll loop would fill the
+    // stdout pipe, block the compiler inside its own write, and never see it exit.
+    // Draining on threads keeps the cancel signal answerable within milliseconds
+    // instead of at the end of a compile whose result nobody wants any more.
+    let drain = |stream: Option<std::process::ChildStdout>| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                use std::io::Read;
+                let _ = stream.read_to_end(&mut bytes);
+            }
+            let _ = sender.send(bytes);
+        });
+        receiver
+    };
+    let stdout_rx = drain(child.stdout.take());
+    let stderr_rx = {
+        let stream = child.stderr.take();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                use std::io::Read;
+                let _ = stream.read_to_end(&mut bytes);
+            }
+            let _ = sender.send(bytes);
+        });
+        receiver
+    };
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => return Err(format!("{context} — cannot wait for node: {error}")),
+        }
+        if cancel.cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    let stdout_bytes = stdout_rx.recv().unwrap_or_default();
+    let stderr_bytes = stderr_rx.recv().unwrap_or_default();
+    if !status.success() {
         return Err(format!(
             "{context} — that compiler failed:\n{}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr_bytes).trim()
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|error| {
+    let parsed: serde_json::Value = serde_json::from_slice(&stdout_bytes).map_err(|error| {
         format!(
             "{context} — unreadable compiler output ({error}): {}",
-            String::from_utf8_lossy(&out.stdout).trim()
+            String::from_utf8_lossy(&stdout_bytes).trim()
         )
     })?;
     let sheet = parsed
         .get("css")
         .and_then(|value| value.as_str())
         .ok_or_else(|| format!("{context} — compiler output has no `css` field"))?;
-    Ok(DelegatedSheet {
+    Ok(Some(DelegatedSheet {
         css: sheet.to_string(),
         engine: parsed
             .get("engine")
@@ -117,7 +166,7 @@ pub fn compile(
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -194,7 +243,9 @@ mod tests {
         let gap = native_gap(css, None).expect("a `@plugin` is a native gap");
         assert_eq!(gap, NativeGap::Plugin("./plugin.js".to_string()));
 
-        let sheet = compile(&entry, css, &probe_candidates(), &gap).unwrap();
+        let sheet = compile(&entry, css, &probe_candidates(), &gap, crate::bundler::EmitCancel::never())
+            .unwrap()
+            .expect("an uncancellable compile always produces a sheet");
         assert_eq!(sheet.engine, "@tailwindcss/node");
         assert!(sheet.version.starts_with('4'), "version {:?}", sheet.version);
         assert!(
@@ -226,7 +277,9 @@ mod tests {
         let (entry, css) = plugin_entry(dir.path());
 
         let gap = native_gap(css, None).unwrap();
-        let sheet = compile(&entry, css, &probe_candidates(), &gap).unwrap();
+        let sheet = compile(&entry, css, &probe_candidates(), &gap, crate::bundler::EmitCancel::never())
+            .unwrap()
+            .expect("an uncancellable compile always produces a sheet");
         assert_eq!(sheet.engine, "tailwindcss");
         assert!(sheet.version.starts_with('4'), "version {:?}", sheet.version);
         assert!(sheet.css.contains("rebeccapurple"));
@@ -243,7 +296,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (entry, css) = plugin_entry(dir.path());
         let gap = native_gap(css, None).unwrap();
-        let error = compile(&entry, css, &probe_candidates(), &gap).unwrap_err();
+        let error = compile(&entry, css, &probe_candidates(), &gap, crate::bundler::EmitCancel::never())
+            .unwrap_err();
         assert!(error.contains(&entry.display().to_string()), "{error}");
         assert!(error.contains("tailwindcss"), "{error}");
         // And it says WHY the native engine was left.

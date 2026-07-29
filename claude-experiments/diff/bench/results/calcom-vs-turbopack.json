@@ -1,9 +1,9 @@
 {
   "meta": {
-    "date": "2026-07-29T19:03:33.422Z",
+    "date": "2026-07-29T20:45:19.185Z",
     "app": "/tmp/dpe2e/calcom",
     "appCommit": "3894f37",
-    "diffpackCommit": "72dd1e7b1",
+    "diffpackCommit": "65c9b28f7",
     "node": "v26.5.0",
     "next": "16.2.3",
     "port": 3000,
@@ -12,104 +12,104 @@
     "gapMs": 4200,
     "cadenceGapMs": 800,
     "loadAtStart": [
-      30.9,
-      31.3,
-      31.4
+      76.8,
+      76.9,
+      74.9
     ],
     "loadAtEnd": [
-      32.7,
-      32.4,
-      32.1
+      74.9,
+      76.1,
+      75.6
     ]
   },
   "build": {
     "diffpack": {
       "wallMs": [
-        9226,
-        8686
+        8702,
+        8537
       ],
       "cpuUserS": [
-        29.02,
-        28.85
+        29.3,
+        29.23
       ],
       "peakRssMb": [
-        1948.71875,
-        1914.21875
+        1974.6875,
+        1960.390625
       ]
     },
     "turbopack": {
       "wallMs": [
-        26371,
-        27194
+        28034,
+        25665
       ],
       "cpuUserS": [
-        161.9,
-        164.05
+        158.5,
+        161.35
       ],
       "peakRssMb": [
-        5967.078125,
-        6046.78125
+        6052.90625,
+        6001.890625
       ]
     }
   },
   "dev": {
     "diffpack": {
-      "startup": 6470,
-      "secondRouteMs": 195,
+      "startup": 6143,
+      "secondRouteMs": 189,
       "hmr": {
         "island": {
           "name": "island (leaf client component)",
-          "warmupMs": 44,
+          "warmupMs": 50,
           "samples": [
-            49,
             50,
-            48,
-            51,
-            56
+            47,
+            49,
+            47,
+            47
           ]
         },
         "shared": {
           "name": "shared client component",
-          "warmupMs": 128,
+          "warmupMs": 187,
           "samples": [
-            127,
-            138,
-            114,
-            113,
-            118
+            68,
+            68,
+            66,
+            66,
+            67
           ]
         },
         "server": {
           "name": "server component",
-          "warmupMs": 90,
+          "warmupMs": 61,
           "samples": [
-            81,
-            77,
-            75,
-            76,
-            74
+            58,
+            49,
+            47,
+            56,
+            48
           ]
         },
         "css": {
           "name": "global CSS",
-          "warmupMs": 32989,
+          "warmupMs": 937,
           "samples": [
-            11508,
-            11491,
-            11345,
-            11472,
-            11578
+            843,
+            370,
+            424,
+            546,
+            1309
           ]
         },
         "cadence": {
           "name": "sustained edits @ ~1/sec",
           "warmupMs": null,
           "samples": [
-            53,
-            49,
-            49,
             48,
-            50
+            46,
+            48,
+            48,
+            48
           ]
         }
       },
@@ -118,107 +118,107 @@
           "name": "island edit",
           "warmupMs": 83,
           "samples": [
-            93,
-            94,
-            82,
-            82,
-            91
+            80,
+            91,
+            77,
+            74,
+            75
           ]
         },
         "fresh-server": {
           "name": "server-component edit",
-          "warmupMs": 76,
+          "warmupMs": 70,
           "samples": [
-            84,
-            76,
-            106,
-            76,
-            106
+            83,
+            72,
+            77,
+            73,
+            75
           ]
         }
       }
     },
     "turbopack": {
-      "startup": 13759,
-      "secondRouteMs": 5508,
+      "startup": 13380,
+      "secondRouteMs": 5009,
       "hmr": {
         "island": {
           "name": "island (leaf client component)",
-          "warmupMs": 510,
+          "warmupMs": 468,
           "samples": [
-            440,
-            427,
-            418,
-            444,
-            421
+            436,
+            430,
+            425,
+            428,
+            418
           ]
         },
         "shared": {
           "name": "shared client component",
-          "warmupMs": 608,
+          "warmupMs": 694,
           "samples": [
-            532,
-            519,
-            493,
-            486,
-            515
+            539,
+            483,
+            520,
+            503,
+            503
           ]
         },
         "server": {
           "name": "server component",
-          "warmupMs": 511,
+          "warmupMs": 506,
           "samples": [
-            488,
-            467,
+            475,
+            472,
+            477,
             474,
-            468,
-            476
+            "TIMEOUT"
           ]
         },
         "css": {
           "name": "global CSS",
-          "warmupMs": 7729,
+          "warmupMs": 7450,
           "samples": [
-            7612,
-            7561,
-            7419,
-            7705,
-            7549
+            7382,
+            7375,
+            7174,
+            7350,
+            7354
           ]
         },
         "cadence": {
           "name": "sustained edits @ ~1/sec",
           "warmupMs": null,
           "samples": [
-            417,
-            420,
-            413,
-            428,
-            412
+            445,
+            423,
+            414,
+            410,
+            420
           ]
         }
       },
       "fresh": {
         "fresh-island": {
           "name": "island edit",
-          "warmupMs": 458,
+          "warmupMs": 448,
           "samples": [
-            489,
-            471,
-            485,
-            475,
-            474
+            454,
+            455,
+            473,
+            487,
+            466
           ]
         },
         "fresh-server": {
           "name": "server-component edit",
-          "warmupMs": 595,
+          "warmupMs": 568,
           "samples": [
-            571,
-            587,
+            543,
+            543,
             566,
-            566,
-            565
+            546,
+            549
           ]
         }
       }

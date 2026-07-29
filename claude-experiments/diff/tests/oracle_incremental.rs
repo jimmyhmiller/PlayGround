@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use diffpack::bundler::{BuildUpdate, Bundler, DirectReachability, EmitOptions};
+use diffpack::bundler::{BuildConfig, BuildUpdate, Bundler, DirectReachability, EmitOptions};
 use tempfile::tempdir;
 
 #[test]
@@ -228,7 +228,15 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
         ..EmitOptions::default()
     };
 
-    let (mut incremental, _) = Bundler::discover(&entry).unwrap();
+    // Maps can only be emitted by a bundler DISCOVERED with `source_maps`, since
+    // that is what makes the transform keep the printer's real positions — the
+    // plain `discover()` used by the other cases in this file would (correctly)
+    // refuse the emit below.
+    let config = BuildConfig {
+        source_maps: true,
+        ..BuildConfig::default()
+    };
+    let (mut incremental, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
     let mut reachability = incremental.direct_reachability();
     let mut reachable = reachability.reachable_modules();
     let initial = incremental
@@ -275,7 +283,7 @@ fn source_mapped_incremental_emit_reuses_every_unchanged_chunk_and_map() {
         "the unchanged main chunk's composed map must be reused verbatim"
     );
 
-    let (fresh, _) = Bundler::discover(&entry).unwrap();
+    let (fresh, _) = Bundler::discover_direct_with_config(&entry, &config).unwrap();
     let fresh_reachable = fresh.reachable_modules_direct();
     fresh
         .emit_with_options(&fresh_reachable, &fresh_dir.join("bundle.js"), options)
