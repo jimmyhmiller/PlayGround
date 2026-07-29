@@ -81,7 +81,7 @@ no caching approaches for now.
 
 | Commit | Issue |
 |---|---|
-| `b0df5053f` | Dev: hot pushes queued behind the deferred full re-emit (~1s edit-to-DOM at 1Hz cadence; now flat ~50ms — settle window 2s + one-graph-per-step flush; residual: an edit landing inside a single graph's emit window ~2.0-3.0s after the previous edit still waits for that one emit, ~0.6s bounded) |
+| `b0df5053f` | Dev: hot pushes queued behind the deferred full re-emit (~1s edit-to-DOM at 1Hz cadence; FULLY resolved in `08f72d3c8` by in-place chunk patching: each edit's micro-chunk is spliced into the on-disk host chunks in ~140ms, the full re-emit became 10s-idle compaction, and edit-to-DOM measures 48-53ms flat at every cadence including the old resonance points — no residual) |
 | `b0df5053f` | Dev: global CSS edits rebuilt but never reached open browsers in the Next topology (now fingerprinted at settle and delivered via the HMR client's in-place link swap; measured ~3.4s edit-to-applied vs Turbopack's ~7.4s) |
 | `75a2a630f` | `next/dynamic` wrapped every call in `<Suspense>`; Next's `Loadable` rule (`!ssr \|\| !!loading`) gives the default call NO boundary — the extra fallback commit made tab swaps two commits and minted auto-animate ghosts (the deterministic variant) |
 | `0c180b351` | Soft navigation swapped in a still-streaming flight; a suspended transition commits nothing — stalled navigations presented as flaky tests |
