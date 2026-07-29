@@ -66,6 +66,27 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
+### 7. Global CSS edits rebuild but never reach open browsers (Next dev topology)
+
+Editing `styles/globals.css` under `diffpack dev` recompiles the sheet (the marker
+appears in the served `/rsc.css` on the next request) but no cache-busted link swap or
+reload is pushed, so an open page keeps the stale stylesheet forever. Measured: marker
+never applied in 30s, twice; the served sheet had it. Turbopack delivers the same edit
+in ~7.4s (its own Tailwind recompile dominates). The SPA/Vite dev path HAS a css
+hot-swap (`push_css`); the Next topology never wires it. Fix shape: fingerprint the
+emitted sheets after each settle and push the swap (or a reload) when they change.
+
+### 8. Edits within ~1.6s of a previous edit contend with the deferred full re-emit
+
+Clean-path edit-to-DOM is ~50ms (island) / ~50ms (server component) / ~69ms (shared
+client component). But an edit arriving while the PREVIOUS edit's deferred full
+re-emit is still running (client+ssr ~1.6s, react-server ~1.0s on cal.com) measures
+~1.0s to the DOM — a 20x penalty at a ~1-edit-per-second cadence (measured: 112ms
+first edit, then 986-1068ms steady). The §2.3 coalescing handles bursts *within* the
+150ms settle window; the gap is edits landing *during* the re-emit itself. Turbopack
+has no equivalent cliff (flat ~420ms at the same cadence). Fix shape: let hot pushes
+preempt/interleave with the background re-emit instead of queueing behind it.
+
 ## Reference-side failures (NOT diffpack bugs — do not spend time here)
 
 - `cannot book same slot multiple times`: fails identically on `next start`; the
