@@ -1668,6 +1668,30 @@ impl Bundler {
         output_root: &Path,
         options: EmitOptions,
     ) -> Result<EmitSummary, String> {
+        self.emit_public_preserving(reachable, output_root, options, &BTreeSet::new())
+    }
+
+    /// [`Self::emit_public`], plus paths under `public/` that this emit does NOT own
+    /// and its prune must therefore leave alone.
+    ///
+    /// The prune deletes every file under `public/` the CLIENT graph did not just
+    /// write, which is right for the client's own stale chunks and wrong for a file
+    /// another graph published there. `public/rsc.css` is exactly that: the
+    /// react-server graph is authoritative for the app's CSS and preserves its
+    /// compiled sheet to that path, and in a production `build-app` the two graphs are
+    /// separate processes, so the react-server copy simply lands after the client's
+    /// prune. `diffpack dev` builds both in ONE process with the react-server graph
+    /// FIRST, so the client's prune deleted the sheet it had just written: the document
+    /// still linked `/rsc.css` (the link is guarded on the artifact beside the render
+    /// bundle, which survives), `GET /rsc.css` 404ed, and the page rendered unstyled —
+    /// on cal.com, and on `integration/next-app-router` from a cold dev boot.
+    pub fn emit_public_preserving(
+        &self,
+        reachable: &BTreeSet<ModuleId>,
+        output_root: &Path,
+        options: EmitOptions,
+        preserve: &BTreeSet<PathBuf>,
+    ) -> Result<EmitSummary, String> {
         // The client build is always browser-executable ESM, regardless of the
         // caller's options. The SSR document injects `client.js` as
         // `<script type="module">`, so a CJS `module.exports=…` entry would throw
@@ -1680,7 +1704,9 @@ impl Bundler {
         };
         let public_dir = output_root.join("public");
         let stats = self.emit_environment(reachable, &public_dir, "client.js", options)?;
-        prune_stale_files(&public_dir, &stats.written)?;
+        let mut keep = stats.written.clone();
+        keep.extend(preserve.iter().cloned());
+        prune_stale_files(&public_dir, &keep)?;
         let mut summary = EmitSummary::of(&public_dir)?;
         summary.rendered_chunks = stats.rendered_chunks;
         Ok(summary)
@@ -15351,6 +15377,58 @@ mod tests {
             .emit_public(&reachable, &output_root, EmitOptions::default())
             .unwrap();
         assert!(!stale.exists(), "re-emit must clear stale output");
+    }
+
+    /// REGRESSION. The client emit's prune deletes everything under `public/` the
+    /// client graph did not itself write — correct for the client's own stale chunks,
+    /// wrong for a file another graph published there. `public/rsc.css` is published by
+    /// the REACT-SERVER graph, which in `diffpack dev` is built FIRST in the same
+    /// process, so the client's prune deleted the sheet moments after it was written.
+    /// The document kept linking `/rsc.css` (that link is guarded on the artifact beside
+    /// the render bundle, which the prune never sees), `GET /rsc.css` returned the 404
+    /// HTML shell, and `nosniff` made the browser reject it: cal.com and
+    /// `integration/next-app-router` both rendered completely unstyled from a cold
+    /// `diffpack dev`.
+    ///
+    /// A preserved path survives the prune; everything NOT preserved still goes, so the
+    /// fix cannot degrade into "stop pruning".
+    #[test]
+    fn emit_public_prune_keeps_the_paths_this_emit_does_not_own() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("entry.js"), "console.log('app');\n").unwrap();
+        let entry = directory.path().join("entry.js");
+        let output_root = directory.path().join(".diffpack-output");
+        let (bundler, _) = Bundler::discover_direct(&entry).unwrap();
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_public(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+
+        // Stand in for what the react-server build preserves before the client emit runs.
+        let public_dir = output_root.join("public");
+        let rsc_css = public_dir.join("rsc.css");
+        fs::write(&rsc_css, ".from-the-react-server-graph { color: red; }").unwrap();
+        let stale = public_dir.join("stale.js");
+        fs::write(&stale, "// stale").unwrap();
+
+        let preserve = BTreeSet::from([rsc_css.clone()]);
+        bundler
+            .emit_public_preserving(&reachable, &output_root, EmitOptions::default(), &preserve)
+            .unwrap();
+
+        assert!(
+            rsc_css.is_file(),
+            "the client emit must not delete a file it does not own",
+        );
+        assert_eq!(
+            fs::read_to_string(&rsc_css).unwrap(),
+            ".from-the-react-server-graph { color: red; }",
+            "preserving must leave the bytes alone, not just the path",
+        );
+        assert!(
+            !stale.exists(),
+            "an UNpreserved stale file must still be pruned",
+        );
     }
 
     /// The client `public/` build must emit BROWSER-executable ESM: the entry

@@ -3869,9 +3869,34 @@ mod next {
         output_root: &Path,
     ) -> Result<EmitSummary, String> {
         let reachable = reachable_ids(client);
-        let summary = client
-            .bundler
-            .emit_public(&reachable, output_root, client.options)?;
+        // `public/rsc.css` belongs to the REACT-SERVER graph, which is built first in dev
+        // and preserves its compiled sheet there. Without this the client's prune — which
+        // deletes everything under `public/` the client graph did not itself write —
+        // removed it, and the document went on linking `/rsc.css` (that link is guarded on
+        // `rsc-render/server.css`, which the prune never touches) while `GET /rsc.css`
+        // 404ed: an unstyled page, served with `X-Content-Type-Options: nosniff` so the
+        // browser rejected the 404's HTML outright.
+        //
+        // Preserved on exactly the condition that makes the document link it — the sheet
+        // sitting beside the render bundle — so the link and the artifact stay one fact,
+        // and a react-server graph that stops compiling CSS still has its stale sheet
+        // pruned.
+        let mut preserve = BTreeSet::new();
+        if output_root
+            .join("rsc-render")
+            .join(crate::next_adapter::RSC_EMITTED_CSS_FILE)
+            .is_file()
+        {
+            preserve.insert(
+                output_root
+                    .join("public")
+                    .join(crate::next_adapter::RSC_CSS_URL.trim_start_matches('/')),
+            );
+        }
+        let summary =
+            client
+                .bundler
+                .emit_public_preserving(&reachable, output_root, client.options, &preserve)?;
         config::copy_static_public(project_root, &summary.output_dir)?;
         // next/image: emit downscaled responsive variants for every public raster.
         let images = crate::next_adapter::scan_public_images(project_root)?;

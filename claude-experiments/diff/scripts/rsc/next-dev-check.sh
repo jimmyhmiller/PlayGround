@@ -87,6 +87,34 @@ echo "$html" | grep -q "/__diffpack_hmr/ws" || fail "dev / missing the WebSocket
 echo "$html" | grep -q '\$RefreshRuntime\$' || fail "dev / missing the React Fast Refresh runtime preamble"
 echo "OK (gate D1): dev server SSRs the app-router document with the WS HMR + Fast Refresh preamble injected"
 
+# --- Gate D1b: the stylesheet the document links is actually SERVED --------------
+# REGRESSION. The react-server graph compiles the app's CSS and preserves it to
+# `public/rsc.css`; the client graph is emitted afterwards into the SAME `public/`
+# and its prune deletes everything the CLIENT graph did not write — which took the
+# sheet with it. Nothing downstream noticed: the <link> is guarded on the artifact
+# beside the render bundle (untouched by that prune), so the document went on linking
+# /rsc.css while GET /rsc.css returned the 404 HTML shell. Served with
+# `X-Content-Type-Options: nosniff`, the browser rejected the HTML outright and the
+# page rendered fully unstyled — on cal.com and on this app, from a cold dev boot.
+#
+# The production gate (next-check.sh, gate 1c) could never catch it: `build-app`
+# builds the client and react-server graphs in SEPARATE processes, so the preserve
+# lands after the client's prune and the ordering hazard does not exist there. This
+# asserts STATUS and CONTENT-TYPE as well as bytes, because the failure served a
+# perfectly readable 200-shaped HTML body on the CSS URL.
+echo "$html" | grep -qE '<link[^>]*href="/rsc.css"' || { echo "$html"; fail "dev: the app stylesheet <link href=/rsc.css> was not linked into the document"; }
+css_head="$(curl -s -o /tmp/diffpack-dev-rsc.css -w '%{http_code} %{content_type}' "$base/rsc.css")"
+case "$css_head" in
+  200\ text/css*) ;;
+  *) echo "$css_head"; head -5 /tmp/diffpack-dev-rsc.css; fail "dev: the document links /rsc.css but GET /rsc.css returned '$css_head' (expected '200 text/css'); the page renders unstyled";;
+esac
+grep -q "background: rgb(11, 22, 33)" /tmp/diffpack-dev-rsc.css || { head -5 /tmp/diffpack-dev-rsc.css; fail "dev: served /rsc.css does not carry globals.css (body background)"; }
+module_class="$(echo "$html" | grep -oE -m1 '_page_[a-z0-9]+' || true)"
+[ -n "$module_class" ] || { echo "$html"; fail "dev: the scoped CSS-Module class was not applied to <main>"; }
+grep -q "._${module_class#_}" /tmp/diffpack-dev-rsc.css || grep -q ".$module_class" /tmp/diffpack-dev-rsc.css || { head -5 /tmp/diffpack-dev-rsc.css; fail "dev: served /rsc.css has no rule for the applied class .$module_class (scoping disagrees)"; }
+rm -f /tmp/diffpack-dev-rsc.css
+echo "OK (gate D1b): the linked /rsc.css is served as text/css and carries globals.css + the CSS-Module rule for .$module_class"
+
 # --- Gate D2: island hydrated + interactive (5 -> 6) -----------------------------
 agent-browser open "$base/" >/dev/null 2>&1
 agent-browser wait "#inc" >/dev/null 2>&1 || fail "dev: #inc island button not present"
