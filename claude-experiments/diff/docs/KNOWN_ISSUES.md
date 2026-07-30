@@ -66,67 +66,31 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
-### 7. Dev ships one chunk per island now, which is too many chunks
+### 7. Per-island chunking is too granular on island-heavy routes
 
-FIXED: the dev browser bundle is no longer one 17.8 MB file (see the Resolved table).
-What remains is the granularity. Per-island chunks mean `/auth/login` fetches 112 JS
-files and `/apps` 165, against Turbopack's 36 and 49, and the dev server answers each
-with `Connection: close` — so every chunk costs a fresh TCP connection, six at a time.
+Both modes split per island now, and on most routes that is a straight win. The exception is
+a route that renders many islands: cal.com's `/apps` pulls 162 JS files in production
+against Turbopack's 47, and the extra requests cost more than the smaller payload saves.
 
-That shows up in two places. On the wire, gzip does worse on many small files than on a
-few big ones (`/auth/login`: 2.60 MB across 118 requests vs Turbopack's 1.69 MB across
-40, even though we send LESS decoded code — 8.09 MB vs 9.20 MB). And the load event
-lands later (669 ms vs 226 ms) despite the smaller payload.
-
-Two fixes, both independent of the split itself:
-
-- Coalesce chunks below a minimum size, which is what webpack and Turbopack do. The
-  planner already groups by reachability label; a post-pass merging small groups into
-  their common parent would cut request count by roughly an order of magnitude.
-- HTTP keep-alive in the dev server. Every response currently ends the connection.
-
-Measured, cold cache, gzip on both sides, after the split:
-
-| route | diffpack wire / decoded / requests | Turbopack wire / decoded / requests |
+| production, cold cache | diffpack JS wire / decoded / files | Turbopack |
 |---|---|---|
-| `/auth/login` | 2.60 MB / 8.09 MB / 118 | 1.69 MB / 9.20 MB / 40 |
-| `/pro/30min` | **1.15 MB / 2.15 MB / 34** | 2.75 MB / 15.84 MB / 62 |
-| `/apps` | 4.09 MB / 10.51 MB / 251 | 3.04 MB / 15.06 MB / 136 |
+| `/auth/login` | **165 KB / 544 KB / 27** | 482 KB / 1.48 MB / 30 |
+| `/pro/30min` | **155 KB / 503 KB / 27** | 1.02 MB / 3.09 MB / 54 |
+| `/apps` | 1.16 MB / 4.22 MB / 162 | **813 KB / 2.43 MB / 47** |
 
-### 8. Production ships one 8.1 MB monolith to EVERY route
+Load event: 215 / 213 / 547 ms against 94 / 190 / 197 ms — so even where we send a third of
+the bytes we take longer, which points at per-request overhead rather than payload.
 
-The per-island split is dev-only, and production has the identical shape for the identical
-reason: `island_pins` still records static `require` edges there, so every island is in the
-one chunk. This is the worse case, not the excused one.
+Two independent fixes:
 
-Measured with both production builds served and a cold browser cache, per page:
+- Coalesce chunks below a minimum size, which is what webpack and Turbopack do. The planner
+  already groups modules by reachability label; a post-pass merging small groups into their
+  common parent would cut the request count by roughly an order of magnitude.
+- HTTP keep-alive in the DEV server (`Connection: close` on every response there, so each
+  chunk costs a fresh connection, six at a time). Production is served by Node's http
+  server, which keeps connections alive already.
 
-| route | diffpack wire / decoded / JS files | Turbopack wire / decoded / JS files |
-|---|---|---|
-| `/auth/login` | 2.00 MB / **7.93 MB** / 2 | 482 KB / **1.48 MB** / 30 |
-| `/pro/30min` | 2.00 MB / **7.93 MB** / 2 | 1.02 MB / **3.09 MB** / 54 |
-| `/apps` | 2.00 MB / **7.93 MB** / 2 | 813 KB / **2.43 MB** / 47 |
-
-diffpack sends the SAME two files on every route. Turbopack sends route-specific chunks, so
-a page pays for itself: **3-5x less JS per page than we ship**. Load event 497-591 ms
-against 111-446 ms.
-
-Do not be reassured by emitted totals — they invert the answer. diffpack emits 8,870 KB
-across 86 files and `next build` emits 17,628 KB across 645 files (largest 432 KB), so we
-emit half as much and ship several times more. Only per-page bytes mean anything here.
-
-Nor is the 554 KB in `project_diffpack_bundle_size` a cal.com number: that is
-`integration/tanstack-start-reference`, where all client JS totals 545 KB across 29 files.
-
-Extending the split to production needs the browser told which chunks a route needs before
-it hydrates, and production serves a STREAMING document. The react-server render discovers
-client references as it serializes, so the complete list only exists once the flight does —
-which the buffered dev document has (it drains the flight first) and a streaming one does
-not. The reference emits a `<script>` per route chunk into the document as the render
-discovers them; that is the shape to copy, and it would also remove the one wave of chunk
-fetches dev currently pays before hydrating.
-
-### 9. Two dev responses still go out uncompressed
+### 8. Two dev responses still go out uncompressed
 
 Assets are compressed now (see the Resolved table), but two are not. The Node-forwarded
 HTML document is proxied as a raw response buffer rather than re-framed, so it ships
@@ -149,6 +113,7 @@ Refresh runtime, 21 KB) has no compression path at all.
 
 | Commit | Issue |
 |---|---|
+| this commit | PRODUCTION shipped the same monolith dev did — `client.js` 8,116 KB, the identical 7.93 MB of JS decoded on EVERY route — and the split turned out to need nothing but the pin flip. The chunk-list plumbing built for dev (a proxy over the manifest React resolves references with, the list injected into the document, the browser entry loading it before hydrating, `x-diffpack-chunks` for soft navigation) was diagnosed against a tree that still had the two real bugs: with the seam's chunk table complete and the control boundary's `default` no longer shaken away, React's own flight client preloads a reference's chunk before requiring the module, in the streaming document as well as the buffered one. All of that machinery is DELETED. Production `client.js` 8,116 KB -> 344 KB, and per page: `/auth/login` 2.00 MB -> 165 KB of JS on the wire, `/pro/30min` -> 155 KB, `/apps` -> 1.16 MB. Hydration verified fiber-for-fiber against the reference on all three routes (858/909/3283 with matching interactive-element counts) with zero console errors on two of them. Dev got faster too once the redundant preload went (81 files / 511 ms against 112 / 669 ms). |
 | this commit | Dev: the browser bundle was ONE 17.8 MB `client.js`, so every page downloaded every `"use client"` island in the app (cal.com's login form pulled the app store, the booker, all of settings and every payment component) and re-parsed all of it on each full navigation: 693 ms of V8 compile against Turbopack's 33 ms, and no code cache at that size. `island_pins` recorded each island's edge as `() => require(path)` — a STATIC edge, and `chunk_plan` splits only on dynamic-import roots. Dev now pins with `import()` (`PinKind::DynamicChunk`; production keeps the static requires, where whole-graph DCE already shrinks the one chunk). Two real bugs had to be fixed for the split to work at all: the RSC seam's chunk-id -> URL table was built from `chunk_names` (root -> chunk) and so omitted every rootless shared chunk, and a module reached by BOTH a static named import and a dynamic `import()` never became a chunk root and therefore kept only the static importer's names — which shook `default` off the RSC control boundary and killed hydration on every page with "Element type is invalid. Received a promise that resolves to: undefined". Measured: `client.js` 17.8 MB -> 1.2 MB; `/auth/login` 18.86 MB -> 2.60 MB on the wire and 18.35 MB -> 8.09 MB decoded (Turbopack: 1.69 MB / 9.20 MB); `/pro/30min` 1.15 MB / 2.15 MB against Turbopack's 2.75 MB / 15.84 MB. Hydration is fiber-for-fiber with the reference on `/auth/login`, `/pro/30min` and `/apps` (858/859, 891/911, 3283/3284). |
 | this commit | Dev served every asset uncompressed and with no validator: `/auth/login` put 18.86 MB on the wire against Turbopack's 2.75 MB, 0 of 8 responses compressed against 50 of 62. Assets now carry gzip (level 1, memoised per file size+mtime) and a weak ETag, so an unchanged chunk revalidates into a 304. |
 | `b0df5053f` | Dev: hot pushes queued behind the deferred full re-emit (~1s edit-to-DOM at 1Hz cadence; FULLY resolved in `08f72d3c8` by in-place chunk patching: each edit's micro-chunk is spliced into the on-disk host chunks in ~140ms, the full re-emit became 10s-idle compaction, and edit-to-DOM measures 48-53ms flat at every cadence including the old resonance points — no residual) |

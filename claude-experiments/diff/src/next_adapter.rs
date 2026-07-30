@@ -2882,7 +2882,13 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
             // to put that list yet (the react-server render discovers the references as it
             // serializes, so the list is only complete once the flight is). The buffered
             // dev document drains the flight first, so it has the list in time.
-            if dev { PinKind::DynamicChunk } else { PinKind::StaticRequire },
+            // Per-island chunks in BOTH modes: a page downloads the islands it renders
+            // instead of every island in the app. Static pins put all 229 of cal.com's in
+            // one chunk — 17.8 MB in dev, 8.1 MB minified in production — and every route
+            // paid for all of it. Nothing extra is needed to make this work: React's flight
+            // client preloads a reference's chunk (`__webpack_chunk_load__`) before it
+            // requires the module, in both the buffered and the streaming document.
+            PinKind::DynamicChunk,
         ),
     )?;
     // --- per-environment config --------------------------------------------------
@@ -4860,35 +4866,10 @@ function renderStore(pathname, reqCtx, params) {{
   }};
 }}
 
-// WHICH CLIENT-REFERENCE CHUNKS THIS ROUTE USES.
-//
-// React resolves every client reference it serializes through `bundlerConfig[modulePath]`
-// (`resolveClientReferenceMetadata`), so a proxy over the manifest is an EXACT record of
-// the references a render reached — no flight-wire parsing and no guessing from the route
-// table. The browser needs it because the seam's `__webpack_require__` is synchronous:
-// a reference whose module sits in a split chunk has to be registered before hydration
-// renders it, and React's own blocked-module-chunk path does not get there in time (it
-// surfaces as "Element type is invalid. Received a promise that resolves to: undefined").
-//
-// `chunks` is React's flat `[chunkId, chunkFile, ...]`; the loader takes the id.
-function recordUsedChunks(bundlerConfig, used) {{
-  return new Proxy(bundlerConfig, {{
-    get(target, key) {{
-      const entry = target[key];
-      if (entry && Array.isArray(entry.chunks)) {{
-        for (let i = 0; i < entry.chunks.length; i += 2) used.add(entry.chunks[i]);
-      }}
-      return entry;
-    }},
-  }});
-}}
-
 // Render `pathname` to a flight BUFFER + control meta. Shared by the one-shot argv
 // `render` op AND the persistent `serve` worker, so both paths render identically.
 export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
   const control = {{}};
-  const usedChunks = new Set();
-  bundlerConfig = recordUsedChunks(bundlerConfig, usedChunks);
   // `documentTree` awaits the matched page (see `resolvePage`), and the page reads
   // request state through the ALS store — so the store has to be established around the
   // composition, not just around the flight render.
@@ -4905,8 +4886,6 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
   }});
   return {{
     flight,
-    // The chunks the browser must have registered before it hydrates this document.
-    chunks: [...usedChunks],
     status: control.status || status || 200,
     params,
     redirect: control.redirect,
@@ -4936,8 +4915,6 @@ export async function renderRequest(pathname, bundlerConfig, reqCtx) {{
 // reported on `sink.end` and the orchestrator logs it loudly (never silently dropped).
 export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink) {{
   const control = {{}};
-  const usedChunks = new Set();
-  bundlerConfig = recordUsedChunks(bundlerConfig, usedChunks);
   // See `renderRequest`: composing the tree now RUNS the page, which reads request state.
   const store = renderStore(pathname, reqCtx, matchParams(pathname, renderOpts(reqCtx)));
   const {{ tree, status, params, intercept }} = await requestAls.run(store, () =>
@@ -4984,10 +4961,7 @@ export async function renderRequestStream(pathname, bundlerConfig, reqCtx, sink)
     // cannot change the response and the orchestrator reports it. A redirect/notFound the
     // meta already carried was acted on and must NOT be reported.
     const lateControl = !!((control.redirect && !metaControl.redirect) || (control.notFound && !metaControl.notFound));
-    // `chunks` rides on `end`, not `meta`: client references are discovered as React
-    // serializes the tree, so the full set only exists once the flight does. The buffered
-    // document path drains the flight before it renders, so it has them in time.
-    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, lateControl, chunks: [...usedChunks], tags: [...store.tags], setCookies: store.responseCookies.slice() }});
+    sink.end({{ status: control.status || status || 200, redirect: control.redirect, notFound: control.notFound, metaSent, lateControl, tags: [...store.tags], setCookies: store.responseCookies.slice() }});
   }});
 }}
 
@@ -5266,7 +5240,7 @@ async function serveLoop() {{
         manifestCache.delete(req.manifestPath);
         if (req.op === "render") {{
           const r = await mod.renderRequest(req.pathname || "/", manifest(req.manifestPath), req.reqCtx || {{}});
-          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, chunks: r.chunks || [], tags: r.tags || [], setCookies: r.setCookies || [] }});
+          reply({{ id: req.id, flight: Buffer.from(r.flight).toString("base64"), status: r.status, params: r.params, redirect: r.redirect, notFound: r.notFound, dynamicBailout: r.dynamicBailout, tags: r.tags || [], setCookies: r.setCookies || [] }});
         }} else if (req.op === "render-stream") {{
           // Streaming render: one `streamMeta` line, then N `streamChunk` lines, then a
           // single `streamEnd` line — all sharing this request id. The orchestrator
@@ -5548,7 +5522,7 @@ function installSeam() {{
 // client bootstrap module (`/client.js`) and the inlined flight are injected via
 // react-dom's bootstrap options, so the served DOM (scripts included) is exactly
 // what hydration on the browser expects — no mismatch.
-export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce, routeChunks) {{
+export async function renderFlightToDocument(flightBytes, serverConsumerManifest, flightBase64, params, url, nonce) {{
   installSeam();
   const bytes = new Uint8Array(flightBytes);
   const stream = new ReadableStream({{
@@ -5613,10 +5587,6 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       bootstrapScriptContent:
         "window.__DIFFPACK_FLIGHT__ = " + JSON.stringify(flightBase64) + ";" +
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
-        // The split chunks carrying this route's client references. The browser entry
-        // loads them BEFORE it hydrates, because the RSC seam's require is synchronous
-        // (see `recordUsedChunks` in the react-server entry).
-        "window.__DIFFPACK_ROUTE_CHUNKS__ = " + JSON.stringify(routeChunks || []) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onAllReady() {{
         pipe(sink);
@@ -5848,12 +5818,6 @@ async function fetchFlight(href) {{
   // with no Suspense boundary of its own, so React could never commit a partially
   // arrived tree anyway — every successful navigation already waited for the last row.
   const bytes = new Uint8Array(await res.arrayBuffer());
-  // The split chunks THIS route's client references live in, which the loaded page may
-  // never have needed. They are loaded before the flight is decoded, because the RSC
-  // seam's `__webpack_require__` is synchronous: a reference whose module is not
-  // registered yet cannot be rendered, and React's blocked-chunk path does not cover a
-  // navigation render. Absent header = nothing to load (production ships one chunk).
-  await loadRouteChunks(res.headers.get("x-diffpack-chunks"), href);
   const tree = createFromReadableStream(
     new ReadableStream({{
       start(controller) {{
@@ -5867,32 +5831,6 @@ async function fetchFlight(href) {{
   // than during a render that has no boundary to catch it.
   await tree;
   return {{ tree, intercept, params }};
-}}
-
-// Load the chunks named by `x-diffpack-chunks` (percent-encoded JSON array). A PRESENT
-// but malformed value is a server bug and throws rather than being ignored: silently
-// skipping the load would fail later, inside a render, on a reference whose module never
-// registered — with nothing left to name the chunk that was missed.
-async function loadRouteChunks(header, href) {{
-  if (!header) return;
-  let list;
-  try {{
-    list = JSON.parse(decodeURIComponent(header));
-  }} catch (error) {{
-    throw new Error(
-      "diffpack next client: malformed x-diffpack-chunks for " + href + ": " + String(error.message),
-    );
-  }}
-  if (!Array.isArray(list)) {{
-    throw new Error("diffpack next client: x-diffpack-chunks for " + href + " is not an array");
-  }}
-  if (!list.length) return;
-  if (typeof globalThis.__webpack_chunk_load__ !== "function") {{
-    throw new Error(
-      "diffpack next client: x-diffpack-chunks arrived but the RSC seam installed no __webpack_chunk_load__",
-    );
-  }}
-  await Promise.all(list.map((chunk) => globalThis.__webpack_chunk_load__(chunk)));
 }}
 
 // Decode the `x-diffpack-params` header the orchestrator stamps on a soft-navigation
@@ -6133,27 +6071,7 @@ function flightStreamFromDF() {{
   }});
 }}
 
-async function boot() {{
-  // EVERY SPLIT CHUNK THIS ROUTE'S CLIENT REFERENCES LIVE IN, BEFORE ANYTHING RENDERS.
-  //
-  // The RSC seam's `__webpack_require__` is synchronous, so a reference whose module sits
-  // in a split chunk has to be registered before the render asks for it. React's own
-  // blocked-module-chunk path does not get there in time under document hydration — it
-  // surfaces as "Element type is invalid. Received a promise that resolves to: undefined".
-  // The react-server render recorded the exact set (`recordUsedChunks`) and the document
-  // injected it, so this is one parallel wave of fetches, not a per-reference waterfall.
-  //
-  // A chunk that fails to load is a HARD failure: hydration would otherwise die further
-  // in, on a reference whose module never registered, with nothing naming the chunk.
-  const routeChunks = window.__DIFFPACK_ROUTE_CHUNKS__;
-  if (Array.isArray(routeChunks) && routeChunks.length) {{
-    if (typeof globalThis.__webpack_chunk_load__ !== "function") {{
-      throw new Error(
-        "diffpack next client: the document lists route chunks but the RSC seam installed no __webpack_chunk_load__",
-      );
-    }}
-    await Promise.all(routeChunks.map((chunk) => globalThis.__webpack_chunk_load__(chunk)));
-  }}
+function boot() {{
   // Streaming render inlines the flight incrementally as __DF_FLIGHT; the buffered
   // render (notFound / error docs) inlines the whole flight as __DIFFPACK_FLIGHT__.
   let stream;
@@ -12626,9 +12544,8 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
             "the stream end reports whether the control flow was LATE: {source}",
         );
         assert!(
-            source.contains("metaSent, lateControl, chunks: [...usedChunks], tags:"),
-            "lateControl and the route's client-reference chunk list both travel on the \
-             stream-end message: {source}",
+            source.contains("lateControl, tags:"),
+            "lateControl travels on the stream-end message: {source}",
         );
         assert!(
             NEXT_SERVER_MJS.contains("if (m && m.metaSent && m.lateControl && (m.redirect || m.notFound)) {"),

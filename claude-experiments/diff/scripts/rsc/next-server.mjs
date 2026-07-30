@@ -1900,7 +1900,6 @@ const server = createServer(async (req, res) => {
       const queue = [];
       let waiters = [];
       let ended = false;
-      let endMeta = null;
       let streamError = null;
       const wake = () => {
         const w = waiters;
@@ -1916,9 +1915,6 @@ const server = createServer(async (req, res) => {
             wake();
           },
           onEnd: (m) => {
-            // The END meta carries this route's client-reference chunk list (references
-            // are discovered as React serializes, so `meta` is too early for it).
-            endMeta = m || {};
             // redirect()/notFound() thrown BEHIND a Suspense boundary (after the shell
             // already flushed) can't unwind the streamed response. Never silent: log it.
             // `lateControl` is what makes this a real report: a redirect the META carried
@@ -2002,7 +1998,6 @@ const server = createServer(async (req, res) => {
           {},
           { pathname: url.pathname, search: url.search },
           scriptNonce,
-          nf.chunks || [],
         );
         const nfHeaders = { "content-type": "text/html; charset=utf-8" };
         for (const [k, v] of configHeaders) nfHeaders[k] = v;
@@ -2028,22 +2023,6 @@ const server = createServer(async (req, res) => {
         // page. Percent-encoded because a param value may hold non-ASCII bytes.
         rscHeaders["x-diffpack-params"] = encodeURIComponent(JSON.stringify(meta.params || {}));
         if (meta.intercept) rscHeaders["x-diffpack-intercept"] = "1";
-        // DEV splits the islands into per-island chunks, so a soft navigation can reach
-        // references the loaded page never needed. The client Router loads these before
-        // it decodes the flight (the RSC seam's require is synchronous). Buffered rather
-        // than streamed, because the list is only complete once the flight is — and the
-        // client buffers this response anyway (`fetchFlight` reads it to completion).
-        if (DEV) {
-          const parts = [];
-          for await (const b64 of flightChunks()) parts.push(Buffer.from(b64, "base64"));
-          const chunkList = (endMeta && endMeta.chunks) || [];
-          if (chunkList.length) rscHeaders["x-diffpack-chunks"] = encodeURIComponent(JSON.stringify(chunkList));
-          if (mwSetCookies.length) rscHeaders["set-cookie"] = mwSetCookies;
-          mergeSetCookie(rscHeaders, meta.setCookies);
-          res.writeHead(200, rscHeaders);
-          res.end(Buffer.concat(parts));
-          return;
-        }
         if (mwSetCookies.length) rscHeaders["set-cookie"] = mwSetCookies;
         mergeSetCookie(rscHeaders, meta.setCookies);
         res.writeHead(200, rscHeaders);
@@ -2074,7 +2053,6 @@ const server = createServer(async (req, res) => {
           scriptNonce,
           // Drained above, so the END meta has landed: every split chunk this route's
           // client references live in, for the browser entry to load before it hydrates.
-          (endMeta && endMeta.chunks) || [],
         );
         res.writeHead(meta.status || 200, docHeaders);
         res.end(html);
