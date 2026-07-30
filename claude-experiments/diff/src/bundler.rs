@@ -3482,34 +3482,41 @@ impl Bundler {
             .flat_map(|pattern| expand_braces(pattern))
             .map(|pattern| path_segments(Path::new(&pattern)))
             .collect();
-        let read_stage = crate::build_profile::stage("css/tailwind-read-sources");
-        let mut sources = Vec::new();
-        // The walk reads every source file under the root — hundreds of milliseconds on
-        // a monorepo — so it asks between directories whether it is still wanted.
-        if !collect_scan_sources(scan_root, &mut sources, &skip, &cancel) {
+        let walk_stage = crate::build_profile::stage("css/tailwind-walk-sources");
+        let mut paths = Vec::new();
+        // The walk enumerates every source file under the root — a monorepo has thousands —
+        // so it asks between directories whether it is still wanted.
+        if !collect_scan_sources(scan_root, &mut paths, &skip, &cancel) {
             return Ok(None);
         }
         for pattern in included {
-            collect_glob_sources(pattern, &mut sources, &skip);
+            collect_glob_sources(pattern, &mut paths, &skip);
             if cancel.cancelled() {
                 return Ok(None);
             }
         }
+        drop(walk_stage);
+        // READ + TOKENIZE IN PARALLEL. Both are per-file independent work over thousands of
+        // files, and serially they were the single largest fixed cost of a dev cold start on
+        // cal.com (611 ms reading, 291 ms tokenizing, on a 12-core machine). The result is a
+        // path-keyed map, so the order files are visited in cannot change it. A file that
+        // cannot be read is skipped exactly as before.
+        let read_stage = crate::build_profile::stage("css/tailwind-read-and-scan-sources");
+        let per_file: HashMap<PathBuf, crate::tailwind::SourceScan> = paths
+            .into_par_iter()
+            .filter(|_| !cancel.cancelled())
+            .filter_map(|path| {
+                let source = fs::read_to_string(&path).ok()?;
+                Some((path, crate::tailwind::scan_source_parts(&source)))
+            })
+            .collect();
         drop(read_stage);
-        let scan_stage = crate::build_profile::stage("css/tailwind-scan-candidates");
-        // Tokenized per file and KEPT per file: an edit then re-tokenizes one file
-        // instead of the tree (see [`TailwindScan`]). Batched with a yield point
-        // between batches, because tokenizing thousands of files is ~150 ms.
-        let mut per_file = HashMap::new();
-        for batch in sources.chunks(128) {
-            if cancel.cancelled() {
-                return Ok(None);
-            }
-            for (path, source) in batch {
-                per_file.insert(path.clone(), crate::tailwind::scan_source_parts(source));
-            }
+        // Cancelled part-way through: the map is missing whatever the remaining files would
+        // have contributed, and a partial candidate set compiles a stylesheet that silently
+        // lacks utilities. Report "no scan" instead, exactly as the walk does.
+        if cancel.cancelled() {
+            return Ok(None);
         }
-        drop(scan_stage);
         Ok(Some(per_file))
     }
 
@@ -8832,7 +8839,11 @@ impl ScanSkip {
         }
     }
 
-    fn skips(&self, path: &Path, name: &str) -> bool {
+    /// Whether the walk skips this entry. `is_dir` comes from the directory entry itself
+    /// (never a fresh `stat`), and gates the out-root check below: the build's output root is
+    /// a directory, so a FILE can never be it, and canonicalizing every file to find that out
+    /// cost more than the rest of the walk put together on a monorepo.
+    fn skips(&self, path: &Path, name: &str, is_dir: bool) -> bool {
         if name.starts_with('.') || name == "node_modules" {
             return true;
         }
@@ -8851,7 +8862,8 @@ impl ScanSkip {
                 return true;
             }
         }
-        if let Some(out_root) = &self.out_root
+        if is_dir
+            && let Some(out_root) = &self.out_root
             && let Ok(canonical) = fs::canonicalize(path)
             && canonical == *out_root
         {
@@ -9017,7 +9029,7 @@ fn is_glob_segment(segment: &str) -> bool {
 /// Reads every source file an `@source` pattern selects. A pattern with no glob
 /// metacharacters names a file (read directly) or a directory (walked whole,
 /// exactly as Tailwind treats a bare `@source "./dir"`).
-fn collect_glob_sources(pattern: &str, out: &mut Vec<(PathBuf, String)>, skip: &ScanSkip) {
+fn collect_glob_sources(pattern: &str, out: &mut Vec<PathBuf>, skip: &ScanSkip) {
     for expanded in expand_braces(pattern) {
         let segments = path_segments(Path::new(&expanded));
         let literal = segments.iter().take_while(|s| !is_glob_segment(s)).count();
@@ -9028,8 +9040,8 @@ fn collect_glob_sources(pattern: &str, out: &mut Vec<(PathBuf, String)>, skip: &
                 // between patterns, which is granular enough for the handful an app
                 // declares.
                 collect_scan_sources(&root, out, skip, &EmitCancel::never());
-            } else if let Ok(source) = fs::read_to_string(&root) {
-                out.push((root.clone(), source));
+            } else if root.is_file() {
+                out.push(root.clone());
             }
             continue;
         }
@@ -9037,11 +9049,11 @@ fn collect_glob_sources(pattern: &str, out: &mut Vec<(PathBuf, String)>, skip: &
     }
 }
 
-/// Walks `directory`, reading every file whose full path matches `pattern`.
+/// Walks `directory`, collecting every file whose full path matches `pattern`.
 fn collect_matching_sources(
     directory: &Path,
     pattern: &[String],
-    out: &mut Vec<(PathBuf, String)>,
+    out: &mut Vec<PathBuf>,
     skip: &ScanSkip,
 ) {
     let Ok(entries) = fs::read_dir(directory) else {
@@ -9051,15 +9063,14 @@ fn collect_matching_sources(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if skip.skips(&path, &name) {
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or_else(|_| path.is_dir());
+        if skip.skips(&path, &name, is_dir) {
             continue;
         }
-        if path.is_dir() {
+        if is_dir {
             collect_matching_sources(&path, pattern, out, skip);
-        } else if glob_matches(pattern, &path_segments(&path))
-            && let Ok(source) = fs::read_to_string(&path)
-        {
-            out.push((path, source));
+        } else if glob_matches(pattern, &path_segments(&path)) {
+            out.push(path);
         }
     }
 }
@@ -9070,11 +9081,15 @@ fn collect_matching_sources(
 /// own output directory, so only the app's own classes are scanned. The files
 /// are scanned together (`scan_class_candidates_multi`) so identifiers resolve
 /// across module boundaries.
-/// Reads every scannable source under `root` into `out`. Returns false if `cancel`
-/// fired part-way, in which case `out` is incomplete and must not be scanned.
+/// Collects the PATH of every scannable source under `root` into `out`. Returns false if
+/// `cancel` fired part-way, in which case `out` is incomplete and must not be scanned.
+///
+/// Deliberately does not read the files: the walk is a serial directory traversal, but
+/// reading is per-file independent work and there are thousands of them (cal.com: 611 ms of
+/// the 900 ms candidate scan was `read_to_string`), so the caller reads them in parallel.
 fn collect_scan_sources(
     root: &Path,
-    out: &mut Vec<(PathBuf, String)>,
+    out: &mut Vec<PathBuf>,
     skip: &ScanSkip,
     cancel: &EmitCancel<'_>,
 ) -> bool {
@@ -9088,19 +9103,19 @@ fn collect_scan_sources(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if skip.skips(&path, &name) {
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or_else(|_| path.is_dir());
+        if skip.skips(&path, &name, is_dir) {
             continue;
         }
-        if path.is_dir() {
+        if is_dir {
             if !collect_scan_sources(&path, out, skip, cancel) {
                 return false;
             }
         } else if matches!(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "html")
-        ) && let Ok(source) = fs::read_to_string(&path)
-        {
-            out.push((path, source));
+        ) {
+            out.push(path);
         }
     }
     true

@@ -191,7 +191,7 @@ fn check_app(app_src: &Path) {
     // (8) configure_dev: HMR on, NODE_ENV=development, production condition swapped, for
     // every environment.
     for environment in ["client", "react-server", "ssr"] {
-        let dev = configure_dev(&root, environment)
+        let dev = configure_dev(&root, environment, &diffpack::next_adapter::RouteScope::All)
             .unwrap_or_else(|e| panic!("[{label}] configure_dev({environment}) errored: {e}"))
             .unwrap_or_else(|| panic!("[{label}] configure_dev({environment}) returned None"));
         assert!(dev.build.hmr, "[{label}] dev {environment} turns HMR on");

@@ -199,20 +199,30 @@ echo "OK (gate 1h): loading.tsx composed a Suspense around the blog page (struct
 # React 19 — so the attribute-name greps here are case-insensitive.
 hero_img="$(echo "$html" | grep -oiE -m1 '<img[^>]*id="hero"[^>]*>' || true)"
 [ -n "$hero_img" ] || { echo "$html"; fail "next/image: the raster hero <img id=hero> was not rendered"; }
-cand="$(echo "$hero_img" | grep -oiE '/_diffpack-image/[^ ]+\.png [0-9]+w' | wc -l | tr -d ' ' || true)"
-[ "${cand:-0}" -ge 2 ] || { echo "$hero_img"; fail "next/image: hero srcset has <2 build-emitted variant candidates (got: ${cand:-0})"; }
-echo "$hero_img" | grep -qiE 'srcset="[^"]*/_diffpack-image/' || { echo "$hero_img"; fail "next/image: hero <img> has no srcset pointing at /_diffpack-image/ variants"; }
+# The srcset carries Next's OWN URL shape (`/_next/image?url=&w=&q=`), byte-faithful to
+# what `next build` renders; the build-emitted variant files sit behind those URLs and the
+# orchestrator's `/_next/image` handler serves them (see `_diffpack-image/variants.json`).
+# So the candidates to count are the `/_next/image` ones, and what proves the variants are
+# real is fetching them (below), not the URL spelling.
+cand="$(echo "$hero_img" | grep -oiE '/_next/image\?url=[^ ]+ [0-9]+w' | wc -l | tr -d ' ' || true)"
+[ "${cand:-0}" -ge 2 ] || { echo "$hero_img"; fail "next/image: hero srcset has <2 responsive candidates (got: ${cand:-0})"; }
+echo "$hero_img" | grep -qiE 'srcset="[^"]*/_next/image\?url=' || { echo "$hero_img"; fail "next/image: hero <img> has no responsive srcset of /_next/image URLs"; }
 echo "$hero_img" | grep -qF 'sizes="(max-width: 600px) 100vw, 600px"' || { echo "$hero_img"; fail "next/image: hero <img> lost the sizes passthrough"; }
 echo "$hero_img" | grep -qiE 'decoding="async"' || { echo "$hero_img"; fail "next/image: hero <img> missing decoding=async"; }
-echo "$hero_img" | grep -qiE 'fetchpriority="high"' || { echo "$hero_img"; fail "next/image: priority image missing fetchpriority=high"; }
+# `priority` turns lazy loading OFF and hoists the preload link (asserted below); it does
+# NOT synthesize `fetchPriority="high"` — Next's `getImgProps` passes the caller's
+# `fetchPriority` through untouched, so emitting "high" here would be an attribute Next
+# never renders (pinned by `image_shim_passes_fetch_priority_through_instead_of_synthesizing_high`).
+if echo "$hero_img" | grep -qiE 'loading="lazy"'; then echo "$hero_img"; fail "next/image: priority image must not be loading=lazy"; fi
+if echo "$hero_img" | grep -qiE 'fetchpriority='; then echo "$hero_img"; fail "next/image: priority must not synthesize a fetchPriority attribute (Next passes the caller's through)"; fi
 # The largest variant URL is a REAL emitted static file (200 image/png).
-largest="$(echo "$hero_img" | grep -oiE -m1 'src="/_diffpack-image/[^"]+\.png"' | sed -E 's/^src="//i; s/"$//' || true)"
-[ -n "$largest" ] || { echo "$hero_img"; fail "next/image: hero <img> src is not a /_diffpack-image variant"; }
+largest="$(echo "$hero_img" | grep -oiE -m1 'src="/_next/image\?url=[^"]+"' | sed -E 's/^src="//i; s/"$//; s/&amp;/\&/g' || true)"
+[ -n "$largest" ] || { echo "$hero_img"; fail "next/image: hero <img> src is not a /_next/image URL"; }
 vhdr="$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$base$largest")"
 echo "$vhdr" | grep -qE '^200 image/png' || fail "next/image: the largest variant $largest is not a real 200 image/png (got: $vhdr)"
 # The priority preload <link rel=preload as=image> is hoisted into <head>.
 echo "$html" | grep -qiE '<link[^>]*rel="preload"[^>]*as="image"' || { echo "$html"; fail "next/image: no priority preload <link rel=preload as=image> was hoisted"; }
-echo "$html" | grep -oiE '<link[^>]*rel="preload"[^>]*as="image"[^>]*>' | grep -qiE 'imagesrcset="[^"]*/_diffpack-image/|href="/_diffpack-image/' || { echo "$html"; fail "next/image: the preload link does not reference the hero variants (imagesrcset/href)"; }
+echo "$html" | grep -oiE '<link[^>]*rel="preload"[^>]*as="image"[^>]*>' | grep -qiE 'imagesrcset="[^"]*/_next/image\?url=|href="/_next/image\?url=' || { echo "$html"; fail "next/image: the preload link does not reference the hero image URLs (imagesrcset/href)"; }
 # The SVG image is unoptimized: raw src, NO srcset.
 logo_img="$(echo "$html" | grep -oiE -m1 '<img[^>]*id="logo"[^>]*>' || true)"
 [ -n "$logo_img" ] || { echo "$html"; fail "next/image: the SVG logo <img id=logo> was not rendered"; }

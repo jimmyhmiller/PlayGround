@@ -75,6 +75,62 @@ const ISLANDS_FILE: &str = "islands.json";
 /// regenerating the entries and rediscovering once.
 const ASYNC_ISLANDS_FILE: &str = "async-islands.json";
 
+/// The islands the REACT-SERVER graph actually references (canonical paths), recorded
+/// by the dev server from that graph's own client-references manifest.
+///
+/// Pinning is what puts an island into the client and SSR graphs so its client reference
+/// resolves, and the project walk that discovers islands cannot say whether any route
+/// references one — so it pins every `"use client"` file in the tree. On cal.com that is
+/// 231 islands, of which the whole app references 101 and a single route references 11;
+/// the other pins compile a `"use client"` component (and its imports) into two graphs
+/// for a flight that can never mention it. The react-server graph knows the exact set:
+/// a `"use client"` module in it IS the client-reference boundary, so its reachable
+/// client-directive modules are precisely the references a flight can carry.
+///
+/// Recorded rather than derived in-process because the three graphs are configured
+/// independently; the dev server builds react-server first and writes this, and the
+/// client/ssr `configure` passes read it. Absent (a build that has never built the
+/// react-server graph — every production build, whose client graph is emitted first)
+/// falls back to pinning the walk, which is what the file's absence means: "no better
+/// information yet".
+const REFERENCED_ISLANDS_FILE: &str = "referenced-islands.json";
+
+/// The recorded [`REFERENCED_ISLANDS_FILE`] set, or `None` when it has never been
+/// written (so the caller pins the project walk instead).
+fn referenced_islands(adapter_dir: &Path) -> Option<BTreeSet<String>> {
+    let text = std::fs::read_to_string(adapter_dir.join(REFERENCED_ISLANDS_FILE)).ok()?;
+    serde_json::from_str::<BTreeSet<String>>(&text).ok()
+}
+
+/// Record which islands the react-server graph references, from that graph's own
+/// client-references manifest (whose keys are exactly the canonical paths of its
+/// reachable `"use client"` modules). Returns `true` when the recorded set CHANGED, so
+/// the caller knows the client/ssr entries on disk were generated from a stale pin set.
+pub fn write_referenced_islands(root: &Path, references_manifest: &Path) -> Result<bool, String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let adapter_dir = root.join(ADAPTER_DIR);
+    let text = std::fs::read_to_string(references_manifest).map_err(|error| {
+        format!(
+            "cannot read the react-server client-references manifest {}: {error}",
+            references_manifest.display(),
+        )
+    })?;
+    let manifest: BTreeMap<String, serde_json::Value> = serde_json::from_str(&text)
+        .map_err(|error| format!("cannot parse {}: {error}", references_manifest.display()))?;
+    let referenced: BTreeSet<&String> = manifest.keys().collect();
+    let text = serde_json::to_string_pretty(&referenced)
+        .map_err(|error| format!("cannot serialize the referenced-island set: {error}"))?;
+    let path = adapter_dir.join(REFERENCED_ISLANDS_FILE);
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&adapter_dir)
+        .map_err(|error| format!("cannot create {}: {error}", adapter_dir.display()))?;
+    std::fs::write(&path, text)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(true)
+}
+
 /// The recorded eager-island union (all environments). Empty when never
 /// recorded — the correct default: a lazily-pinned async island is caught by
 /// the reconcile step before emit.
@@ -86,6 +142,16 @@ fn recorded_eager_islands(adapter_dir: &Path) -> BTreeSet<String> {
         return BTreeSet::new();
     };
     map.into_values().flatten().collect()
+}
+
+/// The pinned-island list (canonical paths) the last scaffold recorded in
+/// [`ISLANDS_FILE`]. Empty when the project has never been scaffolded.
+pub fn recorded_islands(root: &Path) -> Vec<String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let Ok(text) = std::fs::read_to_string(root.join(ADAPTER_DIR).join(ISLANDS_FILE)) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text).unwrap_or_default()
 }
 
 /// After a client/ssr graph discovery: intersect the pinned islands with the
@@ -1387,6 +1453,120 @@ pub fn write_prerender_plan(project_root: &Path, out_dir: &Path) -> Result<usize
     Ok(disc.routes.len())
 }
 
+/// Which of the app's routes a build COMPILES.
+///
+/// Production always compiles every route: the output has to be able to serve any of
+/// them. Dev does not — a cold start compiles all 229 of cal.com's routes into three
+/// whole-app graphs before it answers anything, and the browser then asks for exactly
+/// one of them. [`Only`](RouteScope::Only) narrows the generated entries to a subset so
+/// a cold start pays for the route being loaded; the dev server widens the scope as
+/// routes are asked for and fills in the rest in the background.
+///
+/// The app-root conventions (root layout, `not-found`, `global-error`, middleware, the
+/// metadata image files) are NOT route-scoped: every document is built from them, so
+/// they are always compiled.
+/// HTTP endpoints (`route.ts` handlers + `pages/api/**`) are scoped separately from
+/// pages, because a page is USELESS without them: the document a browser renders
+/// immediately calls the app's own API (cal.com's login page reads a next-auth session and
+/// several tRPC queries), and an endpoint that is not compiled answers 404, which the page
+/// reports as a broken app rather than as "still compiling".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointScope {
+    /// Compile every endpoint. What a lazily-scoped dev build uses, so the first page it
+    /// serves is functional and not just visible.
+    All,
+    /// Compile only these endpoint URL paths.
+    Only(BTreeSet<String>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RouteScope {
+    /// Every discovered route, handler and pages-API endpoint.
+    #[default]
+    All,
+    /// Only these page routes (the discovery spelling, e.g. `/booking/[uid]`), with
+    /// endpoints scoped by `endpoints`.
+    Only {
+        pages: BTreeSet<String>,
+        endpoints: EndpointScope,
+    },
+}
+
+impl RouteScope {
+    /// A scope holding exactly `pages`, with every HTTP endpoint compiled.
+    pub fn pages<I: IntoIterator<Item = String>>(pages: I) -> Self {
+        RouteScope::Only {
+            pages: pages.into_iter().collect(),
+            endpoints: EndpointScope::All,
+        }
+    }
+
+    /// A scope holding exactly `pages` and exactly `endpoints`.
+    pub fn pages_and_endpoints<P, E>(pages: P, endpoints: E) -> Self
+    where
+        P: IntoIterator<Item = String>,
+        E: IntoIterator<Item = String>,
+    {
+        RouteScope::Only {
+            pages: pages.into_iter().collect(),
+            endpoints: EndpointScope::Only(endpoints.into_iter().collect()),
+        }
+    }
+
+    /// Every page this scope compiles, or `None` for [`RouteScope::All`].
+    pub fn compiled_pages(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            RouteScope::All => None,
+            RouteScope::Only { pages, .. } => Some(pages),
+        }
+    }
+
+    /// Whether this scope compiles `url_path`, which is what decides if a request for it
+    /// can be served now or has to wait for a wider build. The kind matters: pages and
+    /// endpoints are scoped separately.
+    pub fn includes(&self, url_path: &str, kind: PatternKind) -> bool {
+        match kind {
+            PatternKind::Page => self.includes_page(url_path),
+            PatternKind::Endpoint => self.includes_endpoint(url_path),
+        }
+    }
+
+    fn includes_page(&self, url_path: &str) -> bool {
+        match self {
+            RouteScope::All => true,
+            RouteScope::Only { pages, .. } => pages.contains(url_path),
+        }
+    }
+
+    fn includes_endpoint(&self, url_path: &str) -> bool {
+        match self {
+            RouteScope::All => true,
+            RouteScope::Only { endpoints: EndpointScope::All, .. } => true,
+            RouteScope::Only { endpoints: EndpointScope::Only(paths), .. } => {
+                paths.contains(url_path)
+            }
+        }
+    }
+
+    /// A short label for the dev log.
+    pub fn label(&self) -> String {
+        match self {
+            RouteScope::All => "all routes".to_string(),
+            RouteScope::Only { pages, endpoints } => {
+                let pages = match pages.len() {
+                    0 => "no pages".to_string(),
+                    1 => format!("page {}", pages.iter().next().expect("len 1")),
+                    n => format!("{n} pages"),
+                };
+                match endpoints {
+                    EndpointScope::All => format!("{pages} + all endpoints"),
+                    EndpointScope::Only(paths) => format!("{pages} + {} endpoint(s)", paths.len()),
+                }
+            }
+        }
+    }
+}
+
 /// The full app-router discovery result: the matchable routes plus the app-root
 /// convention files used for the default document (root layout, root metadata) and
 /// the real 404 body (`app/not-found`).
@@ -2401,6 +2581,212 @@ fn scan_project(root: &Path) -> Result<ProjectScan, String> {
     Ok(scan)
 }
 
+/// What kind of thing a [`RoutePattern`] addresses, because pages and endpoints are
+/// scoped separately (see [`EndpointScope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternKind {
+    /// An app-router page.
+    Page,
+    /// A `route.ts` handler or a `pages/api/**` endpoint.
+    Endpoint,
+}
+
+/// One matchable URL pattern of the app, with the scope key needed to compile it.
+///
+/// This is the table the dev server matches an incoming request against BEFORE anything
+/// is compiled, so it can decide which route a request needs and widen its
+/// [`RouteScope`] to include it. Discovery is a directory walk, so having the full table
+/// costs nothing; compiling what it names is the expensive part, and that stays lazy.
+#[derive(Debug, Clone)]
+pub struct RoutePattern {
+    /// The discovery spelling (`/booking/[uid]`), which is the scope key.
+    pub url_path: String,
+    pub kind: PatternKind,
+    segments: Vec<Seg>,
+}
+
+impl RoutePattern {
+    /// A pattern from its URL spelling (`/blog/[slug]`, `/api/trpc/[...trpc]`), for tests
+    /// that need a pattern table without a project on disk. The segment grammar is the
+    /// pages-router one, which is exactly the spelling `url_path` carries: route groups and
+    /// parallel slots contribute no URL segment, so they never appear here.
+    #[cfg(test)]
+    pub fn parse(url_path: &str, kind: PatternKind) -> RoutePattern {
+        RoutePattern {
+            url_path: url_path.to_string(),
+            kind,
+            segments: url_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(parse_pages_segment)
+                .collect(),
+        }
+    }
+
+    /// Whether `request_path` (a URL path, no query) matches this pattern. The same rule
+    /// the generated entry's `matchSegments` applies, so Rust's pre-match and the
+    /// orchestrator's real match agree on which route a request belongs to.
+    pub fn matches(&self, request_path: &str) -> bool {
+        let parts: Vec<&str> = request_path.split('/').filter(|p| !p.is_empty()).collect();
+        let mut i = 0usize;
+        for segment in &self.segments {
+            match segment {
+                Seg::Static(value) => {
+                    if parts.get(i) != Some(&value.as_str()) {
+                        return false;
+                    }
+                    i += 1;
+                }
+                Seg::Dynamic(_) => {
+                    if i >= parts.len() {
+                        return false;
+                    }
+                    i += 1;
+                }
+                Seg::CatchAll(_) => {
+                    if i >= parts.len() {
+                        return false;
+                    }
+                    i = parts.len();
+                }
+                Seg::OptionalCatchAll(_) => {
+                    i = parts.len();
+                }
+            }
+        }
+        i == parts.len()
+    }
+}
+
+/// Every matchable pattern of an app-router project, endpoints first and then pages —
+/// the orchestrator's own precedence, so the pattern this returns for a request path is
+/// the one that will actually serve it. Each table stays in discovery order, which is
+/// most-specific-first.
+///
+/// Discovery only: no scaffolding is written, no config is evaluated, nothing is
+/// compiled. `Ok(None)` for a project that is not app-router.
+pub fn discover_route_patterns(root: &Path) -> Result<Option<Vec<RoutePattern>>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot open project root {}: {error}", root.display()))?;
+    if detect_app_router(&root).is_none() {
+        return Ok(None);
+    }
+    let Some(app_dir) = app_dir(&root) else {
+        return Ok(None);
+    };
+    let layout = first_existing(&app_dir, "layout")
+        .map(|l| l.canonicalize().unwrap_or(l));
+    let discovered = discover_routes(&app_dir, layout.as_deref())?;
+    let mut patterns = Vec::new();
+    for handler in &discovered.handlers {
+        patterns.push(RoutePattern {
+            url_path: handler.url_path.clone(),
+            kind: PatternKind::Endpoint,
+            segments: handler.segments.clone(),
+        });
+    }
+    for endpoint in &discovered.pages_api {
+        patterns.push(RoutePattern {
+            url_path: endpoint.url_path.clone(),
+            kind: PatternKind::Endpoint,
+            segments: endpoint.segments.clone(),
+        });
+    }
+    for route in &discovered.routes {
+        patterns.push(RoutePattern {
+            url_path: route.url_path.clone(),
+            kind: PatternKind::Page,
+            segments: route.segments.clone(),
+        });
+    }
+    Ok(Some(patterns))
+}
+
+/// A route/handler pattern the current [`RouteScope`] does NOT compile: enough to
+/// MATCH a request (so a request for it is a "not built yet", not a 404) and nothing
+/// else. Carries no module reference, so publishing it compiles nothing.
+#[derive(Debug, Clone)]
+struct UnbuiltPattern {
+    url_path: String,
+    segments: Vec<Seg>,
+}
+
+/// Everything a scope leaves out, by kind. Empty for [`RouteScope::All`].
+#[derive(Debug, Clone, Default)]
+struct UnbuiltPatterns {
+    routes: Vec<UnbuiltPattern>,
+    handlers: Vec<UnbuiltPattern>,
+    pages_api: Vec<UnbuiltPattern>,
+}
+
+/// The patterns `scope` excludes, computed BEFORE [`apply_route_scope`] drops them.
+fn unbuilt_patterns(disc: &Discovered, scope: &RouteScope) -> UnbuiltPatterns {
+    if *scope == RouteScope::All {
+        return UnbuiltPatterns::default();
+    }
+    let excluded = |included: bool, url_path: &String, segments: &Vec<Seg>| {
+        (!included).then(|| UnbuiltPattern {
+            url_path: url_path.clone(),
+            segments: segments.clone(),
+        })
+    };
+    UnbuiltPatterns {
+        routes: disc
+            .routes
+            .iter()
+            .filter_map(|route| {
+                excluded(scope.includes_page(&route.url_path), &route.url_path, &route.segments)
+            })
+            .collect(),
+        handlers: disc
+            .handlers
+            .iter()
+            .filter_map(|handler| {
+                excluded(
+                    scope.includes_endpoint(&handler.url_path),
+                    &handler.url_path,
+                    &handler.segments,
+                )
+            })
+            .collect(),
+        pages_api: disc
+            .pages_api
+            .iter()
+            .filter_map(|route| {
+                excluded(
+                    scope.includes_endpoint(&route.url_path),
+                    &route.url_path,
+                    &route.segments,
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Drop every route/handler/endpoint `scope` excludes, so the generated entries import
+/// only the modules the in-scope routes need.
+///
+/// The app-root conventions (root layout, `not-found`, `global-error`, metadata images)
+/// are deliberately untouched: every document is built from them, so scoping them would
+/// only mean rebuilding on the first request. Intercepting routes go with their target —
+/// an intercept whose target is out of scope cannot be reached.
+fn apply_route_scope(disc: &mut Discovered, scope: &RouteScope) {
+    if *scope == RouteScope::All {
+        return;
+    }
+    disc.routes.retain(|route| scope.includes_page(&route.url_path));
+    disc.handlers
+        .retain(|handler| scope.includes_endpoint(&handler.url_path));
+    disc.pages_api
+        .retain(|route| scope.includes_endpoint(&route.url_path));
+    // An intercept is addressed by the URL of the route it intercepts; keep it exactly
+    // when that route is compiled.
+    let in_scope_paths: BTreeSet<&str> = disc.routes.iter().map(|r| r.url_path.as_str()).collect();
+    disc.intercepts
+        .retain(|intercept| in_scope_paths.contains(segments_display(&intercept.target_segments).as_str()));
+}
+
 /// Every module the app's ROUTES are built from: each route's page and its whole
 /// nested layout/loading/error/template chain (parallel `@slot` subtrees included),
 /// the root layout, `not-found`, `global-error`, every `route.*` handler, and each
@@ -2526,7 +2912,8 @@ fn js_str(value: &str) -> String {
 /// PRODUCTION entry point (`build-app`): byte-identical to before the dev server
 /// existed.
 pub fn configure(root: &Path, environment: &str) -> Result<Option<AppConfig>, String> {
-    configure_inner(root, environment, false)
+    // Production compiles every route: the output must be able to serve any of them.
+    configure_inner(root, environment, false, &RouteScope::All)
 }
 
 /// The DEV variant of [`configure`] (the `diffpack dev` Next topology, Slice K):
@@ -2539,11 +2926,24 @@ pub fn configure(root: &Path, environment: &str) -> Result<Option<AppConfig>, St
 /// purely from `NODE_ENV` (its `exports` has no `development` condition), so the
 /// condition swap is inert for React itself and only affects packages that publish a
 /// `development`/`production` exports map.
-pub fn configure_dev(root: &Path, environment: &str) -> Result<Option<AppConfig>, String> {
-    configure_inner(root, environment, true)
+///
+/// `scope` decides which routes the generated entries import (see [`RouteScope`]): dev
+/// starts narrow and widens as routes are asked for, so a cold start compiles the route
+/// being loaded rather than the whole app.
+pub fn configure_dev(
+    root: &Path,
+    environment: &str,
+    scope: &RouteScope,
+) -> Result<Option<AppConfig>, String> {
+    configure_inner(root, environment, true, scope)
 }
 
-fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<AppConfig>, String> {
+fn configure_inner(
+    root: &Path,
+    environment: &str,
+    dev: bool,
+    scope: &RouteScope,
+) -> Result<Option<AppConfig>, String> {
     let root = root
         .canonicalize()
         .map_err(|error| format!("cannot open project root {}: {error}", root.display()))?;
@@ -2715,6 +3115,14 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     discovered
         .handlers
         .extend(synthesize_metadata_file_handlers(&app_dir, &shims_dir)?);
+    // The FULL route table is always discovered (a directory walk, no compilation), so
+    // the served route set and the compiled one stay separate facts: the dev server can
+    // tell "a route that exists but is not compiled yet" from "no such route" and keep
+    // 404 behaviour identical while compiling lazily. Only what the generated entries
+    // IMPORT is scoped — the patterns the scope leaves out are still published (as pure
+    // data, no imports) so the orchestrator can match them and ask for a build.
+    let unbuilt = unbuilt_patterns(&discovered, scope);
+    apply_route_scope(&mut discovered, scope);
 
     // Island discovery over-approximates on purpose (see `scan_project`), and a pin is
     // a hard build dependency — so a `"use client"` file that is BOTH unbuildable and
@@ -2800,6 +3208,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         &adapter_dir.join("rsc-entry.tsx"),
         &rsc_entry_module(
             &discovered,
+            &unbuilt,
             &fonts,
             &error_boundary_canon,
             &segment_boundary_canon,
@@ -2820,7 +3229,7 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
     // diffpack's own shims are never candidates for being dropped as unreachable.
     let link_canon = link_shim.canonicalize().unwrap_or_else(|_| link_shim.clone());
     if !islands.contains(&link_canon) {
-        islands.push(link_canon);
+        islands.push(link_canon.clone());
     }
     // `next/script` is the same shape: a `"use client"` component the react-server graph
     // sees only as a client reference. Next's own `next/script` is CommonJS inside
@@ -2832,8 +3241,44 @@ fn configure_inner(root: &Path, environment: &str, dev: bool) -> Result<Option<A
         .canonicalize()
         .unwrap_or_else(|_| script_shim.clone());
     if !islands.contains(&script_canon) {
-        islands.push(script_canon);
+        islands.push(script_canon.clone());
     }
+    // THE PIN SET. A pin exists for exactly one reason: to put an island into the client
+    // and SSR graphs so the client reference the flight carries for it resolves. The
+    // react-server graph knows precisely which those are — every `"use client"` module it
+    // reaches IS a reference boundary — so when that set has been recorded
+    // ([`REFERENCED_ISLANDS_FILE`]) it is authoritative, and the project walk's
+    // over-approximation (231 islands on cal.com against 101 the app references and 11 a
+    // single route does) stops being compiled into two graphs for nothing.
+    //
+    // diffpack's OWN generated islands are unioned in unconditionally rather than trusted
+    // to appear: they are pinned by construction (the walk skips `.diffpack-next/`), they
+    // cost five modules, and one missing from the recorded set would be a render-time
+    // "Could not find the module in the React Client Manifest" rather than a build error.
+    //
+    // No recorded set (a production build, or the very first react-server build of a cold
+    // tree) falls back to pinning the walk, which is the pre-existing behaviour.
+    let adapter_pins = [
+        control_boundary_canon.clone(),
+        error_boundary_canon.clone(),
+        segment_boundary_canon.clone(),
+        link_canon.clone(),
+        script_canon.clone(),
+    ];
+    // DEV ONLY. A production build must pin from its own walk: it is a single pass that
+    // emits the client graph FIRST (nothing has recorded a referenced set yet), and reading
+    // a file some earlier `diffpack dev` left behind would make the build's output depend on
+    // whether a dev server had ever run in this tree. That is not hypothetical — it silently
+    // shrank a production pin set to a dev route scope's, and the next/image gate caught it
+    // as a hero image with no srcset candidates.
+    let islands: Vec<PathBuf> = match referenced_islands(&adapter_dir).filter(|_| dev) {
+        Some(referenced) => {
+            let mut pinned: BTreeSet<PathBuf> = referenced.iter().map(PathBuf::from).collect();
+            pinned.extend(adapter_pins.iter().cloned());
+            pinned.into_iter().collect()
+        }
+        None => islands,
+    };
     // Record the pinned-island list (canonical) and split the pins into lazy
     // thunks vs the recorded async set's eager imports — see `island_pins`.
     let canonical_islands: Vec<String> = islands
@@ -3963,6 +4408,7 @@ fn hooks_context_module() -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn rsc_entry_module(
     disc: &Discovered,
+    unbuilt: &UnbuiltPatterns,
     fonts: &crate::next_font::FontOutput,
     error_boundary: &Path,
     segment_boundary: &Path,
@@ -4140,6 +4586,26 @@ fn rsc_entry_module(
         ));
     }
 
+    // The patterns this build did NOT compile (dev [`RouteScope`]). Pure data — no module
+    // is referenced, so publishing them costs nothing — and they are what lets the
+    // orchestrator tell a request for an uncompiled route from a request for a route that
+    // does not exist.
+    let unbuilt_entries = |patterns: &[UnbuiltPattern]| -> String {
+        patterns
+            .iter()
+            .map(|pattern| {
+                format!(
+                    "  {{ path: {}, segments: {} }},\n",
+                    js_str(&pattern.url_path),
+                    segments_js(&pattern.segments),
+                )
+            })
+            .collect()
+    };
+    let unbuilt_route_entries = unbuilt_entries(&unbuilt.routes);
+    let unbuilt_handler_entries = unbuilt_entries(&unbuilt.handlers);
+    let unbuilt_pages_api_entries = unbuilt_entries(&unbuilt.pages_api);
+
     // Middleware: namespace-import it (named `middleware` or default export) so
     // `runMiddleware` can invoke it; `null` when the app has none.
     let (middleware_import, middleware_const) = match middleware {
@@ -4289,6 +4755,18 @@ const ROUTE_HANDLERS = [
 // both could answer (Next's precedence).
 const PAGES_API = [
 {pages_api_entries}];
+// Routes/handlers/endpoints this build did NOT compile, because the dev server's route
+// scope left them out (see RouteScope). PATTERNS ONLY, referencing no module, so the
+// tables exist without pulling a single uncompiled route into this graph. The
+// orchestrator matches them AFTER the compiled tables above and asks the dev server to
+// widen its scope, which is what separates "not built yet" from a real 404. Always empty
+// in a production build.
+const UNBUILT_ROUTES = [
+{unbuilt_route_entries}];
+const UNBUILT_HANDLERS = [
+{unbuilt_handler_entries}];
+const UNBUILT_PAGES_API = [
+{unbuilt_pages_api_entries}];
 // Ssg routes (a dynamic segment with generateStaticParams) → their module namespace,
 // so the `staticparams` op can enumerate concrete param sets at build time.
 const STATIC_PARAM_ROUTES = {{
@@ -5135,6 +5613,13 @@ export function routeManifest() {{
     handlers: ROUTE_HANDLERS.map((entry) => ({{ segments: entry.segments, methods: Object.keys(entry.methods) }})),
     pagesApi: PAGES_API.map((entry) => ({{ segments: entry.segments }})),
     hasMiddleware: MIDDLEWARE != null,
+    // What this build left uncompiled, so the orchestrator can match a request against a
+    // route that exists but is not built yet and ask for it instead of 404ing.
+    unbuilt: {{
+      routes: UNBUILT_ROUTES,
+      handlers: UNBUILT_HANDLERS,
+      pagesApi: UNBUILT_PAGES_API,
+    }},
   }};
 }}
 
@@ -8050,6 +8535,156 @@ fn font_mime(href: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    // --- lazy route compilation: the pattern table + the scope ---------------------
+
+    #[test]
+    fn a_pattern_matches_the_same_paths_the_generated_entry_matcher_does() {
+        let page = |spelling: &str| RoutePattern::parse(spelling, PatternKind::Page);
+        assert!(page("/auth/login").matches("/auth/login"));
+        assert!(!page("/auth/login").matches("/auth/login/extra"));
+        assert!(!page("/auth/login").matches("/auth"));
+        // A dynamic segment takes exactly one part.
+        assert!(page("/booking/[uid]").matches("/booking/abc"));
+        assert!(!page("/booking/[uid]").matches("/booking"));
+        assert!(!page("/booking/[uid]").matches("/booking/a/b"));
+        // A catch-all takes one or more; the optional form also takes none.
+        assert!(page("/api/trpc/[...trpc]").matches("/api/trpc/viewer.me"));
+        assert!(page("/api/trpc/[...trpc]").matches("/api/trpc/a/b/c"));
+        assert!(!page("/api/trpc/[...trpc]").matches("/api/trpc"));
+        assert!(page("/docs/[[...slug]]").matches("/docs"));
+        assert!(page("/docs/[[...slug]]").matches("/docs/a/b"));
+        // The root page matches only the root.
+        assert!(page("/").matches("/"));
+        assert!(!page("/").matches("/anything"));
+    }
+
+    #[test]
+    fn a_scope_answers_pages_and_endpoints_separately() {
+        let scope = RouteScope::pages(["/auth/login".to_string()]);
+        assert!(scope.includes("/auth/login", PatternKind::Page));
+        assert!(!scope.includes("/pro", PatternKind::Page));
+        // `RouteScope::pages` compiles every endpoint: a page whose API 404s is a broken
+        // app, not a page that is still compiling.
+        assert!(scope.includes("/api/trpc/[...trpc]", PatternKind::Endpoint));
+        assert!(scope.includes("/api/anything", PatternKind::Endpoint));
+
+        let narrow = RouteScope::pages_and_endpoints(
+            ["/auth/login".to_string()],
+            ["/api/auth/[...nextauth]".to_string()],
+        );
+        assert!(narrow.includes("/api/auth/[...nextauth]", PatternKind::Endpoint));
+        assert!(!narrow.includes("/api/trpc/[...trpc]", PatternKind::Endpoint));
+
+        // `All` includes everything, of either kind.
+        assert!(RouteScope::All.includes("/whatever", PatternKind::Page));
+        assert!(RouteScope::All.includes("/whatever", PatternKind::Endpoint));
+    }
+
+    /// A `Discovered` with the given page/handler/endpoint spellings and all four app-root
+    /// conventions present. Built fresh per assertion because `Discovered` is a build
+    /// internal with no `Clone`.
+    fn discovered_fixture(pages: &[&str], handlers: &[&str], endpoints: &[&str]) -> Discovered {
+        Discovered {
+            routes: pages
+                .iter()
+                .map(|url_path| Route {
+                    url_path: (*url_path).to_string(),
+                    segments: RoutePattern::parse(url_path, PatternKind::Page).segments,
+                    page: PathBuf::from(format!("/app{url_path}/page.tsx")),
+                    levels: Vec::new(),
+                    metadata: RouteMetadata::default(),
+                    kind: RouteKind::Dynamic,
+                    has_generate_static_params: false,
+                    dynamic_params: true,
+                    dynamic_reason: String::new(),
+                    revalidate_seconds: None,
+                })
+                .collect(),
+            root_layout: Some(PathBuf::from("/app/layout.tsx")),
+            root_metadata: RouteMetadata::default(),
+            app_not_found: Some(PathBuf::from("/app/not-found.tsx")),
+            global_error: Some(PathBuf::from("/app/global-error.tsx")),
+            handlers: handlers
+                .iter()
+                .map(|url_path| RouteHandler {
+                    url_path: (*url_path).to_string(),
+                    segments: RoutePattern::parse(url_path, PatternKind::Endpoint).segments,
+                    file: PathBuf::from(format!("/app{url_path}/route.ts")),
+                    methods: vec!["GET".to_string()],
+                    edge: false,
+                })
+                .collect(),
+            intercepts: Vec::new(),
+            meta_images: Vec::new(),
+            pages_api: endpoints
+                .iter()
+                .map(|url_path| PagesApiRoute {
+                    url_path: (*url_path).to_string(),
+                    segments: RoutePattern::parse(url_path, PatternKind::Endpoint).segments,
+                    file: PathBuf::from(format!("/pages{url_path}.ts")),
+                })
+                .collect(),
+        }
+    }
+
+    /// The scope decides what the generated entries IMPORT; the app-root conventions are
+    /// not route-scoped, because every document is built from them.
+    #[test]
+    fn applying_a_scope_drops_other_routes_but_never_the_app_root_conventions() {
+        let pages = ["/auth/login", "/pro", "/booking/[uid]"];
+        let handlers = ["/api/og"];
+        let endpoints = ["/api/trpc/[trpc]"];
+
+        // Pages narrowed, endpoints kept (the default lazy shape).
+        let mut scoped = discovered_fixture(&pages, &handlers, &endpoints);
+        apply_route_scope(&mut scoped, &RouteScope::pages(["/auth/login".to_string()]));
+        assert_eq!(
+            scoped.routes.iter().map(|r| r.url_path.as_str()).collect::<Vec<_>>(),
+            vec!["/auth/login"],
+        );
+        assert_eq!(scoped.handlers.len(), 1, "endpoints are not page-scoped");
+        assert_eq!(scoped.pages_api.len(), 1, "pages API is not page-scoped");
+        assert!(scoped.root_layout.is_some(), "the root layout is never scoped out");
+        assert!(scoped.app_not_found.is_some(), "not-found is never scoped out");
+        assert!(scoped.global_error.is_some(), "global-error is never scoped out");
+
+        // Endpoints narrowed too.
+        let mut narrow = discovered_fixture(&pages, &handlers, &endpoints);
+        apply_route_scope(
+            &mut narrow,
+            &RouteScope::pages_and_endpoints(["/pro".to_string()], Vec::<String>::new()),
+        );
+        assert!(narrow.handlers.is_empty());
+        assert!(narrow.pages_api.is_empty());
+        assert!(narrow.root_layout.is_some());
+
+        // `All` changes nothing — the production path.
+        let mut all = discovered_fixture(&pages, &handlers, &endpoints);
+        apply_route_scope(&mut all, &RouteScope::All);
+        assert_eq!(all.routes.len(), 3);
+        assert_eq!(all.handlers.len(), 1);
+        assert_eq!(all.pages_api.len(), 1);
+    }
+
+    #[test]
+    fn the_unbuilt_table_names_exactly_what_the_scope_left_out() {
+        let disc = discovered_fixture(&["/auth/login", "/pro"], &["/api/og"], &["/api/trpc/[trpc]"]);
+        let unbuilt = unbuilt_patterns(&disc, &RouteScope::pages(["/auth/login".to_string()]));
+        assert_eq!(
+            unbuilt.routes.iter().map(|p| p.url_path.as_str()).collect::<Vec<_>>(),
+            vec!["/pro"],
+            "the compiled route is not reported as unbuilt",
+        );
+        assert!(
+            unbuilt.handlers.is_empty() && unbuilt.pages_api.is_empty(),
+            "endpoints this scope compiles are not reported as unbuilt",
+        );
+        // A production build compiles everything, so nothing is ever reported unbuilt —
+        // which is what keeps the generated entry identical to before this existed.
+        let none = unbuilt_patterns(&disc, &RouteScope::All);
+        assert!(none.routes.is_empty() && none.handlers.is_empty() && none.pages_api.is_empty());
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "diffpack-next-adapter-{}-{}",
@@ -8525,7 +9160,7 @@ console.log(JSON.stringify({{
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("slotBase:"), "levels carry slotBase: {rsc_src}");
         assert!(rsc_src.contains(r#"name: "team""#) && rsc_src.contains(r#"name: "analytics""#), "slot tables emitted");
         assert!(rsc_src.contains("function matchSlots"), "the slot matcher is generated");
@@ -8543,7 +9178,7 @@ console.log(JSON.stringify({{
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         // Each route carries a metadata namespace chain resolved at render time.
         assert!(rsc_src.contains("metaChain: ["), "routes carry a metadata chain: {rsc_src}");
         assert!(rsc_src.contains("async function resolveMetadata"), "the metadata resolver is generated");
@@ -8667,7 +9302,7 @@ console.log(JSON.stringify({{
         let seg_boundary = root.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = root.join(".diffpack-next/control-boundary.tsx");
         let reqctx = root.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains(r#"rel: "icon", href: "/icon.png""#), "icon link emitted: {rsc_src}");
         assert!(rsc_src.contains(r#"rel: "apple-touch-icon", href: "/apple-icon.png""#), "apple-touch-icon emitted");
         assert!(rsc_src.contains(r#"property: "og:image", content: "/opengraph-image.jpg""#), "og:image emitted");
@@ -8798,7 +9433,7 @@ console.log(JSON.stringify({{
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let rsc_src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let rsc_src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc_src.contains("const INTERCEPTS = ["), "INTERCEPTS table emitted: {rsc_src}");
         assert!(rsc_src.contains("function matchIntercept"), "intercept matcher generated");
         assert!(rsc_src.contains("opts.softNav"), "intercept only on soft-nav");
@@ -9041,6 +9676,7 @@ console.log(JSON.stringify({{
         let disc = discover_routes(&app, layout.as_deref()).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &fixture.join(".diffpack-next/error-boundary.tsx"),
             &fixture.join(".diffpack-next/segment-boundary.tsx"),
@@ -9086,6 +9722,7 @@ console.log(JSON.stringify({{
         let disc = discover_routes(&app, layout.as_deref()).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &fixture.join(".diffpack-next/error-boundary.tsx"),
             &fixture.join(".diffpack-next/segment-boundary.tsx"),
@@ -9813,7 +10450,7 @@ console.log(JSON.stringify({{
 
         for environment in ["client", "react-server", "ssr"] {
             let prod = configure(&root, environment).unwrap().unwrap();
-            let dev = configure_dev(&root, environment).unwrap().unwrap();
+            let dev = configure_dev(&root, environment, &RouteScope::All).unwrap().unwrap();
             assert!(!prod.build.hmr, "prod {environment} keeps HMR off");
             assert!(dev.build.hmr, "dev {environment} turns HMR on");
             assert!(
@@ -9829,6 +10466,63 @@ console.log(JSON.stringify({{
             assert_eq!(prod.build.target, dev.build.target);
             assert_eq!(prod.entry, dev.entry);
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression: a production build must pin from its OWN project walk and ignore any
+    /// [`REFERENCED_ISLANDS_FILE`] a previous `diffpack dev` left in the tree. Reading it
+    /// made the build's output depend on whether a dev server had ever run here — it
+    /// silently shrank a production pin set to a dev route scope's, which surfaced as a
+    /// `next/image` hero rendered with no srcset candidates.
+    #[test]
+    fn a_production_build_ignores_the_referenced_island_set_a_dev_run_recorded() {
+        let root = scratch("app-router-referenced-islands");
+        std::fs::write(root.join("next.config.ts"), "export default {}\n").unwrap();
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("layout.tsx"), "export default function L({children}){return children}\n").unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "import W from \"./widget\";\nexport default function P(){return <W/>}\n",
+        )
+        .unwrap();
+        // A real island the project walk finds.
+        std::fs::write(
+            app.join("widget.tsx"),
+            "\"use client\";\nexport default function W(){return null}\n",
+        )
+        .unwrap();
+
+        // Scaffold once so `.diffpack-next/` exists, then plant a recorded set that names
+        // NOTHING of the app — the shape a dev run with a narrow route scope leaves behind.
+        configure(&root, "client").unwrap().unwrap();
+        let adapter_dir = root.canonicalize().unwrap().join(ADAPTER_DIR);
+        std::fs::write(
+            adapter_dir.join(REFERENCED_ISLANDS_FILE),
+            serde_json::to_string(&Vec::<String>::new()).unwrap(),
+        )
+        .unwrap();
+
+        configure(&root, "client").unwrap().unwrap();
+        let production_pins = recorded_islands(&root);
+        assert!(
+            production_pins.iter().any(|pin| pin.ends_with("widget.tsx")),
+            "the production build pinned its own walk, not the recorded set: {production_pins:?}",
+        );
+
+        // Dev, by contrast, is exactly the consumer of that recorded set: an empty one pins
+        // only diffpack's own generated islands (the boundaries + the next/link and
+        // next/script shims), never the app's.
+        configure_dev(&root, "client", &RouteScope::All).unwrap().unwrap();
+        let dev_pins = recorded_islands(&root);
+        assert!(
+            !dev_pins.iter().any(|pin| pin.ends_with("widget.tsx")),
+            "dev honours the recorded referenced set: {dev_pins:?}",
+        );
+        assert!(
+            dev_pins.iter().any(|pin| pin.ends_with("error-boundary.tsx")),
+            "diffpack's own generated islands are pinned regardless: {dev_pins:?}",
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -10408,7 +11102,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
         // With an asset base the stylesheet href carries the prefix — and it is still
         // only linked when the react-server build emitted a stylesheet beside the entry.
-        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
+        let src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
         assert!(
             src.contains(
                 r#"const RSC_CSS_HREF = existsSync(new URL("./server.css", import.meta.url)) ? "/docs/rsc.css" : null;"#
@@ -10423,7 +11117,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
             "the head <link> is conditional on the emitted stylesheet: {src}",
         );
         // Empty asset base keeps the bare `/rsc.css`.
-        let plain = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let plain = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(plain.contains(r#"? "/rsc.css" : null;"#), "no prefix -> bare /rsc.css: {plain}");
     }
 
@@ -10446,7 +11140,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(
             src.contains(&format!(
                 r#"const CLIENT_CSS_HREF = existsSync(new URL("{CLIENT_EMITTED_CSS_PATH}", import.meta.url)) ? "{CLIENT_CSS_URL}" : null;"#
@@ -10471,7 +11165,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let client_at = src.find("items.push(createElement(\"link\", { rel: \"stylesheet\", href: CLIENT_CSS_HREF").expect("client link push");
         assert!(client_at > rsc_at, "the client stylesheet must be linked after the app stylesheet");
         // An asset base prefixes it exactly like every other static URL.
-        let prefixed = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
+        let prefixed = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "/docs");
         assert!(
             prefixed.contains(r#"? "/docs/client.css" : null;"#),
             "the client stylesheet href carries the asset base: {prefixed}",
@@ -10495,7 +11189,7 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         let seg_boundary = fixture.join(".diffpack-next/segment-boundary.tsx");
         let ctl_boundary = fixture.join(".diffpack-next/control-boundary.tsx");
         let reqctx = fixture.join(".diffpack-next/request-context.ts");
-        let src = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let src = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         for line in src.lines() {
             if !line.contains(RSC_CSS_URL) {
                 continue;
@@ -11423,7 +12117,7 @@ export default function Page(){ return null; }
         std::fs::write(&boundary, error_boundary_module(&ctl_boundary)).unwrap();
         let reqctx = app.join("request-context.ts");
         std::fs::write(&reqctx, request_context_module()).unwrap();
-        let rsc = rsc_entry_module(&disc, &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
+        let rsc = rsc_entry_module(&disc, &UnbuiltPatterns::default(), &crate::next_font::FontOutput::default(), &boundary, &seg_boundary, &ctl_boundary, &reqctx, None, "");
         assert!(rsc.contains("template:"), "levels carry a template id");
         assert!(rsc.contains("const GLOBAL_ERROR ="), "GLOBAL_ERROR const emitted");
         assert!(rsc.contains("key: pathname"), "template is keyed by pathname for remount");
@@ -11747,6 +12441,7 @@ console.log(out.join("|"));
         let reqctx = dir.join("request-context.ts");
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &boundary,
             &seg_boundary,
@@ -11830,6 +12525,7 @@ console.log(out.join("|"));
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12130,6 +12826,7 @@ console.log(out.join("|"));
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12203,6 +12900,7 @@ console.log(out.join("|"));
         assert_eq!(disc.handlers.len(), 1, "the route handler is discovered");
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12432,6 +13130,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         assert!(disc.app_not_found.is_some(), "the fixture has an app/not-found.tsx");
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12541,6 +13240,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         );
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12638,6 +13338,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12697,6 +13398,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),
@@ -12788,6 +13490,7 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         let disc = discover_routes(&app, Some(&app.join("layout.tsx"))).unwrap();
         let source = rsc_entry_module(
             &disc,
+            &UnbuiltPatterns::default(),
             &crate::next_font::FontOutput::default(),
             &dir.join("error-boundary.tsx"),
             &dir.join("segment-boundary.tsx"),

@@ -81,6 +81,246 @@ pub struct DevOptions {
     pub source_map: bool,
 }
 
+/// Lazy route compilation for the Next dev server: what is compiled right now, what has
+/// been asked for, and where the orchestrator serving it is listening.
+///
+/// A cold start used to compile every route of the app into three whole-app graphs before
+/// answering anything — 7.7 s on cal.com, for a browser that then asks for one route.
+/// This is the state that lets it compile on demand instead: the proxy thread matches an
+/// incoming request against the app's full pattern table (a directory walk, free) and
+/// BLOCKS it until the graphs contain that route, while the build thread widens the scope
+/// and rebuilds. A request is never answered 404 because its route has not been compiled
+/// yet — it waits, which is the one behaviour that makes laziness invisible.
+struct LazyRoutes {
+    /// Every matchable pattern of the app, endpoints before pages (the orchestrator's
+    /// precedence). Fixed for the process; a route file added later is a structural
+    /// change, which rebuilds everything and re-derives the scope.
+    patterns: Vec<crate::next_adapter::RoutePattern>,
+    state: Mutex<LazyState>,
+    /// Signalled when a build lands, when a want is registered, or on failure.
+    changed: std::sync::Condvar,
+}
+
+/// The mutable half of [`LazyRoutes`].
+#[derive(Default)]
+struct LazyState {
+    /// The scope the live graphs were built from, or `None` before the first build has
+    /// landed (there is no orchestrator yet, so even a request matching no route waits).
+    /// This is the ONE source of truth for "can this request be served now": asking the
+    /// scope itself, rather than tracking a parallel set of compiled paths, is what keeps
+    /// the answer right for endpoints, which a scope can compile wholesale.
+    scope: Option<crate::next_adapter::RouteScope>,
+    /// Paths asked for and not yet compiled, drained by the build thread.
+    wanted: BTreeSet<String>,
+    /// Requests currently being served, and when the last one finished. The fill waits for
+    /// both to say "nothing is happening": a 6-second whole-app compile running alongside
+    /// the very first render steals the cores that render needs, and measurably did —
+    /// cal.com's first document went from 1.4s to 2.5s when the two overlapped.
+    in_flight: usize,
+    last_activity: Option<Instant>,
+    /// Set when a request arrived that no pattern matched: there is nothing specific to
+    /// compile, so the only correct answer is "compile everything and let the app 404 it
+    /// properly".
+    wanted_everything: bool,
+    /// The orchestrator's loopback port, 0 until the first build boots it.
+    node_port: u16,
+    /// Set while the emitted output is being swapped under the orchestrator: for those few
+    /// milliseconds there is no server to forward to, so requests wait rather than see a
+    /// half-swapped tree.
+    swapping: bool,
+    /// The last build failure, so a waiter fails loudly instead of hanging forever.
+    failure: Option<String>,
+}
+
+/// How long a request waits for its route to compile before giving up. Generous: it
+/// covers a cold cal.com build of the whole app, and the alternative to waiting is a
+/// wrong answer.
+const LAZY_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl LazyRoutes {
+    fn new(patterns: Vec<crate::next_adapter::RoutePattern>) -> Self {
+        LazyRoutes {
+            patterns,
+            state: Mutex::new(LazyState::default()),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// The pattern that will serve `request_path`, if any.
+    fn match_path(&self, request_path: &str) -> Option<&crate::next_adapter::RoutePattern> {
+        self.patterns
+            .iter()
+            .find(|pattern| pattern.matches(request_path))
+    }
+
+    /// Block until `request_path` can be served, and return the orchestrator's port.
+    ///
+    /// Returns `Ok(None)` when this dev server is not compiling lazily at all (every
+    /// route is already built), so the caller uses its own port and pays nothing.
+    fn ensure(&self, request_path: &str) -> Result<Option<u16>, String> {
+        let matched = self
+            .match_path(request_path)
+            .map(|pattern| (pattern.url_path.clone(), pattern.kind));
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        loop {
+            if let Some(failure) = &state.failure {
+                return Err(failure.clone());
+            }
+            let ready = match (&state.scope, &matched) {
+                (Some(scope), Some((url_path, kind))) => scope.includes(url_path, *kind),
+                // Nothing matched: the app itself owns the answer (a 404, a rewrite, a
+                // static file), so a running orchestrator is all that is needed.
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if ready && !state.swapping {
+                // Count this as activity BEFORE the caller takes its in-flight guard. The
+                // fill starts as soon as the server looks idle, and the instant after a
+                // build lands is exactly when a released request is about to render but has
+                // not registered itself yet — without this the fill starts underneath it.
+                state.last_activity = Some(Instant::now());
+                return Ok(Some(state.node_port));
+            }
+            // Register the want and wake the build thread. Re-registered on every loop
+            // turn, which is harmless (a set) and covers a build that landed without
+            // covering this route.
+            match &matched {
+                Some((url_path, _)) => {
+                    state.wanted.insert(url_path.clone());
+                }
+                None => state.wanted_everything = true,
+            }
+            self.changed.notify_all();
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(state, LAZY_WAIT_TIMEOUT)
+                .expect("lazy routes condvar");
+            state = next;
+            if timeout.timed_out() {
+                return Err(format!(
+                    "timed out after {}s waiting for {request_path} to compile",
+                    LAZY_WAIT_TIMEOUT.as_secs(),
+                ));
+            }
+        }
+    }
+
+    /// Wait until there is something to build, and return the paths asked for. `None`
+    /// means "build everything" (an unmatched request, or an explicit fill).
+    fn take_wanted(&self) -> Option<BTreeSet<String>> {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        while state.wanted.is_empty() && !state.wanted_everything {
+            state = self.changed.wait(state).expect("lazy routes condvar");
+        }
+        if state.wanted_everything {
+            state.wanted_everything = false;
+            state.wanted.clear();
+            return None;
+        }
+        Some(std::mem::take(&mut state.wanted))
+    }
+
+    /// Mark a request as being served, so the fill knows the server is busy. The returned
+    /// guard decrements on drop, including when the connection handler bails out early.
+    fn serving_request(&self) -> InFlightGuard<'_> {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.in_flight += 1;
+        state.last_activity = Some(Instant::now());
+        InFlightGuard { lazy: self }
+    }
+
+    /// Block until nothing has been served for `quiet`, so a background build does not
+    /// compete with a render the visitor is waiting on. Gives up after `budget` so a page
+    /// that polls forever cannot postpone the fill indefinitely.
+    ///
+    /// Returns AT ONCE if anything is already waiting for a wider build, and that is not an
+    /// optimization — it is what stops a deadlock. An in-flight render can itself depend on
+    /// a route this build does not have: cal.com's server components call the app's own API
+    /// over HTTP, so the document render sits in flight waiting for an endpoint, while a
+    /// fill that waits for the server to go idle waits for that same render. Demand that is
+    /// already blocked outranks idleness.
+    fn wait_for_quiet(&self, quiet: Duration, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        loop {
+            if !state.wanted.is_empty() || state.wanted_everything {
+                return;
+            }
+            let idle_for = match (state.in_flight, state.last_activity) {
+                (0, Some(last)) => last.elapsed(),
+                (0, None) => quiet,
+                _ => Duration::ZERO,
+            };
+            if idle_for >= quiet || Instant::now() >= deadline {
+                return;
+            }
+            // Poll rather than wait on the condvar: the interesting event is a request
+            // FINISHING, which the guard signals, plus the passage of time.
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, (quiet - idle_for).min(Duration::from_millis(50)))
+                .expect("lazy routes condvar");
+            state = next;
+        }
+    }
+
+    /// Hold every request: the emitted output is about to be replaced under the running
+    /// orchestrator. Released by the next [`landed`](LazyRoutes::landed).
+    fn begin_swap(&self) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = true;
+    }
+
+    /// Publish a landed build: the scope it compiled and the orchestrator port serving it.
+    fn landed(&self, scope: &crate::next_adapter::RouteScope, node_port: u16) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = false;
+        let complete = *scope == crate::next_adapter::RouteScope::All;
+        state.scope = Some(scope.clone());
+        state.node_port = node_port;
+        // A landing releases whoever was waiting, and they are about to render. Counting
+        // the landing itself as activity is what makes the idle wait race-free: the
+        // released request does not have to win a lock against the thread that is deciding
+        // whether the server is idle.
+        state.last_activity = Some(Instant::now());
+        state.failure = None;
+        if complete {
+            state.wanted.clear();
+            state.wanted_everything = false;
+        }
+        self.changed.notify_all();
+    }
+
+    /// Publish a build failure, releasing every waiter with the error rather than
+    /// letting them hang on a build that will never land.
+    fn failed(&self, error: &str) {
+        let mut state = self.state.lock().expect("lazy routes mutex");
+        state.swapping = false;
+        state.failure = Some(error.to_string());
+        self.changed.notify_all();
+    }
+
+    /// Whether anything is still uncompiled (so the proxy keeps consulting this).
+    fn incomplete(&self) -> bool {
+        self.state.lock().expect("lazy routes mutex").scope
+            != Some(crate::next_adapter::RouteScope::All)
+    }
+}
+
+/// Decrements [`LazyState::in_flight`] when a request handler returns, however it returns.
+struct InFlightGuard<'a> {
+    lazy: &'a LazyRoutes,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.lazy.state.lock().expect("lazy routes mutex");
+        state.in_flight = state.in_flight.saturating_sub(1);
+        state.last_activity = Some(Instant::now());
+        self.lazy.changed.notify_all();
+    }
+}
+
 /// One long-lived environment build (client or server): the bundler, its
 /// persistent reachability session, and the current reachable set. Kept alive
 /// across edits so a rebuild is incremental.
@@ -403,7 +643,9 @@ pub fn run(options: DevOptions) -> Result<(), String> {
         let refresh_runtime = Arc::clone(&refresh_runtime);
         std::thread::Builder::new()
             .name("diffpack-dev-proxy".into())
-            .spawn(move || serve_proxy(proxy_listener, node_port, hub, refresh_runtime, None))
+            .spawn(move || {
+                serve_proxy(proxy_listener, node_port, hub, refresh_runtime, None, None)
+            })
             .map_err(|error| format!("cannot start proxy thread: {error}"))?;
     }
     println!(
@@ -989,13 +1231,28 @@ fn register_server_virtual_modules(
     project_root: &Path,
     output_root: &Path,
 ) -> Result<(), String> {
+    // TanStack Start's dev-time head-script manifest, derived from the CLIENT build's
+    // output — which is what makes the client build have to run first. Only a
+    // `@tanstack/start-server-core` graph can import it, so the Next server graphs
+    // register the rest of these modules without it (see
+    // `register_next_server_virtual_modules`) and are free to build before the client.
     let client_manifest_path = output_root.join(manifest::CLIENT_MANIFEST_FILE);
     let client_manifest = ClientRouteManifest::read(&client_manifest_path)?;
     config.build.virtual_modules.push((
         manifest::START_MANIFEST_SPECIFIER.to_string(),
         client_manifest.to_start_manifest_source(),
     ));
+    register_next_server_virtual_modules(config, project_root)
+}
 
+/// The server-graph virtual modules a NEXT app-router graph needs: the native server-fn
+/// resolver plus the RSC action resolver / endpoint / client transport. Deliberately
+/// excludes TanStack Start's client-derived manifest (unimportable from a Next graph), so
+/// nothing here depends on the client build having already emitted.
+fn register_next_server_virtual_modules(
+    config: &mut AppConfig,
+    project_root: &Path,
+) -> Result<(), String> {
     let server_fns = server_fn::scan_project_server_fns(project_root)?;
     config.build.virtual_modules.push((
         server_fn::RESOLVER_SPECIFIER.to_string(),
@@ -1026,10 +1283,17 @@ fn reachable_ids(build: &EnvBuild) -> BTreeSet<String> {
     build.reachable.clone()
 }
 
-/// Reserve an ephemeral loopback port for the Node child by binding and
-/// immediately dropping a listener, returning its number.
+/// Reserve an ephemeral port for the Node child by binding and immediately dropping a
+/// listener, returning its number.
+///
+/// Bound on the WILDCARD address, not on `127.0.0.1`, because the Node child listens on
+/// the wildcard (dual-stack) too. A loopback-only probe considers a port free while
+/// another process holds the same number on the wildcard, so it hands out a port the child
+/// then fails to bind with `EADDRINUSE` — which surfaces 15 seconds later as "node did not
+/// listen", with nothing pointing at the real cause. Seen for real, from a leaked
+/// orchestrator of a previous run.
 fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let listener = TcpListener::bind("0.0.0.0:0")
         .map_err(|error| format!("cannot reserve a port for the node runtime: {error}"))?;
     listener
         .local_addr()
@@ -1086,12 +1350,18 @@ fn serve_proxy(
     // browser's HMR chunk fetch (`/client.js?__diffpack_hmr=1`) off the critical path
     // of a Node round-trip; route documents (no matching file) still forward to Node.
     static_dir: Option<Arc<PathBuf>>,
+    // Set when the Next dev server is compiling routes on demand: a request whose route
+    // is not compiled yet waits here (and learns the orchestrator's port from it) instead
+    // of being forwarded to a server that cannot answer it. `None` is the eager topology,
+    // where `node_port` is already correct and nothing blocks.
+    lazy: Option<Arc<LazyRoutes>>,
 ) {
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
         let hub = hub.clone();
         let refresh_runtime = Arc::clone(&refresh_runtime);
         let static_dir = static_dir.clone();
+        let lazy = lazy.clone();
         let _ = std::thread::Builder::new()
             .name("diffpack-dev-conn".into())
             .spawn(move || {
@@ -1101,6 +1371,7 @@ fn serve_proxy(
                     &hub,
                     &refresh_runtime,
                     static_dir.as_deref().map(|p| p.as_path()),
+                    lazy.as_deref(),
                 ) {
                     // A dropped browser connection is normal; log at a low volume.
                     let _ = error;
@@ -1120,6 +1391,7 @@ fn handle_connection(
     hub: &HmrHub,
     refresh_runtime: &str,
     static_dir: Option<&Path>,
+    lazy: Option<&LazyRoutes>,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(
         stream
@@ -1178,6 +1450,37 @@ fn handle_connection(
 
     // Read the request body (for server-fn POSTs) so it forwards intact.
     let body = read_body(&mut reader, &headers)?;
+    // LAZY COMPILATION. Block here until the route behind this path exists in the live
+    // graphs. Deliberately AFTER the static fast path (an emitted chunk needs no route)
+    // and before anything is forwarded, so an uncompiled route is a slow request rather
+    // than a wrong answer. A build failure becomes the same 500 overlay any other build
+    // error gets, instead of a hung connection.
+    let node_port = match lazy.filter(|lazy| lazy.incomplete()) {
+        Some(lazy) => match lazy.ensure(path) {
+            Ok(Some(port)) => port,
+            Ok(None) => node_port,
+            Err(error) => {
+                let error = format!("diffpack dev: {error}");
+                eprintln!("[dev] {error}");
+                let document = synthesize_ssr_error_document(&error);
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
+                    document.len(),
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|error| format!("cannot write build-error response: {error}"))?;
+                stream.flush().ok();
+                return Ok(());
+            }
+        },
+        None => node_port,
+    };
+    // Counted as in-flight only from HERE — after any wait for a build. The background fill
+    // holds off while requests are in flight, and a request that is itself waiting for that
+    // fill would otherwise keep the server permanently "busy" and stall the very build it
+    // is waiting for.
+    let _in_flight = lazy.map(|lazy| lazy.serving_request());
     let upstream = forward_to_node(node_port, &method, &target, &headers, &body)?;
     let response = maybe_inject_hmr(upstream);
     stream
@@ -1310,16 +1613,18 @@ impl GzipCache {
     /// compressed. A poisoned lock or an oversized entry falls back to compressing
     /// without caching, never to sending nothing.
     fn get(path: &Path, len: u64, mtime: u128, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
-        if let Ok(cache) = Self::global().lock() {
-            if let Some((cached_len, cached_mtime, gz)) = cache.entries.get(path) {
-                if *cached_len == len && *cached_mtime == mtime {
-                    return Some(Arc::clone(gz));
-                }
-            }
+        if let Ok(cache) = Self::global().lock()
+            && let Some((cached_len, cached_mtime, gz)) = cache.entries.get(path)
+            && *cached_len == len
+            && *cached_mtime == mtime
+        {
+            return Some(Arc::clone(gz));
         }
         let gz = Arc::new(gzip_fast(bytes)?);
-        if gz.len() <= Self::MAX_ENTRY {
-            if let Ok(mut cache) = Self::global().lock() {
+        if gz.len() <= Self::MAX_ENTRY
+            && let Ok(mut cache) = Self::global().lock()
+        {
+            {
                 if cache.total + gz.len() > Self::MAX_TOTAL {
                     cache.entries.clear();
                     cache.total = 0;
@@ -1376,10 +1681,10 @@ fn write_file(
 ) -> Result<(), String> {
     let meta = std::fs::metadata(file).ok();
     let etag = meta.as_ref().and_then(file_validator);
-    if let (Some(etag), Some(sent)) = (&etag, if_none_match) {
-        if etag_matches(sent, etag) {
-            return write_not_modified(stream, etag);
-        }
+    if let (Some(etag), Some(sent)) = (&etag, if_none_match)
+        && etag_matches(sent, etag)
+    {
+        return write_not_modified(stream, etag);
     }
     let bytes =
         std::fs::read(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
@@ -1949,6 +2254,22 @@ fn start_watcher_paths(
     roots: &[(PathBuf, RecursiveMode)],
 ) -> Result<Receiver<notify::Result<notify::Event>>, String> {
     let (events, receiver) = mpsc::channel();
+    start_watcher_paths_into(roots, events)?;
+    Ok(receiver)
+}
+
+/// [`start_watcher_paths`] against a channel the caller owns, so a second set of roots can
+/// be added later without losing what the first set has already queued.
+///
+/// The Next dev server needs exactly that: it starts watching as soon as the FIRST build
+/// exists (so an edit during the background fill is not silently dropped), and the fill then
+/// compiles more of the app, which can pull in source directories the first build never
+/// reached. Both watchers feed one receiver; the watch loop already drops an event whose
+/// `(mtime, len)` it has processed, so overlapping roots cost nothing but a duplicate event.
+fn start_watcher_paths_into(
+    roots: &[(PathBuf, RecursiveMode)],
+    events: Sender<notify::Result<notify::Event>>,
+) -> Result<(), String> {
     // TWO event sources feed one channel:
     //
     // 1. The OS-native backend (FSEvents on macOS, inotify on Linux) — the RELIABLE
@@ -1981,7 +2302,26 @@ fn start_watcher_paths(
     // Leak the watcher so it lives for the whole process (dropping it stops watching).
     Box::leak(Box::new(watcher));
     spawn_supplement_poller(roots.to_vec(), events);
-    Ok(receiver)
+    Ok(())
+}
+
+/// The roots in `wanted` that `covered` does not already watch — a root is covered by an
+/// equal path, or by a recursive ancestor of it.
+fn uncovered_watch_roots(
+    wanted: &[(PathBuf, RecursiveMode)],
+    covered: &[(PathBuf, RecursiveMode)],
+) -> Vec<(PathBuf, RecursiveMode)> {
+    wanted
+        .iter()
+        .filter(|(root, mode)| {
+            !covered.iter().any(|(existing, existing_mode)| {
+                existing == root
+                    || (*existing_mode == RecursiveMode::Recursive && root.starts_with(existing))
+                    || (*mode == RecursiveMode::NonRecursive && root.starts_with(existing))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The fast supplementary poller (see [`start_watcher_paths`]). Walks the watched
@@ -2784,10 +3124,10 @@ mod spa {
                 // Same validator as the Next dev path: revalidate every time, but let
                 // an unchanged chunk be reused instead of re-sent and re-compiled.
                 let etag = fs::metadata(&file).ok().as_ref().and_then(file_validator);
-                if let (Some(etag), Some(sent)) = (&etag, if_none_match(&headers)) {
-                    if etag_matches(sent, etag) {
-                        return write_not_modified(&mut stream, etag);
-                    }
+                if let (Some(etag), Some(sent)) = (&etag, if_none_match(&headers))
+                    && etag_matches(sent, etag)
+                {
+                    return write_not_modified(&mut stream, etag);
                 }
                 let bytes = fs::read(&file)
                     .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
@@ -2797,7 +3137,7 @@ mod spa {
                     &bytes,
                     head_only,
                     etag.as_deref(),
-                    accepts_gzip(&headers).then(|| file.as_path()),
+                    accepts_gzip(&headers).then_some(file.as_path()),
                 );
             }
             // A path that names a concrete file (has an extension) but is missing is
@@ -3048,6 +3388,7 @@ mod spa {
 /// `<out>/.rsc/server` and copying to `<out>/rsc-render` keeps them separate.
 mod next {
     use super::*;
+    use crate::next_adapter::RouteScope;
     use std::fs;
 
     /// The next orchestrator, embedded so the dev server is self-contained (it does
@@ -3080,15 +3421,18 @@ mod next {
         // Everything the orchestrator needs beyond the graph outputs, written
         // before ANY boot (warm or cold) so both paths run the same bytes.
         let next_server_script = output_root.join("next-server.mjs");
-        let write_orchestrator_scripts = || -> Result<(), String> {
-            fs::create_dir_all(&output_root)
-                .map_err(|error| format!("cannot create {}: {error}", output_root.display()))?;
-            fs::write(&next_server_script, NEXT_SERVER_MJS).map_err(|error| {
-                format!("cannot write {}: {error}", next_server_script.display())
-            })?;
+        // Takes the output dir explicitly because the background fill emits into a SHADOW
+        // dir (see the fill below) that is then swapped in wholesale, and it has to carry
+        // the same orchestrator bytes.
+        let write_orchestrator_scripts = |dir: &Path| -> Result<(), String> {
+            fs::create_dir_all(dir)
+                .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+            let script = dir.join("next-server.mjs");
+            fs::write(&script, NEXT_SERVER_MJS)
+                .map_err(|error| format!("cannot write {}: {error}", script.display()))?;
             // The orchestrator imports this as a sibling (the one place that joins the
             // three references manifests into the divergent-id ssrModuleMapping).
-            let ssr_module_map = output_root.join(crate::rsc::SSR_MODULE_MAP_FILE);
+            let ssr_module_map = dir.join(crate::rsc::SSR_MODULE_MAP_FILE);
             fs::write(&ssr_module_map, include_str!("../scripts/rsc/ssr-module-map.mjs"))
                 .map_err(|error| format!("cannot write {}: {error}", ssr_module_map.display()))?;
             Ok(())
@@ -3100,7 +3444,7 @@ mod next {
             })?;
             Ok(node)
         };
-        let start_proxy = |node_port: u16| -> Result<(), String> {
+        let start_proxy = |node_port: u16, lazy: Option<Arc<LazyRoutes>>| -> Result<(), String> {
             // The diffpack reverse proxy: serves the HMR client + Fast Refresh
             // runtime, upgrades the WS channel, and injects the preamble into
             // every served HTML document.
@@ -3114,64 +3458,223 @@ mod next {
             std::thread::Builder::new()
                 .name("diffpack-dev-next-proxy".into())
                 .spawn(move || {
-                    serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir)
+                    serve_proxy(proxy_listener, node_port, hub, refresh_runtime, static_dir, lazy)
                 })
                 .map_err(|error| format!("cannot start proxy thread: {error}"))?;
             Ok(())
         };
 
-        // Build order is load-bearing only for the client (its manifests feed the
-        // server graphs). The react-server and ssr graphs read those manifests and
-        // never each other's output — react-server emits into `.rsc`/`rsc-render`,
-        // ssr into `server/` — so the two build concurrently, which is most of the
-        // difference between a ~8.5s and a ~6s cold start on cal.com.
-        println!("[dev] next: building client graph...");
-        let mut client = build_next_client(project_root, &output_root, emit_options)?;
-        println!("[dev] next: building react-server and ssr graphs (concurrently)...");
-        let (react_server_result, ssr_result) = std::thread::scope(|scope| {
-            let react_server = scope.spawn(|| {
-                build_next_react_server(project_root, &output_root, &rsc_root, emit_options)
-            });
-            let ssr = scope.spawn(|| build_next_ssr(project_root, &output_root, emit_options));
-            (react_server.join(), ssr.join())
-        });
-        let mut react_server = react_server_result
-            .map_err(|_| "the react-server build thread panicked".to_string())??;
-        let mut ssr = ssr_result.map_err(|_| "the ssr build thread panicked".to_string())??;
-
-        write_orchestrator_scripts()?;
+        // LAZY COMPILATION. Instead of compiling every route before answering anything,
+        // put the proxy up first, let the first request say which route it wants, compile
+        // that, and fill in the rest behind it. `DIFFPACK_DEV_LAZY=0` restores the eager
+        // whole-app cold start.
+        //
+        // The pattern table comes from discovery alone (a directory walk), so the dev
+        // server can match a request to a route before a single module is compiled.
+        let lazy_wanted = std::env::var("DIFFPACK_DEV_LAZY").as_deref() != Ok("0");
+        let lazy = match lazy_wanted {
+            true => crate::next_adapter::discover_route_patterns(project_root)?
+                .map(|patterns| Arc::new(LazyRoutes::new(patterns))),
+            false => None,
+        };
+        let cold_started = Instant::now();
+        write_orchestrator_scripts(&output_root)?;
         let node_port = free_port()?;
-        let mut node = boot_node(node_port)?;
-        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port}");
-        start_proxy(node_port)?;
+        // The proxy binds BEFORE anything is compiled when lazy: a request arriving now is
+        // what tells the first build which route to compile, and it blocks in
+        // `LazyRoutes::ensure` until that build lands.
+        if lazy.is_some() {
+            start_proxy(node_port, lazy.clone())?;
+            println!(
+                "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} — routes compile on demand",
+                options.port,
+            );
+        }
+
+        // The first build's scope: what the first visitor asked for, or the whole app when
+        // nobody asks within the grace period (nothing is waiting, so there is no reason
+        // to compile a subset).
+        let first_scope = match &lazy {
+            Some(lazy) => first_build_scope(lazy),
+            None => RouteScope::All,
+        };
+        println!("[dev] next: building graphs ({})...", first_scope.label());
+        let graphs_started = Instant::now();
+        let first = build_all_graphs(
+            project_root, &output_root, &rsc_root, emit_options, &first_scope,
+        )
+                .inspect_err(|error| {
+                    // Release anything blocked on this build with the real error rather
+                    // than leaving the connection hanging until the wait times out.
+                    if let Some(lazy) = &lazy {
+                        lazy.failed(error);
+                    }
+                })?;
+        let (mut client, mut react_server, mut ssr) = (first.client, first.react_server, first.ssr);
+        let graphs_ms = graphs_started.elapsed().as_secs_f64() * 1_000.0;
         println!(
-            "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
-            options.port
+            "[dev] next: {} | wall {graphs_ms:.0}ms | {} islands pinned",
+            graph_timing_label(&first.timings),
+            crate::next_adapter::recorded_islands(project_root).len(),
         );
 
-        // Watch the app dir recursively (all convention files live there) + the project
-        // root non-recursively (next.config.*), without recursing into node_modules.
-        // `run_next` is only reached after `is_app_router` said yes, so a missing app dir
-        // is an invariant break, not a case to fall back from.
+        let boot_started = Instant::now();
+        let mut node = boot_node(node_port).inspect_err(|error| {
+            if let Some(lazy) = &lazy {
+                lazy.failed(error);
+            }
+        })?;
+        let boot_ms = boot_started.elapsed().as_secs_f64() * 1_000.0;
+        println!("[dev] next orchestrator listening on 127.0.0.1:{node_port} (boot {boot_ms:.0}ms)");
+        let cold_ms = cold_started.elapsed().as_secs_f64() * 1_000.0;
+        println!(
+            "[dev] next cold start: {cold_ms:.0}ms total (graphs {graphs_ms:.0} + boot {boot_ms:.0})",
+        );
+        // A dev server never reaches main's exit-time report (it blocks in the watch loop
+        // until killed), so the cold start prints its own stage table under
+        // `DIFFPACK_PROFILE=1`. Without this the startup breakdown is unobservable in the
+        // one process where startup is the whole question.
+        crate::build_profile::report("dev cold start", cold_ms);
+        // Whatever was waiting for this build can go now.
+        if let Some(lazy) = &lazy {
+            lazy.landed(&first_scope, node_port);
+        }
+        if lazy.is_none() {
+            start_proxy(node_port, None)?;
+            println!(
+                "[dev] diffpack dev server (next app-router) on http://127.0.0.1:{} (proxying node :{node_port})",
+                options.port
+            );
+        }
+
+        // THE FILL: compile the routes the first build left out, so a later navigation is
+        // instant instead of paying for its own build. It runs right after the first page
+        // has been served — getting that page out was the whole point of the first build,
+        // and the fill is what makes the second one free.
+        //
+        // It emits into a SHADOW output dir rather than over the live one. The live
+        // orchestrator serves its bundles out of `<out>` and the proxy serves chunks
+        // straight off `<out>/public`, so emitting the fill there would rewrite, mid-render,
+        // the exact files the page being displayed is running from — which is not a
+        // theoretical risk: doing that made every request between the first build and the
+        // fill's end fail. The finished shadow dir is renamed into place instead, which is
+        // atomic enough that only the swap itself (a few milliseconds, with requests held)
+        // is a window at all.
+        //
+        // The swap does need the orchestrator restarted and open browsers reloaded once:
+        // growing the module set moves runtime module ids, so a page holding the old ids
+        // cannot resolve the new bundles' client references. Said out loud in the log,
+        // because a reload nobody explained looks like a bug.
+        // START WATCHING NOW, before the fill. The watch loop cannot run until the graphs
+        // are final, but the WATCHER can, and it has to: the fill takes seconds, and an
+        // edit made during it would otherwise be dropped on the floor — the browser shows
+        // stale output with nothing said. Events queue in this channel and the loop drains
+        // them the moment it starts.
         let app_dir = crate::next_adapter::app_dir(project_root).ok_or_else(|| {
             format!("next dev: {} has no app/ or src/app directory", project_root.display())
         })?;
-        let mut watch_roots = source_watch_roots(project_root, [&client, &react_server, &ssr]);
-        if !watch_roots
-            .iter()
-            .any(|(root, mode)| *mode == RecursiveMode::Recursive && app_dir.starts_with(root))
-        {
-            watch_roots.push((app_dir.clone(), RecursiveMode::Recursive));
+        let watch_roots_for = |client: &EnvBuild, react_server: &EnvBuild, ssr: &EnvBuild| {
+            let mut roots = source_watch_roots(project_root, [client, react_server, ssr]);
+            if !roots
+                .iter()
+                .any(|(root, mode)| *mode == RecursiveMode::Recursive && app_dir.starts_with(root))
+            {
+                roots.push((app_dir.clone(), RecursiveMode::Recursive));
+            }
+            if !roots.iter().any(|(root, _)| root == project_root) {
+                roots.push((project_root.to_path_buf(), RecursiveMode::NonRecursive));
+            }
+            roots
+        };
+        let announce_roots = |roots: &[(PathBuf, RecursiveMode)]| {
+            for (root, mode) in roots {
+                println!(
+                    "[dev] watching {}{}",
+                    root.display(),
+                    if *mode == RecursiveMode::Recursive { "" } else { " (top level only)" }
+                );
+            }
+        };
+        let (watch_events, receiver) = mpsc::channel();
+        let mut watch_roots = watch_roots_for(&client, &react_server, &ssr);
+        announce_roots(&watch_roots);
+        start_watcher_paths_into(&watch_roots, watch_events.clone())?;
+
+        let mut live_scope = first_scope.clone();
+        if first_scope != RouteScope::All {
+            // Let the page that triggered the first build actually finish first. A whole-app
+            // compile saturates every core, and starting it while the first render is in
+            // flight is measurable in exactly the number this whole change exists to
+            // improve (cal.com: 1.4s render -> 2.5s). Capped so a page that polls forever
+            // cannot postpone the fill for good.
+            if let Some(lazy) = &lazy {
+                lazy.wait_for_quiet(FILL_QUIET, FILL_QUIET_BUDGET);
+            }
+            let fill_started = Instant::now();
+            println!("[dev] next: compiling the remaining routes in the background...");
+            let fill_root = path_with_suffix_local(&output_root, ".fill");
+            let fill_rsc_root = fill_root.join(".rsc");
+            if fill_root.exists() {
+                fs::remove_dir_all(&fill_root)
+                    .map_err(|error| format!("cannot clear {}: {error}", fill_root.display()))?;
+            }
+            match build_all_graphs(
+                project_root, &fill_root, &fill_rsc_root, emit_options, &RouteScope::All,
+            )
+            .and_then(|built| write_orchestrator_scripts(&fill_root).map(|()| built))
+            {
+                Ok(filled) => {
+                    let build_ms = fill_started.elapsed().as_secs_f64() * 1_000.0;
+                    let swap_started = Instant::now();
+                    if let Some(lazy) = &lazy {
+                        lazy.begin_swap();
+                    }
+                    let _ = node.kill();
+                    let _ = node.wait();
+                    swap_output_dir(&fill_root, &output_root)?;
+                    client = filled.client;
+                    react_server = filled.react_server;
+                    ssr = filled.ssr;
+                    live_scope = RouteScope::All;
+                    node = boot_node(node_port)?;
+                    if let Some(lazy) = &lazy {
+                        lazy.landed(&RouteScope::All, node_port);
+                    }
+                    hub.broadcast_reload();
+                    println!(
+                        "[dev] next: all routes compiled in {build_ms:.0}ms | {} | swapped in {:.0}ms, reloading open browsers once (module ids moved)",
+                        graph_timing_label(&filled.timings),
+                        swap_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                }
+                // A fill failure must NOT take down a dev server that is already serving the
+                // route it was asked for. Keep serving it, say exactly what is degraded (a
+                // request for any other route now fails instead of waiting forever), and let
+                // the next edit — which rebuilds from scratch — recover.
+                Err(error) => {
+                    eprintln!(
+                        "[dev] next: compiling the remaining routes FAILED: {error}\n\
+                         [dev] next: still serving {}; other routes will report this error until an edit rebuilds",
+                        first_scope.label(),
+                    );
+                    if let Some(lazy) = &lazy {
+                        lazy.failed(&error);
+                    }
+                }
+            }
         }
-        if !watch_roots.iter().any(|(root, _)| root == project_root) {
-            watch_roots.push((project_root.to_path_buf(), RecursiveMode::NonRecursive));
-        }
-        for (root, mode) in &watch_roots {
-            println!(
-                "[dev] watching {}{}",
-                root.display(),
-                if *mode == RecursiveMode::Recursive { "" } else { " (top level only)" }
-            );
+
+        // The fill compiled the rest of the app, which can reach source directories the
+        // first build never did. Watch the ones the running watcher does not already cover;
+        // the two feed one channel (see `start_watcher_paths_into`).
+        let extra_roots = uncovered_watch_roots(
+            &watch_roots_for(&client, &react_server, &ssr),
+            &watch_roots,
+        );
+        if !extra_roots.is_empty() {
+            announce_roots(&extra_roots);
+            start_watcher_paths_into(&extra_roots, watch_events.clone())?;
+            watch_roots.extend(extra_roots);
         }
         // The shallowest watched directory; everything watched lives under it.
         let watch_base = watch_roots
@@ -3179,7 +3682,6 @@ mod next {
             .map(|(root, _)| root.clone())
             .min_by_key(|root| root.components().count())
             .unwrap_or_else(|| project_root.to_path_buf());
-        let receiver = start_watcher_paths(&watch_roots)?;
 
         let result = next_watch_loop(
             &receiver,
@@ -3195,6 +3697,7 @@ mod next {
             &hub,
             emit_options,
             &watch_base,
+            &live_scope,
         );
         let _ = node.kill();
         let _ = node.wait();
@@ -3208,8 +3711,9 @@ mod next {
         project_root: &Path,
         output_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let build = discover_next_env_reconciled(project_root, "client", options, &|config| {
+        let build = discover_next_env_reconciled(project_root, "client", options, scope, &|config| {
             // The client needs `#diffpack-call-server` so a `"use server"` client stub
             // resolves its transport (harmless/unreachable when there is no action).
             config.build.virtual_modules.push((
@@ -3230,11 +3734,12 @@ mod next {
         project_root: &Path,
         environment: &str,
         options: EmitOptions,
+        scope: &RouteScope,
         prepare: &dyn Fn(&mut AppConfig) -> Result<(), String>,
     ) -> Result<EnvBuild, String> {
         let mut regenerated = false;
         loop {
-            let mut config = next_config_dev(project_root, environment)?;
+            let mut config = next_config_dev(project_root, environment, scope)?;
             prepare(&mut config)?;
             let build = discover_next_env(config, environment, options)?;
             if !crate::next_adapter::reconcile_async_islands(
@@ -3265,11 +3770,20 @@ mod next {
         output_root: &Path,
         rsc_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let mut config = next_config_dev(project_root, "react-server")?;
-        register_server_virtual_modules(&mut config, project_root, output_root)?;
+        let mut config = next_config_dev(project_root, "react-server", scope)?;
+        register_next_server_virtual_modules(&mut config, project_root)?;
         let build = discover_next_env(config, "react-server", options)?;
         emit_next_react_server(&build, output_root, rsc_root, crate::bundler::EmitCancel::never())?;
+        // The emit just wrote this graph's client-references manifest, whose keys are
+        // exactly the islands a flight from these routes can reference. Record them: the
+        // client and ssr graphs are configured next and pin precisely that set instead of
+        // every `"use client"` file in the tree.
+        crate::next_adapter::write_referenced_islands(
+            project_root,
+            &output_root.join(crate::rsc::REACT_SERVER_REFERENCES_MANIFEST_FILE),
+        )?;
         Ok(build)
     }
 
@@ -3278,9 +3792,10 @@ mod next {
         project_root: &Path,
         output_root: &Path,
         options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<EnvBuild, String> {
-        let build = discover_next_env_reconciled(project_root, "ssr", options, &|config| {
-            register_server_virtual_modules(config, project_root, output_root)
+        let build = discover_next_env_reconciled(project_root, "ssr", options, scope, &|config| {
+            register_next_server_virtual_modules(config, project_root)
         })?;
         emit_next_ssr(&build, output_root, crate::bundler::EmitCancel::never())?;
         Ok(build)
@@ -3289,8 +3804,12 @@ mod next {
     /// Scaffold `.diffpack-next/` + derive the dev [`AppConfig`] for one environment
     /// (a Next app-router project is guaranteed here — the caller already detected
     /// it, so `None` is an internal invariant break, a clear error not a silent skip).
-    fn next_config_dev(project_root: &Path, environment: &str) -> Result<AppConfig, String> {
-        crate::next_adapter::configure_dev(project_root, environment)?.ok_or_else(|| {
+    fn next_config_dev(
+        project_root: &Path,
+        environment: &str,
+        scope: &RouteScope,
+    ) -> Result<AppConfig, String> {
+        crate::next_adapter::configure_dev(project_root, environment, scope)?.ok_or_else(|| {
             format!(
                 "next dev: {} is not an app-router project (environment={environment})",
                 project_root.display()
@@ -4199,6 +4718,9 @@ mod next {
         // The topmost watched directory: dependency/generated-output exclusion is
         // judged relative to it (see `is_dependency_or_generated`).
         watch_base: &Path,
+        // The routes the live graphs were built from; a rebuild must reproduce the SAME
+        // scope, or an edit would silently widen or narrow what is served.
+        scope: &RouteScope,
     ) -> Result<(), String> {
         // Publish the base the watch sources judge relevance against, so their event
         // COUNT (what deferred work cancels on) matches what this loop rebuilds for.
@@ -4418,13 +4940,12 @@ mod next {
             if structural {
                 let started = Instant::now();
                 rebuild_all(
-                    project_root,
-                    output_root,
-                    rsc_root,
+                    BuildPaths { project_root, output_root, rsc_root },
                     client,
                     react_server,
                     ssr,
                     emit_options,
+                    scope,
                 )?;
                 // Everything was re-emitted from scratch: no deferred debt survives, and
                 // the worker replay list (whose micro-chunks the new bundles already
@@ -4546,13 +5067,12 @@ mod next {
             // graphs, so it also clears everything the hot channel was carrying.
             if graph_changed {
                 rebuild_all(
-                    project_root,
-                    output_root,
-                    rsc_root,
+                    BuildPaths { project_root, output_root, rsc_root },
                     client,
                     react_server,
                     ssr,
                     emit_options,
+                    scope,
                 )?;
                 // Every graph was just emitted from scratch: disk IS the truth, so the
                 // deferred debt, the worker replay list, and every chunk patcher are
@@ -4757,20 +5277,187 @@ mod next {
         }
     }
 
-    /// Re-discover and re-emit all three graphs from scratch (used for structural /
-    /// graph-changing edits, where module ids shift across the partition).
-    fn rebuild_all(
+    /// How long the first build waits for a request to tell it which route to compile.
+    /// Short: a dev server is normally started with a browser already open or about to be,
+    /// and if nobody asks, compiling the whole app is exactly the right thing to do.
+    const FIRST_REQUEST_GRACE: Duration = Duration::from_millis(750);
+
+    /// How quiet the server has to be before the fill starts, and how long the fill will
+    /// wait for that quiet before starting anyway.
+    const FILL_QUIET: Duration = Duration::from_millis(400);
+    const FILL_QUIET_BUDGET: Duration = Duration::from_secs(20);
+
+    /// How long to keep collecting wants after the first one, so a page load that fires a
+    /// document plus several API calls compiles them in ONE build instead of one per
+    /// request. Small enough to stay invisible against a multi-second build.
+    const WANT_COALESCE_MS: u64 = 60;
+
+    /// The scope of the first build: whatever the first requests asked for, or the whole
+    /// app if nothing arrived within [`FIRST_REQUEST_GRACE`].
+    ///
+    /// HTTP endpoints (`route.ts`, `pages/api/**`) are compiled EAGERLY by default even
+    /// though pages are not. A page whose API answers 404 is a broken app, not a page that
+    /// is still compiling, and on cal.com the document immediately reads a next-auth
+    /// session and several tRPC queries; the app's API surface is also most of the server
+    /// graph, so leaving it out is what makes the first build fast. `DIFFPACK_DEV_LAZY=api`
+    /// opts into the faster-first-paint trade: endpoints compile lazily too, and those
+    /// requests WAIT (they are never answered wrongly) for the fill.
+    fn first_build_scope(lazy: &LazyRoutes) -> RouteScope {
+        let lazy_endpoints = std::env::var("DIFFPACK_DEV_LAZY").as_deref() == Ok("api");
+        let Some(wanted) = wait_for_first_wants(lazy) else {
+            println!(
+                "[dev] next: no request within {}ms — compiling the whole app",
+                FIRST_REQUEST_GRACE.as_millis(),
+            );
+            return RouteScope::All;
+        };
+        let (pages, endpoints): (Vec<String>, Vec<String>) = wanted
+            .into_iter()
+            .partition(|path| {
+                lazy.patterns
+                    .iter()
+                    .find(|pattern| pattern.url_path == *path)
+                    .is_none_or(|pattern| pattern.kind == crate::next_adapter::PatternKind::Page)
+            });
+        if lazy_endpoints {
+            RouteScope::pages_and_endpoints(pages, endpoints)
+        } else {
+            RouteScope::pages(pages)
+        }
+    }
+
+    /// Block until a request registers a want, then keep collecting for
+    /// [`WANT_COALESCE_MS`]. `None` means either nothing arrived within the grace period or
+    /// a request matched no pattern at all — both of which mean "compile everything".
+    fn wait_for_first_wants(lazy: &LazyRoutes) -> Option<BTreeSet<String>> {
+        {
+            let mut state = lazy.state.lock().expect("lazy routes mutex");
+            let deadline = Instant::now() + FIRST_REQUEST_GRACE;
+            while state.wanted.is_empty() && !state.wanted_everything {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let (next, _) = lazy
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .expect("lazy routes condvar");
+                state = next;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(WANT_COALESCE_MS));
+        lazy.take_wanted()
+    }
+
+    /// One graph's contribution to a cold start / rebuild, for the log line.
+    struct GraphTiming {
+        ms: f64,
+        modules: usize,
+    }
+
+    /// The three environment builds a pass produces, in the order they are always named:
+    /// client, react-server, ssr.
+    struct Graphs {
+        client: EnvBuild,
+        react_server: EnvBuild,
+        ssr: EnvBuild,
+        /// What each one cost, for the log line.
+        timings: [(&'static str, GraphTiming); 3],
+    }
+
+    /// Build all three graphs for `scope`, in the order their facts flow.
+    ///
+    /// REACT-SERVER FIRST, then client and ssr concurrently. The react-server graph is
+    /// what decides which islands exist as client references at all, so building it first
+    /// lets the other two pin exactly that set (see [`REFERENCED_ISLANDS_FILE`]) instead
+    /// of every `"use client"` file in the project. The client and ssr graphs read no
+    /// output of each other's — client emits `public/`, ssr emits `server/` — so they run
+    /// on two threads, and neither reads the react-server graph's output at build time.
+    ///
+    /// (The pre-existing order was client first, because TanStack Start's server graph
+    /// imports a virtual module derived from the client build. A Next graph cannot import
+    /// it; see `register_next_server_virtual_modules`.)
+    fn build_all_graphs(
         project_root: &Path,
         output_root: &Path,
         rsc_root: &Path,
+        emit_options: EmitOptions,
+        scope: &RouteScope,
+    ) -> Result<Graphs, String> {
+        let started = Instant::now();
+        let react_server =
+            build_next_react_server(project_root, output_root, rsc_root, emit_options, scope)?;
+        let react_server_timing = GraphTiming {
+            ms: started.elapsed().as_secs_f64() * 1_000.0,
+            modules: react_server.reachable.len(),
+        };
+        let (client_result, ssr_result) = std::thread::scope(|threads| {
+            let client = threads.spawn(|| {
+                let started = Instant::now();
+                let build = build_next_client(project_root, output_root, emit_options, scope);
+                (build, started.elapsed().as_secs_f64() * 1_000.0)
+            });
+            let ssr = threads.spawn(|| {
+                let started = Instant::now();
+                let build = build_next_ssr(project_root, output_root, emit_options, scope);
+                (build, started.elapsed().as_secs_f64() * 1_000.0)
+            });
+            (client.join(), ssr.join())
+        });
+        let (client_result, client_ms) =
+            client_result.map_err(|_| "the client build thread panicked".to_string())?;
+        let (ssr_result, ssr_ms) =
+            ssr_result.map_err(|_| "the ssr build thread panicked".to_string())?;
+        let client = client_result?;
+        let ssr = ssr_result?;
+        let timings = [
+            ("react-server", react_server_timing),
+            ("client", GraphTiming { ms: client_ms, modules: client.reachable.len() }),
+            ("ssr", GraphTiming { ms: ssr_ms, modules: ssr.reachable.len() }),
+        ];
+        Ok(Graphs { client, react_server, ssr, timings })
+    }
+
+    /// The one-line summary of a [`build_all_graphs`] pass.
+    fn graph_timing_label(timings: &[(&'static str, GraphTiming); 3]) -> String {
+        timings
+            .iter()
+            .map(|(name, timing)| {
+                format!("{name} {:.0}ms ({} modules)", timing.ms, timing.modules)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Where a rebuild reads its inputs from and writes its outputs to. Grouped because the
+    /// four travel together everywhere a rebuild happens.
+    #[derive(Clone, Copy)]
+    struct BuildPaths<'a> {
+        project_root: &'a Path,
+        output_root: &'a Path,
+        rsc_root: &'a Path,
+    }
+
+    /// Re-discover and re-emit all three graphs from scratch (used for structural /
+    /// graph-changing edits, where module ids shift across the partition).
+    fn rebuild_all(
+        paths: BuildPaths<'_>,
         client: &mut EnvBuild,
         react_server: &mut EnvBuild,
         ssr: &mut EnvBuild,
         emit_options: EmitOptions,
+        scope: &RouteScope,
     ) -> Result<(), String> {
-        *client = build_next_client(project_root, output_root, emit_options)?;
-        *react_server = build_next_react_server(project_root, output_root, rsc_root, emit_options)?;
-        *ssr = build_next_ssr(project_root, output_root, emit_options)?;
+        let fresh = build_all_graphs(
+            paths.project_root,
+            paths.output_root,
+            paths.rsc_root,
+            emit_options,
+            scope,
+        )?;
+        *client = fresh.client;
+        *react_server = fresh.react_server;
+        *ssr = fresh.ssr;
         Ok(())
     }
 
@@ -4836,6 +5523,38 @@ mod next {
 
     /// Replace `dest` with a fresh recursive copy of `src` (used to publish the freshly
     /// emitted react-server bundle from `.rsc/server` to `rsc-render`).
+    /// Move `fresh` into `live`'s place by RENAME, not by copy: `live` is a 626 MB tree on
+    /// cal.com and the requests being held during the swap are waiting on it, so the swap
+    /// has to be O(1). The displaced tree is renamed aside and deleted on a background
+    /// thread, since nothing reads it any more.
+    fn swap_output_dir(fresh: &Path, live: &Path) -> Result<(), String> {
+        let displaced = path_with_suffix_local(live, ".old");
+        if displaced.exists() {
+            fs::remove_dir_all(&displaced)
+                .map_err(|error| format!("cannot clear {}: {error}", displaced.display()))?;
+        }
+        if live.exists() {
+            fs::rename(live, &displaced).map_err(|error| {
+                format!(
+                    "cannot move {} aside to {}: {error}",
+                    live.display(),
+                    displaced.display(),
+                )
+            })?;
+        }
+        fs::rename(fresh, live).map_err(|error| {
+            format!("cannot move {} into {}: {error}", fresh.display(), live.display())
+        })?;
+        if displaced.exists() {
+            let _ = std::thread::Builder::new()
+                .name("diffpack-dev-output-cleanup".into())
+                .spawn(move || {
+                    let _ = fs::remove_dir_all(&displaced);
+                });
+        }
+        Ok(())
+    }
+
     fn replace_dir(src: &Path, dest: &Path) -> Result<(), String> {
         if dest.exists() {
             fs::remove_dir_all(dest)
@@ -4997,6 +5716,142 @@ mod next {
             owed.react_server = true;
             assert_eq!(owed.label(), "client + ssr + react-server");
         }
+    }
+}
+
+#[cfg(test)]
+mod lazy_route_tests {
+    use super::*;
+    use crate::next_adapter::{PatternKind, RoutePattern, RouteScope};
+
+    fn lazy() -> LazyRoutes {
+        // Endpoints before pages, the orchestrator's own precedence — and the ordering that
+        // matters here, since cal.com's `/api/**` endpoints would otherwise be swallowed by
+        // a root catch-all page.
+        LazyRoutes::new(vec![
+            RoutePattern::parse("/api/auth/[...nextauth]", PatternKind::Endpoint),
+            RoutePattern::parse("/api/trpc/[trpc]", PatternKind::Endpoint),
+            RoutePattern::parse("/auth/login", PatternKind::Page),
+            RoutePattern::parse("/[user]", PatternKind::Page),
+        ])
+    }
+
+    #[test]
+    fn a_request_matches_the_pattern_that_will_serve_it_endpoints_first() {
+        let lazy = lazy();
+        assert_eq!(
+            lazy.match_path("/api/trpc/viewer.me").map(|p| p.url_path.as_str()),
+            Some("/api/trpc/[trpc]"),
+        );
+        assert_eq!(
+            lazy.match_path("/auth/login").map(|p| p.url_path.as_str()),
+            Some("/auth/login"),
+        );
+        // A path only the catch-all page can serve.
+        assert_eq!(lazy.match_path("/jimmy").map(|p| p.url_path.as_str()), Some("/[user]"));
+        // Nothing matches a path with too many segments for any pattern.
+        assert_eq!(lazy.match_path("/a/b/c/d").map(|p| p.url_path.as_str()), None);
+    }
+
+    /// Regression: readiness has to be decided by asking the SCOPE, not by looking a path up
+    /// in a set of compiled routes. A scope that compiles every endpoint knows
+    /// `/api/trpc/[trpc]` is ready without ever naming it, and an earlier version — which
+    /// recorded only the compiled PAGES — left every endpoint request blocked until the whole
+    /// app had been compiled, turning a 5s first response into a 13s one.
+    #[test]
+    fn an_endpoint_request_is_ready_when_the_scope_compiles_all_endpoints() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        assert_eq!(lazy.ensure("/api/trpc/viewer.me"), Ok(Some(4242)));
+        assert_eq!(lazy.ensure("/auth/login"), Ok(Some(4242)));
+        // A path no pattern matches needs a running orchestrator and nothing else: the app
+        // owns that answer (its own 404, a rewrite, a static file).
+        assert_eq!(lazy.ensure("/a/b/c/d"), Ok(Some(4242)));
+    }
+
+    #[test]
+    fn a_request_for_an_uncompiled_page_waits_and_is_released_by_the_build_that_covers_it() {
+        let lazy = Arc::new(lazy());
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        // `/[user]` is not compiled: this blocks, and registers the want that tells the
+        // build thread what to compile.
+        let waiter = {
+            let lazy = Arc::clone(&lazy);
+            std::thread::spawn(move || lazy.ensure("/jimmy"))
+        };
+        // The build thread sees the want (blocking until there is one) and lands a scope
+        // covering it.
+        assert_eq!(lazy.take_wanted(), Some(["/[user]".to_string()].into_iter().collect()));
+        lazy.landed(&RouteScope::All, 4243);
+        assert_eq!(waiter.join().expect("waiter thread"), Ok(Some(4243)));
+        // Everything is compiled now, so the proxy stops consulting this at all.
+        assert!(!lazy.incomplete());
+    }
+
+    #[test]
+    fn a_build_failure_releases_waiters_with_the_error_instead_of_hanging_them() {
+        let lazy = Arc::new(lazy());
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        let waiter = {
+            let lazy = Arc::clone(&lazy);
+            std::thread::spawn(move || lazy.ensure("/jimmy"))
+        };
+        assert!(lazy.take_wanted().is_some());
+        lazy.failed("the ssr graph did not compile");
+        assert_eq!(
+            waiter.join().expect("waiter thread"),
+            Err("the ssr graph did not compile".to_string()),
+        );
+    }
+
+    /// The fill must not start while a request is already blocked on a wider build: an
+    /// in-flight render can itself depend on a route this build does not have (cal.com's
+    /// server components call the app's own API over HTTP), so waiting for the server to go
+    /// idle would wait for a render that is waiting for the fill.
+    #[test]
+    fn waiting_demand_outranks_idleness_so_the_fill_cannot_deadlock_behind_a_render() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        {
+            let mut state = lazy.state.lock().expect("lazy routes mutex");
+            state.in_flight = 1;
+            state.wanted.insert("/[user]".to_string());
+        }
+        let started = Instant::now();
+        lazy.wait_for_quiet(Duration::from_secs(30), Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a blocked want must make the fill start at once, waited {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[test]
+    fn the_fill_waits_for_an_in_flight_render_when_nothing_is_blocked() {
+        let lazy = lazy();
+        lazy.landed(&RouteScope::pages(["/auth/login".to_string()]), 4242);
+        let guard = lazy.serving_request();
+        let started = Instant::now();
+        // Nothing is waiting for a build, so the request in flight holds the fill off — up
+        // to the budget, which is what stops a page that polls forever from postponing it.
+        lazy.wait_for_quiet(Duration::from_secs(30), Duration::from_millis(150));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        drop(guard);
+    }
+
+    #[test]
+    fn a_watch_root_already_covered_recursively_is_not_watched_twice() {
+        let recursive = |path: &str| (PathBuf::from(path), RecursiveMode::Recursive);
+        let top_level = |path: &str| (PathBuf::from(path), RecursiveMode::NonRecursive);
+        let covered = vec![recursive("/app/src"), top_level("/app")];
+        // Already covered: an equal root, and one under a recursive root.
+        assert!(uncovered_watch_roots(&[recursive("/app/src")], &covered).is_empty());
+        assert!(uncovered_watch_roots(&[recursive("/app/src/routes")], &covered).is_empty());
+        // A sibling the first build never reached IS new.
+        assert_eq!(
+            uncovered_watch_roots(&[recursive("/app/packages")], &covered),
+            vec![recursive("/app/packages")],
+        );
     }
 }
 
