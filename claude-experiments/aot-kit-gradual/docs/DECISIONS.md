@@ -283,3 +283,67 @@ type rather than node id, because optimisation deletes arguments and shifts ever
 wrapping, because JavaScript promotes to a double and doing that properly needs M5's value domain; a
 wrapped answer would make the oracle quietly disagree with the language it exists to define. A
 failing `Cast` is a **compiler** bug and has its own status.
+
+---
+
+## D13. A memory access reads a REFERENCE, and the two checks over it live in different places
+
+**Decision.** A `Load` or a `Store`'s pointer operand must be **an object and nothing else**
+(`ty-only-obj?`), and the verifier reports `VERR-PTR-SLOT` when it is not. It **abstains** while the
+pointer's type is high, which is the same optimistic case `load-compute` special-cases. Which
+**shape** the pointer has is a different question and is deliberately not asked there: it is the
+interpreter's `EV-SHAPE` and, from M9, a guard.
+
+**Why "and nothing else" rather than "could be an object".** `arith-compute` types `o + 8` as plain
+`dyn`, and `dyn` includes `VK-OBJ`, so the weaker form accepts exactly the address arithmetic
+[R1](#d2-the-ir-is-gc-abstract-safepoints-are-explicit) exists to keep out of the graph. Before this
+check existed, `Load(mem, Const int=8)` and `Load(mem, Add(o, 8))` both built, verified clean,
+round-tripped and ran. D2 claims both GC rules are machine-checked by the verifier on every phase;
+that claim was simply not true for R1, and it held only because nothing in the IR was yet NAMED an
+address. Nothing would have gone red the day M8's safepoints or any address-computing lowering
+arrived.
+
+**What M5 owes.** When `dyn` grows objects, a value may honestly be `dyn` at a memory access before
+anything has refined it. This rule then requires a **`Cast` to `obj` first**, which is the same
+shape D4 already gives every other narrowing: the guard is ordinary control flow and the `Cast` is
+its value side. The alternative, accepting `dyn`, weakens the rule to nothing.
+
+**The two checks that are NOT here, and why.** "The memory state carries the class this node names"
+and "the pointer's shape carries this word" are both statically checkable, and both are left to the
+interpreter (`EV-MEM`, `EV-SHAPE`) rather than made verifier rules. An alias bitset and a shape set
+are both **unions over paths**, so a state that statically carries a class need not carry it on the
+path taken, and a static rule strong enough to be worth having would make `EV-SHAPE` unreachable
+from any verifier-clean graph. `tests/mem-test.coil`'s
+`running_it_catches_the_memory_contracts_the_verifier_cannot` is the argument for that split. What
+the compiler owes instead is that no **rewrite** launders such an access into a plausible value,
+which is what `load-compute`'s two refusals and `load-idealize`'s `access-refused?` are for.
+
+---
+
+## D14. An object's identity across two runs is its reachable heap, not its allocation index
+
+**Decision.** `rt-eq?` compares an object by its index in the run's allocation stream, and that stays
+the implementation of `===` **within one run**. The **differential oracle** uses `ev-render-outcome`
+instead: the status, the result, and the heap reachable from it, with objects numbered by
+**discovery order** in a deterministic walk and shapes named by their **field names**.
+
+**Why.** A table index is a run artefact. It fails in both directions, and both were measured.
+Removing an allocation nothing reads shifts every later index, so the oracle reports
+`DIFFERENTIAL FAILURE` on a transformation that changed nothing observable, and that transformation
+is exactly 4c-3's dead-allocation removal. In the other direction, two objects of different shapes
+that land at the same index compare EQUAL, so the oracle could not see a rewrite that returned the
+wrong object. A shape ID is a build artefact for the same reason an object index is: `{x}` and `{y}`
+are both shape 1 in their own runs.
+
+**Why discovery order.** It makes sharing and aliasing observable (`{a: o, b: o}` renders differently
+from `{a: o, b: o2}`) while an allocation nothing can reach is invisible. That is isomorphism of the
+two reachable heaps, which is identity modulo renaming, which is what "the same outcome" means.
+
+**Why rendered to text.** The comparison has to outlive `ev-reset!`: the second build cannot run
+until the first run's heap is cleared, and carrying a heap across runs is the one thing that must
+not happen.
+
+**Corollary.** This is also what makes a **memory phi's arm order** observable at all. Reading the
+returned object's field out of the state the `MemMerge` produced is what turns LAW 5's failure mode
+into a red gate; before it, swapping `fx-shape-poly`'s class-x memory phi's arms left the whole gate
+green.

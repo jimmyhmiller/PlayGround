@@ -22,6 +22,7 @@
 (module verifytest)
 
 (import "../src/ty.coil"     :use *)
+(import "../src/shape.coil"  :use *)
 (import "../src/node.coil"   :use *)
 (import "../src/verify.coil" :use *)
 (import "../src/corpus.coil" :use *)
@@ -47,7 +48,7 @@
 ;; The corpus is allowed to GROW; losing a fixture is a silent weakening of every later gate,
 ;; because "on the whole corpus" is only as strong as the corpus. Adding one means raising this
 ;; deliberately, in the same commit as the fixture.
-(const CORPUS-FLOOR i64 22)
+(const CORPUS-FLOOR i64 25)
 
 ;; The lattice sample is 32 hand-listed types plus all 32 duals, and 468 of the 4096 ordered
 ;; pairs are strictly comparable. Both are floors for the same reason: narrowing the sample
@@ -367,6 +368,86 @@
     (n-set-def! add 2 (g-start))
     (expect-only "Start as an Add operand" VERR-DATA-SLOT)
     (assert (= (g-verify-node) add))))
+
+;; A MEMORY STATE IN A SLOT THAT MUST HOLD A VALUE, which is the mirror of VERR-MEM-SLOT and was
+;; missing entirely. `op-value?` is `>= OP-CONST` and Store is 24, so a memory producer satisfied
+;; every value slot in the IR: an If's predicate, a Return's value, a binop's operand and a
+;; Store's own value slot all accepted one and verified clean.
+;;
+;; The Store case is the one that reached the lattice rather than the interpreter. `store-compute`
+;; meets its value slot into its class's contents, so a Store parked in another Store's value slot
+;; minted `mem#1 mem#1 int`, a memory type nested inside a memory type; `ty-depth` reports 0 for
+;; it by construction, so no depth guard applies, and `ty-print-exact` then ABORTED THE PROCESS on
+;; a graph `g-verify` called clean. `t-mem` now panics on such a contents, so the verifier has to
+;; be what refuses the graph.
+(deftest a_memory_state_in_a_value_slot_is_caught
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+            (n-keep! m1)
+            ; a second Store whose VALUE is the first Store, which is a memory state
+            (let [m2 (n-new4 OP-STORE ax NO-NODE (n-obj-mem nw 0) o m1)]
+              (n-unkeep! m1)
+              (ret-to-mem (g-start) (mk-int 0) m2)
+              (expect-verr-at "a Store in another Store's value slot" VERR-VALUE-IS-MEM m2))))))))
+
+;; R1 MADE CHECKABLE. D2 claims both GC rules are machine-checked by the verifier on every phase;
+;; R1 was not checked at all, and it held only because nothing in the IR is NAMED an address. All
+;; three of these built, verified CLEAN, round-tripped and ran before VERR-PTR-SLOT existed.
+;;
+;; The third is why the rule is "an object and nothing else" rather than "could be an object":
+;; `arith-compute` types `o + 8` as plain `dyn`, and `dyn` includes VK-OBJ, so the weaker form
+;; accepts exactly the address arithmetic R1 exists to keep out of the graph.
+(defn build-ptr-slot-corruption! [(which i64)] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [min (n-new1 OP-ARG (t-mem-alias ax (t-top)) (g-start))]
+        (let [nw (n-new OP-NEW sx)]
+          (n-add-def! nw (g-start)) (n-add-def! nw min)
+          (let [o  (n-new1 OP-PROJ 0 nw)
+                m0 (n-new1 OP-PROJ 1 nw)
+                c8 (n-new1 OP-CONST (t-int-con 8) (g-start))]
+            ;; Built RAW and only ANALYSED. Nothing is peepholed, so nothing folds and nothing is
+            ;; rewritten: the graph reaching the verifier is exactly the one written here, which is
+            ;; what a corruption test needs. Every node has a reader, so VERR-LEAK cannot fire
+            ;; first and steal the report.
+            (let [bad (case which
+                        0 (let [st (n-new4 OP-STORE ax NO-NODE m0 o
+                                           (n-new1 OP-CONST (t-int-con 5) (g-start)))]
+                            (let [ld (n-new3 OP-LOAD ax NO-NODE st c8)]
+                              (n-add-def! (g-stop) (n-new3 OP-RETURN 0 (g-start) ld st))
+                              ld))
+                        1 (let [st (n-new4 OP-STORE ax NO-NODE m0 c8
+                                           (n-new1 OP-CONST (t-int-con 5) (g-start)))]
+                            (let [ld (n-new3 OP-LOAD ax NO-NODE st o)]
+                              (n-add-def! (g-stop) (n-new3 OP-RETURN 0 (g-start) ld st))
+                              st))
+                        (let [add (n-new3 OP-ADD 0 NO-NODE o c8)]
+                          (let [ld (n-new3 OP-LOAD ax NO-NODE m0 add)]
+                            (n-add-def! (g-stop) (n-new3 OP-RETURN 0 (g-start) ld m0))
+                            ld)))]
+              (g-analyze!)
+              bad)))))))
+
+(deftest a_load_or_store_through_something_that_is_not_a_reference_is_caught
+  (let [w (stdout)]
+    (let [ld (build-ptr-slot-corruption! 0)]
+      (ps w "\n--- a Load whose pointer is the integer 8 ---\n")
+      (assert (not (ty-only-obj? (n-in-ty ld 2))))
+      (expect-verr-at "a Load through Const int=8" VERR-PTR-SLOT ld))
+    (let [st (build-ptr-slot-corruption! 1)]
+      (expect-verr-at "a Store through Const int=8" VERR-PTR-SLOT st))
+    (let [ld (build-ptr-slot-corruption! 2)]
+      ; the address really is typed `dyn`, which is what makes this the interesting one
+      (ps w "  o + 8 is typed ") (ty-print w (n-in-ty ld 2)) (ps w "\n")
+      (assert (!= (& (ty-kinds (n-in-ty ld 2)) VK-OBJ) 0))
+      (expect-verr-at "a Load through Add(o, 8)" VERR-PTR-SLOT ld))))
 
 ;; A merge's slot 0 is unused BY CONSTRUCTION (`region-compute` starts its meet at 1), so a node
 ;; parked there is a use nothing reads: exactly how a stale edge survives a rewrite and keeps a
@@ -700,6 +781,41 @@
 ;; how many comparisons the last run made. Second, it has to FIRE: a node is seeded with a type
 ;; strictly below its true computed one, which makes the next `compute` a rise, and the abort
 ;; that follows is observed from the parent process.
+;; A MEMORY TYPE'S CONTENTS MUST BE A VALUE, AND `t-mem` NOW ENFORCES IT. Three comments in this
+;; project already said it did: `ty-xdepth` answers 0 for a memory type BECAUSE of the
+;; restriction, and `shape-transition` cites `t-mem` as the precedent for its own check. It was
+;; not enforced, and the consequence was not cosmetic. A memory state parked in a Store's value
+;; slot minted `mem#1 mem#1 int`, nesting without bound, with `ty-depth` reporting 0 at every
+;; level so no depth guard applied, and `ty-print-exact` then ABORTED THE PROCESS on a graph
+;; `g-verify` called clean.
+;;
+;; The panic is the mint-site half; `a_memory_state_in_a_value_slot_is_caught` above is the
+;; graph-level half, and both are needed: the verifier refuses the graph, and the lattice refuses
+;; to represent the type even if some future compute tries to build one directly.
+(deftest a_memory_type_cannot_hold_a_memory_type
+  (let [w (stdout)]
+    (ps w "\n--- t-mem refuses a contents that is not a value ---\n")
+    ; the restriction, stated as the predicate the mint site asks
+    (assert (ty-mem-contents-ok? (t-int-con 5)))
+    (assert (ty-mem-contents-ok? (t-top)))
+    (assert (ty-mem-contents-ok? (t-bot)))
+    (assert (not (ty-mem-contents-ok? (t-mem-alias 0 (t-dyn)))))
+    (assert (not (ty-mem-contents-ok? (t-ctrl))))
+    ; and the mint site must DIE on it rather than intern it. Without the check the child reaches
+    ; `_exit(0)` and this fails.
+    (let [pid (fork)]
+      (if (= pid 0)
+          (do (t-mem-alias 0 (t-mem-alias 0 (t-dyn)))
+              (_exit 0)
+              0)
+        (let [st (alloc-stack i32)]
+          (store! st 0)
+          (waitpid pid st 0)
+          (let [status (cast i64 (load st)) sig (& status 127)]
+            (fmt w "  child wait status {d}: signal {d}\n" status sig)
+            (assert (!= sig 0))
+            0))))))
+
 (deftest a_rising_type_aborts_g_analyze
   (let [w (stdout)]
     ; a RAW fixture, built with no peepholing, so `g-analyze!` has real work to do and the

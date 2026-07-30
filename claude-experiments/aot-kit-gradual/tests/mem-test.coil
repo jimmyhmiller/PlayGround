@@ -1,36 +1,57 @@
-;; The M4 slice 4b gate: New, Load, Store and MemMerge.
+;; The M4 memory gate: slice 4b's four ops, and slice 4c-1's load-after-store forwarding.
 ;;
-;; 4a built the shape table and the memory type and gated them against each other. Nothing
-;; PRODUCED or CONSUMED a memory state, so `op-memory?` was legitimately false for every op and
-;; the whole apparatus was, in the roadmap's own words, untested as a claim about a graph. This
-;; suite is where it becomes one. Six claims, and the order is cause before consequence:
+;; 4b built New, Load, Store and MemMerge and gated them as a graph: they build, verify, print,
+;; reparse and RUN. It also pinned the one number 4c had to beat, namely what a load can honestly
+;; report at alias granularity (`undefined|int=5`, not `int=5`), so that this slice would be
+;; measured against what the analysis earned rather than against a hope.
+;;
+;; 4c-1 is the read side of the rewriting: `Load(p, Store(p, v, m))` is `v`. What makes it a
+;; separate slice rather than a line of code is that the decision procedure reads NO TYPE at all.
+;; A memory type describes an alias CLASS, so `store-compute` meets the stored value into the
+;; incoming contents and no alias-level type can ever say that THIS pointer's word is the one the
+;; store wrote (DESIGN.md section 4). The recovery is structural: the same alias class, and the
+;; same pointer NODE. So the claims this file has to make about forwarding are claims about the
+;; GRAPH and about what the program COMPUTES, and never about a type.
+;;
+;; The clauses, cause before consequence:
 ;;
 ;;   1. THE FOUR OPS RUN. A program with a heap in it builds, verifies clean, prints and reparses
 ;;      to the same bytes, and the interpreter returns the value that was stored. Every earlier
 ;;      milestone's corpus-wide gate already ranges over the memory fixtures, so this suite only
 ;;      has to say the things those cannot.
-;;   2. WHAT A LOAD REPORTS, EXACTLY, and it is `undefined|int` rather than `int=5`. A memory type
-;;      describes an alias CLASS, so an alias-level analysis cannot say that this pointer's word is
-;;      the one the store wrote. That number is pinned here so 4c's forwarding is measured against
-;;      what 4b actually earned rather than against a hope.
-;;   3. AN ALIAS IS A WORD, END TO END. 4a asserts that a transition inherits its parent's aliases;
-;;      here a store and a load through DIFFERENT shapes that share an edge hit the same word and
-;;      the interpreter reads the value back. That is the property that makes memory SSA work, and
-;;      until there was a Load it could only be asserted about a table.
-;;   4. TWO NEWS ARE TWO OBJECTS. `op-gvn?` excludes New, and the witness is a program that
-;;      compares two structurally identical allocations and answers false. Under value numbering it
-;;      answers true, the graph is internally consistent, and no verifier can see it.
-;;   5. A SHAPE-POLYMORPHIC MERGE KEEPS BOTH SHAPES, its two arms name different alias classes, and
-;;      the MemMerge at the exit describes their union. This is the M4 gate clause that is about
-;;      the lattice rather than about rewriting.
-;;   6. THE VERIFIER IS SPECIFICALLY RED, and the INTERPRETER catches what the verifier cannot.
-;;      The second half matters more: a Load whose memory edge does not carry its alias, and one
-;;      whose object has no such field, are both STRUCTURALLY perfect graphs. Only running them
-;;      says anything, which is the whole argument for having an oracle at all.
+;;   2. WHAT A LOAD REPORTS, EXACTLY, and it is `undefined|int` rather than `int=5`. 4b measured
+;;      this on the eager fixture; the eager fixture now forwards, so the measurement lives on its
+;;      RAW twin, which is never rewritten and still exhibits it exactly. Nothing about the claim
+;;      was weakened: it is what says forwarding could not have come from the lattice.
+;;   3. FORWARDING FIRES, AND WHAT IT LEAVES BEHIND. Zero loads on the smallest heap program, and
+;;      the Return's value is the literal 5.
+;;   4. FORWARDING IS DECIDED BY POINTER IDENTITY. Two allocations of one shape are one alias
+;;      class and two objects; the load must NOT take the other object's store. A rule that read
+;;      the store's value without comparing pointer nodes passes every other check in this project
+;;      and fails only here, and only through the interpreter.
+;;   5. FORWARDING REQUIRES THE SAME ALIAS. A Load whose memory edge does not carry its class is a
+;;      structurally perfect graph; a rule that matched on "the memory input is a Store" alone
+;;      would launder it into a plausible value instead of the EV-MEM the oracle reports.
+;;   6. A REFUSAL IS DEFERRED, NOT DECLINED. The rewrite is irreversible, so it asks for a proven
+;;      cone (D8) and refuses inside a settling one. `iterate!` sweeps, so the refusal has to come
+;;      back: the same program built RAW and then iterated reaches the same live count, the same
+;;      graph and the same answer as the eager build, under every seed.
+;;   7. AN ALIAS IS A WORD, END TO END, and TWO NEWS ARE TWO OBJECTS: 4b's two structural claims,
+;;      both of which needed adjusting to keep a real Load in the graph now that a forwardable one
+;;      disappears.
+;;   8. THE CORPUS IS STILL WHOLE. Every fixture verifies clean and no fixture leaves the Return's
+;;      memory wired to a killed node. That failure is not hypothetical: forwarding the last
+;;      reader of a store runs the kill cascade over the whole memory chain, and the Return built
+;;      on the next line reads a corpse. It is reported as VERR-DEAD-INPUT at the Return, a long
+;;      way from the fold that caused it.
+;;   9. THE VERIFIER IS SPECIFICALLY RED, and the INTERPRETER catches what the verifier cannot.
 ;;
 ;; THE VACUITY DEFENCE. Every sweep counts what it compared and refuses to pass below a floor, and
 ;; every provocation asserts the SPECIFIC named code rather than "something failed": a verifier
-;; that always says no and an interpreter that always fails would satisfy the weaker form.
+;; that always says no and an interpreter that always fails would satisfy the weaker form. For
+;; forwarding in particular there are floors in both directions, because "the load disappeared" is
+;; also satisfied by a rule that deletes every load it sees: the corpus is asserted to still
+;; CONTAIN loads, and the ones that survive are the ones named in clauses 4, 5 and 7.
 ;;
 ;;   coil test tests/mem-test.coil
 (module memtest)
@@ -61,7 +82,8 @@
 
 ;; Worklist seeds for the determinism sweep. The claim every seed defends is that a peephole
 ;; fixpoint is a property of the program and not of the pop order, and memory ops are where a
-;; missing revisit would show up as a memory edge pointing at the wrong state.
+;; missing revisit would show up as a memory edge pointing at the wrong state. It is also what
+;; says a DEFERRED forwarding is retried rather than lost to pop order.
 (const SEEDS i64 40)
 
 ;; Argument bindings per fixture in the differential clause, matching eval-test.coil.
@@ -72,7 +94,13 @@
 ;; The memory fixtures in the shared corpus. Naming them here rather than looping over the whole
 ;; corpus is deliberate: these claims are about memory, and a sweep that silently covered zero
 ;; memory fixtures would pass.
-(const MEM-FIXTURES i64 4)
+(const MEM-FIXTURES i64 7)
+
+;; The corpus is allowed to GROW; losing a fixture silently weakens every claim below that says
+;; "the whole corpus". 25 is what it holds today: 4c-1 added `23-object-two` as the negative
+;; witness for pointer identity, and the object-identity review added `24-object-returned` and its
+;; scratch twin, the first pair whose RESULT is an object.
+(const MEM-CORPUS-FLOOR i64 25)
 
 ; ---------------------------------------------------------------------------
 ; Reporting
@@ -123,6 +151,68 @@
             0)))
     (load k)))
 
+;; Nodes of this op that were CREATED and are now dead. `n-kill!` sets the dead flag and clears
+;; the inputs, but it leaves the op alone, so the arena still records that the node existed. For
+;; a Load that is exactly "this load was removed", and in this corpus a load is removed by one
+;; thing only, which is why it stands in for a forwarding counter. The companion claim in
+;; `the_corpus_forwards_loads_and_leaves_none_forwardable` is what makes that stand-in honest:
+;; every remaining forwardable load is counted too, and in the optimised mode there must be none.
+(defn count-dead-op [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (n-dead? (load i)) (= (n-op (load i)) op)) (store! k (+ (load k) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+;; The OR of `1 << aux` over every live node of this op: "which shapes" for a New, "which alias
+;; classes" for a Load or a Store. `popcount64` of it is how many DISTINCT ones, which is the
+;; question that separates "two allocations of one shape" from "one allocation seen twice".
+(defn aux-bits [(op i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut b) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (store! b (| (load b) (<< 1 (n-aux (load i)))))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load b)))
+
+;; THE CONTRACT'S OWN STATEMENT OF "the same word", written out here rather than called into
+;; node.coil. It is the DESIGN.md rule: one alias class is one field of one shape, and one node is
+;; one object because `op-gvn?` excludes New, so the pointer is compared by node identity. Stating
+;; it independently is the point: a gate that asked the implementation whether the implementation
+;; agreed with itself would pass with both halves of the rule deleted.
+(defn forwardable? [(ld i64)] (-> bool)
+  (let [m (n-in ld 1) p (n-in ld 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) false
+      (if (n-dead? m) false
+        (and (= (n-op m) OP-STORE)
+             (and (= (n-aux m) (n-aux ld)) (= (n-in m 2) p)))))))
+
+(defn count-forwardable [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-LOAD))
+                (if (forwardable? (load i)) (store! k (+ (load k) 1)) 0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(defn bytes-eq? [(a (slice u8)) (b (slice u8))] (-> bool)
+  (if (!= (slice-len a) (slice-len b)) false
+    (let [n (slice-len a) (mut i) 0 (mut same) true]
+      (loop
+        (if (or (>= (load i) n) (not (load same))) (break)
+          (do (if (!= (slice-get a (load i)) (slice-get b (load i))) (store! same false) 0)
+              (store! i (+ (load i) 1))
+              0)))
+      (load same))))
+
 ;; The corpus indices that have a heap in them, so "the memory fixtures" is a list and not a
 ;; phrase. `corpus-count` growing must not silently leave this behind, which is what the floor is.
 (defn mem-fixture [(i i64)] (-> i64)
@@ -131,7 +221,91 @@
     1 CX-OBJECT-RAW
     2 CX-SHAPE-POLY
     3 CX-OBJECT-LOOP
+    4 CX-OBJECT-TWO
+    5 CX-OBJECT-RET
+    6 CX-OBJECT-RET-SCRATCH
     (do (mfail-head "mem-fixture: index out of range") (abort) 0)))
+
+; ---------------------------------------------------------------------------
+; Builders this suite needs and the corpus cannot provide
+; ---------------------------------------------------------------------------
+;; THE SMALLEST HEAP PROGRAM UNDER A CALLER-CHOSEN SEED, in both build modes. These mirror
+;; `fx-object` and `fx-object-raw` node for node, and they are duplicated here for exactly one
+;; reason: every corpus builder calls `graph-reset! 1` itself, so re-seeding before
+;; `corpus-build!` gets seed 1 back and a "multi-seed" sweep over the corpus compares a graph
+;; with itself. A claim about pop order needs a builder that takes the seed.
+(defn build-object-eager! [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+      (let [o  (n-obj-ptr nw)
+            m1 (n-obj-mem nw 0)]
+        (let [m2 (n-store! m1 o (mk-int 5) ax)]
+          ; THE MEMORY IS PINNED ACROSS THE LOAD'S CONSTRUCTION. `n-load!` peepholes on the spot,
+          ; the load forwards, and subsuming it drops the Store's ONLY use: the cascade then takes
+          ; the Store, the projections, the New and the whole memory chain, and the `ret-to-mem` on
+          ; the next line wires a corpse into the Return's memory slot. Nothing says a word here;
+          ; VERR-DEAD-INPUT reports it much later, at the Return.
+          (n-keep! m2)
+          (let [v (n-load! m2 o ax)]
+            (n-unkeep! m2)
+            (ret-to-mem (g-start) v m2))))))
+  (iterate!) 0)
+
+;; The same program with NOTHING rewritten and, optionally, nothing analysed either. Returns the
+;; Load's node id, because the deferral claim is about that node in particular.
+;;
+;; `analyse?` false is the mode that matters and it is not a convenience: with every type still at
+;; ANY, the load's input cone is by definition not at a fixpoint, so `n-ty-proven?` is FALSE and
+;; the rewrite is REQUIRED to refuse. That is the only way to reach the refusal at all. It was
+;; measured: over 40 seeds, an analysed build never once refuses (the cone is already settled
+;; before any peephole runs), so a "deferred rewrite" gate built on the analysed fixture would be
+;; gating a branch that never executes.
+(defn build-object-unrewritten! [(seed i64) (analyse? bool)] (-> i64)
+  (graph-reset! seed)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [m0 (raw-arg (t-mem-alias ax (t-top)))
+          nw (n-new OP-NEW sx)]
+      (n-add-def! nw (g-start))
+      (n-add-def! nw m0)
+      (let [o  (n-new1 OP-PROJ 0 nw)
+            m1 (n-new1 OP-PROJ 1 nw)]
+        (let [m2 (n-new4 OP-STORE ax NO-NODE m1 o (raw-int 5))]
+          (let [ld  (n-new3 OP-LOAD ax NO-NODE m2 o)
+                ret (n-new3 OP-RETURN 0 (g-start) NO-NODE NO-NODE)]
+            (n-set-def! ret 1 ld)
+            (n-set-def! ret 2 m2)
+            (n-add-def! (g-stop) ret)
+            ; types to a fixpoint, edges untouched, or not even that
+            (if analyse? (do (g-analyze!) 0) 0)
+            ld))))))
+
+;; A LOAD WHOSE MEMORY EDGE DOES NOT CARRY ITS CLASS, built so that every OTHER half of the
+;; forwarding rule holds. The object is of shape `{x,y}` so it really has both fields, the load's
+;; memory input really is a Store, and the store's pointer really is the load's pointer NODE. The
+;; single difference is the alias, and the value it would launder (5) is a perfectly plausible
+;; answer for a program whose real answer is "this memory state does not describe class y".
+;; Returns the load's node id.
+(defn build-miswired-alias! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx  (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [sxy (shape-transition sx "y" (t-dyn))
+          ax  (shape-field-alias sx 0)]
+      (let [ay (shape-field-alias sxy 1)]
+        (let [nw (n-new-obj2! (g-start) sxy (mk-mem-in ax) (mk-mem-in ay))]
+          (let [o (n-obj-ptr nw)]
+            (let [mx (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+              (n-keep! mx)
+              (let [ld (n-load! mx o ay)]
+                (n-unkeep! mx)
+                (ret-to-mem (g-start) ld (n-memmerge2! mx (n-obj-mem nw 1)))
+                (iterate!)
+                ld))))))))
 
 ; ===========================================================================
 ; 1. The four ops run, and the whole existing gate applies to them
@@ -141,10 +315,14 @@
 ;; at all. A memory fixture that quietly built no memory node would pass the verifier, the round
 ;; trip and the differential comparison, and every claim this suite makes about "the memory
 ;; fixtures" would be about straight-line arithmetic.
+;;
+;; It is asserted on the RAW twin, because that is the build mode in which the program's own Load
+;; still exists: 4c-1 forwards the eager one away, and a gate that counted ops after the rewrite
+;; could no longer tell "the front end never built a Load" from "the optimiser removed it".
 (deftest the_smallest_program_with_a_heap_runs
   (let [w (stdout)]
-    (corpus-build! CX-OBJECT)
-    (ps w "\n--- o = {x}; o.x = 5; return o.x ---\n")
+    (corpus-build! CX-OBJECT-RAW)
+    (ps w "\n--- o = {x}; o.x = 5; return o.x   (raw: nothing rewritten) ---\n")
     (g-print-flat w)
     (assert (= (count-op OP-NEW) 1))
     (assert (= (count-op OP-STORE) 1))
@@ -172,17 +350,18 @@
     (assert (rt-eq? (ev-result) (RInt 5)))
     (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n")))
 
-;; WHAT A LOAD REPORTS, PINNED EXACTLY. This is the number 4c has to beat, and writing it down is
-;; the difference between "forwarding improved something" and a measurement.
+;; WHAT A LOAD REPORTS, PINNED EXACTLY, AND IT IS THE NUMBER 4c-1 BEAT. Writing it down is the
+;; difference between "forwarding improved something" and a measurement.
 ;;
 ;; The union is not a defect to be apologised for: a `Store` produces the new state of an alias
 ;; CLASS, and every other object in that class still holds what it held, so meeting the incoming
 ;; contents is the only sound answer at this granularity. Recovering the 5 needs the observation
-;; that the load's pointer is the SAME NODE as the store's, which is structural and is 4c's whole
-;; job. See the header of node.coil's memory compute section.
+;; that the load's pointer is the SAME NODE as the store's, which is structural. So this test is
+;; also the argument that 4c-1 could not have been done in the lattice: on a graph where nothing
+;; is rewritten, the best available type is still the union, for ever.
 (deftest a_load_reports_its_whole_alias_class_and_not_the_pointer
   (let [w (stdout) ba (alloc-stack (array u8 256))]
-    (corpus-build! CX-OBJECT)
+    (corpus-build! CX-OBJECT-RAW)
     (let [ld (find-op OP-LOAD)
           st (find-op OP-STORE)]
       (ps w "\n--- what an alias-level load can and cannot say ---\n")
@@ -206,7 +385,506 @@
         (ps w "  the load prints as ") (ps w txt) (ps w "\n")))))
 
 ; ===========================================================================
-; 2. An alias is a word, across a transition, end to end
+; 2. Load after store forwards, by pointer identity
+; ===========================================================================
+;; THE 4c-1 CLAIM ITSELF, on the same program the clause above measured raw. The load is gone and
+;; the Return's value is the literal 5.
+;;
+;; What makes this non-vacuous is the pair: the RAW build of this same program, three assertions
+;; up, still holds a Load whose type is the union `undefined|int=5`. Delete `load-idealize` and
+;; the eager build becomes the raw one, which is what the suite pinned before this slice: one
+;; surviving Load, a Return whose value is that Load, and a type that is not a constant. Both
+;; halves are asserted here, against each other, in one test.
+(deftest load_after_store_forwards_to_the_stored_value
+  (let [w (stdout)]
+    ; the number to beat, re-read here so the comparison is in one place
+    (corpus-build! CX-OBJECT-RAW)
+    (let [raw-loads (count-op OP-LOAD)
+          raw-ty    (n-ty (find-op OP-LOAD))]
+      (assert (= raw-loads 1))
+      (assert (not (ty-const? raw-ty)))
+
+      (corpus-build! CX-OBJECT)
+      (ps w "\n--- o = {x}; o.x = 5; return o.x   (forwarded) ---\n")
+      (g-print-flat w)
+      (assert (= (g-verify) 0))
+      (assert (= (g-leaked-count) 0))
+
+      ; ZERO LOADS SURVIVE
+      (assert (= (count-op OP-LOAD) 0))
+      (assert (= (find-op OP-LOAD) NO-NODE))
+      ; and one was built and removed, so "zero" is not "the front end emitted none"
+      (assert (= (count-dead-op OP-LOAD) 1))
+
+      ; THE RETURN'S VALUE IS THE STORED CONSTANT, by identity and by type
+      (let [ret (find-op OP-RETURN)]
+        (assert (!= ret NO-NODE))
+        (let [v (n-in ret 1)]
+          (assert (not (n-dead? v)))
+          (assert (= (n-op v) OP-CONST))
+          (assert (ty-const? (n-ty v)))
+          (assert (= (n-ty v) (t-int-con 5)))
+          ; it is strictly BELOW what the raw build could say, which is the measurement
+          (assert (!= (n-ty v) raw-ty))
+          (assert (ty-isa (n-ty v) raw-ty))
+          (ps w "  the Return's value is ") (ty-print w (n-ty v))
+          (ps w ", where the raw build could only say ") (ty-print w raw-ty) (ps w "\n"))
+
+        ; AND THE MEMORY IS STILL ROOTED AT THE EXIT, not left pointing at a corpse. Forwarding
+        ; the store's last reader is precisely what runs the kill cascade over the memory chain.
+        (assert (>= (n-nins ret) 3))
+        (let [m (n-in ret 2)]
+          (assert (!= m NO-NODE))
+          (assert (not (n-dead? m)))
+          (assert (ty-mem? (n-ty m)))
+          ; the Store survived: nothing about this slice deletes stores, that is 4c-2
+          (assert (= (n-op m) OP-STORE))
+          (assert (= (count-op OP-STORE) 1))
+          (assert (= (count-op OP-NEW) 1))))
+
+      ; AND IT STILL COMPUTES 5. The graph changed; the program did not.
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 5)))
+      (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n"))))
+
+;; POINTER IDENTITY IS THE DECISION, and this is the fixture that says so.
+;;
+;;   a = {x}; a.x = 1; b = {x}; b.x = 2; return a.x;
+;;
+;; ONE shape, so ONE alias class, so ONE memory chain: `b`'s store sits between `a`'s store and
+;; the load. Both pointers have the same TYPE, `obj{x}`. Every fact a type could offer says the
+;; two stores are interchangeable. The only thing that says the load must not take the 2 is that
+;; the store's pointer is a different NODE.
+;;
+;; A rule that skipped the pointer comparison returns 2 here, and the graph that returns 2 passes
+;; the verifier, the print/parse round trip, the leak check and every structural count in this
+;; file. Only the interpreter tells them apart (D12), which is why the answer is asserted three
+;; ways: it is 1, it is not 2, and it is not undefined.
+(deftest forwarding_is_decided_by_pointer_identity
+  (let [w (stdout)]
+    (corpus-build! CX-OBJECT-TWO)
+    (ps w "\n--- a = {x}; a.x = 1; b = {x}; b.x = 2; return a.x ---\n")
+    (g-print-flat w)
+    (assert (= (g-verify) 0))
+    (assert (= (count-op OP-NEW) 2))
+    (assert (= (count-op OP-STORE) 2))
+    ; ONE alias class between the two stores, and ONE shape between the two allocations: there is
+    ; nothing here for a class-based or a shape-based rule to separate.
+    (assert (= (popcount64 (aux-bits OP-STORE)) 1))
+    (assert (= (popcount64 (aux-bits OP-NEW)) 1))
+
+    ; THE LOAD SURVIVES THE WHOLE OF iterate!
+    (assert (= (count-op OP-LOAD) 1))
+    (assert (= (count-dead-op OP-LOAD) 0))
+    (let [ld (find-op OP-LOAD)]
+      (let [st (n-in ld 1)]
+        ; its memory input IS a Store of the SAME class, so every non-pointer half of the rule
+        ; holds and the refusal can only have come from the pointer comparison
+        (assert (= (n-op st) OP-STORE))
+        (assert (not (n-dead? st)))
+        (assert (= (n-aux st) (n-aux ld)))
+        (assert (!= (n-in st 2) (n-in ld 2)))
+        ; and the two pointers are indistinguishable BY TYPE
+        (assert (= (n-ty (n-in st 2)) (n-ty (n-in ld 2))))
+        (assert (not (forwardable? ld)))
+        (fmt w "  the load reads n{d} and the store writes n{d}: same class {d}, same type\n"
+             (n-in ld 2) (n-in st 2) (n-aux ld))
+        (ps w "  both pointers are ") (ty-print w (n-ty (n-in ld 2))) (ps w "\n"))
+      ; nor did it fold: the load's own type is still the class union
+      (assert (not (ty-const? (n-ty ld)))))
+
+    ; AND THE ANSWER IS a.x, WHICH IS 1
+    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+    (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n")
+    (assert (rt-eq? (ev-result) (RInt 1)))
+    (assert (not (rt-eq? (ev-result) (RInt 2))))       ; b's store, the pointer-blind answer
+    (assert (not (rt-eq? (ev-result) (RUndef))))))     ; and not "the word was never written"
+
+;; FORWARDING REQUIRES THE SAME ALIAS, and the witness is a graph that is structurally perfect.
+;;
+;; Everything the rule needs except the class is present: the object has both fields, the load's
+;; memory input IS a Store, and the store's pointer IS the load's pointer node. The memory state
+;; describes class x; the load names class y. `g-verify` is CLEAN on it, asserted rather than
+;; assumed, and `load-compute` reports the contents of a class the state does not describe, which
+;; is a perfectly ordinary type.
+;;
+;; So a rule that matched on "the memory input is a Store" alone would hand this load the 5 and
+;; launder a miswired memory edge into a plausible value. What the program actually does is fail,
+;; by name: EV-MEM, at the load that read it.
+(deftest forwarding_refuses_a_memory_edge_that_does_not_carry_its_alias
+  (let [w (stdout)]
+    (let [ld (build-miswired-alias!)]
+      (ps w "\n--- a Load naming class y whose memory is class x's Store ---\n")
+      (g-print-flat w)
+      ; the graph is structurally impeccable
+      (assert (= (g-verify) 0))
+      ; the load is still there
+      (assert (not (n-dead? ld)))
+      (assert (= (count-op OP-LOAD) 1))
+      (assert (= (count-dead-op OP-LOAD) 0))
+      (let [st (n-in ld 1)]
+        ; ... and every OTHER half of the forwarding rule holds, which is what makes the refusal
+        ; attributable to the alias comparison and to nothing else
+        (assert (= (n-op st) OP-STORE))
+        (assert (= (n-in st 2) (n-in ld 2)))
+        (assert (!= (n-aux st) (n-aux ld)))
+        (assert (not (forwardable? ld)))
+        ; the value it would have laundered is a plausible one
+        (assert (= (n-ty (n-in st 3)) (t-int-con 5)))
+        (fmt w "  store writes class {d}, load reads class {d}, same pointer n{d}\n"
+             (n-aux st) (n-aux ld) (n-in ld 2)))
+      ; and the oracle names what is wrong with it
+      (assert (= (ev-run-bound 1 BUDGET) EV-MEM))
+      (ps w "  the interpreter reports ") (ps w (ev-status-name EV-MEM)) (ps w "\n"))))
+
+; ===========================================================================
+; 5b. A MISWIRED ACCESS SURVIVES THE FOLD, NOT ONLY THE FORWARDING RULE
+; ===========================================================================
+;; THE CLAUSE ABOVE MEASURES ONE PATH OUT OF TWO, AND THE OTHER ONE WAS OPEN.
+;;
+;; `n-peephole` runs its CONSTANT FOLD before it ever calls `n-idealize`. `op-foldable?` is
+;; `>= OP-PROJ` and a Load is past that, so whenever a Load's type is a constant the node is
+;; replaced by a Const and deleted, and `load-idealize`'s carefully written alias comparison never
+;; runs at all. The fixture above survives that only by an accident of arithmetic: its store sits
+;; on the New's projection, so `new-compute` has met `undefined` into the contents and the load's
+;; type is `undefined|int=5`, which is not constant.
+;;
+;; Move the store onto the class's INCOMING state and the contents is a bare `int=5`. Then one
+;; verifier-clean graph has two observable answers, EV-MEM before `iterate!` and 5 after it,
+;; produced by nothing but the fold. That is LAW 10's differential oracle failing across a pass,
+;; and it is precisely the laundering clause 5 exists to forbid, arriving through the door clause
+;; 5 does not watch.
+;;
+;; The same hole exists on the SHAPE half, and there it needs no contrivance at all: every freshly
+;; allocated field holds `undefined`, which IS a constant, so an unguarded fixed-offset access into
+;; an allocation-derived class folds to `undefined` and reports success.
+;;
+;; The fix is in `load-compute` rather than in the fold: it reports ANY when the memory state does
+;; not carry its class and ALL when the pointer's shape does not carry the word, so there is no
+;; constant to fold and the Load survives for the interpreter to refuse. Each builder below is
+;; asserted BEFORE and AFTER `iterate!` on the SAME graph, because "the answer did not change" is
+;; the claim, and a gate that only looked at the finished graph could not make it.
+
+;; `mx0` and `my0` are the incoming states of two classes, and the store writes class x THROUGH
+;; ITS INCOMING STATE, so its contents is exactly `int=5` with no `undefined` met into it. The load
+;; names class y. Built raw and analysed, so that `iterate!` is the only thing that then runs.
+;;
+;; `plus?` puts an `Add(ld, 1)` between the load and the Return. It is the variant that says the
+;; defect is the TYPE and not merely that one exit: blocking the fold for OP-LOAD alone would
+;; still let the bogus `int=5` flow into the Add, which folds to 6 and drops the load anyway.
+(defn build-const-miswired-alias! [(plus? bool)] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx  (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [sxy (shape-transition sx "y" (t-dyn))
+          ax  (shape-field-alias sx 0)]
+      (let [ay (shape-field-alias sxy 1)]
+        (let [mx0 (n-new1 OP-ARG (t-mem-alias ax (t-top)) (g-start))
+              my0 (n-new1 OP-ARG (t-mem-alias ay (t-top)) (g-start))]
+          (let [nw (n-new OP-NEW sxy)]
+            (n-add-def! nw (g-start)) (n-add-def! nw mx0) (n-add-def! nw my0)
+            (let [o  (n-new1 OP-PROJ 0 nw)
+                  m0 (n-new1 OP-PROJ 1 nw)
+                  m1 (n-new1 OP-PROJ 2 nw)]
+              (let [st (n-new4 OP-STORE ax NO-NODE mx0 o
+                               (n-new1 OP-CONST (t-int-con 5) (g-start)))]
+                (let [ld (n-new3 OP-LOAD ay NO-NODE st o)]
+                  (let [v (if plus?
+                              (n-new3 OP-ADD 0 NO-NODE ld
+                                      (n-new1 OP-CONST (t-int-con 1) (g-start)))
+                            ld)]
+                    (let [r (n-new3 OP-RETURN 0 (g-start) v
+                                    (n-new3 OP-MEMMERGE 0 NO-NODE m0 m1))]
+                      (n-add-def! (g-stop) r)
+                      (g-analyze!)
+                      ld)))))))))))
+
+;; AN UNGUARDED FIXED-OFFSET ACCESS, WITH NOTHING CONTRIVED ABOUT THE MEMORY. Two allocations of
+;; two shapes; the load names class y, its memory edge IS class y's state, and its pointer is the
+;; object of shape `{x}`, which has no field y. That is the EV-SHAPE corruption, and class y's
+;; contents here is the constant `undefined` for the most ordinary reason there is: it comes off
+;; an allocation, and `new-compute` initialises every fresh field to `undefined`.
+;;
+;; So this one needs no hand-written memory type to reach the fold. Any front end that emitted
+;; `o.y` without a shape guard produces it.
+(defn build-unguarded-field! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        sy (shape-transition SHAPE-ROOT "y" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)
+          ay (shape-field-alias sy 0)]
+      (let [mx0 (n-new1 OP-ARG (t-mem-alias ax (t-top)) (g-start))
+            my0 (n-new1 OP-ARG (t-mem-alias ay (t-top)) (g-start))]
+        (let [na (n-new OP-NEW sy)
+              nb (n-new OP-NEW sx)]
+          (n-add-def! na (g-start)) (n-add-def! na my0)
+          (n-add-def! nb (g-start)) (n-add-def! nb mx0)
+          ; the {y} allocation's OBJECT projection is never created: nothing reads that object,
+          ; and an orphan projection would be a leak rather than the corruption under test
+          (let [ma (n-new1 OP-PROJ 1 na)
+                ob (n-new1 OP-PROJ 0 nb)
+                mb (n-new1 OP-PROJ 1 nb)]
+            (let [ld (n-new3 OP-LOAD ay NO-NODE ma ob)]
+              (let [r (n-new3 OP-RETURN 0 (g-start) ld
+                              (n-new3 OP-MEMMERGE 0 NO-NODE ma mb))]
+                (n-add-def! (g-stop) r)
+                (g-analyze!)
+                ld))))))))
+
+;; A STORE WHOSE ONLY READER IS A FORWARDABLE LOAD, AND WHOSE MEMORY RESULT IS NOT AT THE EXIT.
+;; The store-side twin of clause 5, and nothing gated it.
+;;
+;; The load is impeccable: same class, same pointer NODE, so `load-store-same-word?` says yes.
+;; What is wrong is the STORE. `o` is of shape `{y}` and the store names class x, so the program
+;; refuses it with EV-SHAPE. Forwarding the load drops the store's only reader, the kill cascade
+;; collects the store, and that refusal disappears with it; the same program then returns 5.
+;;
+;; Nothing here is about the LOAD's own access, which is why the fix is a refusal in
+;; `load-idealize` rather than another answer from `load-compute`: a rewrite must not consume an
+;; access the program would refuse.
+(defn build-store-launder! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        sy (shape-transition SHAPE-ROOT "y" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)
+          ay (shape-field-alias sy 0)]
+      (let [mx0 (n-new1 OP-ARG (t-mem-alias ax (t-top)) (g-start))
+            my0 (n-new1 OP-ARG (t-mem-alias ay (t-top)) (g-start))]
+        (let [nw (n-new OP-NEW sy)]
+          (n-add-def! nw (g-start)) (n-add-def! nw my0)
+          (let [o  (n-new1 OP-PROJ 0 nw)
+                mo (n-new1 OP-PROJ 1 nw)]
+            (let [st (n-new4 OP-STORE ax NO-NODE mx0 o
+                             (n-new1 OP-CONST (t-int-con 5) (g-start)))]
+              (let [ld (n-new3 OP-LOAD ax NO-NODE st o)]
+                ; THE STORE'S MEMORY RESULT IS NOT AT THE EXIT: the Return carries the New's own
+                ; projection, so this load is the store's only reader
+                (let [r (n-new3 OP-RETURN 0 (g-start) ld mo)]
+                  (n-add-def! (g-stop) r)
+                  (g-analyze!)
+                  ld)))))))))
+
+;; THE NEGATIVE CONTROL FOR THE ONE ABOVE, and without it the refusal could be "declines whenever
+;; the store's memory result is unrooted", which would kill every legitimate dead-store case 4c-3
+;; is going to want. Same shape of graph, same unrooted store, but the object really is of the
+;; shape the store's class belongs to and the store extends that class's own state. Here the
+;; forwarding MUST happen.
+(defn build-store-sound-unrooted! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [mx0 (n-new1 OP-ARG (t-mem-alias ax (t-top)) (g-start))]
+        (let [nw (n-new OP-NEW sx)]
+          (n-add-def! nw (g-start)) (n-add-def! nw mx0)
+          (let [o  (n-new1 OP-PROJ 0 nw)
+                mo (n-new1 OP-PROJ 1 nw)]
+            (let [st (n-new4 OP-STORE ax NO-NODE mo o
+                             (n-new1 OP-CONST (t-int-con 5) (g-start)))]
+              (let [ld (n-new3 OP-LOAD ax NO-NODE st o)]
+                (let [r (n-new3 OP-RETURN 0 (g-start) ld mo)]
+                  (n-add-def! (g-stop) r)
+                  (g-analyze!)
+                  ld)))))))))
+
+;; The shared shape of every assertion in this clause: the graph is structurally clean, the
+;; interpreter refuses it by NAME, and running `iterate!` on that very graph changes neither.
+;; Counting the live loads is what says the refusal is still ATTACHED to a node rather than to a
+;; graph that no longer contains the access.
+(defn a-refusal-survives-iterate [(what (slice u8)) (ld i64) (status i64)] (-> i64)
+  (let [w (stdout)]
+    (ps w "\n--- ") (ps w what) (ps w " ---\n")
+    (assert (= (g-verify) 0))
+    (assert (= (count-op OP-LOAD) 1))
+    ; the load's type is not a constant, which is the whole reason it is still here
+    (assert (not (ty-const? (n-ty ld))))
+    (ps w "  the load reports ") (ty-print w (n-ty ld)) (ps w "\n")
+    (assert (= (ev-run-bound 1 BUDGET) status))
+    (ps w "  before iterate!: ") (ps w (ev-status-name status)) (ps w "\n")
+    (iterate!)
+    (assert (= (g-verify) 0))
+    (assert (= (count-op OP-LOAD) 1))
+    (assert (= (ev-run-bound 1 BUDGET) status))
+    (ps w "  after  iterate!: ") (ps w (ev-status-name (ev-status)))
+    (fmt w "   ({d} live load(s))\n" (count-op OP-LOAD))
+    0))
+
+(deftest a_miswired_access_is_not_laundered_by_the_constant_fold
+  (let [w (stdout)]
+    ; 1. the alias half, with the store's contents a bare int=5
+    (a-refusal-survives-iterate "a Load on class y, off a class-x state whose contents is int=5"
+                                (build-const-miswired-alias! false) EV-MEM)
+
+    ; 2. the same, with the load's value consumed by an Add. Without the compute fix the Add folds
+    ;    to int=6 and the load is collected even if the fold is blocked for OP-LOAD alone.
+    (let [ld (build-const-miswired-alias! true)]
+      (a-refusal-survives-iterate "the same, with the load's value going into an Add" ld EV-MEM)
+      (assert (= (count-op OP-ADD) 1))
+      (let [add (find-op OP-ADD)]
+        (assert (not (ty-const? (n-ty add))))
+        (ps w "  the Add above it reports ") (ty-print w (n-ty add)) (ps w "\n")))
+
+    ; 3. the shape half, on memory that came off an allocation, so the contents is the constant
+    ;    `undefined` with nothing hand-written anywhere
+    (let [ld (build-unguarded-field! )]
+      (assert (= (ty-mem-contents (n-in-ty ld 1)) (t-undef)))
+      (assert (ty-const? (ty-mem-contents (n-in-ty ld 1))))
+      (ps w "\n  (the class's contents really is the constant ")
+      (ty-print w (ty-mem-contents (n-in-ty ld 1))) (ps w ")\n")
+      (a-refusal-survives-iterate "a Load of a field the pointer's shape does not carry"
+                                  ld EV-SHAPE))))
+
+(deftest forwarding_refuses_a_store_the_program_itself_refuses
+  (let [w (stdout)]
+    ;; THE MISWIRED STORE. Its access is the thing that is wrong, the load on top of it is
+    ;; perfect, and the load is the store's only reader.
+    (let [ld (build-store-launder!)]
+      (ps w "\n--- a Store the program refuses, whose only reader is a forwardable Load ---\n")
+      (assert (= (g-verify) 0))
+      ; every structural half of the forwarding rule holds: this is not a decline by the alias or
+      ; the pointer comparison
+      (assert (forwardable? ld))
+      (assert (= (ev-run-bound 1 BUDGET) EV-SHAPE))
+      (ps w "  before iterate!: ") (ps w (ev-status-name EV-SHAPE)) (ps w "\n")
+      (iterate!)
+      (assert (= (g-verify) 0))
+      ; the store is still here, because the load that would have consumed it declined
+      (assert (= (count-op OP-STORE) 1))
+      (assert (= (count-op OP-LOAD) 1))
+      (assert (= (ev-run-bound 1 BUDGET) EV-SHAPE))
+      (fmt w "  after  iterate!: {s}   ({d} store(s), {d} load(s) left)\n"
+           (ev-status-name (ev-status)) (count-op OP-STORE) (count-op OP-LOAD)))
+
+    ;; THE NEGATIVE CONTROL. Identical graph shape, identical unrooted store, an access the
+    ;; program does NOT refuse. Forwarding fires, the store is collected with its last reader, and
+    ;; the answer is the stored 5. Without this the clause above would be satisfied by a
+    ;; `load-idealize` that had simply stopped forwarding.
+    (let [ld (build-store-sound-unrooted!)]
+      (ps w "\n--- the same graph with an access the program accepts ---\n")
+      (assert (= (g-verify) 0))
+      (assert (forwardable? ld))
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 5)))
+      (iterate!)
+      (assert (= (g-verify) 0))
+      (assert (= (count-op OP-LOAD) 0))
+      (assert (= (count-op OP-STORE) 0))
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 5)))
+      (ps w "  forwarded: 0 loads, 0 stores, and the answer is still ")
+      (rt-print w (ev-result)) (ps w "\n"))))
+
+;; A PROOF-GATED REFUSAL IS DEFERRED, NOT DECLINED.
+;;
+;; The rewrite reads no type, but it is IRREVERSIBLE, so it asks for a proven cone anyway (D8): a
+;; Store in a still-settling cone is one the sweep may yet replace, and taking its value commits
+;; to its identity permanently. That refusal happens inside a graph that is mid-analysis, and
+;; nothing re-queues a node when what blocked it was "the cone had not settled": the blocker's
+;; type may never change again, so neither `wl-push-outs!` nor the deps list brings it back. Only
+;; the SWEEP in `iterate!` does. Without it, forwarding would be a function of the pop order.
+;;
+;; THE REFUSAL IS OBSERVED, NOT ASSUMED, and that took a measurement to get right. The obvious
+;; fixture (build raw, `g-analyze!` to a type fixpoint, then iterate) never refuses even once:
+;; instrumenting `load-idealize` over 40 seeds counted zero proof-gated refusals on it, because
+;; the analysis has already settled the whole cone before any peephole runs. A gate written on
+;; that fixture would be gating a branch that never executes.
+;;
+;; So this one leaves the graph UNANALYSED, every type still at ANY. The cone is then not at a
+;; fixpoint by definition, `n-ty-proven?` is false, and the rewrite MUST refuse. Both halves are
+;; asserted directly: the load is peepholed by hand and observed to survive, and only then is
+;; `iterate!` allowed to run and required to land the forwarding anyway. Same live count, same
+;; text and same answer as the eager build, under every seed.
+;;
+;; The seed is also why these builders are local rather than `corpus-build!`: every corpus fixture
+;; calls `graph-reset! 1` itself, so a sweep that re-seeds and then calls `corpus-build!` compares
+;; seed 1 with seed 1.
+(deftest a_refused_forwarding_is_deferred_and_lands_under_every_seed
+  (let [w (stdout)
+        ba (alloc-stack (array u8 4096))
+        bb (alloc-stack (array u8 4096))
+        (mut checked) 0 (mut refused) 0]
+    (ps w "\n--- deferred forwarding: unrewritten, then iterate!, under every seed ---\n")
+    (build-object-eager! 1)
+    (let [eager-live  (g-live-count)
+          eager-loads (count-op OP-LOAD)
+          eager-txt   (g-render (cast (ptr i8) ba) 4096)]
+      (assert (= eager-loads 0))
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 5)))
+      (fmt w "  the eager build settles at {d} live nodes and no load\n" eager-live)
+
+      (let [(mut s) 1]
+        (loop
+          (if (> (load s) SEEDS) (break)
+            (do (let [ld (build-object-unrewritten! (load s) false)]
+                  ; THE OPPORTUNITY IS THERE AND THE PROOF IS NOT, which is the state in which the
+                  ; rewrite is required to refuse
+                  (assert (= (count-op OP-LOAD) 1))
+                  (assert (forwardable? ld))
+                  (assert (not (n-ty-proven? ld)))
+                  ; PEEPHOLE IT BY HAND AND WATCH IT REFUSE. `n-peephole` returns the node to use
+                  ; from here on, so getting the load back is the refusal, observed at the moment
+                  ; it happens rather than inferred from the fixpoint.
+                  (if (and (= (n-peephole ld) ld) (= (n-op ld) OP-LOAD))
+                      (do (store! refused (+ (load refused) 1)) 0)
+                    (do (mfail-head "the rewrite fired on an unproven cone")
+                        (let [e (stderr)] (fmt e "  seed {d}: load n{d} folded early\n" (load s) ld))
+                        (abort) 0))
+                  ; NOW LET THE SWEEP HAVE IT. The load must be gone, and the graph must be the
+                  ; one the eager build reached, whatever order the worklist popped in.
+                  (iterate!)
+                  (let [txt (g-render (cast (ptr i8) bb) 4096)]
+                    (if (and (and (= (count-op OP-LOAD) 0) (= (g-live-count) eager-live))
+                             (bytes-eq? eager-txt txt)) 0
+                      (do (mfail-head "a deferred forwarding did not land")
+                          (let [e (stderr)]
+                            (fmt e "  seed {d}: {d} loads, {d} live nodes (eager: {d})\n"
+                                 (load s) (count-op OP-LOAD) (g-live-count) eager-live)
+                            (ps e eager-txt) (ps e "  ---\n") (ps e txt))
+                          (abort) 0)))
+                  (assert (= (g-verify) 0))
+                  (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                  (assert (rt-eq? (ev-result) (RInt 5)))
+                  0)
+                (store! checked (+ (load checked) 1))
+                (store! s (+ (load s) 1))
+                0))))
+      (fmt w "  {d} seeds refused first and landed after\n" (load refused))
+      (assert (= (load checked) SEEDS))
+      ; every seed reached the refusal: this is the count that stops the clause above from being
+      ; a description of a branch nothing executes
+      (assert (= (load refused) SEEDS)))
+
+    ;; AND THE OTHER PHASE ORDER, which is a different claim and the one ROADMAP's open item 2 is
+    ;; about: a graph that arrives fully ANALYSED and unrewritten must optimise to the same place.
+    ;; Nothing refuses here (the cone is settled before the first peephole), so this is not the
+    ;; deferral claim; it is "analyse to a fixpoint, then transform" reaching the eager answer.
+    (build-object-eager! 1)
+    (let [eager-live (g-live-count) (mut s) 1]
+      (loop
+        (if (> (load s) SEEDS) (break)
+          (do (let [ld (build-object-unrewritten! (load s) true)]
+                (assert (= (count-op OP-LOAD) 1))
+                (assert (forwardable? ld))
+                ; analysed to a fixpoint, so the graph is verifiable BEFORE any rewriting
+                (assert (= (g-verify) 0))
+                (assert (n-ty-proven? ld))
+                (iterate!)
+                (assert (= (count-op OP-LOAD) 0))
+                (assert (= (g-live-count) eager-live))
+                (assert (= (g-verify) 0))
+                (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                (assert (rt-eq? (ev-result) (RInt 5)))
+                0)
+              (store! s (+ (load s) 1))
+              0)))
+      (fmt w "  and {d} analysed-then-transformed builds reach the same {d} nodes\n"
+           SEEDS eager-live))))
+
+; ===========================================================================
+; 3. An alias is a word, across a transition, end to end
 ; ===========================================================================
 ;; 4a's claim was about the TABLE: `{x}` and `{x,y}` give field x the same alias and the same
 ;; offset, because the edge that introduced x is one edge. This is the same claim with a program
@@ -216,6 +894,13 @@
 ;; Allocate per (shape, field) instead and every type still checks out, every structure check
 ;; still passes, and this test reads back `undefined` from a word the program never wrote, because
 ;; the store went to a different class. That is the failure mode it exists for.
+;;
+;; THE LOAD READS THROUGH A MemMerge, and that is not decoration: 4c-1 would otherwise forward the
+;; load to the stored constant and this test would stop touching the heap at all. Forwarding
+;; declines through a MemMerge (its memory input is not a Store), so the load survives, the
+;; interpreter walks the merge to the class that owns the word, and the end-to-end claim is still
+;; about a load. That the load survives is asserted, so the day forwarding learns to walk a merge
+;; this test says so rather than quietly becoming a test of constant folding.
 (deftest an_alias_is_the_same_word_through_a_longer_shape
   (let [w (stdout)]
     (graph-reset! 1)
@@ -238,19 +923,23 @@
           (let [nw (n-new-obj2! (g-start) sxy (mk-mem-in ax) (mk-mem-in ay))]
             (let [o (n-obj-ptr nw)]
               (let [m (n-store! (n-obj-mem nw 0) o (mk-int 7) ax)]
-                ; the load names the alias the {x} EDGE allocated, not a field index of {x,y}
-                (let [ld (n-load! m o ax)]
-                  (ret-to-mem (g-start) ld (n-memmerge2! m (n-obj-mem nw 1)))
-                  (iterate!)
-                  (g-print-flat w)
-                  (assert (= (g-verify) 0))
-                  (assert (= (ev-run-bound 1 BUDGET) EV-OK))
-                  (ps w "  read back ") (rt-print w (ev-result)) (ps w " through alias ")
-                  (fmt w "{d}\n" ax)
-                  (assert (rt-eq? (ev-result) (RInt 7))))))))))))
+                (let [mm (n-memmerge2! m (n-obj-mem nw 1))]
+                  ; the load names the alias the {x} EDGE allocated, not a field index of {x,y}
+                  (let [ld (n-load! mm o ax)]
+                    (ret-to-mem (g-start) ld mm)
+                    (iterate!)
+                    (g-print-flat w)
+                    (assert (= (g-verify) 0))
+                    ; a real Load really ran: the value below came out of the heap
+                    (assert (not (n-dead? ld)))
+                    (assert (= (count-op OP-LOAD) 1))
+                    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                    (ps w "  read back ") (rt-print w (ev-result)) (ps w " through alias ")
+                    (fmt w "{d}\n" ax)
+                    (assert (rt-eq? (ev-result) (RInt 7)))))))))))))
 
 ; ===========================================================================
-; 3. Two News are two objects
+; 4. Two News are two objects
 ; ===========================================================================
 ;; `a = {}; b = {}; return a == b;` and the answer is false.
 ;;
@@ -260,6 +949,9 @@
 ;; true. NOTHING DOWNSTREAM CAN NOTICE: the resulting graph is well formed, its types are at a
 ;; fixpoint, the verifier is clean, and the diagram looks like a program that allocated once
 ;; because that is what it now is. Only running it says otherwise.
+;;
+;; It is also the premise 4c-1's pointer comparison rests on: "one node is one object" is only
+;; true because `op-gvn?` excludes New, so the test that defends it defends forwarding too.
 (deftest two_allocations_are_two_objects
   (let [w (stdout)]
     (graph-reset! 1)
@@ -284,25 +976,48 @@
 ;; The other half of the same claim: everything else about a memory graph IS value numbered. Two
 ;; loads of one word from one memory state are one load, which is the common-subexpression case
 ;; that makes GVN worth having on memory ops at all.
+;;
+;; The program is `a = {x}; a.x = 3; b = {x}; return b.x;` and the two loads are of `b.x`. The
+;; second allocation is what keeps a Load in the graph to value number at all: the loads read
+;; b's post-allocation projection rather than a Store, so 4c-1 declines, and their type is the
+;; class union rather than a constant, so nothing folds either. Read one word through a Store on
+;; the same pointer instead and both loads become the stored constant, one node by constant
+;; interning rather than by GVN, and this test would pass while measuring nothing about `node-eq`
+;; on a Load at all.
 (deftest two_loads_of_one_word_are_one_load
   (let [w (stdout)]
     (graph-reset! 1)
     (shape-reset!)
     (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
       (let [ax (shape-field-alias sx 0)]
-        (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
-          (let [o (n-obj-ptr nw)]
-            (let [m (n-store! (n-obj-mem nw 0) o (mk-int 3) ax)]
-              (let [l1 (n-load! m o ax)
-                    l2 (n-load! m o ax)]
-                (ps w "\n--- two loads of one word ---\n")
-                (assert (= l1 l2))
-                (assert (= (count-op OP-LOAD) 1))
-                (mk-ret l1)
-                (assert (= (g-verify) 0))))))))))
+        (let [na (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+          (let [oa (n-obj-ptr na)]
+            (let [ma (n-store! (n-obj-mem na 0) oa (mk-int 3) ax)]
+              (let [nb (n-new-obj1! (g-start) sx ma)]
+                (let [ob (n-obj-ptr nb)
+                      mb (n-obj-mem nb 0)]
+                  (let [l1 (n-load! mb ob ax)
+                        l2 (n-load! mb ob ax)]
+                    (ps w "\n--- two loads of one word ---\n")
+                    (assert (= l1 l2))
+                    (assert (= (n-op l1) OP-LOAD))
+                    (assert (= (count-op OP-LOAD) 1))
+                    ; and it is a Load rather than a folded constant: the class holds
+                    ; `undefined|int=3`, which is not a constant and must not become one
+                    (assert (not (ty-const? (n-ty l1))))
+                    (ret-to-mem (g-start) l1 mb)
+                    (iterate!)
+                    (g-print-flat w)
+                    (assert (= (count-op OP-LOAD) 1))
+                    (assert (= (g-verify) 0))
+                    ; b's field was never written, so the answer is `undefined`: the load really
+                    ; reads the heap rather than the class's type
+                    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                    (ps w "  b.x is ") (rt-print w (ev-result)) (ps w "\n")
+                    (assert (rt-eq? (ev-result) (RUndef)))))))))))))
 
 ; ===========================================================================
-; 4. A shape-polymorphic merge keeps both shapes
+; 5. A shape-polymorphic merge keeps both shapes
 ; ===========================================================================
 ;; The M4 gate's last clause. Three separate things have to hold, and each of them is a decision
 ;; some other design would have made differently:
@@ -325,38 +1040,24 @@
     (assert (= (count-op OP-STORE) 2))
     (assert (= (count-op OP-MEMMERGE) 1))
 
-    ; the two allocations are of two DIFFERENT shapes
-    (let [n1 (n-count) (mut shapes) 0 (mut aliases) 0 (mut i) 0 (mut news) 0 (mut stores) 0]
-      (loop
-        (if (>= (load i) n1) (break)
-          (do (if (n-dead? (load i)) 0
-                (do (if (= (n-op (load i)) OP-NEW)
-                        (do (store! shapes (| (load shapes) (<< 1 (n-aux (load i)))))
-                            (store! news (+ (load news) 1)) 0)
-                      0)
-                    (if (= (n-op (load i)) OP-STORE)
-                        (do (store! aliases (| (load aliases) (<< 1 (n-aux (load i)))))
-                            (store! stores (+ (load stores) 1)) 0)
-                      0)))
-              (store! i (+ (load i) 1))
-              0)))
-      (assert (= (load news) 2))
-      (assert (= (load stores) 2))
-      ; two shapes and two classes, not one of each seen twice
-      (assert (= (popcount64 (load shapes)) 2))
-      (assert (= (popcount64 (load aliases)) 2))
-      (fmt w "  2 shapes (bits {d}) and 2 alias classes (bits {d})\n" (load shapes) (load aliases))
+    ; the two allocations are of two DIFFERENT shapes, and the two stores name two DIFFERENT
+    ; classes: two of each, not one of each seen twice
+    (let [shapes  (aux-bits OP-NEW)
+          aliases (aux-bits OP-STORE)]
+      (assert (= (popcount64 shapes) 2))
+      (assert (= (popcount64 aliases) 2))
+      (fmt w "  2 shapes (bits {d}) and 2 alias classes (bits {d})\n" shapes aliases)
 
       ; THE MERGED POINTER CARRIES BOTH SHAPES. `t-obj-shapes` of the two bits is exactly the type,
       ; so this is not "some object type" but the specific set.
       (let [po (find-op OP-PHI)]
-        (assert (= (n-ty po) (t-obj-shapes (load shapes))))
+        (assert (= (n-ty po) (t-obj-shapes shapes)))
         (ps w "  the merged pointer is ") (ty-print w (n-ty po)) (ps w "\n"))
 
       ; and the memory at the exit describes the UNION of the two classes
       (let [mm (find-op OP-MEMMERGE)]
         (assert (ty-mem? (n-ty mm)))
-        (assert (= (ty-mem-aliases (n-ty mm)) (load aliases)))
+        (assert (= (ty-mem-aliases (n-ty mm)) aliases))
         (assert (= (popcount64 (ty-mem-aliases (n-ty mm))) 2))
         (ps w "  the merged memory is ") (ty-print w (n-ty mm)) (ps w "\n")
         ; the union is exactly the OR of its inputs' classes, which is the axis claim
@@ -365,9 +1066,33 @@
         ; and the two inputs are DISJOINT, so nothing about the union is a coincidence
         (assert (= (& (ty-mem-aliases (n-in-ty mm 1)) (ty-mem-aliases (n-in-ty mm 2))) 0))))
 
-    ; it runs, and the object it returns has the shape of the arm control took
-    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
-    (ps w "  returns ") (rt-print w (ev-result)) (ps w "\n")))
+    ;; AND BOTH ARMS ARE RUN, WITH THE WORD READ BACK OUT OF THE MERGED MEMORY. This is the half
+    ;; that used to be missing, and its absence was measured rather than suspected: swapping the
+    ;; class-x memory phi's arms in `fx-shape-poly` -- the canonical LAW 5 miscompile, a phi
+    ;; reading the pre-store state on the arm that stored -- left the whole gate green. Two
+    ;; separate things hid it.
+    ;;
+    ;; First, no seed ever took the else arm: `ev-value-in` answered `1 + seed%97` for a `dyn`
+    ;; argument, which is truthy for every seed, so every branch predicated on a dyn Arg went one
+    ;; way for ever. Second, the assertion here was `EV-OK` and a PRINT of the result, and a
+    ;; printed object is a name; nothing read the merged memory back, so no arm order was
+    ;; observable at all.
+    ;;
+    ;; `ev-outcome` renders the reachable heap under the result, so the returned object's field is
+    ;; read out of the state the MemMerge produced, and the two seeds below take different arms.
+    ;; With either phi's arms swapped the word comes back as `?` -- the merged state does not
+    ;; describe that write -- and this clause is red.
+    (let [ba (alloc-stack (array u8 4096))]
+      ; seed 1 is truthy: the true arm allocated {x} and stored 1
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (let [o1 (ev-outcome (cast (ptr i8) ba) 4096)]
+        (ps w "  seed 1 (truthy) returns ") (ps w o1) (ps w "\n")
+        (assert (bytes-eq? o1 "ok @0:{x:1}")))
+      ; seed 3 is falsey: the else arm allocated {y} and stored 2
+      (assert (= (ev-run-bound 3 BUDGET) EV-OK))
+      (let [o3 (ev-outcome (cast (ptr i8) ba) 4096)]
+        (ps w "  seed 3 (falsey) returns ") (ps w o3) (ps w "\n")
+        (assert (bytes-eq? o3 "ok @0:{y:2}"))))))
 
 ;; LAW 5 HAS A SECOND INSTANCE, and it is a memory Phi. A region and every Phi on it are ONE arity
 ;; invariant, so dropping a dead control path has to drop the matching arm of the MEMORY phi in the
@@ -404,7 +1129,10 @@
                       (do (fmt w "  region {d} inputs, phi {d} inputs\n" (n-nins rr) (n-nins pp))
                           (assert (= (n-nins pp) (n-nins rr))) 0)))
                   (assert (= (g-verify) 0))
-                  ; and the surviving program stores 2, which is the FALSE arm: the arm that runs
+                  ; and the surviving program stores 2, which is the FALSE arm: the arm that runs.
+                  ; The load here may or may not have been forwarded, depending on whether the phi
+                  ; collapsed onto the surviving Store first; the ANSWER is the claim either way,
+                  ; which is exactly what D12 says an optimisation gate should assert.
                   (assert (= (ev-run-bound 1 BUDGET) EV-OK))
                   (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n")
                   (assert (rt-eq? (ev-result) (RInt 2))))))))))))
@@ -419,6 +1147,11 @@
 ;; project has hit and the reason this test is written as a fixture that must simply finish. The
 ;; step caps in `iterate!` and `wl-drain!` turn it into a named abort rather than a wedged suite,
 ;; so "this test passes at all" is the assertion; the numbers below are what make it non-vacuous.
+;;
+;; IT IS ALSO WHERE FORWARDING MUST DECLINE THROUGH A PHI. The load's memory input is the loop's
+;; memory phi, not a Store, so the load stays. Simple's rule for pushing a load up through a Phi
+;; builds a new Phi on the merge's region and lands squarely in LAW 5's arity lockstep; it is not
+;; in 4c-1, and this fixture is what would notice if it arrived without the lockstep.
 (deftest a_memory_phi_on_a_loop_reaches_a_fixpoint
   (let [w (stdout)]
     (corpus-build! CX-OBJECT-LOOP)
@@ -446,6 +1179,12 @@
         (assert (op-phi? (n-op (n-in st 1))))
         (assert (= (n-in (n-in st 1) 0) lp))))
 
+    ; the load survives, because its memory is a Phi and forwarding declines on anything that is
+    ; not a Store
+    (assert (= (count-op OP-LOAD) 1))
+    (assert (op-phi? (n-op (n-in (find-op OP-LOAD) 1))))
+    (assert (not (forwardable? (find-op OP-LOAD))))
+
     ; WIDENING BLUNTED THE CONTENTS, and that is the honest outcome rather than a defect: the
     ; current rule widens on any change to a non-constant, which is documented in `phi-compute` as
     ; blunter than it needs to be. What matters here is that it TERMINATED, and the interpreter
@@ -459,7 +1198,7 @@
     (assert (rt-eq? (ev-result) (RInt 2)))))
 
 ; ===========================================================================
-; 5. The verifier is specifically red
+; 6. The verifier is specifically red
 ; ===========================================================================
 ;; Every graph below is corrupted in exactly ONE way and asserts the SPECIFIC code that should
 ;; notice. "verify returned non-zero" is satisfied by a verifier that always fails.
@@ -531,7 +1270,7 @@
     (assert (>= (popcount64 (load seen)) VERR-CODE-FLOOR))))
 
 ; ===========================================================================
-; 6. The interpreter catches what the verifier cannot
+; 7. The interpreter catches what the verifier cannot
 ; ===========================================================================
 ;; BOTH GRAPHS BELOW ARE STRUCTURALLY PERFECT. Every slot holds the right kind of node, every
 ;; arity is right, every shape and alias is defined, and `g-verify` is CLEAN on both — asserted,
@@ -541,7 +1280,9 @@
 ;; one the source asked for.
 ;;
 ;; This is the argument for having an oracle rather than only a verifier, made concrete on the
-;; first data structure the IR has.
+;; first data structure the IR has. The forwarding-specific version of the first one, where the
+;; miswired memory edge is a STORE and so is one comparison away from being laundered into a
+;; value, is `forwarding_refuses_a_memory_edge_that_does_not_carry_its_alias` above.
 (deftest running_it_catches_the_memory_contracts_the_verifier_cannot
   (let [w (stdout) (mut seen) 0]
     (ps w "\n--- structurally perfect graphs that only running can refuse ---\n")
@@ -591,17 +1332,140 @@
     (assert (>= (popcount64 (load seen)) EV-CODE-FLOOR))))
 
 ; ===========================================================================
-; 7. The memory fixtures are order-independent and monotone
+; 8. The corpus is still whole
+; ===========================================================================
+;; EVERY FIXTURE VERIFIES CLEAN, AND NO RETURN'S MEMORY POINTS AT A CORPSE.
+;;
+;; The second half is why this sweep exists and it is not hypothetical. Forwarding a load that was
+;; the store's LAST reader drops the store's only use; the kill cascade then takes the Store, the
+;; projections, the New and the entire memory chain, and a `ret-to-mem` built on the next line
+;; wires a dead node into the Return's memory slot. Nothing at the fold says a word. It surfaces
+;; as VERR-DEAD-INPUT at the Return, a long way from the cause, and it was reproduced on this
+;; corpus rather than imagined.
+;;
+;; `g-verify` reports exactly that, so the clause is largely "the corpus is clean"; the memory
+;; slot is walked explicitly anyway, and counted, so the claim survives a verifier that stopped
+;; checking Return inputs.
+;; How many live Returns carry a memory input, aborting by name on one that carries a corpse.
+;; A separate function because the walk is three loops deep otherwise, and because "the Return's
+;; memory is live" is the claim, stated once.
+(defn returns-with-live-mem [(what (slice u8))] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (and (not (n-dead? (load i))) (= (n-op (load i)) OP-RETURN))
+                     (>= (n-nins (load i)) 3))
+                (let [m (n-in (load i) 2)]
+                  (if (= m NO-NODE) 0
+                    (do (if (n-dead? m)
+                            (do (mfail-head what)
+                                (let [e (stderr)]
+                                  (fmt e "  Return n{d} reads dead memory n{d}\n" (load i) m))
+                                (abort) 0)
+                          0)
+                        (assert (ty-mem? (n-ty m)))
+                        (store! k (+ (load k) 1))
+                        0)))
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+(deftest the_whole_corpus_verifies_and_no_return_reads_a_corpse
+  (let [w (stdout) (mut fixtures) 0 (mut with-mem) 0 (mut modes) 0]
+    (ps w "\n--- every fixture, in the mode it declares ---\n")
+    (assert (>= (corpus-count) MEM-CORPUS-FLOOR))
+    (let [(mut f) 0]
+      (loop
+        (if (>= (load f) (corpus-count)) (break)
+          (do (corpus-build! (load f))
+              (store! modes (| (load modes) (<< 1 (corpus-mode (load f)))))
+              (if (= (g-verify) 0) 0
+                (do (mfail-head (corpus-name (load f))) (abort) 0))
+              (store! with-mem (+ (load with-mem) (returns-with-live-mem (corpus-name (load f)))))
+              (store! fixtures (+ (load fixtures) 1))
+              (store! f (+ (load f) 1))
+              0))))
+    (fmt w "  {d} fixtures verified, {d} Returns carry memory\n" (load fixtures) (load with-mem))
+    (assert (>= (load fixtures) MEM-CORPUS-FLOOR))
+    ; the sweep really covered the memory fixtures, and really covered BOTH build modes: a corpus
+    ; of straight-line arithmetic would satisfy every assertion above
+    (assert (>= (load with-mem) MEM-FIXTURES))
+    (assert (!= (& (load modes) (<< 1 CORPUS-RAW-ANALYSED)) 0))
+    (assert (!= (& (load modes) (<< 1 CORPUS-OPTIMISED)) 0))))
+
+;; THE COUNTED FLOOR (D11). A rewrite that quietly stopped firing has to fail, not pass.
+;;
+;; What is counted is loads that were CREATED and are now dead. `n-kill!` leaves a node's op in
+;; the arena, so that number is exactly "loads the optimiser removed", and in this corpus removing
+;; a load is something only forwarding does. The companion count is what keeps that stand-in
+;; honest, and it runs in the opposite direction: how many forwardable loads SURVIVE. In the
+;; optimised mode that must be zero, or the rewrite is firing somewhere and not here; in the
+;; raw-analysed mode it must NOT be zero, because the raw twin of the smallest heap program is
+;; precisely a graph with the opportunity still in it. Together they say the opportunity exists,
+;; the optimised mode takes all of them, and the analysis-only mode takes none.
+(deftest the_corpus_forwards_loads_and_leaves_none_forwardable
+  (let [w (stdout) (mut removed) 0 (mut live-loads) 0 (mut raw-chances) 0]
+    (ps w "\n--- loads removed and loads left, over the whole corpus ---\n")
+    (let [(mut f) 0]
+      (loop
+        (if (>= (load f) (corpus-count)) (break)
+          (do (corpus-build! (load f))
+              (let [gone (count-dead-op OP-LOAD)
+                    kept (count-op OP-LOAD)
+                    open (count-forwardable)]
+                (if (or (> gone 0) (> kept 0))
+                    (do (fmt w "  {s}: {d} forwarded, {d} loads left, {d} still forwardable\n"
+                             (corpus-name (load f)) gone kept open) 0)
+                  0)
+                (if (= (corpus-mode (load f)) CORPUS-OPTIMISED)
+                    ; AT A PEEPHOLE FIXPOINT NOTHING FORWARDABLE MAY SURVIVE. This is the clause
+                    ; that fails when a refusal is declined instead of deferred: the load sits
+                    ; there, forwardable, and nothing ever comes back for it.
+                    (do (if (= open 0) 0
+                          (do (mfail-head (corpus-name (load f)))
+                              (let [e (stderr)]
+                                (fmt e "  {d} forwardable loads survived a peephole fixpoint\n"
+                                     open))
+                              (abort) 0))
+                        0)
+                  (do (store! raw-chances (+ (load raw-chances) open)) 0))
+                (store! removed    (+ (load removed) gone))
+                (store! live-loads (+ (load live-loads) kept)))
+              (store! f (+ (load f) 1))
+              0))))
+    (fmt w "  {d} loads forwarded, {d} loads still in the corpus, {d} raw opportunities\n"
+         (load removed) (load live-loads) (load raw-chances))
+    ; IT FIRED. Zero here is a rewrite that stopped working, not a corpus with nothing to do.
+    (assert (> (load removed) 0))
+    ; IT DID NOT JUST DELETE EVERY LOAD IT SAW. The surviving ones are the fixtures of clauses 4,
+    ; 5 and 7: a different pointer, a Phi, a projection.
+    (assert (> (load live-loads) 0))
+    ; and the opportunity really exists in a graph nothing rewrote, which is what says the zero
+    ; above is a rewrite happening rather than a corpus with no load-after-store in it
+    (assert (> (load raw-chances) 0))))
+
+; ===========================================================================
+; 9. Order independence, monotonicity, the differential oracle, and the text
 ; ===========================================================================
 ;; THE PEEPHOLE FIXPOINT IS A PROPERTY OF THE PROGRAM, NOT OF THE POP ORDER, and memory is where
 ;; a missing revisit would show up as a memory edge pointing at a state that is no longer current.
-;; Every seed must produce byte-identical text.
+;;
+;; READ THE TWO HALVES SEPARATELY. Every corpus builder calls `graph-reset! 1` itself, so the loop
+;; below re-seeds and gets seed 1 back: what it actually gates is that a fixture is a pure function
+;; of its own source, with no state carried over from whatever the previous test left in the arena,
+;; the shape table or the GVN map. That is worth gating and it is NOT the seed claim.
+;;
+;; THE SEED CLAIM LIVES IN `a_refused_forwarding_is_deferred_and_lands_under_every_seed`, which
+;; builds the same program through a local builder that takes the seed, and compares text, live
+;; count and answer across all of them. Saying so here rather than leaving this loop to imply
+;; otherwise is the point: an assertion that cannot fail is worse than no assertion.
 (deftest every_seed_builds_the_same_memory_graph
   (let [w (stdout)
         ba (alloc-stack (array u8 4096))
         bb (alloc-stack (array u8 4096))
         (mut checked) 0]
-    (ps w "\n--- the memory fixtures under every worklist seed ---\n")
+    (ps w "\n--- the memory fixtures, rebuilt from a dirty arena ---\n")
     (let [(mut f) 0]
       (loop
         (if (>= (load f) MEM-FIXTURES) (break)
@@ -610,34 +1474,22 @@
                 (loop
                   (if (> (load s) SEEDS) (break)
                     (do (graph-reset! (load s))
-                        ; the fixture resets the graph itself, with its own seed; re-seeding
-                        ; first is what makes the next build pop in a different order
                         (corpus-build! (mem-fixture (load f)))
                         (let [txt (g-render (cast (ptr i8) bb) 4096)]
                           (if (bytes-eq? base txt) 0
                             (do (mfail-head (corpus-name (mem-fixture (load f))))
                                 (let [e (stderr)]
-                                  (fmt e "  seed {d} produced different text\n" (load s))
+                                  (fmt e "  rebuild {d} produced different text\n" (load s))
                                   (ps e base) (ps e "  ---\n") (ps e txt))
                                 (abort) 0)))
                         (store! checked (+ (load checked) 1))
                         (store! s (+ (load s) 1))
                         0)))
-                (fmt w "  {s}: identical under every seed\n" (corpus-name (mem-fixture (load f)))))
+                (fmt w "  {s}: identical on every rebuild\n" (corpus-name (mem-fixture (load f)))))
               (store! f (+ (load f) 1))
               0))))
-    (fmt w "  {d} seeded builds compared\n" (load checked))
+    (fmt w "  {d} rebuilds compared\n" (load checked))
     (assert (>= (load checked) (* MEM-FIXTURES (- SEEDS 1))))))
-
-(defn bytes-eq? [(a (slice u8)) (b (slice u8))] (-> bool)
-  (if (!= (slice-len a) (slice-len b)) false
-    (let [n (slice-len a) (mut i) 0 (mut same) true]
-      (loop
-        (if (or (>= (load i) n) (not (load same))) (break)
-          (do (if (!= (slice-get a (load i)) (slice-get b (load i))) (store! same false) 0)
-              (store! i (+ (load i) 1))
-              0)))
-      (load same))))
 
 ;; EVERY MEMORY COMPUTE IS MONOTONE OVER THE WHOLE LATTICE SAMPLE, in every input slot.
 ;;
@@ -766,13 +1618,22 @@
     (assert (= (g-analyze-checks) 0))
     (assert (= (g-verify) 0))))
 
-;; The differential clause, on the fixtures that have a heap. Two builds of one program (raw and
-;; optimised) must agree on the observable result for every argument binding. It is the shape
-;; every later memory optimisation is gated on, running one milestone before there is an
-;; optimisation to gate: what 4c changes is measured against exactly this.
+;; THE DIFFERENTIAL CLAUSE, and this is where 4c-1 is gated in D12's own terms: the rewrite
+;; changed the graph and did NOT change the result.
+;;
+;; The two builds are no longer merely two spellings of one program. `CX-OBJECT` has had its load
+;; forwarded away and returns a literal; `CX-OBJECT-RAW` still performs the load, through the
+;; heap, at run time. Both must answer identically for every argument binding. That asymmetry is
+;; asserted rather than assumed, because if the two builds ever became the same graph this test
+;; would still pass while comparing a program with itself.
 (deftest the_two_builds_of_the_object_program_agree
   (let [w (stdout) (mut checked) 0]
     (ps w "\n--- raw against optimised, over argument bindings ---\n")
+    ; the two builds really are different graphs, and differ in exactly the load
+    (corpus-build! CX-OBJECT)
+    (assert (= (count-op OP-LOAD) 0))
+    (corpus-build! CX-OBJECT-RAW)
+    (assert (= (count-op OP-LOAD) 1))
     (let [(mut s) 1]
       (loop
         (if (> (load s) DIFF-SEEDS) (break)
@@ -789,6 +1650,8 @@
                           (ps e (ev-status-name sb)) (ps e " ") (rt-print e vb) (ps e "\n"))
                         (abort) 0))
                   (assert (= sa EV-OK))
+                  ; and the value both of them agree on is the one the source asked for
+                  (assert (rt-eq? va (RInt 5)))
                   (store! checked (+ (load checked) 1))))
               (store! s (+ (load s) 1))
               0))))
@@ -796,7 +1659,7 @@
     (assert (= (load checked) DIFF-SEEDS))))
 
 ; ===========================================================================
-; 8. The text of a memory graph round-trips
+; 10. The text of a memory graph round-trips
 ; ===========================================================================
 ;; Print, parse, print: the same bytes. The corpus-wide version of this lives in
 ;; tests/gtext-test.coil and already covers these fixtures; what is added here is the reason it
@@ -806,7 +1669,7 @@
 ;; still contain the memory ops with the same aux.
 (deftest a_memory_graph_survives_print_and_reparse
   (let [w (stdout) ba (alloc-stack (array u8 4096)) bb (alloc-stack (array u8 4096))
-        (mut checked) 0]
+        (mut checked) 0 (mut loads-seen) 0]
     (ps w "\n--- print, parse, print ---\n")
     (let [(mut f) 0]
       (loop
@@ -833,9 +1696,13 @@
                 (assert (= (g-verify) 0))
                 (fmt w "  {s}: {d} New, {d} Load, {d} Store, {d} MemMerge\n"
                      (corpus-name (mem-fixture (load f))) news loads stores merges)
+                (store! loads-seen (+ (load loads-seen) loads))
                 (store! checked (+ (load checked) (+ news (+ loads (+ stores merges))))))
               (store! f (+ (load f) 1))
               0))))
-    ; and the sweep really saw memory ops rather than three fixtures of arithmetic
-    (fmt w "  {d} memory nodes round-tripped\n" (load checked))
-    (assert (>= (load checked) 10))))
+    ; and the sweep really saw memory ops rather than five fixtures of arithmetic. A Load's alias
+    ; is the aux this round trip is most likely to lose, so "at least one Load went through it" is
+    ; its own floor: after 4c-1 the eager object fixture no longer has one.
+    (fmt w "  {d} memory nodes round-tripped, {d} of them Loads\n" (load checked) (load loads-seen))
+    (assert (>= (load checked) 10))
+    (assert (>= (load loads-seen) 2))))

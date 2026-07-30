@@ -12,6 +12,7 @@
 (module evaltest)
 
 (import "../src/ty.coil"     :use *)
+(import "../src/shape.coil"  :use *)
 (import "../src/node.coil"   :use *)
 (import "../src/corpus.coil" :use *)
 (import "../src/eval.coil"   :use *)
@@ -435,23 +436,43 @@
 ;;
 ;; Arguments are bound to values INSIDE their declared types, keyed by type rather than by node id,
 ;; because optimisation deletes arguments and shifts ids. See ev-bind-args!.
+;;
+;; THE COMPARISON IS `ev-outcome` AND NOT `rt-eq?`, and the difference only shows up once a
+;; fixture's result is an OBJECT. `rt-eq?` compares an object by its index in the allocation
+;; stream, which is a run artefact rather than an observable: it reports a difference when a
+;; rewrite removes an allocation nothing reads, and it reports EQUALITY for two different objects
+;; that happen to land at the same index. `ev-outcome` renders the reachable heap under the result
+;; with objects numbered by discovery order, which is the same thing up to renaming, and it does
+;; it as BYTES so run A's answer survives the `ev-reset!` that run B needs.
+(defn bytes-eq? [(a (slice u8)) (b (slice u8))] (-> bool)
+  (if (!= (slice-len a) (slice-len b)) false
+    (let [n (slice-len a) (mut i) 0 (mut same) true]
+      (loop
+        (if (or (>= (load i) n) (not (load same))) (break)
+          (do (if (!= (slice-get a (load i)) (slice-get b (load i))) (store! same false) 0)
+              (store! i (+ (load i) 1))
+              0)))
+      (load same))))
+
 (defn diff-pair [(raw i64) (opt i64) (label (slice u8))] (-> i64)
-  (let [(mut seed) 1]
+  (let [ba (alloc-stack (array u8 8192))
+        bb (alloc-stack (array u8 8192))
+        (mut seed) 1]
     (loop
       (if (> (load seed) 12) (break)
         (do (corpus-build! raw)
             (let [sr (ev-run-bound (load seed) BUDGET)
-                  vr (ev-result)]
+                  oa (ev-outcome (cast (ptr i8) ba) 8192)]
               (corpus-build! opt)
               (let [so (ev-run-bound (load seed) BUDGET)
-                    vo (ev-result)]
-                (if (and (= sr so) (rt-eq? vr vo)) 0
+                    ob (ev-outcome (cast (ptr i8) bb) 8192)]
+                (if (and (= sr so) (bytes-eq? oa ob)) 0
                   (do (let [w (stderr)]
                         (ps w "\nDIFFERENTIAL FAILURE: ") (ps w label)
                         (fmt w "  (seed {d})\n  raw:       " (load seed))
-                        (ps w (ev-status-name sr)) (ps w " ") (rt-print w vr)
+                        (ps w oa)
                         (ps w "\n  optimised: ")
-                        (ps w (ev-status-name so)) (ps w " ") (rt-print w vo)
+                        (ps w ob)
                         (ps w "\n"))
                       (abort) 0))))
             (store! seed (+ (load seed) 1))
@@ -462,7 +483,54 @@
   (diff-pair CX-FOLD-BEFORE CX-FOLD-AFTER  "1 + 2*3, folded")
   (diff-pair CX-GVN-BEFORE  CX-GVN-AFTER   "(arg+2)-(2+arg), value numbered")
   (diff-pair CX-BIG-BEFORE  CX-BIG-AFTER   "nine expressions collapsing to one multiply")
-  (diff-pair CX-DEAD-BEFORE CX-DEAD-AFTER  "if(0), dead branch removed"))
+  (diff-pair CX-DEAD-BEFORE CX-DEAD-AFTER  "if(0), dead branch removed")
+  ;; THE PAIR WHOSE RESULT IS AN OBJECT. It is the same program with and without a scratch
+  ;; allocation nothing reads back, which is 4c-3's dead-allocation removal, and it is the first
+  ;; pair in this corpus that a positional object identity gets wrong: the returned object is
+  ;; allocation 1 in one build and allocation 0 in the other. With `rt-eq?` this line aborts with
+  ;; DIFFERENTIAL FAILURE on a pair that agrees.
+  (diff-pair CX-OBJECT-RET-SCRATCH CX-OBJECT-RET "o = {x}; o.x = 5; return o, with and without a scratch allocation"))
+
+;; THE OTHER DIRECTION, and it is the half that says the comparison is not vacuous. An oracle that
+;; called every pair equal would satisfy the test above; this one requires two programs that
+;; genuinely differ to be reported as DIFFERENT.
+;;
+;; Both builds return an object that is the FIRST allocation of its run, so both are `obj0` and
+;; `rt-eq?` calls them the same value -- shape included, since `rt-eq?` compares the tag and the
+;; table index and nothing else. They are not the same value: one is an object of shape `{x}`,
+;; the other of shape `{y}`, and the WORD THEY HOLD IS THE SAME 5, so the only thing that can tell
+;; them apart is the shape. The shape has to be named by its FIELD NAMES for that to work: both
+;; are shape id 1 in their own run, ids being allocated in transition order.
+(defn build-ret-obj! [(field-name (slice u8)) (v i64)] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [s (shape-transition SHAPE-ROOT field-name (t-dyn))]
+    (let [a (shape-field-alias s 0)]
+      (let [nw (n-new-obj1! (g-start) s (mk-mem-in a))]
+        (let [o (n-obj-ptr nw)]
+          (let [m (n-store! (n-obj-mem nw 0) o (mk-int v) a)]
+            (ret-to-mem (g-start) o m))))))
+  (iterate!) 0)
+
+(deftest the_oracle_can_tell_two_different_objects_apart
+  (let [w (stdout)
+        ba (alloc-stack (array u8 8192))
+        bb (alloc-stack (array u8 8192))]
+    (ps w "\n--- two results, both the first allocation of their run ---\n")
+    (build-ret-obj! "x" 5)
+    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+    (let [va (ev-result)
+          oa (ev-outcome (cast (ptr i8) ba) 8192)]
+      (ps w "  shape {x}, holding 5: ") (ps w oa) (ps w "\n")
+      (build-ret-obj! "y" 5)
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (let [vb (ev-result)
+            ob (ev-outcome (cast (ptr i8) bb) 8192)]
+        (ps w "  shape {y}, holding 5: ") (ps w ob) (ps w "\n")
+        ; the premise: a positional identity really cannot tell them apart
+        (assert (rt-eq? va vb))
+        ; and the outcome comparison really can
+        (assert (not (bytes-eq? oa ob)))))))
 
 ;; Every corpus program must reach a DEFINITE outcome, and specifically must never report a defect.
 ;; STUCK, TYPE, CAST and DEAD each mean something is wrong with the graph or the compiler, so none

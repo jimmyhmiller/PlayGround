@@ -311,9 +311,11 @@
    (hv     (ArrayList HvEnt))   ; the heap: every memory state this run has produced
    (hvk    (ArrayList i64))     ; a MemMerge's children, addressed by (koff, klen)
    (objs   (ArrayList i64))     ; object id -> its shape
+   (seen   (ArrayList i64))     ; `ev-render-outcome`'s walk: object id, in DISCOVERY order
    (status i64)
    (steps  i64)
    (result RtVal)
+   (resmem i64)                 ; the memory version the Return carried, or -1
    (at     i64)                 ; the node a non-OK status happened at
    (inited bool)])
 
@@ -328,6 +330,7 @@
           (store! (field p hv)     (al-new [HvEnt] (malloc-allocator)))
           (store! (field p hvk)    (al-new [i64]   (malloc-allocator)))
           (store! (field p objs)   (al-new [i64]   (malloc-allocator)))
+          (store! (field p seen)   (al-new [i64]   (malloc-allocator)))
           0))
     p))
 
@@ -353,9 +356,11 @@
             (al-push! [RtVal] (field p env)    (RUndef))
             (store! i (+ (load i) 1))
             0)))
+    (al-clear! [i64]   (field p seen))
     (store! (field p status) EV-OK)
     (store! (field p steps) 0)
     (store! (field p result) (RUndef))
+    (store! (field p resmem) -1)
     (store! (field p at) NO-NODE)
     0))
 
@@ -369,6 +374,12 @@
 (defn ev-steps  [] (-> i64) (load (field (ev) steps)))
 (defn ev-at     [] (-> i64) (load (field (ev) at)))
 (defn ev-result [] (-> RtVal) (load (field (ev) result)))
+
+;; The memory state the Return carried, or -1 when it carried none. It is what makes the FIELDS of
+;; a returned object observable: an object is an identity and a shape, and everything it holds
+;; lives in the memory states, so a comparison of two runs that ignores this compares two names
+;; and no contents.
+(defn ev-result-mem [] (-> i64) (load (field (ev) resmem)))
 
 (defn ev-fail! [(s i64) (n i64)] (-> RtVal)
   (let [p (ev)]
@@ -411,9 +422,17 @@
     (RObj  [id] (do (fmt w "obj{d}#{d}" id (ev-obj-shape id)) 0))
     (RMem  [ver] (do (fmt w "mem#{d}@{d}" (hv-mask ver) ver) 0))))
 
-;; Identity of runtime values, for the differential comparison. Bit equality on floats on purpose:
-;; two NaNs are the same OUTCOME even though `==` says otherwise, and an oracle comparing two runs
-;; of one program wants outcomes. Object identity is table identity, which is the same statement.
+;; Identity of runtime values, WITHIN ONE RUN. This is JavaScript `===` and it is what OP-EQ is
+;; implemented with: bit equality on floats on purpose (two NaNs are the same outcome even though
+;; `==` says otherwise), and object identity is table identity, which inside a single run is
+;; exactly right because the table index IS the object.
+;;
+;; IT IS NOT THE CROSS-RUN COMPARISON, and it used to be doing that job as well. A table index is
+;; a position in this run's allocation stream, so across two builds of one program it reports a
+;; difference when a rewrite removes an allocation nothing reads, and reports EQUALITY for two
+;; objects of different shapes that land at the same index. The differential oracle uses
+;; `ev-render-outcome` instead; the two questions are different and the comment that said they
+;; were "the same statement" is what made this look settled.
 (defn rt-eq? [(a RtVal) (b RtVal)] (-> bool)
   (and (= (rt-tag a) (rt-tag b)) (= (rt-payload a) (rt-payload b))))
 
@@ -433,9 +452,11 @@
     ; one used, because every caller asks `rt-condition?` first and reports EV-TYPE.
     (RMem  [ver] false)))
 
-;; Can this value be a condition at all? The verifier cannot answer it: `Store` is a value op by
-;; the numbering, so a memory state parked in an If's predicate slot passes `v-need-value`, and
-;; only running the program can say that the branch had nothing to test.
+;; Can this value be a condition at all? The verifier NOW answers this statically -- `v-need-value`
+;; rejects a memory producer with VERR-VALUE-IS-MEM, which is the mirror of VERR-MEM-SLOT that was
+;; missing while `op-value?` (`>= OP-CONST`) admitted Store and MemMerge. This stays anyway, and
+;; not out of caution: the interpreter runs on graphs nobody verified, including the ones a gate
+;; builds by hand to provoke a failure, and a status is a better answer there than a wrong branch.
 (defn rt-condition? [(v RtVal)] (-> bool) (!= (rt-tag v) RT-MEM))
 
 ; ============================================================================
@@ -861,7 +882,14 @@
                             ; program whose value is fine and whose heap is not is not a program
                             ; that passed.
                             (if (or (ev-failed?) (< (n-nins c) 3)) 0
-                              (do (ev-data (n-in c 2)) 0))
+                              (let [m (ev-data (n-in c 2))]
+                                ; and it is REMEMBERED, because the reachable heap rooted at the
+                                ; result is what a cross-run comparison has to look at; see
+                                ; `ev-render-outcome`
+                                (if (= (rt-tag m) RT-MEM)
+                                    (do (store! (field p resmem) (rt-payload m)) 0)
+                                  0)
+                                0))
                             (if (ev-failed?) 0 (store! (field p status) EV-OK))
                             (break))
                       OP-IF
@@ -920,9 +948,22 @@
             lo (val-ilo v)
             hi (val-ihi v)]
         (if (!= (& k VK-INT) 0)
-            ; inside the range, and biased away from 0 so truthiness is exercised rather than
-            ; every branch always going the same way
-            (if (or (> lo hi) (= lo TY-IMIN)) (RInt (+ 1 (% (abs64 seed) 97)))
+            ;; INSIDE THE RANGE, AND IT HAS TO BE ABLE TO BE ZERO. This arm used to answer
+            ;; `1 + seed%97` for an unbounded int, with a comment saying the bias existed "so
+            ;; truthiness is exercised rather than every branch always going the same way". For a
+            ;; `dyn` argument it guaranteed the opposite: every value was truthy under every seed,
+            ;; so every branch predicated on a dyn Arg took its TRUE arm for ever. Measured: 5001
+            ;; seeds, 5001 truthy, 0 falsey, and `CX-SHAPE-POLY` returned the true arm's object on
+            ;; all 60 seeds it was tried with. The else arm of eight corpus fixtures was dead code
+            ;; as far as the oracle was concerned, which is LAW 5's failure mode (a phi reading the
+            ;; wrong arm) going unseen on the one M4 fixture built to have two arms.
+            ;;
+            ;; A bool-typed Arg already alternates, one line below. This makes an int-typed one do
+            ;; the same: one seed in three is falsey, which is often enough that a 12-seed or
+            ;; 40-seed sweep walks both arms and rare enough that a fixture pinned at one seed
+            ;; mostly keeps its answer.
+            (if (or (> lo hi) (= lo TY-IMIN))
+                (if (= (% (abs64 seed) 3) 0) (RInt 0) (RInt (+ 1 (% (abs64 seed) 97))))
               (if (= lo hi) (RInt lo)
                 (RInt (+ lo (% (abs64 seed) (+ (- hi lo) 1))))))
           (if (!= (& k VK-BOOL) 0) (RBool (= (% (abs64 seed) 2) 0))
@@ -1004,3 +1045,118 @@
             (do (fmt w " at n{d} " (ev-at)) (ps w (op-name (n-op (ev-at)))) 0))
           (fmt w "  ({d} steps)" (ev-steps))
           0))))
+
+; ============================================================================
+; The OUTCOME of a run, for the differential oracle
+; ============================================================================
+;; WHY `rt-eq?` IS NOT THE CROSS-RUN COMPARISON, and it was doing both jobs.
+;;
+;; `rt-eq?` compares an object by its table index, which is its position in this run's ALLOCATION
+;; STREAM. Inside one run that IS `===` and it is exactly right. Across two runs it is wrong in
+;; both directions, and both were measured rather than argued:
+;;
+;;   - Removing a dead allocation shifts every later index, so `dead = {}; o = {}; o.x = 5;
+;;     return o;` answers `obj1` with the allocation and `obj0` without it. That transformation is
+;;     the one `ev-enter-ctrl!` calls unobservable and the one ROADMAP.md names as remaining 4c
+;;     work, so the oracle would report DIFFERENTIAL FAILURE on a rewrite that changed nothing.
+;;   - Two genuinely different objects that land at the same index compare EQUAL, shape and all,
+;;     so an oracle built on it also could not see a rewrite that returned the wrong object.
+;;
+;; It also quietly assumes an object's name is its position in the allocation stream, which is the
+;; one identity model D2's relocating collector is defined not to have.
+;;
+;; WHAT IS OBSERVABLE is the reachable heap up to renaming. This renders it: objects are numbered
+;; by DISCOVERY ORDER in a deterministic walk, so sharing and aliasing stay observable (`{a: o,
+;; b: o}` renders differently from `{a: o, b: o2}`) while an allocation nothing can reach is
+;; invisible. Two runs agree exactly when their renderings are equal, which is isomorphism of the
+;; two reachable heaps.
+;;
+;; IT RENDERS TO TEXT RATHER THAN COMPARING TWO LIVE HEAPS because it has to outlive `ev-reset!`:
+;; the second build of a program cannot run until the first run's heap has been cleared, so a
+;; comparison holding two heaps at once would need the interpreter to keep both, and the comment
+;; on `ev-reset!` is right that carrying a heap across runs is the one thing that must not happen.
+
+;; The walk's object numbering. `seen` is a list in discovery order, so an object's ordinal is its
+;; index; -1 means it has not been reached yet.
+(defn ev-seen-ord [(o i64)] (-> i64)
+  (let [p (ev) n (al-len [i64] (load (field p seen))) (mut i) 0 (mut found) -1]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) -1)) (break)
+        (do (if (= (al-get (load (field p seen)) (load i)) o) (store! found (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+(defn ev-seen-push! [(o i64)] (-> i64)
+  (let [p (ev)]
+    (al-push! [i64] (field p seen) o)
+    (- (al-len [i64] (load (field p seen))) 1)))
+
+;; One value, and the reachable heap under it. Self-recursive rather than mutually recursive with
+;; a field walker, because only the object arm recurses and splitting it would need a forward
+;; declaration for no gain. The `seen` list terminates it on a cyclic heap.
+;;
+;; A FIELD THE FINAL MEMORY DOES NOT DESCRIBE RENDERS AS `?`, not as `undefined`. The state at the
+;; Return need not carry every class the program touched, and "this run cannot say" is a different
+;; outcome from "this word holds undefined"; conflating them would let a rewrite that dropped a
+;; class out of the exit's memory compare equal to one that did not.
+(defn ev-render-val [(w (ptr Writer)) (v RtVal) (mem i64)] (-> i64)
+  (match v
+    (RObj [id]
+      (let [k (ev-seen-ord id)]
+        (if (>= k 0) (do (fmt w "@{d}" k) 0)
+          (let [ord (ev-seen-push! id)
+                s   (ev-obj-shape id)]
+            ;; THE SHAPE IS NAMED BY ITS FIELD NAMES, not by its id. A shape id is allocated in
+            ;; transition order and is therefore a build artefact exactly like an object index:
+            ;; `{x}` and `{y}` are both shape 1 in their own runs, so an outcome carrying the id
+            ;; would call two differently shaped results identical. The field names are what the
+            ;; source language actually said.
+            (fmt w "@{d}:{{" ord)
+            (let [n (shape-field-count s) (mut i) 0]
+              (loop
+                (if (>= (load i) n) (break)
+                  (do (if (> (load i) 0) (ps w " ") 0)
+                      (ps w (shape-name-bytes (shape-field-name s (load i))))
+                      (ps w ":")
+                      (let [a   (shape-field-alias s (load i))
+                            ver (if (< mem 0) -1 (hv-find mem id a))]
+                        (if (< ver 0) (ps w "?")
+                          (ev-render-val w (hve-val (hv-ent ver)) mem)))
+                      (store! i (+ (load i) 1))
+                      0))))
+            (ps w "}")
+            0))))
+    ; every other runtime value is its own outcome, and `rt-print` already spells it
+    (RUndef [] (rt-print w v))
+    (RNull  [] (rt-print w v))
+    (RBool [b] (rt-print w v))
+    (RInt  [n] (rt-print w v))
+    (RFlt  [bits] (rt-print w v))
+    ; a memory state is never a program's result; if one ever is, saying so beats printing a
+    ; version number that means nothing outside this run
+    (RMem [ver] (ps w "<memory>"))))
+
+(defn ev-render-outcome [(w (ptr Writer))] (-> i64)
+  (al-clear! [i64] (field (ev) seen))
+  (ps w (ev-status-name (ev-status)))
+  (ps w " ")
+  (ev-render-val w (ev-result) (ev-result-mem))
+  0)
+
+;; The same thing as BYTES, so a caller can keep run A's outcome across run B. It panics rather
+;; than truncating for the reason `g-render` does: a truncated outcome compares equal to another
+;; truncated outcome, which is a differential oracle that stops noticing.
+(defn ev-outcome [(buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (ev-render-outcome w)
+    (let [n (load (field fb len))]
+      (if (>= n cap)
+          (do (ev-heap-panic "ev-outcome: the run's outcome does not fit the buffer; a truncated outcome compares equal to another truncated one") 0)
+        0)
+      (slice-new [u8] (cast (ptr u8) buf) n))))

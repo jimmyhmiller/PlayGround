@@ -837,8 +837,31 @@
 ;; the 64 bits is a legal alias class, so -1 (all of memory) is a legal argument and there is no
 ;; out-of-range bitset. It is `t-mem-alias`, which turns an alias NUMBER into a bit, that has a
 ;; bound to enforce.
+;; THE CONTENTS RESTRICTION IS ENFORCED HERE, which is what three other comments in this project
+;; already said it was: `ty-xdepth`'s literal 0 is justified by it, and `shape-transition` cites
+;; this function as the precedent for its own check. It was not actually checked, and the gap is
+;; not cosmetic. `store-compute` meets its value slot into the contents, a memory state is a value
+;; op by the numbering (`op-value?` is `>= OP-CONST`, and Store is 24), so a Store parked in
+;; another Store's value slot type-checked all the way through and minted `mem#1 mem#1 int`.
+;; Nesting is unbounded, `ty-depth` reports 0 at every level because of the restriction this
+;; function was supposed to guarantee, and `ty-print-exact` then aborts the process on a graph
+;; `g-verify` calls clean. A named panic at the mint site instead.
 (defn t-mem [(aliases i64) (contents i64)] (-> i64)
+  (if (ty-mem-contents-ok? contents) 0
+    (do (ty-panic "t-mem: a memory type's contents must be a value, ANY or ALL") 0))
   (ty-intern (TMem aliases contents)))
+
+;; READING A VALUE SLOT THAT IS ABOUT TO BECOME A MEMORY STATE'S CONTENTS. The panic above is at
+;; the mint site, so a compute that feeds it has to stay TOTAL: `every_memory_compute_is_monotone_in_every_slot`
+;; sweeps every element of the lattice, memory types included, through `store-compute`'s value
+;; slot, and a panic there would kill the sweep rather than report anything.
+;;
+;; The conservative reading is the same one `ty-mem-contents` gives a non-memory type in a memory
+;; slot, and for the same reason: ANY means unanalysed and must stay ANY, and anything else in a
+;; value slot is a malformed graph whose honest description is ALL. It is monotone -- ANY maps to
+;; itself and every other unrepresentable type maps to the bottom, so a fall into one is a fall.
+(defn ty-as-mem-value [(t i64)] (-> i64)
+  (if (ty-mem-contents-ok? t) t (t-bot)))
 
 ;; One alias class. See `t-obj-shape` for why the bound is here and not in the caller: `(<< 1 64)`
 ;; is the EMPTY alias set, which is the top of the axis, so an unbounded caller would silently
@@ -885,6 +908,43 @@
     (TTop [] (t-top))
     (TBot [] (t-bot)) (TCtrl [] (t-bot)) (TXCtrl [] (t-bot))
     (TVal [v] (t-bot)) (TTuple [o l] (t-bot))))
+
+;; THE KIND SET OF A TYPE, on the same convention: ANY claims no kind (the top of the axis) and
+;; everything that is not a value claims every kind, which is the reading that keeps a consumer
+;; from concluding something from a kind's absence and then rising when the real type arrives.
+(defn ty-kinds [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-kinds v))
+    (TTop [] VK-NONE) (TXCtrl [] VK-NONE)
+    (TBot [] VK-MASK) (TCtrl [] VK-MASK) (TTuple [o l] VK-MASK) (TMem [a c] VK-MASK)))
+
+;; IS EVERY VALUE OF THIS TYPE A MANAGED REFERENCE. R1 (D2) says an interior or derived pointer is
+;; never a first-class IR value, and this is the predicate that makes that checkable.
+;;
+;; "OBJECT AND NOTHING ELSE", not "could be an object", and the difference is the whole strength of
+;; the check. `arith-compute` types `o + 8` as plain `dyn`, and `dyn` includes VK-OBJ, so the
+;; weaker form accepts an address computed by arithmetic -- which is exactly the value R1 exists to
+;; keep out of the graph. It also puts the obligation where D4 already puts every other narrowing:
+;; when M5 gives a `dyn` value objects, a memory access through it needs a Cast to refine it first,
+;; and the Cast is ordinary control flow's value side rather than a new mechanism. See D13.
+(defn ty-only-obj? [(t i64)] (-> bool)
+  (let [k (ty-kinds t)]
+    (and (!= (& k VK-OBJ) 0) (= (& k (bits-dual VK-OBJ VK-MASK)) 0))))
+
+;; THE SHAPE SET OF A POINTER, read from outside this file for the same reason the three memory
+;; readers above exist: `load-compute` asks which objects a pointer can be, and the alternative is
+;; a seven-arm `match` in node.coil that means one thing.
+;;
+;; The answers off the TVal arm follow the same convention as `ty-mem-aliases`: ANY is unanalysed
+;; and claims NO shape (the empty set is the top of a bitset axis), and everything else claims
+;; EVERY shape, which is the conservative reading of a type that cannot describe an object at all.
+;; It has to be that way round or a consumer would RISE: the set only grows as a type falls, so a
+;; consumer that concludes something from a shape being absent stays sound as the set fills in.
+(defn ty-shapes [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-shapes v))
+    (TTop [] 0) (TXCtrl [] 0)                    ; high: no object is here yet
+    (TBot [] -1) (TCtrl [] -1) (TTuple [o l] -1) (TMem [a c] -1)))
 
 (defn t-tuple2 [(a i64) (b i64)] (-> i64)
   (let [tb (ty-tuple-open 2)]

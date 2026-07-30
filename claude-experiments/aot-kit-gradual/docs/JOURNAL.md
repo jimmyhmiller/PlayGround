@@ -665,3 +665,199 @@ What was decided, as opposed to implemented:
   program and `EV-MEM` on a load of a word this run never allocated is the correct answer rather
   than a limitation. M6 changes that, and the memory a function receives is already spelled: an
   `Arg` of memory type, which is how the initial heap enters today.
+
+## M4 slice 4c-1: load-after-store forwarding, by pointer identity
+
+`load-idealize` in `src/node.coil`, wired into `n-idealize` under `OP-LOAD`. If the load's memory
+input is a live `Store` naming the SAME alias class whose pointer is the SAME NODE, the load is
+that store's value. Nothing else forwards: a `Phi`, a `MemMerge`, a `Proj` of a `New`, a store on
+another class, a store on another pointer all decline and record a dep on the memory node.
+
+**Why it reads no type at all, and why it asks `n-ty-proven?` anyway.** Every other guarded
+rewrite in `node.coil` asks for the proven answer because it read a type and a provisional type is
+a lie. This one reads node identity and an alias number, and neither can be provisional. The guard
+is there for a different reason and it is worth keeping the reason attached: the rewrite is
+irreversible and the graph is not finished, so a store sitting in a still-settling cone is a store
+the sweep may yet replace, and taking its value commits to its identity permanently. The fixpoint
+of the load's input cone is the available proxy for "this part of the graph has stopped moving",
+and being transitive it covers the store, its pointer and its value at once. It also keeps the
+substitution a type NARROWING rather than a widening: `load-compute` reports `t-top` while the
+pointer is high, and swapping in the stored value under that would widen the type at every use.
+
+**Simple's offset-overlap rule is deliberately not ported.** Chapter 24's `LoadNode.idealize` also
+forwards past a store whose offsets provably cannot overlap, which asks whether two types are
+disjoint and then rewrites: the exact shape D8 forbids acting on provisionally. Its
+distinct-allocation rule is structural and would be legitimate, but needs a predicate that does not
+exist yet; its push-a-load-through-a-Phi rule builds a new Phi on the merge's region and lands in
+LAW 5's arity lockstep. Both stay out of this slice.
+
+**Two things measured rather than anticipated:**
+
+1. **The forwarded load takes the whole heap with it if memory is not rooted first.** `fx-object`
+   built the load as an argument to `ret-to-mem`, so the load forwarded, subsuming it dropped the
+   `Store`'s only use, and the kill cascade collected the store, both projections and the `New`
+   before the `Return` that was supposed to root them existed. `ret-to-mem` then wired a corpse.
+   Nothing at the construction site says a word; the corpus-wide verifier reports `VERR-DEAD-INPUT`
+   much later. The fix is `n-keep!` on the memory value across the load's construction, the same
+   mechanism `n-peephole` uses to stop a cascade eating the replacement it is installing, and it
+   works because `n-del-use!` reports a pinned node as still used. This is D9's still-open "a dead
+   node can be wired as an input" clause showing up exactly where the roadmap said it would.
+   It also hit two pre-existing tests in `tests/mem-test.coil` that build a load and then keep
+   using its memory (`an_alias_is_the_same_word_through_a_longer_shape`, and
+   `two_loads_of_one_word_are_one_load`, where the SECOND load is built against the corpse of the
+   store the first one killed).
+2. **"The load disappeared" is a vacuous gate.** A rule that deletes every load satisfies it. The
+   weight is carried by `fx-object-two` (`a = {x}; a.x = 1; b = {x}; b.x = 2; return a.x;`): two
+   allocations of one shape, so both stores name the same alias class and both pointers carry the
+   identical type `obj@2`. Everything a type could look at says the two stores are interchangeable,
+   and the only thing between the right answer and 2 is that the store's pointer is a different
+   NODE. The graph that returns 2 is well formed, at a type fixpoint, clean under `g-verify`,
+   survives print and reparse, and has every structural count unchanged. Only the interpreter tells
+   them apart, which is what D12's oracle exists for.
+
+**What 4c-1 deliberately does NOT do.** It does not eliminate the store it forwarded past: a read
+being redundant says nothing about whether the write is observable, and `fx-object` keeps its
+`Store` and its `New` rooted at the `Return`'s memory slot. Store-after-store elimination and
+dead-store removal are 4c-2.
+
+## The M4 adversarial review: eight findings, and what they had in common
+
+Eight findings survived an attempt to refute them. Six of the eight are the same defect wearing
+different clothes, and it is worth naming the pattern before the individual fixes: **a check written
+on one path, with a second path into the same place that nobody checked.** The gate was green
+throughout, and stayed green through the first draft of every fix, which is why each one below ends
+with the measurement that made it red.
+
+### The fold is a second door into forwarding, and it had no lock on it
+
+`n-peephole` runs its constant fold BEFORE it calls `n-idealize`. `op-foldable?` is `>= OP-PROJ` and
+`OP-LOAD` is 23, so whenever a Load's type is a constant the node becomes a `Const` and disappears,
+and `load-idealize`'s alias comparison never runs. Clause 5 of `tests/mem-test.coil` was written
+specifically to forbid laundering a miswired memory edge into a plausible value, and it measured the
+idealize path only.
+
+It survived by an accident of arithmetic. Its store sits on the `New`'s projection, so `new-compute`
+has met `undefined` into the class's contents and the load is typed `undefined|int=5`, which is not
+constant. Move the store onto the class's INCOMING state and the contents is a bare `int=5`: one
+verifier-clean graph, `EV-MEM` before `iterate!` and `5` after it, produced by nothing but the fold.
+The shape half needs no contrivance at all, because every freshly allocated field holds `undefined`,
+which IS a constant, so an unguarded `o.y` on allocation-derived memory folds to `undefined` and
+reports success.
+
+**The fix is in `load-compute`, not in the fold**, and that distinction is the finding. Blocking the
+fold for `OP-LOAD` alone leaves the bogus type in the graph, where an `Add` above the load folds to
+`int=6` instead and the load is collected anyway. So the compute reports **ANY** when the memory
+state's alias bitset does not carry the node's class, and **ALL** when some shape the pointer can be
+does not carry the word.
+
+ANY on one and ALL on the other is not a stylistic choice, and getting it backwards is caught by the
+project's own monotonicity sweep. An alias bitset only GROWS as a memory type falls, so "the class
+is absent" can only become "present"; a low answer there would have to RISE to the contents at that
+moment, and `every_memory_compute_is_monotone_in_every_slot` says so by name. A shape SET also only
+grows, so "some shape misses this word" can only become more true, and ALL is stable. The predicate
+has to be "some shape misses it" rather than "no shape has it" for exactly that reason.
+
+### A rewrite must not consume an access the program would refuse
+
+The store-side twin of clause 5, and nothing gated it. Build a `Store` whose own access is bogus (an
+object of shape `{y}`, a store naming class x) with a perfectly formed `Load` on top of it, and root
+the memory somewhere else so the load is the store's only reader. The load forwards correctly, that
+drops the store's last reader, the kill cascade collects the store, and the `EV-SHAPE` that store
+owed the program vanishes with it. Same program, two builds, `EV-SHAPE` against `5`.
+
+`load-idealize` now asks `access-refused?` of the store it is about to consume. Reading a type in
+order to DECLINE is always sound, which is why this may look at an answer that an irreversible
+rewrite may not (LAW 3). The negative control is the same graph shape with a sound access and the
+same unrooted store: forwarding must still fire there, or the refusal would just be "declines
+whenever the store is unrooted", which would kill every legitimate case 4c-3 wants.
+
+### `t-mem` did not enforce the restriction three other comments said it enforced
+
+`ty-xdepth` answers 0 for a memory type BECAUSE its contents must be a value; `shape-transition`
+cites `t-mem` as the precedent for its own bounds check. `t-mem` checked nothing. Since `op-value?`
+is `>= OP-CONST` and `Store` is 24, a memory state parked in another `Store`'s value slot passed
+`v-need-value`, `store-compute` met it into the contents, and the result was `mem#1 mem#1 int`:
+nesting without bound, `ty-depth` reporting 0 at every level so no depth guard applied, and
+`ty-print-exact` aborting the process on a graph `g-verify` called clean.
+
+Three changes, and all three are needed. `t-mem` panics by name. `store-compute` clamps its value
+slot through `ty-as-mem-value`, because the monotonicity sweep deliberately feeds every lattice
+element including memory types through that slot and a panic there would kill the sweep rather than
+report anything. And `v-need-value` gained the mirror of `VERR-MEM-SLOT`: `VERR-VALUE-IS-MEM`.
+
+Adding that mirror immediately found a second thing. `v-mem-producer?` said "a `Proj` of a `New`, at
+any slot", which was harmless while the predicate had one direction and reports every store's own
+POINTER as a memory state the moment it has two. Slot 0 is the object. The comment that said the
+arity check would catch it was wrong; `v-check-proj` only checks the range.
+
+### R1 was not machine-checked, and D2 said it was
+
+Nothing required a `Load`'s or `Store`'s pointer to be a managed reference. `v-check-slots` asks only
+`v-need-value`, and `load-compute` consulted the pointer only through `ty-high?`. So
+`Load(mem, Const int=8)` and `Load(mem, Add(o, 8))` built, verified clean, round-tripped and ran. D2
+claims both GC rules are machine-checked on every phase; that was true of R2 and not of R1, and it
+held only because nothing in the IR was yet NAMED an address.
+
+`VERR-PTR-SLOT`, in `v-pass-types`, which runs last and only on an otherwise clean graph. It has to
+be a type check: unlike a memory state, a reference is an ordinary value and an `Arg`, a `Phi`, a
+`Cast` and another `Load` (`o.y.x`) are all legitimate producers, so there is no finite producer set
+to whitelist. The rule is "an object and NOTHING ELSE": `arith-compute` types `o + 8` as plain `dyn`
+and `dyn` includes `VK-OBJ`, so "could be an object" accepts precisely the address arithmetic R1
+exists to exclude. That puts an obligation on M5, and D13 records it rather than leaving it to be
+rediscovered.
+
+### The oracle could not see an object
+
+`rt-eq?` compares an object by its index in the run's allocation stream. Inside one run that IS
+`===`. Across two it is wrong in both directions. Removing an allocation nothing reads shifts every
+later index, so the oracle reports `DIFFERENTIAL FAILURE` on 4c-3's dead-allocation removal, a
+transformation `ev-enter-ctrl!`'s own comment calls unobservable. And two objects of DIFFERENT
+SHAPES that land at the same index compare EQUAL, so the oracle also could not see a rewrite that
+returned the wrong one. Nothing was red only because every `diff-pair` fixture returned an integer
+and the one fixture that returns an object had no twin.
+
+`ev-render-outcome` renders the reachable heap under the result, objects numbered by DISCOVERY
+ORDER, shapes named by their FIELD NAMES. Discovery order is what keeps sharing observable
+(`{a: o, b: o}` differs from `{a: o, b: o2}`) while an unreachable allocation is invisible: that is
+isomorphism of the two heaps, which is identity modulo renaming. Field names rather than the shape
+id for the same reason as the object index: `{x}` and `{y}` are both shape 1 in their own runs, and
+the first draft of this renderer printed `s1` for both and could not tell them apart.
+
+It renders to TEXT because it has to outlive `ev-reset!`. The second build cannot run until the
+first run's heap is cleared, so a comparison holding two live heaps would need the interpreter to
+keep both, which is the one thing `ev-reset!`'s comment is right to forbid.
+
+### No else arm in the corpus had ever executed
+
+`ev-value-in` answered `1 + seed%97` for an unbounded int, with a comment saying the bias existed
+"so truthiness is exercised rather than every branch always going the same way". For a `dyn`
+argument it guaranteed the opposite: 5001 seeds, 5001 truthy, 0 falsey. Every branch predicated on a
+`dyn` `Arg` took its true arm for ever, which is eight corpus fixtures including the one M4 built to
+have two arms.
+
+That alone was not what hid the LAW 5 miscompile, and the second half is the more useful lesson.
+With the binder fixed so one seed in three is falsey, swapping `fx-shape-poly`'s class-x memory
+phi's arms STILL left the gate green, because the clause asserted `EV-OK` and PRINTED the result. A
+printed object is a name. Nothing read the merged memory back, so no arm order was observable. It
+went red only once `ev-outcome` read the returned object's field out of the state the `MemMerge`
+produced, and the clause asserted the whole outcome under one truthy and one falsey seed. Two
+independent gaps, and closing either one alone leaves the miscompile invisible.
+
+### What was measured
+
+Every fix above was reverted in turn and the corresponding gate confirmed red: eight fixes, eight
+red gates, then green again at 185. The corpus grew by the pair `24-object-returned` and
+`25-object-returned-scratch`, which is the same program with and without an allocation nothing reads
+back and is 4c-3's gate, written before the pass it gates.
+
+### What was deliberately NOT done
+
+Two of the eight findings suggested making "the memory edge carries this class" and "the pointer's
+shape carries this word" into verifier rules. They are not, and D13 records why rather than leaving
+it as an omission. Both a memory type's alias bitset and a value type's shape set are unions over
+PATHS, so carrying a class statically does not mean carrying it on the path taken; and a shape rule
+strong enough to be worth having would make `EV-SHAPE` unreachable from any verifier-clean graph,
+which would delete the project's own argument for having an oracle at all
+(`running_it_catches_the_memory_contracts_the_verifier_cannot`). What is closed is the laundering,
+which is the part that made one program give two answers. Whether M5 wants the static forms as well
+is in ROADMAP.md's open list, with the `dyn` pointer question that has to be settled first.

@@ -55,6 +55,9 @@
 (const CX-OBJECT-RAW  i64 19)
 (const CX-SHAPE-POLY  i64 20)
 (const CX-OBJECT-LOOP i64 21)
+(const CX-OBJECT-TWO  i64 22)
+(const CX-OBJECT-RET  i64 23)
+(const CX-OBJECT-RET-SCRATCH i64 24)
 
 ;; RAW-ANALYSED: every node created, nothing peepholed, then `g-analyze!` to a type fixpoint.
 ;; OPTIMISED:    peepholed during construction and then `iterate!` to a peephole fixpoint.
@@ -70,7 +73,7 @@
 (const CORPUS-RAW-ANALYSED i64 0)
 (const CORPUS-OPTIMISED    i64 1)
 
-(defn corpus-count [] (-> i64) 22)
+(defn corpus-count [] (-> i64) 25)
 
 (defn panic-corpus [(msg (slice u8))] (-> i64)
   (let [w (stderr)] (ps w "corpus: ") (ps w msg) (ps w "\n"))
@@ -102,6 +105,9 @@
     CX-OBJECT-RAW     "20-object-raw"
     CX-SHAPE-POLY     "21-shape-polymorphic"
     CX-OBJECT-LOOP    "22-object-loop"
+    CX-OBJECT-TWO     "23-object-two"
+    CX-OBJECT-RET     "24-object-returned"
+    CX-OBJECT-RET-SCRATCH "25-object-returned-scratch"
     (do (panic-corpus "corpus-name: index out of range") "")))
 
 (defn corpus-mode [(i i64)] (-> i64)
@@ -133,6 +139,9 @@
     CX-OBJECT-RAW     CORPUS-RAW-ANALYSED
     CX-SHAPE-POLY     CORPUS-OPTIMISED
     CX-OBJECT-LOOP    CORPUS-OPTIMISED
+    CX-OBJECT-TWO     CORPUS-OPTIMISED
+    CX-OBJECT-RET     CORPUS-OPTIMISED
+    CX-OBJECT-RET-SCRATCH CORPUS-OPTIMISED
     (do (panic-corpus "corpus-mode: index out of range") 0)))
 
 (defn corpus-mode-name [(m i64)] (-> (slice u8))
@@ -482,12 +491,17 @@
 
 ;; `o = {x}; o.x = 5; return o.x;` — the smallest program with a heap in it.
 ;;
-;; WHAT ITS LOAD REPORTS IS THE POINT OF THE FIXTURE, and it is `undefined|int=5` rather than
-;; `int=5`. A memory type describes a whole ALIAS CLASS: the allocation puts `undefined` in class
-;; x, the store puts 5 there, and no alias-level type can say that THIS pointer's word is the one
-;; the store wrote. Recovering the 5 needs pointer identity, which is structural, and that is 4c.
-;; The union is asserted exactly in tests/mem-test.coil so that 4c is measured against a number
-;; this milestone actually earned.
+;; SINCE 4c-1 THIS IS THE FIXTURE THAT FORWARDS. `load-idealize` sees that the load's memory input
+;; is the Store, on the same alias class, with the SAME POINTER NODE, and hands back the stored 5;
+;; the load is gone from the optimised graph and the Return's value is a literal.
+;;
+;; WHAT THE LOAD REPORTED IS STILL THE MEASUREMENT, and it moved to `fx-object-raw`, which is
+;; never rewritten and still exhibits it exactly: `undefined|int=5` rather than `int=5`. A memory
+;; type describes a whole ALIAS CLASS, so the allocation puts `undefined` in class x, the store
+;; puts 5 there, and no alias-level type can say that THIS pointer's word is the one the store
+;; wrote. That union is what pointer identity beats, it is asserted exactly in tests/mem-test.coil
+;; against the raw twin, and nothing about it was weakened by this slice: the claim simply lives
+;; on the fixture that still shows it.
 (defn fx-object [] (-> i64)
   (graph-reset! 1)
   (shape-reset!)
@@ -497,7 +511,20 @@
       (let [o  (n-obj-ptr nw)
             m1 (n-obj-mem nw 0)]
         (let [m2 (n-store! m1 o (mk-int 5) ax)]
-          (ret-to-mem (g-start) (n-load! m2 o ax) m2)))))
+          ; THE MEMORY IS PINNED ACROSS THE LOAD'S CONSTRUCTION, and this is a trap that was
+          ; measured rather than anticipated. `n-load!` peepholes on the spot, the load forwards to
+          ; the stored 5, and subsuming it drops the Store's ONLY use: the kill cascade then takes
+          ; the Store, the New's projections, the New and the entire memory chain, and the
+          ; `ret-to-mem` on the next line wires a corpse into the Return's memory slot. Nothing at
+          ; this line says a word; the corpus-wide verifier reports VERR-DEAD-INPUT much later.
+          ; `n-keep!` is the same mechanism `n-peephole` uses to stop a cascade eating the
+          ; replacement it is installing, and it works here because `n-del-use!` reports a pinned
+          ; node as still used. The Return is what roots memory at the exit, and it does not exist
+          ; until after the load, so the window has to be held open by hand.
+          (n-keep! m2)
+          (let [v (n-load! m2 o ax)]
+            (n-unkeep! m2)
+            (ret-to-mem (g-start) v m2))))))
   (iterate!) 0)
 
 ;; The same program built RAW, so `g-analyze!` has to reach the memory fixpoint with nothing
@@ -614,6 +641,97 @@
                     (wl-push! nx) (wl-push! st))))))))))
   (iterate!) 0)
 
+;; `a = {x}; a.x = 1; b = {x}; b.x = 2; return a.x;` — the NEGATIVE witness for 4c-1's forwarding,
+;; and the reason the gate on it is not vacuous.
+;;
+;; TWO ALLOCATIONS OF ONE SHAPE. Both stores therefore name the SAME alias class, and both pointers
+;; have the SAME TYPE, `obj{x}`. Every fact a type could offer says the two stores are
+;; interchangeable, and the load's memory input is `b.x = 2`. The only thing that says the load
+;; must not take that 2 is that the store's pointer is a DIFFERENT NODE from the load's, which is
+;; exactly the structural fact `load-idealize` is built on. A forwarding rule that compared alias
+;; classes and skipped the pointer check returns 2 here; the answer is 1, and the graph that
+;; returns 2 passes the verifier, the print/parse round trip and every structural count. Only the
+;; interpreter tells them apart, which is what D12's oracle is for.
+;;
+;; SO THE LOAD SURVIVES IN THIS FIXTURE, and that is the other half of the measurement: "the load
+;; disappeared" is also satisfied by a rule that deletes every load it sees.
+;;
+;; Appended at the end of the corpus, never inserted: an index is a diagram file name and a golden
+;; string, so inserting one renames every later fixture's artifacts at once.
+(defn fx-object-two [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      ; ONE memory chain, because one shape is one alias class: the second allocation takes the
+      ; first store's memory as its incoming state for class x, which is what puts `b`'s store
+      ; between `a`'s store and the load.
+      (let [na (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [oa (n-obj-ptr na)]
+          (let [ma (n-store! (n-obj-mem na 0) oa (mk-int 1) ax)]
+            (let [nb (n-new-obj1! (g-start) sx ma)]
+              (let [ob (n-obj-ptr nb)]
+                (let [mb (n-store! (n-obj-mem nb 0) ob (mk-int 2) ax)]
+                  ; Pinned for the same reason `fx-object` pins, even though the load declines here
+                  ; and so nothing cascades today. The pin is what makes a REGRESSION in
+                  ; `load-idealize` fail with the right diagnosis: if the pointer check were ever
+                  ; dropped, this load would fold, and with memory rooted the fixture reports the
+                  ; wrong ANSWER (2 instead of 1) from the interpreter, rather than a corrupt graph
+                  ; and a VERR-DEAD-INPUT that says nothing about pointer identity.
+                  (n-keep! mb)
+                  (let [v (n-load! mb oa ax)]
+                    (n-unkeep! mb)
+                    (ret-to-mem (g-start) v mb))))))))))
+  (iterate!) 0)
+
+;; `o = {x}; o.x = 5; return o;` -- THE FIRST FIXTURE WHOSE RESULT IS AN OBJECT, and it exists in
+;; a pair for one reason: to make the differential oracle say something about object identity.
+;;
+;; Until this pair, every fixture with a `diff-pair` twin returned an integer, and `fx-shape-poly`
+;; returned an object but had no twin. That is the only reason nothing was red, because the
+;; comparison was `rt-eq?`, which compares an object by its INDEX IN THE ALLOCATION STREAM. Under
+;; that rule this fixture and its scratch twin below differ (`obj0` against `obj1`) while
+;; computing the same thing, and two objects of different shapes that both land at index 0 compare
+;; EQUAL. See `ev-render-outcome` for the notion that replaced it.
+(defn fx-object-ret [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          (let [m (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+            (ret-to-mem (g-start) o m))))))
+  (iterate!) 0)
+
+;; The SAME program with a scratch object allocated first: `d = {x}; d.x = 9; o = {x}; o.x = 5;
+;; return o;`. Nothing ever reads `d` back, so the two programs have identical observable
+;; behaviour, and 4c-3's dead-allocation removal is exactly the pass that turns this one into the
+;; one above.
+;;
+;; ITS ONE JOB IS TO SHIFT THE ALLOCATION INDEX. The returned object is the SECOND allocation here
+;; and the first one there, so a cross-run comparison that names an object by its position in the
+;; allocation stream reports DIFFERENTIAL FAILURE on a pair that agrees, which is the pass 4c-3
+;; would have landed on. The scratch store also puts a 9 into class x, so the exit memory's
+;; contents differs as a TYPE (`undefined|int=[5..9]` against `undefined|int=5`) while the
+;; reachable heap under the result does not: the oracle must see the second thing and not the
+;; first.
+(defn fx-object-ret-scratch [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      ; one shape is one alias class, so the scratch object's store is the incoming memory of the
+      ; allocation that follows it: one chain, two objects
+      (let [nd (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [od (n-obj-ptr nd)]
+          (let [md (n-store! (n-obj-mem nd 0) od (mk-int 9) ax)]
+            (let [nw (n-new-obj1! (g-start) sx md)]
+              (let [o (n-obj-ptr nw)]
+                (let [m (n-store! (n-obj-mem nw 0) o (mk-int 5) ax)]
+                  (ret-to-mem (g-start) o m)))))))))
+  (iterate!) 0)
+
 ; ============================================================================
 ; Building by index
 ; ============================================================================
@@ -643,4 +761,7 @@
     CX-OBJECT-RAW     (fx-object-raw)
     CX-SHAPE-POLY     (fx-shape-poly)
     CX-OBJECT-LOOP    (fx-object-loop)
+    CX-OBJECT-TWO     (fx-object-two)
+    CX-OBJECT-RET     (fx-object-ret)
+    CX-OBJECT-RET-SCRATCH (fx-object-ret-scratch)
     (do (panic-corpus "corpus-build!: index out of range") 0)))

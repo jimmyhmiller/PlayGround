@@ -27,7 +27,7 @@ Two rules that apply throughout:
 | **M2** | Control flow | done | `tests/control-test.coil` |
 | | Dominators and the loop tree | done | `tests/loop-tree-test.coil` |
 | **M3** | Verifier, interpreter, textual IR | done | `verify-`, `eval-`, `text-`, `gtext-test.coil` |
-| **M4** | Memory SSA and shapes | **in progress**: shapes, the memory type and all four memory ops are in and run; no forwarding or elimination yet | `tests/shape-test.coil`, `tests/mem-test.coil` |
+| **M4** | Memory SSA and shapes | **in progress**: shapes, the memory type, all four memory ops and load-after-store forwarding are in and run; store-after-store elimination and dead-store removal are not | `tests/shape-test.coil`, `tests/mem-test.coil` |
 | M5 | Dynamic values end to end | not started | |
 | M6 | Functions, calls, closures | not started | |
 | M7 | Closed-world inference | not started | |
@@ -56,24 +56,43 @@ that looks gratuitous.
 
 ## The next concrete piece of work
 
-M4 slice 4c: the three rewrites M4's gate names, on the memory graph 4b built.
+M4 slice 4c-2 and 4c-3: the two rewrites of M4's gate that are still open. 4c-1
+(load-after-store forwarding) is done and is `load-idealize` in `src/node.coil`.
 
-- **Load-after-store forwarding.** `Load(p, Store(p, v, m))` is `v`. It is decided by POINTER
-  IDENTITY, not by types: 4b's `tests/mem-test.coil` pins the load's type at `undefined|int`
-  exactly, because an alias-level type describes a whole class and can never say that this
-  pointer's word is the one the store wrote. Simple's `Load.idealize` also forwards past a store
-  to a *provably different* pointer (two distinct `New`s never alias), which is structural and
-  safe; its offset-overlap test reads a TYPE and is exactly the shape D8 forbids acting on
-  provisionally.
-- **Store-after-store elimination.** `Store(p, v2, Store(p, v1, m))` drops the inner store.
+- **Store-after-store elimination.** `Store(p, v2, Store(p, v1, m))` drops the inner store. Same
+  decision procedure as 4c-1 and the same refusals: same alias class, same pointer NODE, no type
+  read anywhere. It is a harder rewrite than the load side for one reason, and it is worth
+  knowing before starting: the inner store may have OTHER readers, so dropping it is only legal
+  when this store is its only memory consumer.
+- **Forwarding past a provably different pointer.** Simple's `Load.idealize` also walks past a
+  store to a *provably different* allocation (two distinct `New`s never alias), which is
+  structural and safe. It needs a distinct-allocation predicate that does not exist yet. Its
+  offset-overlap test reads a TYPE and is exactly the shape D8 forbids acting on provisionally,
+  and its push-a-load-up-through-a-Phi rule builds a new Phi on the merge's region, which lands
+  in LAW 5's region/phi arity lockstep. Neither is in 4c-1.
 - **Dead-allocation removal.** A `New` none of whose projections is read is unobservable. Most of
   this already falls out: killing the last projection drops the New's last use and the cascade
   takes it. What has to be *added* is dropping a store to an object that escapes nowhere.
 
-Each one is irreversible, so each one must ask `n-ty-proven?` before it acts (D8). Each one is
-gated the same way: the differential interpreter must return the identical result on the whole
-corpus before and after, and the four memory fixtures (19 to 22) are what make "the whole corpus"
-mean something for memory.
+Each one is irreversible, so each one must ask `n-ty-proven?` before it acts (D8). NOTE WHAT
+THAT GUARD IS FOR ON A STRUCTURAL RULE, which 4c-1 had to work out: these rules read no type, so
+the guard is not about disbelieving a provisional type. It is about not committing permanently to
+a store that the sweep has not finished with. Each one is gated the same way: the differential
+interpreter must return the identical result on the whole corpus before and after, and the seven
+memory fixtures (19 to 25) are what make "the whole corpus" mean something for memory.
+
+**4c-3 HAS ITS GATE ALREADY, AND IT IS `24-object-returned` AND ITS SCRATCH TWIN.** They are the
+same program with and without an allocation nothing reads back, they are the first pair in the
+corpus whose RESULT is an object, and they are already through `diff-pair`. That is deliberate:
+before D14 the oracle compared objects by their index in the allocation stream, so removing a dead
+allocation shifted every later index and the oracle would have reported `DIFFERENTIAL FAILURE` on a
+pass that changed nothing. The pass now has a gate that will pass when it is right.
+
+AND EVERY MEMORY FIXTURE THAT FORWARDS MUST PIN ITS MEMORY ACROSS THE FOLD. 4c-1 measured this:
+when the forwarded load is the store's last reader, subsuming it runs the kill cascade over the
+entire memory chain, and the `Return` built on the next line is wired to a corpse. `n-keep!` on
+the memory value across the load's construction is the fix, and the corpus-wide verifier
+(`VERR-DEAD-INPUT`) is what catches a missed one, a long way from the cause.
 
 Two things are open from M3 and are worth reading, because the first one will bite around memory
 edges:
@@ -87,6 +106,23 @@ edges:
    nested-guard fixture, from a fully analysed graph. It does not reproduce now, which means only
    that no gate covers that phase order. A gate for it is the first thing to write when it is picked
    up.
+3. **The two memory access contracts are checked only by the interpreter**, by decision rather than
+   by omission: `EV-MEM` (the memory edge carries the class this node names) and `EV-SHAPE` (the
+   pointer's shape carries this word) are both statically checkable, and D13 records why they are
+   not verifier rules today. What is closed is the LAUNDERING: no rewrite may turn either refusal
+   into a plausible value, which is `load-compute`'s two answers and `load-idealize`'s
+   `access-refused?`, gated by
+   `a_miswired_access_is_not_laundered_by_the_constant_fold` and
+   `forwarding_refuses_a_store_the_program_itself_refuses`. What is still open is whether M5 wants
+   the static forms as well; that decision needs the `dyn` pointer rule in D13 settled first, and it
+   is not free, because a shape rule strong enough to be worth having makes `EV-SHAPE` unreachable
+   from a verifier-clean graph and so removes the project's own argument for having an oracle.
+4. **An unread store's checks never run at all**, and that is a property of the demand-driven
+   interpreter rather than of any rewrite: a `Store` whose memory result nothing reads is never
+   evaluated, so its `ev-check-access` never happens, in EVERY build. `forwarding_refuses_a_store_the_program_itself_refuses`
+   pins the part that IS a rewrite's fault (a store that was demanded becoming undemanded); the
+   residual is a gap in the oracle's coverage of stores and is worth closing when 4c-3 makes stores
+   disappear on purpose.
 
 ---
 
@@ -278,15 +314,15 @@ known shape.
 removal all demonstrated by golden tests; differential tests green; a shape-polymorphic site
 keeps two inline paths instead of collapsing.
 
-Where the clauses stand after 4b:
+Where the clauses stand after 4c-1:
 
 | Clause | State |
 |---|---|
 | the ops exist, verify, print, reparse and RUN | done (`tests/mem-test.coil`) |
-| differential tests green | done, on four memory fixtures in both build modes |
-| a shape-polymorphic site does not collapse | done for the LATTICE half: the merged pointer keeps both shape bits, the two arms keep distinct alias classes, and the `MemMerge` describes their union. The two INLINE PATHS are M9's, since a guard is what makes a path, and 4c's forwarding is what makes each path worth having |
-| load-after-store forwarding | 4c |
-| store-after-store elimination | 4c |
+| differential tests green | done, on seven memory fixtures in both build modes, and the comparison is now the reachable HEAP rather than an object's allocation index (D14) |
+| a shape-polymorphic site does not collapse | done for the LATTICE half: the merged pointer keeps both shape bits, the two arms keep distinct alias classes, and the `MemMerge` describes their union. The two INLINE PATHS are M9's, since a guard is what makes a path, and 4c's forwarding is what makes each path worth having. It is now RUN on both arms and the merged memory is read back through the returned object, so swapping either memory phi's arms is red; before that, no seed ever took the else arm and nothing read the merge, so the canonical LAW 5 miscompile left the whole gate green |
+| load-after-store forwarding | **done (4c-1)**. `load-idealize`: the load's memory input is a Store on the SAME alias class whose pointer is the SAME NODE, so the load is that store's value. Decided structurally and never from a type; Simple's offset-overlap rule is deliberately not ported, because it reads a type and then rewrites irreversibly. `fx-object` (19) forwards; `fx-object-two` (23) is the negative witness, two allocations of one shape where the pointer check is the only thing between the right answer and 2 |
+| store-after-store elimination | 4c-2 |
 | dead-allocation removal | partly, and for free: killing a `New`'s last projection drops its last use and the cascade collects it. A store to an object nothing reads still survives |
 
 ## M5. Dynamic values end to end

@@ -1185,6 +1185,79 @@
 ;; `cast-compute`'s freeze rule for what that costs), or quietly make the front end's annotation
 ;; load-bearing for correctness. D4 says a narrowing needs a guard, and a declared type is not one.
 
+;; ---------------------------------------------------------------------------
+;; The two questions every memory compute has to ask before it reads a contents
+;; ---------------------------------------------------------------------------
+;; DOES THIS STATE DESCRIBE THE CLASS I AM TOUCHING. `ty-mem-contents` is a projection: it hands
+;; back the contents field whatever the alias bitset says, so reading it for a class the bitset
+;; does not carry reports ANOTHER CLASS'S value. That is not imprecision, it is an
+;; UNDER-approximation: a type no proof supports, in the direction that miscompiles.
+;;
+;; It matters because of which consumer sees it first. `load-idealize` refuses this graph shape by
+;; comparing alias numbers, but `n-peephole` runs the constant fold BEFORE it ever calls
+;; `n-idealize`, so when the other class's contents happens to be a constant -- and `undefined`,
+;; the contents of every freshly allocated field, is one -- the Load is replaced by a Const and
+;; deleted, and the EV-MEM the interpreter owed that graph is gone with it. One verifier-clean
+;; graph then has two observable answers, which is LAW 10's differential oracle failing across a
+;; pass, and it is exactly the laundering the alias comparison was written to refuse.
+;;
+;; ANY, NOT ALL. An alias bitset only GROWS as a memory type falls (meet is OR), so "the class is
+;; absent" can only turn into "the class is present". A low answer here would have to RISE to the
+;; contents at that moment; ANY falls to it. The project's own `every_memory_compute_is_monotone_in_every_slot`
+;; catches the ALL version by name.
+(defn mem-in-misses-alias? [(t i64) (alias i64)] (-> bool)
+  (and (ty-mem? t) (= (& (ty-mem-aliases t) (<< 1 alias)) 0)))
+
+(defn mem-in-contents-for [(t i64) (alias i64)] (-> i64)
+  (if (mem-in-misses-alias? t alias) (t-top) (ty-mem-contents t)))
+
+;; DOES EVERY OBJECT THIS POINTER CAN BE CARRY THIS WORD. The other half of `ev-check-access`, and
+;; the reason `shape-field-by-alias` answers SHAPE-NO-FIELD rather than aborting.
+;;
+;; A fixed-offset access to a word the object does not have is a front end that emitted `o.y`
+;; without a shape guard, which D4 says is the bug rather than something the compiler should
+;; paper over. `load-compute` answering the class's contents anyway is what lets the fold delete
+;; the load and report `undefined`, which hides precisely the guard D4 requires. So the answer for
+;; a pointer that MISSES the word is ALL: no proof, nothing to fold, and the Load survives for the
+;; interpreter to refuse with EV-SHAPE.
+;;
+;; "SOME shape misses it" and not "no shape has it", and that is the monotone form. The shape
+;; bitset only grows as a pointer type falls, so a set that already contains a missing shape
+;; contains it for ever, and the answer can only stay at ALL. Requiring merely that SOME shape
+;; carries the word would flip back the other way the moment a second shape arrived.
+;;
+;; Only DEFINED shape ids are consulted. `t-kinds` mints its shape bitset as -1 (every shape:
+;; the bottom of that axis), so most low types name shapes that no transition ever allocated, and
+;; `shape-field-by-alias` has nothing to say about those. Newly defined shapes can only ADD a
+;; missing one, so the walk stays monotone as the table grows.
+(defn ptr-misses-alias? [(t i64) (alias i64)] (-> bool)
+  (let [bits (ty-shapes t) k (shape-count) (mut i) 0 (mut missing) false]
+    (loop
+      (if (or (>= (load i) k) (load missing)) (break)
+        (do (if (and (!= (& bits (<< 1 (load i))) 0)
+                     (= (shape-field-by-alias (load i) alias) SHAPE-NO-FIELD))
+                (store! missing true)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load missing)))
+
+;; WILL THE PROGRAM REFUSE THIS ACCESS. The static twin of `ev-check-access`, asked of a Load's or
+;; a Store's own types: slots 1 and 2 are the memory state and the pointer for both ops, so one
+;; predicate covers both. `false` is not a promise that the access succeeds -- an alias bitset and
+;; a shape set are both unions over paths, so a state that carries the class statically may not
+;; carry it on the path taken -- but `true` means every path refuses it.
+;;
+;; IT EXISTS SO A REWRITE CANNOT CONSUME AN ACCESS THE PROGRAM WOULD REFUSE. Forwarding a load out
+;; of a store drops the store's last reader, the kill cascade collects the store, and the
+;; EV-SHAPE or EV-MEM that store owed the program disappears; the same program then answers 5
+;; before the pass and traps after it, or the other way round. Reading a type to DECLINE a rewrite
+;; is always sound, which is why this may look at a provisional answer where an irreversible
+;; rewrite may not (LAW 3).
+(defn access-refused? [(n i64)] (-> bool)
+  (or (mem-in-misses-alias? (n-in-ty n 1) (n-aux n))
+      (ptr-misses-alias? (n-in-ty n 2) (n-aux n))))
+
 ;; A New's tuple is one slot per field plus the object, and the object's shape bitset bounds the
 ;; field count, so this buffer cannot be overrun by a legal shape. The check below says so anyway,
 ;; because "cannot" is a property of another file.
@@ -1209,7 +1282,11 @@
         (if (>= (load i) k) (break)
           (do (store! (index p (+ (load i) 1))
                       (t-mem-alias (shape-field-alias s (load i))
-                                   (ty-meet (ty-mem-contents (n-in-ty n (+ (load i) 1)))
+                                   ; the incoming state has to be one that DESCRIBES this field's
+                                   ; class, or the meet would carry a sibling class's contents
+                                   ; into it; see `mem-in-contents-for`
+                                   (ty-meet (mem-in-contents-for (n-in-ty n (+ (load i) 1))
+                                                                 (shape-field-alias s (load i)))
                                             (t-undef))))
               (store! i (+ (load i) 1))
               0)))
@@ -1223,13 +1300,25 @@
 ;; A HIGH POINTER MEANS NO OBJECT REACHES THIS LOAD, so no value comes out of it. That is the
 ;; ordinary optimistic answer and it falls to the contents as soon as the pointer does; it is what
 ;; lets a load on a dead arm stay out of the meet at a Phi below it.
+;; A POINTER THAT MISSES THE WORD ANSWERS ALL, for the reason `ptr-misses-alias?` gives: the
+;; access is a front-end bug rather than a value, and reporting the class's contents would let the
+;; fold turn it into `undefined` and delete the node the oracle had to complain about.
 (defn load-compute [(n i64)] (-> i64)
   (if (ty-high? (n-in-ty n 2)) (t-top)
-    (ty-mem-contents (n-in-ty n 1))))
+    (if (ptr-misses-alias? (n-in-ty n 2) (n-aux n)) (t-bot)
+      (mem-in-contents-for (n-in-ty n 1) (n-aux n)))))
 
+;; The pointer is deliberately NOT consulted here. A Store's result is a memory STATE, never a
+;; constant, so nothing can fold it away and there is no laundering to prevent; meeting the value
+;; into its own class is an over-approximation, which is the safe direction. What it does have to
+;; ask is the memory question: an incoming state that describes some other class says nothing
+;; about this one, and inheriting its contents would mint a state more specific than the truth.
 (defn store-compute [(n i64)] (-> i64)
   (t-mem-alias (n-aux n)
-               (ty-meet (ty-mem-contents (n-in-ty n 1)) (n-in-ty n 3))))
+               (ty-meet (mem-in-contents-for (n-in-ty n 1) (n-aux n))
+                        ; a memory state is not a value, so it cannot BE a contents; `t-mem`
+                        ; panics on one and this compute has to stay total
+                        (ty-as-mem-value (n-in-ty n 3)))))
 
 ;; The union of its inputs' alias classes, which is exactly `ty-meet` on the memory production:
 ;; OR on the alias bitset, meet on the contents. Seeding at `t-mem-none` is seeding at the top of
@@ -1449,6 +1538,86 @@
       (n-in n 1)
     NO-NODE))
 
+;; THE SAME WORD OF THE SAME OBJECT, decided without reading a single type.
+;;
+;; Two conditions, and each of them is one half of "the same word". The alias class is the FIELD:
+;; this IR resolves memory to alias classes, one class is one field of one shape, and that is what
+;; takes the place of Simple's offset comparison. The pointer is the OBJECT, and it is compared by
+;; NODE IDENTITY: one node is one object because `op-gvn?` excludes `New`, so two structurally
+;; identical allocations stay two nodes and two objects, and therefore one node can only ever have
+;; been one allocation.
+(defn load-store-same-word? [(ld i64) (st i64) (p i64)] (-> bool)
+  (and (= (n-op st) OP-STORE)
+       (and (= (n-aux st) (n-aux ld)) (= (n-in st 2) p))))
+
+;; LOAD AFTER STORE. `Load(ptr=p, mem=Store(mem=_, ptr=p, val=v))` is `v`.
+;;
+;; IT IS STRUCTURAL, AND IT HAS TO BE. The memory compute header above says why: a memory type
+;; describes a whole alias CLASS, so `store-compute` MEETS the stored value into the incoming
+;; contents rather than replacing it, and the load on the smallest heap fixture is honestly typed
+;; `undefined|int=5`. No alias-level type can ever say that THIS pointer's word is the one the
+;; store wrote. Node identity can, and that is a fact about the graph rather than about the
+;; lattice, which is exactly why 4b pinned the union in `tests/mem-test.coil`: so this slice is
+;; measured against a number the analysis actually earned.
+;;
+;; SIMPLE'S OFFSET-OVERLAP TEST IS DELIBERATELY NOT PORTED. Chapter 24's `LoadNode.idealize` also
+;; forwards PAST a store when the two offsets provably cannot overlap, which asks whether two
+;; types are disjoint and then rewrites irreversibly: that is the exact shape D8 forbids acting on
+;; provisionally. Its other rule (forwarding past a store to a provably DIFFERENT allocation) is
+;; structural and would be legitimate here, but it needs a distinct-allocation predicate that does
+;; not exist yet, and pushing a load up through a Phi -- Simple's third rule -- builds a new Phi on
+;; the merge's region and so lands in region/phi arity lockstep (LAW 5). Both are later business.
+;;
+;; ANYTHING ELSE DECLINES: a Phi, a MemMerge, a `Proj` of a New, a Store naming a different class,
+;; a Store on a different pointer. Declining is unconditionally sound, because the load simply
+;; stays and reads its own memory edge.
+;;
+;; THE DECLINE RECORDS A DEP ON THE MEMORY NODE, which `wl-push-outs!` does not cover: that pushes
+;; the load when the memory node's TYPE moves, and this rule reads the memory node's OP and INPUTS.
+;; A Store whose pointer is later rewritten to `p` by some other peephole changes neither its own
+;; type nor the load's, and without the dep the load would never be reconsidered. `n-set-def!`
+;; flushes a node's deps, which is precisely the event that matters.
+(defn load-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 1) p (n-in n 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) NO-NODE
+      ; A dead memory input is graph corruption (VERR-DEAD-INPUT), not a rewrite opportunity, and
+      ; reporting it is `g-verify`'s job, with the offending node in hand. What must not happen is
+      ; reading `ins` out of a killed node: `n-kill!` clears that list, so the read would be either
+      ; a bounds panic or, worse, a stale id (see `cproj-idealize`).
+      (if (n-dead? m) NO-NODE
+        ;; PROVEN, and the reason is not the usual one, so it is worth writing down rather than
+        ;; copying. Every other guarded rewrite in this file asks `n-ty-proven?` because it READ a
+        ;; type and a provisional type is a lie. This one reads no type at all: node identity and an
+        ;; alias number are facts about the graph as it stands, and they cannot be provisional.
+        ;;
+        ;; It asks anyway, because the rewrite is IRREVERSIBLE and the graph it is reading is not
+        ;; finished. A Store sitting in a still-settling cone is a store the sweep may yet replace
+        ;; (GVN can fold it into an equal one; 4c-2 will delete it outright), and taking its value
+        ;; and deleting the load commits to that store's identity permanently. The load's cone
+        ;; being at a type fixpoint is the available proxy for "this part of the graph has stopped
+        ;; moving", and it is transitive, so it covers the store, its pointer and its value.
+        ;;
+        ;; It is also what makes the replacement's type safe to install. `load-compute` reports
+        ;; `t-top` while the pointer is high, and swapping in `v` under that would WIDEN the type at
+        ;; every use of the load. At a fixpoint the pointer is high only if no object reaches the
+        ;; load at all, and otherwise `v`'s type is a member of the contents `load-compute`
+        ;; reported, so the substitution narrows -- which is the direction `n-set-ty-falling!`
+        ;; allows across a rewrite.
+        ;; AND THE STORE'S OWN ACCESS MUST NOT BE ONE THE PROGRAM REFUSES. This load is the
+        ;; store's reader; taking its value drops that reader and the cascade collects the store,
+        ;; so a store the interpreter would have refused by name (EV-SHAPE for a word the object
+        ;; does not have, EV-MEM for a state that does not carry the class) turns into a plausible
+        ;; value with nothing reported anywhere. Same program, two builds, two answers. Declining
+        ;; costs nothing: the load simply stays and reads its own memory edge, and the graph is
+        ;; one `g-verify` will not save you from, so somebody has to notice.
+        (if (and (load-store-same-word? n m p) (n-ty-proven? n))
+            ;; ... AND THE STORE'S OWN ACCESS MUST NOT BE ONE THE PROGRAM REFUSES. Asked in its own
+            ;; `if` rather than folded into the condition above, because it may only be asked once
+            ;; `m` is known to be a Store: `access-refused?` reads `n-aux` as an alias number, and
+            ;; a Phi's aux is a declared TYPE.
+            (if (access-refused? m) (do (n-add-dep! m n) NO-NODE) (n-in m 3))
+          (do (n-add-dep! m n) NO-NODE))))))
+
 ; ============================================================================
 ; idealize: local rewrites
 ; ============================================================================
@@ -1467,6 +1636,7 @@
     OP-EQ     (cmp-idealize n)
     OP-LT     (cmp-idealize n)
     OP-LE     (cmp-idealize n)
+    OP-LOAD   (load-idealize n)
     NO-NODE))
 
 ;; "This operand IS the integer k", which every identity rule below asks about the operand it is

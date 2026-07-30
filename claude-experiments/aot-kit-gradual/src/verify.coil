@@ -67,6 +67,31 @@
 (const VERR-SHAPE        i64 16)  ; a New whose aux is not a defined shape id
 (const VERR-ALIAS        i64 17)  ; a Load or Store whose aux is not an allocated alias number
 
+;; A LOAD OR STORE WHOSE POINTER CANNOT BE A MANAGED REFERENCE. This is R1 (D2) made checkable,
+;; and until now it held only because nothing in the IR was NAMED an address: the pointer slot
+;; asks `v-need-value`, which is satisfied by any op at or past OP-CONST, so `Load(mem, Const
+;; int=8)` and `Load(mem, Add(o, 8))` both build, verify, round trip and run. D2 claims both GC
+;; rules are machine-checked on every phase; that claim was not true for R1, and the moment M8's
+;; safepoints or any address-computing lowering exists there would be nothing to go red.
+;;
+;; IT IS A TYPE CHECK AND SO IT LIVES IN THE TYPE PASS, which runs last and only on an otherwise
+;; clean graph. A structural whitelist in the style of `v-mem-producer?` is not available here:
+;; unlike a memory state, a reference is an ORDINARY value, and an Arg, a Phi, a Cast and another
+;; Load (`o.y.x`) are all legitimate producers, so there is no finite producer set to enumerate.
+;;
+;; It ABSTAINS on a high pointer, which is the same optimistic case `load-compute` special-cases:
+;; nothing reaches this access, so there is no pointer to object to. Otherwise the pointer must be
+;; an object and NOTHING ELSE (`ty-only-obj?`): "could be an object" would accept `dyn`, and
+;; `arith-compute` types `o + 8` as exactly that, so the weaker form accepts the address
+;; arithmetic R1 exists to keep out. It deliberately does NOT ask which SHAPES: that question
+;; belongs to the interpreter, which is what EV-SHAPE is, and to M9's guards. See DECISIONS.md D13
+;; for what M5 owes here.
+(const VERR-PTR-SLOT     i64 18)
+
+;; A MEMORY STATE IN A SLOT THAT MUST HOLD A VALUE: the mirror of VERR-MEM-SLOT, and its own code
+;; for the same reason that one is. See `v-need-value` for why nothing caught it before.
+(const VERR-VALUE-IS-MEM i64 19)
+
 (defn verr-name [(c i64)] (-> (slice u8))
   (case c
     VERR-NONE         "VERR-NONE"
@@ -87,6 +112,8 @@
     VERR-MEM-SLOT     "VERR-MEM-SLOT"
     VERR-SHAPE        "VERR-SHAPE"
     VERR-ALIAS        "VERR-ALIAS"
+    VERR-PTR-SLOT     "VERR-PTR-SLOT"
+    VERR-VALUE-IS-MEM "VERR-VALUE-IS-MEM"
     "VERR-?"))
 
 ; ============================================================================
@@ -261,11 +288,6 @@
     (let [d (n-in n i)]
       (v-need (and (!= d NO-NODE) (op-control? (n-op d))) VERR-CTRL-SLOT n))))
 
-(defn v-need-value [(n i64) (i i64)] (-> i64)
-  (if (>= i (n-nins n)) (v-fail! VERR-DATA-SLOT n)
-    (let [d (n-in n i)]
-      (v-need (and (!= d NO-NODE) (op-value? (n-op d))) VERR-DATA-SLOT n))))
-
 ;; A slot that must hold a MEMORY STATE, decided STRUCTURALLY. It would be shorter to ask
 ;; `ty-mem?` of the input's computed type, and it would be wrong here for the reason the pass
 ;; order at the bottom of this file already states: `v-pass-structure` runs BEFORE the types are
@@ -273,7 +295,7 @@
 ;; reports ANY. So the question is which nodes can produce memory at all, and that is a fact about
 ;; the graph's shape:
 ;;
-;;   Proj      of a New, at any slot; slot 0 is the object and is caught by the arity check below
+;;   Proj      of a New, at slot 1 or later; slot 0 is the OBJECT and is an ordinary value
 ;;   Store     its whole result
 ;;   MemMerge  likewise
 ;;   Phi / Arg when their DECLARED type (aux, which no analysis writes) is a memory type
@@ -281,12 +303,35 @@
 ;; An Arg is on that list because a declared memory state is how memory ENTERS a graph: the
 ;; program's initial heap is empty, a function's incoming memory is its caller's, and both are
 ;; opaque values of a declared type, which is exactly what an Arg is.
+;;
+;; THE SLOT NUMBER IS PART OF THE ANSWER and it did not used to be. A New's slot 0 is the object,
+;; which is the pointer every Load and Store reads, so "any Proj of a New is memory" was harmless
+;; only while this predicate had one direction: now that `v-need-value` rejects a memory producer,
+;; it would report every store's own pointer as a memory state in a value slot.
 (defn v-mem-producer? [(d i64)] (-> bool)
   (let [op (n-op d)]
-    (if (= op OP-PROJ) (and (>= (n-nins d) 1) (= (n-op (n-in d 0)) OP-NEW))
+    (if (= op OP-PROJ) (and (>= (n-nins d) 1)
+                            (and (= (n-op (n-in d 0)) OP-NEW) (>= (n-aux d) 1)))
       (if (or (= op OP-STORE) (= op OP-MEMMERGE)) true
         (if (or (op-phi? op) (= op OP-ARG)) (ty-mem? (n-aux d))
           false)))))
+
+;; THE MIRROR OF `v-need-mem`, AND IT IS NOT SYMMETRIC BY ACCIDENT. `op-value?` is `>= OP-CONST`
+;; and Store is 24, MemMerge 25, so every memory producer already satisfied the value test: a
+;; memory state parked in an If's predicate, a Return's value, a binop's operand or a Store's
+;; value slot verified CLEAN. src/eval.coil documents that hole for the If predicate and works
+;; around it at run time with `rt-condition?`; the Store's value slot had no such backstop and
+;; reached the lattice instead, where it minted a memory type nested inside a memory type and
+;; aborted the printer.
+;;
+;; It is decided structurally for exactly the reason `v-mem-producer?` gives: this pass runs
+;; before types are evidence, so the question is which nodes can PRODUCE memory, and the same
+;; predicate answers both directions.
+(defn v-need-value [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (v-fail! VERR-DATA-SLOT n)
+    (let [d (n-in n i)]
+      (if (and (!= d NO-NODE) (v-mem-producer? d)) (v-fail! VERR-VALUE-IS-MEM n)
+        (v-need (and (!= d NO-NODE) (op-value? (n-op d))) VERR-DATA-SLOT n)))))
 
 (defn v-need-mem [(n i64) (i i64)] (-> i64)
   (if (>= i (n-nins n)) (v-fail! VERR-MEM-SLOT n)
@@ -328,7 +373,12 @@
     (if (or (= r NO-NODE) (not (op-merge? (n-op r))))
         (v-fail! VERR-PHI-REGION n)
       (do (v-need (= (n-nins n) (n-nins r)) VERR-PHI-ARITY n)
-          (v-need-value-from n 1)
+          ;; A MEMORY PHI'S ARMS ARE MEMORY, and which kind of Phi this is is its DECLARED type,
+          ;; which no analysis writes. Before `v-need-value` learned to reject a memory producer
+          ;; the two cases were one line, because every memory producer is also a value op by the
+          ;; numbering; now they have to be told apart, and telling them apart is a strictly
+          ;; better check in both directions.
+          (if (ty-mem? (n-aux n)) (v-need-mem-from n 1) (v-need-value-from n 1))
           0))))
 
 ;; A projection reads a slot of a tuple, so its parent has to actually produce one and the slot
@@ -452,12 +502,24 @@
 ;; never revisited after an input changed, which is a missing dependency. The claim that every
 ;; `compute` only ever FALLS is a claim about a sequence and is checked where sequences happen,
 ;; in `g-analyze!`.
+;; The pointer contract, per node. See VERR-PTR-SLOT.
+(defn v-check-ptr [(n i64)] (-> i64)
+  (let [op (n-op n)]
+    (if (or (= op OP-LOAD) (= op OP-STORE))
+        (if (>= (n-nins n) 3)
+            (let [t (n-in-ty n 2)]
+              (if (ty-high? t) 0 (v-need (ty-only-obj? t) VERR-PTR-SLOT n)))
+          0)          ; the arity pass already reported the missing slot
+      0)))
+
 (defn v-pass-types [] (-> i64)
   (let [n (n-count) (mut i) 0]
     (loop
       (if (>= (load i) n) (break)
         (do (if (n-dead? (load i)) 0
-              (v-need (= (n-compute (load i)) (n-ty (load i))) VERR-STALE-TYPE (load i)))
+              (do (v-need (= (n-compute (load i)) (n-ty (load i))) VERR-STALE-TYPE (load i))
+                  (v-check-ptr (load i))
+                  0))
             (store! i (+ (load i) 1))
             0))))
   0)
