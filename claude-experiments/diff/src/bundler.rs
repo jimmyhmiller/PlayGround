@@ -5219,6 +5219,8 @@ function __require(id){{
 }})();
 {server_control}
 __runtime.register(__newModules,__newMaps,__newChunks);
+const __queued=globalThis[{runtime_key}+":pending"];
+if(__queued){{for(let __i=0;__i<__queued.length;__i++)__runtime.register(__queued[__i][0],__queued[__i][1],__queued[__i][2]);__queued.length=0;}}
 {reimport_guard}
 return __runtime.{require_entry}({entry_runtime_id});"#
             )
@@ -5247,12 +5249,32 @@ return __runtime.{require_entry}({entry_runtime_id});"#
                 }
                 _ => "return __runtime;".to_string(),
             };
+            // ORDER-INDEPENDENT REGISTRATION. A chunk may execute BEFORE the chunk that
+            // builds the runtime: the document loads them as separate scripts, and nothing
+            // in HTML guarantees which runs first (react-dom even marks its bootstrap tag
+            // `async`). Throwing there made document order load-bearing, and it broke three
+            // separate ways on cal.com before this: a chunk racing the entry threw, so no
+            // page hydrated.
+            //
+            // So an early chunk QUEUES its registration and the runtime drains the queue the
+            // moment it is created — the same shape webpack uses (`webpackChunk.push`), and
+            // the reason webpack chunks can be loaded in any order at all.
+            //
+            // Its default export is `undefined` on that path, because evaluating the root
+            // needs the registry. Nothing reads it there: `require.dynamic` resolves by
+            // runtime id and the RSC seam's `__webpack_chunk_load__` discards the namespace.
+            // The one consumer that DOES read it — the generated SSR router importing the
+            // TanStack manifest chunk — runs in a single server bundle whose entry has
+            // always executed first, so it still gets the evaluated root below.
             format!(
                 r#"const __runtime=globalThis[{runtime_key}];
-if(!__runtime)throw new Error("Diffpack runtime is not initialized");
+if(!__runtime){{
+(globalThis[{runtime_key}+":pending"]??=[]).push([__newModules,__newMaps,__newChunks]);
+}}else{{
 __runtime.register(__newModules,__newMaps,__newChunks);
 {reimport_guard}
-{evaluate}"#
+{evaluate}
+}}"#
             )
         };
         // The registry runtime is identical across formats; only the module
@@ -17357,6 +17379,72 @@ mod tests {
              importer's names (it kept {:?})",
             demands[boundary].names,
         );
+    }
+
+    /// A split chunk loaded BEFORE the chunk that builds the runtime must register itself
+    /// anyway, not throw.
+    ///
+    /// The document loads the entry and this route's chunks as separate scripts and nothing
+    /// in HTML orders them (react-dom even marks its bootstrap tag `async`). While an early
+    /// chunk threw "Diffpack runtime is not initialized", document order was load-bearing —
+    /// and it broke three separate ways on cal.com, each time as "no page hydrates". The
+    /// chunk now queues and the runtime drains the queue before the entry evaluates, which
+    /// is the same shape webpack's `webpackChunk.push` gives it.
+    ///
+    /// Executed under node in BOTH orders, because the whole point is that neither is
+    /// special.
+    #[test]
+    fn a_chunk_loaded_before_the_runtime_registers_instead_of_throwing() {
+        if node_command().arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("island.js"), "export const island = \"island-value\";\n").unwrap();
+        std::fs::write(
+            root.join("entry.js"),
+            "globalThis.pin = [() => import(\"./island.js\")];\n\
+             globalThis.loadIsland = async () => (await globalThis.pin[0]()).island;\n",
+        )
+        .unwrap();
+        let (bundler, update) = Bundler::discover_direct(&root.join("entry.js")).unwrap();
+        assert!(update.diagnostics.is_empty(), "{:?}", update.diagnostics);
+        let output_root = root.join(".out");
+        let reachable = bundler.reachable_modules_direct();
+        bundler
+            .emit_public(&reachable, &output_root, EmitOptions::default())
+            .unwrap();
+        let public_dir = output_root.join("public");
+        let chunk = fs::read_dir(&public_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("client.chunk-"))
+            .expect("the dynamic import produced a chunk");
+
+        for (label, first, second) in [
+            ("chunk first", chunk.as_str(), "client.js"),
+            ("entry first", "client.js", chunk.as_str()),
+        ] {
+            let driver = public_dir.join(format!("drive-{}.mjs", label.replace(' ', "-")));
+            fs::write(
+                &driver,
+                format!(
+                    "import \"./{first}\";\nimport \"./{second}\";\n\
+                     const value = await globalThis.loadIsland();\n\
+                     if (value !== \"island-value\") throw new Error(\"got \" + value);\n\
+                     console.log(\"ok\");\n"
+                ),
+            )
+            .unwrap();
+            let out = node_command().arg(&driver).output().unwrap();
+            assert!(
+                out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ok"),
+                "{label}: loading the chunk before the runtime must still register it\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
     }
 
     /// The chunk-id -> URL table the RSC seam installs is built from EVERY split chunk,

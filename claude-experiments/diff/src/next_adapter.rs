@@ -5643,7 +5643,7 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       const tags =
         moduleTag({client_js}) +
         recorder.chunks().map((chunk) => moduleTag(chunkUrl(chunk))).join("") +
-        "<script type=\"module\"" + nonceAttr + ">globalThis.__diffpackBoot()</script>";
+        "<script type=\"module\"" + nonceAttr + ">window.__DIFFPACK_BOOT_REQUESTED__=1;if(globalThis.__diffpackBoot)globalThis.__diffpackBoot()</script>";
       const bodyEnd = html.lastIndexOf("</body>");
       html = bodyEnd === -1 ? html + tags : html.slice(0, bodyEnd) + tags + html.slice(bodyEnd);
       if (inserted.length) {{
@@ -5746,7 +5746,7 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     }}
     byteController.close();
     scriptQueue.push("<script" + nonceAttr + ">(self.__DF_FLIGHT=self.__DF_FLIGHT||[]).push([0])</script>");
-    scriptQueue.push("<script type=\"module\"" + nonceAttr + ">globalThis.__diffpackBoot()</script>");
+    scriptQueue.push("<script type=\"module\"" + nonceAttr + ">window.__DIFFPACK_BOOT_REQUESTED__=1;if(globalThis.__diffpackBoot)globalThis.__diffpackBoot()</script>");
     if (sink) sink.scheduleDrain();
     pumpDone = true;
   }})();
@@ -6267,7 +6267,11 @@ async function boot() {{
 // A document that does not defer (no client references, or a build with no split chunks)
 // gets the historical behaviour: boot immediately.
 (globalThis).__diffpackBoot = boot;
-if (!window.__DIFFPACK_DEFER_BOOT__) boot();
+// The boot tag and this entry are separate scripts, so either can run first: the tag sets
+// `__DIFFPACK_BOOT_REQUESTED__` and calls `__diffpackBoot` if it is already defined, and
+// this checks the flag in case the tag got there first. Nothing about the pair depends on
+// document order — which is the property the chunk registry now has as well.
+if (!window.__DIFFPACK_DEFER_BOOT__ || window.__DIFFPACK_BOOT_REQUESTED__) boot();
 "##,
     )
 }
