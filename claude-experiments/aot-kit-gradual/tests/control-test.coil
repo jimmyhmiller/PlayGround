@@ -425,6 +425,68 @@
       (iterate!)
       (assert (ty-high? (n-ty lp))))))
 
+;; The gate the widening bug slipped through. The eagerly-peepholed loop above terminates partly
+;; by luck: the in-progress contract makes the increment read the phi's DECLARED type, so the very
+;; first joined type is already at the axis bottom and no widening is ever needed. Build the same
+;; loop RAW, with nothing peepholed, and the analysis has to widen for real. It used to creep
+;; `int=[0..k]` by one step per round for ever, because the fuel was read out of the meet of the
+;; phi's paths and integer arithmetic mints a fresh type with the counter at zero. Terminating by
+;; accident of construction order is not terminating.
+(defn build-raw-counted-loop [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE)
+    (n-add-def! lp (g-start))
+    (n-add-def! lp NO-NODE)
+    (let [c0 (n-new1 OP-CONST (t-int-con 0) (g-start))
+          ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp)
+      (n-add-def! ph c0)
+      (n-add-def! ph NO-NODE)
+      (let [c1 (n-new1 OP-CONST (t-int-con 1) (g-start))
+            nx (n-new3 OP-ADD 0 NO-NODE ph c1)]
+        ; nothing above was peepholed, so every type starts at ANY and the analysis does all
+        ; the work, widening included
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 lp)
+        (let [r (n-new2 OP-RETURN 0 lp ph)]
+          (n-add-def! (g-stop) r))
+        ph))))
+
+(deftest a_raw_loop_phi_settles_too
+  (let [ph (build-raw-counted-loop 1)]
+    ; g-analyze! caps its step count and raises a named error, so failing to converge shows up as
+    ; an abort rather than a hang. Reaching this assertion at all is most of the claim.
+    (g-analyze!)
+    (assert (= (n-ty ph) (t-int)))
+    (assert (not (ty-const? (n-ty ph)))))
+
+  ; and it settles at the SAME type the eager build reaches, since they are the same program.
+  ; Type ids are interned globally and outlive graph-reset!, so comparing across the two graphs is
+  ; comparing types and not addresses.
+  (let [raw-phi (build-raw-counted-loop 7)]
+    (g-analyze!)
+    (let [raw (n-ty raw-phi)
+          eager (n-ty (build-counted-loop 7))]
+      (if (= raw eager) 0
+        (do (let [w (stderr)]
+              (ps w "\nraw and eager builds of the same loop settled differently\n  raw:   ")
+              (ty-print w raw) (ps w "\n  eager: ") (ty-print w eager) (ps w "\n"))
+            (abort) 0)))))
+
+;; Widening fuel accumulates. Fuel taken from the type being widened rather than from the previous
+;; one is the bug above, and it looks identical from outside unless you count the steps: a fresh
+;; tank every round still converges on a SMALL example, just slowly. So this bounds the work.
+(deftest widening_actually_accumulates
+  (build-raw-counted-loop 1)
+  (let [steps (g-analyze!)]
+    ; the loop is 8 nodes; a handful of rounds over them is tens of steps, not thousands. With the
+    ; fuel bug this ran into the millions before the cap fired.
+    (if (< steps 2000) 0
+      (do (let [w (stderr)]
+            (fmt w "\nwidening did not accumulate: g-analyze! took {d} steps on an 8-node loop\n" steps))
+          (abort) 0))))
+
 ; ---------------------------------------------------------------------------
 ; The printer, eyeballed
 ; ---------------------------------------------------------------------------

@@ -558,6 +558,36 @@
 ;; Bump the widening counter; once it is spent, fall to the bottom of the int axis. A loop
 ;; induction variable's range would otherwise creep upward forever and the optimistic pass
 ;; would not terminate.
+;; How much widening fuel this type has already spent.
+(defn ty-iwide [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-iwide v))
+    (TBot   [] TY-WIDEN-MAX)     ; already at the bottom; no fuel left to spend
+    (TTop   [] 0) (TCtrl [] 0) (TXCtrl [] 0) (TTuple [o l] 0)))
+
+(defn ty-with-iwide [(t i64) (w i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (ty-intern (TVal (val-make (val-kinds v) (val-ilo v) (val-ihi v) w
+                                         (val-fsz v) (val-fbits v)
+                                         (val-fidxs v) (val-shapes v)))))
+    (TBot [] t) (TTop [] t) (TCtrl [] t) (TXCtrl [] t) (TTuple [o l] t)))
+
+;; Widen `t`, taking the fuel already spent from `prev` rather than from `t` itself.
+;;
+;; This distinction is the whole difference between terminating and not. A loop phi's new type is
+;; the meet of its incoming paths, and integer arithmetic MINTS A FRESH TYPE: `t-int-range` sets
+;; the counter to 0. So a phi that reads its fuel out of that meet is handed a full tank on every
+;; trip, one widening step never accumulates into the next, and the range creeps by one step per
+;; round for ever. The fuel has to come from the phi's own previous type, which is the only place
+;; that remembers how many times it has already widened.
+(defn ty-widen-from [(prev i64) (t i64)] (-> i64)
+  (let [w (imax2 (ty-iwide prev) (ty-iwide t))]
+    (if (>= w TY-WIDEN-MAX)
+        (match (ty-get t)
+          (TVal [v] (t-kinds (val-kinds v)))
+          (TBot [] t) (TTop [] t) (TCtrl [] t) (TXCtrl [] t) (TTuple [o l] t))
+      (ty-with-iwide t (+ w 1)))))
+
 (defn ty-widen [(t i64)] (-> i64)
   (match (ty-get t)
     (TVal [v]

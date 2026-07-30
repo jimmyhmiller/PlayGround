@@ -820,21 +820,18 @@
             ; loop ranges Simple keeps; termination is the property that matters here, and
             ; sharpening it belongs with loop optimisation.
             ;
-            ; KNOWN GAP, found in M3 and reproduced, NOT yet fixed. The widening fuel lives in
-            ; the type being widened, and integer arithmetic MINTS A FRESH TYPE: `t-int-range`
-            ; sets `iwide` to 0. So `joined` arrives with an empty gauge on every trip and one
-            ; widening step never accumulates into the next. Around a loop that is peepholed
-            ; eagerly this never shows, because the in-progress contract makes the increment
-            ; read the phi's DECLARED type and the very first `joined` is already `int`. Build
-            ; the same loop RAW and run `g-analyze!` and the phi creeps `int=[0..k]` one step per
-            ; round for ever: measured 6663 after 20000 steps, zero rises, until the step cap
-            ; in `g-analyze!` fires its named error. No corpus fixture is a raw loop, so no gate
-            ; covers it yet. The fix is for the fuel to come from the phi's OWN previous type
-            ; rather than from `joined`, which trades some loop-range precision for termination
-            ; and so belongs with M7's inference-precision gate, where a precision regression is
-            ; visible rather than invisible.
+            ; Around a loop an induction variable's range grows on every trip, and widening is
+            ; what bounds it. The FUEL MUST COME FROM THE PHI'S OWN PREVIOUS TYPE, not from
+            ; `joined`. Integer arithmetic mints a fresh type (`t-int-range` sets the counter to
+            ; 0), so a phi reading its fuel out of the meet of its paths gets a full tank every
+            ; trip and the range creeps one step per round for ever. That bug was real and was
+            ; invisible on the eagerly-peepholed path, because the in-progress contract makes the
+            ; increment read the phi's DECLARED type and the very first `joined` is already at the
+            ; axis bottom. Building the same loop raw and running `g-analyze!` reached
+            ; `int=[0..6663]` after 20000 steps with zero rises, until the step cap fired. So the
+            ; eager path was terminating by accident of construction order rather than by design.
             (if (and (and (= (n-op r) OP-LOOP) (!= joined (n-ty n))) (not (ty-const? joined)))
-                (ty-widen joined)
+                (ty-widen-from (n-ty n) joined)
               joined)))))))
 
 ;; Cast is the mechanism the entire guard design rests on: after a type test, the value on the
