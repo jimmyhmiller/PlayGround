@@ -66,29 +66,34 @@ visit (what `next dev` does), which is an architecture project, deliberately def
 The persistent warm-start cache prototype (1.66s restarts) was removed by request —
 no caching approaches for now.
 
-### 7. Per-island chunking is too granular on island-heavy routes
+### 7. Per-island chunking is too granular — the request count is now the bottleneck
 
-Both modes split per island now, and on most routes that is a straight win. The exception is
-a route that renders many islands: cal.com's `/apps` pulls 162 JS files in production
-against Turbopack's 47, and the extra requests cost more than the smaller payload saves.
+Both modes split per island and the document declares the route's chunks (see the Resolved
+table), which is correct but coarse-grained in the wrong direction: a page loads one script
+per island. cal.com's booker pulls 209 JS files where Turbopack pulls 54.
 
-| production, cold cache | diffpack JS wire / decoded / files | Turbopack |
-|---|---|---|
-| `/auth/login` | **165 KB / 544 KB / 27** | 482 KB / 1.48 MB / 30 |
-| `/pro/30min` | **155 KB / 503 KB / 27** | 1.02 MB / 3.09 MB / 54 |
-| `/apps` | 1.16 MB / 4.22 MB / 162 | **813 KB / 2.43 MB / 47** |
+Production, cold cache, quiet machine, JS on the wire / decoded / files:
 
-Load event: 215 / 213 / 547 ms against 94 / 190 / 197 ms — so even where we send a third of
-the bytes we take longer, which points at per-request overhead rather than payload.
+| route | monolith (before) | per-island (now) | Turbopack |
+|---|---|---|---|
+| `/auth/login` | 2.00 MB / 7.93 MB / 2 | 889 KB / 3.33 MB / 109 | **482 KB / 1.48 MB / 30** |
+| `/pro/30min` | 2.00 MB / 7.93 MB / 2 | 1.46 MB / 5.14 MB / 209 | **1.02 MB / 3.09 MB / 54** |
+| `/apps` | 2.00 MB / 7.93 MB / 2 | 1.16 MB / 4.22 MB / 162 | **813 KB / 2.43 MB / 47** |
 
-Two independent fixes:
+Load event: 441 / 391 / 477 ms, against the monolith's 591 / 579 / 497 ms and Turbopack's
+89 / 112 / 177 ms. So the split is strictly better than what it replaced on both bytes and
+load, and still 1.4-1.8x Turbopack's wire bytes and 3-5x its load event — and the shape of
+the gap says requests, not payload.
 
-- Coalesce chunks below a minimum size, which is what webpack and Turbopack do. The planner
-  already groups modules by reachability label; a post-pass merging small groups into their
-  common parent would cut the request count by roughly an order of magnitude.
-- HTTP keep-alive in the DEV server (`Connection: close` on every response there, so each
-  chunk costs a fresh connection, six at a time). Production is served by Node's http
-  server, which keeps connections alive already.
+Turbopack's chunks are grouped by package and app directory (`node_modules_@radix-ui_…`,
+`apps_web_app_(booking-page-wrapper)_…`) with a minimum size, which is why it needs 30-54 of
+them. Two fixes:
+
+- Coalesce groups below a minimum size, merging by shared reachability label or common path
+  prefix. The planner already groups by label, so this is a post-pass over `chunk_plan`.
+- HTTP keep-alive in the DEV server, which still sends `Connection: close` on every
+  response, so each chunk costs a fresh connection six at a time. Production is served by
+  Node's http server, which already keeps them alive.
 
 ### 8. Two dev responses still go out uncompressed
 
@@ -113,6 +118,7 @@ Refresh runtime, 21 KB) has no compression path at all.
 
 | Commit | Issue |
 |---|---|
+| this commit | Dev AND production shipped one monolithic client bundle to every route (17.8 MB in dev, 8,116 KB minified in production, the same 7.93 MB decoded on every page). Both now split per island, with the route's client-reference chunks DECLARED BY THE DOCUMENT as plain (deferred, ordered) module scripts ahead of a boot call — the same property `next build` gets from emitting a `<script>` per route chunk. Which references a route resolved is recorded exactly by proxying the object React resolves them through (`moduleMap[clientId]`), so there is no wire parsing and no static over-approximation. Three ordering facts, each one a red run of cal.com's own suite: lazy discovery hydrates islands with no handlers attached (a theme option clicked too early leaves its form clean and the submit button `disabled` for 240s); an entry that awaits its own fetches hydrates after DOMContentLoaded (the theme test reads `<html class>` right after DCL and saw `notranslate light`); and react-dom's `bootstrapModules` stamps `async` on the entry tag, which is unordered against the chunk scripts, so a chunk can run before the runtime it registers into exists and throw (all three theme tests). Result on a quiet machine, same 65 tests: **59 passed / 4 skipped / 2 failed with the split, against 57 / 4 / 4 with the monolith** — the split passes MORE, and the two failure sets barely overlap because the booking-flow family is flaky on both. `client.js` 17.8 MB -> 1.2 MB (dev) and 8,116 KB -> 344 KB (production); per page 7.93 MB -> 3.33 MB decoded on login. |
 | this commit | PRODUCTION shipped the same monolith dev did — `client.js` 8,116 KB, the identical 7.93 MB of JS decoded on EVERY route — and the split turned out to need nothing but the pin flip. The chunk-list plumbing built for dev (a proxy over the manifest React resolves references with, the list injected into the document, the browser entry loading it before hydrating, `x-diffpack-chunks` for soft navigation) was diagnosed against a tree that still had the two real bugs: with the seam's chunk table complete and the control boundary's `default` no longer shaken away, React's own flight client preloads a reference's chunk before requiring the module, in the streaming document as well as the buffered one. All of that machinery is DELETED. Production `client.js` 8,116 KB -> 344 KB, and per page: `/auth/login` 2.00 MB -> 165 KB of JS on the wire, `/pro/30min` -> 155 KB, `/apps` -> 1.16 MB. Hydration verified fiber-for-fiber against the reference on all three routes (858/909/3283 with matching interactive-element counts) with zero console errors on two of them. Dev got faster too once the redundant preload went (81 files / 511 ms against 112 / 669 ms). |
 | this commit | Dev: the browser bundle was ONE 17.8 MB `client.js`, so every page downloaded every `"use client"` island in the app (cal.com's login form pulled the app store, the booker, all of settings and every payment component) and re-parsed all of it on each full navigation: 693 ms of V8 compile against Turbopack's 33 ms, and no code cache at that size. `island_pins` recorded each island's edge as `() => require(path)` — a STATIC edge, and `chunk_plan` splits only on dynamic-import roots. Dev now pins with `import()` (`PinKind::DynamicChunk`; production keeps the static requires, where whole-graph DCE already shrinks the one chunk). Two real bugs had to be fixed for the split to work at all: the RSC seam's chunk-id -> URL table was built from `chunk_names` (root -> chunk) and so omitted every rootless shared chunk, and a module reached by BOTH a static named import and a dynamic `import()` never became a chunk root and therefore kept only the static importer's names — which shook `default` off the RSC control boundary and killed hydration on every page with "Element type is invalid. Received a promise that resolves to: undefined". Measured: `client.js` 17.8 MB -> 1.2 MB; `/auth/login` 18.86 MB -> 2.60 MB on the wire and 18.35 MB -> 8.09 MB decoded (Turbopack: 1.69 MB / 9.20 MB); `/pro/30min` 1.15 MB / 2.15 MB against Turbopack's 2.75 MB / 15.84 MB. Hydration is fiber-for-fiber with the reference on `/auth/login`, `/pro/30min` and `/apps` (858/859, 891/911, 3283/3284). |
 | this commit | Dev served every asset uncompressed and with no validator: `/auth/login` put 18.86 MB on the wire against Turbopack's 2.75 MB, 0 of 8 responses compressed against 50 of 62. Assets now carry gzip (level 1, memoised per file size+mtime) and a weak ETag, so an unchanged chunk revalidates into a 304. |

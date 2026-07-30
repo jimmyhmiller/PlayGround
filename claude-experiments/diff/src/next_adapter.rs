@@ -5528,7 +5528,7 @@ function installSeam() {{
 }}
 
 // A chunk id's public URL. diffpack's chunk id IS its file name, and the browser serves it
-// from the app's asset base — the same base `bootstrapModules` points at for `client.js`.
+// from the app's asset base — the same base the entry's own module tag is emitted with.
 function chunkUrl(chunk) {{
   const base = {asset_base_json};
   return (base ? base.replace(/\/$/, "") : "") + "/" + String(chunk).replace(/^\.?\//, "");
@@ -10357,24 +10357,39 @@ console.log(JSON.stringify(CASES.map(([s, w, q]) => buildVariantFile(s, w, q))))
         assert!(plain.contains(r#"const BASE_PATH = "";"#), "empty basePath const: {plain}");
     }
 
+    /// The browser bootstrap AND this route's client-reference chunks are fetched under the
+    /// app's asset base, on both render paths.
+    ///
+    /// The entry is emitted by the document rather than by react-dom's `bootstrapModules`,
+    /// which stamps `async` on its tag: an async module script is unordered against the
+    /// chunk scripts, so a chunk could execute before the entry that creates the runtime it
+    /// registers into and throw. So `bootstrapModules` must NOT come back, and the test says
+    /// so — with all three theme tests in cal.com's suite as the evidence for why.
     #[test]
-    fn ssr_entry_bakes_asset_base_into_bootstrap_modules() {
+    fn ssr_entry_bakes_asset_base_into_the_module_scripts_it_emits() {
         let dir = scratch("ssr-asset-base");
         let hooks = dir.join("hooks-context.ts");
-        // With an asset base the browser bootstrap is fetched under the prefix.
         let with_prefix = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "/cdn/docs", &[]);
-        assert!(
-            with_prefix.contains(r#"bootstrapModules: ["/cdn/docs/client.js"]"#),
-            "bootstrapModules carry the asset base (both render paths): {with_prefix}",
-        );
         assert_eq!(
-            with_prefix.matches(r#"bootstrapModules: ["/cdn/docs/client.js"]"#).count(),
+            with_prefix.matches(r#"moduleTag("/cdn/docs/client.js")"#).count(),
             2,
-            "both the buffered and streaming render paths are prefixed",
+            "the entry tag carries the asset base on BOTH render paths: {with_prefix}",
+        );
+        assert!(
+            with_prefix.contains(r#"const base = "/cdn/docs";"#),
+            "chunk URLs resolve against the same base: {with_prefix}",
+        );
+        assert!(
+            !with_prefix.contains("bootstrapModules:"),
+            "the entry must not go back to react-dom's async bootstrap tag: {with_prefix}",
         );
         // Empty asset base keeps the bare `/client.js`.
         let plain = ssr_entry_module(&dir, &[], &BTreeSet::new(), &hooks, "", &[]);
-        assert!(plain.contains(r#"bootstrapModules: ["/client.js"]"#), "no prefix -> bare client.js");
+        assert_eq!(
+            plain.matches(r#"moduleTag("/client.js")"#).count(),
+            2,
+            "no prefix -> bare client.js: {plain}",
+        );
     }
 
     #[test]
