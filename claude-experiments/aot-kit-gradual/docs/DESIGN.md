@@ -90,6 +90,37 @@ tracking is the classic source of a stale graph that is wrong only under some vi
 so the worklist is seeded with a **deterministic pseudo-random order** in tests: the same
 program must optimise identically regardless of the seed, and we test several seeds.
 
+The dependency is recorded on the node whose TYPE was inspected, which for `phi-compute` is the
+region's control INPUT and not the region: a region already reachable does not change type when a
+second path goes live, so a dep recorded on it is never flushed. That one lost `.in(i)` relative to
+Simple's `PhiNode.compute` published a phi type that excluded a value the program produces.
+
+### Proven, versus the optimistic answer so far
+
+An analysis may act on a high type; an irreversible rewrite may not. The distinction the IR needs is
+sharper than high versus low, and getting it wrong produced seven separate miscompiles:
+
+- **ANY is the absence of information.** It is what `n-new` seeds a type to and what a missing input
+  reads as. Every OTHER high type is a CLAIM someone computed: XCtrl says a control edge is dead,
+  `~dyn` and `int=~[5..8]` say no value fits. `ty-unanalysed?` is the test; `ty-high?` cannot make
+  that distinction and must not be used for it.
+- **XCtrl is the HIGH element of the control axis**, so `meet(~ctrl, ctrl)` is `ctrl` and "exactly
+  `~ctrl`" is not proof of anything on its own. It is proof only once nothing its type depends on can
+  still move.
+- **A type is PROVEN when its whole input cone is at a fixpoint**, which is what `n-ty-proven?`
+  answers, and every irreversible rewrite asks it. It has to be transitive because `phi-compute`
+  skips region paths whose control is still high (which is load-bearing for loops: a loop phi must
+  report its entry value while the back edge is unanalysed, or phi, exit test and back edge all wait
+  on each other at ANY). A Phi's type is therefore provisional while its own type and its inputs'
+  types are all low, which no local check can see. And "not ANY" is not enough either: a stale LOW
+  type is exactly as provisional, so the test is the fixpoint condition itself.
+- **A refused rewrite is DEFERRED, not declined**, so `iterate!` sweeps: drain the worklist, and if
+  that drain changed anything, push every live node and drain again. Nothing else re-queues a node
+  whose blocker's type never changes again.
+
+`compute` correspondingly never manufactures a claim from an absence: `region-compute` and
+`if-compute` report ANY while an input they would draw a conclusion from is unanalysed.
+
 ### Op definitions in one place
 
 Each op needs a label, an arity contract, `compute`, `idealize`, hash/eq, a printer, and later
@@ -321,6 +352,22 @@ unreadable without it.
   involutivity of `dual`, `join`/`meet` duality, reflexivity and transitivity of `isa`,
   monotonicity of every `compute`, and termination of ascending chains. These run over
   exhaustively generated small types plus randomly generated large ones.
+
+**The graph text's identity, stated exactly**, because the claim above is the one a reader will
+lean on. Printing a graph and parsing it back is an identity **up to a dense renumbering of the
+live nodes**: `n<k>` in a line is a print INDEX, the node's position in the listing, not its arena
+id, because the arena ids of dead nodes cannot be recreated. Everything else is exact, and every
+field is mandatory: a Const's aux type equals its computed type and is printed anyway, a Region's
+unused slot 0 is always `_` and is printed anyway. An optional field would give two texts for one
+graph, which is the same defect the type format refuses with `TERR-DUP-KIND`, and the one wart the
+type format still has (`int=[min..max]` versus `w0`) is what tolerating a second spelling costs.
+Types are restored from the text rather than recomputed, so a text that lies about a type is a
+verifier violation and not a silently corrected one. What the format does not carry is `outs`
+order, the GVN table, `deps` and `hash`, all of which a parse rebuilds or does not need; a pin
+outside the two roots is refused rather than dropped, since it means a construction window is
+still open. A failed parse leaves the graph in an **unspecified partial state** that the caller
+must not use — the strict entry point reports the failing check by name and stops, precisely so
+that a partial graph is never handed on.
 
 Later, a live graph viewer. Simple drives one over a websocket; the jim editor's widget bus
 is the natural host here.

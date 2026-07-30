@@ -512,3 +512,456 @@
             (store! i (+ (load i) 1))
             0)))
     0))
+
+; ---------------------------------------------------------------------------
+; A MERGE WHOSE INPUT IS A MERGE
+; ---------------------------------------------------------------------------
+;; Nested control flow, over every worklist order, checked by running the program.
+;;
+;; This is the shape the corpus was missing, and the whole family of miscompiles the M3 review
+;; found lived in the gap. What made them invisible was not subtlety: `g-verify` reports nothing,
+;; because a graph with an arm deleted is still a structurally valid graph, and the printer omits
+;; dead nodes, so the diagram of the wreckage looks like a smaller program rather than a wrong one.
+;; Only running it says anything.
+;;
+;; The mechanism, once: an unanalysed Region reported `~ctrl`. `region-compute` seeds its meet with
+;; `~ctrl` and meet(~ctrl, ANY) is `~ctrl`, so a merge none of whose paths has a type yet claimed to
+;; be PROVABLY UNREACHABLE. A merge above it inherits that claim as a dead path. Four rewrites test
+;; `= (t-xctrl)` in the belief that it is the proven answer, and on the control axis it is not: XCtrl
+;; is the HIGH element there, so it may still fall to `ctrl`.
+;;
+;; HOW THIS FAILS WITHOUT THE FIX, measured: `region-compute` without its `n-inputs-analysed?` guard
+;; gives the wrong answer on 55 of 200 seeds for the two-level program below (the whole graph becomes
+;; `return 1`), and deletes the entire program on 31 of 200 for the three-merge one (Stop with no
+;; inputs at all, and the interpreter reporting EV-STUCK where a value is the only correct answer).
+;; It is not a golden-string gate for the same reason: the answer is seed-dependent, so on any given
+;; seed the golden string may be the right one.
+
+;; `if (p) x = 1; else { if (q) x = 2; else x = 3; }  return x;`
+;; Arms EAGER, both merges RAW and on the worklist, then `iterate!`. Returns `p`; `q` is the next
+;; node, which the caller asserts rather than assumes.
+(defn build-merge-of-merge [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [p (a-arg (t-dyn))
+        q (a-arg (t-dyn))]
+    (let [o (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) p)))]
+      (let [i2 (n-if-arms! (n-peephole (n-new2 OP-IF 0 (arms-f o) q)))]
+        (let [ri (let [z (n-new OP-REGION 0)]
+                   (n-add-def! z NO-NODE) (n-add-def! z (arms-t i2)) (n-add-def! z (arms-f i2)) z)]
+          (let [pi (let [z (n-new OP-PHI (t-int))]
+                     (n-add-def! z ri) (n-add-def! z (a-int 2)) (n-add-def! z (a-int 3)) z)
+                ro (let [z (n-new OP-REGION 0)]
+                     (n-add-def! z NO-NODE) (n-add-def! z (arms-t o)) (n-add-def! z ri) z)]
+            (let [po (let [z (n-new OP-PHI (t-int))]
+                       (n-add-def! z ro) (n-add-def! z (a-int 1)) (n-add-def! z pi) z)]
+              (let [ret (n-peephole (n-new2 OP-RETURN 0 ro po))]
+                (n-add-def! (g-stop) ret)
+                (n-peephole (g-stop)))
+              (wl-push! ri) (wl-push! pi) (wl-push! ro) (wl-push! po)
+              (iterate!)
+              p)))))))
+
+;; p and q as two integers, and the answer the program must give.
+(defn run2 [(p i64) (pv i64) (qv i64)] (-> i64)
+  (ev-reset!) (ev-bind! p (RInt pv)) (ev-bind! (+ p 1) (RInt qv)) (ev-run-nobind BUDGET) 0)
+
+(defn expect2 [(what (slice u8)) (p i64) (pv i64) (qv i64) (want i64)] (-> i64)
+  (run2 p pv qv)
+  (if (!= (ev-status) EV-OK) (fail what) 0)
+  (if (rt-eq? (ev-result) (RInt want)) 0
+    (do (let [w (stderr)]
+          (ps w "\n") (ps w what) (ps w "\n  want: ") (rt-print w (RInt want))
+          (ps w "\n  got:  ") (rt-print w (ev-result)) (ps w "\n"))
+        (abort) 0)))
+
+(deftest a_merge_whose_input_is_a_merge_computes_the_same_program_under_every_seed
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-merge-of-merge (+ 1 (load s)))]
+          ; the two Args really are the two predicates: ids shift whenever a builder changes
+          (assert (= (n-op p) OP-ARG))
+          (assert (= (n-op (+ p 1)) OP-ARG))
+          ; all three arms, on every seed. p false and q true is the one that was miscompiled.
+          (expect2 "merge of merges: p=1 takes the outer arm"   p 1 0 1)
+          (expect2 "merge of merges: p=0 q=1 takes the inner true arm"  p 0 1 2)
+          (expect2 "merge of merges: p=0 q=0 takes the inner false arm" p 0 0 3)
+          (store! s (+ (load s) 1))
+          0)))))
+
+;; `if (p) { if (q) x=1; else x=2; } else { if (r) x=3; else x=4; }  return x;`
+;; Two merges feeding a merge: BOTH of the outer merge's paths are unanalysed merges at once.
+(defn build-merge-tree [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [p (a-arg (t-dyn))
+        q (a-arg (t-dyn))
+        r (a-arg (t-dyn))]
+    (let [o (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) p)))]
+      (let [a (n-if-arms! (n-peephole (n-new2 OP-IF 0 (arms-t o) q)))
+            b (n-if-arms! (n-peephole (n-new2 OP-IF 0 (arms-f o) r)))]
+        (let [ra (let [z (n-new OP-REGION 0)]
+                   (n-add-def! z NO-NODE) (n-add-def! z (arms-t a)) (n-add-def! z (arms-f a)) z)
+              rb (let [z (n-new OP-REGION 0)]
+                   (n-add-def! z NO-NODE) (n-add-def! z (arms-t b)) (n-add-def! z (arms-f b)) z)]
+          (let [pa (let [z (n-new OP-PHI (t-int))]
+                     (n-add-def! z ra) (n-add-def! z (a-int 1)) (n-add-def! z (a-int 2)) z)
+                pb (let [z (n-new OP-PHI (t-int))]
+                     (n-add-def! z rb) (n-add-def! z (a-int 3)) (n-add-def! z (a-int 4)) z)]
+            (let [ro (let [z (n-new OP-REGION 0)]
+                       (n-add-def! z NO-NODE) (n-add-def! z ra) (n-add-def! z rb) z)]
+              (let [po (let [z (n-new OP-PHI (t-int))]
+                         (n-add-def! z ro) (n-add-def! z pa) (n-add-def! z pb) z)]
+                (let [ret (n-peephole (n-new2 OP-RETURN 0 ro po))]
+                  (n-add-def! (g-stop) ret)
+                  (n-peephole (g-stop)))
+                (wl-push! ra) (wl-push! pa) (wl-push! rb) (wl-push! pb)
+                (wl-push! ro) (wl-push! po)
+                (iterate!)
+                p))))))))
+
+(defn run3 [(p i64) (pv i64) (qv i64) (rv i64)] (-> i64)
+  (ev-reset!) (ev-bind! p (RInt pv)) (ev-bind! (+ p 1) (RInt qv)) (ev-bind! (+ p 2) (RInt rv))
+  (ev-run-nobind BUDGET) 0)
+
+(defn expect3 [(what (slice u8)) (p i64) (pv i64) (qv i64) (rv i64) (want i64)] (-> i64)
+  (run3 p pv qv rv)
+  (if (!= (ev-status) EV-OK) (fail what) 0)
+  (if (rt-eq? (ev-result) (RInt want)) 0
+    (do (let [w (stderr)]
+          (ps w "\n") (ps w what) (ps w "\n  want: ") (rt-print w (RInt want))
+          (ps w "\n  got:  ") (rt-print w (ev-result)) (ps w "\n"))
+        (abort) 0)))
+
+(deftest two_merges_feeding_a_merge_keep_the_whole_program
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-merge-tree (+ 1 (load s)))]
+          (assert (= (n-op p) OP-ARG))
+          ; the Return is still there. Checked directly as well as through the interpreter, because
+          ; `stop-idealize` dropping it is what left Start and Stop with nothing in between, and a
+          ; verifier cannot object to an empty graph.
+          (assert (= (n-nins (g-stop)) 1))
+          (expect3 "merge tree: p=1 q=1" p 1 1 0 1)
+          (expect3 "merge tree: p=1 q=0" p 1 0 0 2)
+          (expect3 "merge tree: p=0 r=1" p 0 0 1 3)
+          (expect3 "merge tree: p=0 r=0" p 0 0 0 4)
+          (store! s (+ (load s) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; The same, one level deeper, for the two rewrites that read a PHI's type
+; ---------------------------------------------------------------------------
+;; `a_cast_nothing_proved_is_kept_whatever_the_worklist_order` above builds its branch eagerly, so
+;; both of the region's paths are typed `ctrl` from the start and only the Phi itself is ANY. Add one
+;; level of nesting, which any nested if/else produces, and the guard it gates on is defeated:
+;; `phi-compute` legitimately SKIPS a region path whose control is still high, so the outer Phi
+;; momentarily reports the type of the single arm that happens to have been analysed. That type is
+;; LOW, it satisfies the Cast, and the type check was deleted on 110 of 200 seeds. The surviving
+;; graph even printed the Phi's settled type as `null|int`, so the analysis proved the Cast
+;; unsatisfiable AFTER the Cast was gone.
+;;
+;; `if (p) { a = 1; } else { if (q) a = null; else a = null; }  return (int)a;`
+(defn build-nested-guarded-merge [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [p (a-arg (t-dyn))
+        q (a-arg (t-dyn))]
+    (let [o (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) p)))]
+      (let [i2 (n-if-arms! (n-peephole (n-new2 OP-IF 0 (arms-f o) q)))]
+        (let [ri (let [z (n-new OP-REGION 0)]
+                   (n-add-def! z NO-NODE) (n-add-def! z (arms-t i2)) (n-add-def! z (arms-f i2)) z)]
+          (let [pi (let [z (n-new OP-PHI (t-dyn))]
+                     (n-add-def! z ri) (n-add-def! z (a-con (t-null)))
+                     (n-add-def! z (a-con (t-null))) z)
+                ro (let [z (n-new OP-REGION 0)]
+                     (n-add-def! z NO-NODE) (n-add-def! z (arms-t o)) (n-add-def! z ri) z)]
+            (let [po (let [z (n-new OP-PHI (t-dyn))]
+                       (n-add-def! z ro) (n-add-def! z (a-int 1)) (n-add-def! z pi) z)]
+              (let [c   (n-new2 OP-CAST (t-int) ro po)]
+                (let [ret (n-peephole (n-new2 OP-RETURN 0 ro c))]
+                  (n-add-def! (g-stop) ret)
+                  (n-peephole (g-stop)))
+                (wl-push! ri) (wl-push! pi) (wl-push! ro) (wl-push! po) (wl-push! c)
+                (iterate!)
+                p))))))))
+
+(deftest a_cast_nothing_proved_survives_a_merge_of_merges
+  (let [(mut s) 0 (mut lost) 0 (mut wrong) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-nested-guarded-merge (+ 1 (load s)))]
+          (if (= (live-casts) 0) (store! lost (+ (load lost) 1)) 0)
+          ; p falsey takes the nested arms, both of which assign null, so nothing satisfies the
+          ; annotation and EV-CAST is the only correct answer.
+          (run2 p 0 1)
+          (if (= (ev-status) EV-CAST) 0 (store! wrong (+ (load wrong) 1)))
+          (run2 p 0 0)
+          (if (= (ev-status) EV-CAST) 0 (store! wrong (+ (load wrong) 1)))
+          (store! s (+ (load s) 1))
+          0)))
+    (if (and (= (load lost) 0) (= (load wrong) 0)) 0
+      (do (let [w (stderr)]
+            (fmt w "\nnested: the Cast was discharged on {d} of 200 seeds, {d} runs did not report EV-CAST\n"
+                 (load lost) (load wrong))
+            (ps w "  ") (ev-print w) (ps w "\n")
+            (g-print-flat w))
+          (abort) 0))
+    ; and the outer arm still satisfies it, so this is a guard and not a wall
+    (let [p (build-nested-guarded-merge 1)]
+      (run2 p 1 0)
+      (assert (= (ev-status) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 1))))))
+
+;; AN IDENTITY ON A PROVISIONAL PHI TYPE, which is the same defeat aimed at `ty-int-only?` instead
+;; of at the Cast: `if (p) x = 1; else { if (q) x = true; else x = true; }  return x + 0;`
+;;
+;; With the inner merge unanalysed the outer Phi reports `int=1`, `ty-int-only?` is true, and `x + 0`
+;; hands back the phi. Its settled type is `bool|int`, and `true + 0` is what `ev-arith` correctly
+;; refuses. The Add was lost on 99 of 200 seeds and the program answered `true`; when the live arm is
+;; a constant, the Add folded to `Const int=1` on 108 of 200 instead. EV-TYPE is the only correct
+;; answer on the arm that assigns a bool.
+(defn build-nested-bool-merge [(seed i64) (live-const bool)] (-> i64)
+  (graph-reset! seed)
+  (let [p (a-arg (t-dyn))
+        q (a-arg (t-dyn))]
+    (let [o (n-if-arms! (n-peephole (n-new2 OP-IF 0 (g-start) p)))]
+      (let [i2 (n-if-arms! (n-peephole (n-new2 OP-IF 0 (arms-f o) q)))]
+        (let [ri (let [z (n-new OP-REGION 0)]
+                   (n-add-def! z NO-NODE) (n-add-def! z (arms-t i2)) (n-add-def! z (arms-f i2)) z)]
+          (let [pi (let [z (n-new OP-PHI (t-dyn))]
+                     (n-add-def! z ri) (n-add-def! z (a-con (t-bool-con true)))
+                     (n-add-def! z (a-con (t-bool-con true))) z)
+                ro (let [z (n-new OP-REGION 0)]
+                     (n-add-def! z NO-NODE) (n-add-def! z (arms-t o)) (n-add-def! z ri) z)]
+            ; a constant live arm lets the whole Add fold; a range live arm leaves only the
+            ; `x + 0` identity. Both were defeated through the phi, so both are covered.
+            (let [po (let [z (n-new OP-PHI (t-dyn))]
+                       (n-add-def! z ro)
+                       (n-add-def! z (if live-const (a-int 1) (a-arg (t-int-range 3 9))))
+                       (n-add-def! z pi) z)]
+              (let [add (n-new3 OP-ADD 0 NO-NODE po (a-int 0))]
+                (let [ret (n-peephole (n-new2 OP-RETURN 0 ro add))]
+                  (n-add-def! (g-stop) ret)
+                  (n-peephole (g-stop)))
+                (wl-push! ri) (wl-push! pi) (wl-push! ro) (wl-push! po) (wl-push! add)
+                (iterate!)
+                p))))))))
+
+(deftest an_identity_is_not_taken_on_a_provisional_phi_type
+  (let [(mut variant) 0]
+    (loop
+      (if (>= (load variant) 2) (break)
+        (let [(mut s) 0 (mut wrong) 0]
+          (loop
+            (if (>= (load s) 200) (break)
+              (let [p (build-nested-bool-merge (+ 1 (load s)) (= (load variant) 0))]
+                ; p falsey reaches the arms that assign `true`, and `true + 0` is a type error
+                (run2 p 0 1)
+                (if (= (ev-status) EV-TYPE) 0 (store! wrong (+ (load wrong) 1)))
+                (store! s (+ (load s) 1))
+                0)))
+          (if (= (load wrong) 0) 0
+            (do (let [w (stderr)]
+                  (fmt w "\nx+0 on a provisional phi: {d} of 200 seeds did not report EV-TYPE (variant {d})\n"
+                       (load wrong) (load variant))
+                  (ps w "  ") (ev-print w) (ps w "\n")
+                  (g-print-flat w))
+                (abort) 0))
+          (store! variant (+ (load variant) 1))
+          0)))
+    ; the reference answer, from a build that never rewrites anything: same program, same verdict
+    (graph-reset! 1)
+    (let [x (a-arg (t-bool))
+          n (n-new3 OP-ADD 0 NO-NODE x (a-int 0))
+          r (n-new2 OP-RETURN 0 (g-start) n)]
+      (n-add-def! (g-stop) r)
+      (g-analyze!)
+      (ev-reset!) (ev-bind! x (RBool true)) (ev-run-nobind BUDGET)
+      (assert (= (ev-status) EV-TYPE)))))
+
+; ---------------------------------------------------------------------------
+; An If whose own control has not been analysed yet
+; ---------------------------------------------------------------------------
+;; `if (p) { if (q) return 1; else return 2; } else return 3;` with the OUTER If and its projections
+;; raw and the inner branch eager. `if-compute`'s unreachable-control test was
+;; `(and (!= c (t-ctrl)) (!= c (t-bot)))`, which ANY satisfies, so an If whose control was merely
+;; unanalysed reported [~ctrl ~ctrl]: both arms provably not taken, out of nothing. `cproj-idealize`
+;; then replaced BOTH live projections with XCtrl and the two Returns were killed outright.
+(defn build-raw-outer-if [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [p   (a-arg (t-dyn))
+        q   (a-arg (t-dyn))
+        iff (n-new2 OP-IF 0 (g-start) p)]
+    ; raw, and both projections exist before either is looked at
+    (let [tt (n-new1 OP-CPROJ 0 iff)
+          ff (n-new1 OP-CPROJ 1 iff)]
+      (let [inner (n-if-arms! (n-peephole (n-new2 OP-IF 0 tt q)))]
+        (let [r1 (n-peephole (n-new2 OP-RETURN 0 (arms-t inner) (a-int 1)))
+              r2 (n-peephole (n-new2 OP-RETURN 0 (arms-f inner) (a-int 2)))
+              r3 (n-peephole (n-new2 OP-RETURN 0 ff (a-int 3)))]
+          (n-add-def! (g-stop) r1) (n-add-def! (g-stop) r2) (n-add-def! (g-stop) r3)
+          (n-peephole (g-stop))
+          (wl-push! iff) (wl-push! tt) (wl-push! ff)
+          (iterate!)
+          p)))))
+
+(deftest a_raw_outer_if_keeps_the_arms_of_a_nested_if
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-raw-outer-if (+ 1 (load s)))]
+          (assert (= (n-op p) OP-ARG))
+          ; all three Returns are still reachable, on every seed
+          (assert (= (n-nins (g-stop)) 3))
+          (expect2 "raw outer if: p=1 q=1" p 1 1 1)
+          (expect2 "raw outer if: p=1 q=0" p 1 0 2)
+          (expect2 "raw outer if: p=0"     p 0 0 3)
+          (store! s (+ (load s) 1))
+          0)))))
+
+; ---------------------------------------------------------------------------
+; A diamond built entirely raw, then peepholed
+; ---------------------------------------------------------------------------
+;; `if (p) x = 8; else x = 0; return x + 1;` with nothing peepholed and everything on the worklist.
+;; The flat case, and it miscompiled to `return 1` on 9 of 40 seeds through a route none of the
+;; guards above covers: the phi met `int=0` with an as-yet-unanalysed `8` (ANY is the identity for
+;; meet), so it LOOKED like the integer constant 0. `should-swap?` moved it to the right because
+;; constants belong on the right, and `x + 0 = x` then returned the literal 1 as the whole program.
+;; No fold and no control rewrite was involved: the guard that was missing is on `n-int-con?`.
+;; CONSTRUCTION ORDER IS PART OF THE FIXTURE. Every node is created before anything is pushed, and
+;; they are pushed in creation order, because `wl-pop!` picks a random INDEX in the worklist: which
+;; orders the seed can produce depends on how the list was filled. An earlier version of this builder
+;; created the constants inline (so they got later ids) and pushed with `wl-push-live!`, and it did
+;; not reproduce the miscompile at all, on any of 200 seeds. A fixture that cannot fail is not a gate.
+(defn build-raw-diamond [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [p   (n-new1 OP-ARG (t-dyn) (g-start))
+        iff (n-new2 OP-IF 0 (g-start) p)
+        tt  (n-new1 OP-CPROJ 0 iff)
+        ff  (n-new1 OP-CPROJ 1 iff)
+        c8  (n-new1 OP-CONST (t-int-con 8) (g-start))
+        c0  (n-new1 OP-CONST (t-int-con 0) (g-start))
+        c1  (n-new1 OP-CONST (t-int-con 1) (g-start))
+        r   (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph r) (n-add-def! ph c8) (n-add-def! ph c0)
+      (let [add (n-new3 OP-ADD 0 NO-NODE ph c1)
+            ret (n-new2 OP-RETURN 0 r add)]
+        (n-add-def! (g-stop) ret)
+        (wl-push! p) (wl-push! iff) (wl-push! tt) (wl-push! ff)
+        (wl-push! c8) (wl-push! c0) (wl-push! c1)
+        (wl-push! r) (wl-push! ph) (wl-push! add) (wl-push! ret)
+        (wl-push! (g-start)) (wl-push! (g-stop))
+        (iterate!)
+        p))))
+
+;; The value type the surviving Return publishes, found from Stop so a folded Add is still seen.
+(defn stop-return-value-ty [] (-> i64)
+  (let [st (g-stop)]
+    (assert (= (n-nins st) 1))
+    (n-ty (n-in (n-in st 0) 1))))
+
+(deftest a_raw_diamond_computes_the_same_program_under_every_seed
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (let [p (build-raw-diamond (+ 1 (load s)))]
+          ; the published type is the whole range, not one arm of it: `int=1` here was the analysis
+          ; agreeing with the miscompile
+          (if (= (stop-return-value-ty) (t-int-range 1 9)) 0
+            (do (let [w (stderr)]
+                  (fmt w "\nraw diamond, seed {d}: the return value's type is " (+ 1 (load s)))
+                  (ty-print w (stop-return-value-ty))
+                  (ps w " and should be int=[1..9]\n")
+                  (g-print-flat w))
+                (abort) 0))
+          (ev-reset!) (ev-bind! p (RInt 1)) (ev-run-nobind BUDGET)
+          (if (and (= (ev-status) EV-OK) (rt-eq? (ev-result) (RInt 9))) 0
+            (fail "raw diamond: the true arm should give 9"))
+          (ev-reset!) (ev-bind! p (RInt 0)) (ev-run-nobind BUDGET)
+          (if (and (= (ev-status) EV-OK) (rt-eq? (ev-result) (RInt 1))) 0
+            (fail "raw diamond: the false arm should give 1"))
+          (store! s (+ (load s) 1))
+          0)))))
+
+;; And the ANALYSIS-only half of the same fixture, which is the corpus's one raw merge. A phi type
+;; that is too SPECIFIC is the miscompile direction: it excludes a value the program produces, so a
+;; later fold on it is wrong rather than merely missed. `phi-compute` recorded its revisit dependency
+;; on the REGION instead of on the region's control input, and a region already at `ctrl` does not
+;; change type when a second path goes live (meet(ctrl,ctrl) is ctrl), so nothing re-queued the phi;
+;; `g-analyze!` also never flushed the deps list at all. Either bug alone leaves this wrong on 5 of
+;; 40 seeds, with `g-verify` reporting VERR-STALE-TYPE on exactly those.
+(deftest the_analysis_only_pass_reaches_the_same_fixpoint_under_every_seed
+  (let [(mut s) 0]
+    (loop
+      (if (>= (load s) 200) (break)
+        (do (graph-reset! (+ 1 (load s)))
+            ; the corpus fixture, rebuilt here per seed: same program, seed 1 there
+            (let [p   (n-new1 OP-ARG (t-dyn) (g-start))
+                  iff (n-new2 OP-IF 0 (g-start) p)]
+              (let [tt (n-new1 OP-CPROJ 0 iff)
+                    ff (n-new1 OP-CPROJ 1 iff)
+                    r  (n-new OP-REGION 0)]
+                (n-add-def! r NO-NODE) (n-add-def! r tt) (n-add-def! r ff)
+                (let [ph (n-new OP-PHI (t-int))]
+                  (n-add-def! ph r)
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 8) (g-start)))
+                  (n-add-def! ph (n-new1 OP-CONST (t-int-con 0) (g-start)))
+                  (let [add (n-new3 OP-ADD 0 NO-NODE ph (n-new1 OP-CONST (t-int-con 1) (g-start)))
+                        ret (n-new2 OP-RETURN 0 r add)]
+                    (n-add-def! (g-stop) ret)
+                    (g-analyze!)
+                    ; the analysis really ran, rather than the assertions holding vacuously
+                    (assert (> (g-analyze-checks) 0))
+                    (if (and (= (n-ty ph) (t-int-range 0 8)) (= (n-ty add) (t-int-range 1 9))) 0
+                      (do (let [w (stderr)]
+                            (fmt w "\nraw analysis, seed {d}: phi is " (+ 1 (load s)))
+                            (ty-print w (n-ty ph)) (ps w " (want int=[0..8]) and add is ")
+                            (ty-print w (n-ty add)) (ps w " (want int=[1..9])\n")
+                            (g-print-flat w))
+                          (abort) 0))
+                    ; and the interpreter's answer on the arm the stale type excluded
+                    (ev-reset!) (ev-bind! p (RInt 0)) (ev-run-nobind BUDGET)
+                    (if (and (= (ev-status) EV-OK) (rt-eq? (ev-result) (RInt 1))) 0
+                      (fail "raw analysis: the false arm should give 1"))))))
+            (store! s (+ (load s) 1))
+            0)))))
+
+;; `iterate!` CLAIMS A PEEPHOLE FIXPOINT, so ask for it. Draining the worklist once is no longer
+;; enough on its own: a rewrite that needs a proven type is REFUSED while its input cone is still
+;; settling, and nothing re-queues it afterwards, because the blocker's type may never change again
+;; and neither `wl-push-outs!` nor the deps list will fire. One drain therefore reaches a fixpoint of
+;; "what could be proven at the time", which is a function of the pop order; `1 + 2*3` stayed unfolded
+;; on some seeds. `iterate!` sweeps instead: drain, and if that drain changed anything, push every
+;; live node and drain again.
+;;
+;; This checks the claim rather than the mechanism: after any corpus fixture that says it is
+;; optimised, one more full sweep must change nothing. The step count is asserted too, so the test
+;; cannot pass by sweeping nothing.
+(deftest iterate_reaches_a_peephole_fixpoint_on_every_optimised_fixture
+  (let [n (corpus-count) (mut i) 0 (mut checked) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (corpus-mode (load i)) CORPUS-OPTIMISED)
+                (do (corpus-build! (load i))
+                    (let [before (g-changes)]
+                      (wl-push-live!)
+                      (let [steps (wl-drain!)]
+                        ; real work: every live node was reconsidered
+                        (assert (> steps 0))
+                        (if (= (g-changes) before) 0
+                          (do (let [w (stderr)]
+                                (ps w "\n") (ps w (corpus-name (load i)))
+                                (fmt w " was not at a peephole fixpoint: one more sweep made {d} change(s) in {d} steps\n"
+                                     (- (g-changes) before) steps)
+                                (g-print-flat w))
+                              (abort) 0))))
+                    (store! checked (+ (load checked) 1))
+                    0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    ; and it really did range over the optimised half of the corpus
+    (assert (>= (load checked) 12))))
+

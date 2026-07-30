@@ -141,10 +141,12 @@ the corpus and *red* on a set of deliberately corrupted graphs (a verifier that 
 not a verifier); the interpreter agrees with expected results on the corpus, before and after
 `Opto`.
 
-**Status: slices 1, 2 and 3a DONE, slice 3b outstanding.** The whole gate is 114 tests green
-(`tools/gate.sh`). M3 itself stays open until the GRAPH round trip lands, because the milestone's
-gate says "`print` then `parse` is the identity on the whole corpus" and 3a proves that for types
-only. Nothing after M3 starts on the strength of the type format alone.
+**Status: DONE**, all four slices (`tools/gate.sh`). M3 stayed open through 3a on purpose, because
+the milestone's gate says "`print` then `parse` is the identity on the whole corpus" and 3a proved
+that for types only; slice 3b is the clause itself, and `src/gtext.coil` gated by
+`tests/gtext-test.coil` closes it. Two items are still open and are carried forward at the end of
+this entry rather than dropped: the type format's one spelling wart, and `region-dead-path` acting
+on a provisional `~ctrl`, which is now formally M7's.
 
 **Slice 1, the verifier: DONE** (`src/verify.coil`, `src/corpus.coil`, 19 tests). One named code
 per check, which is what stops the corrupted-graph half from being vacuous: "verify returned
@@ -279,6 +281,10 @@ were invisible to a green gate and three were live miscompiles:
   `ty-high?`, which is what `cast-compute` twelve lines away already used. Gated three ways: 200
   worklist seeds (unguarded it discharged on 108, i.e. the answer depended on the seed), the
   contradictory-phi structural case, and the differential run reporting EV-CAST rather than `null`.
+  **This one was only PARTLY closed, and the second review found the rest**: `not ty-high?` is not
+  the proven answer either, so the same Cast was still discharged one nesting level deeper. See
+  "the second review" below; the fix is `n-ty-proven?` and the gate is
+  `a_cast_nothing_proved_survives_a_merge_of_merges`.
 - **A multi node is IN PROGRESS until all of its projections exist**, and that is LAW 4 for a multi
   node rather than for a merge. Peepholing an If's projections ONE AT A TIME folds the first to
   XCtrl, which drops the If's last use, so the kill cascade takes the If itself; the sibling is
@@ -329,24 +335,284 @@ were invisible to a green gate and three were live miscompiles:
   round-tripping a tuple at exactly the bound. Depth is recorded once per interned type, so the
   check is O(arity). Arity stays unbounded, which is what M6's `Start` actually needs.
 
-**Open, found while gating the above: an irreversible rewrite still acts on a provisional `~ctrl`.**
-`region-dead-path` requires XCtrl exactly rather than merely high, which is the letter of LAW 3.
-But XCtrl is itself an optimistic answer when the If's PREDICATE is unanalysed: `if-compute` reads
-a high predicate as "no value can be here", reports `[~ctrl ~ctrl]`, and a Region peepholed at that
-moment loses both paths and takes the whole branch with it. Building a diamond FULLY raw and then
-running `iterate!` does exactly that; it is why the corpus's raw fixtures use `g-analyze!` (which
-changes no edges) and why the eager path never sees it. The honest guard is not local: the
-projection's own type is not ANY, so `n-inputs-analysed?` does not catch it, and the property
-needed is transitive. This is the case M7's phase structure exists for (analyse to a fixpoint, then
-transform), and it is recorded here rather than papered over with a partial local check. Slice 3b
-must not build a diamond fully raw until it is resolved.
+**CLOSED, by the second review below: an irreversible rewrite acting on a provisional `~ctrl`.**
+This was recorded here as open, with the note that "the honest guard is not local, and the property
+needed is transitive". That was right, and the property now has a name: `n-ty-proven?`. It is also
+recorded here that it was one instance of something larger; the entry below replaces it.
 
-**Slice 3b, the graph round trip: still to do.** LAWS 3, 4 and 5 do not bite in 3a, because nothing
-in it constructs, rewrites or peepholes a graph. They bite in 3b: the graph parser has to build a
-loop's region and phis inside the in-progress window without letting a peephole fire, has to keep
-region and phi arity as one operation, and has to build a multi node's projections inside
-`n-multi-open!`/`n-multi-close!` (the review above turned forgetting that into a named abort rather
-than a miscompile).
+## The second adversarial review: seven findings, one law, all closed
+
+Every one of the seven was a different consequence of ONE mistake, and it is worth stating the
+mistake in one sentence because five separate "fixes" had already been written against instances of
+it and none of them had named it:
+
+> ANY is what an UNANALYSED node reports; every other high type is a CLAIM someone computed. A
+> producer must not mint a claim out of the absence of information, and a consumer must not read a
+> claim as a PROOF.
+
+The three earlier repairs (`phi-single-input`, `cproj-idealize`, `stop-idealize`, and the constant
+fold) all moved from `ty-high?` to `= (t-xctrl)` and believed that was the proven answer. On the
+control axis it is not: **XCtrl IS the high element of that axis**, so `meet(~ctrl, ctrl)` is `ctrl`
+and a node reporting `~ctrl` may still fall. `region-compute` made that concrete by seeding its meet
+with `~ctrl`, so a merge none of whose paths had a type reported PROVABLY UNREACHABLE out of nothing.
+
+What was found, in the order the damage runs:
+
+- **A merge whose input is a merge was miscompiled to a single wrong constant** on 55 of 200
+  worklist seeds, using the construction order the project itself documents as mandatory (arms
+  eager, merges raw, worklist, `iterate!`). `g-verify` reported 0 violations, because a graph with an
+  arm deleted is a structurally valid graph.
+- **Two merges feeding a merge deleted the entire program** on 31 of 200 seeds: `stop-idealize`
+  dropped the only Return and the kill cascade did the rest. Stop with no inputs at all, `g-verify`
+  clean, and the printer omits dead nodes so the diagram showed Start and Stop with nothing between
+  them. Note Simple does NOT delete a Return; that rewrite is this project's own addition.
+- **The Cast finding from the first review was only half closed.** `phi-compute` legitimately SKIPS
+  a region path whose control is still high, so a Phi momentarily reports the type of the single arm
+  that happens to have been analysed. That type is LOW, it satisfies the Cast, and the type check
+  was deleted on 110 of 200 seeds; the surviving graph printed the Phi's settled type as `null|int`,
+  so the analysis proved the Cast unsatisfiable AFTER the Cast was gone.
+- **`if-compute` reported "neither arm is taken" for an If whose own CONTROL was unanalysed**
+  (`(and (!= c (t-ctrl)) (!= c (t-bot)))` is satisfied by ANY), and `cproj-idealize` then replaced
+  BOTH live projections with XCtrl.
+- **The constant fold's guard asked the wrong question.** `n-inputs-analysed?` is one level deep,
+  and for a Phi the relevant fact is two or more levels away. `if (p) x=1; else { if (q) x=true;
+  else x=true; } return x + 0;` folded to `Const int=1` on 108 of 200 seeds, and with a
+  non-constant live arm the `x + 0` identity alone still lost the Add on 99 of 200 and answered
+  `true` where `ev-arith` correctly reports a type error.
+- **The dep mechanism `phi-compute` relies on was inert.** Two independent halves: the dependency
+  was recorded on the REGION rather than on the region's control input (Simple does `addDep(r.in(i))`
+  and the port had lost the `.in(i)`), and `g-analyze!` never called `n-move-deps!` at all. A region
+  already at `ctrl` does not change type when a SECOND path goes live, so nothing re-queued the phi
+  and `if (p) x=8; else x=0;` published `int=8`. That is the too-SPECIFIC direction, which is the
+  miscompile direction, and `n-set-ty-falling!` cannot catch it because the stale type never changes.
+- **`ty-high?` answered a per-axis question with a single-axis test.** `join(int=8, int=[0..5])` is
+  `int=~[5..8]`: the INT bit present, the range inverted, which is the high element of that axis and
+  which `ty-print` even spells with a `~`. Reading it as LOW made four computes answer with their
+  axis BOTTOM and then RISE when the input fell, and `g-analyze!`'s own monotonicity assertion
+  aborted the compiler on a 14-node program. It also disabled `cast-compute`'s freeze rule for every
+  Cast that disagrees with its input on the RANGE rather than on the kind.
+
+### What closed them
+
+**`n-ty-proven?`, and every irreversible rewrite asks it.** The answer is "no node in this node's
+input cone is unanalysed, and every type in the cone is at its fixpoint". Both halves are needed and
+the second was found the hard way: a first version tested only for ANY, and a FLAT diamond still
+compiled to `return 1` on 9 of 40 seeds, because the phi had met `int=0` with an as-yet-unanalysed
+`8` (ANY is the identity for meet) and the `8` was analysed one step before the Add was popped. A
+stale LOW type is exactly as provisional as ANY. The test is therefore the fixpoint condition
+itself, `n-ty (n-compute)` on every node in the cone; being on the worklist is the wrong proxy,
+because `iterate!` sweeps by pushing every live node.
+
+It has to be TRANSITIVE, and that is forced by `phi-compute`, whose optimism is load-bearing: a loop
+phi must be able to report its entry value while the back edge is unanalysed, or the phi, the exit
+test and the back edge sit at ANY forever waiting on each other. So a Phi's type is provisional
+while its own type and all of its inputs' types are low, which no local check can see.
+
+**Six call sites, one predicate**: the constant fold, `n-int-con?`, `n-proven-int-only?` (the five
+arithmetic identities), `cast-idealize`, `n-in-proven-xctrl?` (`region-dead-path`,
+`phi-single-input`, `stop-idealize`), and `cproj-idealize`. `n-int-con?` is the one nobody had
+suspected: it asks "is this operand the literal 0", a Phi that momentarily reports `int=0` says yes,
+`should-swap?` moves it to the right because constants belong on the right, and `x + 0 = x` then
+returns the OTHER operand as the whole program's value. No fold and no control rewrite is involved,
+which is why the four guards on those did not see it.
+
+**Two producers stopped manufacturing proof**: `region-compute` returns ANY while any path is
+unanalysed, and `if-compute` returns ANY while its control or its predicate is. These are now
+redundant with the consumer-side proof for every fixture in the corpus, and both are kept anyway,
+because a compute that reports "provably unreachable" for a node nobody has looked at is a false
+statement about the program regardless of who is reading it, and `g-analyze!` publishes those types
+to the verifier, to the diagrams, and to M7's optimistic pass. Each has its own unit gate for
+exactly that reason: the end-to-end gates cannot see them while the consumers refuse to act, so
+without the unit gates the pair would silently degrade to one.
+
+**`val-high?` is an INHABITATION test now**, per axis and per kind, and its old comment claiming
+that erring toward `false` "never breaks correctness" is deleted, because erring toward false is
+precisely what made four computes non-monotone. Note this is not a lattice-POSITION test:
+`int=~[5..8] isa ~dyn` is false, since the product lattice does not identify "uninhabited" with "at
+or above the value top".
+
+**`iterate!` sweeps.** A proof-gated rewrite is DEFERRED rather than declined, and nothing re-queues
+it: the blocker's type may never change again, so neither `wl-push-outs!` nor the deps list will fire.
+One drain therefore reached a fixpoint of "what could be proven at the time", which is a function of
+the pop order, and `1 + 2*3` stayed unfolded on some seeds. So: drain, and if that drain changed
+anything, push every live node and drain again. `iterate_reaches_a_peephole_fixpoint_on_every_optimised_fixture`
+is the gate, and it asks for the claim (one more sweep changes nothing) rather than for the mechanism.
+
+### The gates, and how each one fails without its fix
+
+Three new corpus fixtures (`16-merge-of-merge`, `17-merge-tree`, `18-diamond-raw`, floor raised
+15 -> 18), of which the last is the FIRST raw-analysed fixture containing a merge: every other one is
+straight-line, which is why nothing exercised `phi-compute` under the analysis-only pass. Twelve new
+tests, 121 -> 138.
+
+**Every fix was reverted one at a time and the gate re-run**, which is the only way to know a gate
+tests what it claims. That exercise changed the work twice:
+
+- **A fixture's CONSTRUCTION ORDER is part of the fixture.** The first version of the raw diamond
+  created its constants inline and pushed with `wl-push-live!`, and it did not reproduce the
+  miscompile on ANY of 200 seeds. `wl-pop!` picks a random INDEX, so which orders a seed can produce
+  depends on how the list was filled. It is written the way the witness was written now, and says so.
+- **Two producers and one consumer overlap**, so reverting any one of them left the gate green even
+  though the miscompiles were real. That is why `region-compute` and `if-compute` have unit gates on
+  their ANSWER (`an_unanalysed_merge_does_not_claim_to_be_unreachable`,
+  `an_if_whose_control_is_unanalysed_does_not_claim_neither_arm`) rather than only end-to-end gates,
+  and why the proven-XCtrl requirement has one too
+  (`a_provisional_xctrl_is_not_a_licence_to_drop_a_control_path`, which builds a graph where a
+  projection's stored type says `~ctrl` and the claim is a lie). Without those three, the pair would
+  have degraded to one at the next refactor with nothing to say so.
+
+**Five changes are NOT individually gated, and here is the honest reason for each.** Three are the
+axis-level answer stated where the axis is computed, and are unreachable while `val-high?` is right,
+because each is behind that same compute's own `ty-high?` test: `minus-compute`'s and
+`not-compute`'s uninhabited-input branches and `if-compute`'s neither-truthy-nor-falsey branch.
+(`int-arith`'s is reachable through a direct call and IS gated.) The other two are
+`g-analyze!`'s `n-move-deps!` and `iterate!`'s sweep: both are the mechanism behind a property that
+is gated (the analysis reaches a type fixpoint; `iterate!` reaches a peephole fixpoint), and with
+`region-compute` reporting ANY there is no constructible graph today where either is the only thing
+holding the property up. They are kept because the property should be true by construction rather
+than by an argument about which pushes happen to reach which node.
+
+### Still open
+
+- **A dead node can be wired as an input**, and nothing says so at the wiring site. Peephole a raw
+  merge whose only user is a Phi that then collapses, and the merge loses its last use and is killed;
+  the id in your hand is now a corpse, and `n-add-def!` accepts it. The graph that results fails
+  `g-verify` with VERR-DEAD-INPUT far from the line that caused it, and the interpreter reports
+  EV-STUCK. A named panic in `n-add-def!` was written and reverted: `identity-peepholes-do-not-change-a-non-numeric-type`
+  reuses an Arg after the peephole under test has killed it, so closing this means changing that
+  test's hygiene, which is a separate change from these seven findings.
+- **`g-analyze!` followed by `iterate!`** on the nested-guard fixture deleted the whole If on 15 of
+  200 seeds while this review was being written. It reproduced from a FULLY ANALYSED graph, so it is
+  not an instance of the law above and needs its own investigation. It does not reproduce now, which
+  means only that no current gate covers that phase order; a gate for it is the first thing to write
+  when it is picked up.
+
+**Slice 3b, the GRAPH round trip: DONE** (`src/gtext.coil`, gated by `tests/gtext-test.coil`).
+Printer and parser in one file because they are one format, the same reason 3a gives. One line per
+LIVE node:
+
+```
+n0: Start <- : ctrl
+n1: Stop <- n7 : ALL
+n2: Const int=1 <- n0 : int=1
+n4: If <- n0 n3 : [ctrl,ctrl]
+n5: CProj.0 <- n4 : ctrl
+n9: Phi dyn <- n7 n2 n8 : dyn
+```
+
+Aux is `.<dec>` for a projection slot and ` <exact type>` for Const/Arg/Cast/Phi, chosen by
+`op-aux-kind`, a case over the NAMED op constants whose default is a hard error: a new op silently
+inheriting "no aux" would print a Const whose value had vanished, which is the same failure
+`v-check-arity`'s missing-entry panic exists for. The delimiters are the two bytes a type's grammar
+cannot contain, `<` and `:`, so ` <-` and ` : ` terminate a field unambiguously even though a
+type's text carries spaces, commas and brackets; the three fields are found by scanning for one
+byte each, with no lookahead.
+
+**IDENTITY IS EXACT UP TO A DENSE RENUMBERING OF LIVE NODES**, and that is a real weakening of the
+gate's word "identity" rather than an implementation detail. `n<k>` is a PRINT INDEX, the node's
+position in the listing, because the arena ids of DEAD nodes cannot be recreated (nothing recreates
+a node in order to kill it again). Consistent with [D5](DECISIONS.md#d5-written-in-coil-node-and-type-handles-are-integer-ids),
+which already says ids are dense arena indices and not identities, so no amendment was needed. It
+is not a vacuous distinction: 6 of the 15 corpus fixtures have live nodes whose arena ids are not
+their print indices (`02-fold-after` prints 4 lines out of a 10-node arena), so the renumbering is
+exercised by the identity clause itself. A listing whose indices are not dense and ascending is
+`GERR-INDEX-ORDER` and not a text the parser renumbers for you: a parser that quietly accepted `n7`
+on line 3 would make every hand-written reduction filed against the optimiser ambiguous.
+
+**THE PARSER PEEPHOLES NOTHING, AND THAT IS LAW 3 RATHER THAN A CHOICE.** When this was written, a
+diamond built fully raw and handed to `iterate!` lost both arms; that is fixed (see the second
+review above, and a fully raw diamond is now a gate), but the policy stands on the reasons below,
+which have nothing to do with that bug. There is no `n-peephole`, no `iterate!` and no `g-analyze!`
+in `src/gtext.coil`, and the gate does not iterate a parsed graph either. Everything the parser does instead is analysis-free:
+types are RESTORED with `n-set-ty!` and checked with `g-verify`, which runs `compute` and never
+`idealize`. Restoring is also the only exact choice, not merely the safe one: `cast-compute`'s
+freeze rule and `phi-compute`'s widening fuel both read the node's PREVIOUS type, so re-analysing
+from ANY is not guaranteed to reach the same fixpoint. Letting `g-verify`'s type pass then prove
+`n-compute == n-ty` on every node is exact AND a stronger check, and it is what makes a text that
+LIES about a type a named `VERR-STALE-TYPE` instead of a silently corrected one.
+
+**Three passes, which is LAW 4 discharged rather than honoured.** A loop phi's back-edge value is a
+node created later in the listing, so a one-pass parser needs a placeholder for a forward
+reference, and any placeholder that is a plausible node id is LAW 2's forbidden stub in its purest
+form. Pass 1 creates every node, pass 2 wires every input with `n-add-def!`, pass 3 restores every
+type. Because nothing computes or rewrites during pass 2, the in-progress window and `n-if-arms!`
+are not needed at all: there is no moment at which a half-wired node's type is consulted. That is a
+STRONGER position than opening the window, and the file says so explicitly so that a later reader
+does not "restore" the window and feel entitled to add a peephole inside it. A side effect worth
+keeping: an IN-PROGRESS graph round-trips, `_` and all, which is exactly the reduced test case
+someone debugging the in-progress contract will want to file.
+
+**What the format does NOT carry**, listed because a reader will otherwise assume it does: `outs`
+order, the GVN table, `deps`, `hash`, and `keeps` beyond the two pinned roots. The first four are
+caches or unordered, and a parsed graph rebuilds `outs` as a by-product of wiring. Every current
+reader of `outs` (`ev-ctrl-succ`, `ev-if-arm`, `ev-enter-merge!`, `v-check-edges`,
+`region-has-phi?`) is order-insensitive, but that is an ARGUMENT and not a proof: if it is wrong,
+the differential clause across the reparse is what reports it, and that would be a finding to write
+down here rather than something to paper over. `keeps` is the one that is asserted instead of
+dropped: `g-write` refuses to print a graph with a pin anywhere but the roots, because a live pin
+means a construction window is still open and the caller is printing a half-built graph.
+
+**What the gate proves.** The corpus round trip (text identity, live-count equality, `g-verify`
+clean on every reparsed graph, with a counted floor on lines round-tripped); the differential
+oracle across the reparse for 12 argument seeds per fixture; the field-sensitivity table; the
+malformed-text table, one named code each plus a distinct-code floor; that `g-parse` aborts in a
+forked child rather than handing back a partial graph; the "the parser optimises nothing" fixture;
+and the structural loop check (region and phi arity equal, back edge in slot 2).
+
+**What the gate deliberately does NOT assert.**
+
+- **LAW 5 is not enforceable by the format, and no attempt is made to pretend otherwise.** A text
+  whose Phi has one fewer input than its Region is lexically fine, and the printer emits the two
+  arities independently, so a dropped input on one side round-trips happily. Duplicating
+  `v-check-phi` inside the parser would give two implementations of one contract that could drift,
+  so a short-phi text is instead a named case whose expected outcome is `VERR-PHI-ARITY`. The same
+  split covers a Return with its inputs deleted, which parses cleanly and reports `VERR-ARITY`.
+- **"Reparse, `iterate!` to a fixpoint, get the same text" is NOT gated**, and is the most
+  attractive property that was left out. It is exactly the shape that trips the open
+  `region-dead-path` item, so it waits for M7's phase structure rather than being half-attempted.
+- **`GRT-DIFFERENT-TEXT` is provoked only by a hand-written text, never by a printed one.** Like
+  `ty-injective?` returning false in 3a, the branch that says "the format is ambiguous" has no
+  reachable witness among graphs the project builds, which is the property being gated rather than
+  a hole in it.
+
+**Why the identity clause is not self-fulfilling**, which is LAW 8 and is the whole reason this
+slice is as large as it is. A print-then-parse-then-print identity would pass for a printer that
+emitted only op names. Three separate defences: the field-sensitivity table deletes one printed
+field at a time; the line-count floor pins how much text is actually being compared; and the
+differential clause requires the reparsed graph to COMPUTE the same answers. Measured rather than
+argued, by deleting each field from a real four-line graph and recording what notices: deleting the
+print index reports `GERR-NO-NPREFIX`, the op name `GERR-UNKNOWN-OP`, a Const's aux type
+`GERR-AUX-MISSING`, the computed type `GERR-NO-SEP` — and deleting the INPUT LIST is caught by
+nothing in the parser at all, only by `g-verify` (`VERR-ARITY`), by text identity (the reparse
+prints the shorter line), and by the interpreter. That last one is the honest measurement the table
+exists to produce, and it is why the input list could not have been left to the parser to police.
+
+**Truncation is a named panic and never a shorter answer.** A `FixBuf` clamps at its capacity and
+the discarded `Result` hides it, so a text that did not fit would come back truncated — and a
+truncated text compares EQUAL to another truncated text, which would make the identity clause pass
+on nothing at all. `g-render` panics by name instead, the lesson `tests/text-test.coil` already
+paid for once. Printing a type goes through the CHECKED `ty-print-exact`, so a type whose exact
+form is not injective aborts by name rather than putting an ambiguous string into a graph line and
+having the ambiguity attributed to this file.
+
+**Twenty named failure codes, all twenty provoked and distinct**, including
+`GERR-NO-NEWLINE` for a truncated text and `GERR-ROOT-DUP` for a second Start or Stop (without
+which the parser would `n-new` a root that `g-start` does not name: a Start nothing anchors
+constants to). The two type codes, `GERR-BAD-TYPE` and `GERR-BAD-AUX-TYPE`, leave `text-err`
+readable so the type production that failed is still named; "the graph line is malformed" and "the
+type on it is malformed" are two bugs in two files, and `g-parse` prints both.
+
+**Still open, carried forward, not fixed here.**
+
+- **The `int=[min..max]` versus `w0` wart in the TYPE format** (recorded under slice 3a above) is
+  untouched. It is a decision, not a fix: either reject an explicitly written full interval or
+  derive the widening default from the interval on both sides. Nothing is red, because the printer
+  only ever emits the second spelling, so the graph round trip inherits an exact type form.
+- **`region-dead-path` acting on a provisional `~ctrl`** (recorded above) is now formally assigned
+  to **M7's phase structure**, which analyses to a fixpoint before transforming anything. Slice 3b
+  did not need it resolved, because it neither peepholes nor iterates; the constraint it imposed
+  was "do not build a diamond fully raw and then iterate it", and the parser satisfies that by
+  never iterating at all.
 
 ## M4. Memory SSA and shapes
 

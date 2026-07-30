@@ -71,6 +71,10 @@
 (const VK-MASK  i64 1023)        ; every kind: the bottom of this axis
 (const VK-NONE  i64 0)           ; no kind: the top of this axis
 (const VK-NUM   i64 24)          ; VK-INT | VK-FLT
+;; The kinds with no refinement axis, so a present bit there always means at least one inhabitant.
+;; `val-high?` needs them named: every other kind can be present with an EMPTY refinement, which is
+;; uninhabited, and telling those two apart is the whole content of that predicate.
+(const VK-UNREFINED i64 227)     ; VK-UNDEF | VK-NULL | VK-STR | VK-SYM | VK-BIG
 
 ; ============================================================================
 ; Axis bounds
@@ -228,10 +232,32 @@
      (bits-dual (val-fidxs x)  -1)
      (bits-dual (val-shapes x) -1))))
 
-;; High means "no value can be here": the optimistic pass uses it to spot dead code, and
-;; constant folding refuses to fire on it. Reporting `false` where `true` was possible
-;; loses an optimisation and never breaks correctness, so this errs toward `false`.
-(defn val-high? [(x Val)] (-> bool) (= (val-kinds x) VK-NONE))
+;; High means "no value can be here". IT IS A QUESTION ABOUT EVERY AXIS, and answering it with
+;; the kinds axis alone was a bug, not a conservative approximation:
+;;
+;; `join(int=8, int=[0..5])` is `int=~[5..8]`: the INT bit is present while the range is
+;; inverted, which is this lattice's high element on that axis (`ty-print` even spells it `~`).
+;; Reading that as LOW made four computes ANSWER WITH THE AXIS BOTTOM for it and then RISE when
+;; the input fell: `int-arith` said `int` and later `int=[1..6]`, `minus-compute` said `int` and
+;; later a range, `not-compute` said `bool` and later `bool=0`, `if-compute` said [ctrl ctrl] and
+;; later [ctrl ~ctrl]. `g-analyze!`'s monotonicity assertion aborted the compiler on a 14-node
+;; program because of it, and it also disabled `cast-compute`'s freeze rule for every Cast whose
+;; input disagrees with the target on the RANGE rather than on the kind.
+;;
+;; So the old comment's claim that erring toward `false` "never breaks correctness" was exactly
+;; backwards: erring toward false is what made those computes non-monotone.
+;;
+;; This is an INHABITATION test, not a lattice-position test. `int=~[5..8] isa ~dyn` is false,
+;; because the product lattice does not identify "uninhabited" with "at or above ~dyn"; a
+;; kind bit with an empty refinement is uninhabited without being above the value top.
+(defn val-high? [(x Val)] (-> bool)
+  (let [k (val-kinds x)]
+    (if (= k VK-NONE) true
+      (and (= (& k VK-UNREFINED) 0)
+       (and (if (!= (& k (| VK-INT VK-BOOL)) 0) (> (val-ilo x) (val-ihi x)) true)
+        (and (if (!= (& k VK-FLT) 0) (= (val-fsz x) FSZ-HIGH) true)
+         (and (if (!= (& k VK-FUN) 0) (= (val-fidxs x) 0) true)
+              (if (!= (& k VK-OBJ) 0) (= (val-shapes x) 0) true))))))))
 
 ;; Exactly one kind, pinned to one inhabitant. `undefined` and `null` are single-inhabitant
 ;; kinds, so naming the kind is naming the value. Booleans reuse the int axis (0 or 1).
@@ -620,6 +646,16 @@
 ;; `(ty-isa old new)` reads backwards at the assertion site and an assertion nobody can read
 ;; is an assertion that gets written the wrong way round. (M0 had three of those.)
 (defn ty-falls? [(old i64) (new i64)] (-> bool) (ty-isa old new))
+
+;; THE ABSENCE OF INFORMATION IS NOT INFORMATION, and this predicate is how the two are told
+;; apart. ANY is what an UNANALYSED node reports: `n-new` seeds every type to it and `n-in-ty`
+;; returns it for a missing input. Every OTHER high type is a claim someone computed. XCtrl
+;; says a control edge is dead, `~dyn` and `int=~[5..8]` say no value fits.
+;;
+;; `ty-high?` cannot make that distinction and must not be used for it. Five separate rewrites
+;; in node.coil were wrong because a producer minted a high answer out of an unanalysed input
+;; and the consumer read it as a proof.
+(defn ty-unanalysed? [(t i64)] (-> bool) (= t (t-top)))
 
 (defn ty-high? [(t i64)] (-> bool)
   (match (ty-get t)

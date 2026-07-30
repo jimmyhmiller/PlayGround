@@ -47,7 +47,7 @@
 ;; The corpus is allowed to GROW; losing a fixture is a silent weakening of every later gate,
 ;; because "on the whole corpus" is only as strong as the corpus. Adding one means raising this
 ;; deliberately, in the same commit as the fixture.
-(const CORPUS-FLOOR i64 15)
+(const CORPUS-FLOOR i64 18)
 
 ;; The lattice sample is 32 hand-listed types plus all 32 duals, and 468 of the 4096 ordered
 ;; pairs are strictly comparable. Both are floors for the same reason: narrowing the sample

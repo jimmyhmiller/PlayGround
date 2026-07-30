@@ -292,6 +292,46 @@
   (assert (= (ty-meet (t-nodyn) (t-dyn)) (t-dyn)))
   (assert (= (ty-meet (t-nodyn) (t-int-range 0 10)) (t-int-range 0 10))))
 
+;; HIGH IS A QUESTION ABOUT EVERY AXIS, and answering it with the kinds axis alone was a bug rather
+;; than a conservative approximation. A join of two disjoint refinements KEEPS the kind bit and
+;; empties the refinement, so the type is uninhabited while `kinds` is non-empty: `ty-print` spells
+;; the int case with a `~`. Four computes answered with their axis BOTTOM for such a type and so
+;; ROSE when the input fell, and `g-analyze!`'s monotonicity assertion aborted the compiler on a
+;; 14-node program. It also disabled `cast-compute`'s freeze rule for every Cast whose input
+;; disagrees with the target on the RANGE rather than on the kind.
+;;
+;; Each pair below is a join whose result no value can inhabit, on a different axis.
+(deftest an_uninhabited_join_is_high_on_every_axis
+  ; int: disjoint ranges leave an inverted range, kinds still VK-INT
+  (let [inv (ty-join (t-int-con 8) (t-int-range 0 5))]
+    (assert (ty-high? inv))
+    ; and it is neither ANY nor ~dyn: "unanalysed" and "the value top" are different elements, and
+    ; conflating any of the three is what the five node.coil rewrites did
+    (assert (!= inv (t-top)))
+    (assert (!= inv (t-nodyn))))
+  ; bool reuses the int axis, so true joined with false is the same shape
+  (let [invb (ty-join (t-bool-con true) (t-bool-con false))]
+    (assert (ty-high? invb))
+    (assert (!= invb (t-top))))
+  ; float: two different constants join to the high end of the float chain
+  (let [invf (ty-join (t-flt-con 1.0) (t-flt-con 2.0))]
+    (assert (ty-high? invf))
+    (assert (!= invf (t-top))))
+  ; function and object sets: disjoint bitsets join to the empty set
+  (assert (ty-high? (ty-join (t-fun-con 0) (t-fun-con 1))))
+  (assert (ty-high? (ty-join (t-obj-shape 0) (t-obj-shape 1))))
+  ; a kind with no refinement axis is always inhabited, so the same shape there is NOT high
+  (assert (not (ty-high? (t-null))))
+  (assert (not (ty-high? (t-str))))
+  (assert (not (ty-high? (ty-join (t-int-range 0 10) (t-int-range 5 20)))))   ; they overlap
+  (assert (not (ty-high? (t-int-con 8))))
+  (assert (not (ty-high? (t-flt-con 1.0))))
+  (assert (not (ty-high? (t-fun-con 0))))
+  ; and an uninhabited type is not the same lattice element as the value top: the product lattice
+  ; does not identify "no value fits" with "at or above ~dyn", which is why this is an inhabitation
+  ; test and not a position test
+  (assert (not (ty-isa (ty-join (t-int-con 8) (t-int-range 0 5)) (t-nodyn)))))
+
 (deftest unrelated-kinds-fall-to-bottom
   ; control is not a value, and a tuple is not either
   (assert (= (ty-meet (t-ctrl) (t-int)) (t-bot)))

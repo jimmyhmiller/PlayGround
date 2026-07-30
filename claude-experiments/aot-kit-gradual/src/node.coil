@@ -141,6 +141,11 @@
    (domver i64)                ; the cfgver the tables above were built at; -1 = never
    (verifying bool)            ; a checker is walking the graph; see n-add-dep!
    (achecks i64)               ; falling-type checks the last g-analyze! performed
+   (pmark  (ArrayList i64))    ; id -> generation stamp, for n-ty-proven?'s input-cone walk
+   (pstack (ArrayList i64))    ; its DFS stack; both are reused rather than reallocated
+   (pgen   i64)                ; the current generation
+   (pbusy  bool)               ; a cone walk is in progress; the buffers above are not reentrant
+   (nchg   i64)                ; peephole changes; see iterate!'s sweep loop
    (inited bool)])
 
 (defn graph [] (-> (ptr Graph))
@@ -160,6 +165,11 @@
           (store! (field p domver) -1)
           (store! (field p verifying) false)
           (store! (field p achecks) 0)
+          (store! (field p pmark)  (al-new [i64] (malloc-allocator)))
+          (store! (field p pstack) (al-new [i64] (malloc-allocator)))
+          (store! (field p pgen)   0)
+          (store! (field p pbusy)  false)
+          (store! (field p nchg)   0)
           0))
     p))
 
@@ -173,6 +183,10 @@
     (al-clear! [bool] (field p onwl))
     (al-clear! [i64]  (field p idep))
     (al-clear! [i64]  (field p ldep))
+    (al-clear! [i64]  (field p pmark))
+    (al-clear! [i64]  (field p pstack))
+    (store! (field p pbusy) false)
+    (store! (field p nchg) 0)
     (store! (field p cfgver) 0)
     (store! (field p domver) -1)
     (store! (field p verifying) false)
@@ -455,6 +469,12 @@
 
 (defn wl-empty? [] (-> bool) (= (al-len [i64] (load (field (graph) wl))) 0))
 
+;; Is this node pending? Exported for the tests that check the revisit machinery directly: "a type
+;; change re-queues the nodes that read it" is otherwise only observable as a fixpoint several steps
+;; later, which is a much weaker thing to assert. NOT what `n-ty-proven?` asks, deliberately:
+;; `iterate!` sweeps by pushing every live node, so "pending" is true of everything mid-sweep.
+(defn wl-on? [(n i64)] (-> bool) (al-get (load (field (graph) onwl)) n))
+
 ; ============================================================================
 ; Global value numbering
 ; ============================================================================
@@ -604,8 +624,13 @@
           (int-arith op (ty-int-lo a) (ty-int-hi a) (ty-int-lo b) (ty-int-hi b)))))))
 
 (defn int-arith [(op i64) (alo i64) (ahi i64) (blo i64) (bhi i64)] (-> i64)
-  ; an inverted range is a high element on that axis; nothing useful to compute
-  (if (or (> alo ahi) (> blo bhi)) (t-int)
+  ; An inverted range is the HIGH element of the int axis: no integer is in it. So the answer
+  ; is the HIGH type, not `int`. Answering `int` (the axis BOTTOM) is what made this compute
+  ; RISE: `join(int=8, int=[0..5])` is `int=~[5..8]`, the old answer was `int`, and when the
+  ; input later fell to `int=[0..5]` the result became `int=[1..6]`, which is above `int`.
+  ; `val-high?` now reports an inverted range as high so `arith-compute` filters it out one
+  ; level up; this stays because the axis rule belongs where the axis is computed.
+  (if (or (> alo ahi) (> blo bhi)) (t-top)
     (if (= op OP-ADD)
         (let [lo (+ alo blo) hi (+ ahi bhi)]
           (if (or (add-ovf? alo blo lo) (add-ovf? ahi bhi hi)) (t-int)
@@ -637,8 +662,11 @@
     (if (not (ty-numeric? a)) (t-num)
       (if (not (ty-int-only? a)) (t-num)
         (let [lo (ty-int-lo a) hi (ty-int-hi a)]
-          (if (or (> lo hi) (= lo TY-IMIN)) (t-int)
-            (t-int-range (- 0 hi) (- 0 lo))))))))
+          ; an inverted range holds no integer, so the negation holds none either: the HIGH
+          ; answer, not `int`. See the note in `int-arith`; `int` here also rose.
+          (if (> lo hi) (t-top)
+            (if (= lo TY-IMIN) (t-int)              ; -IMIN is not representable
+              (t-int-range (- 0 hi) (- 0 lo)))))))))
 
 ;; `!x` is the truthiness question with the answer inverted, so it asks the same predicates
 ;; the If does rather than carrying a second, smaller copy of the rules.
@@ -647,7 +675,9 @@
     (let [f (ty-can-be-falsey? a) tr (ty-can-be-truthy? a)]
       (if (and f (not tr)) (t-bool-con true)
         (if (and tr (not f)) (t-bool-con false)
-          (t-bool))))))
+          ; neither truthy nor falsey means the operand holds no value at all, so neither does
+          ; the answer. `bool` here is the axis bottom and rose as soon as the input fell.
+          (if (or f tr) (t-bool) (t-top)))))))
 
 (defn cmp-compute [(op i64) (a i64) (b i64)] (-> i64)
   (if (or (ty-high? a) (ty-high? b)) (t-top)
@@ -834,26 +864,58 @@
 (defn t-if-false   [] (-> i64) (t-tuple2 (t-xctrl) (t-ctrl)))
 (defn t-if-neither [] (-> i64) (t-tuple2 (t-xctrl) (t-xctrl)))
 
+;; UNANALYSED IS NOT UNREACHABLE, ON EITHER INPUT.
+;;
+;; The old test was `(and (!= c (t-ctrl)) (!= c (t-bot)))`, which ANY satisfies, so an If whose
+;; own control had not been computed yet reported [~ctrl ~ctrl]: "both arms provably not taken",
+;; minted out of no information at all. `cproj-idealize`'s guard is `= (t-xctrl)`, the test its
+;; comment defends as "XCtrl, not merely high", and it cannot tell that answer from a proven
+;; one, so it replaced BOTH live projections with XCtrl and the arms were killed outright.
+;;
+;; Same for the predicate: ANY there is "not analysed yet", while a high-but-not-ANY predicate
+;; (`~dyn`, or an uninhabited `int=~[5..8]`) is a real claim that no value reaches the test, and
+;; an If no value reaches takes neither arm. So the two are separated by `ty-unanalysed?`.
+;;
+;; Returning ANY is monotone: it falls to [ctrl ctrl] when the control turns out live and to
+;; [~ctrl ~ctrl] when it turns out dead, and `proj-compute` maps ANY to ANY so the projections
+;; stay unanalysed rather than becoming provably dead.
 (defn if-compute [(n i64)] (-> i64)
   (let [c (n-in-ty n 0) p (n-in-ty n 1)]
-    ; an If in unreachable code takes neither branch
-    (if (and (!= c (t-ctrl)) (!= c (t-bot))) (t-if-neither)
-      (if (ty-high? p) (t-if-neither)
-        (let [f (ty-can-be-falsey? p) tr (ty-can-be-truthy? p)]
-          (if (and tr (not f)) (t-if-true)
-            (if (and f (not tr)) (t-if-false)
-              (t-if-both))))))))
+    (if (or (ty-unanalysed? c) (ty-unanalysed? p)) (t-top)
+      ; an If in unreachable code takes neither branch
+      (if (and (!= c (t-ctrl)) (!= c (t-bot))) (t-if-neither)
+        (if (ty-high? p) (t-if-neither)
+          (let [f (ty-can-be-falsey? p) tr (ty-can-be-truthy? p)]
+            (if (and tr (not f)) (t-if-true)
+              (if (and f (not tr)) (t-if-false)
+                ; neither truthy nor falsey: the predicate holds no value, so neither arm runs
+                (if (or f tr) (t-if-both) (t-if-neither))))))))))
 
 ;; A merge is reachable when ANY path into it is. Input 0 is unused and skipped.
+;;
+;; WHILE A PATH IS UNANALYSED THERE IS NO CLAIM TO MAKE. The meet below is seeded with `~ctrl`
+;; and `ty-meet-ctrl` gives meet(~ctrl, ANY) = ~ctrl (src/ty.coil), so without this guard a
+;; Region none of whose paths has a type yet reported `~ctrl`: PROVABLY UNREACHABLE, out of
+;; nothing. That is the answer four separate rewrites test for with `= (t-xctrl)` believing they
+;; had the proven one. `region-dead-path` dropped a live path and the matching Phi arm,
+;; `stop-idealize` dropped a live Return and the kill cascade took the whole program with it,
+;; `phi-single-input` collapsed a Phi onto one arm, `cproj-idealize` replaced a live projection
+;; with XCtrl. On the control axis "exactly ~ctrl" and "high" are the same thing when the
+;; producer is a Region, which is why switching those four from `ty-high?` to `= (t-xctrl)` did
+;; not close the hole.
+;;
+;; ANY is also what makes unanalysedness PROPAGATE: a merge above an unanalysed merge is itself
+;; ANY, so a Phi on it has an ANY input and `n-inputs-analysed?` can see it.
 (defn region-compute [(n i64)] (-> i64)
   (if (n-in-progress? n) (t-ctrl)
+   (if (not (n-inputs-analysed? n)) (t-top)
     (let [len (n-nins n) (mut t) (t-xctrl) (mut i) 1]
       (loop
         (if (>= (load i) len) (break)
           (do (store! t (ty-meet (load t) (n-in-ty n (load i))))
               (store! i (+ (load i) 1))
               0)))
-      (load t))))
+      (load t)))))
 
 ;; A loop is reachable exactly when its ENTRY is. Meeting the back edge in would make the
 ;; loop's liveness depend on its own body, which is circular and never settles.
@@ -883,7 +945,15 @@
         (let [len (n-nins n) (mut t) (t-top) (mut i) 1]
           (loop
             (if (>= (load i) len) (break)
-              (do (n-add-dep! r n)
+              ; THE DEP GOES ON THE PATH, NOT ON THE REGION. Simple's PhiNode.compute does
+              ; `addDep(r.in(i))`, and this port had lost the `.in(i)`. A region already at
+              ; `ctrl` does NOT change type when a SECOND path goes live (meet(ctrl,ctrl) is
+              ; ctrl), so nothing re-queued the phi and it kept a type computed while that path
+              ; was still high: `if (p) x=8; else x=0;` settled at `int=8` on 5 of 40 seeds and
+              ; the analysis concluded the program always returns 9. A type that is too SPECIFIC
+              ; is the miscompile direction, and `n-set-ty-falling!` cannot catch it because the
+              ; stale type never changes at all.
+              (do (if (!= (n-in r (load i)) NO-NODE) (n-add-dep! (n-in r (load i)) n) 0)
                   (if (ty-high? (n-in-ty r (load i))) 0
                     (store! t (ty-meet (load t) (n-in-ty n (load i)))))
                   (store! i (+ (load i) 1))
@@ -938,7 +1008,11 @@
   (let [len (n-nins n) (mut i) 1 (mut found) 0]
     (loop
       (if (or (>= (load i) len) (!= (load found) 0)) (break)
-        (do (if (and (= (n-in-ty n (load i)) (t-xctrl))
+        ; PROVEN unreachable. Dropping a path is irreversible and it drops an arm from every Phi
+        ; on this region with it, so a provisional `~ctrl` here is a miscompile: the arm that
+        ; should have run vanishes and the graph left behind is internally consistent, so
+        ; `g-verify` sees nothing wrong with it.
+        (do (if (and (n-in-proven-xctrl? n (load i))
                      (not (and (= (n-op n) OP-LOOP) (= (load i) 1))))
                 (store! found (load i))
               0)
@@ -1003,13 +1077,16 @@
             ; every read of the tuple is bounds-checked against the arity the TYPE declares: aux
             ; is a slot index and a slot index past the end is a malformed node, not a rewrite
             (if (or (< idx 0) (>= idx len)) NO-NODE
-              ; XCtrl, not merely high: see the note on phi-single-input
-              (if (= (ty-kid off idx) (t-xctrl)) (n-xctrl)
-                ; the sibling is dead, so the If does not branch: this projection IS its control
-                (if (and (and (= (n-op m) OP-IF) (= len 2))
-                         (= (ty-kid off (- 1 idx)) (t-xctrl)))
-                    (n-in m 0)
-                  NO-NODE))))
+              ; XCtrl AND PROVEN: see the notes on n-ty-proven? and phi-single-input. `if-compute`
+              ; used to report [~ctrl ~ctrl] for an If whose own control was merely unanalysed,
+              ; and this rewrite then replaced BOTH live projections with XCtrl, deleting the arms.
+              (if (not (n-ty-proven? m)) NO-NODE
+                (if (= (ty-kid off idx) (t-xctrl)) (n-xctrl)
+                  ; the sibling is dead, so the If does not branch: this projection IS its control
+                  (if (and (and (= (n-op m) OP-IF) (= len 2))
+                           (= (ty-kid off (- 1 idx)) (t-xctrl)))
+                      (n-in m 0)
+                    NO-NODE)))))
           (TBot [] NO-NODE) (TTop [] NO-NODE) (TCtrl [] NO-NODE) (TXCtrl [] NO-NODE)
           (TVal [v] NO-NODE))))))
 
@@ -1027,7 +1104,7 @@
     (loop
       (if (or (>= (load i) len) (not (load ok))) (break)
         (do (let [v (n-in n (load i))]
-              (if (or (= (n-in-ty r (load i)) (t-xctrl)) (= v n)) 0
+              (if (or (n-in-proven-xctrl? r (load i)) (= v n)) 0
                 (if (= (load live) NO-NODE) (store! live v)
                   (if (!= (load live) v) (store! ok false) 0))))
             (store! i (+ (load i) 1))
@@ -1052,9 +1129,13 @@
     (loop
       (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
         (do (let [r (n-in n (load i))]
-              ; XCtrl, not merely high: a Return whose control is still ANY has not been
-              ; shown unreachable, and dropping it would be premature
-              (if (and (!= r NO-NODE) (= (n-in-ty r 0) (t-xctrl)))
+              ; XCtrl AND PROVEN. Dropping the last Return runs the kill cascade over the whole
+              ; program, so a provisional answer here compiles a valid program to nothing at all:
+              ; Stop with no inputs, which `g-verify` accepts because an empty graph is
+              ; structurally valid and the printer omits dead nodes, so the diagram shows Start
+              ; and Stop and nothing says a word. Simple does not delete a Return at all; this
+              ; rewrite is this project's own addition and carries its own obligation.
+              (if (and (!= r NO-NODE) (n-in-proven-xctrl? r 0))
                   (store! found (load i))
                 0))
             (store! i (+ (load i) 1))
@@ -1081,7 +1162,23 @@
   ;
   ; `cast-compute` twelve lines up already guards on exactly this condition (Simple's freeze
   ; rule). The compute half was right and the irreversible half was not.
-  (if (and (not (ty-high? (n-in-ty n 1))) (ty-isa (n-in-ty n 1) (n-aux n))) (n-in n 1) NO-NODE))
+  ;
+  ; AND `not ty-high?` IS STILL NOT THE PROVEN ANSWER, which the nested case showed: with
+  ;
+  ;   if (p) { a = 1; } else { if (q) a = null; else a = null; }  return (int)a;
+  ;
+  ; the outer merge's second path is the inner merge, `phi-compute` skips it while it is
+  ; unanalysed, and the Phi momentarily reports `int=1`. That is LOW, it satisfies the target, and
+  ; the check on a value nothing had proved anything about was deleted on 110 of 200 worklist
+  ; seeds. The surviving graph even printed the Phi's settled type as `null|int`, so the analysis
+  ; knew the Cast was unsatisfiable after the Cast was gone. A local "no region path of the input
+  ; phi is high" test would fix that fixture and not the next level down, because the arm can
+  ; itself be a provisional Phi while every region path already reads `ctrl`; the property needed
+  ; is transitive, so this asks `n-ty-proven?`.
+  (if (and (n-ty-proven? (n-in n 1))
+           (and (not (ty-high? (n-in-ty n 1))) (ty-isa (n-in-ty n 1) (n-aux n))))
+      (n-in n 1)
+    NO-NODE))
 
 ; ============================================================================
 ; idealize: local rewrites
@@ -1103,8 +1200,18 @@
     OP-LE     (cmp-idealize n)
     NO-NODE))
 
+;; "This operand IS the integer k", which every identity rule below asks about the operand it is
+;; about to discard. IT IS A CLAIM ABOUT A TYPE, so it needs the proven answer too: a Phi
+;; momentarily reporting `int=0` (its region's other path unanalysed and skipped) is not the
+;; literal 0, and reading it as one is how the flat diamond `if (p) x = 8; else x = 0;
+;; return x + 1;` compiled to `return 1`. The Phi looked like a constant, `should-swap?` moved it
+;; to the right because constants belong on the right, and `x + 0 = x` then handed back the
+;; LITERAL 1 as the whole program's value. No fold and no control rewrite was involved, so the
+;; four guards on those did not see it.
 (defn n-int-con? [(n i64) (v i64)] (-> bool)
-  (let [t (n-ty n)] (and (ty-int-only? t) (and (ty-const? t) (= (ty-int-lo t) v)))))
+  (let [t (n-ty n)]
+    (and (and (ty-int-only? t) (and (ty-const? t) (= (ty-int-lo t) v)))
+         (n-ty-proven? n))))
 
 ;; Order the operands of a commutative op so that value numbering can see `a+b` and `b+a` as
 ;; the same node. Constants go on the right, then lower node ids first: any total order works,
@@ -1143,36 +1250,46 @@
 ;; test even where all numerics would be sound (x-0, x*1, -(-x)), because it is what the siblings
 ;; use; and for `+` it is REQUIRED rather than merely consistent, since -0.0 + 0 is +0.0 and so 0
 ;; is not an identity for floats either.
+;; AND THE DOMAIN HAS TO BE PROVEN, NOT MERELY REPORTED. Each of these reads a type and then
+;; irreversibly replaces a node, so it needs `n-ty-proven?` on top of `ty-int-only?`. A Phi that
+;; momentarily reports `int=1` because `phi-compute` skipped an unanalysed path makes
+;; `ty-int-only?` true while the Phi's settled type is `bool|int`, and `x + 0` then hands back the
+;; bool that `ev-arith` refuses. Measured on `if (p) x=1; else { if (q) x=true; else x=true; }
+;; return x + 0;`: the Add was lost on 99 of 200 worklist seeds and the program answered `true`
+;; where the only correct answer is a type error.
+(defn n-proven-int-only? [(n i64)] (-> bool)
+  (and (ty-int-only? (n-ty n)) (n-ty-proven? n)))
+
 (defn add-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
     ; x + 0 = x, integers only: on a non-number `+` concatenates, and for floats -0.0 + 0 is +0.0
-    (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) l NO-NODE)))
+    (if (and (n-int-con? r 0) (n-proven-int-only? l)) l NO-NODE)))
 
 (defn sub-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
-    (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) l    ; x - 0 = x, numbers only: "3"-0 is 3
+    (if (and (n-int-con? r 0) (n-proven-int-only? l)) l    ; x - 0 = x, numbers only: "3"-0 is 3
       ; x - x = 0, but only for integers: NaN - NaN is NaN, not 0
-      (if (and (= l r) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
+      (if (and (= l r) (n-proven-int-only? l)) (n-const (t-int-con 0))
         NO-NODE))))
 
 (defn mul-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
-    (if (and (n-int-con? r 1) (ty-int-only? (n-ty l))) l    ; x * 1 = x, numbers only
+    (if (and (n-int-con? r 1) (n-proven-int-only? l)) l    ; x * 1 = x, numbers only
       ; x * 0 = 0 only when x cannot be NaN or an infinity, so integers only
-      (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
+      (if (and (n-int-con? r 0) (n-proven-int-only? l)) (n-const (t-int-con 0))
         NO-NODE))))
 
 (defn minus-idealize [(n i64)] (-> i64)
   ; -(-x) = x once x is known numeric; on a non-number the INNER minus already coerced, so the
   ; pair is not the identity at all
   (let [a (n-in n 1)]
-    (if (and (= (n-op a) OP-MINUS) (ty-int-only? (n-ty (n-in a 1)))) (n-in a 1) NO-NODE)))
+    (if (and (= (n-op a) OP-MINUS) (n-proven-int-only? (n-in a 1))) (n-in a 1) NO-NODE)))
 
 (defn cmp-idealize [(n i64)] (-> i64)
   (let [l (n-in n 1) r (n-in n 2)]
     ; x == x is true and x < x is false, for integers. Floats are excluded because NaN is not
     ; equal to itself, which is exactly the trap this guard exists for.
-    (if (and (= l r) (ty-int-only? (n-ty l)))
+    (if (and (= l r) (n-proven-int-only? l))
         (n-const (t-bool-con (!= (n-op n) OP-LT)))
       NO-NODE)))
 
@@ -1186,10 +1303,112 @@
     (loop
       (if (or (>= (load i) len) (not (load ok))) (break)
         (do (let [d (n-in n (load i))]
-              (if (and (!= d NO-NODE) (= (n-ty d) (t-top))) (store! ok false) 0))
+              (if (and (!= d NO-NODE) (ty-unanalysed? (n-ty d))) (store! ok false) 0))
             (store! i (+ (load i) 1))
             0)))
     (load ok)))
+
+;; IS THIS TYPE PROVEN, OR MERELY THE OPTIMISTIC ANSWER SO FAR? Every irreversible rewrite has
+;; to ask this and none of them may ask `n-inputs-analysed?` instead, because ONE INPUT DEEP IS
+;; NOT DEEP ENOUGH. The answer is "every node in this node's input cone is at its type fixpoint",
+;; and both halves of that (the whole cone, and fixpoint rather than merely analysed) were learned
+;; from a miscompile that survived the weaker version.
+;;
+;; The reason it has to be transitive is `phi-compute`. That compute deliberately SKIPS every
+;; region path whose control is still high, which is correct for an ANALYSIS (it gets revisited
+;; when the control falls) and is load-bearing for loops: a loop phi has to be able to report its
+;; entry value while the back edge is unanalysed, or the phi, the exit test and the back edge all
+;; sit at ANY forever waiting on each other. The cost is that a Phi's type is provisional while
+;; its own type is LOW and its inputs' types are low too, so provisionality does not show up
+;; anywhere a one-level check can see it:
+;;
+;;   if (p) x = 1; else { if (q) x = true; else x = true; }  return x + 0;
+;;
+;; The outer Phi momentarily reports `int=1` because the inner merge is unanalysed and that path
+;; is skipped. Its own inputs are all typed, so `n-inputs-analysed?` passed, and the Add folded
+;; to `Const int=1`. The Phi's final type is `bool|int` and `true + 0` is a type error, but the
+;; Add was already gone. The same provisional read defeated `ty-int-only?` in the five arithmetic
+;; identities and `cast-idealize`'s discharge, which DELETES A TYPE CHECK.
+;;
+;; AND "ANALYSED" IS NOT THE SAME AS "AT A FIXPOINT". A stale LOW type is every bit as provisional
+;; as ANY, and the first version of this predicate only looked for ANY, so a flat diamond still
+;; miscompiled: `if (p) x = 8; else x = 0; return x + 1;` built raw became `return 1` on 10 of 40
+;; seeds. The phi met `int=0` with an as-yet-unanalysed `8` (ANY is the identity for meet, so the
+;; phi reported `int=0`), the `8` was analysed a moment later, and the Add was popped before the
+;; phi could be revisited: at that instant nothing in the cone was ANY, yet the phi's stored type
+;; was one worklist step out of date.
+;;
+;; So the test is the FIXPOINT CONDITION ITSELF, asked of every node in the cone: does its stored
+;; type still equal what its compute says? A node's type is a function of its input cone alone, so
+;; a cone that is internally at a fixpoint cannot move, and a conclusion drawn from those types is
+;; a conclusion about the finished program. (Being on the worklist is the wrong proxy for this:
+;; `iterate!` sweeps by pushing every live node, so "pending" would be true of everything.)
+;;
+;; A later REWRITE can still narrow a type in the cone (dropping a dead region path removes an arm
+;; from a Phi, which is the type RISE `n-set-ty-falling!`'s comment allows across `iterate!`). That
+;; is sound to have acted on: the settled type was an over-approximation, and a rise only makes it
+;; more specific, so a constant folded from it is still that constant.
+;;
+;; Cost is one input-cone walk per query, with the mark array and the stack reused across calls.
+;; Cycles (a loop phi's back edge) are handled by the generation stamp: a node already visited in
+;; this walk is skipped, so the walk terminates and the cycle is not itself a reason to answer no.
+(defn n-proven-grow! [] (-> i64)
+  (let [p (graph) need (n-count)]
+    (loop
+      (if (>= (al-len [i64] (load (field p pmark))) need) (break)
+        (do (al-push! [i64] (field p pmark) 0) 0)))
+    0))
+
+(defn n-ty-settled? [(n i64)] (-> bool)
+  (and (not (ty-unanalysed? (n-ty n))) (= (n-ty n) (n-compute n))))
+
+(defn n-ty-proven? [(n i64)] (-> bool)
+  (let [p (graph) was (g-verifying?)]
+    ; The mark array and the stack are ONE buffer shared by every call, so a walk inside a walk would
+    ; silently truncate the outer one and answer "proven" for a cone it never finished looking at.
+    ; Nothing reentrant calls this today (`n-compute` below never asks for a proof), and a named abort
+    ; is what keeps that true rather than remembered.
+    (if (load (field p pbusy))
+        (do (panic-corrupt "n-ty-proven?: reentrant input-cone walk; the mark and stack buffers are shared") 0)
+      0)
+    (store! (field p pbusy) true)
+    (n-proven-grow!)
+    (store! (field p pgen) (+ (load (field p pgen)) 1))
+    ; Recomputing types is what this does, and `phi-compute` records a dependency as a side
+    ; effect. The same flag `g-verify` uses keeps a guard from being observable in later results.
+    (g-set-verifying! true)
+    (let [gen (load (field p pgen)) (mut ok) true]
+      (al-clear! [i64] (field p pstack))
+      (al-push! [i64] (field p pstack) n)
+      (loop
+        (let [depth (al-len [i64] (load (field p pstack)))]
+          (if (or (not (load ok)) (= depth 0)) (break)
+            (let [m (al-get (load (field p pstack)) (- depth 1))]
+              (al-pop! [i64] (field p pstack))
+              (if (= (al-get (load (field p pmark)) m) gen) 0
+                (do (al-set! [i64] (field p pmark) m gen)
+                    (if (not (n-ty-settled? m)) (store! ok false)
+                      (let [len (n-nins m) (mut i) 0]
+                        (loop
+                          (if (>= (load i) len) (break)
+                            (do (let [d (n-in m (load i))]
+                                  (if (!= d NO-NODE)
+                                      (do (al-push! [i64] (field p pstack) d) 0)
+                                    0))
+                                (store! i (+ (load i) 1))
+                                0)))
+                        0))
+                    0))))))
+      (g-set-verifying! was)
+      (store! (field p pbusy) false)
+      (load ok))))
+
+;; PROVEN dead, not merely reported dead. `= (t-xctrl)` alone is not proof: XCtrl is the HIGH
+;; element of the control axis, so meet(~ctrl, anything reachable) is `ctrl` and a node reporting
+;; `~ctrl` may still fall to `ctrl` later. It is proof only once nothing its type depends on is
+;; unanalysed. Every rewrite that deletes a control path goes through here.
+(defn n-in-proven-xctrl? [(n i64) (i i64)] (-> bool)
+  (and (= (n-in-ty n i) (t-xctrl)) (n-ty-proven? (n-in n i))))
 
 (defn n-const [(t i64)] (-> i64)
   (n-peephole (n-new1 OP-CONST t (g-start))))
@@ -1205,30 +1424,47 @@
       (if (and (op-commutes? (n-op n)) (should-swap? n)) (n-swap-args! n) 0)
       (let [t (n-compute n)]
         (if (!= t (n-ty n))
-            (do (n-set-ty! n t) (wl-push-outs! n) (n-move-deps! n) 0)
+            (do (n-set-ty! n t) (wl-push-outs! n) (n-move-deps! n) (g-changed!) 0)
           0)
-;; ANALYSIS versus TRANSFORMATION again, and this was the third place it bit. Replacing a
+        ;; ANALYSIS versus TRANSFORMATION again, and this was the third place it bit. Replacing a
         ;; node by a constant is irreversible, so the constant answer has to be final, not
         ;; provisional. An input still at ANY has not been analysed yet: around a loop, the phi
         ;; is momentarily `int=0` because its back-edge value has no type yet, and folding there
-        ;; turns the induction variable into its initial value and deletes the loop.
-        (if (and (and (op-foldable? (n-op n)) (ty-const? t)) (n-inputs-analysed? n))
+        ;; turns the induction variable into its initial value and deletes the loop. `t` being a
+        ;; constant is not enough on its own; see `n-ty-proven?` for why the test is transitive
+        ;; and why it asks for a fixpoint rather than only for "not ANY".
+        (if (and (and (op-foldable? (n-op n)) (ty-const? t)) (n-ty-proven? n))
             (let [c (n-new1 OP-CONST t (g-start))]
               (n-set-ty! c t)
               (let [c2 (gvn! c)]
                 (if (!= c2 c) (do (n-kill! c) 0) 0)
                 (n-keep! c2) (n-subsume! n c2) (n-unkeep! c2)
+                (g-changed!)
                 c2))
           (let [m (n-idealize n)]
             (if (and (!= m NO-NODE) (!= m n))
-                (do (n-keep! m) (n-subsume! n m) (n-unkeep! m) (n-peephole m))
+                (do (n-keep! m) (n-subsume! n m) (n-unkeep! m) (g-changed!) (n-peephole m))
               (let [e (gvn! n)]
                 (if (!= e n)
-                    (do (n-keep! e) (n-subsume! n e) (n-unkeep! e) e)
+                    (do (n-keep! e) (n-subsume! n e) (n-unkeep! e) (g-changed!) e)
                   n)))))))))
 
-;; Run peepholes to a fixpoint. Order comes from the seed; the result must not.
-(defn iterate! [] (-> i64)
+;; How many peepholes actually changed something. `iterate!` compares it across a sweep, so it
+;; has to count every kind of change: a type falling, a fold, an idealize, a GVN replacement.
+(defn g-changes [] (-> i64) (load (field (graph) nchg)))
+(defn g-changed! [] (-> i64)
+  (store! (field (graph) nchg) (+ (load (field (graph) nchg)) 1)) 0)
+
+(defn wl-push-live! [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (wl-push! (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    0))
+
+(defn wl-drain! [] (-> i64)
   (let [(mut steps) 0]
     (loop
       (let [n (wl-pop!)]
@@ -1240,6 +1476,35 @@
                   (do (panic-corrupt "iterate!: worklist did not converge") 0)
                 0)
               0))))
+    (load steps)))
+
+;; Run peepholes to a fixpoint. Order comes from the seed; the result must not.
+;;
+;; IT SWEEPS, and it has to, because a rewrite may now be DEFERRED rather than declined. Any
+;; rewrite that needs a proven type (`n-ty-proven?`) is refused while the input cone is still
+;; settling, and nothing re-queues the node afterwards: the blocker's type may never change
+;; again, so neither `wl-push-outs!` nor the deps list will bring the node back. Draining the
+;; worklist once therefore reached a fixpoint of "what could be proven at the time", which is a
+;; function of the pop order, and `1 + 2*3` stayed unfolded on some seeds.
+;;
+;; So: drain, and if that drain changed anything, put every live node back and drain again. A
+;; sweep that changes nothing is the fixpoint. Each round needs the previous round to have made
+;; progress, and progress is monotone (types only fall, nodes only die), so this terminates.
+(defn iterate! [] (-> i64)
+  (let [(mut steps) 0 (mut sweeps) 0]
+    (loop
+      (let [before (g-changes)]
+        (wl-push-live!)
+        (store! steps (+ (load steps) (wl-drain!)))
+        (store! sweeps (+ (load sweeps) 1))
+        ; Each sweep needs the previous one to have changed something, and change is monotone
+        ; (types only fall, nodes only die, GVN only merges), so this terminates. A cap anyway:
+        ; two peepholes that undo each other would otherwise sweep for ever, and the per-drain
+        ; step cap cannot see it because each drain on its own converges.
+        (if (> (load sweeps) 10000)
+            (do (panic-corrupt "iterate!: sweeps did not converge; two peepholes are undoing each other") 0)
+          0)
+        (if (= (g-changes) before) (break) 0)))
     (load steps)))
 
 ;; Types WITHOUT rewriting: recompute every node's type to a fixpoint and change no edges.
@@ -1284,19 +1549,20 @@
 
 (defn g-analyze! [] (-> i64)
   (store! (field (graph) achecks) 0)
-  (let [n (n-count) (mut i) 0]
-    (loop
-      (if (>= (load i) n) (break)
-        (do (if (n-dead? (load i)) 0 (wl-push! (load i)))
-            (store! i (+ (load i) 1))
-            0))))
+  (wl-push-live!)
   (let [(mut steps) 0]
     (loop
       (let [n (wl-pop!)]
         (if (= n NO-NODE) (break)
           (do (if (n-dead? n) 0
                 (let [t (n-compute n)]
-                  (if (!= t (n-ty n)) (do (n-set-ty-falling! n t) (wl-push-outs! n) 0) 0)))
+                  ; DEPS MUST BE FLUSHED HERE TOO. `n-peephole` calls `n-move-deps!` on a type
+                  ; change and this loop did not, so every dependency `phi-compute` records was
+                  ; recorded and never acted on: the mechanism was inert in exactly the phase
+                  ; documented as the shape M7's optimistic pass takes.
+                  (if (!= t (n-ty n))
+                      (do (n-set-ty-falling! n t) (wl-push-outs! n) (n-move-deps! n) 0)
+                    0)))
               (store! steps (+ (load steps) 1))
               (if (> (load steps) 10000000)
                   (do (panic-corrupt "g-analyze!: types did not reach a fixpoint") 0)
