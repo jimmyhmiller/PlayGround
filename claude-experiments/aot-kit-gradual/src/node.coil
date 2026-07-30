@@ -66,6 +66,24 @@
 ;; excluded from constant *folding*, since folding a constant to a constant is a loop.
 (defn op-pure? [(op i64)] (-> bool) (or (= op OP-CONST) (>= op OP-ADD)))
 
+;; ---------------------------------------------------------------------------
+;; Op classification, used by the optimiser and by the visualizer.
+;; ---------------------------------------------------------------------------
+;; Control ops produce control rather than a value: they are the CFG spine inside the graph.
+;; M2 adds If, Region, Loop and CProj here.
+(defn op-control? [(op i64)] (-> bool)
+  (or (= op OP-START) (or (= op OP-STOP) (= op OP-RETURN))))
+
+;; No Phi op exists until M2, so this is false for every op there is. It is a classification,
+;; not a placeholder: when Phi lands, it goes here.
+(defn op-phi? [(op i64)] (-> bool) false)
+
+;; Likewise memory-producing ops arrive with memory SSA in M4.
+(defn op-memory? [(op i64)] (-> bool) false)
+
+;; With no loops there are no back edges. M2's Loop marks input 2 as its back edge.
+(defn n-back-edge? [(n i64) (i i64)] (-> bool) false)
+
 ;; Ops whose operands may be swapped, which is what lets value numbering see `a+b` and `b+a`
 ;; as one node once the inputs are ordered canonically.
 (defn op-commutes? [(op i64)] (-> bool)
@@ -641,6 +659,35 @@
               ; a runaway worklist is a bug in a peephole, not something to grind on
               (if (> (load steps) 10000000)
                   (do (panic-corrupt "iterate!: worklist did not converge") 0)
+                0)
+              0))))
+    (load steps)))
+
+;; Types WITHOUT rewriting: recompute every node's type to a fixpoint and change no edges.
+;; Two uses. It renders an honest "before" picture (raw construction leaves every type at ANY,
+;; which tells you nothing about the analysis), and it is the shape the optimistic
+;; interprocedural pass in M7 takes: seed high, propagate, never rewrite mid-flight.
+;;
+;; Termination rests on types only ever falling. M1 has no cycles in the graph at all; when
+;; M2 introduces loop phis, widening at those phis is what keeps the int axis from creeping
+;; forever. The step cap turns a non-converging compute into a named error, not a hang.
+(defn g-analyze! [] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (wl-push! (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  (let [(mut steps) 0]
+    (loop
+      (let [n (wl-pop!)]
+        (if (= n NO-NODE) (break)
+          (do (if (n-dead? n) 0
+                (let [t (n-compute n)]
+                  (if (!= t (n-ty n)) (do (n-set-ty! n t) (wl-push-outs! n) 0) 0)))
+              (store! steps (+ (load steps) 1))
+              (if (> (load steps) 10000000)
+                  (do (panic-corrupt "g-analyze!: types did not reach a fixpoint") 0)
                 0)
               0))))
     (load steps)))

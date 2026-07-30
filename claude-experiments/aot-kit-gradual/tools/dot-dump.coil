@@ -1,0 +1,120 @@
+;; Emit every visualization fixture as Graphviz, to stdout, separated by markers.
+;;
+;;   coil run tools/dot-dump.coil | tools/render-dot.sh
+;;
+;; Fixtures are built twice where it is interesting: once raw (every node created, nothing
+;; peepholed) and once optimised, so the before/after is a picture rather than a claim.
+(module dotdump)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "../src/ty.coil"        :use *)
+(import "../src/node.coil"      :use *)
+(import "../src/dot.coil"       :use *)
+
+; --- eager builders: peephole as we go ---------------------------------------
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 op 0 NO-NODE a)))
+(defn mk-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    (iterate!)
+    r))
+
+; --- raw builders: create nodes, peephole nothing ----------------------------
+(defn raw-arg [(t i64)] (-> i64) (n-new1 OP-ARG t (g-start)))
+(defn raw-int [(v i64)] (-> i64) (n-new1 OP-CONST (t-int-con v) (g-start)))
+(defn raw-bin [(op i64) (a i64) (b i64)] (-> i64) (n-new3 op 0 NO-NODE a b))
+(defn raw-un  [(op i64) (a i64)] (-> i64) (n-new2 op 0 NO-NODE a))
+(defn raw-ret [(v i64)] (-> i64)
+  (let [r (n-new2 OP-RETURN 0 (g-start) v)]
+    (n-add-def! (g-stop) r)
+    ; analysis WITHOUT rewriting: the before picture should show what the lattice concluded,
+    ; not a graph of ANYs, which would say nothing about the analysis at all
+    (g-analyze!)
+    r))
+
+; --- the fixtures ------------------------------------------------------------
+;; 1 + 2*3, entirely constant, so the optimiser should leave a single literal behind.
+(defn fx-fold-raw [] (-> i64)
+  (graph-reset! 1)
+  (raw-ret (raw-bin OP-ADD (raw-int 1) (raw-bin OP-MUL (raw-int 2) (raw-int 3)))) 0)
+(defn fx-fold [] (-> i64)
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-bin OP-MUL (mk-int 2) (mk-int 3)))) 0)
+
+;; (arg+2) - (2+arg). Needs operand canonicalisation, then value numbering, then x-x, and
+;; all three have to fire for this to reach zero.
+(defn fx-gvn-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a (raw-arg (t-int))]
+    (raw-ret (raw-bin OP-SUB (raw-bin OP-ADD a (raw-int 2))
+                             (raw-bin OP-ADD (raw-int 2) a)))) 0)
+(defn fx-gvn [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-SUB (mk-bin OP-ADD a (mk-int 2))
+                           (mk-bin OP-ADD (mk-int 2) a)))) 0)
+
+;; Ranges, not constants: nothing folds to a literal, but every node carries what the lattice
+;; worked out. This is the fixture that shows the analysis rather than the rewriting.
+(defn fx-ranges [] (-> i64)
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        b (mk-arg (t-int-range 2 3))
+        c (mk-arg (t-dyn))
+        e (mk-bin OP-ADD (mk-bin OP-MUL a b) (mk-int 5))]
+    (mk-ret (mk-bin OP-ADD e (mk-bin OP-SUB c (mk-int 1))))) 0)
+
+;; The M1 test fixture: nine expressions that collapse to one multiply.
+(defn fx-big-raw [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (raw-arg (t-int-range 0 100))
+        b  (raw-arg (t-int-range 1 4))
+        e1 (raw-bin OP-ADD a (raw-int 0))
+        e2 (raw-bin OP-MUL e1 (raw-int 1))
+        e3 (raw-bin OP-ADD (raw-int 3) e2)
+        e4 (raw-bin OP-ADD e2 (raw-int 3))
+        e5 (raw-bin OP-SUB e3 e4)
+        e6 (raw-bin OP-MUL b (raw-int 2))
+        e7 (raw-bin OP-ADD e5 e6)]
+    (raw-ret (raw-un OP-MINUS (raw-un OP-MINUS e7)))) 0)
+(defn fx-big [] (-> i64)
+  (graph-reset! 1)
+  (let [a  (mk-arg (t-int-range 0 100))
+        b  (mk-arg (t-int-range 1 4))
+        e1 (mk-bin OP-ADD a (mk-int 0))
+        e2 (mk-bin OP-MUL e1 (mk-int 1))
+        e3 (mk-bin OP-ADD (mk-int 3) e2)
+        e4 (mk-bin OP-ADD e2 (mk-int 3))
+        e5 (mk-bin OP-SUB e3 e4)
+        e6 (mk-bin OP-MUL b (mk-int 2))
+        e7 (mk-bin OP-ADD e5 e6)]
+    (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS e7)))) 0)
+
+(defn emit [(w (ptr Writer)) (name (slice u8))] (-> i64)
+  (ps w "=== FIXTURE ") (ps w name) (ps w "\n")
+  ; counts come from the compiler, not from counting lines in the output afterwards
+  (fmt w "// stats live={d} created={d} leaked={d}\n"
+       (g-live-count) (n-count) (g-leaked-count))
+  (g-print-dot w)
+  (ps w "=== END\n")
+  0)
+
+(defn main [] (-> i64)
+  (let [w (stdout)]
+    (fx-fold-raw)  (emit w "01-fold-before")
+    (fx-fold)      (emit w "02-fold-after")
+    (fx-gvn-raw)   (emit w "03-gvn-before")
+    (fx-gvn)       (emit w "04-gvn-after")
+    (fx-big-raw)   (emit w "05-big-before")
+    (fx-big)       (emit w "06-big-after")
+    (fx-ranges)    (emit w "07-ranges"))
+  0)

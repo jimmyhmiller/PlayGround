@@ -1,0 +1,149 @@
+;; Graphviz output for the graph.
+;;
+;; A sea-of-nodes graph stops being readable as text the moment control flow arrives, so this
+;; is not a nicety. The conventions follow Simple's visualizer, because they are the ones
+;; people who know this IR already read fluently:
+;;
+;;   rankdir=BT      edges run use -> def, so definitions sit ABOVE their uses
+;;   boxes           control nodes; ellipses are data
+;;   red edges       control; black is data; blue is memory (from M4)
+;;   edge labels     the input index, so operand order is visible (a-b is not b-a)
+;;   dashed          a loop back edge, which also drops its ranking constraint so the
+;;                   layout does not turn inside out (from M2)
+;;
+;; Every node is labelled with its op AND its computed type, since "what did the lattice
+;; conclude here" is the question this project is mostly about.
+(module dot)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+(import "node.coil"      :use *)
+
+; ---------------------------------------------------------------------------
+; Palette
+; ---------------------------------------------------------------------------
+;; Chosen to stay legible on the light card these get embedded in, and to keep the control
+;; spine findable at a glance in a graph with a hundred data nodes.
+(defn dot-header [(w (ptr Writer))] (-> i64)
+  (ps w "digraph IR {\n")
+  (ps w "  rankdir=BT;\n")
+  (ps w "  bgcolor=\"transparent\";\n")
+  (ps w "  node [fontname=\"Helvetica\" fontsize=11 penwidth=1.2];\n")
+  (ps w "  edge [fontname=\"Helvetica\" fontsize=9 penwidth=1.2 arrowsize=0.7];\n")
+  0)
+
+(defn dot-footer [(w (ptr Writer))] (-> i64) (ps w "}\n"))
+
+;; Control is the spine of the graph and worth spotting instantly. Constants are visually
+;; quiet on purpose: there are a lot of them and they are rarely what you are looking for.
+(defn dot-node-style [(w (ptr Writer)) (op i64)] (-> i64)
+  (if (op-control? op)
+      (ps w "shape=box style=\"filled,rounded\" fillcolor=\"#FFDFA6\" color=\"#B26B00\" ")
+    (if (= op OP-CONST)
+        (ps w "shape=ellipse style=filled fillcolor=\"#EAF2FD\" color=\"#7FA8D8\" ")
+      (if (= op OP-ARG)
+          (ps w "shape=ellipse style=filled fillcolor=\"#EDEDED\" color=\"#8A8A8A\" ")
+        (if (op-phi? op)
+            (ps w "shape=ellipse style=filled fillcolor=\"#FFF6D0\" color=\"#B8A24A\" ")
+          (ps w "shape=ellipse color=\"#555555\" "))))))
+
+; ---------------------------------------------------------------------------
+; Nodes
+; ---------------------------------------------------------------------------
+;; A constant's label is just its value: `Const` above `int=3` is pure noise, and constants
+;; are the most numerous nodes in any real graph.
+(defn dot-node-label [(w (ptr Writer)) (n i64)] (-> i64)
+  (ps w "label=\"")
+  (if (= (n-op n) OP-CONST) (ty-print w (n-ty n))
+    (do (ps w (op-name (n-op n)))
+        (if (op-shows-type? (n-op n)) (do (ps w "\\n") (ty-print w (n-ty n)) 0) 0)
+        0))
+  (ps w "\" ")
+  0)
+
+;; Control and the tuple-typed nodes do not get a type line: `ctrl` under every box, and a
+;; Return's `[ctrl int]`, are things you can already see from the shape and the edges.
+(defn op-shows-type? [(op i64)] (-> bool)
+  (not (or (op-control? op) (= op OP-RETURN))))
+
+(defn dot-nodes [(w (ptr Writer))] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0
+              (do (fmt w "  n{d} [" (load i))
+                  (dot-node-style w (n-op (load i)))
+                  (dot-node-label w (load i))
+                  (ps w "];\n")
+                  0))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+; ---------------------------------------------------------------------------
+; Edges
+; ---------------------------------------------------------------------------
+;; An edge's kind comes from what the SOURCE produces, not from which slot it lands in: a
+;; control node's output is control wherever it goes.
+;;
+;; One exception, and it matters for legibility. A constant or an opaque argument takes Start
+;; as input 0 only so that it is rooted in the graph; control does not flow into a literal.
+;; Drawing those as bold red control edges turns Start into a hub with a dozen arcs across the
+;; whole picture and buries the actual control spine. They are drawn faint, and released from
+;; ranking so they stop dragging the layout around.
+(defn anchor-edge? [(use i64) (def i64) (i i64)] (-> bool)
+  (and (= i 0)
+   (and (op-control? (n-op def))
+        (or (= (n-op use) OP-CONST) (= (n-op use) OP-ARG)))))
+
+(defn dot-edge-style [(w (ptr Writer)) (def i64)] (-> i64)
+  (if (op-control? (n-op def))
+      (ps w "color=\"#C0392B\" penwidth=1.8 ")
+    (if (op-memory? (n-op def))
+        (ps w "color=\"#2E86C1\" style=dashed ")
+      (ps w "color=\"#444444\" "))))
+
+(defn dot-edges [(w (ptr Writer))] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (dot-node-edges w (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+(defn dot-node-edges [(w (ptr Writer)) (u i64)] (-> i64)
+  (let [nin (n-nins u) (mut k) 0]
+    (loop
+      (if (>= (load k) nin) (break)
+        (do (let [d (n-in u (load k))]
+              (if (or (= d NO-NODE) (n-dead? d)) 0
+                (do (fmt w "  n{d} -> n{d} [" u d)
+                    (if (anchor-edge? u d (load k))
+                        (ps w "color=\"#E2CBA8\" style=dotted arrowhead=none constraint=false ")
+                      (do (fmt w "taillabel=\"{d}\" " (load k))
+                          (dot-edge-style w d)
+                          0))
+                    ; A back edge would drag the layout inside out if it also constrained
+                    ; ranking, so it is drawn but not allowed to place nodes.
+                    (if (n-back-edge? u (load k)) (ps w "constraint=false style=dashed ") 0)
+                    (ps w "];\n")
+                    0)))
+            (store! k (+ (load k) 1))
+            0))))
+  0)
+
+; ---------------------------------------------------------------------------
+; Entry points
+; ---------------------------------------------------------------------------
+(defn g-print-dot [(w (ptr Writer))] (-> i64)
+  (dot-header w)
+  (dot-nodes w)
+  (dot-edges w)
+  (dot-footer w)
+  0)
