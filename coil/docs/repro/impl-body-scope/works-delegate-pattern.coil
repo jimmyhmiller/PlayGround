@@ -1,0 +1,26 @@
+(module pc)
+(import "control.coil" :use *)
+(import "io.coil" :use *)
+(import "fmt.coil" :use *)
+(defstruct Val [(a i64) (b i64)])
+; plain, hand-written, uses CLEAN operators on i64 + and
+(defn val-eq [(x Val) (y Val)] (-> bool)
+  (and (= (load (field x a)) (load (field y a)))
+       (= (load (field x b)) (load (field y b)))))
+(impl Eq Val (= [(x Val) (y Val)] (-> bool) (val-eq x y)))
+(defsum Ty (TBot) (TVal [(v Val)]))
+(defn ty-eq [(p Ty) (q Ty)] (-> bool)
+  (match p
+    (TBot [] (match q (TBot [] true) (TVal [x] false)))
+    (TVal [vx] (match q (TBot [] false) (TVal [vy] (val-eq vx vy))))))
+(impl Eq Ty (= [(x Ty) (y Ty)] (-> bool) (ty-eq x y)))
+(defn ty-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+  (ty-eq (load (cast (ptr Ty) ka)) (load (cast (ptr Ty) kb))))
+(defn main [] (-> i64)
+  (let [(mut v1) (zeroed Val) (mut v2) (zeroed Val)]
+    (store! (field v1 a) 7) (store! (field v2 a) 7)
+    (fmt (stdout) "val = {d}  ty = {d}  tyne = {d}\n"
+      (if (= (load v1) (load v2)) 1 0)
+      (if (= (TVal (load v1)) (TVal (load v2))) 1 0)
+      (if (= (TVal (load v1)) (TBot)) 1 0)))
+  0)
