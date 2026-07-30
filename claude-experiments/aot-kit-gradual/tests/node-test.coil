@@ -1,0 +1,439 @@
+;; The M1 gate: the node engine.
+;;
+;; Three things are being held up here:
+;;   1. peepholes fold and simplify, checked against printed IR (a golden diff you can read)
+;;   2. the SAME program reaches the SAME graph under every worklist seed, which is what
+;;      catches a peephole that forgot to record a dependency
+;;   3. nothing leaks: every node is either reachable or dead
+;;
+;;   coil test tests/node-test.coil
+(module nodetest)
+
+(import "../src/ty.coil"   :use *)
+(import "../src/node.coil" :use *)
+(import "assert.coil"      :use *)
+(import "control.coil"     :use *)
+(import "io.coil"          :use *)
+(import "fmt.coil"         :use *)
+(import "alloc.coil"       :use *)
+(import "str.coil"         :use *)
+(import "slice.coil"       :use *)
+
+; ---------------------------------------------------------------------------
+; Building programs
+; ---------------------------------------------------------------------------
+;; Binary and unary ops take (ctrl, args...), so the operand indices line up with what
+;; `n-compute` reads. Control is absent for pure arithmetic.
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-con [(t i64)] (-> i64) (n-const t))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 op 0 NO-NODE a)))
+(defn mk-int [(v i64)] (-> i64) (mk-con (t-int-con v)))
+
+;; Finish a program: return the value, hook it to Stop, then run peepholes to a fixpoint.
+(defn mk-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r)
+    (n-peephole (g-stop))
+    (iterate!)
+    r))
+
+; ---------------------------------------------------------------------------
+; Comparing printed IR
+; ---------------------------------------------------------------------------
+(defn render-stop [(buf (ptr i8))] (-> (slice u8)) (n-render (g-stop) buf 1024))
+
+(defn check-ir [(name (slice u8)) (expect (slice u8))] (-> i64)
+  (let [bufa (alloc-stack (array u8 1024))
+        got  (render-stop (cast (ptr i8) bufa))]
+    (if (str-eq got expect) 0
+      (do (let [w (stderr)]
+            (ps w "\nIR MISMATCH in ") (ps w name)
+            (ps w "\n  want: ") (ps w expect)
+            (ps w "\n  got:  ") (ps w got)
+            (ps w "\n  flat:\n")
+            (g-print-flat w))
+          (abort)
+          0))))
+
+;; Every completed program must also be leak-free: a live node that nothing can reach would
+;; grow the arena without bound over a real compile.
+(defn check-no-leaks [(name (slice u8))] (-> i64)
+  (let [n (g-leaked-count)]
+    (if (= n 0) 0
+      (do (let [w (stderr)]
+            (fmt w "\n{d} LEAKED NODES in " n) (ps w name) (ps w "\n")
+            (g-print-flat w))
+          (abort)
+          0))))
+
+(defn check-prog [(name (slice u8)) (expect (slice u8))] (-> i64)
+  (check-ir name expect)
+  (check-no-leaks name)
+  0)
+
+; ---------------------------------------------------------------------------
+; Constant folding
+; ---------------------------------------------------------------------------
+(deftest folds-literals
+  (graph-reset! 1)
+  (mk-ret (mk-int 1))
+  (check-prog "return 1" "return int=1;"))
+
+(deftest folds-arithmetic
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-int 2)))
+  (check-prog "1+2" "return int=3;")
+
+  (graph-reset! 1)
+  ; 1 + 2*3, folded all the way down
+  (mk-ret (mk-bin OP-ADD (mk-int 1) (mk-bin OP-MUL (mk-int 2) (mk-int 3))))
+  (check-prog "1+2*3" "return int=7;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-SUB (mk-int 10) (mk-int 4)))
+  (check-prog "10-4" "return int=6;")
+
+  (graph-reset! 1)
+  ; exact division stays an integer
+  (mk-ret (mk-bin OP-DIV (mk-int 12) (mk-int 4)))
+  (check-prog "12/4" "return int=3;")
+
+  (graph-reset! 1)
+  ; inexact division leaves the integers, so it is `num` and cannot fold to a literal
+  (mk-ret (mk-bin OP-DIV (mk-int 1) (mk-int 2)))
+  (check-prog "1/2" "return (int=1/int=2);")
+
+  (graph-reset! 1)
+  ; division by zero is an infinity, which is a float, so again no integer to fold to
+  (mk-ret (mk-bin OP-DIV (mk-int 1) (mk-int 0)))
+  (check-prog "1/0" "return (int=1/int=0);"))
+
+(deftest folds-comparisons
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-LT (mk-int 1) (mk-int 2)))
+  (check-prog "1<2" "return bool=1;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-EQ (mk-int 1) (mk-int 2)))
+  (check-prog "1==2" "return bool=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-NOT (mk-int 0)))
+  (check-prog "!0" "return bool=1;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-NOT (mk-int 7)))
+  (check-prog "!7" "return bool=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-MINUS (mk-int 5)))
+  (check-prog "-5" "return int=-5;"))
+
+; ---------------------------------------------------------------------------
+; Algebraic identities, which need a non-constant operand to be visible
+; ---------------------------------------------------------------------------
+(deftest simplifies-with-an-opaque-operand
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-ADD (mk-arg (t-int)) (mk-int 0)))
+  (check-prog "arg+0" "return arg;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-bin OP-MUL (mk-arg (t-int)) (mk-int 1)))
+  (check-prog "arg*1" "return arg;")
+
+  (graph-reset! 1)
+  ; x*0 is 0 for integers. It is NOT for floats, where x could be NaN or an infinity.
+  (mk-ret (mk-bin OP-MUL (mk-arg (t-int)) (mk-int 0)))
+  (check-prog "arg*0" "return int=0;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-SUB a a)))
+  (check-prog "arg-arg" "return int=0;")
+
+  (graph-reset! 1)
+  (mk-ret (mk-un OP-MINUS (mk-un OP-MINUS (mk-arg (t-int)))))
+  (check-prog "-(-arg)" "return arg;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-EQ a a)))
+  (check-prog "arg==arg" "return bool=1;")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))]
+    (mk-ret (mk-bin OP-LT a a)))
+  (check-prog "arg<arg" "return bool=0;"))
+
+;; Floats are excluded from the identities that integers get, and that exclusion is the point:
+;; NaN != NaN, so `x==x` is not true and `x-x` is not 0 for an arbitrary number.
+(deftest float-identities-are-not-taken
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-EQ a a)))
+  (check-prog "num==num survives" "return (arg==arg);")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-SUB a a)))
+  (check-prog "num-num survives" "return (arg-arg);")
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-num))]
+    (mk-ret (mk-bin OP-MUL a (mk-int 0))))
+  (check-prog "num*0 survives" "return (arg*int=0);"))
+
+; ---------------------------------------------------------------------------
+; Commutativity and value numbering, together
+; ---------------------------------------------------------------------------
+(deftest gvn-sees-through-commutativity
+  (graph-reset! 1)
+  ; (arg+2) - (2+arg). Canonical operand order makes both Adds structurally identical, value
+  ; numbering collapses them to one node, and then x-x folds to 0. Any one of the three
+  ; missing and this stays an expression.
+  (let [a (mk-arg (t-int))
+        l (mk-bin OP-ADD a (mk-int 2))
+        r (mk-bin OP-ADD (mk-int 2) a)]
+    (mk-ret (mk-bin OP-SUB l r)))
+  (check-prog "(arg+2)-(2+arg)" "return int=0;"))
+
+(deftest gvn-dedups-identical-expressions
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        l (mk-bin OP-MUL a a)
+        r (mk-bin OP-MUL a a)]
+    ; both multiplies are the same node, so this is x-x
+    (assert (= l r))
+    (mk-ret (mk-bin OP-SUB l r)))
+  (check-prog "(arg*arg)-(arg*arg)" "return int=0;"))
+
+(deftest gvn-dedups-constants
+  (graph-reset! 1)
+  (assert (= (mk-int 5) (mk-int 5)))
+  (assert (!= (mk-int 5) (mk-int 6))))
+
+; ---------------------------------------------------------------------------
+; Types propagate, not just constants
+; ---------------------------------------------------------------------------
+(deftest ranges-propagate-through-arithmetic
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        e (mk-bin OP-ADD a (mk-int 5))]
+    (assert (= (n-ty e) (t-int-range 5 15))))
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 2 3))
+        b (mk-arg (t-int-range 10 20))
+        e (mk-bin OP-MUL a b)]
+    (assert (= (n-ty e) (t-int-range 20 60))))
+
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int-range 0 10))
+        b (mk-arg (t-int-range 1 2))
+        e (mk-bin OP-SUB a b)]
+    (assert (= (n-ty e) (t-int-range -2 9))))
+
+  (graph-reset! 1)
+  ; an unbounded range must not pretend to a bound after overflow
+  (let [a (mk-arg (t-int))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-int)))))
+
+(deftest dynamic-operands_stay_sound
+  (graph-reset! 1)
+  ; `+` on an unknown value can concatenate strings, so the result is dyn
+  (let [a (mk-arg (t-dyn))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-dyn))))
+
+  (graph-reset! 1)
+  ; `-` coerces to number, so it is num even on a dyn operand
+  (let [a (mk-arg (t-dyn))
+        e (mk-bin OP-SUB a (mk-int 1))]
+    (assert (= (n-ty e) (t-num))))
+
+  (graph-reset! 1)
+  ; a string operand cannot be an integer add
+  (let [a (mk-arg (t-str))
+        e (mk-bin OP-ADD a (mk-int 1))]
+    (assert (= (n-ty e) (t-dyn)))))
+
+; ---------------------------------------------------------------------------
+; The seed test: order must not matter
+; ---------------------------------------------------------------------------
+;; A peephole that inspects a node which is not one of its inputs, and does not record the
+;; dependency, produces a graph that is correct under some visit orders and stale under
+;; others. Running the same program under many seeds is how that shows up as a failure
+;; instead of as a mystery months later.
+(defn build-fixture [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [a  (mk-arg (t-int-range 0 100))
+        b  (mk-arg (t-int-range 1 4))
+        e1 (mk-bin OP-ADD a (mk-int 0))          ; folds to a
+        e2 (mk-bin OP-MUL e1 (mk-int 1))         ; folds to a
+        e3 (mk-bin OP-ADD (mk-int 3) e2)         ; canonicalises to a+3
+        e4 (mk-bin OP-ADD e2 (mk-int 3))         ; the same node as e3, after GVN
+        e5 (mk-bin OP-SUB e3 e4)                 ; therefore 0
+        e6 (mk-bin OP-MUL b (mk-int 2))
+        e7 (mk-bin OP-ADD e5 e6)                 ; 0 + b*2
+        e8 (mk-un OP-MINUS (mk-un OP-MINUS e7))] ; double negation
+    (mk-ret e8))
+  0)
+
+;; The eager fixture only leaves a handful of nodes on the worklist, so on its own the seed
+;; test explores few orders. This builds the SAME program with no peepholing at all, pushing
+;; every node onto the worklist and letting `iterate!` do the whole job. Two things fall out:
+;; the order space is much larger, and eager and deferred peepholing are shown to reach the
+;; same graph, which is what the optimistic pass in M7 will depend on.
+(defn raw-arg [(t i64)] (-> i64) (let [n (n-new1 OP-ARG t (g-start))] (wl-push! n) n))
+(defn raw-con [(t i64)] (-> i64) (let [n (n-new1 OP-CONST t (g-start))] (wl-push! n) n))
+(defn raw-int [(v i64)] (-> i64) (raw-con (t-int-con v)))
+(defn raw-bin [(op i64) (a i64) (b i64)] (-> i64)
+  (let [n (n-new3 op 0 NO-NODE a b)] (wl-push! n) n))
+(defn raw-un [(op i64) (a i64)] (-> i64)
+  (let [n (n-new2 op 0 NO-NODE a)] (wl-push! n) n))
+
+(defn build-fixture-raw [(seed i64)] (-> i64)
+  (graph-reset! seed)
+  (let [a  (raw-arg (t-int-range 0 100))
+        b  (raw-arg (t-int-range 1 4))
+        e1 (raw-bin OP-ADD a (raw-int 0))
+        e2 (raw-bin OP-MUL e1 (raw-int 1))
+        e3 (raw-bin OP-ADD (raw-int 3) e2)
+        e4 (raw-bin OP-ADD e2 (raw-int 3))
+        e5 (raw-bin OP-SUB e3 e4)
+        e6 (raw-bin OP-MUL b (raw-int 2))
+        e7 (raw-bin OP-ADD e5 e6)
+        e8 (raw-un OP-MINUS (raw-un OP-MINUS e7))
+        r  (n-new2 OP-RETURN 0 (g-start) e8)]
+    (wl-push! r)
+    (n-add-def! (g-stop) r)
+    (wl-push! (g-stop))
+    (iterate!))
+  0)
+
+(deftest deferred_peepholing_reaches_the_eager_result
+  (let [bufa (alloc-stack (array u8 1024))
+        bufb (alloc-stack (array u8 1024))]
+    (build-fixture 1)
+    (let [eager (render-stop (cast (ptr i8) bufa))]
+      (build-fixture-raw 1)
+      (let [deferred (render-stop (cast (ptr i8) bufb))]
+        (if (str-eq eager deferred) 0
+          (do (let [w (stderr)]
+                (ps w "\nEAGER AND DEFERRED PEEPHOLING DISAGREE\n  eager:    ") (ps w eager)
+                (ps w "\n  deferred: ") (ps w deferred) (ps w "\n")
+                (g-print-flat w))
+              (abort) 0))))
+    ; and the deferred build is order-independent too, over a much larger order space
+    (build-fixture-raw 1)
+    (let [ref (render-stop (cast (ptr i8) bufa))
+          (mut s) 0]
+      (loop
+        (if (>= (load s) 24) (break)
+          (let [seed (+ 3 (* (load s) 104729))]
+            (build-fixture-raw seed)
+            (let [got (render-stop (cast (ptr i8) bufb))]
+              (if (not (str-eq got ref))
+                  (do (let [w (stderr)]
+                        (fmt w "\nDEFERRED BUILD DIFFERS UNDER SEED {d}\n  seed 1: " seed)
+                        (ps w ref) (fmt w "\n  seed {d}: " seed) (ps w got) (ps w "\n")
+                        (g-print-flat w))
+                      (abort) 0)
+                0)
+              (check-no-leaks "deferred fixture")
+              (store! s (+ (load s) 1))
+              0))))
+      0)))
+
+(deftest same_graph_under_every_seed
+  (let [bufa (alloc-stack (array u8 1024))
+        bufb (alloc-stack (array u8 1024))
+        (mut live0) 0
+        (mut nodes0) 0]
+    (build-fixture 1)
+    (let [ref (render-stop (cast (ptr i8) bufa))]
+      (store! live0 (g-live-count))
+      (check-no-leaks "fixture seed 1")
+      ; 12 seeds, deliberately spread so the LCG takes different paths
+      (let [(mut s) 0]
+        (loop
+          (if (>= (load s) 12) (break)
+            (let [seed (+ 2 (* (load s) 7919))]
+              (build-fixture seed)
+              (let [got (render-stop (cast (ptr i8) bufb))]
+                (if (not (str-eq got ref))
+                    (do (let [w (stderr)]
+                          (fmt w "\nSEED {d} PRODUCED A DIFFERENT GRAPH\n" seed)
+                          (ps w "  seed 1: ") (ps w ref) (ps w "\n")
+                          (fmt w "  seed {d}: " seed) (ps w got) (ps w "\n")
+                          (g-print-flat w))
+                        (abort) 0)
+                  0)
+                (if (!= (g-live-count) (load live0))
+                    (do (let [w (stderr)]
+                          (fmt w "\nSEED {d}: {d} live nodes, seed 1 had {d}\n"
+                               seed (g-live-count) (load live0))
+                          (g-print-flat w))
+                        (abort) 0)
+                  0)
+                (check-no-leaks "fixture under seed")
+                (store! s (+ (load s) 1))
+                0))))))
+    ; and the fixture really does collapse to b*2 doubled-negated away
+    (build-fixture 1)
+    (check-prog "seed fixture" "return (arg*int=2);")))
+
+; ---------------------------------------------------------------------------
+; Edge bookkeeping
+; ---------------------------------------------------------------------------
+(deftest edges_stay_symmetric
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        b (mk-int 7)
+        e (mk-bin OP-ADD a b)]
+    ; the add is a use of both operands
+    (assert (= (n-in e 1) a))
+    (assert (= (n-in e 2) b))
+    (assert (= (n-nouts a) 1))
+    (assert (= (n-out a 0) e))
+    ; and dropping the edge kills the operand, since nothing else used it
+    (n-set-def! e 1 NO-NODE)
+    (assert (n-dead? a))
+    (assert (= (n-nins e) 3))
+    (assert (= (n-in e 1) NO-NODE))))
+
+(deftest killing_cascades
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        inner (mk-bin OP-MUL a a)
+        outer (mk-bin OP-ADD inner (mk-int 1))]
+    (assert (not (n-dead? inner)))
+    ; killing the only user of `inner` must take `inner` with it, and then `a`
+    (n-kill! outer)
+    (assert (n-dead? outer))
+    (assert (n-dead? inner))
+    (assert (n-dead? a))))
+
+(deftest dead_nodes_are_never_resurrected
+  (graph-reset! 1)
+  (let [a (mk-arg (t-int))
+        e (mk-bin OP-ADD a (mk-int 0))]     ; folds to a, so the Add dies
+    (assert (= e a))
+    (mk-ret a)
+    (check-no-leaks "folded add")))
+
+; ---------------------------------------------------------------------------
+; The printer, eyeballed
+; ---------------------------------------------------------------------------
+(deftest print_the_fixture
+  (build-fixture 1)
+  (let [w (stdout)]
+    (ps w "\n--- fixture, expression form ---\n  ")
+    (n-print w (g-stop))
+    (ps w "\n--- fixture, flat form ---\n")
+    (g-print-flat w)
+    (fmt w "--- {d} nodes, {d} live, {d} leaked ---\n"
+         (n-count) (g-live-count) (g-leaked-count))
+    0))

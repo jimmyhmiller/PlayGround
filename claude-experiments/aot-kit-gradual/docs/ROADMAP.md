@@ -50,8 +50,33 @@ the worklist with explicit dependency tracking, global value numbering. Ops: `St
 `Return`, `Constant`, integer and float arithmetic, comparisons, `Not`, `Minus`.
 
 **Gate.** Golden tests on printed IR for constant folding and algebraic identities; the same
-program optimises to an identical graph under at least 8 different worklist seeds; no node
-leaks (every unreachable node is dead and freed).
+program optimises to an identical graph under many worklist seeds; no node leaks (every
+unreachable node is dead).
+
+**Status: DONE.** `src/node.coil`, gated by `tests/node-test.coil`: 16 tests. Ops through
+`Return`, plus an opaque `Arg` node standing in until `Proj` arrives in M2.
+
+The seed test is doubled up, because the obvious version of it is nearly vacuous. Peepholing
+eagerly during construction leaves only 5 nodes on the worklist, so seeds barely explore
+anything. So there is a second fixture built with **no** peepholing at all, which pushes
+every node and lets `iterate!` do the whole job: 18 items entering, 35 steps, sampled over 24
+seeds. That version also pins something M7 will depend on directly, namely that **eager and
+deferred peepholing reach the same graph**.
+
+Four real bugs this gate caught, none of which a smaller test would have:
+
+- **`Const` was excluded from value numbering**, so no constant ever deduplicated and
+  `(arg+2)` and `(2+arg)` stayed distinct nodes. Deduplicating constants is most of what GVN
+  buys.
+- **The kill cascade ate the replacement.** `x+0` rewrites to `x`, and killing the `Add`
+  released its inputs, which killed the `x` being returned. `return arg+0;` printed
+  `return DEAD;`. Fixed with a pin, which is what Simple's `deadCodeElim` is for.
+- **Operand canonicalisation ran inside `idealize` and returned the node itself**, so the
+  identity rules never saw the new order and `0+x` stayed `0+x`. Normalising *before*
+  `idealize` means each identity rule only handles one form.
+- **The pin was first implemented as a fake `NO-NODE` out edge** and assumed to stay last,
+  which stopped being true the moment `subsume` appended real uses after it. It is a counter
+  now, and `outs` no longer contains a value every walker has to special-case.
 
 ## M2. Control flow
 

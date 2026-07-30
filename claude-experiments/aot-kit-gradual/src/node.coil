@@ -1,0 +1,769 @@
+;; The sea-of-nodes graph: nodes, edges, peepholes, global value numbering, worklist.
+;;
+;; A node is (op, type, inputs, outputs). Inputs are use-def edges, ordered, possibly null
+;; (NO-NODE), with input 0 conventionally the controlling node. Outputs are the def-use
+;; direction and are maintained automatically, so the graph walks both ways.
+;;
+;; Three behaviours define an op, and together they are the whole optimiser:
+;;
+;;   n-compute    the node's type from its inputs' types. MUST BE MONOTONE: if the inputs
+;;                only fall in the lattice, the result only falls. That is what makes the
+;;                optimistic dataflow pass in M7 both terminate and be correct.
+;;   n-idealize   a local rewrite to a better node, or NO-NODE for "no change".
+;;   node-hash / node-eq   structural identity, for global value numbering.
+;;
+;; `n-peephole` composes them: recompute the type, replace with a constant if the type says
+;; so, idealize, then value-number. Running it while the graph is being built keeps the graph
+;; near-minimal instead of building garbage and sweeping later.
+(module node)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "hashmap.coil"   :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+
+;; A node id is a plain `i64` index into the arena, for the same reason a type id is: a
+;; one-field struct would be passed by reference in Coil. `nid`/`n` for node ids, `t` for
+;; type ids, so the two never get mixed up by accident.
+(const NO-NODE i64 -1)
+
+; ============================================================================
+; Ops
+; ============================================================================
+(const OP-START  i64 0)    ; the root of control
+(const OP-STOP   i64 1)    ; collects every Return
+(const OP-RETURN i64 2)    ; (ctrl, value)
+(const OP-CONST  i64 3)    ; aux = the constant's TyId
+(const OP-ARG    i64 4)    ; an opaque value of a declared type; aux = that TyId
+(const OP-ADD    i64 5)
+(const OP-SUB    i64 6)
+(const OP-MUL    i64 7)
+(const OP-DIV    i64 8)
+(const OP-MINUS  i64 9)    ; unary negate
+(const OP-NOT    i64 10)   ; logical not, over JS truthiness
+(const OP-EQ     i64 11)
+(const OP-LT     i64 12)
+(const OP-LE     i64 13)
+(const OP-COUNT  i64 14)
+
+(defn op-name [(op i64)] (-> (slice u8))
+  (case op
+    0 "Start" 1 "Stop" 2 "Return" 3 "Const" 4 "Arg"
+    5 "Add" 6 "Sub" 7 "Mul" 8 "Div" 9 "Minus"
+    10 "Not" 11 "Eq" 12 "Lt" 13 "Le"
+    "?"))
+
+;; Pure ops participate in value numbering. Control and the opaque `Arg` are
+;; identity-bearing: two `Arg`s are different arguments even with the same type, and
+;; collapsing two `Return`s would lose a control edge.
+;;
+;; `Const` is pure and MUST be here: deduplicating constants is most of what value numbering
+;; buys, and it is what lets `(arg+2)` and `(2+arg)` become the same node. It is separately
+;; excluded from constant *folding*, since folding a constant to a constant is a loop.
+(defn op-pure? [(op i64)] (-> bool) (or (= op OP-CONST) (>= op OP-ADD)))
+
+;; Ops whose operands may be swapped, which is what lets value numbering see `a+b` and `b+a`
+;; as one node once the inputs are ordered canonically.
+(defn op-commutes? [(op i64)] (-> bool)
+  (or (= op OP-ADD) (or (= op OP-MUL) (= op OP-EQ))))
+
+; ============================================================================
+; The node
+; ============================================================================
+(defstruct Node
+  [(id    i64)
+   (op    i64)
+   (ty    i64)                 ; the current computed type
+   (aux   i64)                 ; op-specific payload: the TyId for Const and Arg
+   (ins   (ArrayList i64))     ; use-def, ordered, may contain NO-NODE
+   (outs  (ArrayList i64))     ; def-use, unordered
+   (deps  (ArrayList i64))     ; nodes to revisit when this node's type changes
+   (dead  bool)
+   (keeps i64)                 ; pins against the kill cascade; see n-keep!
+   (hash  i64)])               ; cached structural hash; 0 means "not computed"
+
+; ============================================================================
+; The graph
+; ============================================================================
+(defstruct Graph
+  [(nodes  (ArrayList i64))    ; id -> (ptr Node), held as an integer address
+   (gvn    (HashMap i64 i64))  ; structural key -> node id (see gvn-keyops)
+   (wl     (ArrayList i64))    ; the worklist
+   (onwl   (ArrayList bool))   ; id -> is it on the worklist
+   (seed   i64)                ; drives worklist pop order; varying it must not change results
+   (start  i64)
+   (stop   i64)
+   (inited bool)])
+
+(defn graph [] (-> (ptr Graph))
+  (let [p (alloc-static Graph)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)
+          (store! (field p nodes) (al-new [i64] (malloc-allocator)))
+          (store! (field p gvn)   (hm-new [i64 i64] (malloc-allocator) (gvn-keyops)))
+          (store! (field p wl)    (al-new [i64] (malloc-allocator)))
+          (store! (field p onwl)  (al-new [bool] (malloc-allocator)))
+          (store! (field p seed)  123)
+          (store! (field p start) NO-NODE)
+          (store! (field p stop)  NO-NODE)
+          0))
+    p))
+
+;; Start a fresh graph. Tests call this between cases, and the seed selects a worklist pop
+;; order: the same program must optimise to the same graph under every seed.
+(defn graph-reset! [(seed i64)] (-> i64)
+  (let [p (graph)]
+    (al-clear! [i64]  (field p nodes))
+    (hm-clear! [i64 i64] (field p gvn))
+    (al-clear! [i64]  (field p wl))
+    (al-clear! [bool] (field p onwl))
+    (store! (field p seed) seed)
+    (store! (field p start) (n-new OP-START 0))
+    (store! (field p stop)  (n-new OP-STOP 0))
+    (n-peephole (load (field p start)))
+    (n-peephole (load (field p stop)))
+    0))
+
+(defn g-start [] (-> i64) (load (field (graph) start)))
+(defn g-stop  [] (-> i64) (load (field (graph) stop)))
+(defn n-count [] (-> i64) (al-len [i64] (load (field (graph) nodes))))
+
+; ============================================================================
+; Node accessors
+; ============================================================================
+(defn nd [(n i64)] (-> (ptr Node))
+  (cast (ptr Node) (al-get (load (field (graph) nodes)) n)))
+
+(defn n-op    [(n i64)] (-> i64)  (load (field (nd n) op)))
+(defn n-ty    [(n i64)] (-> i64)  (load (field (nd n) ty)))
+(defn n-aux   [(n i64)] (-> i64)  (load (field (nd n) aux)))
+(defn n-dead? [(n i64)] (-> bool) (load (field (nd n) dead)))
+(defn n-nins  [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) ins))))
+(defn n-nouts [(n i64)] (-> i64)  (al-len [i64] (load (field (nd n) outs))))
+(defn n-in    [(n i64) (i i64)] (-> i64) (al-get (load (field (nd n) ins)) i))
+(defn n-out   [(n i64) (i i64)] (-> i64) (al-get (load (field (nd n) outs)) i))
+
+(defn n-set-ty! [(n i64) (t i64)] (-> i64) (store! (field (nd n) ty) t) 0)
+
+; ============================================================================
+; Creating nodes and maintaining edges
+; ============================================================================
+(defn n-new [(op i64) (aux i64)] (-> i64)
+  (let [p  (graph)
+        id (al-len [i64] (load (field p nodes)))
+        np (unwrap-ptr [Node] (create [Node] (malloc-allocator)))]
+    (store! (field np id)   id)
+    (store! (field np op)   op)
+    (store! (field np ty)   (t-top))      ; optimistic until computed
+    (store! (field np aux)  aux)
+    (store! (field np ins)  (al-new [i64] (malloc-allocator)))
+    (store! (field np outs) (al-new [i64] (malloc-allocator)))
+    (store! (field np deps) (al-new [i64] (malloc-allocator)))
+    (store! (field np dead) false)
+    (store! (field np keeps) 0)
+    (store! (field np hash) 0)
+    (al-push! [i64]  (field p nodes) (cast i64 np))
+    (al-push! [bool] (field p onwl)  false)
+    id))
+
+(defn n-add-def! [(n i64) (d i64)] (-> i64)
+  (al-push! [i64] (field (nd n) ins) d)
+  (if (!= d NO-NODE) (do (al-push! [i64] (field (nd d) outs) n) 0) 0)
+  (store! (field (nd n) hash) 0)
+  0)
+
+(defn n-new1 [(op i64) (aux i64) (a i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) n))
+(defn n-new2 [(op i64) (aux i64) (a i64) (b i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) n))
+(defn n-new3 [(op i64) (aux i64) (a i64) (b i64) (c i64)] (-> i64)
+  (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) (n-add-def! n c) n))
+
+;; Remove one use edge d->u. Unordered, so a swap-remove is fine.
+(defn n-del-use! [(d i64) (u i64)] (-> bool)
+  (let [outs (field (nd d) outs)
+        len  (al-len [i64] (load outs))
+        (mut i) 0 (mut found) false]
+    (loop
+      (if (or (>= (load i) len) (load found)) (break)
+        (do (if (= (al-get (load outs) (load i)) u)
+                (do (al-set! [i64] outs (load i) (al-get (load outs) (- len 1)))
+                    (al-pop! [i64] outs)
+                    (store! found true)
+                    0)
+              (store! i (+ (load i) 1)))
+            0)))
+    (and (= (al-len [i64] (load outs)) 0) (= (load (field (nd d) keeps)) 0))))
+
+(defn n-find-in [(n i64) (d i64)] (-> i64)
+  (let [len (n-nins n) (mut i) 0 (mut at) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load at) NO-NODE)) (break)
+        (do (if (= (n-in n (load i)) d) (store! at (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load at)))
+
+;; The normal way to change an edge. Keeps def-use in step, kills a def that just lost its
+;; last use, and re-queues anything whose analysis depended on this node.
+(defn n-set-def! [(n i64) (i i64) (d i64)] (-> i64)
+  (let [old (n-in n i)]
+    (if (= old d) 0
+      (do
+        ; add the new use BEFORE dropping the old one: dropping it may kill a subtree that
+        ; the new def is part of.
+        (if (!= d NO-NODE) (do (al-push! [i64] (field (nd d) outs) n) 0) 0)
+        (al-set! [i64] (field (nd n) ins) i d)
+        (if (!= old NO-NODE)
+            (if (n-del-use! old n) (n-kill! old) (wl-push! old))
+          0)
+        (store! (field (nd n) hash) 0)
+        (n-move-deps! n)
+        (wl-push! n)
+        0))))
+
+;; A node with no uses is garbage. Killing it releases its inputs, which may cascade.
+(defn n-kill! [(n i64)] (-> i64)
+  (if (n-dead? n) 0
+    (do (if (> (n-keeps n) 0) (do (panic-corrupt "n-kill!: node is pinned") 0) 0)
+        (store! (field (nd n) dead) true)
+        (gvn-remove! n)
+        (let [(mut i) 0]
+          (loop
+            (if (>= (load i) (n-nins n)) (break)
+              (do (let [d (n-in n (load i))]
+                    (if (!= d NO-NODE)
+                        (if (n-del-use! d n) (n-kill! d) (wl-push! d))
+                      0))
+                  (store! i (+ (load i) 1))
+                  0))))
+        (al-clear! [i64] (field (nd n) ins))
+        0)))
+
+;; Replace every use of `old` with `new`, then kill `old`.
+(defn n-subsume! [(old i64) (new i64)] (-> i64)
+  (loop
+    (let [k (- (n-nouts old) 1)]
+      (if (< k 0) (break)
+        (let [u  (n-out old k)
+              at (n-find-in u old)]
+          (if (= at NO-NODE)
+              ; `old` is listed as a use but is absent from that user's inputs: a corrupted
+              ; graph. Spinning forever is the worst way to find that out.
+              (do (panic-corrupt "n-subsume!: def-use edge with no matching use-def edge") 0)
+            (do (n-set-def! u at new) 0))))))
+  (n-kill! old)
+  0)
+
+;; Killing a node releases its inputs, which cascades. When the node being killed is being
+;; REPLACED by one of its own inputs (`x+0` becomes `x`), that cascade would kill the
+;; replacement, which usually has no uses of its own yet. `n-keep!` pins it for the duration.
+;; Simple calls this `deadCodeElim`; it is not optional, and without it `return arg+0;`
+;; returns a dead node.
+(defn n-keeps  [(n i64)] (-> i64) (load (field (nd n) keeps)))
+(defn n-keep!  [(n i64)] (-> i64) (store! (field (nd n) keeps) (+ (n-keeps n) 1)) 0)
+(defn n-unkeep! [(n i64)] (-> i64)
+  (if (<= (n-keeps n) 0) (do (panic-corrupt "n-unkeep!: not pinned") 0)
+    (do (store! (field (nd n) keeps) (- (n-keeps n) 1)) 0)))
+
+(defn panic-corrupt [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (print-str w "graph corruption: ") (print-str w msg) (print-str w "\n"))
+  (abort) 0)
+
+; ============================================================================
+; Dependency tracking
+; ============================================================================
+;; A peephole that looked at a node which is NOT one of its inputs has to say so, or it will
+;; not be revisited when that node changes. Missing this is the classic source of a graph
+;; that is only wrong under some visit orders, which is exactly what the multi-seed test is
+;; built to catch.
+(defn n-add-dep! [(n i64) (dep i64)] (-> i64)
+  (al-push! [i64] (field (nd n) deps) dep) 0)
+
+(defn n-move-deps! [(n i64)] (-> i64)
+  (let [deps (field (nd n) deps) len (al-len [i64] (load deps)) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (wl-push! (al-get (load deps) (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    (al-clear! [i64] deps)
+    0))
+
+; ============================================================================
+; The worklist
+; ============================================================================
+;; Pop order is pseudo-random, seeded. Peepholes must reach the same fixpoint whatever the
+;; order; the multi-seed test is what holds that claim up.
+(defn wl-push! [(n i64)] (-> i64)
+  (let [p (graph)]
+    (if (al-get (load (field p onwl)) n) 0
+      (do (al-set! [bool] (field p onwl) n true)
+          (al-push! [i64] (field p wl) n)
+          0))))
+
+(defn wl-push-outs! [(n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nouts n)) (break)
+        (do (wl-push! (n-out n (load i)))
+            (store! i (+ (load i) 1))
+            0)))
+    0))
+
+(defn wl-next-seed! [] (-> i64)
+  (let [p (graph)
+        ; a plain LCG; the point is a different order per seed, not statistical quality
+        s (+ (* (load (field p seed)) 6364136223846793005) 1442695040888963407)]
+    (store! (field p seed) s)
+    (& s TY-IMAX)))
+
+(defn wl-pop! [] (-> i64)
+  (let [p (graph) wl (field p wl) len (al-len [i64] (load wl))]
+    (if (= len 0) NO-NODE
+      (let [i (% (wl-next-seed!) len)
+            n (al-get (load wl) i)]
+        (al-set! [i64] wl i (al-get (load wl) (- len 1)))
+        (al-pop! [i64] wl)
+        (al-set! [bool] (field p onwl) n false)
+        n))))
+
+(defn wl-empty? [] (-> bool) (= (al-len [i64] (load (field (graph) wl))) 0))
+
+; ============================================================================
+; Global value numbering
+; ============================================================================
+;; The table is node id -> node id, with hash and equality reaching into the arena, so two
+;; structurally identical nodes collide and the second one is thrown away.
+(defn node-hash [(n i64)] (-> i64)
+  (let [cached (load (field (nd n) hash))]
+    (if (!= cached 0) cached
+      (let [(mut h) (hash-step (hash-step 1099511628211 (n-op n)) (n-aux n))
+            (mut i) 0]
+        (loop
+          (if (>= (load i) (n-nins n)) (break)
+            (do (store! h (hash-step (load h) (n-in n (load i))))
+                (store! i (+ (load i) 1))
+                0)))
+        ; 0 is the "not computed" marker, so never hand it back as a real hash
+        (let [hv (if (= (load h) 0) 1 (load h))]
+          (store! (field (nd n) hash) hv)
+          hv)))))
+
+(defn node-eq [(a i64) (b i64)] (-> bool)
+  (if (= a b) true
+    (if (or (!= (n-op a) (n-op b))
+        (or (!= (n-aux a) (n-aux b))
+            (!= (n-nins a) (n-nins b)))) false
+      (let [len (n-nins a) (mut i) 0 (mut same) true]
+        (loop
+          (if (or (>= (load i) len) (not (load same))) (break)
+            (do (if (!= (n-in a (load i)) (n-in b (load i))) (store! same false) 0)
+                (store! i (+ (load i) 1))
+                0)))
+        (load same)))))
+
+(defn gvn-keyhash [(slot (ptr i8)) (n i64)] (-> i64)
+  (node-hash (load (cast (ptr i64) slot))))
+(defn gvn-keyeq [(ka (ptr i8)) (kb (ptr i8)) (n i64)] (-> bool)
+  (node-eq (load (cast (ptr i64) ka)) (load (cast (ptr i64) kb))))
+(defn gvn-keyops [] (-> (ptr KeyOps))
+  (let [o (alloc-static KeyOps)]
+    (store! (field o hash) (fnptr-of gvn-keyhash))
+    (store! (field o eq)   (fnptr-of gvn-keyeq))
+    (store! (field o size) (sizeof i64))
+    o))
+
+(defn gvn-remove! [(n i64)] (-> i64)
+  (if (op-pure? (n-op n)) (do (hm-remove! [i64 i64] (field (graph) gvn) n) 0) 0))
+
+;; Look up a structurally identical node, or install this one. Returns the node that should
+;; be used from here on.
+(defn gvn! [(n i64)] (-> i64)
+  (if (not (op-pure? (n-op n))) n
+    (match (hm-get (load (field (graph) gvn)) n)
+      (Some [e] (if (or (= e n) (n-dead? e)) n e))
+      (None [] (do (hm-put! [i64 i64] (field (graph) gvn) n n) n)))))
+
+; ============================================================================
+; compute: the type of a node from its inputs
+; ============================================================================
+(defn n-compute [(n i64)] (-> i64)
+  (let [op (n-op n)]
+    (case op
+      0  (t-ctrl)                          ; Start
+      1  (t-bot)                           ; Stop
+      2  (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))   ; Return (ctrl, value)
+      3  (n-aux n)                         ; Const: its type IS the constant
+      4  (n-aux n)                         ; Arg: an opaque value of its declared type
+      5  (arith-compute OP-ADD   (n-in-ty n 1) (n-in-ty n 2))
+      6  (arith-compute OP-SUB   (n-in-ty n 1) (n-in-ty n 2))
+      7  (arith-compute OP-MUL   (n-in-ty n 1) (n-in-ty n 2))
+      8  (arith-compute OP-DIV   (n-in-ty n 1) (n-in-ty n 2))
+      9  (minus-compute (n-in-ty n 1))
+      10 (not-compute   (n-in-ty n 1))
+      11 (cmp-compute OP-EQ (n-in-ty n 1) (n-in-ty n 2))
+      12 (cmp-compute OP-LT (n-in-ty n 1) (n-in-ty n 2))
+      13 (cmp-compute OP-LE (n-in-ty n 1) (n-in-ty n 2))
+      (t-bot))))
+
+;; An absent input contributes ANY (nothing known yet), which keeps compute monotone while a
+;; graph is still being wired up.
+(defn n-in-ty [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (t-top)
+    (let [d (n-in n i)] (if (= d NO-NODE) (t-top) (n-ty d)))))
+
+; ---------------------------------------------------------------------------
+; Arithmetic over the value lattice
+; ---------------------------------------------------------------------------
+;; `int` means "an integer-valued number", so integer arithmetic stays in the int kind and
+;; only the RANGE is lost on i64 overflow. That is sound: the result is still integral, we
+;; just stop tracking bounds. (Whether it is exactly representable past 2^53 is a codegen
+;; question, not a lattice one.)
+;;
+;; Non-numeric operands are handled by real JavaScript semantics, conservatively:
+;;   `+`  can concatenate strings or call valueOf, so the result is `dyn`
+;;   `-` `*` `/`  coerce to number, so the result is `num` (NaN is a float)
+;; Both are sound, and the second is precise. Neither is a placeholder: M5 replaces them with
+;; guarded specialisations, it does not correct them.
+(defn ty-kinds-of [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TVal [v] (val-kinds v))
+    (TBot   [] VK-MASK)     ; ALL includes every value
+    (TTop   [] VK-NONE)
+    (TCtrl  [] VK-NONE)
+    (TXCtrl [] VK-NONE)
+    (TTuple [o l] VK-NONE)))
+
+(defn ty-numeric? [(t i64)] (-> bool)
+  (let [k (ty-kinds-of t)] (and (!= k VK-NONE) (= (& k (^ VK-NUM -1)) 0))))
+
+(defn ty-int-only? [(t i64)] (-> bool) (= (ty-kinds-of t) VK-INT))
+
+(defn ty-int-lo [(t i64)] (-> i64)
+  (match (ty-get t) (TVal [v] (val-ilo v))
+    (TBot [] TY-IMIN) (TTop [] TY-IMAX) (TCtrl [] TY-IMIN) (TXCtrl [] TY-IMIN)
+    (TTuple [o l] TY-IMIN)))
+(defn ty-int-hi [(t i64)] (-> i64)
+  (match (ty-get t) (TVal [v] (val-ihi v))
+    (TBot [] TY-IMAX) (TTop [] TY-IMIN) (TCtrl [] TY-IMAX) (TXCtrl [] TY-IMAX)
+    (TTuple [o l] TY-IMAX)))
+
+(defn add-ovf? [(a i64) (b i64) (s i64)] (-> bool)
+  ; overflow exactly when the operands share a sign and the result's sign differs
+  (and (= (< a 0) (< b 0)) (!= (< s 0) (< a 0))))
+
+(defn mul-ovf? [(a i64) (b i64) (p i64)] (-> bool)
+  (if (= a 0) false
+    (if (and (= a -1) (= b TY-IMIN)) true      ; test before dividing: IMIN/-1 is undefined
+      (!= (/ p a) b))))
+
+(defn imin4 [(a i64) (b i64) (c i64) (d i64)] (-> i64) (imin2 (imin2 a b) (imin2 c d)))
+(defn imax4 [(a i64) (b i64) (c i64) (d i64)] (-> i64) (imax2 (imax2 a b) (imax2 c d)))
+
+(defn arith-compute [(op i64) (a i64) (b i64)] (-> i64)
+  ; ANY on either side means "no value can be here", so the result cannot either. Preserving
+  ; that is what lets the optimistic pass start high and fall.
+  (if (or (ty-high? a) (ty-high? b)) (t-top)
+    (if (not (and (ty-numeric? a) (ty-numeric? b)))
+        (if (= op OP-ADD) (t-dyn) (t-num))
+      (if (= op OP-DIV) (div-numeric a b)
+        (if (not (and (ty-int-only? a) (ty-int-only? b))) (t-num)
+          (int-arith op (ty-int-lo a) (ty-int-hi a) (ty-int-lo b) (ty-int-hi b)))))))
+
+(defn int-arith [(op i64) (alo i64) (ahi i64) (blo i64) (bhi i64)] (-> i64)
+  ; an inverted range is a high element on that axis; nothing useful to compute
+  (if (or (> alo ahi) (> blo bhi)) (t-int)
+    (if (= op OP-ADD)
+        (let [lo (+ alo blo) hi (+ ahi bhi)]
+          (if (or (add-ovf? alo blo lo) (add-ovf? ahi bhi hi)) (t-int)
+            (t-int-range lo hi)))
+      (if (= op OP-SUB)
+          (let [lo (- alo bhi) hi (- ahi blo)]
+            (if (or (add-ovf? alo (- 0 bhi) lo) (or (add-ovf? ahi (- 0 blo) hi)
+                    (or (= bhi TY-IMIN) (= blo TY-IMIN)))) (t-int)
+              (t-int-range lo hi)))
+        ; multiply: the extremes are among the four corner products
+        (let [p1 (* alo blo) p2 (* alo bhi) p3 (* ahi blo) p4 (* ahi bhi)]
+          (if (or (mul-ovf? alo blo p1) (or (mul-ovf? alo bhi p2)
+                  (or (mul-ovf? ahi blo p3) (mul-ovf? ahi bhi p4)))) (t-int)
+            (t-int-range (imin4 p1 p2 p3 p4) (imax4 p1 p2 p3 p4))))))))
+
+;; Division leaves the integers: 1/2 is 0.5 and x/0 is an infinity. So the result is `num`
+;; unless both sides are integer constants that divide exactly.
+(defn div-numeric [(a i64) (b i64)] (-> i64)
+  (if (and (and (ty-int-only? a) (ty-int-only? b))
+       (and (ty-const? a) (ty-const? b)))
+      (let [x (ty-int-lo a) y (ty-int-lo b)]
+        (if (= y 0) (t-num)                                  ; +-Infinity, a float
+          (if (and (= x TY-IMIN) (= y -1)) (t-num)           ; not representable as an i64
+            (if (= (% x y) 0) (t-int-con (/ x y)) (t-num)))))
+    (t-num)))
+
+(defn minus-compute [(a i64)] (-> i64)
+  (if (ty-high? a) (t-top)
+    (if (not (ty-numeric? a)) (t-num)
+      (if (not (ty-int-only? a)) (t-num)
+        (let [lo (ty-int-lo a) hi (ty-int-hi a)]
+          (if (or (> lo hi) (= lo TY-IMIN)) (t-int)
+            (t-int-range (- 0 hi) (- 0 lo))))))))
+
+;; JavaScript truthiness. `undefined` and `null` are always falsey; an integer is falsey only
+;; at 0. Anything wider than that is just `bool`.
+(defn not-compute [(a i64)] (-> i64)
+  (if (ty-high? a) (t-top)
+    (let [k (ty-kinds-of a)]
+      (if (or (= k VK-UNDEF) (= k VK-NULL)) (t-bool-con true)
+        (if (and (or (= k VK-INT) (= k VK-BOOL)) (ty-const? a))
+            (t-bool-con (= (ty-int-lo a) 0))
+          (t-bool))))))
+
+(defn cmp-compute [(op i64) (a i64) (b i64)] (-> i64)
+  (if (or (ty-high? a) (ty-high? b)) (t-top)
+    (if (not (and (and (ty-int-only? a) (ty-int-only? b))
+                  (and (ty-const? a) (ty-const? b)))) (t-bool)
+      (let [x (ty-int-lo a) y (ty-int-lo b)]
+        (t-bool-con (if (= op OP-EQ) (= x y) (if (= op OP-LT) (< x y) (<= x y))))))))
+
+; ============================================================================
+; idealize: local rewrites
+; ============================================================================
+(defn n-idealize [(n i64)] (-> i64)
+  (case (n-op n)
+    5  (add-idealize n)
+    6  (sub-idealize n)
+    7  (mul-idealize n)
+    9  (minus-idealize n)
+    11 (cmp-idealize n)
+    12 (cmp-idealize n)
+    13 (cmp-idealize n)
+    NO-NODE))
+
+(defn n-int-con? [(n i64) (v i64)] (-> bool)
+  (let [t (n-ty n)] (and (ty-int-only? t) (and (ty-const? t) (= (ty-int-lo t) v)))))
+
+;; Order the operands of a commutative op so that value numbering can see `a+b` and `b+a` as
+;; the same node. Constants go on the right, then lower node ids first: any total order works,
+;; it only has to be stable.
+(defn should-swap? [(n i64)] (-> bool)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (or (= l NO-NODE) (= r NO-NODE)) false
+      (let [lc (ty-const? (n-ty l)) rc (ty-const? (n-ty r))]
+        (if (and lc (not rc)) true
+          (if (and rc (not lc)) false
+            (> l r)))))))
+
+(defn n-swap-args! [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (al-set! [i64] (field (nd n) ins) 1 r)
+    (al-set! [i64] (field (nd n) ins) 2 l)
+    (store! (field (nd n) hash) 0)
+    n))
+
+(defn add-idealize [(n i64)] (-> i64)
+  (let [r (n-in n 2)]
+    (if (n-int-con? r 0) (n-in n 1) NO-NODE)))   ; x + 0 = x
+
+(defn sub-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (n-int-con? r 0) l                       ; x - 0 = x
+      ; x - x = 0, but only for integers: NaN - NaN is NaN, not 0
+      (if (and (= l r) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
+        NO-NODE))))
+
+(defn mul-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    (if (n-int-con? r 1) l                       ; x * 1 = x
+      ; x * 0 = 0 only when x cannot be NaN or an infinity, so integers only
+      (if (and (n-int-con? r 0) (ty-int-only? (n-ty l))) (n-const (t-int-con 0))
+        NO-NODE))))
+
+(defn minus-idealize [(n i64)] (-> i64)
+  ; -(-x) = x, for integers; for floats it also holds, but only because negation is exact
+  (let [a (n-in n 1)]
+    (if (= (n-op a) OP-MINUS) (n-in a 1) NO-NODE)))
+
+(defn cmp-idealize [(n i64)] (-> i64)
+  (let [l (n-in n 1) r (n-in n 2)]
+    ; x == x is true and x < x is false, for integers. Floats are excluded because NaN is not
+    ; equal to itself, which is exactly the trap this guard exists for.
+    (if (and (= l r) (ty-int-only? (n-ty l)))
+        (n-const (t-bool-con (!= (n-op n) OP-LT)))
+      NO-NODE)))
+
+; ============================================================================
+; peephole
+; ============================================================================
+(defn n-const [(t i64)] (-> i64)
+  (n-peephole (n-new1 OP-CONST t (g-start))))
+
+;; Recompute the type, fold to a constant if the type says the value is known, idealize, then
+;; value-number. Returns the node to use from here on, which may not be `n`.
+(defn n-peephole [(n i64)] (-> i64)
+  (if (n-dead? n) n
+    (do
+      ; Canonical operand order for commutative ops, FIRST. It is what lets value numbering
+      ; see `a+b` and `b+a` as one node, and it means every identity rule below only has to
+      ; handle the constant-on-the-right form.
+      (if (and (op-commutes? (n-op n)) (should-swap? n)) (n-swap-args! n) 0)
+      (let [t (n-compute n)]
+        (if (!= t (n-ty n))
+            (do (n-set-ty! n t) (wl-push-outs! n) (n-move-deps! n) 0)
+          0)
+        ; a pure node whose type is a single value IS that value
+        (if (and (and (op-pure? (n-op n)) (ty-const? t)) (!= (n-op n) OP-CONST))
+            (let [c (n-new1 OP-CONST t (g-start))]
+              (n-set-ty! c t)
+              (let [c2 (gvn! c)]
+                (if (!= c2 c) (do (n-kill! c) 0) 0)
+                (n-keep! c2) (n-subsume! n c2) (n-unkeep! c2)
+                c2))
+          (let [m (n-idealize n)]
+            (if (and (!= m NO-NODE) (!= m n))
+                (do (n-keep! m) (n-subsume! n m) (n-unkeep! m) (n-peephole m))
+              (let [e (gvn! n)]
+                (if (!= e n)
+                    (do (n-keep! e) (n-subsume! n e) (n-unkeep! e) e)
+                  n)))))))))
+
+;; Run peepholes to a fixpoint. Order comes from the seed; the result must not.
+(defn iterate! [] (-> i64)
+  (let [(mut steps) 0]
+    (loop
+      (let [n (wl-pop!)]
+        (if (= n NO-NODE) (break)
+          (do (if (n-dead? n) 0 (do (n-peephole n) 0))
+              (store! steps (+ (load steps) 1))
+              ; a runaway worklist is a bug in a peephole, not something to grind on
+              (if (> (load steps) 10000000)
+                  (do (panic-corrupt "iterate!: worklist did not converge") 0)
+                0)
+              0))))
+    (load steps)))
+
+; ============================================================================
+; Reachability, for the leak check
+; ============================================================================
+(defn n-reachable-mark [(n i64) (seen (ptr (ArrayList bool)))] (-> i64)
+  (if (al-get (load seen) n) 0
+    (do (al-set! [bool] seen n true)
+        (let [(mut i) 0]
+          (loop
+            (if (>= (load i) (n-nins n)) (break)
+              (do (let [d (n-in n (load i))]
+                    (if (!= d NO-NODE) (do (n-reachable-mark d seen) 0) 0))
+                  (store! i (+ (load i) 1))
+                  0))))
+        0)))
+
+;; Every node that is neither reachable from Stop nor from Start must be dead. A live node
+;; nobody can reach is a leak, and the arena would grow forever across a real compile.
+(defn g-leaked-count [] (-> i64)
+  (let [n (n-count)
+        (mut seen) (al-new [bool] (malloc-allocator))
+        (mut i) 0]
+    (loop (if (>= (load i) n) (break)
+            (do (al-push! [bool] (mut seen) false) (store! i (+ (load i) 1)) 0)))
+    (n-reachable-mark (g-stop)  (mut seen))
+    (n-reachable-mark (g-start) (mut seen))
+    (let [(mut j) 0 (mut leaked) 0]
+      (loop
+        (if (>= (load j) n) (break)
+          (do (if (and (not (n-dead? (load j))) (not (al-get (load seen) (load j))))
+                  (store! leaked (+ (load leaked) 1))
+                0)
+              (store! j (+ (load j) 1))
+              0)))
+      (al-free! [bool] (mut seen))
+      (load leaked))))
+
+(defn g-live-count [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut live) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0 (store! live (+ (load live) 1)))
+            (store! i (+ (load i) 1))
+            0)))
+    (load live)))
+
+; ============================================================================
+; Printing
+; ============================================================================
+;; Expression form, the shape Simple's tests assert on: `return ((arg+2)*3);`. Compact enough
+;; to read in a diff and structural enough that a wrong rewrite changes it.
+(defn n-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (if (= n NO-NODE) (ps w "_")
+    (if (n-dead? n) (do (ps w "DEAD") 0)
+      (case (n-op n)
+        0 (ps w "Start")
+        1 (stop-print w n)
+        2 (do (ps w "return ") (n-print w (n-in n 1)) (ps w ";") 0)
+        3 (ty-print w (n-ty n))
+        4 (ps w "arg")
+        5 (binop-print w n "+")
+        6 (binop-print w n "-")
+        7 (binop-print w n "*")
+        8 (binop-print w n "/")
+        9 (do (ps w "(-") (n-print w (n-in n 1)) (ps w ")") 0)
+        10 (do (ps w "(!") (n-print w (n-in n 1)) (ps w ")") 0)
+        11 (binop-print w n "==")
+        12 (binop-print w n "<")
+        13 (binop-print w n "<=")
+        (do (ps w (op-name (n-op n))) 0)))))
+
+(defn binop-print [(w (ptr Writer)) (n i64) (sym (slice u8))] (-> i64)
+  (ps w "(")
+  (n-print w (n-in n 1))
+  (ps w sym)
+  (n-print w (n-in n 2))
+  (ps w ")"))
+
+(defn stop-print [(w (ptr Writer)) (n i64)] (-> i64)
+  (let [(mut i) 0]
+    (loop
+      (if (>= (load i) (n-nins n)) (break)
+        (do (if (> (load i) 0) (ps w " ") 0)
+            (n-print w (n-in n (load i)))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; Flat form, one line per live node, for when the expression form hides the bug: it shows
+;; ids, types and every edge.
+(defn g-print-flat [(w (ptr Writer))] (-> i64)
+  (let [n (n-count) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (n-dead? (load i)) 0
+              (do (fmt w "n{d}: " (load i))
+                  (ps w (op-name (n-op (load i))))
+                  (ps w " : ")
+                  (ty-print w (n-ty (load i)))
+                  (ps w "  <-")
+                  (let [(mut k) 0]
+                    (loop
+                      (if (>= (load k) (n-nins (load i))) (break)
+                        (do (let [d (n-in (load i) (load k))]
+                              (if (= d NO-NODE) (ps w " _") (do (fmt w " n{d}" d) 0)))
+                            (store! k (+ (load k) 1))
+                            0))))
+                  (ps w "\n")
+                  0))
+            (store! i (+ (load i) 1))
+            0))))
+  0)
+
+;; Render a node to a caller-owned buffer, so tests can compare printed IR as a string.
+(defn n-render [(n i64) (buf (ptr i8)) (cap i64)] (-> (slice u8))
+  (let [fb (alloc-stack FixBuf)
+        w  (alloc-stack Writer)]
+    (store! (field fb data) buf)
+    (store! (field fb cap)  cap)
+    (store! (field fb len)  0)
+    (fixed-buffer-writer w fb)
+    (n-print w n)
+    (slice-new [u8] (cast (ptr u8) buf) (load (field fb len)))))
