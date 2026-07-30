@@ -1907,6 +1907,10 @@ const server = createServer(async (req, res) => {
       const queue = [];
       let waiters = [];
       let ended = false;
+      // The END meta. A redirect()/notFound() that appears only after the first flight chunk
+      // is "late" for a STREAMED response, but the buffered path has sent nothing yet, so it
+      // is still actionable there (see the DEV branch below).
+      let endMeta = null;
       let streamError = null;
       const wake = () => {
         const w = waiters;
@@ -1922,6 +1926,7 @@ const server = createServer(async (req, res) => {
             wake();
           },
           onEnd: (m) => {
+            endMeta = m || {};
             // redirect()/notFound() thrown BEHIND a Suspense boundary (after the shell
             // already flushed) can't unwind the streamed response. Never silent: log it.
             // `lateControl` is what makes this a real report: a redirect the META carried
@@ -2052,6 +2057,44 @@ const server = createServer(async (req, res) => {
         const parts = [];
         for await (const b64 of flightChunks()) parts.push(Buffer.from(b64, "base64"));
         const flightBuf = Buffer.concat(parts);
+        // A redirect()/notFound() thrown behind a Suspense boundary reaches us only on the
+        // END meta, which for a STREAMED response is too late — the shell is already on the
+        // wire. Buffered, nothing has been sent, so it is still a real 307/404 and must be
+        // one: cal.com's logged-out `/settings/my-account/profile` redirects from behind a
+        // boundary, and serving the errored flight instead gave a 200 carrying a broken
+        // document (the reference answers 307). React then reports the aborted render's
+        // component with no end time, which surfaced as "Performance.measure: Given
+        // attribute end cannot be negative" in the dev overlay — collateral, not the cause.
+        if (endMeta && endMeta.redirect) {
+          const rh = { location: addBasePath(endMeta.redirect, localeSeg) };
+          if (mwSetCookies.length) rh["set-cookie"] = mwSetCookies;
+          mergeSetCookie(rh, endMeta.setCookies || meta.setCookies);
+          res.writeHead(endMeta.status || 307, rh);
+          res.end();
+          return;
+        }
+        if (endMeta && endMeta.notFound) {
+          const nf = await runReactServer(
+            ["render", url.pathname, clientManifestPath],
+            JSON.stringify({ ...reqCtxObj, notFound: true }),
+          );
+          const nfDoc = await (await getRenderFlightToDocument())(
+            new Uint8Array(nf.flight),
+            serverConsumerManifest,
+            nf.flight.toString("base64"),
+            {},
+            { pathname: url.pathname, search: url.search },
+            scriptNonce,
+            clientChunksById,
+          );
+          const nfHeaders = { "content-type": "text/html; charset=utf-8" };
+          for (const [k, v] of configHeaders) nfHeaders[k] = v;
+          if (mwSetCookies.length) nfHeaders["set-cookie"] = mwSetCookies;
+          mergeSetCookie(nfHeaders, endMeta.setCookies || meta.setCookies);
+          res.writeHead(404, nfHeaders);
+          res.end(nfDoc);
+          return;
+        }
         const html = await (await getRenderFlightToDocument())(
           new Uint8Array(flightBuf),
           serverConsumerManifest,

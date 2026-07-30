@@ -12722,6 +12722,46 @@ console.log(Buffer.from(result.body, "base64").toString("utf8"));
         );
     }
 
+    /// A `redirect()`/`notFound()` thrown BEHIND a Suspense boundary is still a real
+    /// 307/404 when the response is BUFFERED, because nothing has been sent yet.
+    ///
+    /// It reaches the orchestrator only on the stream's END meta, which for a streamed
+    /// response is genuinely too late — the shell is already on the wire. The buffered dev
+    /// path drains the whole flight before it renders a document, so acting on it there is
+    /// both possible and required: cal.com's logged-out `/settings/my-account/profile`
+    /// redirects from behind a boundary, and serving the errored flight instead answered 200
+    /// with a broken document where the reference answers 307. React then reported the
+    /// aborted render's component with no end time, which surfaced in the dev overlay as
+    /// "Performance.measure: Given attribute end cannot be negative" — collateral damage
+    /// that sent the first look at this bug in entirely the wrong direction.
+    #[test]
+    fn a_late_redirect_is_still_honoured_when_the_document_is_buffered() {
+        assert!(
+            NEXT_SERVER_MJS.contains("if (endMeta && endMeta.redirect) {"),
+            "the buffered path turns a late redirect into a real 307",
+        );
+        assert!(
+            NEXT_SERVER_MJS.contains("if (endMeta && endMeta.notFound) {"),
+            "and a late notFound into a real 404 document",
+        );
+        // Both must be checked AFTER the flight is drained (that is what makes them
+        // actionable) and BEFORE the document is rendered.
+        let drained = NEXT_SERVER_MJS
+            .find("for await (const b64 of flightChunks()) parts.push(")
+            .expect("the buffered path drains the flight");
+        let redirect = NEXT_SERVER_MJS
+            .find("if (endMeta && endMeta.redirect) {")
+            .expect("checked");
+        let render = NEXT_SERVER_MJS[drained..]
+            .find("getRenderFlightToDocument())(")
+            .map(|at| at + drained)
+            .expect("then renders the document");
+        assert!(
+            drained < redirect && redirect < render,
+            "the late-control check sits between draining the flight and rendering the document",
+        );
+    }
+
     /// The real-404 document is a DOCUMENT: Next resolves its `<head>` from the root
     /// layout's metadata plus `not-found.tsx`'s own `metadata`/`generateMetadata`, which is
     /// where cal.com sets the `404: This page could not be found.` title and
