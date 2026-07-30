@@ -21,7 +21,9 @@ Three independent changes, each measured separately in section 2.
 3. compiles that page plus **all** HTTP endpoints, boots the orchestrator, and releases the request;
 4. once the server goes quiet, compiles the rest of the app into a *shadow* output dir, swaps it in by rename, and reloads open browsers once.
 
-A request for a route that is not compiled yet **waits**; it is never answered 404. `DIFFPACK_DEV_LAZY=0` restores the eager whole-app cold start; `DIFFPACK_DEV_LAZY=api` also makes endpoints lazy (measured in section 3 — it is slower on cal.com, and the comment on `first_build_scope` says why).
+A request for a route that is not compiled yet **waits**; it is never answered 404.
+
+**This is OFF by default** (`DIFFPACK_DEV_LAZY=1` turns it on, `=api` also makes endpoints lazy). The decision is section 4's trade: laziness buys 6,196 -> 5,379 ms on the first document and costs 6,306 -> 12,705 ms on a second route clicked during the fill. The eager path keeps every other win here with no such window, so it stays the default until the fill can be made incremental (section 5), at which point this default should flip.
 
 **(d) The Tailwind candidate scan is parallel and stops stat-ing every file.** Not route laziness, but it was the largest fixed cost left: reading and tokenizing thousands of sources ran serially, and `ScanSkip::skips` canonicalized every directory entry to check whether it was the build's output root — a file can never be a directory, so that check now runs for directories only.
 
@@ -29,7 +31,7 @@ A request for a route that is not compiled yet **waits**; it is never answered 4
 
 Medians of 3 samples per mode, interleaved, `.diffpack-next` / `.diffpack-output*` wiped before every sample (true cold starts), leaked orchestrators killed before each. Raw samples included; the harness is `scratchpad/devbench.mjs` in the session dir.
 
-| Axis | before (2026-07-28) | eager today | lazy today | lazy vs before |
+| Axis | before (2026-07-28) | eager today (DEFAULT) | lazy today (opt in) | lazy vs before |
 |---|---:|---:|---:|---|
 | Accepting connections | 7,742 ms | 4,934 ms | **49 ms** | — |
 | First build + orchestrator boot | 7,742 ms | 4,934 ms | **4,096 ms** | 1.89x |

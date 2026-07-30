@@ -3464,18 +3464,34 @@ mod next {
             Ok(())
         };
 
-        // LAZY COMPILATION. Instead of compiling every route before answering anything,
-        // put the proxy up first, let the first request say which route it wants, compile
-        // that, and fill in the rest behind it. `DIFFPACK_DEV_LAZY=0` restores the eager
-        // whole-app cold start.
+        // LAZY COMPILATION, OPT IN. Instead of compiling every route before answering
+        // anything, the dev server can put the proxy up first, let the first request say
+        // which route it wants, compile that, and fill in the rest behind it. The pattern
+        // table comes from discovery alone (a directory walk), so a request can be matched
+        // to a route before a single module is compiled.
         //
-        // The pattern table comes from discovery alone (a directory walk), so the dev
-        // server can match a request to a route before a single module is compiled.
-        let lazy_wanted = std::env::var("DIFFPACK_DEV_LAZY").as_deref() != Ok("0");
-        let lazy = match lazy_wanted {
-            true => crate::next_adapter::discover_route_patterns(project_root)?
+        // OFF by default, on measurement rather than taste. On cal.com it makes the first
+        // document faster (6.2s -> 5.4s) but a second route clicked during the ~7s
+        // background fill much slower (6.3s -> 12.7s), because widening the route scope
+        // renumbers every runtime module id and so costs a full second build. The eager
+        // path keeps every other win of this work (island pins derived from the
+        // react-server graph, react-server built first, the parallel Tailwind scan) with no
+        // such window. When ids become stable the fill turns incremental and this default
+        // should flip — see docs/DEV_LAZY_ROUTES.md §5.
+        //
+        //   DIFFPACK_DEV_LAZY=1     pages compile on demand, endpoints stay eager
+        //   DIFFPACK_DEV_LAZY=api   endpoints compile on demand too (measured SLOWER on
+        //                           cal.com, whose server render calls its own API)
+        let lazy_mode = std::env::var("DIFFPACK_DEV_LAZY").unwrap_or_default();
+        let lazy = match lazy_mode.as_str() {
+            "1" | "pages" | "api" => crate::next_adapter::discover_route_patterns(project_root)?
                 .map(|patterns| Arc::new(LazyRoutes::new(patterns))),
-            false => None,
+            "" | "0" => None,
+            other => {
+                return Err(format!(
+                    "DIFFPACK_DEV_LAZY={other:?} is not a mode; use 1 (lazy pages), api (lazy pages + endpoints), or 0 (the default, compile everything up front)"
+                ));
+            }
         };
         let cold_started = Instant::now();
         write_orchestrator_scripts(&output_root)?;
@@ -5295,15 +5311,18 @@ mod next {
     /// The scope of the first build: whatever the first requests asked for, or the whole
     /// app if nothing arrived within [`FIRST_REQUEST_GRACE`].
     ///
-    /// HTTP endpoints (`route.ts`, `pages/api/**`) are compiled EAGERLY by default even
-    /// though pages are not. A page whose API answers 404 is a broken app, not a page that
+    /// HTTP endpoints (`route.ts`, `pages/api/**`) are compiled EAGERLY even under
+    /// `DIFFPACK_DEV_LAZY=1`. A page whose API answers 404 is a broken app, not a page that
     /// is still compiling, and on cal.com the document immediately reads a next-auth
-    /// session and several tRPC queries; the app's API surface is also most of the server
-    /// graph, so leaving it out is what makes the first build fast. `DIFFPACK_DEV_LAZY=api`
-    /// opts into the faster-first-paint trade: endpoints compile lazily too, and those
-    /// requests WAIT (they are never answered wrongly) for the fill.
+    /// session and several tRPC queries. `DIFFPACK_DEV_LAZY=api` makes them lazy as well
+    /// and those requests WAIT rather than be answered wrongly — but it measured SLOWER
+    /// than compiling everything up front (10.5s to the first document against 6.2s),
+    /// because cal.com's server render calls the app's own API over HTTP, so the render
+    /// itself sits waiting for an endpoint build. Kept because an app whose pages do not
+    /// call their own API would win from it; do not reach for it without measuring.
     fn first_build_scope(lazy: &LazyRoutes) -> RouteScope {
         let lazy_endpoints = std::env::var("DIFFPACK_DEV_LAZY").as_deref() == Ok("api");
+        println!("[dev] next: lazy route compilation is ON; waiting for the first request");
         let Some(wanted) = wait_for_first_wants(lazy) else {
             println!(
                 "[dev] next: no request within {}ms — compiling the whole app",
