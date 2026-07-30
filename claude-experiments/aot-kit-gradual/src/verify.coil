@@ -30,6 +30,7 @@
 (import "fmt.coil"       :use *)
 (import "slice.coil"     :use *)
 (import "ty.coil"        :use *)
+(import "shape.coil"     :use *)   ; a New's shape and a memory op's alias are checked against it
 (import "node.coil"      :use *)
 
 ; ============================================================================
@@ -57,6 +58,15 @@
 (const VERR-STALE-TYPE   i64 13)  ; n-ty differs from n-compute: the types are not at fixpoint
 (const VERR-LEAK         i64 14)  ; a live node nothing can reach
 
+;; A slot that must hold a MEMORY state does not. It is its own code rather than an instance of
+;; VERR-DATA-SLOT because the failure it catches is different in kind: an ordinary value in a
+;; memory slot type-checks all the way through (`ty-mem-contents` answers ALL for it, so every
+;; load below reports "could be anything"), the graph stays internally consistent, and the only
+;; symptom is that memory silently stopped being tracked.
+(const VERR-MEM-SLOT     i64 15)
+(const VERR-SHAPE        i64 16)  ; a New whose aux is not a defined shape id
+(const VERR-ALIAS        i64 17)  ; a Load or Store whose aux is not an allocated alias number
+
 (defn verr-name [(c i64)] (-> (slice u8))
   (case c
     VERR-NONE         "VERR-NONE"
@@ -74,6 +84,9 @@
     VERR-STOP-INPUT   "VERR-STOP-INPUT"
     VERR-STALE-TYPE   "VERR-STALE-TYPE"
     VERR-LEAK         "VERR-LEAK"
+    VERR-MEM-SLOT     "VERR-MEM-SLOT"
+    VERR-SHAPE        "VERR-SHAPE"
+    VERR-ALIAS        "VERR-ALIAS"
     "VERR-?"))
 
 ; ============================================================================
@@ -194,7 +207,8 @@
       OP-START  (v-need (= k 0) VERR-ARITY n)
       OP-XCTRL  (v-need (= k 0) VERR-ARITY n)
       OP-STOP   0
-      OP-RETURN (v-need (= k 2) VERR-ARITY n)
+      ; ctrl and a value, plus the program's final memory when it carries one
+      OP-RETURN (v-need (or (= k 2) (= k 3)) VERR-ARITY n)
       OP-IF     (v-need (= k 2) VERR-ARITY n)
       OP-REGION (v-need (>= k 2) VERR-ARITY n)   ; the unused slot 0 plus at least one path
       OP-LOOP   (v-need (= k 3) VERR-ARITY n)    ; slot 0, the entry, the back edge
@@ -206,15 +220,34 @@
       OP-CAST   (v-need (= k 2) VERR-ARITY n)
       OP-MINUS  (v-need (= k 2) VERR-ARITY n)
       OP-NOT    (v-need (= k 2) VERR-ARITY n)
+      ;; A NEW'S ARITY IS ITS SHAPE'S, which is why the shape is checked first and the count is
+      ;; not checked at all when it is wrong: `shape-field-count` aborts by name on an undefined
+      ;; id, and an abort inside the verifier would take the process with it on exactly the
+      ;; corrupted graph the verifier exists to report on.
+      OP-NEW    (if (not (shape-defined? (n-aux n))) (v-fail! VERR-SHAPE n)
+                  (v-need (= k (+ 1 (shape-field-count (n-aux n)))) VERR-ARITY n))
+      OP-LOAD   (do (v-need (shape-alias-defined? (n-aux n)) VERR-ALIAS n)
+                    (v-need (= k 3) VERR-ARITY n) 0)
+      OP-STORE  (do (v-need (shape-alias-defined? (n-aux n)) VERR-ALIAS n)
+                    (v-need (= k 4) VERR-ARITY n) 0)
+      OP-MEMMERGE (v-need (>= k 2) VERR-ARITY n)   ; the unused slot 0 plus at least one memory
       (if (op-binary? op) (v-need (= k 3) VERR-ARITY n)
         (do (panic-corrupt "v-check-arity: op has no arity contract") 0)))))
 
 ;; How many slots a multi-output node's tuple has. Only meaningful for a multi node, so asking
 ;; about anything else is a caller bug rather than a question with a harmless answer.
-(defn v-multi-arity [(op i64)] (-> i64)
-  (case op
+;;
+;; IT TAKES THE NODE AND NOT THE OP, because two of the three answers are not functions of the op:
+;; a New's tuple is one slot per field of ITS shape, and a Return's is two or three depending on
+;; whether it carries memory. Asking the op alone would have to pick one, and a projection checked
+;; against the wrong arity is either a false report or a missed one.
+(defn v-multi-arity [(n i64)] (-> i64)
+  (case (n-op n)
     OP-IF     2
-    OP-RETURN 2
+    OP-RETURN (n-nins n)
+    OP-NEW    (if (shape-defined? (n-aux n)) (+ 1 (shape-field-count (n-aux n)))
+                ; the arity pass already reported VERR-SHAPE; no slot index can be in range
+                0)
     (do (panic-corrupt "v-multi-arity: not a multi-output op") 0)))
 
 ; ============================================================================
@@ -232,6 +265,40 @@
   (if (>= i (n-nins n)) (v-fail! VERR-DATA-SLOT n)
     (let [d (n-in n i)]
       (v-need (and (!= d NO-NODE) (op-value? (n-op d))) VERR-DATA-SLOT n))))
+
+;; A slot that must hold a MEMORY STATE, decided STRUCTURALLY. It would be shorter to ask
+;; `ty-mem?` of the input's computed type, and it would be wrong here for the reason the pass
+;; order at the bottom of this file already states: `v-pass-structure` runs BEFORE the types are
+;; evidence of anything, and on a graph that is still settling every memory edge legitimately
+;; reports ANY. So the question is which nodes can produce memory at all, and that is a fact about
+;; the graph's shape:
+;;
+;;   Proj      of a New, at any slot; slot 0 is the object and is caught by the arity check below
+;;   Store     its whole result
+;;   MemMerge  likewise
+;;   Phi / Arg when their DECLARED type (aux, which no analysis writes) is a memory type
+;;
+;; An Arg is on that list because a declared memory state is how memory ENTERS a graph: the
+;; program's initial heap is empty, a function's incoming memory is its caller's, and both are
+;; opaque values of a declared type, which is exactly what an Arg is.
+(defn v-mem-producer? [(d i64)] (-> bool)
+  (let [op (n-op d)]
+    (if (= op OP-PROJ) (and (>= (n-nins d) 1) (= (n-op (n-in d 0)) OP-NEW))
+      (if (or (= op OP-STORE) (= op OP-MEMMERGE)) true
+        (if (or (op-phi? op) (= op OP-ARG)) (ty-mem? (n-aux d))
+          false)))))
+
+(defn v-need-mem [(n i64) (i i64)] (-> i64)
+  (if (>= i (n-nins n)) (v-fail! VERR-MEM-SLOT n)
+    (let [d (n-in n i)]
+      (v-need (and (!= d NO-NODE) (v-mem-producer? d)) VERR-MEM-SLOT n))))
+
+(defn v-need-mem-from [(n i64) (lo i64)] (-> i64)
+  (let [len (n-nins n) (mut i) lo]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (v-need-mem n (load i)) (store! i (+ (load i) 1)) 0))))
+  0)
 
 (defn v-need-ctrl-from [(n i64) (lo i64)] (-> i64)
   (let [len (n-nins n) (mut i) lo]
@@ -272,7 +339,7 @@
     (if (or (= m NO-NODE) (not (op-multi? (n-op m))))
         (v-fail! VERR-PROJ-SLOT n)
       (let [idx (n-aux n)]
-        (v-need (and (>= idx 0) (< idx (v-multi-arity (n-op m)))) VERR-PROJ-SLOT n)))))
+        (v-need (and (>= idx 0) (< idx (v-multi-arity m))) VERR-PROJ-SLOT n)))))
 
 ;; Stop collects Returns and nothing else. Anything else in there means some rewrite pointed the
 ;; program's exit at a node that does not end a path.
@@ -298,7 +365,8 @@
       OP-START  0
       OP-XCTRL  0
       OP-STOP   (v-check-stop n)
-      OP-RETURN (do (v-need-ctrl n 0) (v-need-value n 1) 0)
+      OP-RETURN (do (v-need-ctrl n 0) (v-need-value n 1)
+                    (if (>= (n-nins n) 3) (v-need-mem n 2) 0) 0)
       OP-IF     (do (v-need-ctrl n 0) (v-need-value n 1) 0)
       OP-REGION (v-check-merge n)
       OP-LOOP   (v-check-merge n)
@@ -310,6 +378,16 @@
       OP-CAST   (do (v-need-ctrl n 0) (v-need-value n 1) 0)
       OP-MINUS  (v-need-value n 1)
       OP-NOT    (v-need-value n 1)
+      ;; A New's control input is REAL, unlike a Load's or a Store's slot 0: two executions of an
+      ;; allocation are two objects, so it cannot float out of the block it is in. Everything from
+      ;; slot 1 is the incoming memory of one field, in field order.
+      OP-NEW    (do (v-need-ctrl n 0) (v-need-mem-from n 1) 0)
+      OP-LOAD   (do (v-need-mem n 1) (v-need-value n 2) 0)
+      OP-STORE  (do (v-need-mem n 1) (v-need-value n 2) (v-need-value n 3) 0)
+      ;; Slot 0 is unused for the same reason a Region's is, and reported with the same code: a
+      ;; node parked in it is a use nothing reads, which is how a stale edge survives a rewrite.
+      OP-MEMMERGE (do (if (>= (n-nins n) 1) (v-need (= (n-in n 0) NO-NODE) VERR-MERGE-IN0 n) 0)
+                      (v-need-mem-from n 1) 0)
       (if (op-binary? op) (do (v-need-value n 1) (v-need-value n 2) 0)
         (do (panic-corrupt "v-check-slots: op has no slot contract") 0)))))
 

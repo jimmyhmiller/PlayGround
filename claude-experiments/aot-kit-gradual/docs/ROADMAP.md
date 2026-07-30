@@ -27,7 +27,7 @@ Two rules that apply throughout:
 | **M2** | Control flow | done | `tests/control-test.coil` |
 | | Dominators and the loop tree | done | `tests/loop-tree-test.coil` |
 | **M3** | Verifier, interpreter, textual IR | done | `verify-`, `eval-`, `text-`, `gtext-test.coil` |
-| **M4** | Memory SSA and shapes | **in progress**: shapes and the memory type are in; no `Load`, `Store`, `New` or `MemMerge` yet | `tests/shape-test.coil` |
+| **M4** | Memory SSA and shapes | **in progress**: shapes, the memory type and all four memory ops are in and run; no forwarding or elimination yet | `tests/shape-test.coil`, `tests/mem-test.coil` |
 | M5 | Dynamic values end to end | not started | |
 | M6 | Functions, calls, closures | not started | |
 | M7 | Closed-world inference | not started | |
@@ -56,12 +56,27 @@ that looks gratuitous.
 
 ## The next concrete piece of work
 
-M4 slice 4b: `Load`, `Store`, `New` and `MemMerge`, on the alias classes `src/shape.coil` already
-allocates. The clauses of M4's gate are all still untouched, and the design is written down in
-[DESIGN.md section 4](DESIGN.md#4-memory-effects-and-objects).
+M4 slice 4c: the three rewrites M4's gate names, on the memory graph 4b built.
 
-Two things are open from M3 and are worth reading before starting M4, because the first one will
-bite while wiring memory edges:
+- **Load-after-store forwarding.** `Load(p, Store(p, v, m))` is `v`. It is decided by POINTER
+  IDENTITY, not by types: 4b's `tests/mem-test.coil` pins the load's type at `undefined|int`
+  exactly, because an alias-level type describes a whole class and can never say that this
+  pointer's word is the one the store wrote. Simple's `Load.idealize` also forwards past a store
+  to a *provably different* pointer (two distinct `New`s never alias), which is structural and
+  safe; its offset-overlap test reads a TYPE and is exactly the shape D8 forbids acting on
+  provisionally.
+- **Store-after-store elimination.** `Store(p, v2, Store(p, v1, m))` drops the inner store.
+- **Dead-allocation removal.** A `New` none of whose projections is read is unobservable. Most of
+  this already falls out: killing the last projection drops the New's last use and the cascade
+  takes it. What has to be *added* is dropping a store to an object that escapes nowhere.
+
+Each one is irreversible, so each one must ask `n-ty-proven?` before it acts (D8). Each one is
+gated the same way: the differential interpreter must return the identical result on the whole
+corpus before and after, and the four memory fixtures (19 to 22) are what make "the whole corpus"
+mean something for memory.
+
+Two things are open from M3 and are worth reading, because the first one will bite around memory
+edges:
 
 1. **A dead node can be wired as an input** and nothing says so at the wiring site. `n-add-def!`
    accepts a corpse, and the resulting graph fails `g-verify` with `VERR-DEAD-INPUT` a long way from
@@ -262,6 +277,17 @@ known shape.
 **Gate.** Load-after-store forwarding, store-after-store elimination and dead-allocation
 removal all demonstrated by golden tests; differential tests green; a shape-polymorphic site
 keeps two inline paths instead of collapsing.
+
+Where the clauses stand after 4b:
+
+| Clause | State |
+|---|---|
+| the ops exist, verify, print, reparse and RUN | done (`tests/mem-test.coil`) |
+| differential tests green | done, on four memory fixtures in both build modes |
+| a shape-polymorphic site does not collapse | done for the LATTICE half: the merged pointer keeps both shape bits, the two arms keep distinct alias classes, and the `MemMerge` describes their union. The two INLINE PATHS are M9's, since a guard is what makes a path, and 4c's forwarding is what makes each path worth having |
+| load-after-store forwarding | 4c |
+| store-after-store elimination | 4c |
+| dead-allocation removal | partly, and for free: killing a `New`'s last projection drops its last use and the cascade collects it. A store to an object nothing reads still survives |
 
 ## M5. Dynamic values end to end
 

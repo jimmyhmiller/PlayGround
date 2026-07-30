@@ -854,6 +854,38 @@
 (defn t-mem-none [] (-> i64) (t-mem 0 (t-top)))
 (defn t-mem-all  [] (-> i64) (t-mem -1 (t-bot)))
 
+;; READING A MEMORY TYPE FROM OUTSIDE THIS FILE. `Ty` is a sum and matching on it is exhaustive,
+;; so every consumer that only cares about the memory production would otherwise carry six arms
+;; it does not mean; these three name the answer once. `n-compute` for `Load`, `Store` and
+;; `MemMerge` is written in terms of them.
+;;
+;; THE ANSWER FOR A NON-MEMORY TYPE IS THE CONSERVATIVE ONE, NOT AN ERROR, and the split between
+;; ANY and everything else is the same distinction `ty-unanalysed?` exists for. A slot that has
+;; not been analysed yet reports ANY, and its contents must read as "nothing is known" (the top)
+;; or a compute reading it would RISE the moment the real memory type arrived. Anything else in a
+;; memory slot is a malformed graph, and the honest description of a memory state that could be
+;; anything at all is ALL contents over EVERY alias, which is the bottom: a compute built on it
+;; concludes nothing, which is what a verifier is for.
+(defn ty-mem? [(t i64)] (-> bool)
+  (match (ty-get t)
+    (TMem [a c] true)
+    (TBot [] false) (TTop [] false) (TCtrl [] false) (TXCtrl [] false)
+    (TVal [v] false) (TTuple [o l] false)))
+
+(defn ty-mem-aliases [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] a)
+    (TTop [] 0)                                  ; unanalysed: no alias is claimed yet
+    (TBot [] -1) (TCtrl [] -1) (TXCtrl [] -1)    ; not a memory state: assume all of memory
+    (TVal [v] -1) (TTuple [o l] -1)))
+
+(defn ty-mem-contents [(t i64)] (-> i64)
+  (match (ty-get t)
+    (TMem [a c] c)
+    (TTop [] (t-top))
+    (TBot [] (t-bot)) (TCtrl [] (t-bot)) (TXCtrl [] (t-bot))
+    (TVal [v] (t-bot)) (TTuple [o l] (t-bot))))
+
 (defn t-tuple2 [(a i64) (b i64)] (-> i64)
   (let [tb (ty-tuple-open 2)]
     (ty-tuple-put! tb 0 a)

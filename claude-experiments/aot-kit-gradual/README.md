@@ -38,7 +38,7 @@ Read in this order:
 | `src/node.coil` | The graph: nodes, edges, `compute`/`idealize`, peepholes, GVN, the worklist, control flow, dominators and the loop tree |
 | `src/shape.coil` | Hidden classes as a transition tree, and the alias classes memory SSA is built on |
 | `src/verify.coil` | The graph verifier, one named failure code per check |
-| `src/eval.coil` | The IR interpreter, and therefore the **differential oracle** |
+| `src/eval.coil` | The IR interpreter, and therefore the **differential oracle**. Its heap is immutable and versioned, because a demand-driven walker cannot read a mutable one |
 | `src/text.coil` | The exact textual form of a *type*, printed and parsed |
 | `src/gtext.coil` | The textual form of a *graph*, printed and parsed |
 | `src/corpus.coil` | The shared fixtures: the verifier, the diagrams and the differential tests all use these same graphs |

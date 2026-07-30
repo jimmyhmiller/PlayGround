@@ -395,6 +395,37 @@ BODY = f"""
         "mechanism in that picture already existed for other reasons, which is exactly why "
         "guards are not a node kind.")}
 
+{single("19-object",
+        "A heap, in five nodes", "o = {{x}};  o.x = 5;  return o.x;",
+        "Memory is in SSA form and split into alias classes, so there is no alias analysis pass "
+        "anywhere in this compiler: the blue dashed edges ARE the aliasing, and a load reads the "
+        "state its own memory edge names. Follow them from the bottom.",
+        "The <code>New</code> is a multi node like an <code>If</code>: slot 0 of its tuple is the "
+        "object and slot 1 is field <code>x</code>'s memory AFTER the allocation, which is why "
+        "the allocation is a link in the field's memory chain rather than a node that appears out "
+        "of nowhere. Note what the <code>Load</code> is typed: <code>undefined|int</code>, not "
+        "<code>int=5</code>. A memory type describes a whole alias CLASS, and every object in that "
+        "class holds whatever it held, so an alias-level analysis cannot say that this pointer's "
+        "word is the one the store wrote. Recovering the 5 needs the observation that the load's "
+        "pointer is the same NODE as the store's, which is structural rather than a type, and it "
+        "is the next slice. The union is pinned exactly by a test so that the improvement is "
+        "measured rather than asserted.")}
+
+{single("21-shape-polymorphic",
+        "Two shapes through one merge",
+        "if (p) {{ a = {{x}}; a.x = 1 }} else {{ b = {{y}}; b.y = 2 }}  return o;",
+        "A hidden class is a transition tree, and <code>{{x}}</code> and <code>{{y}}</code> are two "
+        "different edges out of the empty shape. What survives the merge is the question this "
+        "specimen is about.",
+        "The <code>Phi</code> that merges the two pointers is typed <code>obj@6</code>: a SET of "
+        "two shapes, not the collapsed <code>obj</code>. That set is what a later milestone guards "
+        "on to keep one inlined path per shape; without it there is nothing to guard on and the "
+        "site is generic for ever. Below it, the two stores name DIFFERENT alias classes, so "
+        "neither arm's memory is ordered against the other's, and the <code>MemMerge</code> at the "
+        "exit is typed <code>mem#3</code>: the union of classes 1 and 2. That union is why the "
+        "alias axis is a bitset rather than Simple's collapse-to-all-memory rule, which would have "
+        "answered &quot;all of memory&quot; here.")}
+
 {text_and_graph("19-text-only-add",
       "A graph with no builder", "return x + 0;   // as TEXT, not as a program",
       "Every other specimen on this page was built by calling into the node engine. This one was "

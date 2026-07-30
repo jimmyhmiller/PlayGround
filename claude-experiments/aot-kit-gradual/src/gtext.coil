@@ -101,6 +101,7 @@
 (import "fmt.coil"       :use *)
 (import "slice.coil"     :use *)
 (import "ty.coil"        :use *)
+(import "shape.coil"     :use *)   ; a parsed shape id or alias number is checked against it
 (import "node.coil"      :use *)
 (import "text.coil"      :use *)
 
@@ -119,9 +120,10 @@
 ;;   type   := the exact type form, src/text.coil
 ;;   udec   := digit+                                  ; never signed: no slot or index is
 ;;
-;; The bytes the grammar adds to the type grammar's. CH-SPACE, CH-MINUS, CH-ZERO, CH-NINE and
-;; `digit?` come from src/text.coil, because two spellings of "is this a digit" is exactly the
-;; kind of duplication that lets two parsers disagree about a number.
+;; The bytes the grammar adds to the type grammar's. CH-SPACE, CH-MINUS, CH-ZERO, CH-NINE,
+;; CH-HASH and `digit?` come from src/text.coil, because two spellings of "is this a digit" is
+;; exactly the kind of duplication that lets two parsers disagree about a number. CH-HASH in
+;; particular is the same byte in both grammars: `mem#3` in a type field and `New#3` in a head.
 (const CH-NEWLINE i64 10)
 (const CH-DOT     i64 46)
 (const CH-COLON   i64 58)
@@ -152,11 +154,26 @@
 (const AUXK-SLOT i64 1)   ; `.<dec>`: which output of a multi node this projects
 (const AUXK-TYPE i64 2)   ; ` <exact type>`: the aux IS a TyId
 
+;; `#<dec>`: an index into a table this format does NOT carry. Two kinds and not one, though they
+;; are spelled identically, because the two numbers are checked against different tables and a
+;; text naming a shape that does not exist has to fail as that rather than as "a bad number".
+;;
+;; THE SHAPE TABLE IS NOT PART OF THE TEXT, and saying so here is the honest statement of what
+;; this format round-trips. A graph line means what it says only against the shape table that was
+;; live when it was printed; parsing one into a different table would silently re-point every
+;; field. `gparse-aux` therefore refuses an id the current table does not define, which turns that
+;; mismatch into a named failure at the first line that mentions it. Serialising the table itself
+;; is a whole-program question and belongs with whichever milestone first has to ship one.
+(const AUXK-SHAPE i64 3)  ; `#<dec>`: the shape a New allocates
+(const AUXK-ALIAS i64 4)  ; `#<dec>`: the alias class a Load or Store names
+
 (defn auxk-name [(k i64)] (-> (slice u8))
   (case k
     AUXK-NONE "AUXK-NONE"
     AUXK-SLOT "AUXK-SLOT"
     AUXK-TYPE "AUXK-TYPE"
+    AUXK-SHAPE "AUXK-SHAPE"
+    AUXK-ALIAS "AUXK-ALIAS"
     (do (panic-gtext "auxk-name: not an aux kind") "")))
 
 ;; A case over the NAMED op constants with a hard-error default, and the default is the whole
@@ -193,6 +210,10 @@
     OP-EQ     AUXK-NONE
     OP-LT     AUXK-NONE
     OP-LE     AUXK-NONE
+    OP-NEW    AUXK-SHAPE
+    OP-LOAD   AUXK-ALIAS
+    OP-STORE  AUXK-ALIAS
+    OP-MEMMERGE AUXK-NONE   ; it names no class of its own; its aliases are its inputs'
     (do (panic-gtext "op-aux-kind: op has no aux spelling; a new op must declare one") 0)))
 
 ; ============================================================================
@@ -232,6 +253,14 @@
 ;; to, or a Stop no Return can be found from. Both are singletons by construction.
 (const GERR-ROOT-DUP      i64 19)
 
+(const GERR-BAD-AUXNUM    i64 20)  ; an op whose aux is `#<digits>` and the `#` or the digits are missing
+;; A shape id or an alias number the CURRENT table does not define. See AUXK-SHAPE: this format
+;; does not carry the shape table, so a text is only meaningful against the table it was printed
+;; from. Refusing here makes that mismatch a named failure on the first line that mentions it,
+;; rather than a graph whose fields silently point at other fields.
+(const GERR-BAD-SHAPE     i64 21)
+(const GERR-BAD-ALIAS     i64 22)
+
 (defn gtext-err-name [(c i64)] (-> (slice u8))
   (case c
     GERR-NONE          "GERR-NONE"
@@ -254,6 +283,9 @@
     GERR-MISSING-ROOTS "GERR-MISSING-ROOTS"
     GERR-ROOT-OP       "GERR-ROOT-OP"
     GERR-ROOT-DUP      "GERR-ROOT-DUP"
+    GERR-BAD-AUXNUM    "GERR-BAD-AUXNUM"
+    GERR-BAD-SHAPE     "GERR-BAD-SHAPE"
+    GERR-BAD-ALIAS     "GERR-BAD-ALIAS"
     "GERR-?"))
 
 ;; How many failure classes there are, so a gate can require its malformed-text table to cover a
@@ -263,7 +295,7 @@
 ;; new code and quietly weakens the floor that reads it. The codes are contiguous from GERR-NONE,
 ;; so the count is right precisely when `gtext-err-name` names the last code and does NOT name the
 ;; one after it, and both directions are a named panic.
-(const GERR-COUNT i64 20)
+(const GERR-COUNT i64 23)
 
 (defn gtext-err-count [] (-> i64)
   (if (gbytes-eq? (gtext-err-name (- GERR-COUNT 1)) "GERR-?")
@@ -467,6 +499,8 @@
     AUXK-NONE 0
     AUXK-SLOT (do (ps w ".") (dec-print w (n-aux n)) 0)
     AUXK-TYPE (do (ps w " ") (ty-print-exact w (n-aux n)) 0)
+    AUXK-SHAPE (do (ps w "#") (dec-print w (n-aux n)) 0)
+    AUXK-ALIAS (do (ps w "#") (dec-print w (n-aux n)) 0)
     (do (panic-gtext "gaux-write: aux kind with no printed form") 0)))
 
 (defn gline-write [(w (ptr Writer)) (n i64)] (-> i64)
@@ -564,7 +598,8 @@
 ;; of an existing one cannot make this quietly pick the wrong op depending on the loop order.
 (defn gop-delim? [(c (ptr GCur))] (-> bool)
   (if (gcur-eof? c) true
-    (let [b (gcur-peek c)] (or (= b CH-SPACE) (= b CH-DOT)))))
+    (let [b (gcur-peek c)]
+      (or (= b CH-SPACE) (or (= b CH-DOT) (= b CH-HASH))))))
 
 (defn gparse-op [(c (ptr GCur))] (-> i64)
   (let [start (load (field c i))
@@ -601,7 +636,22 @@
                 (gparse-udec c))
     AUXK-TYPE (if (not (gcur-eat-ch? c CH-SPACE)) (do (gfail! c GERR-AUX-MISSING) TY-NO-ID)
                 (gparse-aux-type c))
+    AUXK-SHAPE (gparse-aux-num c GERR-BAD-SHAPE)
+    AUXK-ALIAS (gparse-aux-num c GERR-BAD-ALIAS)
     (do (panic-gtext "gparse-aux: aux kind with no parsed form") -1)))
+
+;; `#<dec>`, checked against the table it indexes. `which` selects which table and therefore which
+;; failure a number outside it reports; both are checked HERE and not left to the verifier,
+;; because the parser calls `n-new` and a New whose shape does not exist makes `new-compute` abort
+;; by name at the first peephole. A parser is given untrusted bytes and must not be able to build
+;; a graph that aborts the process.
+(defn gparse-aux-num [(c (ptr GCur)) (which i64)] (-> i64)
+  (if (not (gcur-eat-ch? c CH-HASH)) (do (gfail! c GERR-BAD-AUXNUM) -1)
+    (let [v (gparse-udec c)]
+      (if (not (gtext-ok?)) -1
+        (if (= which GERR-BAD-SHAPE)
+            (if (shape-defined? v) v (do (gfail! c GERR-BAD-SHAPE) -1))
+          (if (shape-alias-defined? v) v (do (gfail! c GERR-BAD-ALIAS) -1)))))))
 
 ;; Print indices 0 and 1 are the singletons `graph-reset!` already made; everything else is new.
 ;; A Start or Stop anywhere else is refused rather than created, because `g-start`/`g-stop` would

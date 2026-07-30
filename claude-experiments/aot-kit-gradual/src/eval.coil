@@ -34,6 +34,7 @@
 (import "fmt.coil"       :use *)
 (import "slice.coil"     :use *)
 (import "ty.coil"        :use *)
+(import "shape.coil"     :use *)
 (import "node.coil"      :use *)
 
 ; ============================================================================
@@ -43,12 +44,45 @@
 ;; an oracle wants to be obviously correct rather than fast. Floats are held as bit patterns for
 ;; the same reason the lattice does: NaN is not reflexive under comparison, and an oracle that
 ;; cannot distinguish two NaNs cannot check a program that produces one.
+;;
+;; AN OBJECT IS AN IDENTITY AND NOTHING ELSE, and a MEMORY STATE IS A VALUE. Both are decisions
+;; about what this interpreter is, and the second one is the load-bearing one: see the heap
+;; section below for why a mutable heap cannot work in a graph with no schedule.
 (defsum RtVal
   (RUndef)
   (RNull)
   (RBool [(b bool)])
   (RInt  [(n i64)])
-  (RFlt  [(bits i64)]))
+  (RFlt  [(bits i64)])
+  (RObj  [(id i64)])      ; an object's identity; its shape is in the object table
+  (RMem  [(ver i64)]))    ; a memory state, as a version in the heap arena
+
+;; The tag and the payload, so that the questions "is this the same value" and "is this a memory
+;; state" are each answered once instead of in an N-by-N nest of matches. `rt-eq?` was that nest
+;; and adding two variants would have made it 49 arms, none of which says anything a tag and an
+;; integer do not.
+;;
+;; EVERY PAYLOAD IS AN i64 AND THAT IS EXACT, not a compression: a bool is 0 or 1, a float is
+;; already held as its BIT PATTERN (see above: an oracle that cannot tell two NaNs apart cannot
+;; check a program that makes one), and an object and a memory state are indices into their
+;; tables, where equality IS identity.
+(const RT-UNDEF i64 0)
+(const RT-NULL  i64 1)
+(const RT-BOOL  i64 2)
+(const RT-INT   i64 3)
+(const RT-FLT   i64 4)
+(const RT-OBJ   i64 5)
+(const RT-MEM   i64 6)
+
+(defn rt-tag [(v RtVal)] (-> i64)
+  (match v
+    (RUndef [] RT-UNDEF) (RNull [] RT-NULL) (RBool [b] RT-BOOL)
+    (RInt [n] RT-INT) (RFlt [bits] RT-FLT) (RObj [id] RT-OBJ) (RMem [ver] RT-MEM)))
+
+(defn rt-payload [(v RtVal)] (-> i64)
+  (match v
+    (RUndef [] 0) (RNull [] 0) (RBool [b] (if b 1 0))
+    (RInt [n] n) (RFlt [bits] bits) (RObj [id] id) (RMem [ver] ver)))
 
 ; ============================================================================
 ; Statuses
@@ -62,6 +96,21 @@
 (const EV-CAST      i64 6)   ; a Cast whose value does not satisfy it: a COMPILER bug
 (const EV-DEAD      i64 7)   ; control reached a dead or unreachable node
 
+;; THE TWO MEMORY CONTRACTS, and both are COMPILER bugs rather than program conditions, which is
+;; why each gets its own status instead of being folded into EV-TYPE.
+;;
+;;   EV-MEM    a memory edge that does not describe the alias class being touched: a Load whose
+;;             memory input does not carry its alias, a MemMerge of two states that both claim
+;;             one, a load of a word no allocation in this chain ever initialised. Every one of
+;;             those is a miswired memory edge, and every one is invisible to the type system,
+;;             which happily reports ALL contents and lets the program run on.
+;;   EV-SHAPE  an object whose shape does not carry the field being touched. In the source
+;;             language that is `o.z` on an object with no `z`, which is `undefined`; in THIS IR
+;;             it is a front end that emitted a fixed-offset access without proving the shape,
+;;             and answering `undefined` would hide exactly the guard D4 exists to require.
+(const EV-MEM       i64 8)
+(const EV-SHAPE     i64 9)
+
 (defn ev-status-name [(s i64)] (-> (slice u8))
   (case s
     EV-OK "ok" EV-STEPS "step budget exhausted" EV-STUCK "control is stuck"
@@ -69,16 +118,199 @@
     EV-OVERFLOW "integer overflow (JS would promote to double: needs M5)"
     EV-CAST "a Cast was not satisfied: the compiler narrowed without proof"
     EV-DEAD "control reached a dead node"
+    EV-MEM "a memory edge does not describe the alias class being touched"
+    EV-SHAPE "an object's shape does not carry that field: the shape was not guarded"
     "?"))
+
+; ============================================================================
+; The heap: a memory state is a VALUE
+; ============================================================================
+;; WHY THE HEAP IS IMMUTABLE AND VERSIONED, which is the one design decision in this file that a
+;; reader is likely to want to argue with.
+;;
+;; The obvious interpreter keeps a mutable heap and has `Store` write into it. That is wrong here,
+;; and not slightly: this walker follows CONTROL explicitly and evaluates DATA ON DEMAND, so a
+;; Load is evaluated when somebody asks for its value, which in a sea of nodes is not the point in
+;; the program where it sits. A mutable heap would answer from whatever state the walk happened to
+;; have reached, so the same graph would produce different results depending on which use asked
+;; first — and the whole purpose of this file is to be the thing that DECIDES what a graph means.
+;;
+;; Memory SSA already says what to do: a memory state is a value like any other, an edge from the
+;; producer to the consumer, and a Load reads the state its own memory edge names. So a version
+;; here is exactly one memory edge's worth of heap, evaluating one is a pure function, and the
+;; answer does not depend on when it is asked. Cost: a Store is O(1) but a lookup walks its chain,
+;; and nothing is ever freed until the run ends. An oracle should be obviously correct.
+;;
+;; THE ALIAS MASK IS CHECKED AND NOT ASSUMED. Each version records which alias classes it
+;; describes, mirroring `TMem.aliases`: a `Store` produces a state describing ONE class, a `New`'s
+;; field projection likewise, and a `MemMerge` combines classes that must be DISJOINT. Every read
+;; checks the mask, so a miswired memory edge is EV-MEM at the node that read it instead of a
+;; plausible value from an unrelated field. That check is most of what makes running a memory
+;; graph evidence of anything.
+(const HV-EMPTY i64 0)   ; describes its mask, and nothing has been written to it
+(const HV-WRITE i64 1)   ; one field of one object, over a previous state
+(const HV-MERGE i64 2)   ; several states over disjoint alias classes
+
+(defstruct HvEnt
+  [(kind  i64)
+   (prev  i64)      ; WRITE: the state this one extends; -1 otherwise
+   (mask  i64)      ; the alias classes this state describes
+   (obj   i64)      ; WRITE: which object
+   (alias i64)      ; WRITE: which class, and therefore which word
+   (val   RtVal)    ; WRITE: what was written
+   (koff  i64)      ; MERGE: the window into `hvk` holding its children
+   (klen  i64)])
+
+(defn hve-kind  [(e HvEnt)] (-> i64) (load (field e kind)))
+(defn hve-prev  [(e HvEnt)] (-> i64) (load (field e prev)))
+(defn hve-mask  [(e HvEnt)] (-> i64) (load (field e mask)))
+(defn hve-obj   [(e HvEnt)] (-> i64) (load (field e obj)))
+(defn hve-alias [(e HvEnt)] (-> i64) (load (field e alias)))
+(defn hve-val   [(e HvEnt)] (-> RtVal) (load (field e val)))
+(defn hve-koff  [(e HvEnt)] (-> i64) (load (field e koff)))
+(defn hve-klen  [(e HvEnt)] (-> i64) (load (field e klen)))
+
+;; An impossible heap is a bug in this file, not a program condition, so it aborts rather than
+;; taking a status: a status is the interpreter's report ABOUT a program, and every one of these
+;; would be the interpreter reporting about itself.
+(defn ev-heap-panic [(msg (slice u8))] (-> i64)
+  (let [w (stderr)] (ps w "eval heap: ") (ps w msg) (ps w "\n"))
+  (abort) 0)
+
+(defn hv-count [] (-> i64) (al-len [HvEnt] (load (field (ev) hv))))
+
+(defn hv-ent [(v i64)] (-> HvEnt)
+  (if (and (>= v 0) (< v (hv-count))) 0
+    (do (ev-heap-panic "hv-ent: not a memory version") 0))
+  (al-get (load (field (ev) hv)) v))
+
+(defn hv-push! [(kind i64) (prev i64) (mask i64) (obj i64) (alias i64) (val RtVal)
+                (koff i64) (klen i64)] (-> i64)
+  (let [p (ev) (mut e) (zeroed HvEnt) id (hv-count)]
+    (store! (field e kind)  kind)
+    (store! (field e prev)  prev)
+    (store! (field e mask)  mask)
+    (store! (field e obj)   obj)
+    (store! (field e alias) alias)
+    (store! (field e val)   val)
+    (store! (field e koff)  koff)
+    (store! (field e klen)  klen)
+    (al-push! [HvEnt] (field p hv) (load e))
+    id))
+
+;; The state a program starts from, or that a function receives: it describes its classes and
+;; holds nothing. This is what an `Arg` of memory type evaluates to, which is how memory ENTERS a
+;; graph at all (see `ev-value-in`).
+(defn hv-empty! [(mask i64)] (-> i64)
+  (hv-push! HV-EMPTY -1 mask 0 0 (RUndef) 0 0))
+
+;; A store to one word. THE MASK IS THE ALIAS'S ALONE, however wide `prev` was, because that is
+;; what `store-compute` says the type is: a Store produces the new state of ITS class and nothing
+;; else. A chain that needs more than one class again goes through a MemMerge.
+(defn hv-write! [(prev i64) (obj i64) (alias i64) (val RtVal)] (-> i64)
+  (hv-push! HV-WRITE prev (<< 1 alias) obj alias val 0 0))
+
+;; The children must already be in `hvk` and their masks disjoint; `ev-memmerge` checks the
+;; disjointness, because that is a claim about the GRAPH and its failure is EV-MEM rather than an
+;; abort.
+(defn hv-merge! [(off i64) (len i64)] (-> i64)
+  (let [p (ev) (mut mask) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (store! mask (| (load mask) (hv-mask (al-get (load (field p hvk)) (+ off (load i))))))
+            (store! i (+ (load i) 1))
+            0)))
+    (hv-push! HV-MERGE -1 (load mask) 0 0 (RUndef) off len)))
+
+(defn hv-mask [(v i64)] (-> i64) (let [e (hv-ent v)] (hve-mask e)))
+
+;; Which child of a merge owns this alias class. The masks are disjoint, so there is at most one,
+;; and -1 (no child) is a legitimate answer: the class is simply not described by this state, and
+;; the caller reports EV-MEM.
+(defn hv-kid-with [(e HvEnt) (alias i64)] (-> i64)
+  (let [p (ev) off (hve-koff e) n (hve-klen e) (mut i) 0 (mut found) -1]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) -1)) (break)
+        (do (let [k (al-get (load (field p hvk)) (+ off (load i)))]
+              (if (!= (& (hv-mask k) (<< 1 alias)) 0) (store! found k) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; The version that wrote (obj, alias) most recently, or -1. Both recursive calls are in tail
+;; position, so a long store chain costs no stack.
+(defn hv-find [(v i64) (obj i64) (alias i64)] (-> i64)
+  (if (< v 0) -1
+    (let [e (hv-ent v)]
+      (case (hve-kind e)
+        HV-EMPTY -1
+        HV-WRITE (if (and (= (hve-obj e) obj) (= (hve-alias e) alias)) v
+                   (hv-find (hve-prev e) obj alias))
+        HV-MERGE (hv-find (hv-kid-with e alias) obj alias)
+        (do (ev-heap-panic "hv-find: a memory version with no kind") -1)))))
+
+;; The lattice type of everything this state holds, which is what `rt-ty` answers for a memory
+;; value. Shadowed writes are included, which only makes the answer more general and so cannot
+;; make a Cast pass that should have failed.
+(defn hv-contents [(v i64)] (-> i64)
+  (if (< v 0) (t-top)
+    (let [e (hv-ent v)]
+      (case (hve-kind e)
+        HV-EMPTY (t-top)
+        HV-WRITE (ty-meet (rt-ty (hve-val e)) (hv-contents (hve-prev e)))
+        HV-MERGE (hv-kids-contents e)
+        (do (ev-heap-panic "hv-contents: a memory version with no kind") (t-bot))))))
+
+(defn hv-kids-contents [(e HvEnt)] (-> i64)
+  (let [p (ev) off (hve-koff e) n (hve-klen e) (mut t) (t-top) (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (store! t (ty-meet (load t) (hv-contents (al-get (load (field p hvk)) (+ off (load i))))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load t)))
+
+; ---------------------------------------------------------------------------
+; Objects
+; ---------------------------------------------------------------------------
+;; AN OBJECT IS AN IDENTITY AND A SHAPE. Its FIELDS are not here: they live in the memory states,
+;; because that is where the IR puts them. An object table that also held values would be a second
+;; heap, and the two would drift on exactly the graph where the memory edges are wrong, which is
+;; the graph this oracle exists to catch.
+(defn ev-obj-count [] (-> i64) (al-len [i64] (load (field (ev) objs))))
+
+(defn ev-obj-new! [(shape i64)] (-> i64)
+  (if (shape-defined? shape) 0
+    (do (ev-heap-panic "ev-obj-new!: a New whose shape id is not defined") 0))
+  (let [p (ev) id (ev-obj-count)]
+    (al-push! [i64] (field p objs) shape)
+    id))
+
+(defn ev-obj-shape [(o i64)] (-> i64)
+  (if (and (>= o 0) (< o (ev-obj-count))) 0
+    (do (ev-heap-panic "ev-obj-shape: not an allocated object") 0))
+  (al-get (load (field (ev) objs)) o))
 
 ; ============================================================================
 ; Interpreter state
 ; ============================================================================
+;; `env` is the environment: node id -> the value control has most recently established for it.
+;; It holds two kinds of node, and they are the same mechanism rather than two:
+;;
+;;   a Phi     gets its value when control arrives at its merge (`ev-enter-merge!`)
+;;   a New     gets its OBJECT when control arrives at the block it is pinned to
+;;
+;; See `ev-enter-ctrl!` for why an allocation cannot be evaluated on demand like every other data
+;; node. It was `hasphi` in M3, when a Phi was the only node whose value came from control rather
+;; than from its inputs.
 (defstruct Ev
   [(bound  (ArrayList bool))    ; node id -> is this Arg bound
    (args   (ArrayList RtVal))   ; node id -> its bound value
-   (hasphi (ArrayList bool))    ; node id -> does the environment hold a value for this Phi
-   (env    (ArrayList RtVal))   ; node id -> a Phi's current value
+   (hasenv (ArrayList bool))    ; node id -> does the environment hold a value for this node
+   (env    (ArrayList RtVal))   ; node id -> that value
+   (hv     (ArrayList HvEnt))   ; the heap: every memory state this run has produced
+   (hvk    (ArrayList i64))     ; a MemMerge's children, addressed by (koff, klen)
+   (objs   (ArrayList i64))     ; object id -> its shape
    (status i64)
    (steps  i64)
    (result RtVal)
@@ -91,8 +323,11 @@
       (do (store! (field p inited) true)
           (store! (field p bound)  (al-new [bool]  (malloc-allocator)))
           (store! (field p args)   (al-new [RtVal] (malloc-allocator)))
-          (store! (field p hasphi) (al-new [bool]  (malloc-allocator)))
+          (store! (field p hasenv) (al-new [bool]  (malloc-allocator)))
           (store! (field p env)    (al-new [RtVal] (malloc-allocator)))
+          (store! (field p hv)     (al-new [HvEnt] (malloc-allocator)))
+          (store! (field p hvk)    (al-new [i64]   (malloc-allocator)))
+          (store! (field p objs)   (al-new [i64]   (malloc-allocator)))
           0))
     p))
 
@@ -102,13 +337,19 @@
   (let [p (ev) n (n-count) (mut i) 0]
     (al-clear! [bool]  (field p bound))
     (al-clear! [RtVal] (field p args))
-    (al-clear! [bool]  (field p hasphi))
+    (al-clear! [bool]  (field p hasenv))
     (al-clear! [RtVal] (field p env))
+    ; The heap belongs to ONE run. Carrying versions or object ids across runs would make a
+    ; differential comparison of two builds of one program compare object identities minted in
+    ; different runs, which is the one thing about an identity that must not be observable.
+    (al-clear! [HvEnt] (field p hv))
+    (al-clear! [i64]   (field p hvk))
+    (al-clear! [i64]   (field p objs))
     (loop
       (if (>= (load i) n) (break)
         (do (al-push! [bool]  (field p bound)  false)
             (al-push! [RtVal] (field p args)   (RUndef))
-            (al-push! [bool]  (field p hasphi) false)
+            (al-push! [bool]  (field p hasenv) false)
             (al-push! [RtVal] (field p env)    (RUndef))
             (store! i (+ (load i) 1))
             0)))
@@ -151,7 +392,12 @@
     (RNull   [] (t-null))
     (RBool [b] (t-bool-con b))
     (RInt  [n] (t-int-con n))
-    (RFlt  [bits] (t-flt-bits bits))))
+    (RFlt  [bits] (t-flt-bits bits))
+    ; An object's most specific type is its own shape, singleton. That is the claim a shape-set
+    ; type is an over-approximation of, so a Cast to `obj#{s}` on an object of shape s passes and
+    ; one on an object of another shape does not, which is exactly what a shape guard must mean.
+    (RObj  [id] (t-obj-shape (ev-obj-shape id)))
+    (RMem  [ver] (t-mem (hv-mask ver) (hv-contents ver)))))
 
 (defn rt-print [(w (ptr Writer)) (v RtVal)] (-> i64)
   (match v
@@ -159,18 +405,17 @@
     (RNull   [] (ps w "null"))
     (RBool [b] (ps w (if b "true" "false")))
     (RInt  [n] (do (fmt w "{d}" n) 0))
-    (RFlt  [bits] (do (fmt w "{f}" (bits-f64 bits)) 0))))
+    (RFlt  [bits] (do (fmt w "{f}" (bits-f64 bits)) 0))
+    ; the IDENTITY is in the print, because "two objects" and "one object twice" is the whole
+    ; difference a fixture about allocation is asserting
+    (RObj  [id] (do (fmt w "obj{d}#{d}" id (ev-obj-shape id)) 0))
+    (RMem  [ver] (do (fmt w "mem#{d}@{d}" (hv-mask ver) ver) 0))))
 
+;; Identity of runtime values, for the differential comparison. Bit equality on floats on purpose:
+;; two NaNs are the same OUTCOME even though `==` says otherwise, and an oracle comparing two runs
+;; of one program wants outcomes. Object identity is table identity, which is the same statement.
 (defn rt-eq? [(a RtVal) (b RtVal)] (-> bool)
-  ; identity of runtime values, for the differential comparison. Bit equality on floats on
-  ; purpose: two NaNs are the same OUTCOME even though `==` says otherwise, and an oracle
-  ; comparing two runs of the same program wants outcomes.
-  (match a
-    (RUndef [] (match b (RUndef [] true) (RNull [] false) (RBool [x] false) (RInt [x] false) (RFlt [x] false)))
-    (RNull  [] (match b (RNull [] true) (RUndef [] false) (RBool [x] false) (RInt [x] false) (RFlt [x] false)))
-    (RBool [x] (match b (RBool [y] (= x y)) (RUndef [] false) (RNull [] false) (RInt [y] false) (RFlt [y] false)))
-    (RInt  [x] (match b (RInt [y] (= x y)) (RUndef [] false) (RNull [] false) (RBool [y] false) (RFlt [y] false)))
-    (RFlt  [x] (match b (RFlt [y] (= x y)) (RUndef [] false) (RNull [] false) (RBool [y] false) (RInt [y] false)))))
+  (and (= (rt-tag a) (rt-tag b)) (= (rt-payload a) (rt-payload b))))
 
 ;; JavaScript truthiness, on a concrete value. It has to agree with `ty-can-be-falsey?` in
 ;; node.coil or the interpreter takes a different branch than the compiler predicted, which would
@@ -181,7 +426,17 @@
     (RNull   [] false)
     (RBool [b] b)
     (RInt  [n] (!= n 0))
-    (RFlt  [bits] (not (fbits-falsey? bits)))))
+    (RFlt  [bits] (not (fbits-falsey? bits)))
+    (RObj  [id] true)          ; every object is truthy: `ty-can-be-truthy?`'s VK-ALWAYS-TRUTHY
+    ; A memory state is not a condition. `ty-can-be-falsey?` and `ty-can-be-truthy?` both answer
+    ; false for one, so the lattice says an If on it takes NEITHER arm; this answer is never the
+    ; one used, because every caller asks `rt-condition?` first and reports EV-TYPE.
+    (RMem  [ver] false)))
+
+;; Can this value be a condition at all? The verifier cannot answer it: `Store` is a value op by
+;; the numbering, so a memory state parked in an If's predicate slot passes `v-need-value`, and
+;; only running the program can say that the branch had nothing to test.
+(defn rt-condition? [(v RtVal)] (-> bool) (!= (rt-tag v) RT-MEM))
 
 ; ============================================================================
 ; Data evaluation
@@ -208,7 +463,13 @@
           OP-EQ    (ev-cmp n OP-EQ)
           OP-LT    (ev-cmp n OP-LT)
           OP-LE    (ev-cmp n OP-LE)
-          OP-PROJ  (ev-fail! EV-STUCK n)   ; no multi-node produces a data value yet
+          OP-PROJ  (ev-proj n)
+          OP-LOAD  (ev-load n)
+          OP-STORE (ev-store n)
+          OP-MEMMERGE (ev-memmerge n)
+          ; A New is a MULTI node and has no single value: its object and each of its fields'
+          ; memory states are read through its projections, exactly as an If's arms are.
+          OP-NEW   (ev-fail! EV-STUCK n)
           (do (ev-unknown-op n) (RUndef)))))))
 
 (defn ev-unknown-op [(n i64)] (-> i64)
@@ -251,9 +512,153 @@
 
 (defn ev-phi [(n i64)] (-> RtVal)
   (let [p (ev)]
-    (if (al-get (load (field p hasphi)) n) (al-get (load (field p env)) n)
+    (if (al-get (load (field p hasenv)) n) (al-get (load (field p env)) n)
       ; a Phi with no environment entry means control never arrived at its merge
       (ev-fail! EV-STUCK n))))
+
+; ---------------------------------------------------------------------------
+; Memory
+; ---------------------------------------------------------------------------
+;; Two coercions with a typed failure attached, so the four rules below read as the rules and not
+;; as tag checks. Neither can be a `match`: the interesting case is one arm and the other six all
+;; do the same thing.
+(defn rt-need-mem [(v RtVal) (n i64)] (-> i64)
+  (if (= (rt-tag v) RT-MEM) (rt-payload v) (do (ev-fail! EV-MEM n) -1)))
+(defn rt-need-obj [(v RtVal) (n i64)] (-> i64)
+  (if (= (rt-tag v) RT-OBJ) (rt-payload v) (do (ev-fail! EV-TYPE n) -1)))
+
+;; Does this memory state describe that class, and does that object carry that word. Both are
+;; asked by Load and by Store, and both are the checks that make running a memory graph mean
+;; something; see EV-MEM and EV-SHAPE.
+(defn ev-check-access [(n i64) (ver i64) (obj i64) (alias i64)] (-> bool)
+  (if (= (& (hv-mask ver) (<< 1 alias)) 0) (do (ev-fail! EV-MEM n) false)
+    (if (= (shape-field-by-alias (ev-obj-shape obj) alias) SHAPE-NO-FIELD)
+        (do (ev-fail! EV-SHAPE n) false)
+      true)))
+
+;; A New's projections. Slot 0 is the object, which control established when it arrived at the
+;; block (see `ev-enter-ctrl!`); slot 1+i is field i's memory, which is the incoming state for
+;; that class with the fresh object's field initialised to `undefined`.
+;;
+;; RE-EVALUATING THIS IS HARMLESS AND THAT IS NOT AN ACCIDENT. A data node is evaluated once per
+;; demand, not once per execution, so this runs again for every consumer of the memory edge; the
+;; object comes from the environment rather than from here, so each of those evaluations produces
+;; the same write over the same parent, and the only cost is an arena entry. Allocating the object
+;; here instead would make a second consumer see a second object.
+(defn ev-proj [(n i64)] (-> RtVal)
+  (let [m (n-in n 0) slot (n-aux n) p (ev)]
+    (if (= m NO-NODE) (ev-fail! EV-STUCK n)
+      ; a projection of an If or a Return carries no runtime value: control took the arm, and
+      ; nothing reads the tuple itself
+      (if (!= (n-op m) OP-NEW) (ev-fail! EV-STUCK n)
+        (if (not (al-get (load (field p hasenv)) m)) (ev-fail! EV-STUCK n)
+          (let [ov (al-get (load (field p env)) m)]
+            (if (= slot 0) ov
+              (if (or (< slot 1) (>= slot (n-nins m))) (ev-fail! EV-STUCK n)
+                (let [alias (shape-field-alias (n-aux m) (- slot 1))
+                      inm   (ev-data (n-in m slot))]
+                  (if (ev-failed?) inm
+                    (let [ver (rt-need-mem inm n)]
+                      (if (ev-failed?) (RUndef)
+                        (RMem (hv-write! ver (rt-payload ov) alias (RUndef)))))))))))))))
+
+(defn ev-load [(n i64)] (-> RtVal)
+  (let [mv (ev-data (n-in n 1))]
+    (if (ev-failed?) mv
+      (let [pv (ev-data (n-in n 2))]
+        (if (ev-failed?) pv
+          (let [ver (rt-need-mem mv n) obj (rt-need-obj pv n)]
+            (if (ev-failed?) (RUndef)
+              (if (not (ev-check-access n ver obj (n-aux n))) (RUndef)
+                (let [e (hv-find ver obj (n-aux n))]
+                  ; NOTHING IN THIS CHAIN EVER INITIALISED THAT WORD. Every object is created by
+                  ; a New that writes `undefined` into each of its fields' classes, so a live
+                  ; object whose field is missing here means the load's memory edge does not
+                  ; descend from that allocation: the chain was miswired, and `undefined` would
+                  ; be a plausible answer that hides it.
+                  (if (< e 0) (ev-fail! EV-MEM n)
+                    (let [ent (hv-ent e)] (hve-val ent))))))))))))
+
+(defn ev-store [(n i64)] (-> RtVal)
+  (let [mv (ev-data (n-in n 1))]
+    (if (ev-failed?) mv
+      (let [pv (ev-data (n-in n 2))]
+        (if (ev-failed?) pv
+          (let [xv (ev-data (n-in n 3))]
+            (if (ev-failed?) xv
+              (let [ver (rt-need-mem mv n) obj (rt-need-obj pv n)]
+                (if (ev-failed?) (RUndef)
+                  (if (not (ev-check-access n ver obj (n-aux n))) (RUndef)
+                    (RMem (hv-write! ver obj (n-aux n) xv))))))))))))
+
+;; THE CHILDREN ARE COLLECTED BEFORE THE WINDOW IS OPENED, and that is the same hazard
+;; `ty-tuple-open` and `shape-fields-open` are shaped around: evaluating an input can itself be a
+;; MemMerge, which appends to the very array this one is filling, so a window opened first would
+;; end up describing the inner merge's children. Here the fix is to finish evaluating and only
+;; then append, which is available because nothing needs the window's address until the end.
+(defn ev-memmerge [(n i64)] (-> RtVal)
+  (let [p (ev)
+        len (n-nins n)
+        (mut kids) (al-new [i64] (malloc-allocator))
+        (mut mask) 0
+        (mut i) 1]
+    (loop
+      (if (or (>= (load i) len) (ev-failed?)) (break)
+        (do (let [v (ev-data (n-in n (load i)))]
+              (if (ev-failed?) 0
+                (let [ver (rt-need-mem v n)]
+                  (if (ev-failed?) 0
+                    ; DISJOINT, checked. Two states both claiming a class means the merge has no
+                    ; answer for it: `ty-meet` on the alias axis would OR the bits and report a
+                    ; state that describes the class twice, and a later load would silently read
+                    ; whichever child the scan reached first.
+                    (if (!= (& (load mask) (hv-mask ver)) 0) (do (ev-fail! EV-MEM n) 0)
+                      (do (store! mask (| (load mask) (hv-mask ver)))
+                          (al-push! [i64] (mut kids) ver)
+                          0))))))
+            (store! i (+ (load i) 1))
+            0)))
+    (let [res (if (ev-failed?) (RUndef)
+                (let [off (al-len [i64] (load (field p hvk)))
+                      k   (al-len [i64] (load kids))
+                      (mut j) 0]
+                  (loop
+                    (if (>= (load j) k) (break)
+                      (do (al-push! [i64] (field p hvk) (al-get (load kids) (load j)))
+                          (store! j (+ (load j) 1))
+                          0)))
+                  (RMem (hv-merge! off k))))]
+      (al-free! [i64] (mut kids))
+      res)))
+
+;; AN ALLOCATION IS EXECUTED WHEN CONTROL ARRIVES, not when its value is demanded, and this is the
+;; one place the interpreter departs from "control explicit, data on demand".
+;;
+;; It has to. A data node is evaluated once per USE, and object identity is not something that may
+;; be computed twice: `o = {}; if (p) use(o); else use(o);` demands the New from two different
+;; control steps, and a New that allocated on demand would hand out two objects for one
+;; allocation. Nor can it allocate once and cache forever, because a New inside a loop must give a
+;; FRESH object every trip. What makes both right at once is the observation that an allocation's
+;; identity is a function of the block it is in and how many times control has entered it — so it
+;; is established exactly when control enters, which is the same mechanism, and the same
+;; environment, a Phi already uses.
+;;
+;; Allocating an object nobody goes on to use is harmless, and saying so is the whole content of
+;; the dead-allocation removal 4c gates: an allocation whose result is never read is unobservable,
+;; which is why removing it is legal.
+(defn ev-enter-ctrl! [(c i64)] (-> i64)
+  (let [p (ev) len (n-nouts c) (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [u (n-out c (load i))]
+              (if (or (n-dead? u) (!= (n-op u) OP-NEW)) 0
+                (if (or (= (n-nins u) 0) (!= (n-in u 0) c)) 0
+                  (do (al-set! [bool]  (field p hasenv) u true)
+                      (al-set! [RtVal] (field p env)    u (RObj (ev-obj-new! (n-aux u))))
+                      0))))
+            (store! i (+ (load i) 1))
+            0)))
+    0))
 
 ;; The check that earns this its own status. A Cast is the compiler asserting a narrower type on a
 ;; control path; if the value does not satisfy it, the compiler narrowed without proof.
@@ -268,17 +673,20 @@
 ;; Numbers only. `+` on a string would concatenate, which is real JavaScript and is why
 ;; `arith-compute` reports `dyn` for it, but there are no runtime strings yet, so a non-numeric
 ;; operand is a typed failure rather than an invented answer.
-(defn rt-num? [(v RtVal)] (-> bool)
-  (match v (RInt [n] true) (RFlt [b] true) (RUndef [] false) (RNull [] false) (RBool [b] false)))
-(defn rt-int? [(v RtVal)] (-> bool)
-  (match v (RInt [n] true) (RFlt [b] false) (RUndef [] false) (RNull [] false) (RBool [b] false)))
+;; An object would coerce through valueOf in real JavaScript, which needs a call, so arithmetic on
+;; one is EV-TYPE here for the same reason arithmetic on a string is: a guess would make this
+;; oracle disagree with the language it defines.
+(defn rt-num? [(v RtVal)] (-> bool) (or (= (rt-tag v) RT-INT) (= (rt-tag v) RT-FLT))
+)
+(defn rt-int? [(v RtVal)] (-> bool) (= (rt-tag v) RT-INT))
 (defn rt-as-f64 [(v RtVal)] (-> f64)
   (match v
     (RInt [n] (cast f64 n))
     (RFlt [b] (bits-f64 b))
-    (RUndef [] 0.0) (RNull [] 0.0) (RBool [b] 0.0)))
+    (RUndef [] 0.0) (RNull [] 0.0) (RBool [b] 0.0) (RObj [id] 0.0) (RMem [ver] 0.0)))
 (defn rt-as-int [(v RtVal)] (-> i64)
-  (match v (RInt [n] n) (RFlt [b] 0) (RUndef [] 0) (RNull [] 0) (RBool [b] 0)))
+  (match v (RInt [n] n) (RFlt [b] 0) (RUndef [] 0) (RNull [] 0) (RBool [b] 0)
+           (RObj [id] 0) (RMem [ver] 0)))
 
 (defn ev-arith [(n i64) (op i64)] (-> RtVal)
   (let [a (ev-data (n-in n 1))]
@@ -407,13 +815,16 @@
                       (do (al-push! [i64] (mut pending-n) u)
                           (al-push! [RtVal] (mut pending-v) (ev-data (n-in u idx)))
                           0))))
+                ; A MEMORY PHI IS AN ORDINARY PHI HERE, and it is worth noticing that nothing
+                ; above had to change for it: its incoming value is a memory state, which is a
+                ; value, so it is evaluated in the old environment and committed with the rest.
                 (store! i (+ (load i) 1))
                 0)))
         (let [m (al-len [i64] (load pending-n)) (mut k) 0]
           (loop
             (if (>= (load k) m) (break)
               (do (let [u (al-get (load pending-n) (load k))]
-                    (al-set! [bool]  (field p hasphi) u true)
+                    (al-set! [bool]  (field p hasenv) u true)
                     (al-set! [RtVal] (field p env)    u (al-get (load pending-v) (load k))))
                   (store! k (+ (load k) 1))
                   0))))
@@ -437,18 +848,30 @@
               (let [c (load cur)]
                 (if (n-dead? c) (do (ev-fail! EV-DEAD c) 0)
                   (if (= (n-ty c) (t-xctrl)) (do (ev-fail! EV-DEAD c) 0)
-                    (case (n-op c)
+                    (do
+                     ; every allocation pinned to this block happens now; see ev-enter-ctrl!
+                     (ev-enter-ctrl! c)
+                     (case (n-op c)
                       OP-RETURN
                         (do (store! (field p result) (ev-data (n-in c 1)))
+                            ; THE FINAL MEMORY IS EVALUATED TOO, when the Return carries one. It
+                            ; is not the program's result and nothing compares it, but forcing
+                            ; the chain is what makes a store nobody reads still run, and
+                            ; therefore what makes EV-MEM reachable on a miswired tail. A
+                            ; program whose value is fine and whose heap is not is not a program
+                            ; that passed.
+                            (if (or (ev-failed?) (< (n-nins c) 3)) 0
+                              (do (ev-data (n-in c 2)) 0))
                             (if (ev-failed?) 0 (store! (field p status) EV-OK))
                             (break))
                       OP-IF
                         (let [pred (ev-data (n-in c 1))]
                           (if (ev-failed?) 0
+                            (if (not (rt-condition? pred)) (do (ev-fail! EV-TYPE c) 0)
                             (let [want (if (rt-truthy? pred) 0 1)
                                   arm  (ev-if-arm c want)]
                               (if (= arm NO-NODE) (do (ev-fail! EV-STUCK c) 0)
-                                (do (store! prev c) (store! cur arm) 0)))))
+                                (do (store! prev c) (store! cur arm) 0))))))
                       OP-REGION
                         (do (ev-enter-merge! c (load prev))
                             (if (ev-failed?) 0
@@ -465,7 +888,7 @@
                       ; Start and CProj just pass control along
                       (let [nx (ev-ctrl-succ c)]
                         (if (= nx NO-NODE) (do (ev-fail! EV-STUCK c) 0)
-                          (do (store! prev c) (store! cur nx) 0))))))))
+                          (do (store! prev c) (store! cur nx) 0)))))))))
             0))))
   (load (field (ev) status)))
 
@@ -514,7 +937,14 @@
     (TCtrl [] (do (ev-no-value-for t) (RUndef)))
     (TXCtrl [] (do (ev-no-value-for t) (RUndef)))
     (TTuple [o l] (do (ev-no-value-for t) (RUndef)))
-    (TMem [a c] (do (ev-no-value-for t) (RUndef)))))
+    ;; MEMORY ENTERS A GRAPH THROUGH AN ARG, and this arm is what makes that work. The
+    ;; inhabitant of a declared memory state is the EMPTY state over its classes, which is
+    ;; exactly right for the two cases that exist: a whole program starts with an empty heap,
+    ;; and (from M6) a function receives its caller's memory, which is opaque to it either way.
+    ;; A run then reports EV-MEM on any load of a word this run's allocations did not create,
+    ;; which is the correct answer and not a limitation: a program cannot read a field of an
+    ;; object it never allocated.
+    (TMem [a c] (RMem (hv-empty! a)))))
 
 (defn abs64 [(x i64)] (-> i64) (if (< x 0) (- 0 x) x))
 

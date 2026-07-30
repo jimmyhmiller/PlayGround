@@ -77,7 +77,7 @@
 ;; How many DIFFERENT named failure codes the malformed table reaches. Every code except GERR-NONE,
 ;; and the count is tied to `gtext-err-count` below so that adding a code without provoking it is a
 ;; failure rather than a silently weaker table.
-(const GERR-CODE-FLOOR i64 19)
+(const GERR-CODE-FLOOR i64 22)
 
 ;; One-field-apart graph pairs. Ten pairs cover op, projection slot, three aux kinds, the computed
 ;; type, which node an input names, input ORDER, and arity.
@@ -651,6 +651,18 @@
     ; which is a root nothing anchors a constant to
     (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Start <- : ctrl\n"
                                              GERR-ROOT-DUP)))
+    ;; THE SHAPE TABLE IS NOT IN THE TEXT, so a shape id or an alias number is only meaningful
+    ;; against the table that is live. This suite never builds one, so its table is the root shape
+    ;; alone and every id below is outside it, which is the same failure as parsing a text printed
+    ;; from another program. It has to be refused HERE and not left to the verifier: the parser
+    ;; calls `n-new`, and `new-compute` aborts by name on an undefined shape at the first
+    ;; peephole, so a parser that accepted this could be made to abort the process by its input.
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: New <- n0 : ANY\n"
+                                             GERR-BAD-AUXNUM)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: New#9 <- n0 : ANY\n"
+                                             GERR-BAD-SHAPE)))
+    (store! seen (| (load seen) (expect-gerr "n0: Start <- : ctrl\nn1: Stop <- : ALL\nn2: Load#0 <- _ n0 n0 : ANY\n"
+                                             GERR-BAD-ALIAS)))
 
     (fmt w "  {d} different named checks reached\n" (popcount64 (load seen)))
     ; a table that tripped one code twenty times would satisfy every assertion above

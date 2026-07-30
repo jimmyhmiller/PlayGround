@@ -64,11 +64,19 @@
   (if (= (n-op n) OP-CONST) (ty-print w (n-ty n))
     (if (= (n-op n) OP-CPROJ) (ps w (cproj-label n))
       (if (= (n-op n) OP-PROJ) (do (fmt w "Proj.{d}" (n-aux n)) 0)
+        ;; A New's shape and a memory op's alias are the whole content of those boxes: three
+        ;; identical `Store` ellipses say nothing about which words a program writes. The alias
+        ;; prints as the field name for the same reason `cproj-label` prints True and False.
+        (if (= (n-op n) OP-NEW)
+            (do (fmt w "New #{d}" (n-aux n)) 0)
+          (if (or (= (n-op n) OP-LOAD) (= (n-op n) OP-STORE))
+              (do (ps w (op-name (n-op n))) (ps w " .")
+                  (field-print w (n-aux n)) (ps w "\\n") (ty-print w (n-ty n)) 0)
         (if (= (n-op n) OP-CAST)
             (do (ps w "Cast to ") (ty-print w (n-aux n)) 0)
           (do (ps w (op-name (n-op n)))
               (if (op-shows-type? (n-op n)) (do (ps w "\\n") (ty-print w (n-ty n)) 0) 0)
-              0)))))
+              0)))))))
   ; Loop nesting applies to EVERY control node, so it goes outside the chain above. Having it
   ; inside meant CProj returned early and the branch arms of a loop showed no nesting at all,
   ; which made the diagram disagree with a correct loop tree.
@@ -80,7 +88,16 @@
 
 ;; Control nodes carry no type line: `ctrl` under every box is noise, and the shape and the red
 ;; edges already say it.
-(defn op-shows-type? [(op i64)] (-> bool) (not (op-control? op)))
+;;
+;; NOR DOES A MULTI NODE, and that is not cosmetic. A multi's type is a TUPLE, and a tuple's two
+;; printed forms differ deliberately (`[ctrl int]` against `[ctrl,int]`, pinned in both columns by
+;; tests/text-test.coil), so a tuple in a gallery label is the one place the human-visible surface
+;; would depend on which printer produced it. It is also redundant: every slot of the tuple is the
+;; type of a projection drawn directly beneath the box, and those labels carry it. Before M4 this
+;; was true by accident — an If and a Return are control nodes and were excluded already — and a
+;; `New` is the first multi node that is not.
+(defn op-shows-type? [(op i64)] (-> bool)
+  (and (not (op-control? op)) (not (op-multi? op))))
 
 (defn dot-nodes [(w (ptr Writer))] (-> i64)
   (let [n (n-count) (mut i) 0]
@@ -112,10 +129,14 @@
    (and (op-control? (n-op def))
         (or (= (n-op use) OP-CONST) (= (n-op use) OP-ARG)))))
 
+;; An edge is memory when its SOURCE produces a memory state, and that is a question about the
+;; node rather than about its op: a `Proj` is memory at a New's field slots and a value at slot 0,
+;; and a `Phi` is memory exactly when it merges memory. `n-memory?` asks the type, which is the
+;; thing that knows.
 (defn dot-edge-style [(w (ptr Writer)) (def i64)] (-> i64)
   (if (op-control? (n-op def))
       (ps w "color=\"#C0392B\" penwidth=1.8 ")
-    (if (op-memory? (n-op def))
+    (if (n-memory? def)
         (ps w "color=\"#2E86C1\" style=dashed ")
       (ps w "color=\"#444444\" "))))
 

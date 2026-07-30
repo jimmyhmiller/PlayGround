@@ -338,6 +338,53 @@
             0)))
     (load found)))
 
+; ---------------------------------------------------------------------------
+; The alias, from the other end
+; ---------------------------------------------------------------------------
+;; AN ALIAS NAMES A WORD, GLOBALLY, and that is what lets a `Load` or a `Store` carry an alias
+;; number and nothing else: no shape, no offset, no field index. The alias is allocated at the
+;; edge that introduces the field, and `shape-transition-new!` copies every inherited field's
+;; alias AND offset unchanged, so `alias -> (declared type, name, offset)` is a function of the
+;; TABLE rather than of whichever shape the pointer happens to have. A memory op that had to name
+;; a shape as well would be unable to describe the polymorphic site 4c is built around, where two
+;; shapes share the word and only the layouts differ.
+;;
+;; THE EDGE IS FOUND BY SCANNING, not by indexing on the alias number. Today alias k IS edge k,
+;; because `shape-alias-new!` is called exactly once per new edge; that is a consequence of the
+;; tree relation `shape-alias-invariant-ok?` asserts, and the note on `shape-alias-new!` already
+;; says a second alias allocator (a header word, an array element) arrives the moment there is
+;; more to name than fields. A scan still answers correctly on that day. The table is small and
+;; the alternative is a second side array that can drift from the edges it mirrors.
+(defn shape-alias-defined? [(a i64)] (-> bool) (and (>= a 0) (< a (shape-alias-count))))
+
+(defn shape-alias-edge [(a i64)] (-> i64)
+  (if (shape-alias-defined? a) 0
+    (do (shape-panic "shape-alias-edge: not an allocated alias number") 0))
+  (let [n (shape-edge-count) (mut i) 0 (mut found) -1]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) -1)) (break)
+        (do (let [e (shape-edge-at (load i))]
+              (if (= (se-alias e) a) (store! found (load i)) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    ; An allocated number with no edge means some second allocator handed it out and did not
+    ; record what it names. Answering 0, or the root's non-existent field, would put a load on
+    ; the wrong word; every caller here needs a real answer or none.
+    (if (!= (load found) -1) 0
+      (do (shape-panic "shape-alias-edge: an allocated alias that no transition edge introduced") 0))
+    (load found)))
+
+(defn shape-alias-name [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))] (se-name e)))
+(defn shape-alias-ty [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))] (se-ty e)))
+
+;; The byte offset of the word this alias names, read off the edge's PARENT: the field was
+;; appended at index `shape-field-count from`, and no descendant moves it.
+(defn shape-alias-offset [(a i64)] (-> i64)
+  (let [e (shape-edge-at (shape-alias-edge a))]
+    (shape-offset-of-index (shape-field-count (se-from e)))))
+
 ; ============================================================================
 ; Building: the field window is reserved, then filled
 ; ============================================================================

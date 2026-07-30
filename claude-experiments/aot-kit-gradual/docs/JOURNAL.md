@@ -589,3 +589,79 @@ pass" is available almost for free here and would prove close to nothing:
   from `neverAlias` on two distinct `New`s, both structural and safe, but its offset-overlap test
   reads a TYPE and is exactly the shape Law 3 forbids acting on provisionally.
 
+
+---
+
+**Slice 4b, the four memory ops: `New`, `Load`, `Store` and `MemMerge` exist, verify, print,
+reparse and RUN** (`src/node.coil`, `src/eval.coil`, `src/verify.coil`, `src/gtext.coil`,
+`src/corpus.coil`, `src/dot.coil` extended; `src/shape.coil` and `src/ty.coil` gained the readers
+the graph needs). Gated by `tests/mem-test.coil`, 15 cases, plus four new corpus fixtures that put
+every earlier milestone's corpus-wide gate over a program with a heap in it.
+
+What was decided, as opposed to implemented:
+
+- **Only `New` carries control.** A memory op is ordered by its memory edge alone, which is the
+  property that makes 4c's forwarding ordinary dataflow rather than a pass. An allocation is the
+  exception, because two executions of it are two objects.
+- **`op-gvn?` excludes `New`,** for the same reason it excludes `Arg`. Two structurally identical
+  allocations are two objects, and the graph that results from merging them is internally
+  consistent, verifies clean, and has quietly lost an object. The witness is a program that
+  compares two allocations and must answer false.
+- **A Store meets the incoming contents rather than replacing it**, so a load reports the union of
+  everything its alias class holds: `undefined|int`, not `int=5`. That number is pinned exactly, so
+  4c's structural forwarding is measured against what 4b earned rather than against a hope. The
+  alternative (contents = the last value stored) is precise for one pointer and a lie about the
+  class, and it would let a load off a different object fold to a constant it never held.
+- **`Return` gained an optional memory input.** Without it the kill cascade collects the whole heap
+  as unused: nothing reads the last store, so 4c's store elimination would have been gated against
+  a program whose stores were already gone for unrelated reasons.
+- **The interpreter's heap is IMMUTABLE AND VERSIONED.** This is the one decision a reader is
+  likely to want to argue with, and the argument is short: `ev-data` evaluates on demand, so a
+  mutable heap would answer from whatever state the walk had reached, and the same graph would mean
+  different things depending on which use asked first. Memory SSA already says a memory state is a
+  value; the oracle takes it literally. A version records which alias classes it describes, every
+  read checks that mask, and a `MemMerge`'s children must be disjoint — which is what makes running
+  a memory graph evidence rather than exercise.
+- **An allocation is executed when control ARRIVES, not when its value is demanded.** A data node is
+  evaluated once per use, and an object's identity may not be computed twice; nor may it be cached
+  forever, because a `New` in a loop must give a fresh object every trip. Both are right at once if
+  identity is established when control enters the block, which is the mechanism and the environment
+  a `Phi` already uses.
+
+**Two gaps found by reviewing the slice against itself, both closed in it:**
+
+1. **No loop had a memory phi.** 4a added widening through `TMem` on the strength of an argument
+   about a bug nobody could yet provoke: a memory phi on a back edge meets a fresh memory type every
+   trip, and with the widening counter invisible inside the memory type the contents creeps by one
+   step per round for ever. The symptom is a hang with nothing reported. Fixture 22 is the witness
+   (`o = {x}; while (i < 3) { o.x = i; i = i + 1 }`), it terminates, and the store is in the body
+   purely by being on the memory back edge.
+2. **Monotonicity of the four new computes was claimed in prose only.** `the_memory_computes_only_
+   ever_fall` observes the handful of types one raw fixture visits; the law is about the whole
+   lattice. `every_memory_compute_is_monotone_in_every_slot` now drives each compute over all 82
+   samples and duals in every input slot with the other slots swept too, 356,454 checks. Reverting
+   `ty-mem-contents`'s ANY arm to ALL makes it red with a printed witness (`Load: input fell from
+   ANY to mem#0 ANY, result rose from ALL to ANY`), and independently trips `g-analyze!`'s falling
+   check on the raw fixture.
+
+**What 4b deliberately does NOT assert**, said plainly for the same reason 4a's list exists:
+
+- **No memory rewrite fires.** There is no load forwarding, no store elimination and no
+  escape-based dead-store removal, so none of Law 3's new consumers exists yet and the
+  `n-ty-proven?` obligation on them is still only written down. Dead-ALLOCATION removal is partly
+  present and was free: killing a `New`'s last projection drops its last use and the cascade
+  collects it.
+- **The shape-polymorphic clause is met for the lattice, not for code.** The merged pointer keeps
+  both shape bits, the two arms keep distinct alias classes, and the `MemMerge` describes their
+  union. "Two inline paths" needs a guard to make a path, which is M9.
+- **A `Load`'s slot 0 is unconstrained and always null.** Nothing pins a load to a block yet; when
+  a load has to be pinned to the block that proved its shape, that slot is where it goes.
+- **The shape table is not part of the graph text.** A printed graph is meaningful only against the
+  table that was live when it was printed. The parser refuses an id the current table does not
+  define (`GERR-BAD-SHAPE`, `GERR-BAD-ALIAS`) so that mismatch is a named failure on the first line
+  that mentions it, but serialising the table is a whole-program question and belongs with whichever
+  milestone first has to ship one.
+- **Nothing escapes.** There are no calls, no globals and no arrays, so every object is local to the
+  program and `EV-MEM` on a load of a word this run never allocated is the correct answer rather
+  than a limitation. M6 changes that, and the memory a function receives is already spelled: an
+  `Arg` of memory type, which is how the initial heap enters today.

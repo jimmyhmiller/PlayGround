@@ -282,7 +282,10 @@ hold something a memory word cannot hold, an undefined shape id, and both bounds
 
 ## 4. Memory, effects, and objects
 
-**PARTIAL.** Shapes, their alias classes and the memory type are built (`src/shape.coil`, `src/ty.coil`). `New`, `Load`, `Store` and `MemMerge` are not: that is M4's remaining work and the next thing to do.
+**PARTIAL.** Shapes, their alias classes, the memory type and all four memory ops are built and run
+(`src/shape.coil`, `src/ty.coil`, `src/node.coil`, `src/eval.coil`). What is not built is the
+REWRITING: load-after-store forwarding, store-after-store elimination and dead-store removal are
+M4's remaining work (slice 4c).
 
 Memory is in SSA form, split into **alias classes**. Each field of each shape gets an alias
 number; a `Store` produces a new memory value for exactly its alias, and a `Load` consumes
@@ -294,6 +297,48 @@ out of ordinary dataflow on the memory edges, with no separate alias analysis pa
 is that allocation must name every alias it touches: a `New` node takes the memory of every
 alias it initialises and produces a projection per alias, which is what makes a freshly
 allocated object's fields provably not aliased with anything else.
+
+### The four ops, and what their inputs mean
+
+```
+  New      (ctrl, mem-of-field-0, ...)   aux = the shape.  A MULTI node: tuple slot 0 is the
+                                         object, slot 1+i is field i's new memory. Input slot
+                                         1+i and output slot 1+i are the same alias class.
+  Load     (_, mem, ptr)                 aux = the alias
+  Store    (_, mem, ptr, val)            aux = the alias
+  MemMerge (_, mem, mem, ...)            one memory over the union of theirs
+  Return   (ctrl, val, mem?)             the exit carries the program's final memory
+```
+
+Three decisions here are not forced by the design above and are worth stating.
+
+**Only `New` has a real control input.** A memory op is ordered by its memory edge and by nothing
+else, which is the property that makes forwarding ordinary dataflow; slot 0 of a Load, a Store and a
+MemMerge is the same unconstrained anchor an `Add` has. An allocation is the exception because two
+executions of it are two objects, so its identity is a function of the block it is in and it cannot
+float. That is also why `op-gvn?` excludes `New`: two structurally identical allocations are two
+objects, and merging them produces a graph that is internally consistent, verifies clean, and has
+lost an object.
+
+**A Store MEETS the incoming contents rather than replacing it.** `TMem(aliases, contents)` says
+that every value in any of those classes is described by `contents`, so `o.x = 5` leaves every other
+object in class x holding what it held and the new state's contents is `meet(old, 5)`. Taking `5`
+would be the precise answer for `o` and a lie about the class, and a Load reading it would fold a
+different object's field to a constant it never held. The consequence is that a load in 4b reports
+the union of everything its class holds — `undefined|int`, not `int=5` — and 4c's forwarding is
+therefore STRUCTURAL, by pointer identity, which is a fact about the graph that no alias-level type
+could have recovered. The exact union is pinned in `tests/mem-test.coil` so that 4c is measured
+against what 4b earned.
+
+**The field's declared type is not joined into a Load.** `shape-alias-ty` records what the front end
+SAID; the contents is what the analysis PROVED. In a dynamic language the two disagree routinely, so
+joining them would either mint a high type for the disagreement (which reads as dead code) or make
+the annotation load-bearing for correctness. D4 says a narrowing needs a guard, and a declared type
+is not one.
+
+**A memory `Phi` is an ordinary `Phi`,** which is why Law 5 needed no new code: `region-remove-path!`
+drops a memory phi's arm with the region path because a memory phi IS a Phi. The same is true in the
+interpreter, where a memory state is a value and is committed at a merge with everything else.
 
 ### The memory type
 

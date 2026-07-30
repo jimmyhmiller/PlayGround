@@ -25,6 +25,10 @@
 (import "fmt.coil"       :use *)
 (import "slice.coil"     :use *)
 (import "ty.coil"        :use *)
+;; The shape table, for `New`'s field count and its per-field aliases. The dependency runs one
+;; way only (shape.coil imports ty.coil and nothing else), and it is what lets a memory op carry
+;; an alias number instead of a shape and an offset.
+(import "shape.coil"     :use *)
 
 ;; A node id is a plain `i64` index into the arena, for the same reason a type id is: a
 ;; one-field struct would be passed by reference in Coil. `nid`/`n` for node ids, `t` for
@@ -58,7 +62,29 @@
 (const OP-EQ     i64 19)
 (const OP-LT     i64 20)
 (const OP-LE     i64 21)
-(const OP-COUNT  i64 22)
+
+;; MEMORY. Four ops, and the input layouts are the whole of memory SSA, so they are written out
+;; here rather than left to be read off `v-check-slots`:
+;;
+;;   New      (ctrl, mem-of-field-0, mem-of-field-1, ...)   aux = the shape
+;;            a MULTI node: slot 0 of its tuple is the object, slot 1+i is field i's new memory.
+;;            Input slot 1+i and output slot 1+i are the same alias, which is what makes the
+;;            allocation a link in every one of its fields' memory chains rather than a node
+;;            that appears out of nowhere.
+;;   Load     (_, mem, ptr)                                 aux = the alias
+;;   Store    (_, mem, ptr, val)                            aux = the alias
+;;   MemMerge (_, mem, mem, ...)                            one memory over the union of theirs
+;;
+;; SLOT 0 OF Load, Store AND MemMerge IS THE ORDINARY CONTROL ANCHOR, null today, exactly as an
+;; Add's is: a memory op is ordered by its MEMORY edge and by nothing else, which is the property
+;; that makes forwarding fall out of dataflow. `New` is the exception and its control input is
+;; real: an allocation happening twice is two objects, so its identity is a function of the block
+;; it is in and it cannot float.
+(const OP-NEW      i64 22)
+(const OP-LOAD     i64 23)
+(const OP-STORE    i64 24)
+(const OP-MEMMERGE i64 25)
+(const OP-COUNT    i64 26)
 
 ;; Case keys are the NAMED constants throughout, never the numbers. Literal keys are how a
 ;; renumbering silently rewires every dispatch table in the file at once.
@@ -69,6 +95,7 @@
     OP-CONST "Const" OP-ARG "Arg" OP-PROJ "Proj" OP-PHI "Phi" OP-CAST "Cast"
     OP-ADD "Add" OP-SUB "Sub" OP-MUL "Mul" OP-DIV "Div" OP-MINUS "Minus"
     OP-NOT "Not" OP-EQ "Eq" OP-LT "Lt" OP-LE "Le"
+    OP-NEW "New" OP-LOAD "Load" OP-STORE "Store" OP-MEMMERGE "MemMerge"
     "?"))
 
 ;; ---------------------------------------------------------------------------
@@ -80,16 +107,28 @@
 (defn op-value?   [(op i64)] (-> bool) (>= op OP-CONST))
 (defn op-phi?     [(op i64)] (-> bool) (= op OP-PHI))
 (defn op-merge?   [(op i64)] (-> bool) (or (= op OP-REGION) (= op OP-LOOP)))
-(defn op-multi?   [(op i64)] (-> bool) (or (= op OP-IF) (= op OP-RETURN)))
+(defn op-multi?   [(op i64)] (-> bool)
+  (or (= op OP-IF) (or (= op OP-RETURN) (= op OP-NEW))))
 
-;; Memory-producing ops arrive with memory SSA in M4.
-(defn op-memory? [(op i64)] (-> bool) false)
+;; DOES THIS NODE PRODUCE A MEMORY STATE. It is a question about the NODE and not about its op,
+;; which is why the `op-memory?` predicate this replaces could never have been implemented: a
+;; `Proj` is memory when it projects a `New`'s field slot and a value when it projects slot 0, and
+;; a `Phi` is memory exactly when it merges memory. The type is what actually knows, and by the
+;; time anything asks (the diagram, a scheduler) the types are computed.
+(defn n-memory? [(n i64)] (-> bool) (ty-mem? (n-ty n)))
 
-;; Value numbering covers everything except the three identity-bearing nodes. Start and Stop
-;; are singletons; two `Arg`s are different arguments even with identical types, so merging
-;; them would merge two parameters.
+;; Value numbering covers everything except the four identity-bearing nodes. Start and Stop are
+;; singletons; two `Arg`s are different arguments even with identical types.
+;;
+;; AND TWO `New`s ARE TWO OBJECTS. Structural identity is exactly the wrong relation for an
+;; allocation: `a = {}; b = {};` builds two News with the same shape, the same control and the
+;; same incoming memory, so they are structurally equal in every respect and merging them makes
+;; `a` and `b` the same object. Nothing downstream could ever notice, because the graph that
+;; results is internally consistent; the interpreter would simply report that a program which
+;; allocates two objects allocates one. It is the same reason `Arg` is excluded, and the same
+;; reason Simple gives `NewNode` its own `_alias` identity rather than letting GVN see it.
 (defn op-gvn? [(op i64)] (-> bool)
-  (and (> op OP-STOP) (!= op OP-ARG)))
+  (and (> op OP-STOP) (and (!= op OP-ARG) (!= op OP-NEW))))
 
 ;; May be replaced by a constant when its type says the value is known. Control cannot (a
 ;; control edge is not a value), `Const` already is one, and `Arg` is opaque by construction.
@@ -294,6 +333,9 @@
   (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) n))
 (defn n-new3 [(op i64) (aux i64) (a i64) (b i64) (c i64)] (-> i64)
   (let [n (n-new op aux)] (n-add-def! n a) (n-add-def! n b) (n-add-def! n c) n))
+(defn n-new4 [(op i64) (aux i64) (a i64) (b i64) (c i64) (d i64)] (-> i64)
+  (let [n (n-new op aux)]
+    (n-add-def! n a) (n-add-def! n b) (n-add-def! n c) (n-add-def! n d) n))
 
 ;; Remove one use edge d->u. Unordered, so a swap-remove is fine.
 (defn n-del-use! [(d i64) (u i64)] (-> bool)
@@ -538,7 +580,7 @@
     OP-START  (t-ctrl)
     OP-STOP   (t-bot)
     OP-XCTRL  (t-xctrl)
-    OP-RETURN (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))
+    OP-RETURN (return-compute n)
     OP-IF     (if-compute n)
     OP-REGION (region-compute n)
     OP-LOOP   (loop-compute n)
@@ -557,6 +599,10 @@
     OP-EQ     (cmp-compute OP-EQ (n-in-ty n 1) (n-in-ty n 2))
     OP-LT     (cmp-compute OP-LT (n-in-ty n 1) (n-in-ty n 2))
     OP-LE     (cmp-compute OP-LE (n-in-ty n 1) (n-in-ty n 2))
+    OP-NEW      (new-compute n)
+    OP-LOAD     (load-compute n)
+    OP-STORE    (store-compute n)
+    OP-MEMMERGE (memmerge-compute n)
     (t-bot)))
 
 ;; An absent input contributes ANY (nothing known yet), which keeps compute monotone while a
@@ -805,6 +851,118 @@
     (n-unkeep! (load (field r f)))
     (load r)))
 
+;; The live projection of a multi node at one slot, or NO-NODE. Found by walking def-use, the
+;; same way `ev-if-arm` finds a branch arm: a multi node's projections are not held anywhere else,
+;; so this is the only place that knows how to get from the multi to its outputs.
+(defn n-multi-proj [(m i64) (slot i64)] (-> i64)
+  (let [len (n-nouts m) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [u (n-out m (load i))]
+              (if (and (and (not (n-dead? u)) (= (n-op u) OP-PROJ)) (= (n-aux u) slot))
+                  (store! found u)
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+; ---------------------------------------------------------------------------
+; Building an allocation
+; ---------------------------------------------------------------------------
+;; A New AND EVERY ONE OF ITS PROJECTIONS, built and peepholed as one operation, inside the same
+;; `n-multi-open!` window `n-if-arms!` uses. LAW 4 applies to any multi node, and a New is one.
+;;
+;; It needs no equivalent of `n-if-arms!`'s pinning of the arms across the close, and the reason
+;; is worth stating rather than leaving as an absence: that pin exists because peepholing an If's
+;; first projection can REPLACE it, which drops the If's last use and runs the kill cascade
+;; through the arm that is about to be returned. A New's projections cannot be replaced by
+;; anything. `proj-compute` gives slot 0 an object type and every other slot a memory type,
+;; `ty-const?` is false for both (an allocation is not a compile-time constant and neither is a
+;; memory state), `n-idealize` has no arm for OP-PROJ, and two projections of one New at one slot
+;; are never built. So nothing here can subsume, and the window is doing only its own job.
+(defn n-new-obj! [(ctrl i64) (shape i64) (mems (slice i64))] (-> i64)
+  (if (shape-defined? shape) 0
+    (do (panic-corrupt "n-new-obj!: not a defined shape id") 0))
+  (let [k (shape-field-count shape)]
+    (if (= (slice-len mems) k) 0
+      (do (panic-corrupt "n-new-obj!: a New takes the incoming memory of EVERY field of its shape, one each") 0))
+    (let [nw (n-new OP-NEW shape) (mut i) 0]
+      (n-add-def! nw ctrl)
+      (loop
+        (if (>= (load i) k) (break)
+          (do (n-add-def! nw (slice-get mems (load i)))
+              (store! i (+ (load i) 1))
+              0)))
+      ; A peephole that MOVED the New would leave the projections below hanging off a node the
+      ; caller does not hold. It cannot today (see the note above), and this is how that stays true.
+      (if (= (n-peephole nw) nw) 0
+        (do (panic-corrupt "n-new-obj!: a New was replaced by its own peephole") 0))
+      (n-multi-open! nw)
+      (let [(mut j) 0]
+        (loop
+          (if (> (load j) k) (break)
+            (do (n-peephole (n-new1 OP-PROJ (load j) nw))
+                (store! j (+ (load j) 1))
+                0))))
+      (n-multi-close! nw)
+      nw)))
+
+;; The two arities the IR builds by hand. A shape with more fields than this is built through
+;; `n-new-obj!` with a slice; these exist so a fixture does not have to spell out a one-element
+;; buffer, and each refuses a shape of the wrong width by name rather than silently allocating an
+;; object whose other fields nothing initialises.
+(defn n-new-obj0! [(ctrl i64) (shape i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 1))]
+    (n-new-obj! ctrl shape (slice-new [i64] (cast (ptr i64) buf) 0))))
+
+(defn n-new-obj1! [(ctrl i64) (shape i64) (m0 i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 1))
+        p   (cast (ptr i64) buf)]
+    (store! (index p 0) m0)
+    (n-new-obj! ctrl shape (slice-new [i64] p 1))))
+
+(defn n-new-obj2! [(ctrl i64) (shape i64) (m0 i64) (m1 i64)] (-> i64)
+  (let [buf (alloc-stack (array i64 2))
+        p   (cast (ptr i64) buf)]
+    (store! (index p 0) m0)
+    (store! (index p 1) m1)
+    (n-new-obj! ctrl shape (slice-new [i64] p 2))))
+
+;; A New's outputs by MEANING rather than by slot number. The pairing (input slot 1+i is field
+;; i's incoming memory, output slot 1+i is its outgoing memory) is stated in the op table and
+;; read out here, so a caller never writes the `+ 1` itself.
+(defn n-obj-proj [(nw i64) (slot i64)] (-> i64)
+  (if (= (n-op nw) OP-NEW) 0
+    (do (panic-corrupt "n-obj-proj: not a New") 0))
+  (let [pr (n-multi-proj nw slot)]
+    (if (!= pr NO-NODE) 0
+      (do (panic-corrupt "n-obj-proj: that projection of the New does not exist") 0))
+    pr))
+(defn n-obj-ptr [(nw i64)] (-> i64) (n-obj-proj nw 0))
+(defn n-obj-mem [(nw i64) (i i64)] (-> i64) (n-obj-proj nw (+ i 1)))
+
+; ---------------------------------------------------------------------------
+; Building a memory op
+; ---------------------------------------------------------------------------
+;; The alias is checked HERE, against the table that could know, for the same reason
+;; `shape-defined?` is checked at every entry point that takes a shape id: `t-mem-alias` would
+;; catch a number past ALIAS-MAX, but an in-range number that no transition ever allocated is a
+;; load off a word the program has no name for, and it would type-check perfectly.
+(defn n-check-alias [(alias i64) (what (slice u8))] (-> i64)
+  (if (shape-alias-defined? alias) 0
+    (do (panic-corrupt what) 0)))
+
+(defn n-load! [(mem i64) (ptr i64) (alias i64)] (-> i64)
+  (n-check-alias alias "n-load!: not an allocated alias number")
+  (n-peephole (n-new3 OP-LOAD alias NO-NODE mem ptr)))
+
+(defn n-store! [(mem i64) (ptr i64) (val i64) (alias i64)] (-> i64)
+  (n-check-alias alias "n-store!: not an allocated alias number")
+  (n-peephole (n-new4 OP-STORE alias NO-NODE mem ptr val)))
+
+(defn n-memmerge2! [(a i64) (b i64)] (-> i64)
+  (n-peephole (n-new3 OP-MEMMERGE 0 NO-NODE a b)))
+
 ; ============================================================================
 ; JavaScript truthiness
 ; ============================================================================
@@ -1000,6 +1158,106 @@
     (if (and (ty-high? j) (not (ty-high? t)))
         (if (= (n-ty n) (t-top)) target (n-ty n))
       j)))
+
+; ============================================================================
+; Memory compute
+; ============================================================================
+;; WHAT A MEMORY STATE'S CONTENTS MEANS, decided here once because every one of the four computes
+;; below is an application of it: `TMem(aliases, contents)` says that every value held in any of
+;; those alias classes, at this point in the program, is described by `contents`. It is a claim
+;; about the WHOLE alias class and not about one object, because an alias class is exactly the
+;; granularity this IR resolves memory to.
+;;
+;; THAT IS WHY A STORE MEETS RATHER THAN REPLACES. `o.x = 5` leaves every OTHER object in alias
+;; x holding whatever it held, so the new state's contents is `meet(old, 5)` and not `5`. Taking
+;; `5` would be the precise answer for `o` and a lie about the class, and a `Load` reading it
+;; would fold a different object's field to a constant it never held. The cost is real and it is
+;; the reason 4c's forwarding is STRUCTURAL: `Load(p, Store(p, v))` is `v` because the pointers
+;; are the same NODE, which is a fact about the graph rather than about the lattice, and no
+;; alias-level type could ever have recovered it. So a load in 4b reports the union of everything
+;; its class holds, `tests/mem-test.coil` asserts that union exactly, and 4c is measured against
+;; it rather than against a claim this milestone could not make.
+;;
+;; The declared field type is deliberately NOT joined in. `shape-alias-ty` records what the front
+;; end SAID; the contents is what the analysis PROVED. In a dynamic language the two disagree
+;; routinely (a field declared `int` can be assigned a string), and joining a proof to a claim
+;; would either mint a high type for the disagreement, which reads as dead code (see
+;; `cast-compute`'s freeze rule for what that costs), or quietly make the front end's annotation
+;; load-bearing for correctness. D4 says a narrowing needs a guard, and a declared type is not one.
+
+;; A New's tuple is one slot per field plus the object, and the object's shape bitset bounds the
+;; field count, so this buffer cannot be overrun by a legal shape. The check below says so anyway,
+;; because "cannot" is a property of another file.
+(const NEW-TUPLE-MAX i64 65)
+
+;; Slot 0 is the object; slot 1+i is field i's memory AFTER the allocation. Every field of a fresh
+;; object holds `undefined`, which is what JavaScript says and what makes an allocation a link in
+;; each of its fields' memory chains: the incoming state for that alias is met with `undefined`
+;; rather than replaced, for the reason in the header above.
+(defn new-compute [(n i64)] (-> i64)
+  (let [s (n-aux n)]
+    (if (shape-defined? s) 0
+      (do (panic-corrupt "new-compute: a New whose aux is not a defined shape id") 0))
+    (let [k   (shape-field-count s)
+          buf (alloc-stack (array i64 65))
+          p   (cast (ptr i64) buf)
+          (mut i) 0]
+      (if (< (+ k 1) NEW-TUPLE-MAX) 0
+        (do (panic-corrupt "new-compute: a shape with more fields than the tuple buffer holds") 0))
+      (store! (index p 0) (t-obj-shape s))
+      (loop
+        (if (>= (load i) k) (break)
+          (do (store! (index p (+ (load i) 1))
+                      (t-mem-alias (shape-field-alias s (load i))
+                                   (ty-meet (ty-mem-contents (n-in-ty n (+ (load i) 1)))
+                                            (t-undef))))
+              (store! i (+ (load i) 1))
+              0)))
+      (t-tuple-list (slice-new [i64] p (+ k 1))))))
+
+;; A Load's value is what its memory input says the class holds. `ty-mem-contents` maps ANY to
+;; ANY, so an unanalysed memory edge leaves the load unanalysed rather than concluding anything,
+;; and a memory state at the top of its own sublattice (`t-mem-none`: the empty alias set) leaves
+;; it there too.
+;;
+;; A HIGH POINTER MEANS NO OBJECT REACHES THIS LOAD, so no value comes out of it. That is the
+;; ordinary optimistic answer and it falls to the contents as soon as the pointer does; it is what
+;; lets a load on a dead arm stay out of the meet at a Phi below it.
+(defn load-compute [(n i64)] (-> i64)
+  (if (ty-high? (n-in-ty n 2)) (t-top)
+    (ty-mem-contents (n-in-ty n 1))))
+
+(defn store-compute [(n i64)] (-> i64)
+  (t-mem-alias (n-aux n)
+               (ty-meet (ty-mem-contents (n-in-ty n 1)) (n-in-ty n 3))))
+
+;; The union of its inputs' alias classes, which is exactly `ty-meet` on the memory production:
+;; OR on the alias bitset, meet on the contents. Seeding at `t-mem-none` is seeding at the top of
+;; that sublattice, so it is the identity for the fold and a MemMerge with no memory inputs
+;; describes nothing rather than describing everything.
+;;
+;; This is the node that makes the bitset alias axis load-bearing rather than decorative: merging
+;; alias {0} with alias {1} has to yield {0,1}, and Simple's collapse rule would answer "all of
+;; memory" here (DESIGN.md section 4 has the arithmetic).
+(defn memmerge-compute [(n i64)] (-> i64)
+  (let [len (n-nins n) (mut t) (t-mem-none) (mut i) 1]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (store! t (ty-meet (load t) (n-in-ty n (load i))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load t)))
+
+;; A Return carries the program's final memory when it has one. It is optional because M0 to M3
+;; built Returns with two inputs and those graphs are still the corpus, and it exists at all
+;; because memory has to be ROOTED at the exit: with nothing reading the last store, the kill
+;; cascade collects the whole heap as unused and 4c's store elimination would be gated on a
+;; program whose stores were already gone. It is also the slot M6's calls need, one milestone
+;; early rather than retrofitted through every Return in the corpus.
+(defn return-compute [(n i64)] (-> i64)
+  (if (>= (n-nins n) 3)
+      (t-tuple3 (n-in-ty n 0) (n-in-ty n 1) (n-in-ty n 2))
+    (t-tuple2 (n-in-ty n 0) (n-in-ty n 1))))
 
 ; ============================================================================
 ; Control-flow idealize
@@ -1666,7 +1924,25 @@
         OP-EQ     (binop-print w n "==")
         OP-LT     (binop-print w n "<")
         OP-LE     (binop-print w n "<=")
+        ;; A LOAD IS AN EXPRESSION AND A MEMORY STATE IS NOT, which is the whole of the
+        ;; convention here. `o.x` is what the source said and it recurses into the pointer like
+        ;; any other operand; a New, a Store and a MemMerge are states, and a state printed
+        ;; inline would read as though the program had a value there. They print as references
+        ;; with their id, exactly as a Region and a Phi do and for the same reason: the flat form
+        ;; and the diagram are where a state's edges are legible.
+        OP-LOAD   (do (n-print w (n-in n 2)) (ps w ".") (field-print w (n-aux n)) 0)
+        OP-STORE  (do (ps w "st") (fmt w "{d}" n) 0)
+        OP-NEW    (do (ps w "new") (fmt w "{d}#{d}" n (n-aux n)) 0)
+        OP-MEMMERGE (do (ps w "mem") (fmt w "{d}" n) 0)
         (do (ps w (op-name (n-op n))) 0)))))
+
+;; An alias printed as the FIELD NAME it introduced. The number is in the flat form and in the
+;; type; a reader of an expression wants `o.x`.
+(defn field-print [(w (ptr Writer)) (alias i64)] (-> i64)
+  (if (shape-alias-defined? alias)
+      (do (print-str w (shape-name-bytes (shape-alias-name alias))) 0)
+    ; a printer is observation: an alias with no edge is exactly what you want to see
+    (do (ps w "a") (fmt w "{d}?" alias) 0)))
 
 (defn binop-print [(w (ptr Writer)) (n i64) (sym (slice u8))] (-> i64)
   (ps w "(")
@@ -1700,7 +1976,12 @@
                       (do (fmt w ".{d}" (n-aux (load i))) 0)
                     (if (= (n-op (load i)) OP-CAST)
                         (do (ps w " to ") (ty-print w (n-aux (load i))) 0)
-                      0))
+                      ; the shape a New allocates and the alias a Load or Store names change what
+                      ; the node MEANS just as much as a projection's slot does
+                      (if (or (= (n-op (load i)) OP-NEW)
+                              (or (= (n-op (load i)) OP-LOAD) (= (n-op (load i)) OP-STORE)))
+                          (do (fmt w "#{d}" (n-aux (load i))) 0)
+                        0)))
                   (ps w " : ")
                   (ty-print w (n-ty (load i)))
                   (ps w "  <-")
