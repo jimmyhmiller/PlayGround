@@ -428,6 +428,38 @@ BODY = f"""
         "reparse, and every structural count is unchanged. Only running it says otherwise, which "
         "is the whole argument for keeping an interpreter as the differential oracle.")}
 
+{pair("27-store-over-store-raw", "26-store-over-store",
+        "A write nothing can observe", "o = {{x}};  o.x = 1;  o.x = 2;  return o.x;",
+        "The read side of memory rewriting forwards a load out of a store. This is the write side: "
+        "a store whose value is overwritten before anything reads it never happened. Both stores "
+        "are on the left; one is on the right, and the load is gone too.",
+        "Follow the blue memory chain on the left: <code>New</code> to <code>o.x = 1</code> to "
+        "<code>o.x = 2</code> to the <code>Load</code>. The second store names the same alias class "
+        "and the same pointer NODE as the first, and nothing but the second store reads the first, "
+        "so the second store's memory edge is rewired to skip it and the first dies of having no "
+        "readers. THEN the load forwards through what is left, which is the earlier rule, and the "
+        "<code>Return</code>'s value is the literal 2. Two rewrites, and they compose in one "
+        "direction only. Note the two stores' TYPES on the left: both say "
+        "<code>mem#1 undefined|int</code>, because a store MEETS its value into the class rather "
+        "than replacing it. That is why neither rule could have come from the lattice, and it is "
+        "also why the surviving store on the right is more specific than the one it replaced.")}
+
+{single("28-store-guarded",
+        "The store that must not be bypassed",
+        "o = {{x}};  o.x = 1;  if (p) {{ o.x = 2; }}  return o.x;",
+        "Everything the rule above looks at says yes here: same word, same object, same pointer "
+        "node, a settled cone. One thing says no, and it is the one that makes the write side "
+        "harder than the read side.",
+        "The first store feeds TWO nodes: the guarded store, and the memory <code>Phi</code>'s else "
+        "arm. On the false path its write is the one the load reads, so it is not a store that only "
+        "the store above it can see. Bypassing it would leave two live writes to one word, both "
+        "hanging off the same incoming state, with no memory edge ordering them against each "
+        "other. Nothing in this picture would be wrong and nothing running it could tell, because "
+        "each memory state here is a VALUE; it becomes wrong when a scheduler has to lay two "
+        "unordered writes to one address onto one mutable heap. Note also that the guarded store "
+        "has no control input at all. It is on the true path solely because the Phi reads it from "
+        "slot 1, which is what makes memory motion fall out of ordinary dataflow.")}
+
 {single("21-shape-polymorphic",
         "Two shapes through one merge",
         "if (p) {{ a = {{x}}; a.x = 1 }} else {{ b = {{y}}; b.y = 2 }}  return o;",

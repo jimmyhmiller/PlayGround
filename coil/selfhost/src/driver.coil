@@ -156,18 +156,21 @@
             0)))))
 
 (defn dump-ast-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
-  (let [w (stdout)]
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))]
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
           (match (parse-program a forms)
             (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-            (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp a)))))))
+            (Ok [prog] (let [pp (alloc-stack Program)] (store! pp prog) (d-program w pp a))))))
+    (buffered-output-flush bout))
   0)
 
 ; ============================ file IO + entry ===============================
 (defn dump-mono-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
@@ -201,12 +204,14 @@
                               (drop-code-funcs a cp)
                               (match (monomorphize a cp)
                                 (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-                                (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a))))))))))))))
+                                (Ok [mp] (do (sort-mono-program a mp) (d-program w mp a)))))))))))))
+    (buffered-output-flush bout))
   0)
 
 ; dump-checked: read -> load -> resolve -> check -> checked Program dump (NO mono).
 (defn dump-checked-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
@@ -235,12 +240,14 @@
                   (Ok [prog]
                       (match (check-program a prog (mut s))
                         (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-                        (Ok [cp] (d-program w cp a))))))))))
+                        (Ok [cp] (d-program w cp a)))))))))
+    (buffered-output-flush bout))
   0)
 
 ; dump-resolved: read -> load -> resolve -> resolved Program dump.
 (defn dump-resolved-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
@@ -266,14 +273,16 @@
                 (let [dp (alloc-stack Diag)] (store! dp (load (field s loaderr))) (dump-error w dp))
                 (match (resolve-program a (mut s) true false)
                   (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-                  (Ok [prog] (d-program w prog a))))))))
+                  (Ok [prog] (d-program w prog a)))))))
+    (buffered-output-flush bout))
   0)
 
 ; dump-read: raw read -> canonical Sexp forms (reader oracle). sx-node's
 ; @source:lo:hi:ctxt is byte-identical to the standalone reader dumper for raw
 ; single-file input (source=0, ctxt=0, no dummy spans).
 (defn dump-read-program [(a (ptr Allocator)) (src (slice u8))] (-> i64)
-  (let [w (stdout)]
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))]
     (match (read-all a src 0)
       (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
       (Ok [forms]
@@ -286,7 +295,8 @@
                         (let [child (alloc-stack Sexp)]
                           (store! child (al-get [Sexp] (load forms) (load i)))
                           (sx-node w child))
-                        (store! i (iadd (load i) 1)))))))))
+                        (store! i (iadd (load i) 1))))))))
+    (buffered-output-flush bout))
   0)
 
 ; ---- loader-dump helpers ported verbatim from selfhost/loader.coil ----
@@ -482,7 +492,8 @@
   0)
 
 (defn dump-load-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
@@ -504,7 +515,8 @@
       (Ok [forms]
           (do
             (load-program (mut s) (prepend-uses a (mut s) forms) cwd)
-            (dump-loaded w a (mut s))))))
+            (dump-loaded w a (mut s)))))
+    (buffered-output-flush bout))
   0)
 
 ; A standalone byte-exact smoke for the 6 new d-expr arms (run: `<bin> __smoke`).

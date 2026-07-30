@@ -1,0 +1,4 @@
+fn main() {
+  let out = Process.capture("printf 'structured-output'; printf 'progress-noise' >&2")
+  Console.log("captured=" + out)
+}

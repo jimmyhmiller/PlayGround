@@ -25,7 +25,7 @@ The toolkit draws three shapes — `circle`, `ring`, `bar` — and which one
 appears is the guest's decision, made by dispatching on its own enum. With a
 single `circle` primitive the enum could only vary a radius, so a variant named
 `Ring` rendered as a slightly larger dot and the type distinction was invisible
-on screen. Steps 4 to 6 are the ones that depend on this.
+on screen. Steps 5 to 7 are the ones that depend on this.
 
 The guest program and every scripted edit are real source files in `demo/`,
 embedded with `include_str!`. `tests/demo_scene.rs` drives those same files
@@ -34,7 +34,7 @@ than by eyeballing a canvas.
 
 ## The walkthrough
 
-Six steps in order, under the source on the right. Each step shows what to
+Seven steps in order, under the source on the right. Each step shows what to
 watch for and its own source, applies straight into the live world, and only
 unlocks the next step once applied. Nothing here loads into the editor — that
 holds your work, and the walkthrough has to stay usable after you have been
@@ -42,18 +42,19 @@ playing in it.
 
 Each step reports what it did in the demo's own terms: what it *evolved* (a
 struct or enum version), what it *installed*, and what it **broke** — being
-published Broken is not an installation, and step 5 exists to show exactly that
+published Broken is not an installation, and steps 3 and 6 show exactly that
 difference.
 
 
 | # | Edit | What it shows |
 |---|---|---|
 | 1 | `edit_1_radius.lt` | Redefining a function takes effect at the next call. The loop is never restarted. |
-| 2 | `edit_2_migrate.lt` | A struct gains a defaulted field; the particles already on screen migrate lazily at their next field read. Same objects, no reseed. |
-| 3 | `edit_3_rejected.lt` | An ill-typed edit is refused at install. The running program keeps executing the last good version. |
-| 4 | `edit_4_enum.lt` | An enum is introduced and dispatched on: `draw`'s arms call different foreign functions, so the right half becomes stroked rings. `radius` is untouched and still sizes both arms. |
-| 5 | `edit_5_break.lt` | Adding a variant makes `draw`'s `match` non-exhaustive. It is published Broken *at install*, brokenness propagates to callers, and the program freezes at the boundary — before the frame performs a single effect. The last good frame stays on screen. |
-| 6 | `edit_6_repair.lt` | Repairing only the *root cause* revives the whole broken chain, and the suspended computation resumes at the instruction that trapped. Bars appear on the far right. |
+| 2 | `edit_2_migrate.lt` | A struct gains defaulted fields; the particles already on screen migrate lazily at their next field read. Same objects, no reseed. |
+| 3 | `edit_3_non_preserving.lt` | `Particle.visible` changes from `bool` to an enum. The edit installs, stale functions become Broken transitively, and the animation freezes at the outer boundary. |
+| 4 | `edit_3_repair.lt` | Code is repaired and a checked bool-to-enum migration is installed. Untouched callers revive and the same particles migrate lazily after resume. |
+| 5 | `edit_4_enum.lt` | Another enum is introduced and dispatched on: `draw`'s arms call different foreign functions, so the right half becomes stroked rings. |
+| 6 | `edit_5_break.lt` | Adding a variant makes `draw`'s `match` non-exhaustive. Brokenness propagates before the frame performs any effect. |
+| 7 | `edit_6_repair.lt` | Repairing only the root cause revives the whole chain, and the suspended computation resumes at the trapping instruction. |
 
 Throughout, the "canvas opened" counter stays at 1: `letonce` holds the native
 resource, so edits change code and never the running world.
@@ -81,7 +82,7 @@ resource, so edits change code and never the running world.
 
 A **Broken function** is repaired by editing: install a good version and thaw.
 Brokenness is a verdict about the world, so fixing the cause revives everything
-that depended on it (step 6 of the walkthrough).
+that depended on it (steps 4 and 7 of the walkthrough).
 
 A **trapped operation** — `x / 0`, an index out of bounds — is not repairable
 that way. The suspended frame is pinned to the version it is already executing,

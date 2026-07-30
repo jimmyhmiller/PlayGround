@@ -78,6 +78,21 @@ expect_rc 1 "check: a broken program exits 1"            "$COIL" check "$T/broke
 expect_out "undefined function 'bad-fn'" "check names the located error"      "$COIL" check "$T/broken.coil"
 # check emits NO object: the .o path must not appear.
 "$COIL" check "$T/seven.coil" >/dev/null 2>&1
+
+echo "== metaprogram closure scope and reachability regressions =="
+for f in bug-nested-dispatch.coil bug-direct-dispatch.coil bug-derived-fn-invisible.coil; do
+  "$COIL" check "docs/repro/impl-body-scope/$f" >/dev/null 2>&1 \
+    && ok "impl body sees generated declarations and same-module impls: $f" \
+    || bad "impl body sees generated declarations and same-module impls: $f" "check failed"
+done
+"$COIL" emit-ir docs/repro/sigbus-emit-ir-singleton-cycle/crash.coil >/dev/null 2>&1 \
+  && ok "an unreachable singleton cycle is not pulled into the macro engine (LLVM)" \
+  || bad "an unreachable singleton cycle is not pulled into the macro engine (LLVM)" "emit-ir failed or crashed"
+if [ "$HOST_OS" = Darwin ] && [ "$HOST_ARCH" = arm64 ]; then
+  "$COIL" build docs/repro/sigbus-emit-ir-singleton-cycle/crash.coil -o "$T/singleton-cycle" --backend arm64 >/dev/null 2>&1 \
+    && ok "an unreachable singleton cycle is not pulled into the macro engine (arm64)" \
+    || bad "an unreachable singleton cycle is not pulled into the macro engine (arm64)" "arm64 build failed or crashed"
+fi
 [ ! -e "$T/seven.o" ] && ok "check writes no object file" || bad "check writes no object" "$T/seven.o exists"
 # A genuinely non-writable -o is a CLEAR error + exit 1, not a SIGABRT.
 expect_rc 1 "build -o into a read-only location is a clear error, not SIGABRT" \
@@ -354,6 +369,51 @@ cat > "$T/gen6col.coil" <<'EOF'
 (defn main [] (-> i64) (go 5))
 EOF
 expect_out "call it qualified" "a collision error advertises Trait::method, not :use" "$COIL" build "$T/gen6col.coil" -o "$T/x"
+
+echo "== inherent methods: receiver dispatch + Type::associated calls =="
+# Struct constructor, bare immutable/mutable receivers, sum/enum receiver,
+# generic impl, scalar/pointer/slice extensions, an imported type extension, and
+# specialization, qualified receiver calls, and coexistence with same-named
+# trait dispatch. Result = 223.
+expect_rc 223 "nominal/generic/structural extension methods dispatch and run" \
+  "$COIL" run selfhost/oracle/cli/fixtures/inherent-methods.coil
+
+# Receiverless associated functions cannot infer an owner and must be qualified.
+cat > "$T/inherent_bare_assoc.coil" <<'EOF'
+(module app)
+(defstruct Box [(v i64)])
+(impl Box (new [(v i64)] (-> Box) (let [p (alloc-stack Box)] (store! (field p v) v) (load p))))
+(defn main [] (-> i64) (let [b (new 1)] (load (field b v))))
+EOF
+expect_out "undefined function 'new'" "a receiverless associated function requires Type::name" \
+  "$COIL" build "$T/inherent_bare_assoc.coil" -o "$T/x"
+
+cat > "$T/inherent_dup.coil" <<'EOF'
+(module app)
+(defstruct P [(x i64)])
+(impl P
+  (x [(p P)] (-> i64) 1)
+  (x [(p P)] (-> i64) 2))
+(defn main [] (-> i64) 0)
+EOF
+expect_out "duplicate inherent method 'x'" "duplicate inherent methods are rejected" \
+  "$COIL" build "$T/inherent_dup.coil" -o "$T/x"
+expect_out "duplicate inherent method 'remote-mark'" "duplicate imported extensions are rejected" \
+  "$COIL" build selfhost/oracle/cli/fixtures/inherent-duplicate-imports.coil -o "$T/x"
+
+cat > "$T/inherent_ambiguous.coil" <<'EOF'
+(module app)
+(defstruct Pair [A B] [(a A) (b B)])
+(impl [B] (Pair i64 B) (mark [(p (Pair i64 B))] (-> i64) 1))
+(impl [A] (Pair A bool) (mark [(p (Pair A bool))] (-> i64) 2))
+(defn main [] (-> i64) (mark (zeroed (Pair i64 bool))))
+EOF
+expect_out "ambiguous inherent method 'mark'" "unordered extension overlap is rejected at use" \
+  "$COIL" build "$T/inherent_ambiguous.coil" -o "$T/x"
+
+echo "== coil.core macros are ambient without an import =="
+printf '(module app)\n(defn main [] (-> i64) (cond false 1 :else 9))\n' > "$T/core_cond.coil"
+expect_rc 9 "cond is owned by coil.core and available by default" "$COIL" run "$T/core_cond.coil"
 
 echo "== supertraits: (deftrait D [Self] :requires [Base] …) (gen-8) =="
 # was: supertraits and associated-type params shared the ONE `[Self …]` vector, so a

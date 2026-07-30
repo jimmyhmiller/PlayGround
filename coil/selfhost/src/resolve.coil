@@ -1360,7 +1360,8 @@
          ; bound (was: lenient `resolve`, so an unknown impl trait slipped past here and was
          ; caught late in the checker with a divergent "impl: unknown trait" message).
          (do
-           (store! (field ip trait_name) (try! (qualify-trait-name c (load (field ip trait_name)))))
+           (when (impl-is-trait ip)
+                 (store! (field ip kind) (TraitImpl (try! (qualify-trait-name c (impl-trait-name ip))))))
            ; A blanket impl — `(impl [T] Show T)`, the implementing type IS a bare type
            ; param — was accepted and then never matched any receiver, so it was dead code
            ; that looked live: the user got no error at the impl and "does not implement" at
@@ -1884,7 +1885,28 @@
                                             (al-push! (mut (field sb items))
                                                       (load (field (al-elem [TraitMethod] ms (load k)) name)))
                                             (store! k (iadd (load k) 1))))))
-                              (store! j (iadd (load j) 1))))))
+                              (store! j (iadd (load j) 1)))))
+                  ; Receiver-bearing inherent methods are validated later, but all
+                  ; inherent names must pass strict resolution so `(size db ty)` can
+                  ; reach the checker's type-directed method selection.
+                  (let [is (load (field prog impls))
+                        ni (al-len [ImplDef] (load is))
+                        (mut ii) 0]
+                    (loop (if (icmp-ge (load ii) ni)
+                              (break)
+                              (do
+                                (let [ip (al-elem [ImplDef] is (load ii))]
+                                  (when (impl-is-inherent ip)
+                                        (let [ms (load (field ip methods))
+                                              nm (al-len [Func] (load ms))
+                                              (mut mi) 0]
+                                          (loop (if (icmp-ge (load mi) nm)
+                                                    (break)
+                                                    (do
+                                                      (al-push! (mut (field sb items))
+                                                                (load (field (al-elem [Func] ms (load mi)) name)))
+                                                      (store! mi (iadd (load mi) 1))))))))
+                                (store! ii (iadd (load ii) 1)))))))
                 (store! i (iadd (load i) 1)))))
     (field sb items)))
 

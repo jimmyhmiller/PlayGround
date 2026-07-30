@@ -543,4 +543,3 @@ packages that up (a `lisp-mode` derivative for `.coil` plus `M-x run-coil`):
 Then from any `.coil` buffer: `C-x C-e` sends the sexp before point, `C-M-x`
 sends (and redefines) the enclosing definition, `C-c C-l` `:load`s the file,
 `C-c C-z` jumps to the REPL.
-

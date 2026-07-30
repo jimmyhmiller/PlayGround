@@ -55,6 +55,7 @@
    ; a TraitCall receiver that resolved to a mangled struct recovers its base
    ; (the impl dispatch key) and args (the impl pattern's bindings).
    (impls (ptr (ArrayList ImplDef)))
+   (trait_impl_idx (HashMap (slice u8) (ptr ImplBucket)))
    ; instantiation-origin: mangled name -> its index in io-origin (the parallel
    ; (base, args) record). A hash index so io-record!/io-find are O(1) instead of a
    ; scan of a list that grows with every instantiation (gen-10). io-origin stays an
@@ -157,27 +158,25 @@
 
 ; ---- generic-impl resolution for deferred trait calls ----------
 (defn impl-lookup [(m (ptr MonoCtx)) (tr (slice u8)) (base (slice u8))] (-> (ptr ImplDef))
-  (let [is (load (field m impls))
-        n (al-len [ImplDef] (load is))
-        (mut i) 0
-        (mut r) (cast (ptr ImplDef) 0)]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [ip (al-elem [ImplDef] is (load i))]
-                  (when (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) base))
-                        (store! r ip)
-                        (break)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+  (let [bucket (impl-index-get (field m trait_impl_idx) (impl-index-key (load (field m a)) tr base))]
+    (if (icmp-eq (cast i64 bucket) 0)
+        (cast (ptr ImplDef) 0)
+        (al-elem [ImplDef]
+                 (load (field m impls))
+                 (al-get [i64] (load (field bucket items)) 0)))))
 ; Several impls can share a key, so "first one with this key" is not good enough here
 ; either: pick the most specific whose pattern accepts the receiver. That is exactly
-; `check.coil::impl-select`, called with mono's own impl table — NOT a second copy of
+; `check.coil::impl-select-indexed`, called with mono's own impl table and index — NOT a second copy of
 ; the rule. A parallel implementation here would be free to disagree with the one that
 ; type-checked the program, which is the whole failure mode this phase keeps hitting.
 (defn impl-lookup-sel [(a (ptr Allocator)) (m (ptr MonoCtx)) (tr (slice u8)) (recv (ptr Type))] (-> (ptr ImplDef))
   (let [s (alloc-stack ImplSel)]
-    (store! s (impl-select a (load (field m impls)) tr recv))
+    (store! s (impl-select-indexed a
+                                   (load (field m impls))
+                                   (impl-index-get (field m trait_impl_idx)
+                                                   (impl-index-key a tr (type-impl-name a recv)))
+                                   tr
+                                   recv))
     (load (field s ip))))
 ; NOTE: the impl-pattern matcher lives in check.coil (`unify-trait-extras`) and mono
 ; uses it directly. There was a second one here (`match-impl-pattern`/`mip-list`),
@@ -1150,6 +1149,20 @@
     (store! (field m queued-sums) (hm-new [(slice u8) i64] a (str-keyops)))
     (store! (field m queued-funcs) (hm-new [(slice u8) i64] a (str-keyops)))
     (store! (field m impls) (load (field p impls)))
+    (store! (field m trait_impl_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
+    (let [is (load (field m impls))
+          ni (al-len [ImplDef] (load is))
+          (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni)
+                (break)
+                (do
+                  (let [ip (al-elem [ImplDef] is (load ii))]
+                    (when (impl-is-trait ip)
+                          (impl-index-add! a
+                                           (mut (field m trait_impl_idx))
+                                           (impl-index-key a (impl-trait-name ip) (load (field ip for_type)))
+                                           (load ii))))
+                  (store! ii (iadd (load ii) 1))))))
     (store! (field m io-index) (hm-new [(slice u8) i64] a (str-keyops)))
     (store! (field m io-origin) (al-new [PendInst] a))
     (let [empty (subst-empty a)]

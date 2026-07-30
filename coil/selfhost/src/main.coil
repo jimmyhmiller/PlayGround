@@ -43,12 +43,15 @@
 
 ; Returns 1 if the pipeline succeeded (IR printed), 0 if a diagnostic was reported.
 (defn dump-ir-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8)) (triple (ptr i8)) (path (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         (mut sp0) (al-new [(slice u8)] a)
-        (mut st0) (al-new [(slice u8)] a)]
-    (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
-      (Some [mp] (do (emit-ir-normalized a w mp triple) 1))
-      (None [] 0))))
+        (mut st0) (al-new [(slice u8)] a)
+        result (match (run-pipeline a src cwd w path (mut sp0) (mut st0))
+                 (Some [mp] (do (emit-ir-normalized a w mp triple) 1))
+                 (None [] 0))]
+    (buffered-output-flush bout)
+    result))
 
 ; The `default<On>` pipeline string for level `n`, with asan appended when
 ; --sanitize=address asked for it. Spelled out rather than built because

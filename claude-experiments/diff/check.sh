@@ -110,8 +110,39 @@ else
 fi
 step "gate prelude self-test (no gate abort can be silent, none is spurious)" \
   bash scripts/rsc/tests/gate-prelude-selftest.sh || true
+# react-dom's ready callbacks are not fire-once, and the SSR entries pipe from them.
+# Needs the fixture's vendored react-dom (the copy the entries actually bind to); it
+# skips itself without one. No browser, no build.
+if [ "$have_node" = "1" ]; then
+  step "SSR pipes once (react-dom calls onAllReady twice; the entry's guard absorbs it)" \
+    node --test scripts/rsc/tests/ssr-pipe-once.test.mjs || true
+else
+  skip_step "SSR pipes once" "node not found"
+fi
 step "gate lint (every scripts/rsc gate sources the ERR net)" \
   bash scripts/rsc/lint-gates.sh || true
+
+# The cal.com head-to-head demo publishes comparisons, so the rules that make those
+# comparisons fair are gated like anything else: navigation never edits source, one
+# scenario press writes once, a reload is labelled as a reload, a non-zero exit is
+# FAILED rather than a timeout, and build memory is the process tree rather than
+# ru_maxrss. Both suites are node-only and touch no dev server; the dashboard one needs
+# jsdom, which it resolves from the cal.com checkout, so it skips without one.
+CALCOM_APP="${DIFFPACK_CALCOM:-/tmp/dpe2e/calcom}"
+if [ "$have_node" = "1" ]; then
+  step "build-memory sampler (a process tree's peak is not ru_maxrss)" \
+    node scripts/tree-rss.test.mjs || true
+  step "spawn order alternates (a fixed order is a standing head start)" \
+    node demo/racing-order.test.mjs || true
+  if node -e "require('node:module').createRequire('$CALCOM_APP/package.json').resolve('jsdom')" >/dev/null 2>&1; then
+    step "demo dashboard rules (navigation/edit separation, hot vs reload, FAILED is not a timeout)" \
+      node demo/dashboard.test.mjs --app "$CALCOM_APP" || true
+  else
+    skip_step "demo dashboard fairness rules" "jsdom not resolvable from $CALCOM_APP (set DIFFPACK_CALCOM)"
+  fi
+else
+  skip_step "demo fairness self-tests" "node not found"
+fi
 
 # --- Tier 2: dev / HMR browser gates -----------------------------------------
 dev_gate() {  # dev_gate "name" <dir> <node-script>
@@ -153,6 +184,17 @@ elif ! deps_ready integration/next-app-router; then
   skip_step "Next dev freshness (an edit must reach a freshly fetched document)" "integration/next-app-router/node_modules missing (npm install there)"
 else
   step "Next dev freshness (an edit must reach a freshly fetched document)" bash scripts/rsc/next-dev-fresh-check.sh
+fi
+# Also curl-level: sweeps every route under `diffpack dev` and reads the server log for
+# react-dom API misuse. The dev orchestrator renders through the BUFFERED path, which is
+# a different react-dom callback than production's streaming one, so next-check.sh's
+# identical assertion does not cover it.
+if [ "$have_node" = "0" ]; then
+  skip_step "Next dev SSR API (no react-dom misuse while rendering every route)" "node not found"
+elif ! deps_ready integration/next-app-router; then
+  skip_step "Next dev SSR API (no react-dom misuse while rendering every route)" "integration/next-app-router/node_modules missing (npm install there)"
+else
+  step "Next dev SSR API (no react-dom misuse while rendering every route)" bash scripts/rsc/next-dev-ssr-api-check.sh
 fi
 rsc_gate "Next UNMODIFIED create-next-app default (build + render + hydrate)" scripts/rsc/next-authentic-check.sh integration/next-app-router
 rsc_gate "Next SSG (prerender + dumb static serve + hydrate + soft-nav)" scripts/rsc/next-ssg-check.sh integration/next-app-router

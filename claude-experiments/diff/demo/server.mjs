@@ -26,6 +26,19 @@
 //     `node scripts/bench-calcom.mjs`.
 //   * The probe polls every 8 ms, so each reading carries up to 8 ms of quantisation
 //     — identical on both sides.
+//   * Which side is SPAWNED FIRST alternates every race (`racingOrder`), because the
+//     first process spawned gets a moment of an uncontended machine.
+//   * `next build` runs with this checkout's `typescript.ignoreBuildErrors` and
+//     `eslint.ignoreDuringBuilds` set (see the benchmark `next.config.ts` wrapper):
+//     diffpack does no type checking, so leaving `tsc` inside `next build` would time
+//     a compiler only one side runs. Both sides therefore skip it.
+//   * Peak memory is SAMPLED over each side's whole process tree, not read from
+//     `/usr/bin/time -l`, whose `ru_maxrss` is the largest single process and would
+//     under-report both trees by different amounts (see `sampleTreeRss`).
+//   * A build that exits non-zero is reported as FAILED, never as a timeout: a crash
+//     on one side must not read as a win for the other.
+//   * Navigation and editing are separate phases: route chips only replace iframe
+//     documents; scenario buttons navigate if needed, settle, then edit exactly once.
 //
 // Every file this touches is snapshotted at startup and restored on exit, including
 // SIGINT/SIGTERM: the injected probe tag, the demo-only X-Frame-Options strip, and
@@ -42,6 +55,8 @@ import {
   createWriteStream,
 } from "node:fs";
 import { createServer } from "node:http";
+import { sampleTreeRss } from "../scripts/tree-rss.mjs";
+import { racingOrder } from "./racing-order.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,7 +64,8 @@ const demoDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(demoDir);
 
 const args = parseArgs(process.argv.slice(2));
-const APP = args.app ?? "/tmp/dpe2e/calcom";
+const corpusApp = join(repoRoot, "integration", "e2e", ".cache", "calcom");
+const APP = args.app ?? (existsSync(corpusApp) ? corpusApp : "/tmp/dpe2e/calcom");
 const WEB = join(APP, "apps", "web");
 const DP_PORT = args.dpPort ?? 3000;
 const TP_PORT = args.tpPort ?? 3001;
@@ -57,6 +73,11 @@ const PORT = args.port ?? 4321;
 const BOOT = !args.noBoot;
 const BOOT_TIMEOUT_MS = args.bootTimeout ?? 240000;
 const READY_PATH = args.readyPath ?? "/auth/login";
+// A 200 is not proof the page rendered. A dev server that answers an error shell, or
+// that streams a document it never finishes, would be called ready early and would be
+// credited with a boot time it did not earn. Ready therefore means: 200, AND the
+// response body carries a marker only the real page has, AND the document is closed.
+const READY_MARKER = args.readyMarker ?? "Cal.diy";
 
 const diffpackBin = join(repoRoot, "target", "release", "diffpack");
 const nextBin = join(APP, "node_modules", ".bin", "next");
@@ -70,7 +91,13 @@ const SIDES = [
     key: "dp",
     label: "diffpack",
     port: DP_PORT,
-    outDir: join(WEB, ".diffpack-output"),
+    // Everything a cold start has to remove for this side. `.diffpack-next/` is the
+    // adapter's GENERATED GLUE, not compiled output: it is rewritten on every boot,
+    // and the adapter is written so a tree without it behaves identically. It still
+    // goes, because a cold start that deletes all of one side's generated files and
+    // keeps some of the other's invites exactly the question a demo should not leave
+    // open.
+    outDirs: [join(WEB, ".diffpack-output"), join(WEB, ".diffpack-next")],
     dev: () => ({ cmd: diffpackBin, argv: ["dev", WEB, String(DP_PORT)], cwd: repoRoot }),
     build: () => ({ cmd: diffpackBin, argv: ["build-app", ".", "production"], cwd: WEB }),
   },
@@ -78,12 +105,20 @@ const SIDES = [
     key: "tp",
     label: "Turbopack",
     port: TP_PORT,
-    outDir: join(WEB, ".next"),
+    outDirs: [join(WEB, ".next")],
     dev: () => ({ cmd: nextBin, argv: ["dev", "--turbopack", "--port", String(TP_PORT)], cwd: WEB }),
-    build: () => ({ cmd: nextBin, argv: ["build"], cwd: WEB }),
+    // `--turbopack` is passed EXPLICITLY even though Next 16 already defaults to it
+    // for `build`. The default is both version- and config-dependent: Next 16 picks
+    // Turbopack only when `process.env.TURBOPACK === "auto"` resolves that way, and
+    // it hard-exits (code 1) when it auto-selects Turbopack for a project that has a
+    // webpack config and no turbopack config. A demo whose headline is "vs Turbopack"
+    // must not be one Next release or one config change away from quietly measuring
+    // webpack instead — or from scoring that exit-1 as a win for the other side.
+    build: () => ({ cmd: nextBin, argv: ["build", "--turbopack"], cwd: WEB }),
   },
 ];
 const sideByKey = new Map(SIDES.map((s) => [s.key, s]));
+
 
 // ---------------------------------------------------------------------------
 // The scenario edits.
@@ -103,14 +138,20 @@ const SWATCH = {
   server: ["#ffd166", "#1a1206"],
   shared: ["#8ab4ff", "#080f22"],
 };
+const BADGE_LABEL = {
+  island: "ISLAND EDIT",
+  server: "SERVER COMPONENT EDIT",
+  shared: "SHARED CLIENT EDIT",
+};
 
 function badge(kind, n) {
   const [fg, bg] = SWATCH[kind];
   const style =
     `{ position: "fixed", ${CORNERS[kind]}, zIndex: 2147483000, background: "${bg}", ` +
-    `color: "${fg}", border: "2px solid ${fg}", borderRadius: 8, padding: "5px 11px", ` +
-    `font: "700 13px/1.2 ui-monospace, SFMono-Regular, monospace", pointerEvents: "none" }`;
-  return `<span data-dpmark="${kind}-${n}" style={${style}}>${kind} #${n}</span>`;
+    `color: "${fg}", border: "3px solid ${fg}", borderRadius: 10, padding: "10px 16px", ` +
+    `boxShadow: "0 8px 28px rgba(0,0,0,.45)", ` +
+    `font: "800 18px/1.2 ui-monospace, SFMono-Regular, monospace", pointerEvents: "none" }`;
+  return `<span data-dpmark="${kind}-${n}" style={${style}}>${BADGE_LABEL[kind]} #${n}</span>`;
 }
 
 function badgeRe(kind) {
@@ -128,7 +169,11 @@ function cssBlock(n) {
   return (
     `\n/* dpmark */\n` +
     `:root { --dpmark: css-${n}; }\n` +
-    `body { box-shadow: inset 0 0 0 10px ${color}; }\n`
+    `body { box-shadow: inset 0 0 0 10px ${color}; }\n` +
+    `body::before { content: "GLOBAL CSS EDIT #${n}"; position: fixed; right: 8px; bottom: 8px; ` +
+    `z-index: 2147483000; padding: 10px 16px; border: 3px solid ${color}; border-radius: 10px; ` +
+    `background: #111827; color: ${color}; box-shadow: 0 8px 28px rgba(0,0,0,.45); ` +
+    `font: 800 18px/1.2 ui-monospace, SFMono-Regular, monospace; pointer-events: none; }\n`
   );
 }
 
@@ -140,7 +185,7 @@ const KINDS = [
     url: "/auth/login",
     file: join(WEB, "modules", "auth", "login-view.tsx"),
     anchor: ">Cal.diy<",
-    plant: (s) => s.replace(">Cal.diy<", `>Cal.diy${badge("island", 0)}<`),
+    plant: (s) => s.replace(">Cal.diy<", `>Cal.diy${badge("island", 1)}<`),
     step: (s, n) => s.replace(badgeRe("island"), badge("island", n)),
   },
   {
@@ -153,7 +198,7 @@ const KINDS = [
     plant: (s) =>
       s.replace(
         "return <Login {...props} />;",
-        `return (<>${badge("server", 0)}<Login {...props} /></>);`,
+        `return (<>${badge("server", 1)}<Login {...props} /></>);`,
       ),
     step: (s, n) => s.replace(badgeRe("server"), badge("server", n)),
   },
@@ -164,7 +209,7 @@ const KINDS = [
     url: "/pro/30min",
     file: join(WEB, "components", "PageWrapperAppDir.tsx"),
     anchor: "return (\n    <>",
-    plant: (s) => s.replace("return (\n    <>", `return (\n    <>${badge("shared", 0)}`),
+    plant: (s) => s.replace("return (\n    <>", `return (\n    <>${badge("shared", 1)}`),
     step: (s, n) => s.replace(badgeRe("shared"), badge("shared", n)),
   },
   {
@@ -174,7 +219,7 @@ const KINDS = [
     url: "/auth/login",
     file: join(WEB, "styles", "globals.css"),
     anchor: null, // appended
-    plant: (s) => s.replace(CSS_BLOCK_RE, "") + cssBlock(0),
+    plant: (s) => s.replace(CSS_BLOCK_RE, "") + cssBlock(1),
     step: (s, n) => s.replace(CSS_BLOCK_RE, "") + cssBlock(n),
   },
 ];
@@ -203,6 +248,7 @@ const ROUTES = [
 
 const layoutFile = join(WEB, "app", "layout.tsx");
 const wrapperFile = join(WEB, "next.config.ts");
+const demoBaseConfig = join(WEB, "next.config.__diffpack_demo_base__.ts");
 const probeDest = join(WEB, "public", "diffpack-demo-probe.js");
 
 // `async` so the probe never blocks body parsing in the page being measured. It
@@ -211,25 +257,36 @@ const probeDest = join(WEB, "public", "diffpack-demo-probe.js");
 const PROBE_TAG = `        <script src="/diffpack-demo-probe.js" data-diffpack-demo="1" async />\n`;
 const LAYOUT_ANCHOR = "        <IconSprites />\n";
 
-const WRAPPER_ANCHOR = "  const config = orig(phase);\n";
-const WRAPPER_PATCH = `  if (process.env.DIFFPACK_DEMO === "1") {
-    // The demo dashboard frames this app side by side. cal.com sends
-    // X-Frame-Options: DENY on /auth/*, which would blank the frame, so the demo
-    // flag — and only the demo flag — drops that one header.
-    const origHeaders = config.headers;
+const DEMO_CONFIG_MARKER = "// Generated temporarily by diffpack's side-by-side demo.";
+function demoConfigModule() {
+  return `${DEMO_CONFIG_MARKER}
+import base from "./next.config.__diffpack_demo_base__.ts";
+
+export default async (...args) => {
+  const original = typeof base === "function" ? await base(...args) : await base;
+  const config = { ...(original ?? {}) };
+  if (process.env.DIFFPACK_DEMO === "1") {
+    // cal.com sends X-Frame-Options: DENY on /auth/*; remove only that header so the
+    // two demo frames are visible. Empty header entries are invalid in Next.
+    const originalHeaders = config.headers;
     config.headers = async () => {
-      const list = origHeaders ? await origHeaders() : [];
-      // An entry left with no headers at all is rejected by next ("\`headers\`
-      // field cannot be empty for route"), so those entries go away entirely.
+      const list = originalHeaders ? await originalHeaders() : [];
       return list
         .map((entry) => ({
           ...entry,
-          headers: (entry.headers ?? []).filter((h) => h.key !== "X-Frame-Options"),
+          headers: (entry.headers ?? []).filter((header) => header.key !== "X-Frame-Options"),
         }))
         .filter((entry) => entry.headers.length > 0);
     };
   }
+  // A production-build race compares bundlers, not diffpack against tsc. diffpack
+  // performs no type/lint pass, so the reference build skips those passes too.
+  config.typescript = { ...(config.typescript ?? {}), ignoreBuildErrors: true };
+  config.eslint = { ...(config.eslint ?? {}), ignoreDuringBuilds: true };
+  return config;
+};
 `;
+}
 
 const pristine = new Map(); // path -> original text
 const state = {
@@ -280,7 +337,7 @@ http.listen(PORT, () => {
   console.log(`  Turbopack   http://localhost:${TP_PORT}`);
   console.log(`  app         ${WEB}`);
   console.log(`  dev logs    ${logDir}/{dp,tp}.log\n`);
-  if (BOOT) for (const side of SIDES) bootSide(side);
+  if (BOOT) for (const side of racingOrder("boot", SIDES)) bootSide(side);
   else for (const side of SIDES) attachSide(side);
 });
 
@@ -317,7 +374,7 @@ async function apiBurst(req, res) {
 function applyEdit(kind) {
   const before = readFileSync(kind.file, "utf8");
   const first = !state.planted.has(kind.key);
-  const n = first ? 0 : (state.counters.get(kind.key) ?? 0) + 1;
+  const n = first ? 1 : (state.counters.get(kind.key) ?? 0) + 1;
   const after = first ? kind.plant(before) : kind.step(before, n);
   if (after === before) {
     // Never report a measurement for an edit that changed nothing: that is the one
@@ -358,14 +415,23 @@ async function apiRestart(req, res) {
   const sides = keys.map((k) => sideByKey.get(k)).filter(Boolean);
   if (!sides.length) return json(res, { error: "no such sides" }, 400);
   state.busy = "restart";
-  json(res, { restarting: sides.map((s) => s.key), wipe });
-  broadcast({ type: "restart-begin", sides: sides.map((s) => s.key), wipe });
+  const order = racingOrder("boot", sides);
+  json(res, { restarting: order.map((s) => s.key), wipe });
+  broadcast({
+    type: "restart-begin",
+    sides: sides.map((s) => s.key),
+    order: order.map((s) => s.key),
+    wipe,
+  });
   try {
     await Promise.all(sides.map((s) => stopSide(s)));
     // A cold start means cold: with the output tree left in place a restart measures
-    // a warm boot, which is a different and much smaller number.
-    if (wipe) for (const s of sides) rmSync(s.outDir, { recursive: true, force: true });
-    for (const s of sides) bootSide(s);
+    // a warm boot, which is a different and much smaller number. Every side's wipe
+    // finishes before any side boots, so no side pays for the other's deletion.
+    if (wipe) {
+      for (const s of sides) for (const dir of s.outDirs) rmSync(dir, { recursive: true, force: true });
+    }
+    for (const s of order) bootSide(s);
   } finally {
     state.busy = null;
   }
@@ -377,14 +443,17 @@ async function apiRestart(req, res) {
 async function apiBuild(req, res) {
   if (state.busy) return json(res, { error: `busy: ${state.busy}` }, 409);
   state.busy = "build";
-  json(res, { started: true });
-  broadcast({ type: "build-begin", sides: SIDES.map((s) => s.key) });
+  const order = racingOrder("build", SIDES);
+  json(res, { started: true, order: order.map((s) => s.key) });
+  broadcast({ type: "build-begin", sides: SIDES.map((s) => s.key), order: order.map((s) => s.key) });
   try {
     await Promise.all(SIDES.map((s) => stopSide(s)));
-    for (const s of SIDES) rmSync(s.outDir, { recursive: true, force: true });
-    await Promise.all(SIDES.map((side) => runBuild(side)));
+    for (const s of SIDES) for (const dir of s.outDirs) rmSync(dir, { recursive: true, force: true });
+    // `order` decides who is spawned first; it alternates per race, because the first
+    // process spawned gets a moment of the machine to itself before the other starts.
+    await Promise.all(order.map((side) => runBuild(side)));
     broadcast({ type: "build-done" });
-    for (const s of SIDES) bootSide(s);
+    for (const s of racingOrder("boot", SIDES)) bootSide(s);
   } finally {
     state.busy = null;
   }
@@ -400,6 +469,7 @@ function runBuild(side) {
       env: sideEnv(side),
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const rss = sampleTreeRss(proc.pid);
     let out = "";
     const onData = (d) => {
       out += d;
@@ -411,15 +481,22 @@ function runBuild(side) {
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
     proc.on("close", (code) => {
+      const peakTreeMb = rss.stop();
       const user = /([0-9.]+)\s+user/.exec(out);
-      const rss = /([0-9]+)\s+maximum resident set size/.exec(out);
+      // `maximum resident set size` from `/usr/bin/time -l` is `ru_maxrss`, which for
+      // children is the max over any ONE waited-for process, never the sum. It is
+      // reported alongside the sampled tree peak, clearly labelled, and it is NOT the
+      // headline: see `sampleTreeRss`.
+      const single = /([0-9]+)\s+maximum resident set size/.exec(out);
       broadcast({
         type: "build-end",
         side: side.key,
         ms: Date.now() - t0,
         code,
         cpuUserS: user ? Number(user[1]) : null,
-        peakRssMb: rss ? Number(rss[1]) / (1024 * 1024) : null,
+        peakRssMb: peakTreeMb,
+        peakRssSingleMb: single ? Number(single[1]) / (1024 * 1024) : null,
+        rssSamples: rss.count(),
       });
       resolve();
     });
@@ -473,6 +550,10 @@ function attachSide(side) {
 
 async function waitForReady(side, entry) {
   const deadline = Date.now() + BOOT_TIMEOUT_MS;
+  // How many times this side answered 200 with a body that was not the real page.
+  // Counted rather than ignored: a side that does that is being handed free boot time
+  // by any harness whose gate is the status code alone, and the count is the evidence.
+  entry.shellHits = 0;
   while (Date.now() < deadline) {
     if (state.procs.get(side.key) !== entry) return; // superseded by a newer boot
     if (entry.status === "error") return;
@@ -481,17 +562,40 @@ async function waitForReady(side, entry) {
         signal: AbortSignal.timeout(30000),
         redirect: "manual",
       });
-      await r.text().catch(() => {});
+      const body = await r.text().catch(() => "");
       if (r.status === 200) {
-        entry.bootMs = Date.now() - entry.startedAt;
-        setStatus(side, "ready");
-        broadcast({ type: "ready", side: side.key, ms: entry.bootMs, at: Date.now() });
-        return;
+        if (body.includes(READY_MARKER) && body.includes("</html>")) {
+          entry.bootMs = Date.now() - entry.startedAt;
+          if (entry.shellHits) {
+            // Both channels: the SSE log pane is empty when no dashboard is attached,
+            // and this is evidence about how a boot time was earned, not a debug aid.
+            const line =
+              `answered 200 without ${JSON.stringify(READY_MARKER)}, or an unclosed document, ` +
+              `${entry.shellHits}x before it was really ready; those did not count as ready`;
+            console.log(`[${side.key}] ${line}`);
+            broadcast({ type: "log", side: side.key, from: "demo", line });
+          }
+          setStatus(side, "ready");
+          broadcast({
+            type: "ready",
+            side: side.key,
+            ms: entry.bootMs,
+            at: Date.now(),
+            shellHits: entry.shellHits,
+          });
+          return;
+        }
+        entry.shellHits++;
       }
     } catch {}
     await sleep(25);
   }
-  setStatus(side, "error", `no 200 from ${READY_PATH} within ${BOOT_TIMEOUT_MS} ms`);
+  setStatus(
+    side,
+    "error",
+    `no 200 carrying ${JSON.stringify(READY_MARKER)} from ${READY_PATH} within ` +
+      `${BOOT_TIMEOUT_MS} ms (${entry.shellHits} bare 200s); wrong --ready-marker looks exactly like this`,
+  );
 }
 
 function setStatus(side, status, note) {
@@ -589,9 +693,25 @@ function preflight() {
   if (!existsSync(diffpackBin)) throw new Error(`missing ${diffpackBin}; run \`cargo build --release\``);
   if (!existsSync(WEB)) throw new Error(`missing ${WEB}; pass --app <cal.com checkout>`);
   if (!existsSync(nextBin)) throw new Error(`missing ${nextBin}; install that checkout's node_modules`);
+  if (!existsSync(wrapperFile)) throw new Error(`missing ${wrapperFile}; the demo expects cal.com's Next config`);
   if (DP_PORT === TP_PORT) throw new Error(`--dp-port and --tp-port must differ`);
 
-  for (const f of [layoutFile, wrapperFile, ...KINDS.map((k) => k.file)]) {
+  // Normally the base file does not exist. If a previous demo was killed with SIGKILL,
+  // recover the pristine config from it instead of snapshotting our generated wrapper.
+  const wrapperOnDisk = readFileSync(wrapperFile, "utf8");
+  if (existsSync(demoBaseConfig)) {
+    if (!wrapperOnDisk.startsWith(DEMO_CONFIG_MARKER)) {
+      throw new Error(
+        `${demoBaseConfig} already exists but ${wrapperFile} is not the demo wrapper; ` +
+          `refusing to overwrite an unrelated file`,
+      );
+    }
+    pristine.set(wrapperFile, readFileSync(demoBaseConfig, "utf8"));
+  } else {
+    pristine.set(wrapperFile, wrapperOnDisk);
+  }
+
+  for (const f of [layoutFile, ...KINDS.map((k) => k.file)]) {
     if (!existsSync(f)) throw new Error(`missing ${f}`);
     pristine.set(f, readFileSync(f, "utf8"));
   }
@@ -606,12 +726,6 @@ function preflight() {
   if (!pristine.get(layoutFile).includes(LAYOUT_ANCHOR)) {
     throw new Error(`cannot find the probe insertion point ${JSON.stringify(LAYOUT_ANCHOR)} in ${layoutFile}`);
   }
-  if (!pristine.get(wrapperFile).includes(WRAPPER_ANCHOR)) {
-    throw new Error(
-      `cannot find ${JSON.stringify(WRAPPER_ANCHOR)} in ${wrapperFile} — the demo needs to drop ` +
-        `X-Frame-Options for the framed pages; is this the benchmark next.config wrapper?`,
-    );
-  }
   mkdirSync(logDir, { recursive: true });
 }
 
@@ -619,10 +733,8 @@ function installDemoFiles() {
   mkdirSync(join(WEB, "public"), { recursive: true });
   copyFileSync(join(demoDir, "probe.js"), probeDest);
   writeFileSync(layoutFile, pristine.get(layoutFile).replace(LAYOUT_ANCHOR, PROBE_TAG + LAYOUT_ANCHOR));
-  writeFileSync(
-    wrapperFile,
-    pristine.get(wrapperFile).replace(WRAPPER_ANCHOR, WRAPPER_ANCHOR + WRAPPER_PATCH),
-  );
+  writeFileSync(demoBaseConfig, pristine.get(wrapperFile));
+  writeFileSync(wrapperFile, demoConfigModule());
 }
 
 function restoreEdits() {
@@ -644,6 +756,9 @@ function restoreAll() {
   }
   try {
     rmSync(probeDest, { force: true });
+  } catch {}
+  try {
+    rmSync(demoBaseConfig, { force: true });
   } catch {}
 }
 
@@ -669,6 +784,8 @@ function publicState() {
     appCommit: gitHead(APP),
     diffpackCommit: gitHead(repoRoot),
     nextVersion: nextVersion(),
+    readyPath: READY_PATH,
+    readyMarker: READY_MARKER,
     busy: state.busy,
     sides: SIDES.map((s) => {
       const e = state.procs.get(s.key);
@@ -780,6 +897,7 @@ function parseArgs(a) {
     else if (k === "--tp-port") o.tpPort = Number(a[++i]);
     else if (k === "--boot-timeout") o.bootTimeout = Number(a[++i]);
     else if (k === "--ready-path") o.readyPath = a[++i];
+    else if (k === "--ready-marker") o.readyMarker = a[++i];
     else if (k === "--no-boot") o.noBoot = true;
     else throw new Error(`unknown arg ${k}`);
   }

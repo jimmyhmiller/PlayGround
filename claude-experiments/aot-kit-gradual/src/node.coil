@@ -185,6 +185,15 @@
    (pgen   i64)                ; the current generation
    (pbusy  bool)               ; a cone walk is in progress; the buffers above are not reentrant
    (nchg   i64)                ; peephole changes; see iterate!'s sweep loop
+   ;; TWO ENGINE COUNTERS, and they exist because the gate that used to stand in for them stopped
+   ;; being an equality. Until 4c-2 the only thing that removed a `Load` was `load-idealize`, so
+   ;; "how many loads are dead" WAS "how many forwardings happened" and the corpus gate counted the
+   ;; first while claiming the second. 4c-2 removes loads by CASCADE (deleting a store can drop the
+   ;; last reader of the object below it), so the stand-in silently inflates the number that says
+   ;; 4c-1 still works. These are incremented at exactly one site each, in the branch that performs
+   ;; the rewrite, so a gate can assert an EQUALITY rather than "more than zero".
+   (nfwd   i64)                ; load-after-store forwardings performed (4c-1)
+   (nselim i64)                ; store-after-store eliminations performed (4c-2)
    (inited bool)])
 
 (defn graph [] (-> (ptr Graph))
@@ -209,6 +218,8 @@
           (store! (field p pgen)   0)
           (store! (field p pbusy)  false)
           (store! (field p nchg)   0)
+          (store! (field p nfwd)   0)
+          (store! (field p nselim) 0)
           0))
     p))
 
@@ -226,6 +237,10 @@
     (al-clear! [i64]  (field p pstack))
     (store! (field p pbusy) false)
     (store! (field p nchg) 0)
+    ; per-GRAPH, not per-process: every fixture starts from `graph-reset!`, so a gate that builds
+    ; the corpus in a loop reads the count for the fixture it just built and not a running total.
+    (store! (field p nfwd) 0)
+    (store! (field p nselim) 0)
     (store! (field p cfgver) 0)
     (store! (field p domver) -1)
     (store! (field p verifying) false)
@@ -1615,8 +1630,163 @@
             ;; `if` rather than folded into the condition above, because it may only be asked once
             ;; `m` is known to be a Store: `access-refused?` reads `n-aux` as an alias number, and
             ;; a Phi's aux is a declared TYPE.
-            (if (access-refused? m) (do (n-add-dep! m n) NO-NODE) (n-in m 3))
+            (if (access-refused? m) (do (n-add-dep! m n) NO-NODE)
+              ;; COUNTED HERE AND NOWHERE ELSE. A store still being wired has no value yet, and
+              ;; `n-peephole` reads the NO-NODE this would return as "declined"; counting it would
+              ;; be counting a forwarding that never happened, which is exactly the kind of
+              ;; plausible number `g-forwards` exists to replace. So the count goes on the branch
+              ;; that hands back a real node.
+              (let [v (n-in m 3)]
+                (if (= v NO-NODE) NO-NODE (do (g-forwarded!) v))))
           (do (n-add-dep! m n) NO-NODE))))))
+
+;; The store-after-store form of the same question, and it IS the same question. Both ops carry
+;; the alias class in `aux` and the pointer in slot 2, so `load-store-same-word?` reads nothing
+;; from its first argument that a Store does not have. It gets its own name so the call site below
+;; says what it is asking, and so that a day when the two ops' layouts diverge has ONE line to
+;; change rather than a call site somebody has to remember.
+(defn store-store-same-word? [(outer i64) (inner i64) (p i64)] (-> bool)
+  (load-store-same-word? outer inner p))
+
+;; IS THIS STORE THE ONLY THING THAT READS THAT MEMORY STATE. Simple's `checkOnlyUse`, and it is
+;; the one clause that makes 4c-2 harder than 4c-1.
+;;
+;; WHAT IT IS NOT FOR, said first because the obvious story is wrong and this was MEASURED rather
+;; than argued. Bypassing an inner store is not a value-level miscompile when somebody else reads
+;; it. In this IR a Store is a pure function from memory state to memory state, so
+;; `Store(p,v2,Store(p,v1,m))` and `Store(p,v2,m)` denote the SAME state -- the second write lands
+;; on the same word of the same object and the first is invisible in the result either way -- and
+;; the other reader goes on reading the inner store, which the bypass leaves untouched. The
+;; guarded fixture in the corpus was built expecting this clause to be the thing standing between
+;; the program and a wrong answer; deleting the clause and running the differential oracle over
+;; the fixture returns the identical answer on every seed. Writing "otherwise it returns 2 where
+;; the answer is 1" here would have been a plausible sentence that no gate could support.
+;;
+;; WHAT IT IS FOR is Simple's own reason, and it is about SERIALISABILITY rather than about values:
+;; "you get weird non-serializable memory effects in the worst case". Bypass a store somebody else
+;; still reads and the graph now holds TWO live writes to one word, both derived from the same
+;; incoming state, with no memory edge ordering them against each other. Nothing in the ideal
+;; graph is wrong, and the demand-driven interpreter cannot see it, because each state is a value.
+;; It stops being harmless the moment memory is one mutable heap and a scheduler has to pick an
+;; order for two writes the IR no longer orders (M10's GCM, and D2's safepoints on top of it).
+;; Refusing to create that shape is much cheaper than detecting it later.
+;;
+;; And it is what makes this rewrite a DELETION rather than an edge shuffle. `g-store-elims` counts
+;; stores that stopped existing; without this clause it would count edge rearrangements that
+;; removed nothing, which is exactly the sort of plausible number the counter was added to replace.
+;;
+;; PINNED COUNTS AS A CONSUMER. `keeps` is the ONLY signal in the graph that says "a use is
+;; coming": a fixture holds a memory state across the next line precisely because the `Return` that
+;; roots it does not exist yet (see `fx-object`'s note), and a store in that window has exactly one
+;; use and looks final. `n-del-use!` already reports a pinned node as still used, so without this
+;; clause the bypass would not kill the store -- it would silently rearrange a chain the builder is
+;; still holding open, and the builder's next line would root a state the write no longer reaches.
+;;
+;; THE DEP GOES ON EVERY OTHER USER. `wl-push-outs!` only re-queues this store when the inner
+;; store's TYPE moves, and this rule reads the inner store's USE COUNT. A user that stops reading
+;; the state changes neither type, so without the dep the rewrite is never reconsidered. That is
+;; Simple's reason for `addDep` in `checkOnlyUse` and it is the same reason `load-idealize` records
+;; one on decline. It is not a complete answer on its own: a user that is KILLED does not flush
+;; its own deps (`n-kill!` releases inputs, it does not move deps), so the backstop for that case
+;; is `iterate!`'s sweep, which re-pushes every live node whenever anything changed.
+(defn store-sole-consumer? [(inner i64) (outer i64)] (-> bool)
+  (let [len (n-nouts inner) (mut i) 0 (mut others) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [u (n-out inner (load i))]
+              (if (= u outer) 0
+                (do (n-add-dep! u outer)
+                    (store! others (+ (load others) 1))
+                    0)))
+            (store! i (+ (load i) 1))
+            0)))
+    (and (= (load others) 0) (= (n-keeps inner) 0))))
+
+;; STORE AFTER STORE. `Store(p, v2, mem=Store(p, v1, m))` becomes `Store(p, v2, mem=m)`: the inner
+;; write is overwritten before anything can read it, so it never happened.
+;;
+;; IT REWIRES IN PLACE AND RETURNS `n`. There is no replacement node to hand back -- the surviving
+;; store is this one -- so the rewrite is a `n-set-def!` on slot 1 and the inner store dies of
+;; having no uses left, through the ordinary cascade. That shape has three consequences, and each
+;; one is a line below rather than a comment:
+;;
+;;   - GVN GOES STALE. A Store is value-numbered (`op-gvn?` admits everything above `Stop` bar
+;;     `Arg` and `New`), and the table hashes the node's INPUTS out of the arena. Mutating an
+;;     installed node leaves an entry filed under a hash nothing will ever compute again, and the
+;;     next structurally identical Store either fails to dedup or, worse, dedups against a stale
+;;     bucket. `gvn-remove!` before the mutation, and `n-peephole`'s own `gvn!` re-files it after.
+;;   - PROGRESS HAS TO BE DECLARED. `n-peephole` counts an idealize as a change only when it
+;;     returns a DIFFERENT node, and `iterate!` stops sweeping when a sweep changed nothing. An
+;;     in-place rewrite that says nothing can therefore end a sweep with a newly enabled,
+;;     proof-gated rewrite still pending, which is an order-dependent graph. Hence `g-changed!`.
+;;     (`region-remove-path!` has exactly this shape and does NOT do it; that is a pre-existing
+;;     hazard, noted rather than copied.) No corpus fixture distinguishes it today: removing the
+;;     call leaves every count and every answer unchanged over 40 raw-then-`iterate!` seeds,
+;;     because something else in the same sweep always bumps `nchg`. It stays because being right
+;;     by construction costs one line and being right by coincidence costs a debugging session.
+;;   - THE STORE'S TYPE RISES, and that is correct. `store-compute` MEETS the stored value into the
+;;     incoming contents, so before the rewrite this store reports `meet(contents(m), v1, v2)` and
+;;     after it reports `meet(contents(m), v2)`, which is strictly MORE SPECIFIC. The old answer
+;;     was an over-approximation naming a value the class no longer holds anywhere; the new one is
+;;     the truth. A rewrite narrowing a type across `iterate!` is the direction the notes on
+;;     `n-ty-proven?` already allow (dropping a dead region path narrows a Phi the same way), and
+;;     `n-peephole` installs it with `n-set-ty!`. It is NOT allowed inside `g-analyze!`, which
+;;     rewrites nothing and would report it through `n-set-ty-falling!`.
+;;
+;; FOUR GUARDS, EACH IN ITS OWN `if`, so the reason for a decline is legible from the code:
+;;
+;;   1. STRUCTURAL same-word, decided without reading a single type: same alias class (the field)
+;;      and the same pointer NODE (the object). This is 4c-1's rule verbatim, and it is structural
+;;      for the same reason -- a memory type describes a whole alias CLASS, so no alias-level type
+;;      could ever say the two stores hit the same word.
+;;   2. ONLY MEMORY CONSUMER, above. It is the one guard here that is NOT a soundness condition on
+;;      the value the program computes; read its note for what it actually buys.
+;;   3. PROVEN, and the reason is 4c-1's rather than the type-disbelief one, so it is worth saying
+;;      again: this rule reads no type, so the guard is not about a provisional type being a lie.
+;;      It is that the rewrite is IRREVERSIBLE and the cone it is reading has not stopped moving.
+;;      A store in a still-settling cone is one the sweep may yet replace (GVN can fold it into an
+;;      equal one; a pointer can still be rewritten under it), and deleting a write on the strength
+;;      of a graph that is still being rearranged commits permanently to an arrangement that was
+;;      never final. `n-ty-proven?` is the available proxy for "this part of the graph has stopped
+;;      moving", and it is transitive, so it covers the inner store, the pointer and both values.
+;;      NOTHING IN THE CORPUS REFUSES ON THIS CLAUSE YET, and that is measured: instrumenting the
+;;      branch over the whole corpus plus 40 raw-then-`iterate!` seeds counted zero proof-gated
+;;      refusals here, for exactly the reason 4c-1 wrote down about its own version -- a fixture
+;;      that is ANALYSED before the first peephole has already settled the cone. The construction
+;;      that forces it is the UNANALYSED one (`a_refused_forwarding_is_deferred_and_lands_under_
+;;      every_seed` in tests/mem-test.coil builds it for a Load); the store analogue belongs in
+;;      the same place, and until it exists this branch is a rule with no witness.
+;;   4. NEITHER ACCESS IS ONE THE PROGRAM REFUSES. This one READS types inside an irreversible
+;;      rewrite, and it is sound only because its sole effect is to NOT FIRE (LAW 3: reading a
+;;      provisional type to decline is always safe). If the inner store is refused, the interpreter
+;;      owes the program an EV-SHAPE or EV-MEM at that node, and deleting it turns a trap into a
+;;      plausible answer -- the same program, two builds, two results. If the OUTER store is
+;;      refused the program traps here anyway and the inner write is not obviously dead, so
+;;      declining costs nothing. It is asked in its own `if`, AFTER the inner node is known to be a
+;;      Store, because `access-refused?` reads `n-aux` as an alias number and a Phi's aux is a
+;;      declared TYPE.
+(defn store-idealize [(n i64)] (-> i64)
+  (let [m (n-in n 1) p (n-in n 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) NO-NODE
+      ; A dead memory input is graph corruption (VERR-DEAD-INPUT), not a rewrite opportunity, and
+      ; reading `ins` out of a killed node returns a stale id: `n-kill!` clears the list. Same
+      ; stance, and the same reason, as `load-idealize`.
+      (if (n-dead? m) NO-NODE
+        (if (not (store-store-same-word? n m p)) (do (n-add-dep! m n) NO-NODE)
+          ; The inner store's own memory is what this store inherits. A store still being wired
+          ; has none yet, and rewiring to NO-NODE would leave a Store with a null memory edge,
+          ; which is a malformed node rather than an optimisation.
+          (let [mm (n-in m 1)]
+            (if (or (= mm NO-NODE) (n-dead? mm)) (do (n-add-dep! m n) NO-NODE)
+              (if (not (store-sole-consumer? m n)) (do (n-add-dep! m n) NO-NODE)
+                (if (not (n-ty-proven? n)) (do (n-add-dep! m n) NO-NODE)
+                  (if (or (access-refused? n) (access-refused? m))
+                      (do (n-add-dep! m n) NO-NODE)
+                    (do (gvn-remove! n)
+                        (n-set-def! n 1 mm)
+                        (g-store-elim!)
+                        (g-changed!)
+                        n)))))))))))
 
 ; ============================================================================
 ; idealize: local rewrites
@@ -1637,6 +1807,7 @@
     OP-LT     (cmp-idealize n)
     OP-LE     (cmp-idealize n)
     OP-LOAD   (load-idealize n)
+    OP-STORE  (store-idealize n)
     NO-NODE))
 
 ;; "This operand IS the integer k", which every identity rule below asks about the operand it is
@@ -1893,6 +2064,22 @@
 (defn g-changes [] (-> i64) (load (field (graph) nchg)))
 (defn g-changed! [] (-> i64)
   (store! (field (graph) nchg) (+ (load (field (graph) nchg)) 1)) 0)
+
+;; WHAT THE TWO MEMORY REWRITES ACTUALLY DID, counted by the engine rather than inferred from the
+;; graph afterwards. Each is bumped from exactly ONE line: the branch of `load-idealize` that hands
+;; back a stored value, and the branch of `store-idealize` that rewires past a dead store. Nothing
+;; else may bump them, because the whole point is that a gate can compare them to a number it
+;; derived independently and have a MISMATCH mean something.
+;;
+;; `g-verify` never runs `idealize` (see verify.coil: asking whether a node could be idealized
+;; means rewriting it), so verification cannot inflate either count. `g-analyze!` does not run it
+;; either. The only producer is `n-peephole`.
+(defn g-forwards    [] (-> i64) (load (field (graph) nfwd)))
+(defn g-store-elims [] (-> i64) (load (field (graph) nselim)))
+(defn g-forwarded!  [] (-> i64)
+  (store! (field (graph) nfwd) (+ (load (field (graph) nfwd)) 1)) 0)
+(defn g-store-elim! [] (-> i64)
+  (store! (field (graph) nselim) (+ (load (field (graph) nselim)) 1)) 0)
 
 (defn wl-push-live! [] (-> i64)
   (let [n (n-count) (mut i) 0]

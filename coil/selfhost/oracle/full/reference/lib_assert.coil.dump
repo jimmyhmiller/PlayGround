@@ -5,8 +5,6 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %alloc.Allocator = type { ptr, ptr, ptr, ptr }
 
-%alloc.Arena = type { ptr, i64, i64 }
-
 %arraylist.ArrayList__slice_u8 = type { ptr, i64, i64, ptr }
 
 %arraylist.ArrayList__u8 = type { ptr, i64, i64, ptr }
@@ -26,8 +24,6 @@ target triple = "arm64-apple-darwin25.5.0"
 %coil.core.Result__i64__io.IoError = type { i32, [2 x i64] }
 
 %hashmap.KeyOps = type { ptr, ptr, i64, ptr, ptr, i64 }
-
-%io.FixBuf = type { ptr, i64, i64 }
 
 %io.IoError = type { i32, [1 x i64] }
 
@@ -170,7 +166,7 @@ declare i64 @write(i32, ptr, i64)
 define i1 @"alloc.ar-in-block?"(ptr %ctx, ptr %p) {
 entry:
   %ptrtoint = ptrtoint ptr %p to i64
-  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 0
+  %field = getelementptr i8, ptr %ctx, i64 0
   %load = load ptr, ptr %field, align 8
   %ptrtoint1 = ptrtoint ptr %load to i64
   %sub = sub i64 %ptrtoint, %ptrtoint1
@@ -179,7 +175,7 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field2 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 2
+  %field2 = getelementptr i8, ptr %ctx, i64 16
   %load3 = load i64, ptr %field2, align 8
   %cmp4 = icmp slt i64 %sub, %load3
   ret i1 %cmp4
@@ -190,18 +186,18 @@ else:                                             ; preds = %entry
 
 define i64 @"arraylist.al-free!__u8"(ptr %l) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field = getelementptr i8, ptr %l, i64 16
   %load = load i64, ptr %field, align 8
   %cmp = icmp sgt i64 %load, 0
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %l, i64 24
   %load2 = load ptr, ptr %field1, align 8
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %l, i64 0
   %load4 = load ptr, ptr %field3, align 8
-  %field5 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field5 = getelementptr i8, ptr %l, i64 16
   %load6 = load i64, ptr %field5, align 8
   %mul = mul i64 %load6, 1
   %call = call i64 @alloc.raw-free(ptr %load2, ptr %load4, i64 %mul, i64 1)
@@ -212,27 +208,27 @@ else:                                             ; preds = %entry
 
 ifcont:                                           ; preds = %else, %then
   %ifval = phi i64 [ %call, %then ], [ 0, %else ]
-  %field7 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field7 = getelementptr i8, ptr %l, i64 0
   store ptr null, ptr %field7, align 8
-  %field8 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field8 = getelementptr i8, ptr %l, i64 8
   store i64 0, ptr %field8, align 8
-  %field9 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field9 = getelementptr i8, ptr %l, i64 16
   store i64 0, ptr %field9, align 8
   ret i64 0
 }
 
 define i64 @"arraylist.al-push!__slice_u8"(ptr %l, { ptr, i64 } %v) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 1
+  %field = getelementptr i8, ptr %l, i64 8
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %l, i64 16
   %load2 = load i64, ptr %field1, align 8
   %cmp = icmp sge i64 %load, %load2
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field3 = getelementptr i8, ptr %l, i64 16
   %load4 = load i64, ptr %field3, align 8
   %cmp5 = icmp eq i64 %load4, 0
   %ifc6 = icmp ne i1 %cmp5, false
@@ -245,7 +241,7 @@ then7:                                            ; preds = %then
   br label %ifcont
 
 else8:                                            ; preds = %then
-  %field9 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field9 = getelementptr i8, ptr %l, i64 16
   %load10 = load i64, ptr %field9, align 8
   %mul = mul i64 %load10, 2
   br label %ifcont
@@ -257,11 +253,11 @@ ifcont:                                           ; preds = %else8, %then7
 
 ifcont11:                                         ; preds = %else, %ifcont
   %ifval12 = phi i64 [ %call, %ifcont ], [ 0, %else ]
-  %field13 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field13 = getelementptr i8, ptr %l, i64 0
   %load14 = load ptr, ptr %field13, align 8
   %idx = getelementptr { ptr, i64 }, ptr %load14, i64 %load
   store { ptr, i64 } %v, ptr %idx, align 8
-  %field15 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 1
+  %field15 = getelementptr i8, ptr %l, i64 8
   %add = add i64 %load, 1
   store i64 %add, ptr %field15, align 8
   %add16 = add i64 %load, 1
@@ -270,16 +266,16 @@ ifcont11:                                         ; preds = %else, %ifcont
 
 define i64 @"arraylist.al-push!__u8"(ptr %l, i8 %v) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field = getelementptr i8, ptr %l, i64 8
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %l, i64 16
   %load2 = load i64, ptr %field1, align 8
   %cmp = icmp sge i64 %load, %load2
   %ifc = icmp ne i1 %cmp, false
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field3 = getelementptr i8, ptr %l, i64 16
   %load4 = load i64, ptr %field3, align 8
   %cmp5 = icmp eq i64 %load4, 0
   %ifc6 = icmp ne i1 %cmp5, false
@@ -292,7 +288,7 @@ then7:                                            ; preds = %then
   br label %ifcont
 
 else8:                                            ; preds = %then
-  %field9 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field9 = getelementptr i8, ptr %l, i64 16
   %load10 = load i64, ptr %field9, align 8
   %mul = mul i64 %load10, 2
   br label %ifcont
@@ -304,11 +300,11 @@ ifcont:                                           ; preds = %else8, %then7
 
 ifcont11:                                         ; preds = %else, %ifcont
   %ifval12 = phi i64 [ %call, %ifcont ], [ 0, %else ]
-  %field13 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field13 = getelementptr i8, ptr %l, i64 0
   %load14 = load ptr, ptr %field13, align 8
   %idx = getelementptr i8, ptr %load14, i64 %load
   store i8 %v, ptr %idx, align 1
-  %field15 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field15 = getelementptr i8, ptr %l, i64 8
   %add = add i64 %load, 1
   store i64 %add, ptr %field15, align 8
   %add16 = add i64 %load, 1
@@ -319,9 +315,9 @@ define i64 @"arraylist.al-reserve!__slice_u8"(ptr %l, i64 %newcap) {
 entry:
   %match.tmp11 = alloca %coil.core.Option__ptr_slice_u8, align 8
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field = getelementptr i8, ptr %l, i64 16
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %l, i64 24
   %load2 = load ptr, ptr %field1, align 8
   %cmp = icmp sle i64 %newcap, %load
   %ifc = icmp ne i1 %cmp, false
@@ -331,7 +327,7 @@ then:                                             ; preds = %entry
   ret i64 0
 
 else:                                             ; preds = %entry
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %l, i64 0
   %load4 = load ptr, ptr %field3, align 8
   %mul = mul i64 %load, 16
   %mul5 = mul i64 %newcap, 16
@@ -348,9 +344,9 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %field8 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field8 = getelementptr i8, ptr %l, i64 0
   store ptr %p, ptr %field8, align 8
-  %field9 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field9 = getelementptr i8, ptr %l, i64 16
   store i64 %newcap, ptr %field9, align 8
   ret i64 0
 
@@ -385,7 +381,7 @@ match.default17:                                  ; preds = %arm7
 
 loop.body:                                        ; preds = %else27, %arm16
   %load21 = load i64, ptr %stack.slot, align 8
-  %field22 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 1
+  %field22 = getelementptr i8, ptr %l, i64 8
   %load23 = load i64, ptr %field22, align 8
   %cmp24 = icmp sge i64 %load21, %load23
   %ifc25 = icmp ne i1 %cmp24, false
@@ -403,7 +399,7 @@ then26:                                           ; preds = %loop.body
 else27:                                           ; preds = %loop.body
   %load28 = load i64, ptr %stack.slot, align 8
   %idx = getelementptr { ptr, i64 }, ptr %np, i64 %load28
-  %field29 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field29 = getelementptr i8, ptr %l, i64 0
   %load30 = load ptr, ptr %field29, align 8
   %load31 = load i64, ptr %stack.slot, align 8
   %idx32 = getelementptr { ptr, i64 }, ptr %load30, i64 %load31
@@ -415,7 +411,7 @@ else27:                                           ; preds = %loop.body
   br label %loop.body
 
 then37:                                           ; preds = %loop.after
-  %field39 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field39 = getelementptr i8, ptr %l, i64 0
   %load40 = load ptr, ptr %field39, align 8
   %mul41 = mul i64 %load, 16
   %call42 = call i64 @alloc.raw-free(ptr %load2, ptr %load40, i64 %mul41, i64 8)
@@ -426,9 +422,9 @@ else38:                                           ; preds = %loop.after
 
 ifcont:                                           ; preds = %else38, %then37
   %ifval = phi i64 [ %call42, %then37 ], [ 0, %else38 ]
-  %field43 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 0
+  %field43 = getelementptr i8, ptr %l, i64 0
   store ptr %np, ptr %field43, align 8
-  %field44 = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %l, i32 0, i32 2
+  %field44 = getelementptr i8, ptr %l, i64 16
   store i64 %newcap, ptr %field44, align 8
   ret i64 0
 }
@@ -437,9 +433,9 @@ define i64 @"arraylist.al-reserve!__u8"(ptr %l, i64 %newcap) {
 entry:
   %match.tmp11 = alloca %coil.core.Option__ptr_u8, align 8
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field = getelementptr i8, ptr %l, i64 16
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %l, i64 24
   %load2 = load ptr, ptr %field1, align 8
   %cmp = icmp sle i64 %newcap, %load
   %ifc = icmp ne i1 %cmp, false
@@ -449,7 +445,7 @@ then:                                             ; preds = %entry
   ret i64 0
 
 else:                                             ; preds = %entry
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %l, i64 0
   %load4 = load ptr, ptr %field3, align 8
   %mul = mul i64 %load, 1
   %mul5 = mul i64 %newcap, 1
@@ -466,9 +462,9 @@ else:                                             ; preds = %entry
 arm:                                              ; preds = %else
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload, i32 0, i32 0
   %p = load ptr, ptr %vf, align 8
-  %field8 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field8 = getelementptr i8, ptr %l, i64 0
   store ptr %p, ptr %field8, align 8
-  %field9 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field9 = getelementptr i8, ptr %l, i64 16
   store i64 %newcap, ptr %field9, align 8
   ret i64 0
 
@@ -503,7 +499,7 @@ match.default17:                                  ; preds = %arm7
 
 loop.body:                                        ; preds = %else27, %arm16
   %load21 = load i64, ptr %stack.slot, align 8
-  %field22 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field22 = getelementptr i8, ptr %l, i64 8
   %load23 = load i64, ptr %field22, align 8
   %cmp24 = icmp sge i64 %load21, %load23
   %ifc25 = icmp ne i1 %cmp24, false
@@ -521,7 +517,7 @@ then26:                                           ; preds = %loop.body
 else27:                                           ; preds = %loop.body
   %load28 = load i64, ptr %stack.slot, align 8
   %idx = getelementptr i8, ptr %np, i64 %load28
-  %field29 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field29 = getelementptr i8, ptr %l, i64 0
   %load30 = load ptr, ptr %field29, align 8
   %load31 = load i64, ptr %stack.slot, align 8
   %idx32 = getelementptr i8, ptr %load30, i64 %load31
@@ -533,7 +529,7 @@ else27:                                           ; preds = %loop.body
   br label %loop.body
 
 then37:                                           ; preds = %loop.after
-  %field39 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field39 = getelementptr i8, ptr %l, i64 0
   %load40 = load ptr, ptr %field39, align 8
   %mul41 = mul i64 %load, 1
   %call42 = call i64 @alloc.raw-free(ptr %load2, ptr %load40, i64 %mul41, i64 1)
@@ -544,9 +540,9 @@ else38:                                           ; preds = %loop.after
 
 ifcont:                                           ; preds = %else38, %then37
   %ifval = phi i64 [ %call42, %then37 ], [ 0, %else38 ]
-  %field43 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field43 = getelementptr i8, ptr %l, i64 0
   store ptr %np, ptr %field43, align 8
-  %field44 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field44 = getelementptr i8, ptr %l, i64 16
   store i64 %newcap, ptr %field44, align 8
   ret i64 0
 }
@@ -669,7 +665,7 @@ entry:
 define i8 @"coil.core.Get$str.StrBuf$get"(ptr %sb, i64 %i) {
 entry:
   %spill = alloca %arraylist.ArrayList__u8, align 8
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %load = load %arraylist.ArrayList__u8, ptr %field, align 8
   store %arraylist.ArrayList__u8 %load, ptr %spill, align 8
   %call = call i8 @arraylist.al-get__u8(ptr %spill, i64 %i)
@@ -690,7 +686,7 @@ entry:
 define i64 @"coil.core.Len$str.StrBuf$len"(ptr %sb) {
 entry:
   %spill = alloca %arraylist.ArrayList__u8, align 8
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %load = load %arraylist.ArrayList__u8, ptr %field, align 8
   store %arraylist.ArrayList__u8 %load, ptr %spill, align 8
   %call = call i64 @arraylist.al-len__u8(ptr %spill)
@@ -823,7 +819,7 @@ entry:
 
 define i1 @"hashmap.ko-owns?"(ptr %opsp) {
 entry:
-  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 5
+  %field = getelementptr i8, ptr %opsp, i64 40
   %load = load i64, ptr %field, align 8
   %cmp = icmp eq i64 %load, 1
   ret i1 %cmp
@@ -838,21 +834,21 @@ entry:
 
 define { ptr, i64 } @"str.sb-finish!"(ptr %sb) {
 entry:
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %call = call { ptr, i64 } @arraylist.al-into-slice__u8(ptr %field)
   ret { ptr, i64 } %call
 }
 
 define i64 @"str.sb-free!"(ptr %sb) {
 entry:
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %call = call i64 @"arraylist.al-free!__u8"(ptr %field)
   ret i64 %call
 }
 
 define i64 @"str.sb-push-byte!"(ptr %sb, i8 %b) {
 entry:
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %call = call i64 @"arraylist.al-push!__u8"(ptr %field, i8 %b)
   ret i64 %call
 }
@@ -872,7 +868,7 @@ loop.body:                                        ; preds = %else, %entry
 
 loop.after:                                       ; preds = %then
   %loop.val = phi i64 [ 0, %then ]
-  %field5 = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field5 = getelementptr i8, ptr %sb, i64 0
   %call6 = call i64 @arraylist.al-len__u8(ptr %field5)
   ret i64 %call6
 
@@ -880,7 +876,7 @@ then:                                             ; preds = %loop.body
   br label %loop.after
 
 else:                                             ; preds = %loop.body
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %load1 = load i64, ptr %stack.slot, align 8
   %call2 = call i8 @slice.slice-get__u8({ ptr, i64 } %s, i64 %load1)
   %call3 = call i64 @"arraylist.al-push!__u8"(ptr %field, i8 %call2)
@@ -1057,11 +1053,11 @@ define %coil.core.Option__ptr_i8 @alloc.ar-alloc(ptr %ctx, i64 %size, i64 %align
 entry:
   %sum.tmp5 = alloca %coil.core.Option__ptr_i8, align 8
   %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
-  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %field = getelementptr i8, ptr %ctx, i64 8
   %load = load i64, ptr %field, align 8
   %call = call i64 @alloc.align-up(i64 %load, i64 %align)
   %add = add i64 %call, %size
-  %field1 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %ctx, i64 16
   %load2 = load i64, ptr %field1, align 8
   %cmp = icmp sgt i64 %add, %load2
   %ifc = icmp ne i1 %cmp, false
@@ -1075,13 +1071,13 @@ then:                                             ; preds = %entry
   ret %coil.core.Option__ptr_i8 %sum
 
 else:                                             ; preds = %entry
-  %field3 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %field3 = getelementptr i8, ptr %ctx, i64 8
   %add4 = add i64 %call, %size
   store i64 %add4, ptr %field3, align 8
   %tag6 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 0
   store i32 1, ptr %tag6, align 4
   %payload7 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp5, i32 0, i32 1
-  %field8 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 0
+  %field8 = getelementptr i8, ptr %ctx, i64 0
   %load9 = load ptr, ptr %field8, align 8
   %idx = getelementptr i8, ptr %load9, i64 %call
   %vf = getelementptr inbounds nuw { ptr }, ptr %payload7, i32 0, i32 0
@@ -1102,7 +1098,7 @@ entry:
   %sum.tmp23 = alloca %coil.core.Option__ptr_i8, align 8
   %sum.tmp = alloca %coil.core.Option__ptr_i8, align 8
   %ptrtoint = ptrtoint ptr %p to i64
-  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 0
+  %field = getelementptr i8, ptr %ctx, i64 0
   %load = load ptr, ptr %field, align 8
   %ptrtoint1 = ptrtoint ptr %load to i64
   %sub = sub i64 %ptrtoint, %ptrtoint1
@@ -1111,7 +1107,7 @@ entry:
   br i1 %ifc, label %then, label %else
 
 then:                                             ; preds = %entry
-  %field2 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 2
+  %field2 = getelementptr i8, ptr %ctx, i64 16
   %load3 = load i64, ptr %field2, align 8
   %cmp4 = icmp slt i64 %sub, %load3
   br label %ifcont
@@ -1126,7 +1122,7 @@ ifcont:                                           ; preds = %else, %then
 
 then6:                                            ; preds = %ifcont
   %add = add i64 %sub, %old
-  %field8 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %field8 = getelementptr i8, ptr %ctx, i64 8
   %load9 = load i64, ptr %field8, align 8
   %cmp10 = icmp eq i64 %add, %load9
   %ifc11 = icmp ne i1 %cmp10, false
@@ -1141,7 +1137,7 @@ else7:                                            ; preds = %ifcont
 
 then12:                                           ; preds = %then6
   %add14 = add i64 %sub, %new
-  %field15 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 2
+  %field15 = getelementptr i8, ptr %ctx, i64 16
   %load16 = load i64, ptr %field15, align 8
   %cmp17 = icmp sgt i64 %add14, %load16
   %ifc18 = icmp ne i1 %cmp17, false
@@ -1162,7 +1158,7 @@ then19:                                           ; preds = %then12
   ret %coil.core.Option__ptr_i8 %sum
 
 else20:                                           ; preds = %then12
-  %field21 = getelementptr inbounds nuw %alloc.Arena, ptr %ctx, i32 0, i32 1
+  %field21 = getelementptr i8, ptr %ctx, i64 8
   %add22 = add i64 %sub, %new
   store i64 %add22, ptr %field21, align 8
   %tag24 = getelementptr inbounds nuw %coil.core.Option__ptr_i8, ptr %sum.tmp23, i32 0, i32 0
@@ -1185,19 +1181,19 @@ entry:
 
 define ptr @alloc.arena-over-buffer(ptr %ar, ptr %a, ptr %buf, i64 %cap) {
 entry:
-  %field = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 0
+  %field = getelementptr i8, ptr %ar, i64 0
   store ptr %buf, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %ar, i64 8
   store i64 0, ptr %field1, align 8
-  %field2 = getelementptr inbounds nuw %alloc.Arena, ptr %ar, i32 0, i32 2
+  %field2 = getelementptr i8, ptr %ar, i64 16
   store i64 %cap, ptr %field2, align 8
-  %field3 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %a, i64 0
   store ptr @alloc.ar-alloc, ptr %field3, align 8
-  %field4 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 1
+  %field4 = getelementptr i8, ptr %a, i64 8
   store ptr @alloc.ar-resize, ptr %field4, align 8
-  %field5 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 2
+  %field5 = getelementptr i8, ptr %a, i64 16
   store ptr @alloc.ar-free, ptr %field5, align 8
-  %field6 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 3
+  %field6 = getelementptr i8, ptr %a, i64 24
   store ptr %ar, ptr %field6, align 8
   ret ptr %a
 }
@@ -1341,9 +1337,9 @@ else:                                             ; preds = %entry
 define ptr @alloc.malloc-allocator() {
 entry:
   store ptr @alloc.ma-alloc, ptr @g.0, align 8
-  store ptr @alloc.ma-resize, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 1), align 8
-  store ptr @alloc.ma-free, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 2), align 8
-  store ptr @g.0, ptr getelementptr inbounds nuw (%alloc.Allocator, ptr @g.0, i32 0, i32 3), align 8
+  store ptr @alloc.ma-resize, ptr getelementptr (i8, ptr @g.0, i64 8), align 8
+  store ptr @alloc.ma-free, ptr getelementptr (i8, ptr @g.0, i64 16), align 8
+  store ptr @g.0, ptr getelementptr (i8, ptr @g.0, i64 24), align 8
   ret ptr @g.0
 }
 
@@ -1467,28 +1463,28 @@ then:                                             ; preds = %entry
 else:                                             ; preds = %entry
   %call2 = call ptr @malloc(i64 24)
   %call3 = call ptr @malloc(i64 32)
-  %field = getelementptr inbounds nuw %alloc.Arena, ptr %call2, i32 0, i32 0
+  %field = getelementptr i8, ptr %call2, i64 0
   store ptr %call, ptr %field, align 8
-  %field4 = getelementptr inbounds nuw %alloc.Arena, ptr %call2, i32 0, i32 1
+  %field4 = getelementptr i8, ptr %call2, i64 8
   store i64 0, ptr %field4, align 8
-  %field5 = getelementptr inbounds nuw %alloc.Arena, ptr %call2, i32 0, i32 2
+  %field5 = getelementptr i8, ptr %call2, i64 16
   store i64 %cap, ptr %field5, align 8
-  %field6 = getelementptr inbounds nuw %alloc.Allocator, ptr %call3, i32 0, i32 0
+  %field6 = getelementptr i8, ptr %call3, i64 0
   store ptr @alloc.aro-alloc, ptr %field6, align 8
-  %field7 = getelementptr inbounds nuw %alloc.Allocator, ptr %call3, i32 0, i32 1
+  %field7 = getelementptr i8, ptr %call3, i64 8
   store ptr @alloc.aro-resize, ptr %field7, align 8
-  %field8 = getelementptr inbounds nuw %alloc.Allocator, ptr %call3, i32 0, i32 2
+  %field8 = getelementptr i8, ptr %call3, i64 16
   store ptr @alloc.aro-free, ptr %field8, align 8
-  %field9 = getelementptr inbounds nuw %alloc.Allocator, ptr %call3, i32 0, i32 3
+  %field9 = getelementptr i8, ptr %call3, i64 24
   store ptr %call2, ptr %field9, align 8
   ret ptr %call3
 }
 
 define %coil.core.Option__ptr_i8 @alloc.raw-alloc(ptr %a, i64 %size, i64 %align) {
 entry:
-  %field = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 0
+  %field = getelementptr i8, ptr %a, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %a, i64 24
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Option__ptr_i8 %load(ptr %load2, i64 %size, i64 %align)
   ret %coil.core.Option__ptr_i8 %callptr
@@ -1496,9 +1492,9 @@ entry:
 
 define i64 @alloc.raw-free(ptr %a, ptr %p, i64 %size, i64 %align) {
 entry:
-  %field = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 2
+  %field = getelementptr i8, ptr %a, i64 16
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %a, i64 24
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call i64 %load(ptr %load2, ptr %p, i64 %size, i64 %align)
   ret i64 %callptr
@@ -1506,9 +1502,9 @@ entry:
 
 define %coil.core.Option__ptr_i8 @alloc.raw-resize(ptr %a, ptr %p, i64 %old, i64 %new, i64 %align) {
 entry:
-  %field = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 1
+  %field = getelementptr i8, ptr %a, i64 8
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %alloc.Allocator, ptr %a, i32 0, i32 3
+  %field1 = getelementptr i8, ptr %a, i64 24
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Option__ptr_i8 %load(ptr %load2, ptr %p, i64 %old, i64 %new, i64 %align)
   ret %coil.core.Option__ptr_i8 %callptr
@@ -1541,7 +1537,7 @@ match.default:                                    ; preds = %entry
 
 define i8 @arraylist.al-get__u8(ptr %l, i64 %i) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field = getelementptr i8, ptr %l, i64 0
   %load = load ptr, ptr %field, align 8
   %idx = getelementptr i8, ptr %load, i64 %i
   %load1 = load i8, ptr %idx, align 1
@@ -1551,13 +1547,13 @@ entry:
 define { ptr, i64 } @arraylist.al-into-slice__u8(ptr %l) {
 entry:
   %match.tmp = alloca %coil.core.Option__ptr_i8, align 8
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 3
+  %field = getelementptr i8, ptr %l, i64 24
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %l, i64 8
   %load2 = load i64, ptr %field1, align 8
-  %field3 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field3 = getelementptr i8, ptr %l, i64 16
   %load4 = load i64, ptr %field3, align 8
-  %field5 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field5 = getelementptr i8, ptr %l, i64 0
   %load6 = load ptr, ptr %field5, align 8
   %cmp = icmp sgt i64 %load4, %load2
   %ifc = icmp ne i1 %cmp, false
@@ -1608,11 +1604,11 @@ match.end:                                        ; preds = %arm13, %arm
 
 ifcont14:                                         ; preds = %else10, %match.end
   %ifval15 = phi ptr [ %match.val, %match.end ], [ %load6, %else10 ]
-  %field16 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field16 = getelementptr i8, ptr %l, i64 0
   store ptr null, ptr %field16, align 8
-  %field17 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field17 = getelementptr i8, ptr %l, i64 8
   store i64 0, ptr %field17, align 8
-  %field18 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 2
+  %field18 = getelementptr i8, ptr %l, i64 16
   store i64 0, ptr %field18, align 8
   %call19 = call { ptr, i64 } @slice.slice-new__u8(ptr %ifval15, i64 %load2)
   ret { ptr, i64 } %call19
@@ -1620,7 +1616,7 @@ ifcont14:                                         ; preds = %else10, %match.end
 
 define i64 @arraylist.al-len__u8(ptr %l) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field = getelementptr i8, ptr %l, i64 8
   %load = load i64, ptr %field, align 8
   ret i64 %load
 }
@@ -1630,7 +1626,7 @@ entry:
   %ret.spill = alloca %arraylist.ArrayList__slice_u8, align 8
   %stack.slot = alloca %arraylist.ArrayList__slice_u8, align 8
   store %arraylist.ArrayList__slice_u8 zeroinitializer, ptr %stack.slot, align 8
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__slice_u8, ptr %stack.slot, i32 0, i32 3
+  %field = getelementptr i8, ptr %stack.slot, i64 24
   store ptr %a, ptr %field, align 8
   %load = load %arraylist.ArrayList__slice_u8, ptr %stack.slot, align 8
   store %arraylist.ArrayList__slice_u8 %load, ptr %ret.spill, align 8
@@ -1643,7 +1639,7 @@ entry:
   %ret.spill = alloca %arraylist.ArrayList__u8, align 8
   %stack.slot = alloca %arraylist.ArrayList__u8, align 8
   store %arraylist.ArrayList__u8 zeroinitializer, ptr %stack.slot, align 8
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %stack.slot, i32 0, i32 3
+  %field = getelementptr i8, ptr %stack.slot, i64 24
   store ptr %a, ptr %field, align 8
   %load = load %arraylist.ArrayList__u8, ptr %stack.slot, align 8
   store %arraylist.ArrayList__u8 %load, ptr %ret.spill, align 8
@@ -1653,9 +1649,9 @@ entry:
 
 define { ptr, i64 } @arraylist.al-slice__u8(ptr %l) {
 entry:
-  %field = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 0
+  %field = getelementptr i8, ptr %l, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %arraylist.ArrayList__u8, ptr %l, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %l, i64 8
   %load2 = load i64, ptr %field1, align 8
   %call = call { ptr, i64 } @slice.slice-new__u8(ptr %load, i64 %load2)
   ret { ptr, i64 } %call
@@ -1696,11 +1692,11 @@ entry:
 define i64 @assert.test-run-begin(i64 %n) {
 entry:
   %call = call ptr @assert.test-state()
-  %field = getelementptr inbounds nuw %assert.TestState, ptr %call, i32 0, i32 0
+  %field = getelementptr i8, ptr %call, i64 0
   store i64 %n, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %assert.TestState, ptr %call, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %call, i64 8
   store i64 0, ptr %field1, align 8
-  %field2 = getelementptr inbounds nuw %assert.TestState, ptr %call, i32 0, i32 2
+  %field2 = getelementptr i8, ptr %call, i64 16
   store i64 0, ptr %field2, align 8
   %call3 = call ptr @io.stdout()
   %call4 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call3, { ptr, i64 } { ptr @str.10, i64 9 })
@@ -1727,9 +1723,9 @@ define i64 @assert.test-run-end() {
 entry:
   %call = call ptr @assert.test-state()
   %call1 = call ptr @io.stdout()
-  %field = getelementptr inbounds nuw %assert.TestState, ptr %call, i32 0, i32 1
+  %field = getelementptr i8, ptr %call, i64 8
   %load = load i64, ptr %field, align 8
-  %field2 = getelementptr inbounds nuw %assert.TestState, ptr %call, i32 0, i32 2
+  %field2 = getelementptr i8, ptr %call, i64 16
   %load3 = load i64, ptr %field2, align 8
   %call4 = call %coil.core.Result__i64__io.IoError @io.print-str(ptr %call1, { ptr, i64 } { ptr @str.15, i64 14 })
   %cmp = icmp eq i64 %load3, 0
@@ -1776,8 +1772,8 @@ entry:
 then:                                             ; preds = %entry
   %call5 = call ptr @assert.test-state()
   %call6 = call ptr @io.stdout()
-  %field = getelementptr inbounds nuw %assert.TestState, ptr %call5, i32 0, i32 2
-  %field7 = getelementptr inbounds nuw %assert.TestState, ptr %call5, i32 0, i32 2
+  %field = getelementptr i8, ptr %call5, i64 16
+  %field7 = getelementptr i8, ptr %call5, i64 16
   %load = load i64, ptr %field7, align 8
   %add = add i64 %load, 1
   store i64 %add, ptr %field, align 8
@@ -1809,8 +1805,8 @@ else12:                                           ; preds = %else
   br i1 %ifc20, label %then21, label %else22
 
 then21:                                           ; preds = %else12
-  %field23 = getelementptr inbounds nuw %assert.TestState, ptr %call17, i32 0, i32 1
-  %field24 = getelementptr inbounds nuw %assert.TestState, ptr %call17, i32 0, i32 1
+  %field23 = getelementptr i8, ptr %call17, i64 8
+  %field24 = getelementptr i8, ptr %call17, i64 8
   %load25 = load i64, ptr %field24, align 8
   %add26 = add i64 %load25, 1
   store i64 %add26, ptr %field23, align 8
@@ -1818,8 +1814,8 @@ then21:                                           ; preds = %else12
   ret i64 0
 
 else22:                                           ; preds = %else12
-  %field28 = getelementptr inbounds nuw %assert.TestState, ptr %call17, i32 0, i32 2
-  %field29 = getelementptr inbounds nuw %assert.TestState, ptr %call17, i32 0, i32 2
+  %field28 = getelementptr i8, ptr %call17, i64 16
+  %field29 = getelementptr i8, ptr %call17, i64 16
   %load30 = load i64, ptr %field29, align 8
   %add31 = add i64 %load30, 1
   store i64 %add31, ptr %field28, align 8
@@ -2487,9 +2483,9 @@ else:                                             ; preds = %loop.body
 
 define i1 @hashmap.ko-eq(ptr %opsp, ptr %a, ptr %b) {
 entry:
-  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 1
+  %field = getelementptr i8, ptr %opsp, i64 8
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %opsp, i64 16
   %load2 = load i64, ptr %field1, align 8
   %callptr = call i1 %load(ptr %a, ptr %b, i64 %load2)
   ret i1 %callptr
@@ -2497,9 +2493,9 @@ entry:
 
 define i64 @hashmap.ko-hash(ptr %opsp, ptr %kp) {
 entry:
-  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 0
+  %field = getelementptr i8, ptr %opsp, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %opsp, i64 16
   %load2 = load i64, ptr %field1, align 8
   %callptr = call i64 %load(ptr %kp, i64 %load2)
   ret i64 %callptr
@@ -2507,7 +2503,7 @@ entry:
 
 define i64 @hashmap.ko-keycopy(ptr %opsp, ptr %a, ptr %slot) {
 entry:
-  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 3
+  %field = getelementptr i8, ptr %opsp, i64 24
   %load = load ptr, ptr %field, align 8
   %callptr = call i64 %load(ptr %a, ptr %slot)
   ret i64 %callptr
@@ -2515,10 +2511,206 @@ entry:
 
 define i64 @hashmap.ko-keyfree(ptr %opsp, ptr %a, ptr %slot) {
 entry:
-  %field = getelementptr inbounds nuw %hashmap.KeyOps, ptr %opsp, i32 0, i32 4
+  %field = getelementptr i8, ptr %opsp, i64 32
   %load = load ptr, ptr %field, align 8
   %callptr = call i64 %load(ptr %a, ptr %slot)
   ret i64 %callptr
+}
+
+define %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %b) {
+entry:
+  %sum.tmp17 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %field = getelementptr i8, ptr %b, i64 16
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp sle i64 %load, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %field1 = getelementptr i8, ptr %b, i64 0
+  %load2 = load ptr, ptr %field1, align 8
+  %field3 = getelementptr i8, ptr %b, i64 8
+  %load4 = load ptr, ptr %field3, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load2, ptr %load4, i64 %load)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag5 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag6 = load i32, ptr %tag5, align 4
+  %payload7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag6, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm8
+  ]
+
+arm:                                              ; preds = %else
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload7, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf9, align 8
+  %tag11 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 0
+  store i32 1, ptr %tag11, align 4
+  %payload12 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 1
+  %vf13 = getelementptr inbounds nuw { %io.IoError }, ptr %payload12, i32 0, i32 0
+  store %io.IoError %e, ptr %vf13, align 8
+  %sum14 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, align 8
+  ret %coil.core.Result__i64__io.IoError %sum14
+
+arm8:                                             ; preds = %else
+  %vf15 = getelementptr inbounds nuw { i64 }, ptr %payload7, i32 0, i32 0
+  %written = load i64, ptr %vf15, align 8
+  %field16 = getelementptr i8, ptr %b, i64 16
+  store i64 0, ptr %field16, align 8
+  %tag18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 0
+  store i32 0, ptr %tag18, align 4
+  %payload19 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 1
+  %vf20 = getelementptr inbounds nuw { i64 }, ptr %payload19, i32 0, i32 0
+  store i64 %written, ptr %vf20, align 8
+  %sum21 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, align 8
+  ret %coil.core.Result__i64__io.IoError %sum21
+
+match.default:                                    ; preds = %else
+  unreachable
+}
+
+define %coil.core.Result__i64__io.IoError @io.buffered-output-flush(ptr %out) {
+entry:
+  %field = getelementptr i8, ptr %out, i64 0
+  %call = call %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %field)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define ptr @io.buffered-output-writer(ptr %out, ptr %inner) {
+entry:
+  %field = getelementptr i8, ptr %out, i64 32
+  %field1 = getelementptr i8, ptr %out, i64 0
+  %field2 = getelementptr i8, ptr %out, i64 48
+  %call = call ptr @io.buffered-writer(ptr %field, ptr %field1, ptr %inner, ptr %field2, i64 65536)
+  ret ptr %call
+}
+
+define %coil.core.Result__i64__io.IoError @io.buffered-write(ptr %ctx, ptr %src, i64 %len) {
+entry:
+  %sum.tmp28 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp17 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %field = getelementptr i8, ptr %ctx, i64 24
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp sle i64 %len, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %cmp1 = icmp sle i64 %load, 0
+  %ifc2 = icmp ne i1 %cmp1, false
+  br i1 %ifc2, label %then3, label %else4
+
+then3:                                            ; preds = %else
+  %field5 = getelementptr i8, ptr %ctx, i64 0
+  %load6 = load ptr, ptr %field5, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load6, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %call
+
+else4:                                            ; preds = %else
+  %field7 = getelementptr i8, ptr %ctx, i64 16
+  %load8 = load i64, ptr %field7, align 8
+  %sub = sub i64 %load, %load8
+  %cmp9 = icmp sle i64 %len, %sub
+  %ifc10 = icmp ne i1 %cmp9, false
+  br i1 %ifc10, label %then11, label %else12
+
+then11:                                           ; preds = %else4
+  %field13 = getelementptr i8, ptr %ctx, i64 8
+  %load14 = load ptr, ptr %field13, align 8
+  %idx = getelementptr i8, ptr %load14, i64 %load8
+  %call15 = call ptr @memcpy(ptr %idx, ptr %src, i64 %len)
+  %field16 = getelementptr i8, ptr %ctx, i64 16
+  %add = add i64 %load8, %len
+  store i64 %add, ptr %field16, align 8
+  %tag18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 0
+  store i32 0, ptr %tag18, align 4
+  %payload19 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 1
+  %vf20 = getelementptr inbounds nuw { i64 }, ptr %payload19, i32 0, i32 0
+  store i64 %len, ptr %vf20, align 8
+  %sum21 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, align 8
+  ret %coil.core.Result__i64__io.IoError %sum21
+
+else12:                                           ; preds = %else4
+  %call22 = call %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %ctx)
+  store %coil.core.Result__i64__io.IoError %call22, ptr %match.tmp, align 8
+  %tag23 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag24 = load i32, ptr %tag23, align 4
+  %payload25 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag24, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm26
+  ]
+
+arm:                                              ; preds = %else12
+  %vf27 = getelementptr inbounds nuw { %io.IoError }, ptr %payload25, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf27, align 8
+  %tag29 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, i32 0, i32 0
+  store i32 1, ptr %tag29, align 4
+  %payload30 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, i32 0, i32 1
+  %vf31 = getelementptr inbounds nuw { %io.IoError }, ptr %payload30, i32 0, i32 0
+  store %io.IoError %e, ptr %vf31, align 8
+  %sum32 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, align 8
+  ret %coil.core.Result__i64__io.IoError %sum32
+
+arm26:                                            ; preds = %else12
+  %vf33 = getelementptr inbounds nuw { i64 }, ptr %payload25, i32 0, i32 0
+  %_ = load i64, ptr %vf33, align 8
+  %cmp34 = icmp sge i64 %len, %load
+  %ifc35 = icmp ne i1 %cmp34, false
+  br i1 %ifc35, label %then36, label %else37
+
+match.default:                                    ; preds = %else12
+  unreachable
+
+then36:                                           ; preds = %arm26
+  %field38 = getelementptr i8, ptr %ctx, i64 0
+  %load39 = load ptr, ptr %field38, align 8
+  %call40 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load39, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %call40
+
+else37:                                           ; preds = %arm26
+  %tailcall = musttail call %coil.core.Result__i64__io.IoError @io.buffered-write(ptr %ctx, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %tailcall
+}
+
+define ptr @io.buffered-writer(ptr %w, ptr %b, ptr %inner, ptr %data, i64 %cap) {
+entry:
+  %field = getelementptr i8, ptr %b, i64 0
+  store ptr %inner, ptr %field, align 8
+  %field1 = getelementptr i8, ptr %b, i64 8
+  store ptr %data, ptr %field1, align 8
+  %field2 = getelementptr i8, ptr %b, i64 16
+  store i64 0, ptr %field2, align 8
+  %field3 = getelementptr i8, ptr %b, i64 24
+  store i64 %cap, ptr %field3, align 8
+  %field4 = getelementptr i8, ptr %w, i64 0
+  store ptr @io.buffered-write, ptr %field4, align 8
+  %field5 = getelementptr i8, ptr %w, i64 8
+  store ptr %b, ptr %field5, align 8
+  ret ptr %w
 }
 
 define %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -2526,9 +2718,9 @@ entry:
   %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp10 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %field = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %field = getelementptr i8, ptr %ctx, i64 8
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %ctx, i64 16
   %load2 = load i64, ptr %field1, align 8
   %sub = sub i64 %load2, %load
   %cmp = icmp slt i64 %len, %sub
@@ -2543,11 +2735,11 @@ else:                                             ; preds = %entry
 
 ifcont:                                           ; preds = %else, %then
   %ifval = phi i64 [ %len, %then ], [ %sub, %else ]
-  %field3 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %ctx, i64 0
   %load4 = load ptr, ptr %field3, align 8
   %idx = getelementptr i8, ptr %load4, i64 %load
   %call = call ptr @memcpy(ptr %idx, ptr %buf, i64 %ifval)
-  %field5 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %field5 = getelementptr i8, ptr %ctx, i64 8
   %add = add i64 %load, %ifval
   store i64 %add, ptr %field5, align 8
   %cmp6 = icmp slt i64 %ifval, %len
@@ -2617,9 +2809,9 @@ else:                                             ; preds = %entry
 
 define ptr @io.fd-reader(ptr %r, i64 %fd) {
 entry:
-  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  %field = getelementptr i8, ptr %r, i64 0
   store ptr @io.fd-read, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %r, i64 8
   %inttoptr = inttoptr i64 %fd to ptr
   store ptr %inttoptr, ptr %field1, align 8
   ret ptr %r
@@ -2663,9 +2855,9 @@ else:                                             ; preds = %entry
 
 define ptr @io.fd-writer(ptr %w, i64 %fd) {
 entry:
-  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field = getelementptr i8, ptr %w, i64 0
   store ptr @io.fd-write, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %w, i64 8
   %inttoptr = inttoptr i64 %fd to ptr
   store ptr %inttoptr, ptr %field1, align 8
   ret ptr %w
@@ -2673,11 +2865,11 @@ entry:
 
 define ptr @io.fixed-buffer-writer(ptr %w, ptr %fb) {
 entry:
-  %field = getelementptr inbounds nuw %io.FixBuf, ptr %fb, i32 0, i32 1
+  %field = getelementptr i8, ptr %fb, i64 8
   store i64 0, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field1 = getelementptr i8, ptr %w, i64 0
   store ptr @io.fb-write, ptr %field1, align 8
-  %field2 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field2 = getelementptr i8, ptr %w, i64 8
   store ptr %fb, ptr %field2, align 8
   ret ptr %w
 }
@@ -2697,7 +2889,7 @@ entry:
 define ptr @io.null-writer() {
 entry:
   store ptr @io.null-write, ptr @g.3, align 8
-  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.3, i32 0, i32 1), align 8
+  store ptr null, ptr getelementptr (i8, ptr @g.3, i64 8), align 8
   ret ptr @g.3
 }
 
@@ -3040,9 +3232,9 @@ else44:                                           ; preds = %else19
 
 define %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %buf, i64 %len) {
 entry:
-  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  %field = getelementptr i8, ptr %r, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %r, i64 8
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
   ret %coil.core.Result__i64__io.IoError %callptr
@@ -3186,9 +3378,9 @@ entry:
 
 define %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len) {
 entry:
-  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field = getelementptr i8, ptr %w, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %w, i64 8
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
   ret %coil.core.Result__i64__io.IoError %callptr
@@ -3294,7 +3486,7 @@ entry:
   %abi.sret = alloca %arraylist.ArrayList__u8, align 8
   %stack.slot = alloca %str.StrBuf, align 8
   store %str.StrBuf zeroinitializer, ptr %stack.slot, align 8
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %stack.slot, i32 0, i32 0
+  %field = getelementptr i8, ptr %stack.slot, i64 0
   call void @arraylist.al-new__u8(ptr sret(%arraylist.ArrayList__u8) align 8 %abi.sret, ptr %a)
   %abi.ret = load %arraylist.ArrayList__u8, ptr %abi.sret, align 8
   store %arraylist.ArrayList__u8 %abi.ret, ptr %field, align 8
@@ -3306,7 +3498,7 @@ entry:
 
 define { ptr, i64 } @str.sb-str(ptr %sb) {
 entry:
-  %field = getelementptr inbounds nuw %str.StrBuf, ptr %sb, i32 0, i32 0
+  %field = getelementptr i8, ptr %sb, i64 0
   %call = call { ptr, i64 } @arraylist.al-slice__u8(ptr %field)
   ret { ptr, i64 } %call
 }
@@ -3622,19 +3814,19 @@ entry:
 define ptr @str.str-keyops() {
 entry:
   store ptr @str.str-key-hash, ptr @g.7, align 8
-  store ptr @str.str-key-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.7, i32 0, i32 1), align 8
-  store i64 16, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.7, i32 0, i32 2), align 8
-  store ptr @str.str-key-copy, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.7, i32 0, i32 3), align 8
-  store ptr @str.str-key-free, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.7, i32 0, i32 4), align 8
-  store i64 1, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.7, i32 0, i32 5), align 8
+  store ptr @str.str-key-eq, ptr getelementptr (i8, ptr @g.7, i64 8), align 8
+  store i64 16, ptr getelementptr (i8, ptr @g.7, i64 16), align 8
+  store ptr @str.str-key-copy, ptr getelementptr (i8, ptr @g.7, i64 24), align 8
+  store ptr @str.str-key-free, ptr getelementptr (i8, ptr @g.7, i64 32), align 8
+  store i64 1, ptr getelementptr (i8, ptr @g.7, i64 40), align 8
   ret ptr @g.7
 }
 
 define ptr @str.str-keyops-borrowed() {
 entry:
   store ptr @str.str-key-hash, ptr @g.8, align 8
-  store ptr @str.str-key-eq, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.8, i32 0, i32 1), align 8
-  store i64 16, ptr getelementptr inbounds nuw (%hashmap.KeyOps, ptr @g.8, i32 0, i32 2), align 8
+  store ptr @str.str-key-eq, ptr getelementptr (i8, ptr @g.8, i64 8), align 8
+  store i64 16, ptr getelementptr (i8, ptr @g.8, i64 16), align 8
   ret ptr @g.8
 }
 

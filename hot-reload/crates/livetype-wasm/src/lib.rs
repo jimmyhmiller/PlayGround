@@ -14,8 +14,7 @@
 //! observable behaviour.
 
 use livetype_core::{
-    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Type, Value,
-    Version, World,
+    Actor, ActorStatus, Condition, DefId, FunctionState, Instruction, Session, Turn, Type, Value, Version, World,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -26,9 +25,22 @@ const SCENE: &str = include_str!("../../../demo/scene.lt");
 
 /// The scripted edits, in the order the demo walks them.
 const SCENARIOS: &[(&str, &str)] = &[
-    ("Redefine a running function", include_str!("../../../demo/edit_1_radius.lt")),
-    ("Evolve a struct under live data", include_str!("../../../demo/edit_2_migrate.lt")),
-    ("Reject a breaking edit", include_str!("../../../demo/edit_3_rejected.lt")),
+    (
+        "Redefine a running function",
+        include_str!("../../../demo/edit_1_radius.lt"),
+    ),
+    (
+        "Evolve a struct under live data",
+        include_str!("../../../demo/edit_2_migrate.lt"),
+    ),
+    (
+        "Change bool to enum — break propagates",
+        include_str!("../../../demo/edit_3_non_preserving.lt"),
+    ),
+    (
+        "Repair code and migrate live values",
+        include_str!("../../../demo/edit_3_repair.lt"),
+    ),
     ("Introduce an enum", include_str!("../../../demo/edit_4_enum.lt")),
     ("Break it: add a variant", include_str!("../../../demo/edit_5_break.lt")),
     ("Repair the root cause", include_str!("../../../demo/edit_6_repair.lt")),
@@ -123,7 +135,10 @@ impl Demo {
                     Box::new(move |_| {
                         let mut t = tk.lock().unwrap();
                         t.canvases_opened += 1;
-                        Value::Foreign { kind, ptr: t.canvases_opened }
+                        Value::Foreign {
+                            kind,
+                            ptr: t.canvases_opened,
+                        }
                     }),
                 )
                 .map_err(|e| JsError::new(&e))?;
@@ -152,9 +167,7 @@ impl Demo {
                     Box::new(move |args| {
                         // The verifier has already checked this call against the
                         // declared signature, so a mismatch here is a host bug.
-                        let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] =
-                            args
-                        else {
+                        let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args else {
                             return Value::Unit;
                         };
                         tk.lock().unwrap().push(tag, *x, *y, *r, 0, *hue);
@@ -187,9 +200,7 @@ impl Demo {
                 .map_err(|e| JsError::new(&e))?;
         }
 
-        session
-            .eval(scene)
-            .map_err(|e| JsError::new(&e))?;
+        session.eval(scene).map_err(|e| JsError::new(&e))?;
         let main = session
             .fn_id("main")
             .ok_or_else(|| JsError::new("the scene has no `main`"))?;
@@ -198,7 +209,13 @@ impl Demo {
             .spawn(main, vec![])
             .map_err(|c| JsError::new(&format!("{c:?}")))?;
 
-        Ok(Demo { session, actor, toolkit, frames: 0, last_condition: String::new() })
+        Ok(Demo {
+            session,
+            actor,
+            toolkit,
+            frames: 0,
+            last_condition: String::new(),
+        })
     }
 
     /// Run the program until it crosses its next `yield` — one frame. Edits
@@ -221,9 +238,7 @@ impl Demo {
                 Turn::Done => return STATUS_DONE,
                 Turn::Paused => {
                     self.last_condition = match &self.actor.status {
-                        ActorStatus::Paused(c) => {
-                            self.session.engine.with_world(|w| describe(w, c))
-                        }
+                        ActorStatus::Paused(c) => self.session.engine.with_world(|w| describe(w, c)),
                         _ => String::new(),
                     };
                     return STATUS_FROZEN;
@@ -257,17 +272,13 @@ impl Demo {
 
         let changed: Vec<(DefId, String, bool)> = after
             .iter()
-            .filter(|(id, (version, ..))| {
-                before.get(id).map(|(v, ..)| v != version).unwrap_or(true)
-            })
+            .filter(|(id, (version, ..))| before.get(id).map(|(v, ..)| v != version).unwrap_or(true))
             .map(|(id, (_, name, broken))| (*id, name.clone(), *broken))
             .collect();
         // A function published Broken is not an installation, and calling it
         // one hides the whole point of the breaking step.
-        let (broken, installed): (Vec<_>, Vec<_>) =
-            changed.iter().partition(|(_, _, is_broken)| *is_broken);
-        let installed: Vec<(DefId, String)> =
-            installed.iter().map(|(id, name, _)| (*id, name.clone())).collect();
+        let (broken, installed): (Vec<_>, Vec<_>) = changed.iter().partition(|(_, _, is_broken)| *is_broken);
+        let installed: Vec<(DefId, String)> = installed.iter().map(|(id, name, _)| (*id, name.clone())).collect();
 
         let unobservable: Vec<String> = self.session.engine.with_world(|w| {
             match reachable_from_entry(w) {
@@ -287,9 +298,7 @@ impl Demo {
             let after_types = self.current_types();
             after_types
                 .iter()
-                .filter(|(id, (version, _))| {
-                    before_types.get(id).map(|(v, _)| v != version).unwrap_or(true)
-                })
+                .filter(|(id, (version, _))| before_types.get(id).map(|(v, _)| v != version).unwrap_or(true))
                 .map(|(_, (_, name))| name.clone())
                 .collect()
         };

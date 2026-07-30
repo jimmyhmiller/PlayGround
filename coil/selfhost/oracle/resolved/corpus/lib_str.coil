@@ -222,7 +222,7 @@
         [p (cast (ptr u8) (unwrap-ptr [i8] (raw-alloc a n 1)))]
         (if
           (icmp-eq (cast :i64 p) 0)
-          (oom)
+          (oom-at c"str-key-copy" n)
           (do
             (mem-copy [u8] p (slice-data s) n)
             (store! (cast (ptr (slice u8)) slot) (slice-new p n))

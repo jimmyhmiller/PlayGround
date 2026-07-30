@@ -101,6 +101,89 @@
     (store! (field w ctx) (cast (ptr i8) 0))
     w))
 
+(defstruct BufferedWriter [(inner (ptr Writer)) (data (ptr i8)) (len :i64) (cap :i64)])
+
+(defn
+  buffered-flush
+  [(b (ptr BufferedWriter))]
+  (-> (Result :i64 IoError))
+  (let
+    [n (load (field b len))]
+    (if
+      (icmp-le n 0)
+      (Ok 0)
+      (match
+        (write-all (load (field b inner)) (load (field b data)) n)
+        (Err [e] (Err e))
+        (Ok [written] (do (store! (field b len) 0) (Ok written)))))))
+
+(defn
+  buffered-write
+  [(ctx (ptr i8)) (src (ptr i8)) (len :i64)]
+  (-> (Result :i64 IoError))
+  (let
+    [b (cast (ptr BufferedWriter) ctx) cap (load (field b cap))]
+    (if
+      (icmp-le len 0)
+      (Ok 0)
+      (if
+        (icmp-le cap 0)
+        (write-all (load (field b inner)) src len)
+        (let
+          [used (load (field b len)) room (isub cap used)]
+          (if
+            (icmp-le len room)
+            (do
+              (memcpy (index (load (field b data)) used) src (cast isize len))
+              (store! (field b len) (iadd used len))
+              (Ok len))
+            (match
+              (buffered-flush b)
+              (Err [e] (Err e))
+              (Ok
+                [_]
+                (if
+                  (icmp-ge len cap)
+                  (write-all (load (field b inner)) src len)
+                  (buffered-write ctx src len))))))))))
+
+(defn
+  buffered-writer
+  [(w (ptr Writer))
+    (b (ptr BufferedWriter))
+    (inner (ptr Writer))
+    (data (ptr i8))
+    (cap :i64)]
+  (-> (ptr Writer))
+  (store! (field b inner) inner)
+  (store! (field b data) data)
+  (store! (field b len) 0)
+  (store! (field b cap) cap)
+  (store! (field w write-fn) (fnptr-of buffered-write))
+  (store! (field w ctx) (cast (ptr i8) b))
+  w)
+
+(defstruct
+  BufferedOutput
+  [(state BufferedWriter) (writer Writer) (buffer (array i8 65536))])
+
+(defn
+  buffered-output-writer
+  [(out (ptr BufferedOutput)) (inner (ptr Writer))]
+  (-> (ptr Writer))
+  (buffered-writer
+    (field out writer)
+    (field out state)
+    inner
+    (cast (ptr i8) (field out buffer))
+    65536))
+
+(defn
+  buffered-output-flush
+  [(out (ptr BufferedOutput))]
+  (-> (Result :i64 IoError))
+  (buffered-flush (field out state)))
+
 (defstruct FixBuf [(data (ptr i8)) (len :i64) (cap :i64)])
 
 (defn

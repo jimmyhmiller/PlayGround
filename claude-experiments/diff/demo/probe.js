@@ -7,18 +7,31 @@
 // side's clock. Detection is a token-membership test, so "was it already showing
 // that?" can never pass.
 //
-// Two things are deliberate:
+// Three things are deliberate:
 //   * Tokens live in `data-dpmark` attributes (and one CSS custom property), never
 //     in body text: `document.body.textContent` on the booker allocates a large
 //     string, and doing that every few milliseconds would tax the page being
 //     measured. `querySelectorAll` over an attribute is indexed and cheap.
 //   * Not framed -> the probe returns immediately and does nothing, so leaving the
 //     script tag in place cannot affect an ordinary dev session or a benchmark run.
+//   * Every message carries a `doc` id unique to THIS document instance. Both
+//     bundlers fall back to a full page reload when a hot update cannot be applied,
+//     and a reload loses everything the user had typed — so "the badge appeared" is
+//     not the whole truth about an edit. The dashboard compares the `doc` id at the
+//     start of a race with the one that reported the change: same id means the
+//     running page was patched in place, a new id means the document was replaced.
 (function () {
   if (window.parent === window) return;
 
   var POLL_MS = 8;
   var last = "";
+  // Unique per document instance: a reload runs this file again and gets a new one.
+  // `performance.timeOrigin` alone is not enough (two loads can round to the same
+  // millisecond), so a random component comes along.
+  var DOC =
+    String(Math.round(window.performance && performance.timeOrigin ? performance.timeOrigin : Date.now())) +
+    "-" +
+    Math.random().toString(36).slice(2, 10);
 
   // The booker opens a timezone dialog on a fresh visit, which covers the page the
   // demo is showing. The real benchmark sets the same cookie through Playwright.
@@ -51,6 +64,7 @@
       source: "diffpack-demo-probe",
       kind: kind,
       path: location.pathname,
+      doc: DOC,
       ts: Date.now(),
     };
     if (extra) for (var k in extra) msg[k] = extra[k];

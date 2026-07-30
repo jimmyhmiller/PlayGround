@@ -193,6 +193,10 @@ fn errorResp(msg: String) -> ModelResponse {
   ModelResponse(text: "[anthropic] " + msg, toolCalls: List<ToolCall>(), stopReason: "error", contentJson: "[]")
 }
 
+fn cliErrorResp(provider: String, msg: String) -> ModelResponse {
+  ModelResponse(text: "[" + provider + "] " + msg, toolCalls: List<ToolCall>(), stopReason: "error", contentJson: "[]")
+}
+
 // ============================ tools ============================
 interface Tool {
   fn name() -> String
@@ -521,6 +525,122 @@ class AnthropicModel implements Model {
       errorResp("API error status=${resp.status}: " + resp.body)
     } else {
       parseAnthropic(resp.body)
+    }
+  }
+}
+
+// A subscription-backed model adapter. It delegates one bounded turn to an installed CLI which
+// already owns authentication, model access, sandboxing, and its internal tool loop. This is
+// deliberately different from AnthropicModel: CLI providers return a final answer, so Scry does
+// not replay their private tool calls through the local Tool list. The CliModel entity and every
+// Message remain live in Scry's heap for the viewer.
+class CliModel implements Model {
+  provider: String          // "claude" | "codex"
+  executable: String
+  modelId: String           // empty => provider default
+  access: String            // "read-only" | "workspace-write"
+  maxTurns: Int
+  calls: Int
+  lastExit: Int
+  lastError: String
+
+  fn init(provider: String, executable: String, modelId: String, access: String, maxTurns: Int) {
+    self.provider = provider
+    self.executable = executable
+    self.modelId = modelId
+    self.access = access
+    self.maxTurns = maxTurns
+    self.calls = 0
+    self.lastExit = 0
+    self.lastError = ""
+  }
+
+  fn complete(prompt: String) -> String {
+    let c = Conversation()
+    c.append(mkTextMessage("user", prompt))
+    self.invoke(c)
+  }
+
+  fn respond(convo: Conversation, tools: List<Tool>) -> ModelResponse {
+    let out = self.invoke(convo)
+    if self.lastExit == 0 {
+      finalTextResp(out)
+    } else {
+      cliErrorResp(self.provider, self.lastError)
+    }
+  }
+
+  fn transcript(convo: Conversation) -> String {
+    var out = "You are the model behind a Scry agent. Continue this conversation and answer the final user message.\n\n"
+    var i = 0
+    while i < convo.size() {
+      let m = convo.messages.get(i)
+      out = out + m.role + ": " + m.content + "\n"
+      i = i + 1
+    }
+    out
+  }
+
+  fn command(prompt: String) -> String {
+    var cmd = shellQuote(self.executable)
+    if self.provider == "claude" {
+      cmd = cmd + " -p --output-format json --max-turns " + "${self.maxTurns}"
+      if self.access == "workspace-write" {
+        cmd = cmd + " --permission-mode acceptEdits"
+      } else {
+        cmd = cmd + " --permission-mode plan"
+      }
+      if self.modelId.len() > 0 { cmd = cmd + " --model " + shellQuote(self.modelId) }
+      cmd = cmd + " " + shellQuote(prompt)
+    } else {
+      cmd = cmd + " exec --ephemeral --skip-git-repo-check --sandbox "
+      if self.access == "workspace-write" { cmd = cmd + "workspace-write" }
+      else { cmd = cmd + "read-only" }
+      if self.modelId.len() > 0 { cmd = cmd + " --model " + shellQuote(self.modelId) }
+      cmd = cmd + " " + shellQuote(prompt)
+    }
+    // Child stdin is isolated from Scry's REPL. Process.exec leaves stderr attached to the live
+    // terminal while returning structured exitCode + stdout without touching either CLI's auth cache.
+    cmd + " < /dev/null"
+  }
+
+  fn invoke(convo: Conversation) -> String {
+    self.calls = self.calls + 1
+    let proc = Process.exec(self.command(self.transcript(convo)))
+    self.lastExit = proc.exitCode
+    let body = proc.stdout
+    if self.provider == "claude" {
+      match Json.parse(body) {
+        Ok(v) -> match jgetStr(v, "result") {
+          Some(s) -> {
+            if self.lastExit != 0 {
+              self.lastError = s
+              ""
+            } else {
+              self.lastError = ""
+              s
+            }
+          }
+          None -> {
+            self.lastExit = 65
+            self.lastError = "claude CLI JSON did not contain a result"
+            ""
+          }
+        }
+        Err(e) -> {
+          self.lastExit = 65
+          self.lastError = "claude CLI returned invalid JSON: " + e
+          ""
+        }
+      }
+    } else {
+      if self.lastExit != 0 {
+        self.lastError = self.provider + " CLI exited with status ${self.lastExit}"
+        ""
+      } else {
+        self.lastError = ""
+        body
+      }
     }
   }
 }

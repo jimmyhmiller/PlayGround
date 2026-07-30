@@ -1,5 +1,14 @@
 # Checking a trait `impl` body loses the module's own impls and macro-generated defns
 
+## Fixed
+
+The metaprogram closure used to retain every application `impl` before top-level
+macros had expanded. An unrelated impl body could therefore be checked against a
+snapshot in which `(derive-eq Val)` had not yet emitted `Val-eq` or its `Eq` impl.
+Macro closures now retain impls only from reachable modules and expand lazily before
+rebuilding the authoritative whole-program engine. All three `bug-*.coil` files are
+regression cases in `selfhost/oracle/gate-cli.sh`.
+
 Reproduced with the `coil` on PATH, macOS arm64, 2026-07-29.
 
 When the compiler checks an `impl` body, any same-module definition that the body

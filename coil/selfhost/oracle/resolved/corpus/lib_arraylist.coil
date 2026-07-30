@@ -47,7 +47,7 @@
           []
           (match
             (alloc-slice [T] a newcap)
-            (None [] (do (oom) -1))
+            (None [] (do (oom-at c"arraylist al-reserve!" (imul newcap (sizeof T))) -1))
             (Some
               [np]
               (do
@@ -85,11 +85,23 @@
       (icmp-ge n (load (field l cap)))
       (al-reserve!
         (mut l)
-        (if (icmp-eq (load (field l cap)) 0) 4 (imul (load (field l cap)) 2)))
+        (if (icmp-eq (load (field l cap)) 0) 2 (imul (load (field l cap)) 2)))
       0)
     (store! (index (load (field l data)) n) v)
     (store! (field l len) (iadd n 1))
     (iadd n 1)))
+
+(defn
+  al-extend!
+  [T]
+  [(l (mut (ArrayList T))) (src (ptr T)) (n i64)]
+  (-> i64)
+  (let
+    [old (load (field l len)) need (iadd old n)]
+    (if (icmp-gt need (load (field l cap))) (al-reserve! (mut l) need) 0)
+    (mem-copy [T] (index (load (field l data)) old) src n)
+    (store! (field l len) need)
+    need))
 
 (defn
   al-pop!

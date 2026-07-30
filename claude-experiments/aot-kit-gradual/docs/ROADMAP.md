@@ -27,7 +27,7 @@ Two rules that apply throughout:
 | **M2** | Control flow | done | `tests/control-test.coil` |
 | | Dominators and the loop tree | done | `tests/loop-tree-test.coil` |
 | **M3** | Verifier, interpreter, textual IR | done | `verify-`, `eval-`, `text-`, `gtext-test.coil` |
-| **M4** | Memory SSA and shapes | **in progress**, slices 4a/4b/4c-1 done: shapes, the memory type, all four memory ops and load-after-store forwarding are in, run, and differentially gated. Two of the gate's three rewrites are open: store-after-store elimination (4c-2) and dead-allocation removal (4c-3) | `tests/shape-test.coil`, `tests/mem-test.coil` |
+| **M4** | Memory SSA and shapes | **in progress**, slices 4a/4b/4c-1/4c-2 done: shapes, the memory type, all four memory ops, load-after-store forwarding and store-after-store elimination are in, run, and differentially gated. One of the gate's three rewrites is open: dead-allocation removal (4c-3) | `tests/shape-test.coil`, `tests/mem-test.coil` |
 | M5 | Dynamic values end to end | not started | |
 | M6 | Functions, calls, closures | not started | |
 | M7 | Closed-world inference | not started | |
@@ -56,14 +56,10 @@ that looks gratuitous.
 
 ## The next concrete piece of work
 
-M4 slice 4c-2 and 4c-3: the two rewrites of M4's gate that are still open. 4c-1
-(load-after-store forwarding) is done and is `load-idealize` in `src/node.coil`.
+M4 slice 4c-3: the last rewrite of M4's gate that is still open. 4c-1 (load-after-store
+forwarding) and 4c-2 (store-after-store elimination) are done and are `load-idealize` and
+`store-idealize` in `src/node.coil`.
 
-- **Store-after-store elimination.** `Store(p, v2, Store(p, v1, m))` drops the inner store. Same
-  decision procedure as 4c-1 and the same refusals: same alias class, same pointer NODE, no type
-  read anywhere. It is a harder rewrite than the load side for one reason, and it is worth
-  knowing before starting: the inner store may have OTHER readers, so dropping it is only legal
-  when this store is its only memory consumer.
 - **Forwarding past a provably different pointer.** Simple's `Load.idealize` also walks past a
   store to a *provably different* allocation (two distinct `New`s never alias), which is
   structural and safe. It needs a distinct-allocation predicate that does not exist yet. Its
@@ -78,8 +74,8 @@ Each one is irreversible, so each one must ask `n-ty-proven?` before it acts (D8
 THAT GUARD IS FOR ON A STRUCTURAL RULE, which 4c-1 had to work out: these rules read no type, so
 the guard is not about disbelieving a provisional type. It is about not committing permanently to
 a store that the sweep has not finished with. Each one is gated the same way: the differential
-interpreter must return the identical result on the whole corpus before and after, and the seven
-memory fixtures (19 to 25) are what make "the whole corpus" mean something for memory.
+interpreter must return the identical result on the whole corpus before and after, and the ten
+memory fixtures (19 to 28) are what make "the whole corpus" mean something for memory.
 
 **4c-3 HAS ITS GATE ALREADY, AND IT IS `24-object-returned` AND ITS SCRATCH TWIN.** They are the
 same program with and without an allocation nothing reads back, they are the first pair in the
@@ -94,11 +90,12 @@ entire memory chain, and the `Return` built on the next line is wired to a corps
 the memory value across the load's construction is the fix, and the corpus-wide verifier
 (`VERR-DEAD-INPUT`) is what catches a missed one, a long way from the cause.
 
-READ **[Open at 4c-1's close](#m4-memory-ssa-and-shapes)** BEFORE STARTING EITHER SLICE. One of its
-four items is an obligation on these two rather than a note: the corpus forwarding gate counts dead
-`Load`s as a stand-in for forwardings, which is only an equality while forwarding is the sole thing
-that removes a load. 4c-2 and 4c-3 both remove loads by cascade, so each has to bring a real counter
-with it or it silently inflates the number that says 4c-1 still works.
+READ **[Open at 4c-1's and 4c-2's close](#m4-memory-ssa-and-shapes)** BEFORE STARTING 4c-3. The
+counter obligation that used to live here is discharged: `g-forwards` and `g-store-elims` are real
+engine counters now, so 4c-3 removing loads by cascade no longer inflates the number that says
+4c-1 still works. What 4c-3 inherits instead is item 7, the one thing 4c-2 could not settle: the
+oracle cannot see a store DISAPPEAR, because the interpreter is demand-driven and a store nothing
+reads is never evaluated. 4c-3 is the slice that makes stores disappear on purpose.
 
 Two things are open from M3 and are worth reading, because the first one will bite around memory
 edges:
@@ -328,18 +325,19 @@ Where the clauses stand after 4c-1:
 | differential tests green | done, on seven memory fixtures in both build modes, and the comparison is now the reachable HEAP rather than an object's allocation index (D14) |
 | a shape-polymorphic site does not collapse | done for the LATTICE half: the merged pointer keeps both shape bits, the two arms keep distinct alias classes, and the `MemMerge` describes their union. The two INLINE PATHS are M9's, since a guard is what makes a path, and 4c's forwarding is what makes each path worth having. It is now RUN on both arms and the merged memory is read back through the returned object, so swapping either memory phi's arms is red; before that, no seed ever took the else arm and nothing read the merge, so the canonical LAW 5 miscompile left the whole gate green |
 | load-after-store forwarding | **done (4c-1)**. `load-idealize`: the load's memory input is a Store on the SAME alias class whose pointer is the SAME NODE, so the load is that store's value. Decided structurally and never from a type; Simple's offset-overlap rule is deliberately not ported, because it reads a type and then rewrites irreversibly. `fx-object` (19) forwards; `fx-object-two` (23) is the negative witness, two allocations of one shape where the pointer check is the only thing between the right answer and 2 |
-| store-after-store elimination | 4c-2 |
+| store-after-store elimination | **done (4c-2)**. `store-idealize`: the store's memory input is a Store on the SAME alias class whose pointer is the SAME NODE, so the outer store's memory edge is rewired past it and the inner store dies of having no readers. Same structural decision procedure as 4c-1 and the same D8 proof gate. Four guards, and the third is Simple's `checkOnlyUse`: the inner store must have no other memory consumer and no pin. `26-store-over-store` eliminates and then forwards (`g-store-elims` 1, `g-forwards` 1, zero loads left); `27-store-over-store-raw` is its unrewritten twin and the differential "before"; `28-store-guarded` is the negative witness |
 | dead-allocation removal | partly, and for free: killing a `New`'s last projection drops its last use and the cascade collects it. A store to an object nothing reads still survives |
 
-**Status: slice 4c-1 DONE; M4 ITSELF IS NOT.** Two of the gate's three named rewrites, 4c-2 and
-4c-3, are still open, and the table above is what "M4 done" would have to mean. Saying so here
+**Status: slices 4c-1 and 4c-2 DONE; M4 ITSELF IS NOT.** One of the gate's three named rewrites,
+4c-3, is still open, and the table above is what "M4 done" would have to mean. Saying so here
 rather than ticking the milestone is the same rule as everywhere else in this file: a status
-nobody can check is worth less than no status. What is green today is `tools/gate.sh`:
-**185 tests across ten suites** (ty 31, node 27, control 19, loop-tree 5, verify 22, eval 24,
-text 14, gtext 7, shape 13, mem 23), plus 26 diagram fixtures rendered and the gallery rebuilt.
-The memory corpus is fixtures 19 to 25, and the gallery now carries the 4c-1 story as a pair
-(`20-object-raw` next to `19-object`, the same program unrewritten and forwarded) plus
-`23-object-two`, the load that must NOT forward.
+nobody can check is worth less than no status. Run `tools/gate.sh` for the live suite counts;
+a number copied into prose here goes stale on the next slice, which this file says elsewhere and
+then did anyway. The memory corpus is fixtures 19 to 28, and the gallery carries the 4c-1 story
+as a pair (`20-object-raw` next to `19-object`, the same program unrewritten and forwarded) with
+`23-object-two`, the load that must NOT forward; and the 4c-2 story the same way
+(`27-store-over-store-raw` next to `26-store-over-store`) with `28-store-guarded`, the store that
+must NOT be bypassed.
 
 **What M4 has taught so far**, six things. The long-form record with the measurement behind each
 is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
@@ -372,6 +370,14 @@ is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
   load's construction is the fix, and the only thing that reports it is the corpus-wide verifier's
   `VERR-DEAD-INPUT`, a long way from the cause. It hit three separate fixtures, two of them tests
   written before the rewrite existed.
+- **The obvious story about a guard can be false, and the mutation is what tells you.** 4c-2's
+  only-consumer clause was written up as the thing standing between the guarded fixture and a
+  wrong answer. Deleting the clause and re-running the oracle returned the identical answer on
+  every seed: in this IR a Store is a pure state-to-state function, so bypassing one that somebody
+  else reads denotes the same state. The clause is right, for Simple's reason (two unordered live
+  writes to one word are not serialisable onto one mutable heap), and the write-up was wrong.
+  Deleting a guard and watching what actually goes red is cheap; asserting a plausible cause is
+  how a comment outlives the truth.
 - **"The load disappeared" is a vacuous gate**, satisfied by a rule that deletes every load. The
   weight is carried by the negative witness, `23-object-two`: two allocations of one shape, so both
   stores name the same alias class and both pointers carry the identical type `obj@2`, and the only
@@ -380,7 +386,7 @@ is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
   reparse, and has every structural count unchanged. Only running it tells them apart, which is
   D12's whole argument.
 
-**Open at 4c-1's close**, recorded here so none of it is lost between slices. Nothing is red.
+**Open at 4c-2's close**, recorded here so none of it is lost between slices. Nothing is red.
 
 1. **The D8 proof gate on `load-idealize` is unreachable from every corpus fixture.** Instrumenting
    the refusal branch counted **0** proof-gated refusals over 40 seeds on eager `19-object`, on
@@ -389,12 +395,15 @@ is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
    locally built UNANALYSED graph in `a_refused_forwarding_is_deferred_and_lands_under_every_seed`
    (119 refusals over 40 seeds, 40/40 refusing at the hand peephole). It is properly tested; what is
    open is that a later gate sweeping the CORPUS for coverage would not see the guard at all.
-2. **There is no engine counter for forwardings.** `the_corpus_forwards_loads_and_leaves_none_forwardable`
-   counts "Loads created and now dead" (`n-kill!` leaves the op in the arena), which equals
-   forwardings only because forwarding is today the only thing that removes a `Load`. It is held
-   honest by the companion forwardable-survivor counts in both modes. **4c-2 and 4c-3 can remove
-   loads by cascade and will make the stand-in drift, so replacing it with a real counter is part of
-   those slices, not a later tidy-up.**
+2. **CLOSED at 4c-2.** There are now two engine counters on the graph, `g-forwards` and
+   `g-store-elims`, each bumped from exactly one line: the branch of `load-idealize` that hands
+   back a stored value and the branch of `store-idealize` that rewires past a dead store. They are
+   per-graph (zeroed by `graph-reset!`, so a sweep reads the fixture it just built), and neither
+   `g-verify` nor `g-analyze!` can inflate them because neither runs `idealize`. The old stand-in
+   counted "Loads created and now dead", which equalled forwardings only while forwarding was the
+   sole thing that removed a `Load`; 4c-2 breaks that equality by cascade (`26-store-over-store`
+   removes a store, and the load above it then forwards), so the dead-Load count survives as a
+   reported companion and is no longer the claim.
 3. **`every_seed_builds_the_same_memory_graph` cannot vary the seed**, because every corpus builder
    calls `graph-reset! 1` itself and re-seeding before `corpus-build!` gets seed 1 back. It was kept
    and re-commented as what it actually gates, which is worth having and is not the seed claim: a
@@ -405,6 +414,29 @@ is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
    asserted present; the suite does NOT run every fixture through both. A raw fixture's contract is
    that it is unrewritten, and iterating them all is open item 2 at the top of this file (the
    `g-analyze!`-then-`iterate!` phase order), which 4c-1 covers for the object program only.
+5. **The D8 proof gate on `store-idealize` has no witness at all yet**, which is item 1 one slice
+   later and one degree worse: instrumenting the branch over the whole corpus plus 40
+   raw-then-`iterate!` seeds counted **0** proof-gated refusals, and unlike 4c-1 there is no
+   locally built unanalysed fixture standing in for it either. The construction that forces it is
+   known (`a_refused_forwarding_is_deferred_and_lands_under_every_seed` builds the Load version);
+   the Store analogue is a gate somebody should write before 4c-3 adds a third rule with the same
+   guard. Until then the branch is a rule with no witness.
+6. **The only-consumer clause in `store-idealize` is NOT a value-soundness condition**, and this
+   was measured rather than assumed. Bypassing an inner store somebody else reads leaves that
+   reader alone and denotes the same state, so deleting the clause and running the differential
+   oracle over `28-store-guarded` returns the identical answer on every seed. What the clause
+   defends is Simple's stated reason, serialisability: without it the graph holds two live writes
+   to one word with no memory edge ordering them, which nothing today can observe and which M10's
+   scheduler inherits. `28-store-guarded` is therefore a STRUCTURAL witness (`g-store-elims` is 0
+   and the guarded store's memory input is the first store), not a differential one, and a gate
+   that claimed otherwise would stay green with the clause removed.
+7. **`g-changed!` on an in-place idealize is right by construction and not by measurement.**
+   `n-peephole` records progress only when idealize returns a DIFFERENT node, so an in-place
+   rewrite that says nothing can end an `iterate!` sweep with a proof-gated rewrite pending.
+   `store-idealize` declares it; removing the call changes no count and no answer over 40
+   raw-then-`iterate!` seeds, because something else in the same sweep always bumps `nchg`.
+   `region-remove-path!` has the same shape and does NOT declare it, which is a pre-existing
+   hazard with no witness either way.
 
 ## M5. Dynamic values end to end
 

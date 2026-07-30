@@ -58,6 +58,9 @@
 (const CX-OBJECT-TWO  i64 22)
 (const CX-OBJECT-RET  i64 23)
 (const CX-OBJECT-RET-SCRATCH i64 24)
+(const CX-STORE-OVER-STORE     i64 25)
+(const CX-STORE-OVER-STORE-RAW i64 26)
+(const CX-STORE-GUARDED        i64 27)
 
 ;; RAW-ANALYSED: every node created, nothing peepholed, then `g-analyze!` to a type fixpoint.
 ;; OPTIMISED:    peepholed during construction and then `iterate!` to a peephole fixpoint.
@@ -73,7 +76,7 @@
 (const CORPUS-RAW-ANALYSED i64 0)
 (const CORPUS-OPTIMISED    i64 1)
 
-(defn corpus-count [] (-> i64) 25)
+(defn corpus-count [] (-> i64) 28)
 
 (defn panic-corpus [(msg (slice u8))] (-> i64)
   (let [w (stderr)] (ps w "corpus: ") (ps w msg) (ps w "\n"))
@@ -108,6 +111,9 @@
     CX-OBJECT-TWO     "23-object-two"
     CX-OBJECT-RET     "24-object-returned"
     CX-OBJECT-RET-SCRATCH "25-object-returned-scratch"
+    CX-STORE-OVER-STORE     "26-store-over-store"
+    CX-STORE-OVER-STORE-RAW "27-store-over-store-raw"
+    CX-STORE-GUARDED        "28-store-guarded"
     (do (panic-corpus "corpus-name: index out of range") "")))
 
 (defn corpus-mode [(i i64)] (-> i64)
@@ -142,6 +148,12 @@
     CX-OBJECT-TWO     CORPUS-OPTIMISED
     CX-OBJECT-RET     CORPUS-OPTIMISED
     CX-OBJECT-RET-SCRATCH CORPUS-OPTIMISED
+    CX-STORE-OVER-STORE     CORPUS-OPTIMISED
+    ;; The "before" of the only diff-pair whose transformation is 4c-2, and the graph in which the
+    ;; opportunity demonstrably still EXISTS: nothing is peepholed here, so the two stores on one
+    ;; word are both still in the chain for a gate to count.
+    CX-STORE-OVER-STORE-RAW CORPUS-RAW-ANALYSED
+    CX-STORE-GUARDED        CORPUS-OPTIMISED
     (do (panic-corpus "corpus-mode: index out of range") 0)))
 
 (defn corpus-mode-name [(m i64)] (-> (slice u8))
@@ -732,6 +744,131 @@
                   (ret-to-mem (g-start) o m)))))))))
   (iterate!) 0)
 
+;; `o = {x}; o.x = 1; o.x = 2; return o.x;` -- THE FIXTURE 4c-2 IS ABOUT, and the smallest program
+;; in which a write is unobservable.
+;;
+;; TWO REWRITES FIRE HERE AND THEY COMPOSE IN ONE DIRECTION ONLY. `store-idealize` sees that the
+;; second store's memory input is a store to the same alias class through the same pointer NODE,
+;; with nothing else reading it, and rewires past it; the first store dies of having no uses. THEN
+;; the load forwards through what is left, by 4c-1, and the Return's value is the literal 2. The
+;; order matters for the counters, not for the answer: `g-forwards` is 1 and `g-store-elims` is 1,
+;; and the dead-Load count that used to stand in for the first of those is also 1 here, which is
+;; exactly why it stopped being a safe stand-in the moment a second rewrite could remove a load.
+;;
+;; THE MEMORY IS PINNED ACROSS THE LOAD'S CONSTRUCTION, for `fx-object`'s measured reason: the load
+;; forwards on the spot, that drops the surviving store's only reader, and the cascade would take
+;; the store, the New and the whole chain before `ret-to-mem` on the next line exists to root them.
+;; The first store needs no pin, because the store built immediately after it is a real consumer.
+(defn fx-store-over-store [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          ; one chain: the second store's incoming memory IS the first store, which is the shape
+          ; 4c-2 recognises
+          (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 1) ax)]
+            (let [m2 (n-store! m1 o (mk-int 2) ax)]
+              (n-keep! m2)
+              (let [v (n-load! m2 o ax)]
+                (n-unkeep! m2)
+                (ret-to-mem (g-start) v m2))))))))
+  (iterate!) 0)
+
+;; The same program built RAW: every node created, nothing peepholed, `g-analyze!` only. It is the
+;; "before" half of 4c-2's differential pair, and it is the graph in which the opportunity is still
+;; visible -- both stores are in the chain, on one word, and a gate can count them.
+;;
+;; IT IS ALSO THE ONLY PLACE THE TWO STORES' TYPES ARE OBSERVABLE UNREWRITTEN. `store-compute`
+;; MEETS the stored value into the incoming contents, so the second store here reports
+;; `undefined|int=[1..2]` while its optimised twin reports `undefined|int=2`. That difference is
+;; the type RISE the rewrite produces, it is a NARROWING of an over-approximation rather than a new
+;; claim, and this fixture is where the un-narrowed number can be read off.
+(defn fx-store-over-store-raw [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [m0 (raw-arg (t-mem-alias ax (t-top)))
+          nw (n-new OP-NEW sx)]
+      (n-add-def! nw (g-start))
+      (n-add-def! nw m0)
+      (let [o  (n-new1 OP-PROJ 0 nw)
+            mm (n-new1 OP-PROJ 1 nw)]
+        (let [m1 (n-new4 OP-STORE ax NO-NODE mm o (raw-int 1))]
+          (let [m2 (n-new4 OP-STORE ax NO-NODE m1 o (raw-int 2))]
+            (let [ld  (n-new3 OP-LOAD ax NO-NODE m2 o)
+                  ret (n-new3 OP-RETURN 0 (g-start) NO-NODE NO-NODE)]
+              ; the Return's value and memory are wired after it exists, because `n-new3` cannot
+              ; take a node that does not exist yet; nothing is peepholed either way
+              (n-set-def! ret 1 ld)
+              (n-set-def! ret 2 m2)
+              (n-add-def! (g-stop) ret)
+              (g-analyze!)))))))
+  0)
+
+;; `o = {x}; o.x = 1; if (p) { o.x = 2; } return o.x;` -- THE NEGATIVE WITNESS for 4c-2, and the
+;; clause it holds up is the one that makes store elimination harder than load forwarding.
+;;
+;; The guarded store is the same word of the same object as the first store, its memory input IS
+;; the first store, and `n-ty-proven?` and `access-refused?` both say go. Every guard except one
+;; passes. The one that refuses is ONLY MEMORY CONSUMER: the first store feeds two nodes, the
+;; guarded store on the true path and the memory Phi's ELSE arm.
+;;
+;; WHAT THIS WITNESS DOES AND DOES NOT SHOW, measured rather than assumed, because the obvious
+;; claim about it is false. Deleting the only-consumer clause and rebuilding this fixture returns
+;; the IDENTICAL answer on every seed: the bypass leaves the first store alive (the Phi still reads
+;; it) and both orderings write the same value to the same word, so the interpreter cannot tell the
+;; two builds apart. This is NOT a differential witness, and a gate that claimed it was would be
+;; asserting something that stays green with the clause removed.
+;;
+;; What it IS is the only program in the corpus that REACHES the clause and is refused by it, and
+;; that is observable two ways, both of which flip the moment the clause goes: `g-store-elims` is 0
+;; here rather than 1, and the guarded store's memory input is the first store rather than the
+;; New's projection. The property being defended is serialisability, not a value: with the clause
+;; gone the graph holds two live writes to one word with nothing ordering them (see
+;; `store-sole-consumer?`), which is a scheduling hazard M10 inherits and no oracle available today
+;; can see.
+;;
+;; THE STORE IS "IN THE ARM" BY MEMORY EDGE ALONE. A Store has no control input, so nothing pins it
+;; to the true path except that the Phi reads it from slot 1 and reads the earlier state from slot
+;; 2; the interpreter is demand-driven, so on the false path the guarded store is never evaluated.
+;; That is the same property `fx-object-loop` rests on, and it is why the memory phi is the whole
+;; mechanism here rather than a detail.
+;;
+;; THE FIRST STORE IS PINNED WHILE THE ARM IS BUILT, and without that pin this fixture would not
+;; exist. Between creating the guarded store and wiring the Phi, the first store has EXACTLY ONE
+;; consumer, `n-store!` peepholes on the spot, and 4c-2 eliminates it before the else arm that
+;; needs it is ever created -- the negative witness deletes itself during construction. `keeps` is
+;; the only signal in the graph that says a use is still coming, which is why `store-sole-consumer?`
+;; treats a pinned store as still consumed. The pin comes off once the Phi is wired, so the
+;; `iterate!` below exercises the USE-COUNT clause rather than the pin.
+(defn fx-store-guarded [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o (n-obj-ptr nw)]
+          (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 1) ax)]
+            (let [arms (n-if-arms! (mk-if (g-start) (mk-arg (t-dyn))))]
+              (n-keep! m1)
+              (let [m2 (n-store! m1 o (mk-int 2) ax)
+                    r  (new-region2 (arms-t arms) (arms-f arms))]
+                ; the merge is open (slot 0 null) while the arm's Phi is built and closed, which is
+                ; the in-progress contract in node.coil
+                (let [mp (new-phi2 r (t-mem-alias ax (t-dyn)) m2 m1)]
+                  (n-unkeep! m1)
+                  ; and the merged memory is pinned across the load, for `fx-object`'s reason: the
+                  ; Return that roots it does not exist yet
+                  (n-keep! mp)
+                  (let [v (n-load! mp o ax)]
+                    (n-unkeep! mp)
+                    (ret-to-mem r v mp)
+                    (wl-push! r) (wl-push! mp))))))))))
+  (iterate!) 0)
+
 ; ============================================================================
 ; Building by index
 ; ============================================================================
@@ -764,4 +901,7 @@
     CX-OBJECT-TWO     (fx-object-two)
     CX-OBJECT-RET     (fx-object-ret)
     CX-OBJECT-RET-SCRATCH (fx-object-ret-scratch)
+    CX-STORE-OVER-STORE     (fx-store-over-store)
+    CX-STORE-OVER-STORE-RAW (fx-store-over-store-raw)
+    CX-STORE-GUARDED        (fx-store-guarded)
     (do (panic-corpus "corpus-build!: index out of range") 0)))

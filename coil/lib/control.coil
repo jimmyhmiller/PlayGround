@@ -6,7 +6,8 @@
 ; `case` defaults to the `Eq` trait, which lives in the auto-loaded prelude — no
 ; import needed for it.
 ; Control-flow sugar — written entirely in Coil macros. `(import "lib/control.coil")`
-; then use `when`/`unless`/`cond`/`|>`/`inline-for`/`for-in`. Nothing in the compiler
+; then use `when`/`unless`/`|>`/`inline-for`/`for-in`. `cond` lives directly in
+; `coil.core`, so it is available even without this module. Nothing in the compiler
 ; knows about any of these; they expand to `if`/`do`/`let` over the core.
 ;
 ; `while` and `for` are MACROS over the core `loop`/`break`/`continue` primitive
@@ -23,24 +24,6 @@
   `(if ~c (do ~@body) 0))
 (defn unless [(c Code) & (body Code)] (-> Code)
   `(if ~c 0 (do ~@body)))
-
-;; `(cond t1 e1 t2 e2 ... [:else e])` — expands to nested ifs. The test `:else` is
-;; always true, so its body is the fallback (Clojure's spelling, and what
-;; `coil lint --fix` writes); a lone trailing clause is also an else, for the
-;; older flat spelling. An empty cond is 0. Clauses after an `:else` are
-;; unreachable and dropped, exactly as in Clojure.
-(defn cond-arms [(cs Code)] (-> Code)
-  (if (icmp-eq (code-count cs) 0)
-      `0
-      (if (icmp-eq (code-count cs) 1)
-          (code-nth cs 0)
-          (if (code-eq (code-nth cs 0) `:else)
-              (code-nth cs 1)
-              `(if ~(code-nth cs 0)
-                   ~(code-nth cs 1)
-                   ~(cond-arms (code-rest (code-rest cs))))))))
-(defn cond [& (cs Code)] (-> Code)
-  (cond-arms cs))
 
 ;; `(case x k1 e1 k2 e2 … [default])` — evaluate `x` ONCE, then pick the first `ei`
 ;; whose `(= x ki)` holds, using the `Eq` trait (auto-loaded prelude); a lone trailing

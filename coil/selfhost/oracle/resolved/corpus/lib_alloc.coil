@@ -4,7 +4,51 @@
 
 (extern abort :cc c [] (-> :i64))
 
-(defn oom [] (-> :i64) (abort) 0)
+(extern write :cc c [i32 (ptr i8) isize] (-> isize))
+
+(defn
+  oom-puts
+  [(s (ptr i8))]
+  (-> :i64)
+  (let
+    [(mut n) 0]
+    (loop
+      (if
+        (icmp-eq (cast :i64 (load (index s (load n)))) 0)
+        (break)
+        (store! n (iadd (load n) 1))))
+    (write 2 s (cast isize (load n)))
+    0))
+
+(defn
+  oom-putd
+  [(v :i64)]
+  (-> :i64)
+  (let
+    [buf (alloc-static (array i8 24)) (mut i) 24 (mut x) v]
+    (loop
+      (do
+        (store! i (isub (load i) 1))
+        (store! (index buf (load i)) (cast i8 (iadd 48 (irem (load x) 10))))
+        (store! x (idiv (load x) 10))
+        (if (icmp-eq (load x) 0) (break) 0)))
+    (write 2 (cast (ptr i8) (index buf (load i))) (cast isize (isub 24 (load i))))
+    0))
+
+(defn
+  oom-at
+  [(site (ptr i8)) (bytes :i64)]
+  (-> :i64)
+  (oom-puts c"out of memory: ")
+  (oom-puts site)
+  (oom-puts c" failed to allocate")
+  (if (icmp-ge bytes 0) (do (oom-puts c" ") (oom-putd bytes) (oom-puts c" bytes")) 0)
+  (oom-puts c"; the allocator is exhausted
+")
+  (abort)
+  0)
+
+(defn oom [] (-> :i64) (oom-at c"an allocation" -1))
 
 (defstruct
   Allocator
@@ -122,9 +166,55 @@
   ar-resize
   [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
   (-> (Option (ptr i8)))
-  (None))
+  (let
+    [ar
+      (cast (ptr Arena) ctx)
+      start
+      (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    (if
+      (and (icmp-ge start 0) (icmp-lt start (load (field ar cap))))
+      (if
+        (icmp-eq (iadd start old) (load (field ar off)))
+        (if
+          (icmp-gt (iadd start new) (load (field ar cap)))
+          (None)
+          (do (store! (field ar off) (iadd start new)) (Some p)))
+        (None))
+      (None))))
 
 (defn ar-free [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)] (-> :i64) 0)
+
+(defn
+  ar-in-block?
+  [(ctx (ptr i8)) (p (ptr i8))]
+  (-> bool)
+  (let
+    [ar (cast (ptr Arena) ctx) d (isub (cast :i64 p) (cast :i64 (load (field ar base))))]
+    (and (icmp-ge d 0) (icmp-lt d (load (field ar cap))))))
+
+(defn
+  aro-alloc
+  [(ctx (ptr i8)) (size :i64) (align :i64)]
+  (-> (Option (ptr i8)))
+  (match (ar-alloc ctx size align) (Some [p] (Some p)) (None [] (ma-alloc ctx size align))))
+
+(defn
+  aro-resize
+  [(ctx (ptr i8)) (p (ptr i8)) (old :i64) (new :i64) (align :i64)]
+  (-> (Option (ptr i8)))
+  (if
+    (icmp-eq (cast :i64 p) 0)
+    (None)
+    (if
+      (ar-in-block? ctx p)
+      (ar-resize ctx p old new align)
+      (ma-resize ctx p old new align))))
+
+(defn
+  aro-free
+  [(ctx (ptr i8)) (p (ptr i8)) (size :i64) (align :i64)]
+  (-> :i64)
+  (if (ar-in-block? ctx p) 0 (ma-free ctx p size align)))
 
 (defn
   arena-over-buffer
@@ -148,4 +238,27 @@
     (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))
     (malloc (cast isize cap))
     cap))
+
+(defn
+  overflow-arena-allocator
+  [(cap :i64)]
+  (-> (ptr Allocator))
+  (let
+    [buf (malloc (cast isize cap))]
+    (if
+      (icmp-eq (cast :i64 buf) 0)
+      (malloc-allocator)
+      (let
+        [ar
+          (cast (ptr Arena) (malloc (cast isize (sizeof Arena))))
+          a
+          (cast (ptr Allocator) (malloc (cast isize (sizeof Allocator))))]
+        (store! (field ar base) buf)
+        (store! (field ar off) 0)
+        (store! (field ar cap) cap)
+        (store! (field a alloc) (fnptr-of aro-alloc))
+        (store! (field a resize) (fnptr-of aro-resize))
+        (store! (field a free) (fnptr-of aro-free))
+        (store! (field a ctx) (cast (ptr i8) ar))
+        a))))
 

@@ -1,4 +1,5 @@
-;; The M4 memory gate: slice 4b's four ops, and slice 4c-1's load-after-store forwarding.
+;; The M4 memory gate: slice 4b's four ops, slice 4c-1's load-after-store forwarding, and slice
+;; 4c-2's store-after-store elimination.
 ;;
 ;; 4b built New, Load, Store and MemMerge and gated them as a graph: they build, verify, print,
 ;; reparse and RUN. It also pinned the one number 4c had to beat, namely what a load can honestly
@@ -46,12 +47,52 @@
 ;;      way from the fold that caused it.
 ;;   9. THE VERIFIER IS SPECIFICALLY RED, and the INTERPRETER catches what the verifier cannot.
 ;;
+;; 4c-2 is the write side: `Store(p, v2, mem=Store(p, v1, m))` becomes `Store(p, v2, mem=m)` and
+;; the inner write, which nothing could have read, stops existing. Same structural decision
+;; procedure as 4c-1 (same alias class, same pointer NODE) and the same D8 proof gate, plus the
+;; clause the roadmap names as what makes this slice harder than the last one: the inner store must
+;; be the ONLY thing that reads that memory state. Its clauses, in the same cause-before-consequence
+;; order, numbered on from the ones above:
+;;
+;;  10. IT FIRES, AND THE ENGINE SAYS SO. `g-store-elims` is a counter bumped from exactly one line
+;;      of `store-idealize`, so the gate compares an independently derived number (`count-op
+;;      OP-STORE`, before and after) against what the engine claims it did. Both are equalities.
+;;  11. IT ELIMINATES THE INNER WRITE AND NOT THE OUTER ONE. The graph that keeps the wrong one is
+;;      well formed, verifies clean, round-trips and has the identical structural node count; only
+;;      the interpreter tells them apart, which is D12's whole argument and 4c-1's lesson repeated.
+;;  12. THE ANSWER IS UNCHANGED ACROSS THE PASS (LAW 10), on the raw twin, over every seed, on
+;;      status and on the rendered reachable heap rather than on an allocation index.
+;;  13. THE ONLY-CONSUMER CLAUSE IS LOAD-BEARING. `28-store-guarded` reaches the rule and is refused
+;;      by that clause alone, which is visible two ways at once: the structural opportunity is
+;;      present (`count-store-forwardable` sees it, because that predicate does not ask about uses)
+;;      and `g-store-elims` is 0. It is a STRUCTURAL witness and not a differential one, and saying
+;;      so is the point: deleting the clause returns the identical answer on every seed, which was
+;;      measured rather than assumed (see `store-sole-consumer?`). What it defends is
+;;      serialisability, which no oracle available today can see.
+;;  14. A PINNED STORE IS NOT A DEAD STORE. `keeps` is the only signal in the graph that says a use
+;;      is still coming, so a use count of one is not "nobody else reads it" while a builder holds
+;;      the state open.
+;;  15. A REFUSED ACCESS IS NEVER LAUNDERED AWAY, in both directions, which is 4c-1's
+;;      `forwarding_refuses_a_store_the_program_itself_refuses` on the write side: deleting a store
+;;      the interpreter owes an EV-MEM or an EV-SHAPE turns a trap into a plausible answer.
+;;  16. THE D8 PROOF GATE IS REACHED AND DEFERS RATHER THAN DECLINES, on the UNANALYSED graph that
+;;      is the only construction that reaches it: 4c-1 measured 0 proof-gated refusals over 40
+;;      corpus seeds, and 4c-2 measured 0 over the whole corpus, so a corpus-based gate for this
+;;      branch would be gating a rule nothing executes.
+;;
 ;; THE VACUITY DEFENCE. Every sweep counts what it compared and refuses to pass below a floor, and
 ;; every provocation asserts the SPECIFIC named code rather than "something failed": a verifier
 ;; that always says no and an interpreter that always fails would satisfy the weaker form. For
 ;; forwarding in particular there are floors in both directions, because "the load disappeared" is
 ;; also satisfied by a rule that deletes every load it sees: the corpus is asserted to still
 ;; CONTAIN loads, and the ones that survive are the ones named in clauses 4, 5 and 7.
+;;
+;; AND THE COUNTERS ARE THE ENGINE'S OWN. Until 4c-2 the forwarding claim was carried by a stand-in,
+;; "Loads that were created and are now dead", which equalled forwardings only while forwarding was
+;; the only thing that could remove a Load. 4c-2 breaks that equality by cascade: eliminating a
+;; store lets the load above it forward, so one program removes a load for two reasons.
+;; `g-forwards` and `g-store-elims` are bumped from one line each, so the dead-Load count survives
+;; below only as a reported companion, and it is explicitly allowed to EXCEED the forwarding count.
 ;;
 ;;   coil test tests/mem-test.coil
 (module memtest)
@@ -94,13 +135,14 @@
 ;; The memory fixtures in the shared corpus. Naming them here rather than looping over the whole
 ;; corpus is deliberate: these claims are about memory, and a sweep that silently covered zero
 ;; memory fixtures would pass.
-(const MEM-FIXTURES i64 7)
+(const MEM-FIXTURES i64 10)
 
 ;; The corpus is allowed to GROW; losing a fixture silently weakens every claim below that says
-;; "the whole corpus". 25 is what it holds today: 4c-1 added `23-object-two` as the negative
-;; witness for pointer identity, and the object-identity review added `24-object-returned` and its
-;; scratch twin, the first pair whose RESULT is an object.
-(const MEM-CORPUS-FLOOR i64 25)
+;; "the whole corpus". 28 is what it holds today: 4c-1 added `23-object-two` as the negative
+;; witness for pointer identity, the object-identity review added `24-object-returned` and its
+;; scratch twin, the first pair whose RESULT is an object, and 4c-2 added `26-store-over-store`,
+;; its raw twin and `28-store-guarded`.
+(const MEM-CORPUS-FLOOR i64 28)
 
 ; ---------------------------------------------------------------------------
 ; Reporting
@@ -152,11 +194,13 @@
     (load k)))
 
 ;; Nodes of this op that were CREATED and are now dead. `n-kill!` sets the dead flag and clears
-;; the inputs, but it leaves the op alone, so the arena still records that the node existed. For
-;; a Load that is exactly "this load was removed", and in this corpus a load is removed by one
-;; thing only, which is why it stands in for a forwarding counter. The companion claim in
-;; `the_corpus_forwards_loads_and_leaves_none_forwardable` is what makes that stand-in honest:
-;; every remaining forwardable load is counted too, and in the optimised mode there must be none.
+;; the inputs, but it leaves the op alone, so the arena still records that the node existed.
+;;
+;; IT IS NO LONGER A STAND-IN FOR ANYTHING, and that is 4c-2's doing. "Loads created and now dead"
+;; equalled forwardings only while forwarding was the one thing that removed a Load; eliminating a
+;; store lets the load above it forward, so `26-store-over-store` removes a load by cascade as well.
+;; The claim now rests on `g-forwards`, which the engine bumps from a single line, and this number
+;; is reported alongside it as a companion that may legitimately be LARGER.
 (defn count-dead-op [(op i64)] (-> i64)
   (let [n (n-count) (mut i) 0 (mut k) 0]
     (loop
@@ -203,6 +247,72 @@
             0)))
     (load k)))
 
+;; THE STORE-SIDE TWIN OF `forwardable?`, and the same argument for writing it out here: it is
+;; DESIGN.md's rule (one alias class is one field of one shape, one node is one object) rather than
+;; a call into the rule under test, so a gate cannot pass by asking the implementation whether the
+;; implementation agrees with itself.
+;;
+;; IT DELIBERATELY DOES NOT ASK ABOUT USES. That is what makes it the right instrument for
+;; `28-store-guarded`: the structural opportunity is there and the only-consumer clause is what
+;; refuses it, so a predicate that folded the use count in would report "no opportunity" and the
+;; witness would say nothing at all.
+(defn store-eliminable? [(st i64)] (-> bool)
+  (let [m (n-in st 1) p (n-in st 2)]
+    (if (or (= m NO-NODE) (= p NO-NODE)) false
+      (if (n-dead? m) false
+        (and (= (n-op m) OP-STORE)
+             (and (= (n-aux m) (n-aux st)) (= (n-in m 2) p)))))))
+
+(defn count-store-forwardable [] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut k) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) OP-STORE))
+                (if (store-eliminable? (load i)) (store! k (+ (load k) 1)) 0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load k)))
+
+;; The live Store that reads this node's memory state, or NO-NODE. Found by walking the uses rather
+;; than by remembering an id at construction time, so it still answers after `iterate!` has had the
+;; graph and a rewrite has moved an edge.
+(defn store-user-of [(n i64)] (-> i64)
+  (let [len (n-nouts n) (mut i) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [u (n-out n (load i))]
+              (if (and (not (n-dead? u)) (= (n-op u) OP-STORE)) (store! found u) 0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; The k-th live node of an op, so a fixture with two stores can talk about both of them. `find-op`
+;; answers the first one and nothing else, which is exactly what the guarded witness cannot use.
+(defn nth-op [(op i64) (k i64)] (-> i64)
+  (let [n (n-count) (mut i) 0 (mut seen) 0 (mut found) NO-NODE]
+    (loop
+      (if (or (>= (load i) n) (!= (load found) NO-NODE)) (break)
+        (do (if (and (not (n-dead? (load i))) (= (n-op (load i)) op))
+                (do (if (= (load seen) k) (store! found (load i)) 0)
+                    (store! seen (+ (load seen) 1))
+                    0)
+              0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+;; WHAT THE ENGINE SAYS IT DID, asserted as an equality and reported with the graph in hand.
+;; `g-store-elims` and `g-forwards` are per-graph and zeroed by `graph-reset!`, which every corpus
+;; builder calls itself, so reading them straight after a `corpus-build!` reads that fixture alone.
+(defn expect-counter [(what (slice u8)) (name (slice u8)) (got i64) (want i64)] (-> i64)
+  (if (= got want) 0
+    (do (mfail-head what)
+        (let [e (stderr)]
+          (ps e "  ") (ps e name) (fmt e " is {d}, wanted {d}\n" got want))
+        (abort) 0))
+  0)
+
 (defn bytes-eq? [(a (slice u8)) (b (slice u8))] (-> bool)
   (if (!= (slice-len a) (slice-len b)) false
     (let [n (slice-len a) (mut i) 0 (mut same) true]
@@ -224,6 +334,9 @@
     4 CX-OBJECT-TWO
     5 CX-OBJECT-RET
     6 CX-OBJECT-RET-SCRATCH
+    7 CX-STORE-OVER-STORE
+    8 CX-STORE-OVER-STORE-RAW
+    9 CX-STORE-GUARDED
     (do (mfail-head "mem-fixture: index out of range") (abort) 0)))
 
 ; ---------------------------------------------------------------------------
@@ -1396,28 +1509,44 @@
 
 ;; THE COUNTED FLOOR (D11). A rewrite that quietly stopped firing has to fail, not pass.
 ;;
-;; What is counted is loads that were CREATED and are now dead. `n-kill!` leaves a node's op in
-;; the arena, so that number is exactly "loads the optimiser removed", and in this corpus removing
-;; a load is something only forwarding does. The companion count is what keeps that stand-in
-;; honest, and it runs in the opposite direction: how many forwardable loads SURVIVE. In the
+;; WHAT IS COUNTED IS `g-forwards`, THE ENGINE'S OWN NUMBER, bumped from the single line of
+;; `load-idealize` that hands back a stored value. It replaces a stand-in that this slice broke.
+;; The old count was "Loads created and now dead", which is exactly "loads the optimiser removed"
+;; and which equalled forwardings only while forwarding was the ONLY thing that removed a Load.
+;; 4c-2 removes a store, and the load above it then forwards, so `26-store-over-store` removes a
+;; load for a reason the stand-in cannot distinguish from a forwarding it never did. The dead-Load
+;; count is still reported, as a companion, and is asserted to be at or ABOVE `g-forwards` rather
+;; than equal to it: that is the whole content of the change, and it is a claim the old form could
+;; not have made.
+;;
+;; The companion count runs in the opposite direction: how many forwardable loads SURVIVE. In the
 ;; optimised mode that must be zero, or the rewrite is firing somewhere and not here; in the
 ;; raw-analysed mode it must NOT be zero, because the raw twin of the smallest heap program is
 ;; precisely a graph with the opportunity still in it. Together they say the opportunity exists,
 ;; the optimised mode takes all of them, and the analysis-only mode takes none.
+;;
+;; `g-store-elims` is swept here too, for the corpus-wide half of 4c-2's "it fires": the per-fixture
+;; equalities live in `store_after_store_eliminates_the_inner_write`. There is deliberately no
+;; "nothing eliminable survives" clause on the store side, because `28-store-guarded` is a fixture
+;; whose contract is that a structural opportunity DOES survive; that is clause 13.
 (deftest the_corpus_forwards_loads_and_leaves_none_forwardable
-  (let [w (stdout) (mut removed) 0 (mut live-loads) 0 (mut raw-chances) 0]
-    (ps w "\n--- loads removed and loads left, over the whole corpus ---\n")
+  (let [w (stdout) (mut fwd) 0 (mut removed) 0 (mut live-loads) 0 (mut raw-chances) 0
+        (mut selim) 0]
+    (ps w "\n--- loads forwarded and loads left, over the whole corpus ---\n")
     (let [(mut f) 0]
       (loop
         (if (>= (load f) (corpus-count)) (break)
           (do (corpus-build! (load f))
-              (let [gone (count-dead-op OP-LOAD)
+              (let [did  (g-forwards)
+                    gone (count-dead-op OP-LOAD)
                     kept (count-op OP-LOAD)
                     open (count-forwardable)]
-                (if (or (> gone 0) (> kept 0))
-                    (do (fmt w "  {s}: {d} forwarded, {d} loads left, {d} still forwardable\n"
-                             (corpus-name (load f)) gone kept open) 0)
+                (if (or (or (> did 0) (> kept 0)) (> (g-store-elims) 0))
+                    (do (fmt w "  {s}: {d} forwarded, {d} stores eliminated, {d} loads left, {d} still forwardable ({d} dead loads)\n"
+                             (corpus-name (load f)) did (g-store-elims) kept open gone) 0)
                   0)
+                ; the counters cannot be inflated by anything this sweep does: `g-verify` and
+                ; `g-analyze!` never run `idealize`, and neither is called before they are read
                 (if (= (corpus-mode (load f)) CORPUS-OPTIMISED)
                     ; AT A PEEPHOLE FIXPOINT NOTHING FORWARDABLE MAY SURVIVE. This is the clause
                     ; that fails when a refusal is declined instead of deferred: the load sits
@@ -1429,15 +1558,32 @@
                                      open))
                               (abort) 0))
                         0)
-                  (do (store! raw-chances (+ (load raw-chances) open)) 0))
+                  (do (store! raw-chances (+ (load raw-chances) open))
+                      ; A MODE THAT REWRITES NOTHING MUST HAVE REWRITTEN NOTHING. Without this the
+                      ; counters could be right in total while the raw twins were being optimised
+                      ; behind the differential comparison that rests on them being raw.
+                      (expect-counter (corpus-name (load f)) "g-forwards" (g-forwards) 0)
+                      (expect-counter (corpus-name (load f)) "g-store-elims" (g-store-elims) 0)
+                      0))
+                (store! fwd        (+ (load fwd) did))
+                (store! selim      (+ (load selim) (g-store-elims)))
                 (store! removed    (+ (load removed) gone))
                 (store! live-loads (+ (load live-loads) kept)))
               (store! f (+ (load f) 1))
               0))))
-    (fmt w "  {d} loads forwarded, {d} loads still in the corpus, {d} raw opportunities\n"
-         (load removed) (load live-loads) (load raw-chances))
-    ; IT FIRED. Zero here is a rewrite that stopped working, not a corpus with nothing to do.
-    (assert (> (load removed) 0))
+    (fmt w "  {d} forwardings, {d} store eliminations, {d} loads left, {d} raw opportunities\n"
+         (load fwd) (load selim) (load live-loads) (load raw-chances))
+    (fmt w "  ({d} Loads were created and are now dead, which is the retired stand-in)\n"
+         (load removed))
+    ; IT FIRED, and this is the engine saying so rather than a graph shape standing in for it.
+    ; Zero here is a rewrite that stopped working, not a corpus with nothing to do.
+    (assert (> (load fwd) 0))
+    ; AND SO DID 4c-2's.
+    (assert (> (load selim) 0))
+    ; THE STAND-IN IS RETIRED, and the inequality is the retirement: a load may now be removed by
+    ; cascade after a store dies, so dead Loads are allowed to EXCEED forwardings. Equality here is
+    ; what the old form asserted, and asserting it now would fail on `26-store-over-store`.
+    (assert (>= (load removed) (load fwd)))
     ; IT DID NOT JUST DELETE EVERY LOAD IT SAW. The surviving ones are the fixtures of clauses 4,
     ; 5 and 7: a different pointer, a Phi, a projection.
     (assert (> (load live-loads) 0))
@@ -1706,3 +1852,554 @@
     (fmt w "  {d} memory nodes round-tripped, {d} of them Loads\n" (load checked) (load loads-seen))
     (assert (>= (load checked) 10))
     (assert (>= (load loads-seen) 2))))
+
+; ===========================================================================
+; 11. Store after store: the inner write stops existing (4c-2)
+; ===========================================================================
+;; `Store(p, v2, mem=Store(p, v1, m))` becomes `Store(p, v2, mem=m)`. The decision procedure is
+;; 4c-1's, verbatim and for 4c-1's reason: same alias class, same pointer NODE, no type read. What
+;; is new is that the rewrite DELETES a node rather than replacing one, so the questions it has to
+;; answer are about who else was reading the state it deletes.
+;;
+;; The gate below is in the order a reader needs: it fires and the engine says by how much; it
+;; removed the right one of the two; the answer did not change; and then the four guards, each with
+;; a graph in which that guard and no other one refuses.
+
+;; THE DIFFERENTIAL COMPARISON, in the same terms `tests/eval-test.coil` uses, because comparing on
+;; anything weaker is how 4c-2 could pass while changing what the program means. `ev-outcome`
+;; renders the reachable heap under the result with objects numbered by discovery order, so it
+;; survives a rewrite that changes an allocation's position in the stream, and it is BYTES so run
+;; A's answer outlives the `ev-reset!` run B needs. Returns how many bindings it compared, and the
+;; caller asserts that number: a loop that ran zero times agrees about everything.
+(defn mdiff-pair [(raw i64) (opt i64) (label (slice u8))] (-> i64)
+  (let [ba (alloc-stack (array u8 8192))
+        bb (alloc-stack (array u8 8192))
+        (mut seed) 1
+        (mut checked) 0]
+    (loop
+      (if (> (load seed) DIFF-SEEDS) (break)
+        (do (corpus-build! raw)
+            (let [sr (ev-run-bound (load seed) BUDGET)
+                  oa (ev-outcome (cast (ptr i8) ba) 8192)]
+              (corpus-build! opt)
+              (let [so (ev-run-bound (load seed) BUDGET)
+                    ob (ev-outcome (cast (ptr i8) bb) 8192)]
+                (if (and (= sr so) (bytes-eq? oa ob)) 0
+                  (do (mfail-head label)
+                      (let [e (stderr)]
+                        (fmt e "  seed {d}\n  raw:       " (load seed))
+                        (ps e oa)
+                        (ps e "\n  optimised: ")
+                        (ps e ob)
+                        (ps e "\n"))
+                      (abort) 0))
+                (store! checked (+ (load checked) 1))
+                0))
+            (store! seed (+ (load seed) 1))
+            0)))
+    (load checked)))
+
+;; THE SMALLEST PROGRAM WITH A DEAD WRITE IN IT, unrewritten and optionally unanalysed, under a
+;; caller-chosen seed. It mirrors `fx-store-over-store-raw` node for node and exists for the reason
+;; `build-object-unrewritten!` does: every corpus builder calls `graph-reset! 1` itself, so a
+;; multi-seed sweep driven through `corpus-build!` compares seed 1 with seed 1.
+;;
+;; `analyse?` false is the mode that reaches the D8 proof gate, and it is not a convenience. With
+;; every type still at ANY the outer store's cone is by definition not at a fixpoint, so
+;; `n-ty-proven?` is FALSE and the rewrite is REQUIRED to refuse. `analyse?` true is the negative
+;; control for exactly that: the SAME graph, one call different, and the rewrite fires at the first
+;; peephole. Returns the OUTER store's node id, because the deferral claim is about that node.
+(defn build-store-over-store-unrewritten! [(seed i64) (analyse? bool)] (-> i64)
+  (graph-reset! seed)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        ax (shape-field-alias sx 0)]
+    (let [m0 (raw-arg (t-mem-alias ax (t-top)))
+          nw (n-new OP-NEW sx)]
+      (n-add-def! nw (g-start))
+      (n-add-def! nw m0)
+      (let [o  (n-new1 OP-PROJ 0 nw)
+            mp (n-new1 OP-PROJ 1 nw)]
+        (let [m1 (n-new4 OP-STORE ax NO-NODE mp o (raw-int 1))]
+          (let [m2 (n-new4 OP-STORE ax NO-NODE m1 o (raw-int 2))]
+            (let [ld  (n-new3 OP-LOAD ax NO-NODE m2 o)
+                  ret (n-new3 OP-RETURN 0 (g-start) NO-NODE NO-NODE)]
+              (n-set-def! ret 1 ld)
+              (n-set-def! ret 2 m2)
+              (n-add-def! (g-stop) ret)
+              ; types to a fixpoint, edges untouched, or not even that
+              (if analyse? (do (g-analyze!) 0) 0)
+              m2)))))))
+
+;; A DEAD-LOOKING WRITE THE PROGRAM ITSELF REFUSES, on the alias half. The object is of shape `{y}`
+;; so it really has the field, both stores name class y through the same pointer NODE, and the
+;; inner store's memory edge carries class x. Every structural half of 4c-2's rule holds; what is
+;; wrong is the INNER STORE's own access, which the interpreter owes an EV-MEM.
+;;
+;; Bypassing it deletes its only reader, the cascade collects it, and the trap goes with it: the
+;; same program then runs to a plausible answer. That is the laundering
+;; `forwarding_refuses_a_store_the_program_itself_refuses` gates for 4c-1, arriving through the
+;; write side. Returns the inner store.
+(defn build-store-elim-launder-alias! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        sy (shape-transition SHAPE-ROOT "y" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)
+          ay (shape-field-alias sy 0)]
+      (let [nw (n-new-obj1! (g-start) sy (mk-mem-in ay))]
+        (let [o  (n-obj-ptr nw)
+              my (n-obj-mem nw 0)]
+          ; the inner store names class y and reads class x's state
+          (let [m1 (n-store! (mk-mem-in ax) o (mk-int 1) ay)]
+            (let [m2 (n-store! m1 o (mk-int 2) ay)]
+              ; the allocation's own state is merged into the exit so nothing is left unrooted;
+              ; the leak check is a claim this suite makes and a dangling projection would trip it
+              (ret-to-mem (g-start) (mk-int 0) (n-memmerge2! m2 my))
+              m1)))))))
+
+;; THE SAME, ON THE SHAPE HALF. The memory edge is class y's this time, so the alias check passes;
+;; the object is of shape `{x}` and carries no word y at all. In the source language `o.y = 1` on
+;; such an object is a transition; in this IR it is a fixed-offset write to a word the object does
+;; not have, and a front end that emitted it without a shape guard is the bug (D4).
+;;
+;; BOTH STORES ARE REFUSED HERE, NOT JUST THE INNER ONE, and that is forced rather than chosen: the
+;; rule only ever considers two stores through the SAME pointer node, so a pointer whose shape
+;; misses the word misses it for both. The claim is unchanged -- neither store may be deleted and
+;; the EV-SHAPE must survive -- and stating which guard fires is what stops the test from being
+;; read as an alias-half duplicate. Returns the inner store.
+(defn build-store-elim-launder-shape! [] (-> i64)
+  (graph-reset! 1)
+  (shape-reset!)
+  (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))
+        sy (shape-transition SHAPE-ROOT "y" (t-dyn))]
+    (let [ax (shape-field-alias sx 0)
+          ay (shape-field-alias sy 0)]
+      (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+        (let [o  (n-obj-ptr nw)
+              mx (n-obj-mem nw 0)]
+          (let [m1 (n-store! (mk-mem-in ay) o (mk-int 1) ay)]
+            (let [m2 (n-store! m1 o (mk-int 2) ay)]
+              (ret-to-mem (g-start) (mk-int 0) (n-memmerge2! m2 mx))
+              m1)))))))
+
+;; The shared shape of both laundering assertions: the graph is structurally clean, BOTH stores are
+;; still there, the engine eliminated nothing, and the interpreter refuses the program by NAME --
+;; before `iterate!` and again after it, on the same graph. "Before and after" is the whole claim,
+;; because what a laundering looks like is one verifier-clean graph with two observable answers.
+(defn a-store-refusal-survives-iterate [(what (slice u8)) (inner i64) (status i64)] (-> i64)
+  (let [w (stdout)]
+    (ps w "\n--- ") (ps w what) (ps w " ---\n")
+    (assert (= (g-verify) 0))
+    (assert (= (count-op OP-STORE) 2))
+    (assert (not (n-dead? inner)))
+    ; every structural half of the rule holds, so the refusal is attributable to the access check
+    ; and to nothing else
+    (assert (= (count-store-forwardable) 1))
+    (assert (= (ev-run-bound 1 BUDGET) status))
+    (ps w "  before iterate!: ") (ps w (ev-status-name status)) (ps w "\n")
+    (iterate!)
+    (assert (= (g-verify) 0))
+    (assert (= (count-op OP-STORE) 2))
+    (assert (not (n-dead? inner)))
+    (expect-counter what "g-store-elims" (g-store-elims) 0)
+    (assert (= (ev-run-bound 1 BUDGET) status))
+    (ps w "  after  iterate!: ") (ps w (ev-status-name (ev-status)))
+    (fmt w "   ({d} store(s) left)\n" (count-op OP-STORE))
+    0))
+
+;; IT FIRES, AND THE ENGINE IS WHAT SAYS SO.
+;;
+;; Two numbers are asserted against each other: `g-store-elims`, which `store-idealize` bumps from
+;; the one line that rewires past a dead store, and the drop in `count-op OP-STORE` between the raw
+;; twin and the optimised one, which this file derives by walking the arena. Both are EQUALITIES.
+;; A rule that fired twice, or a counter bumped on a decline, breaks one of them.
+;;
+;; AND IT REMOVED THE INNER WRITE. The graph that deletes the outer store instead is well formed,
+;; verifies clean, round-trips, has the identical structural node count and the identical counter
+;; readings; the surviving store's VALUE and the interpreter's answer are the only things that tell
+;; the two apart, which is why both are asserted three ways.
+(deftest store_after_store_eliminates_the_inner_write
+  (let [w (stdout)]
+    ; the number to beat, from the twin that is never rewritten
+    (corpus-build! CX-STORE-OVER-STORE-RAW)
+    (ps w "\n--- o = {x}; o.x = 1; o.x = 2; return o.x   (raw: nothing rewritten) ---\n")
+    (g-print-flat w)
+    (let [raw-stores (count-op OP-STORE)]
+      (assert (= raw-stores 2))
+      (assert (= (count-op OP-LOAD) 1))
+      ; the opportunity is structurally present in the raw graph, and nothing took it
+      (assert (= (count-store-forwardable) 1))
+      (expect-counter "27-store-over-store-raw" "g-store-elims" (g-store-elims) 0)
+      (expect-counter "27-store-over-store-raw" "g-forwards"    (g-forwards) 0)
+      (assert (= (g-verify) 0))
+      ; and it already answers 2, so there is an answer for the rewrite to preserve
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 2)))
+
+      (corpus-build! CX-STORE-OVER-STORE)
+      (ps w "\n--- the same program, eliminated and then forwarded ---\n")
+      (g-print-flat w)
+      (assert (= (g-verify) 0))
+      (assert (= (g-leaked-count) 0))
+
+      ; THE ENGINE'S COUNT, EXACTLY ONE, AGAINST AN INDEPENDENTLY DERIVED ONE
+      (expect-counter "26-store-over-store" "g-store-elims" (g-store-elims) 1)
+      (assert (= (count-op OP-STORE) 1))
+      (assert (= (- raw-stores (count-op OP-STORE)) (g-store-elims)))
+      ; nothing eliminable is left behind at the fixpoint
+      (assert (= (count-store-forwardable) 0))
+      ; and the load above it forwarded once the store below it was gone, which is the cascade
+      ; that retired the dead-Load stand-in
+      (expect-counter "26-store-over-store" "g-forwards" (g-forwards) 1)
+      (assert (= (count-op OP-LOAD) 0))
+      (assert (= (count-dead-op OP-LOAD) 1))
+
+      ; THE SURVIVOR IS THE OUTER WRITE. Its value is the second constant, not the first.
+      (let [st (find-op OP-STORE)]
+        (assert (!= st NO-NODE))
+        (let [v (n-in st 3)]
+          (assert (not (n-dead? v)))
+          (assert (= (n-op v) OP-CONST))
+          (assert (= (n-ty v) (t-int-con 2)))
+          (assert (!= (n-ty v) (t-int-con 1)))
+          (ps w "  the surviving Store writes ") (ty-print w (n-ty v)) (ps w "\n"))
+        ; and its memory edge is the allocation's own state now, not another Store
+        (let [m (n-in st 1)]
+          (assert (not (n-dead? m)))
+          (assert (!= (n-op m) OP-STORE))
+          (assert (= (n-op m) OP-PROJ))
+          (assert (= (n-op (n-in m 0)) OP-NEW))
+          (assert (not (store-eliminable? st)))
+          (fmt w "  and reads the allocation's own state n{d}\n" m)))
+
+      ; AND THE ANSWER IS THE SECOND WRITE, which is the only thing that separates this graph from
+      ; the one that kept `o.x = 1`.
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n")
+      (assert (rt-eq? (ev-result) (RInt 2)))
+      (assert (not (rt-eq? (ev-result) (RInt 1))))
+      (assert (not (rt-eq? (ev-result) (RUndef)))))))
+
+;; THE ANSWER IS UNCHANGED ACROSS THE PASS (LAW 10). The graph changed; the program did not.
+;;
+;; The two builds really are different graphs and differ in exactly the rewrite under test, which
+;; is asserted rather than assumed: if the raw twin ever started being optimised this comparison
+;; would still pass while comparing a program with itself.
+(deftest the_two_builds_of_the_store_program_agree
+  (let [w (stdout)]
+    (ps w "\n--- raw against optimised, over argument bindings ---\n")
+    (corpus-build! CX-STORE-OVER-STORE-RAW)
+    (assert (= (count-op OP-STORE) 2))
+    (assert (= (count-op OP-LOAD) 1))
+    (corpus-build! CX-STORE-OVER-STORE)
+    (assert (= (count-op OP-STORE) 1))
+    (assert (= (count-op OP-LOAD) 0))
+    (let [n (mdiff-pair CX-STORE-OVER-STORE-RAW CX-STORE-OVER-STORE
+                        "o = {x}; o.x = 1; o.x = 2; return o.x, before and after 4c-2")]
+      (fmt w "  {d} bindings agreed on status and on the reachable heap\n" n)
+      (assert (= n DIFF-SEEDS)))))
+
+;; THE ONLY-CONSUMER CLAUSE IS LOAD-BEARING, and this is the fixture the roadmap names as what
+;; makes 4c-2 harder than 4c-1.
+;;
+;;   o = {x}; o.x = 1; if (p) { o.x = 2; } return o.x;
+;;
+;; The guarded store is the same word of the same object as the first store, its memory input IS
+;; the first store, the cone is proven and neither access is refused. Every guard except one says
+;; go. The one that refuses is ONLY MEMORY CONSUMER: the first store feeds two nodes, the guarded
+;; store and the memory Phi's else arm.
+;;
+;; IT IS A STRUCTURAL WITNESS AND NOT A DIFFERENTIAL ONE, and saying so is the point. Deleting the
+;; clause and running the oracle over this fixture returns the identical answer on every seed,
+;; which was measured rather than argued (see `store-sole-consumer?`): a Store in this IR is a pure
+;; state-to-state function, the bypass leaves the other reader alone, and both orderings write the
+;; same value to the same word. What the clause defends is serialisability -- two live writes to
+;; one word with no memory edge ordering them -- which nothing available today can observe and
+;; which M10's scheduler would inherit. So the assertions are the two things that DO flip when the
+;; clause goes: `g-store-elims` becomes 1, and the guarded store's memory input becomes the
+;; allocation's projection instead of the first store.
+;;
+;; The instrument matters as much as the assertion. `count-store-forwardable` does not ask about
+;; uses, so it reports the opportunity as present; a predicate that folded the use count in would
+;; say "nothing to do here" and this witness would be indistinguishable from a fixture with no
+;; store-after-store in it at all.
+(deftest store_elimination_needs_the_inner_store_to_be_the_only_consumer
+  (let [w (stdout)]
+    (corpus-build! CX-STORE-GUARDED)
+    (ps w "\n--- o = {x}; o.x = 1; if (p) { o.x = 2; } return o.x ---\n")
+    (g-print-flat w)
+    (assert (= (g-verify) 0))
+    (assert (= (g-leaked-count) 0))
+
+    ; BOTH STORES SURVIVE, and the engine agrees that it did nothing
+    (assert (= (count-op OP-STORE) 2))
+    (expect-counter "28-store-guarded" "g-store-elims" (g-store-elims) 0)
+
+    ; AND THE OPPORTUNITY IS STRUCTURALLY PRESENT: same class, same pointer node, a live inner
+    ; Store. This is exactly what the rule's first guard sees.
+    (assert (= (count-store-forwardable) 1))
+    (let [inner (nth-op OP-STORE 0)
+          outer (nth-op OP-STORE 1)]
+      (assert (!= inner NO-NODE))
+      (assert (!= outer NO-NODE))
+      (assert (= (n-in outer 1) inner))
+      (assert (store-eliminable? outer))
+      (assert (= (n-aux inner) (n-aux outer)))
+      (assert (= (n-in inner 2) (n-in outer 2)))
+      ; the two write DIFFERENT values, so "the inner store survived" is not "the two stores were
+      ; value numbered into one"
+      (assert (!= (n-in inner 3) (n-in outer 3)))
+
+      ; THE CLAUSE THAT REFUSES IT, read as the count the clause reads
+      (assert (> (n-nouts inner) 1))
+      ; and the other consumer is the memory Phi, which is what puts the second live write on a
+      ; path the first one does not own
+      (let [(mut phis) 0 (mut i) 0]
+        (loop
+          (if (>= (load i) (n-nouts inner)) (break)
+            (do (if (op-phi? (n-op (n-out inner (load i))))
+                    (store! phis (+ (load phis) 1))
+                  0)
+                (store! i (+ (load i) 1))
+                0)))
+        (fmt w "  the inner store has {d} consumers, {d} of them a memory phi\n"
+             (n-nouts inner) (load phis))
+        (assert (= (load phis) 1))))
+
+    ; AND BOTH ARMS RUN. Not the clause's witness -- see above -- but a fixture that stopped
+    ; running would stop noticing if the phi's arms were swapped, which is the canonical LAW 5
+    ; miscompile and the one that hid in `21-shape-polymorphic` for a whole slice.
+    (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+    (ps w "  seed 1 (truthy, the guarded store runs) returns ") (rt-print w (ev-result)) (ps w "\n")
+    (assert (rt-eq? (ev-result) (RInt 2)))
+    (assert (= (ev-run-bound 3 BUDGET) EV-OK))
+    (ps w "  seed 3 (falsey, only the first store runs) returns ")
+    (rt-print w (ev-result)) (ps w "\n")
+    (assert (rt-eq? (ev-result) (RInt 1)))
+    (assert (not (rt-eq? (ev-result) (RUndef))))))
+
+;; A PINNED STORE IS NOT A DEAD STORE, and `n-nouts` alone cannot tell the difference.
+;;
+;; `keeps` is the ONLY signal in the graph that says a use is still coming. A builder pins a memory
+;; state across the next line precisely because the node that will root it does not exist yet
+;; (`fx-object`'s measured lesson), and in that window the store has EXACTLY ONE consumer and looks
+;; final. So the use-count half of the clause accepts it and only the pin refuses.
+;;
+;; THE FAILURE THIS PREVENTS IS NOT LOCAL. Bypass a pinned store and the builder's next line roots
+;; a state the write no longer reaches, or wires a Return to a corpse; either way `g-verify`
+;; reports it at the Return, a long way from the peephole that caused it. Both are asserted, and so
+;; is the leak count, because a pinned store that loses its last use is not killed either -- it is
+;; simply unreachable, which is the other shape the same defect takes.
+;;
+;; THE SECOND HALF IS THE NEGATIVE CONTROL, and without it this test would be satisfied by a rule
+;; that had stopped firing altogether: the pin comes off, the same graph is swept, and the
+;; elimination lands.
+(deftest a_pinned_store_is_never_eliminated
+  (let [w (stdout)]
+    (graph-reset! 1)
+    (shape-reset!)
+    (let [sx (shape-transition SHAPE-ROOT "x" (t-dyn))]
+      (let [ax (shape-field-alias sx 0)]
+        (let [nw (n-new-obj1! (g-start) sx (mk-mem-in ax))]
+          (let [o (n-obj-ptr nw)]
+            (let [m1 (n-store! (n-obj-mem nw 0) o (mk-int 1) ax)]
+              ; the window: a use is coming, and nothing in the graph says so but this
+              (n-keep! m1)
+              (let [m2 (n-store! m1 o (mk-int 2) ax)]
+                (ps w "\n--- a store-over-store where the inner store is pinned ---\n")
+                (g-print-flat w)
+                ; IT REFUSED. The counter first, because it prints the graph when it disagrees and
+                ; the shape of the disagreement is the whole diagnosis: a bypassed pinned store
+                ; leaves the outer store reading the allocation's projection.
+                (expect-counter "a pinned inner store" "g-store-elims" (g-store-elims) 0)
+                (assert (= (count-op OP-STORE) 2))
+                (assert (not (n-dead? m1)))
+                (assert (= (n-in m2 1) m1))
+                ; AND THE USE-COUNT HALF ACCEPTED IT: one consumer, and that consumer is the outer
+                ; store, so `n-nouts` alone cannot be what refused.
+                (assert (= (n-nouts m1) 1))
+                (assert (= (n-out m1 0) m2))
+                (assert (= (n-keeps m1) 1))
+                ; every other guard says go, so the refusal is attributable to the pin alone
+                (assert (store-eliminable? m2))
+                (assert (n-ty-proven? m2))
+                (fmt w "  refused with {d} consumer and {d} pin\n" (n-nouts m1) (n-keeps m1))
+
+                ; NOW THE USE ARRIVES, which is what the pin was holding the state open for. The
+                ; load is built under a pin of its own for `fx-object`'s reason: it forwards on the
+                ; spot, dropping the outer store's only reader.
+                (n-unkeep! m1)
+                (n-keep! m2)
+                (let [v (n-load! m2 o ax)]
+                  (n-unkeep! m2)
+                  (ret-to-mem (g-start) v m2))
+                (iterate!)
+                (g-print-flat w)
+                ; and now it lands: the pin was the refusal, not a rule that never fires
+                (assert (= (count-op OP-STORE) 1))
+                (expect-counter "an unpinned inner store" "g-store-elims" (g-store-elims) 1)
+                (assert (= (count-store-forwardable) 0))
+                (assert (n-dead? m1))
+                ; the graph is whole: no Return reading a corpse, and nothing left unreachable
+                (assert (= (g-verify) 0))
+                (assert (= (g-leaked-count) 0))
+                (assert (= (returns-with-live-mem "a pinned inner store, released") 1))
+                (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                (ps w "  runs to ") (rt-print w (ev-result)) (ps w "\n")
+                (assert (rt-eq? (ev-result) (RInt 2)))))))))))
+
+;; A REFUSED STORE IS NEVER LAUNDERED AWAY, in both directions.
+;;
+;; This is 4c-1's `forwarding_refuses_a_store_the_program_itself_refuses` on the write side, and the
+;; hazard is identical: the rewrite DELETES a node, and if that node was one the interpreter owed a
+;; named refusal, the refusal is deleted with it. One verifier-clean graph then has two observable
+;; answers, EV-MEM or EV-SHAPE before the pass and a plausible number after it, which is LAW 10's
+;; oracle failing across a pass.
+;;
+;; Both graphs are structurally impeccable -- `g-verify` is CLEAN on both, asserted rather than
+;; assumed -- and in both of them every structural half of 4c-2's rule holds, so the refusal can
+;; only have come from the access check. Reading a provisional type in order to DECLINE is what
+;; LAW 3 permits (it is acting on one that is forbidden), and this is the clause that needs it.
+(deftest store_elimination_refuses_a_store_the_program_itself_refuses
+  (let [w (stdout)]
+    ; 1. THE ALIAS HALF. The inner store's memory edge carries class x; it writes class y.
+    (let [inner (build-store-elim-launder-alias!)]
+      (a-store-refusal-survives-iterate
+        "an inner Store writing class y through a class-x memory state" inner EV-MEM)
+      (let [outer (store-user-of inner)]
+        (assert (!= outer NO-NODE))
+        ; the OUTER store's own access is fine, so this is the inner store's refusal and not a
+        ; graph in which everything is refused
+        (assert (= (n-aux outer) (n-aux inner)))
+        (assert (= (n-in outer 2) (n-in inner 2)))
+        (assert (ty-mem? (n-in-ty outer 1)))
+        (assert (!= (& (ty-mem-aliases (n-in-ty outer 1)) (<< 1 (n-aux outer))) 0))
+        (assert (= (& (ty-mem-aliases (n-in-ty inner 1)) (<< 1 (n-aux inner))) 0))
+        (fmt w "  the inner store writes class {d} through a state whose alias bits are {d}\n"
+             (n-aux inner) (ty-mem-aliases (n-in-ty inner 1)))))
+
+    ; 2. THE SHAPE HALF. The memory edge is the right class this time; the object has no such word.
+    ;    Both stores are refused here, because the rule only ever pairs stores through the SAME
+    ;    pointer node and a shape that misses the word misses it for both.
+    (let [inner (build-store-elim-launder-shape!)]
+      (a-store-refusal-survives-iterate
+        "an inner Store of a field the pointer's shape does not carry" inner EV-SHAPE)
+      ; the memory edge really does carry the class, so the alias half is NOT what refused
+      (assert (ty-mem? (n-in-ty inner 1)))
+      (assert (!= (& (ty-mem-aliases (n-in-ty inner 1)) (<< 1 (n-aux inner))) 0))
+      (ps w "  the memory state carries the class; the pointer is ")
+      (ty-print w (n-in-ty inner 2)) (ps w "\n"))))
+
+;; A PROOF-GATED REFUSAL IS DEFERRED, NOT DECLINED (D8), on the write side.
+;;
+;; 4c-2's rule reads no type either, and it asks for a proven cone for 4c-1's reason: the rewrite is
+;; IRREVERSIBLE and the graph it is reading is not finished. A store in a still-settling cone is one
+;; the sweep may yet replace, and deleting a write on the strength of an arrangement that was never
+;; final commits to it permanently.
+;;
+;; THE BRANCH IS UNREACHABLE FROM THE CORPUS, which is measured and not assumed: instrumenting it
+;; over the whole corpus plus 40 raw-then-`iterate!` seeds counted ZERO proof-gated refusals, for
+;; the same reason 4c-1 recorded about its own version -- an analysed fixture has settled its cone
+;; before any peephole runs. So the witness is a locally built UNANALYSED graph, every type still
+;; at ANY, where the cone is not at a fixpoint by definition.
+;;
+;; IT IS OBSERVED AT THE MOMENT IT HAPPENS, and that needs one more thing than 4c-1's version did:
+;; `store-idealize` rewires IN PLACE and returns the node it was given, so "the peephole gave me the
+;; same node back" does NOT distinguish a refusal from a firing. The refusal is therefore read off
+;; the engine's counter and the memory edge together.
+;;
+;; AND THE ATTRIBUTION IS A CONTROL RATHER THAN AN ARGUMENT. The same builder with `g-analyze!`
+;; called and nothing else different fires at the very first hand peephole. One call apart, opposite
+;; outcomes: what the proof gate reads is the only thing that changed.
+(deftest a_refused_store_elimination_is_deferred_and_lands_under_every_seed
+  (let [w (stdout)
+        ba (alloc-stack (array u8 4096))
+        bb (alloc-stack (array u8 4096))
+        (mut checked) 0 (mut refused) 0]
+    (ps w "\n--- deferred store elimination: unanalysed, then iterate!, under every seed ---\n")
+    ; THE PLACE EVERY SEED HAS TO REACH, built once at seed 1 and rendered into a buffer nothing
+    ; else writes to. Comparing each seed against the CURRENT graph would compare it with itself.
+    (build-store-over-store-unrewritten! 1 false)
+    (iterate!)
+    (let [base-live (g-live-count)
+          base-txt  (g-render (cast (ptr i8) ba) 4096)
+          (mut s) 1]
+      (fmt w "  seed 1 settles at {d} live nodes and one store\n" base-live)
+      (loop
+        (if (> (load s) SEEDS) (break)
+          (do (let [st (build-store-over-store-unrewritten! (load s) false)]
+                (let [inner (n-in st 1)]
+                  ; THE OPPORTUNITY IS THERE AND THE PROOF IS NOT, which is the state the rewrite
+                  ; is required to refuse in
+                  (assert (= (count-op OP-STORE) 2))
+                  (assert (store-eliminable? st))
+                  (assert (= (count-store-forwardable) 1))
+                  ; and the guards BEFORE the proof gate all pass, so the gate is actually reached:
+                  ; one consumer, no pin, a live inherited memory state
+                  (assert (= (n-nouts inner) 1))
+                  (assert (= (n-keeps inner) 0))
+                  (assert (not (n-dead? (n-in inner 1))))
+                  (assert (not (n-ty-proven? st)))
+                  ; PEEPHOLE IT BY HAND AND WATCH IT REFUSE. The rewrite is in place, so the
+                  ; refusal is "the counter did not move and the memory edge is unchanged".
+                  (n-peephole st)
+                  (if (and (and (= (n-op st) OP-STORE) (= (n-in st 1) inner))
+                           (and (= (g-store-elims) 0) (= (count-op OP-STORE) 2)))
+                      (do (store! refused (+ (load refused) 1)) 0)
+                    (do (mfail-head "the store rewrite fired on an unproven cone")
+                        (let [e (stderr)]
+                          (fmt e "  seed {d}: store n{d} lost its inner store n{d}\n"
+                               (load s) st inner))
+                        (abort) 0)))
+                ; NOW LET THE SWEEP HAVE IT. A deferred rewrite that is merely declined would sit
+                ; here for ever: nothing re-queues a node whose blocker was "the cone had not
+                ; settled", so only `iterate!`'s sweep brings it back.
+                (iterate!)
+                (assert (= (g-verify) 0))
+                (assert (= (g-leaked-count) 0))
+                (expect-counter "a deferred store elimination" "g-store-elims" (g-store-elims) 1)
+                (assert (= (count-op OP-STORE) 1))
+                ; NOTHING ELIMINABLE SURVIVES THE FIXPOINT, which is the clause that fails when a
+                ; refusal is declined instead of deferred
+                (assert (= (count-store-forwardable) 0))
+                ; and the load above it forwarded through what was left
+                (assert (= (count-op OP-LOAD) 0))
+                (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+                (assert (rt-eq? (ev-result) (RInt 2)))
+                ; THE SAME GRAPH UNDER EVERY SEED, so the fixpoint is a property of the program and
+                ; not of the pop order
+                (let [txt (g-render (cast (ptr i8) bb) 4096)]
+                  (if (and (= (g-live-count) base-live) (bytes-eq? base-txt txt)) 0
+                    (do (mfail-head "a deferred store elimination landed differently")
+                        (let [e (stderr)]
+                          (fmt e "  seed {d}: {d} live nodes (seed 1: {d})\n"
+                               (load s) (g-live-count) base-live)
+                          (ps e base-txt) (ps e "  ---\n") (ps e txt))
+                        (abort) 0)))
+                0)
+              (store! checked (+ (load checked) 1))
+              (store! s (+ (load s) 1))
+              0))))
+    (fmt w "  {d} seeds refused first and landed after\n" (load refused))
+    (assert (= (load checked) SEEDS))
+    ; EVERY SEED REACHED THE REFUSAL. This is the count that stops the clause above from being a
+    ; description of a branch nothing executes.
+    (assert (= (load refused) SEEDS))
+
+    ;; THE CONTROL: the same construction, ANALYSED, and the rewrite fires at the first peephole.
+    ;; It is what makes the refusals above attributable to the proof gate rather than to some other
+    ;; guard that happens to fail on a graph of ANYs.
+    (let [st (build-store-over-store-unrewritten! 1 true)]
+      (assert (store-eliminable? st))
+      (assert (n-ty-proven? st))
+      (expect-counter "an analysed store-over-store" "g-store-elims" (g-store-elims) 0)
+      (n-peephole st)
+      (expect-counter "an analysed store-over-store" "g-store-elims" (g-store-elims) 1)
+      (assert (= (count-op OP-STORE) 1))
+      (assert (!= (n-op (n-in st 1)) OP-STORE))
+      (iterate!)
+      (assert (= (g-verify) 0))
+      (assert (= (ev-run-bound 1 BUDGET) EV-OK))
+      (assert (rt-eq? (ev-result) (RInt 2)))
+      (ps w "  and the analysed twin fires at the first peephole, which is the attribution\n"))))

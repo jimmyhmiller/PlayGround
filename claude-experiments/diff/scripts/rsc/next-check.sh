@@ -31,6 +31,7 @@
 # Native build (Rust); Node + Chrome are only the oracle. Exit 0 = gate PASS.
 # Strict mode, the ERR net (no abort is ever silent) and fail() — see _gate-prelude.sh.
 source "$(dirname "$0")/_gate-prelude.sh"
+source "$(dirname "$0")/_react-dom-misuse.sh"
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="${1:-$repo/integration/next-app-router}"
@@ -369,5 +370,14 @@ if echo "$console" | grep -qiE 'hydrat|did not match|text content does not match
   echo "$console"; fail "useParams() client: hydration mismatch in the console (the client hooks must read the SAME context values as SSR)"
 fi
 echo "OK (gate 8 browser): useParams() resolved 'slug: hello' on the client after clean hydration (no mismatch)"
+
+# --- Gate 9: the SSR entry never MISUSES react-dom's server API ---------------------
+# Every route above has now been rendered through the emitted SSR-of-flight entry, here
+# by the PRODUCTION orchestrator (the streaming `renderFlightToStream` path). The
+# patterns and the reasoning live in _react-dom-misuse.sh; the dev half of this
+# assertion — the buffered `onAllReady` path, which is where the double-`pipe` actually
+# reproduces — is next-dev-ssr-api-check.sh.
+assert_no_react_dom_misuse "$serverlog" "every route above"
+echo "OK (gate 9): no react-dom API-misuse errors logged while rendering every route above"
 
 echo "PASS: a REAL Next.js app-router app — app-router layout+page composed, flight render + SSR-of-full-document + browser hydration + server-action round-trip, all built and served by diffpack via the native next app-router adapter"

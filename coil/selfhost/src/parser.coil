@@ -2475,6 +2475,31 @@
 ; full implementing type. Each method carries the impl's type params as its own
 ; (the lowered functions are ordinary generic functions); every declared param
 ; must appear in the implementing type (dispatch infers them from the receiver).
+;
+; An INHERENT impl omits the trait:
+;   `(impl Point (length [(self Point)] (-> i64) …))`
+;   `(impl [T] (Box T) (get [(self (ptr (Box T)))] (-> T) …))`
+; It is unambiguous because the form after the target is a method: a list whose
+; second item is a parameter vector and whose third item is `(-> Type)`. In the
+; trait form, the item after the trait is a TYPE instead. `ImplKind` records the
+; distinction explicitly; inherent methods are still lowered to ordinary Funcs.
+(defn impl-method-form? [(o (Option Sexp))] (-> bool)
+  (match o
+    (None [] false)
+    (Some [s]
+      (if (icmp-ne (sx-tag s) 6)
+          false
+          (let [xs (sx-items s)]
+            (if (icmp-lt (sx-len xs) 3)
+                false
+                (let [ps (sx-at xs 1)
+                      rt (sx-at xs 2)]
+                  (and (icmp-eq (sx-tag ps) 7)
+                       (and (icmp-eq (sx-tag rt) 6)
+                            (let [rs (sx-items rt)]
+                              (and (icmp-gt (sx-len rs) 0)
+                                   (and (icmp-eq (sx-tag (sx-at rs 0)) 2)
+                                        (str-eq (sx-sval (sx-at rs 0)) "->")))))))))))))
 (defn parse-impl [(a (ptr Allocator)) (rest0 (ptr (ArrayList Sexp))) (slo i64) (shi i64) (ssrc i64) (sctxt i64)] (-> (Result ImplDef
                                                                                                                              Diag))
   (try (let [has-tps (opt-is-vec (sx-get rest0 0))
@@ -2503,9 +2528,13 @@
                                        0)))
                              (store! vi (iadd (load vi) 1)))))
                  0))
-         (let [trait-name
-                 (try! (sym-of a (try! (need [Sexp] (sx-get rest0 base) "impl: missing trait name")) "trait name"))
-               target (try! (need [Sexp] (sx-get rest0 (iadd base 1)) "impl: missing implementing type"))
+         (let [inherent (impl-method-form? (sx-get rest0 (iadd base 1)))
+               trait-name
+                 (if inherent
+                     ""
+                     (try! (sym-of a (try! (need [Sexp] (sx-get rest0 base) "impl: missing trait name")) "trait name")))
+               target-idx (if inherent base (iadd base 1))
+               target (try! (need [Sexp] (sx-get rest0 target-idx) "impl: missing implementing type"))
                self-type (try! (parse-type a target))
                stp (alloc-stack Type)]
            (store! stp self-type)
@@ -2534,7 +2563,11 @@
                            (store! ck (iadd (load ck) 1))))))
              (let [(mut methods) (al-new [Func] a)
                    nr (sx-len rest0)
-                   (mut mi) (iadd base 2)]
+                   (mut mi) (if inherent (iadd base 1) (iadd base 2))]
+               (when (icmp-ge (load mi) nr)
+                     (break :try
+                            (Err [ImplDef Diag]
+                                 (derr-at slo shi "inherent impl must define at least one method"))))
                (loop (if (icmp-ge (load mi) nr)
                          (break)
                          (let [m (sx-at rest0 (load mi))]
@@ -2564,7 +2597,7 @@
                                (store! (field fp ctxt) sctxt)
                                (al-push! (mut methods) (load fp)))))))
                (Ok (let [im (alloc-stack ImplDef)]
-                     (store! (field im trait_name) trait-name)
+                     (store! (field im kind) (if inherent (InherentImpl) (TraitImpl trait-name)))
                      (store! (field im for_type) for-type)
                      (store! (field im type_params) (box-al [(slice u8)] a (load type-params)))
                      (store! (field im self_type) self-type)

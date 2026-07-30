@@ -11,8 +11,6 @@ target triple = "arm64-apple-darwin25.5.0"
 
 %coil.core.Result__i64__io.IoError = type { i32, [2 x i64] }
 
-%io.FixBuf = type { ptr, i64, i64 }
-
 %io.IoError = type { i32, [1 x i64] }
 
 %io.Reader = type { ptr, ptr }
@@ -263,7 +261,7 @@ define internal i64 @__coil_llvm_ir_1({ ptr, i64 } %0) #0 {
 
 define internal i64 @adder-code(ptr %env, i64 %x) {
 entry:
-  %field = getelementptr inbounds nuw %AdderEnv, ptr %env, i32 0, i32 0
+  %field = getelementptr i8, ptr %env, i64 0
   %load = load i64, ptr %field, align 8
   %add = add i64 %load, %x
   ret i64 %add
@@ -271,9 +269,9 @@ entry:
 
 define internal i64 @apply(ptr %c, i64 %x) {
 entry:
-  %field = getelementptr inbounds nuw %Closure, ptr %c, i32 0, i32 0
+  %field = getelementptr i8, ptr %c, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %Closure, ptr %c, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %c, i64 8
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call i64 %load(ptr %load2, i64 %x)
   ret i64 %callptr
@@ -858,11 +856,207 @@ ifcont:                                           ; preds = %else15, %then14
 
 define internal i64 @free-closure(ptr %c) {
 entry:
-  %field = getelementptr inbounds nuw %Closure, ptr %c, i32 0, i32 1
+  %field = getelementptr i8, ptr %c, i64 8
   %load = load ptr, ptr %field, align 8
   tail call void @free(ptr %load)
   tail call void @free(ptr %c)
   ret i64 0
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %b) {
+entry:
+  %sum.tmp17 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp10 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %field = getelementptr i8, ptr %b, i64 16
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp sle i64 %load, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %field1 = getelementptr i8, ptr %b, i64 0
+  %load2 = load ptr, ptr %field1, align 8
+  %field3 = getelementptr i8, ptr %b, i64 8
+  %load4 = load ptr, ptr %field3, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load2, ptr %load4, i64 %load)
+  store %coil.core.Result__i64__io.IoError %call, ptr %match.tmp, align 8
+  %tag5 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag6 = load i32, ptr %tag5, align 4
+  %payload7 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag6, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm8
+  ]
+
+arm:                                              ; preds = %else
+  %vf9 = getelementptr inbounds nuw { %io.IoError }, ptr %payload7, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf9, align 8
+  %tag11 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 0
+  store i32 1, ptr %tag11, align 4
+  %payload12 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, i32 0, i32 1
+  %vf13 = getelementptr inbounds nuw { %io.IoError }, ptr %payload12, i32 0, i32 0
+  store %io.IoError %e, ptr %vf13, align 8
+  %sum14 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp10, align 8
+  ret %coil.core.Result__i64__io.IoError %sum14
+
+arm8:                                             ; preds = %else
+  %vf15 = getelementptr inbounds nuw { i64 }, ptr %payload7, i32 0, i32 0
+  %written = load i64, ptr %vf15, align 8
+  %field16 = getelementptr i8, ptr %b, i64 16
+  store i64 0, ptr %field16, align 8
+  %tag18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 0
+  store i32 0, ptr %tag18, align 4
+  %payload19 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 1
+  %vf20 = getelementptr inbounds nuw { i64 }, ptr %payload19, i32 0, i32 0
+  store i64 %written, ptr %vf20, align 8
+  %sum21 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, align 8
+  ret %coil.core.Result__i64__io.IoError %sum21
+
+match.default:                                    ; preds = %else
+  unreachable
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.buffered-output-flush(ptr %out) {
+entry:
+  %field = getelementptr i8, ptr %out, i64 0
+  %call = call %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %field)
+  ret %coil.core.Result__i64__io.IoError %call
+}
+
+define internal ptr @io.buffered-output-writer(ptr %out, ptr %inner) {
+entry:
+  %field = getelementptr i8, ptr %out, i64 32
+  %field1 = getelementptr i8, ptr %out, i64 0
+  %field2 = getelementptr i8, ptr %out, i64 48
+  %call = call ptr @io.buffered-writer(ptr %field, ptr %field1, ptr %inner, ptr %field2, i64 65536)
+  ret ptr %call
+}
+
+define internal %coil.core.Result__i64__io.IoError @io.buffered-write(ptr %ctx, ptr %src, i64 %len) {
+entry:
+  %sum.tmp28 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %match.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp17 = alloca %coil.core.Result__i64__io.IoError, align 8
+  %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
+  %field = getelementptr i8, ptr %ctx, i64 24
+  %load = load i64, ptr %field, align 8
+  %cmp = icmp sle i64 %len, 0
+  %ifc = icmp ne i1 %cmp, false
+  br i1 %ifc, label %then, label %else
+
+then:                                             ; preds = %entry
+  %tag = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 0
+  store i32 0, ptr %tag, align 4
+  %payload = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp, i32 0, i32 1
+  %vf = getelementptr inbounds nuw { i64 }, ptr %payload, i32 0, i32 0
+  store i64 0, ptr %vf, align 8
+  %sum = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp, align 8
+  ret %coil.core.Result__i64__io.IoError %sum
+
+else:                                             ; preds = %entry
+  %cmp1 = icmp sle i64 %load, 0
+  %ifc2 = icmp ne i1 %cmp1, false
+  br i1 %ifc2, label %then3, label %else4
+
+then3:                                            ; preds = %else
+  %field5 = getelementptr i8, ptr %ctx, i64 0
+  %load6 = load ptr, ptr %field5, align 8
+  %call = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load6, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %call
+
+else4:                                            ; preds = %else
+  %field7 = getelementptr i8, ptr %ctx, i64 16
+  %load8 = load i64, ptr %field7, align 8
+  %sub = sub i64 %load, %load8
+  %cmp9 = icmp sle i64 %len, %sub
+  %ifc10 = icmp ne i1 %cmp9, false
+  br i1 %ifc10, label %then11, label %else12
+
+then11:                                           ; preds = %else4
+  %field13 = getelementptr i8, ptr %ctx, i64 8
+  %load14 = load ptr, ptr %field13, align 8
+  %idx = getelementptr i8, ptr %load14, i64 %load8
+  %call15 = call ptr @memcpy(ptr %idx, ptr %src, i64 %len)
+  %field16 = getelementptr i8, ptr %ctx, i64 16
+  %add = add i64 %load8, %len
+  store i64 %add, ptr %field16, align 8
+  %tag18 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 0
+  store i32 0, ptr %tag18, align 4
+  %payload19 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, i32 0, i32 1
+  %vf20 = getelementptr inbounds nuw { i64 }, ptr %payload19, i32 0, i32 0
+  store i64 %len, ptr %vf20, align 8
+  %sum21 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp17, align 8
+  ret %coil.core.Result__i64__io.IoError %sum21
+
+else12:                                           ; preds = %else4
+  %call22 = call %coil.core.Result__i64__io.IoError @io.buffered-flush(ptr %ctx)
+  store %coil.core.Result__i64__io.IoError %call22, ptr %match.tmp, align 8
+  %tag23 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 0
+  %tag24 = load i32, ptr %tag23, align 4
+  %payload25 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %match.tmp, i32 0, i32 1
+  switch i32 %tag24, label %match.default [
+    i32 1, label %arm
+    i32 0, label %arm26
+  ]
+
+arm:                                              ; preds = %else12
+  %vf27 = getelementptr inbounds nuw { %io.IoError }, ptr %payload25, i32 0, i32 0
+  %e = load %io.IoError, ptr %vf27, align 8
+  %tag29 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, i32 0, i32 0
+  store i32 1, ptr %tag29, align 4
+  %payload30 = getelementptr inbounds nuw %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, i32 0, i32 1
+  %vf31 = getelementptr inbounds nuw { %io.IoError }, ptr %payload30, i32 0, i32 0
+  store %io.IoError %e, ptr %vf31, align 8
+  %sum32 = load %coil.core.Result__i64__io.IoError, ptr %sum.tmp28, align 8
+  ret %coil.core.Result__i64__io.IoError %sum32
+
+arm26:                                            ; preds = %else12
+  %vf33 = getelementptr inbounds nuw { i64 }, ptr %payload25, i32 0, i32 0
+  %_ = load i64, ptr %vf33, align 8
+  %cmp34 = icmp sge i64 %len, %load
+  %ifc35 = icmp ne i1 %cmp34, false
+  br i1 %ifc35, label %then36, label %else37
+
+match.default:                                    ; preds = %else12
+  unreachable
+
+then36:                                           ; preds = %arm26
+  %field38 = getelementptr i8, ptr %ctx, i64 0
+  %load39 = load ptr, ptr %field38, align 8
+  %call40 = call %coil.core.Result__i64__io.IoError @io.write-all(ptr %load39, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %call40
+
+else37:                                           ; preds = %arm26
+  %tailcall = musttail call %coil.core.Result__i64__io.IoError @io.buffered-write(ptr %ctx, ptr %src, i64 %len)
+  ret %coil.core.Result__i64__io.IoError %tailcall
+}
+
+define internal ptr @io.buffered-writer(ptr %w, ptr %b, ptr %inner, ptr %data, i64 %cap) {
+entry:
+  %field = getelementptr i8, ptr %b, i64 0
+  store ptr %inner, ptr %field, align 8
+  %field1 = getelementptr i8, ptr %b, i64 8
+  store ptr %data, ptr %field1, align 8
+  %field2 = getelementptr i8, ptr %b, i64 16
+  store i64 0, ptr %field2, align 8
+  %field3 = getelementptr i8, ptr %b, i64 24
+  store i64 %cap, ptr %field3, align 8
+  %field4 = getelementptr i8, ptr %w, i64 0
+  store ptr @io.buffered-write, ptr %field4, align 8
+  %field5 = getelementptr i8, ptr %w, i64 8
+  store ptr %b, ptr %field5, align 8
+  ret ptr %w
 }
 
 define internal %coil.core.Result__i64__io.IoError @io.fb-write(ptr %ctx, ptr %buf, i64 %len) {
@@ -870,9 +1064,9 @@ entry:
   %sum.tmp15 = alloca %coil.core.Result__i64__io.IoError, align 8
   %sum.tmp10 = alloca %io.IoError, align 8
   %sum.tmp = alloca %coil.core.Result__i64__io.IoError, align 8
-  %field = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %field = getelementptr i8, ptr %ctx, i64 8
   %load = load i64, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 2
+  %field1 = getelementptr i8, ptr %ctx, i64 16
   %load2 = load i64, ptr %field1, align 8
   %sub = sub i64 %load2, %load
   %cmp = icmp slt i64 %len, %sub
@@ -887,11 +1081,11 @@ else:                                             ; preds = %entry
 
 ifcont:                                           ; preds = %else, %then
   %ifval = phi i64 [ %len, %then ], [ %sub, %else ]
-  %field3 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 0
+  %field3 = getelementptr i8, ptr %ctx, i64 0
   %load4 = load ptr, ptr %field3, align 8
   %idx = getelementptr i8, ptr %load4, i64 %load
   %call = call ptr @memcpy(ptr %idx, ptr %buf, i64 %ifval)
-  %field5 = getelementptr inbounds nuw %io.FixBuf, ptr %ctx, i32 0, i32 1
+  %field5 = getelementptr i8, ptr %ctx, i64 8
   %add = add i64 %load, %ifval
   store i64 %add, ptr %field5, align 8
   %cmp6 = icmp slt i64 %ifval, %len
@@ -961,9 +1155,9 @@ else:                                             ; preds = %entry
 
 define internal ptr @io.fd-reader(ptr %r, i64 %fd) {
 entry:
-  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  %field = getelementptr i8, ptr %r, i64 0
   store ptr @io.fd-read, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %r, i64 8
   %inttoptr = inttoptr i64 %fd to ptr
   store ptr %inttoptr, ptr %field1, align 8
   ret ptr %r
@@ -1007,9 +1201,9 @@ else:                                             ; preds = %entry
 
 define internal ptr @io.fd-writer(ptr %w, i64 %fd) {
 entry:
-  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field = getelementptr i8, ptr %w, i64 0
   store ptr @io.fd-write, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %w, i64 8
   %inttoptr = inttoptr i64 %fd to ptr
   store ptr %inttoptr, ptr %field1, align 8
   ret ptr %w
@@ -1017,11 +1211,11 @@ entry:
 
 define internal ptr @io.fixed-buffer-writer(ptr %w, ptr %fb) {
 entry:
-  %field = getelementptr inbounds nuw %io.FixBuf, ptr %fb, i32 0, i32 1
+  %field = getelementptr i8, ptr %fb, i64 8
   store i64 0, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field1 = getelementptr i8, ptr %w, i64 0
   store ptr @io.fb-write, ptr %field1, align 8
-  %field2 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field2 = getelementptr i8, ptr %w, i64 8
   store ptr %fb, ptr %field2, align 8
   ret ptr %w
 }
@@ -1041,7 +1235,7 @@ entry:
 define internal ptr @io.null-writer() {
 entry:
   store ptr @io.null-write, ptr @g.0, align 8
-  store ptr null, ptr getelementptr inbounds nuw (%io.Writer, ptr @g.0, i32 0, i32 1), align 8
+  store ptr null, ptr getelementptr (i8, ptr @g.0, i64 8), align 8
   ret ptr @g.0
 }
 
@@ -1384,9 +1578,9 @@ else44:                                           ; preds = %else19
 
 define internal %coil.core.Result__i64__io.IoError @io.read-some(ptr %r, ptr %buf, i64 %len) {
 entry:
-  %field = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 0
+  %field = getelementptr i8, ptr %r, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Reader, ptr %r, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %r, i64 8
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
   ret %coil.core.Result__i64__io.IoError %callptr
@@ -1530,9 +1724,9 @@ entry:
 
 define internal %coil.core.Result__i64__io.IoError @io.write-some(ptr %w, ptr %buf, i64 %len) {
 entry:
-  %field = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 0
+  %field = getelementptr i8, ptr %w, i64 0
   %load = load ptr, ptr %field, align 8
-  %field1 = getelementptr inbounds nuw %io.Writer, ptr %w, i32 0, i32 1
+  %field1 = getelementptr i8, ptr %w, i64 8
   %load2 = load ptr, ptr %field1, align 8
   %callptr = call %coil.core.Result__i64__io.IoError %load(ptr %load2, ptr %buf, i64 %len)
   ret %coil.core.Result__i64__io.IoError %callptr
@@ -1555,11 +1749,11 @@ define internal ptr @make-adder(i64 %n) {
 entry:
   %heap.box = tail call ptr @malloc(i32 ptrtoint (ptr getelementptr (%AdderEnv, ptr null, i32 1) to i32))
   %heap.box1 = tail call ptr @malloc(i32 ptrtoint (ptr getelementptr (%Closure, ptr null, i32 1) to i32))
-  %field = getelementptr inbounds nuw %AdderEnv, ptr %heap.box, i32 0, i32 0
+  %field = getelementptr i8, ptr %heap.box, i64 0
   store i64 %n, ptr %field, align 8
-  %field2 = getelementptr inbounds nuw %Closure, ptr %heap.box1, i32 0, i32 0
+  %field2 = getelementptr i8, ptr %heap.box1, i64 0
   store ptr @adder-code, ptr %field2, align 8
-  %field3 = getelementptr inbounds nuw %Closure, ptr %heap.box1, i32 0, i32 1
+  %field3 = getelementptr i8, ptr %heap.box1, i64 8
   store ptr %heap.box, ptr %field3, align 8
   ret ptr %heap.box1
 }
@@ -1568,18 +1762,18 @@ define internal ptr @make-mul(i64 %k) {
 entry:
   %heap.box = tail call ptr @malloc(i32 ptrtoint (ptr getelementptr (%MulEnv, ptr null, i32 1) to i32))
   %heap.box1 = tail call ptr @malloc(i32 ptrtoint (ptr getelementptr (%Closure, ptr null, i32 1) to i32))
-  %field = getelementptr inbounds nuw %MulEnv, ptr %heap.box, i32 0, i32 0
+  %field = getelementptr i8, ptr %heap.box, i64 0
   store i64 %k, ptr %field, align 8
-  %field2 = getelementptr inbounds nuw %Closure, ptr %heap.box1, i32 0, i32 0
+  %field2 = getelementptr i8, ptr %heap.box1, i64 0
   store ptr @mul-code, ptr %field2, align 8
-  %field3 = getelementptr inbounds nuw %Closure, ptr %heap.box1, i32 0, i32 1
+  %field3 = getelementptr i8, ptr %heap.box1, i64 8
   store ptr %heap.box, ptr %field3, align 8
   ret ptr %heap.box1
 }
 
 define internal i64 @mul-code(ptr %env, i64 %x) {
 entry:
-  %field = getelementptr inbounds nuw %MulEnv, ptr %env, i32 0, i32 0
+  %field = getelementptr i8, ptr %env, i64 0
   %load = load i64, ptr %field, align 8
   %mul = mul i64 %load, %x
   ret i64 %mul

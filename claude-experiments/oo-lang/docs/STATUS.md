@@ -1,6 +1,6 @@
 # Scry — Status: What Works, What Doesn't
 
-_Last updated: 2026-07-14. This is the honest source-of-truth for the current build.
+_Last updated: 2026-07-30. This is the honest source-of-truth for the current build.
 For design rulings see `DECISIONS.md`; for the as-built log + Coil friction see `06-implementation.md`._
 
 ## What Scry is
@@ -13,7 +13,7 @@ expressions against the real heap, invoke methods, run declared actions, and hot
 code, all while the program runs.
 
 Implemented in **Coil** (a Lisp-syntax low-level language). The compiler is a
-lexer → typechecker → bytecode VM; there is no JIT yet. ~321 golden + end-to-end tests
+lexer → typechecker → bytecode VM; there is no JIT yet. 324 golden + end-to-end tests
 gate every change (`python3 tests/run-tests.py`).
 
 - **Thesis:** observability-first. The viewer is not a debugger bolted on — it's the point.
@@ -222,6 +222,22 @@ objects and *leaves the ones already promoted to OLD*, then `gc()` sweeps those 
   This is what turns the assistant's tools from stubs into real work: `ShellTool` now executes,
   `SearchTool` greps the tree, and there are real `FileReadTool`/`FileWriteTool` — the model picks
   a tool, Scry actually does it, the output feeds back (offline golden: `agent_real_tool`).
+
+### Subscription-backed agent providers (production track)
+
+- `CliModel` delegates bounded turns to an installed, already-authenticated Claude Code or Codex
+  CLI. Select it explicitly with `SCRY_PROVIDER=claude|codex`; both default to read-only and can be
+  granted workspace edits with `SCRY_AGENT_ACCESS=workspace-write`. The adapter never reads auth
+  caches, shell-quotes dynamic arguments, isolates child stdin from the REPL, records real exit
+  status, and exposes provider/call/error state as ordinary viewer-browsable entities.
+- `Process.capture(cmd) -> String` is the cooperative stdout-only counterpart to `Process.run`, so
+  structured child output stays parseable while progress remains visible on stderr.
+- Codex subscription execution is verified live. Claude subscription authentication is verified;
+  the current account's live completion gate is presently rate-limited, and the returned limit
+  message is surfaced as a model error.
+- This is the first production slice, not a production-readiness claim. Structured spawn/results,
+  timeout/cancellation, capability-based tools, persistence/recovery, and the operations-console
+  viewer are specified in `docs/10-production-agent.md`.
 - **A real LLM agent loop** — verified live against DeepSeek's Anthropic-compatible
   endpoint (default `deepseek-v4-pro` @ `https://api.deepseek.com/anthropic`; key from
   `DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY`). Real tool-use: the model picks a
@@ -274,7 +290,7 @@ These are real, current gaps. Most are deliberate PoC cut-lines, not bugs.
 
 ## Test & quality status
 
-- **~301 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
+- **324 golden + end-to-end tests, all green.** Categories: `parse/` (AST snapshots +
   parse errors), `check/` (50 typecheck-error cases `e01`–`e50` + 25 success cases
   `s01`–`s25`), `eval/` (the reflection/live-change/trace wire surface, ~90 cases),
   `run/` (end-to-end program output, ~90 cases), `run-arenas/`, `run-err/`, `http/`,

@@ -1,0 +1,7 @@
+(module inherent_duplicate_imports)
+(import "inherent-remote.coil" :use [Remote])
+(import "inherent-extension.coil")
+(import "inherent-extension-duplicate.coil")
+
+(defn main [] (-> i64)
+  (remote-mark (zeroed Remote)))

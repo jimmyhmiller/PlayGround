@@ -63,14 +63,50 @@ impl Parser {
         match self.peek() {
             Tok::Struct => Ok(Item::Struct(self.struct_def()?)),
             Tok::Enum => Ok(Item::Enum(self.enum_def()?)),
+            Tok::Migrate => Ok(Item::BoolToEnumMigration(self.bool_to_enum_migration()?)),
             Tok::Fn => Ok(Item::Fn(self.fn_def()?)),
             Tok::Foreign => self.foreign_item(),
             Tok::LetOnce => self.global_def(),
             other => Err(format!(
-                "line {}: expected `struct`, `fn`, `foreign`, or `letonce`, found {other:?}",
+                "line {}: expected `struct`, `enum`, `migrate`, `fn`, `foreign`, or `letonce`, found {other:?}",
                 self.line()
             )),
         }
+    }
+
+    fn bool_to_enum_migration(&mut self) -> Result<BoolToEnumMigrationDef, String> {
+        self.expect(&Tok::Migrate)?;
+        let struct_name = self.ident()?;
+        self.expect(&Tok::Dot)?;
+        let field_name = self.ident()?;
+        self.expect(&Tok::LBrace)?;
+        self.expect(&Tok::False)?;
+        self.expect(&Tok::FatArrow)?;
+        let enum_name = self.ident()?;
+        self.expect(&Tok::ColonColon)?;
+        let false_variant = self.ident()?;
+        self.expect(&Tok::Comma)?;
+        self.expect(&Tok::True)?;
+        self.expect(&Tok::FatArrow)?;
+        let true_enum_name = self.ident()?;
+        if true_enum_name != enum_name {
+            return Err(format!(
+                "line {}: both migration arms must construct the same enum",
+                self.line()
+            ));
+        }
+        self.expect(&Tok::ColonColon)?;
+        let true_variant = self.ident()?;
+        self.eat(&Tok::Comma);
+        self.expect(&Tok::RBrace)?;
+        self.eat(&Tok::Semi);
+        Ok(BoolToEnumMigrationDef {
+            struct_name,
+            field_name,
+            enum_name,
+            false_variant,
+            true_variant,
+        })
     }
 
     /// `foreign type Name;` or `foreign fn name(params) -> ret;`. `type` is a
@@ -170,7 +206,11 @@ impl Parser {
             } else {
                 None
             };
-            fields.push(FieldDef { name: fname, ty, default });
+            fields.push(FieldDef {
+                name: fname,
+                ty,
+                default,
+            });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -199,7 +239,11 @@ impl Parser {
                     } else {
                         None
                     };
-                    fields.push(FieldDef { name: fname, ty, default });
+                    fields.push(FieldDef {
+                        name: fname,
+                        ty,
+                        default,
+                    });
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
@@ -236,7 +280,12 @@ impl Parser {
             TypeExpr::Unit
         };
         let body = self.block()?;
-        Ok(FnDef { name, params, ret, body })
+        Ok(FnDef {
+            name,
+            params,
+            ret,
+            body,
+        })
     }
 
     fn block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -254,8 +303,7 @@ impl Parser {
                 self.peek(),
                 Tok::Let | Tok::Return | Tok::Emit | Tok::Yield | Tok::If | Tok::While
             );
-            let is_assign = matches!(self.peek(), Tok::Ident(_))
-                && matches!(self.tokens[self.pos + 1].tok, Tok::Eq);
+            let is_assign = matches!(self.peek(), Tok::Ident(_)) && matches!(self.tokens[self.pos + 1].tok, Tok::Eq);
             if is_keyword_stmt || is_assign {
                 stmts.push(self.stmt()?);
             } else {
@@ -270,7 +318,11 @@ impl Parser {
                     };
                     let value = self.expr(true)?;
                     self.expect(&Tok::Semi)?;
-                    stmts.push(Stmt::IndexAssign { array: *array, index: *index, value });
+                    stmts.push(Stmt::IndexAssign {
+                        array: *array,
+                        index: *index,
+                        value,
+                    });
                 } else if self.eat(&Tok::Semi) {
                     stmts.push(Stmt::Expr(e));
                 } else if self.at(&Tok::RBrace) {
@@ -326,7 +378,11 @@ impl Parser {
                 self.bump();
                 let cond = self.expr(false)?; // no struct literal in a condition
                 let then = self.block()?;
-                let els = if self.eat(&Tok::Else) { self.block()? } else { Vec::new() };
+                let els = if self.eat(&Tok::Else) {
+                    self.block()?
+                } else {
+                    Vec::new()
+                };
                 Ok(Stmt::If { cond, then, els })
             }
             Tok::While => {
@@ -392,7 +448,11 @@ impl Parser {
             let arms = arms
                 .into_iter()
                 .map(|(variant, bindings, body)| match body {
-                    ArmBody::Expr(value) => ExprArm { variant, bindings, value },
+                    ArmBody::Expr(value) => ExprArm {
+                        variant,
+                        bindings,
+                        value,
+                    },
                     ArmBody::Block(_) => unreachable!(),
                 })
                 .collect();
@@ -431,7 +491,11 @@ impl Parser {
             };
             self.bump();
             let right = self.additive(allow_struct)?;
-            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -446,7 +510,11 @@ impl Parser {
             };
             self.bump();
             let right = self.multiplicative(allow_struct)?;
-            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -461,7 +529,11 @@ impl Parser {
             };
             self.bump();
             let right = self.unary(allow_struct)?;
-            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -481,11 +553,17 @@ impl Parser {
         loop {
             if self.eat(&Tok::Dot) {
                 let field = self.ident()?;
-                e = Expr::Field { object: Box::new(e), field };
+                e = Expr::Field {
+                    object: Box::new(e),
+                    field,
+                };
             } else if self.eat(&Tok::LBracket) {
                 let index = self.expr(true)?;
                 self.expect(&Tok::RBracket)?;
-                e = Expr::Index { array: Box::new(e), index: Box::new(index) };
+                e = Expr::Index {
+                    array: Box::new(e),
+                    index: Box::new(index),
+                };
             } else {
                 break;
             }
@@ -534,11 +612,18 @@ impl Parser {
                     }
                     self.expect(&Tok::FatArrow)?;
                     let value = self.expr(true)?;
-                    arms.push(ExprArm { variant, bindings, value });
+                    arms.push(ExprArm {
+                        variant,
+                        bindings,
+                        value,
+                    });
                     self.eat(&Tok::Comma);
                 }
                 self.expect(&Tok::RBrace)?;
-                Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms })
+                Ok(Expr::Match {
+                    scrutinee: Box::new(scrutinee),
+                    arms,
+                })
             }
             Tok::True => {
                 self.bump();
@@ -580,7 +665,11 @@ impl Parser {
                         }
                         self.expect(&Tok::RBrace)?;
                     }
-                    return Ok(Expr::VariantLit { enum_name: name, variant, fields });
+                    return Ok(Expr::VariantLit {
+                        enum_name: name,
+                        variant,
+                        fields,
+                    });
                 }
                 if self.at(&Tok::LParen) {
                     self.bump();

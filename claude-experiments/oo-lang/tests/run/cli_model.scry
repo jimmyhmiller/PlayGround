@@ -1,0 +1,8 @@
+import agent.core.{CliModel}
+
+fn main() {
+  let model = CliModel(provider: "claude", executable: "tests/fixtures/fake-claude",
+                       modelId: "", access: "read-only", maxTurns: 2)
+  Console.log(model.complete("hello"))
+  Console.log("calls=${model.calls} exit=${model.lastExit} error=${model.lastError}")
+}

@@ -8,7 +8,7 @@
 
 ; RE-EXPORT: `:reexport` re-publishes a module's exported names as part of core, so
 ; they are auto-referred everywhere (only `:reexport`ed targets, not plain `:use`s).
-; This one line gives every program the everyday control flow (while/for/cond/when/
+; This one line gives every program the everyday control flow (while/for/when/
 ; case/|>/…) with no import. Add another `:reexport` line here to fold more into core.
 (import "control.coil" :reexport)
 
@@ -32,6 +32,22 @@
 (defsum Result [T E]
   (Ok [(val T)])
   (Err [(err E)]))
+
+; `cond` is core vocabulary rather than an optional control-module export. Keeping
+; it here makes the form available in every program even if the rest of
+; `control.coil` is eventually made opt-in.
+(defn cond-arms [(cs Code)] (-> Code)
+  (if (icmp-eq (code-count cs) 0)
+      `0
+      (if (icmp-eq (code-count cs) 1)
+          (code-nth cs 0)
+          (if (code-eq (code-nth cs 0) `:else)
+              (code-nth cs 1)
+              `(if ~(code-nth cs 0)
+                   ~(code-nth cs 1)
+                   ~(cond-arms (code-rest (code-rest cs))))))))
+(defn cond [& (cs Code)] (-> Code)
+  (cond-arms cs))
 
 ; structural equality — the method is `=` (so `(= a b)` at runtime).
 (deftrait Eq [Self]

@@ -33,9 +33,7 @@ struct Toolkit {
 }
 
 fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
-    let kind = session
-        .foreign_kind("Canvas")
-        .expect("Canvas declared by the scene");
+    let kind = session.foreign_kind("Canvas").expect("Canvas declared by the scene");
     {
         let tk = Arc::clone(tk);
         session
@@ -44,7 +42,10 @@ fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
                 Box::new(move |_| {
                     let mut t = tk.lock().unwrap();
                     t.canvases_opened += 1;
-                    Value::Foreign { kind, ptr: t.canvases_opened }
+                    Value::Foreign {
+                        kind,
+                        ptr: t.canvases_opened,
+                    }
                 }),
             )
             .unwrap();
@@ -70,8 +71,7 @@ fn bind(session: &mut Session, tk: &Arc<Mutex<Toolkit>>) {
             .register_foreign(
                 name,
                 Box::new(move |args| {
-                    let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args
-                    else {
+                    let [_, Value::I64(x), Value::I64(y), Value::I64(r), Value::I64(hue)] = args else {
                         panic!("{name} called with the wrong argument shapes: {args:?}");
                     };
                     tk.lock().unwrap().shapes.push(Shape {
@@ -211,8 +211,7 @@ fn a_bigger_seed_count_spreads_across_the_canvas() {
     // Spread, not a pile. Every particle must be individually visible: distinct
     // positions, not merely distinct columns — a coarse grid passed a
     // per-axis check while stacking four particles per slot.
-    let positions: std::collections::BTreeSet<(i64, i64)> =
-        first.iter().map(|s| (s.x, s.y)).collect();
+    let positions: std::collections::BTreeSet<(i64, i64)> = first.iter().map(|s| (s.x, s.y)).collect();
     assert_eq!(positions.len(), 200, "every particle is at its own spot");
     let cornered = first.iter().filter(|s| s.x >= 620 && s.y >= 380).count();
     assert!(cornered < 10, "{cornered} particles piled into the corner");
@@ -265,29 +264,47 @@ fn scenario_2_live_particles_migrate_to_the_new_struct_version() {
 }
 
 #[test]
-fn scenario_3_a_breaking_edit_is_rejected_and_the_program_runs_on() {
+fn scenarios_3_and_4_bool_to_enum_freezes_then_repairs_and_migrates() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
-    let err = session
-        .eval(include_str!("../demo/edit_3_rejected.lt"))
-        .expect_err("a str-returning tint must not install");
-    assert!(!err.is_empty());
-    let before = tk.lock().unwrap().shapes.len();
+    session.eval(include_str!("../demo/edit_2_migrate.lt")).unwrap();
     frame(&mut session, &mut actor);
+
+    session
+        .eval(include_str!("../demo/edit_3_non_preserving.lt"))
+        .expect("the inconsistent type edit installs");
+    let (drawn_at_break, cleared_at_break) = {
+        let t = tk.lock().unwrap();
+        (t.shapes.len(), t.frames_cleared)
+    };
+    assert_eq!(frame(&mut session, &mut actor), Turn::Paused);
+    assert!(matches!(
+        &actor.status,
+        ActorStatus::Paused(livetype_core::Condition::BrokenFunction { .. })
+    ));
+    {
+        let t = tk.lock().unwrap();
+        assert_eq!((t.shapes.len(), t.frames_cleared), (drawn_at_break, cleared_at_break));
+    }
+
+    session
+        .eval(include_str!("../demo/edit_3_repair.lt"))
+        .expect("code repair and bool-to-enum migration install");
+    session.engine.thaw(&mut actor);
+    assert_eq!(frame(&mut session, &mut actor), Turn::Yielded);
     let t = tk.lock().unwrap();
-    assert!(t.shapes.len() > before, "the animation kept running");
-    assert!(
-        t.shapes[before..].iter().all(|s| s.hue == 205),
-        "still drawing with the last good tint"
-    );
+    assert_eq!(t.canvases_opened, 1);
+    assert_eq!(t.frames_cleared - cleared_at_break, 1);
+    assert_eq!(t.shapes.len() - drawn_at_break, 18);
+    assert!(t.shapes[drawn_at_break..].iter().all(|shape| shape.hue > 0));
 }
 
 #[test]
-fn scenarios_4_to_6_break_freeze_and_resume_in_place() {
+fn scenarios_5_to_7_break_freeze_and_resume_in_place() {
     let (mut session, mut actor, tk) = boot();
     frame(&mut session, &mut actor);
 
-    // 4 — introduce the enum and dispatch on it.
+    // 5 — introduce the enum and dispatch on it.
     session.eval(include_str!("../demo/edit_4_enum.lt")).unwrap();
     let before = tk.lock().unwrap().shapes.len();
     frame(&mut session, &mut actor);
@@ -306,7 +323,7 @@ fn scenarios_4_to_6_break_freeze_and_resume_in_place() {
         assert!(drawn.iter().any(|s| s.kind == "circle"), "some particle is a disc");
     }
 
-    // 5 — adding a variant marks the stale match Broken at install, and the
+    // 6 — adding a variant marks the stale match Broken at install, and the
     //     running animation freezes at its next call to it.
     session.eval(include_str!("../demo/edit_5_break.lt")).unwrap();
     let (drawn_at_break, cleared_at_break) = {
@@ -337,7 +354,7 @@ fn scenarios_4_to_6_break_freeze_and_resume_in_place() {
         );
     }
 
-    // 6 — install the missing arm and thaw. It resumes at the trapping
+    // 7 — install the missing arm and thaw. It resumes at the trapping
     //     instruction: the particles it already drew this frame are not redrawn.
     session.eval(include_str!("../demo/edit_6_repair.lt")).unwrap();
     session.engine.thaw(&mut actor);

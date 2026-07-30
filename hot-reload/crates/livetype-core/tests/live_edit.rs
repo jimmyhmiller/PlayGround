@@ -113,7 +113,11 @@ fn a_breaking_edit_traps_and_a_fix_resumes() {
             to: Version(2),
             fields: std::collections::BTreeMap::from([(
                 bal_field,
-                MigrationSource::Wrap { type_id: money, field: cents_field, source: bal_field },
+                MigrationSource::Wrap {
+                    type_id: money,
+                    field: cents_field,
+                    source: bal_field,
+                },
             )]),
             variants: std::collections::BTreeMap::new(),
         })
@@ -173,7 +177,10 @@ fn edit_a_tight_loop_with_no_yields_between_steps() {
     let out = s.engine.output();
     assert_eq!(out[0], Value::I64(42), "early iterations ran the old code");
     assert_eq!(*out.last().unwrap(), Value::I64(142), "later iterations ran the edit");
-    assert!(out.contains(&Value::I64(42)) && out.contains(&Value::I64(142)), "switched mid-loop");
+    assert!(
+        out.contains(&Value::I64(42)) && out.contains(&Value::I64(142)),
+        "switched mid-loop"
+    );
 }
 
 /// Items in one `eval` are installed as a batch, so nothing has to be declared
@@ -257,4 +264,93 @@ fn a_function_broken_on_its_own_merits_is_not_revived() {
         "a genuinely non-exhaustive match is not silently revived"
     );
     assert_eq!(s.call("unrelated", vec![]).unwrap(), Value::I64(7));
+}
+
+#[test]
+fn bool_to_enum_breaks_transitively_then_repairs_code_and_live_values() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        enum Switch { Off, On }
+        struct Lamp { lit: bool }
+        fn make_on() -> Lamp { Lamp { lit: true } }
+        fn make_off() -> Lamp { Lamp { lit: false } }
+        letonce on = make_on();
+        letonce off = make_off();
+        fn read(l: Lamp) -> i64 { if l.lit { return 1; } 0 }
+        fn top_on() -> i64 { read(on) }
+        fn top_off() -> i64 { read(off) }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(s.call("top_on", vec![]).unwrap(), Value::I64(1));
+    assert_eq!(s.call("top_off", vec![]).unwrap(), Value::I64(0));
+
+    // The incompatible schema installs. `read` becomes Broken and that verdict
+    // propagates through both callers instead of rejecting the type edit.
+    s.eval("struct Lamp { lit: Switch }").unwrap();
+    assert!(matches!(
+        s.call("top_on", vec![]),
+        Err(Condition::BrokenFunction { .. })
+    ));
+
+    // Repairing only the root code revives its untouched callers. The live
+    // Lamp bodies still carry bools, so first use now reaches the independent
+    // migration obligation.
+    s.eval(
+        r#"
+        fn read(l: Lamp) -> i64 {
+            match l.lit { Off => 0, On => 1 }
+        }
+    "#,
+    )
+    .unwrap();
+    assert!(matches!(
+        s.call("top_on", vec![]),
+        Err(Condition::MissingMigration { .. })
+    ));
+
+    s.eval("migrate Lamp.lit { false => Switch::Off, true => Switch::On }")
+        .unwrap();
+    assert_eq!(s.call("top_on", vec![]).unwrap(), Value::I64(1));
+    assert_eq!(s.call("top_off", vec![]).unwrap(), Value::I64(0));
+}
+
+#[test]
+fn an_ill_typed_redefinition_is_published_broken_instead_of_rejected() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        fn leaf() -> i64 { 1 }
+        fn top() -> i64 { leaf() + 1 }
+    "#,
+    )
+    .unwrap();
+
+    s.eval("fn leaf() -> i64 { \"wrong\" }")
+        .expect("a live bad redefinition is a supported Broken state");
+    assert!(matches!(s.call("top", vec![]), Err(Condition::BrokenFunction { .. })));
+
+    s.eval("fn leaf() -> i64 { 40 }").unwrap();
+    assert_eq!(s.call("top", vec![]).unwrap(), Value::I64(41));
+}
+
+#[test]
+fn changing_a_function_signature_invalidates_its_callers() {
+    let mut s = Session::new();
+    s.eval(
+        r#"
+        enum Switch { Off, On }
+        fn leaf(x: bool) -> i64 { if x { return 1; } 0 }
+        fn top() -> i64 { leaf(true) }
+    "#,
+    )
+    .unwrap();
+
+    s.eval("fn leaf(x: Switch) -> i64 { match x { Off => 0, On => 1 } }")
+        .unwrap();
+    assert!(matches!(s.call("top", vec![]), Err(Condition::BrokenFunction { .. })));
+
+    s.eval("fn top() -> i64 { leaf(Switch::On) }").unwrap();
+    assert_eq!(s.call("top", vec![]).unwrap(), Value::I64(1));
 }

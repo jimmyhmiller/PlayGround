@@ -42,6 +42,7 @@
 (import "match.coil" :use *)
 (import "ast.coil" :use *)
 (import "parser.coil" :use *)
+(import "layoutdb.coil" :use *)
 (import "wasm.coil" :use *)
 
 ; ============================ layout constants ===============================
@@ -83,21 +84,9 @@
   (WNil [])
   (WBind [(name (slice u8)) (av WAVal) (rest (ptr WScope))]))
 
-; struct/sum layout tables — same shape and sizing as codegen_a64's GStruct/GSum.
-(defstruct WStruct
-  [(name (slice u8))
-   (fields (ptr (ArrayList Field)))
-   (layout Layout)
-   (size i64)
-   (align i64)
-   (offsets (ArrayList i64))])
-(defstruct WSum
-  [(name (slice u8)) (variants (ptr (ArrayList Variant))) (words i64)])
-
 (defstruct Wcg
   [(a (ptr Allocator))
-   (structs (ArrayList WStruct))
-   (sums (ArrayList WSum))
+   (layouts LayoutDb)
    (sigs (ArrayList WSig))
    (imports (ArrayList WImport))  ; env.* function imports (funcidx 0..K-1; defined funcs shift up by K)
    (types (ArrayList (slice u8)))  ; deduped functype byte-strings (type section pool)
@@ -204,339 +193,32 @@
                 (store! i (iadd (load i) 1)))))
     (subslice nm (load cut) n)))
 
-; ============================ type layout (ported from codegen_a64) ==========
-(defn wstruct-idx [(g (ptr Wcg)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [WStruct] (load (field g structs)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (wal-at [WStruct] (field g structs) (load i)) name)) nm) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn wsum-idx [(g (ptr Wcg)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [WSum] (load (field g sums)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (wal-at [WSum] (field g sums) (load i)) name)) nm) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
-
+; ============================ shared type layout =============================
+(defn wstruct-idx [(g (ptr Wcg)) (name (slice u8))] (-> i64)
+  (struct-index (field g layouts) name))
+(defn wsum-idx [(g (ptr Wcg)) (name (slice u8))] (-> i64)
+  (sum-index (field g layouts) name))
 (defn wty-align [(g (ptr Wcg)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
-              (TFloat [bits] (idiv bits 8))
-              (TBool [] 1)
-              (TPtr [_] 8)
-              (TRef [_ _] 8)
-              (TFn [_ _ _] 8)
-              (TNever [] 8)
-              (TArray [elem _n] (wty-align g elem))
-              (TSlice [_] 8)
-              (TVec [elem n] (imul (wty-align g elem) n))
-              (TStruct [nm]
-                       (let [si (wstruct-idx g nm)]
-                         (if (icmp-ge si 0)
-                             (load (field (wal-at [WStruct] (field g structs) si) align))
-                             (if (icmp-ge (wsum-idx g nm) 0)
-                                 8
-                                 (wcg-fail2 "unknown nominal type: " nm)))))
-              (_ (wcg-fail "wty-align on unsupported type"))))
-
+  (align (field g layouts) t))
 (defn wty-size [(g (ptr Wcg)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
-              (TFloat [bits] (idiv bits 8))
-              (TBool [] 1)
-              (TPtr [_] 8)
-              (TRef [_ _] 8)
-              (TFn [_ _ _] 8)
-              (TNever [] 8)
-              (TArray [elem n] (imul (wty-size g elem) n))
-              (TSlice [_] 16)
-              (TVec [elem n] (imul (wty-size g elem) n))
-              (TStruct [nm]
-                       (let [si (wstruct-idx g nm)]
-                         (if (icmp-ge si 0)
-                             (load (field (wal-at [WStruct] (field g structs) si) size))
-                             (let [su (wsum-idx g nm)]
-                               (if (icmp-ge su 0)
-                                   (iadd 8 (imul 8 (load (field (wal-at [WSum] (field g sums) su) words))))
-                                   (wcg-fail2 "unknown nominal type: " nm))))))
-              (_ (wcg-fail "wty-size on unsupported type"))))
-
+  (size (field g layouts) t))
 (defn wfield-off [(g (ptr Wcg)) (si i64) (fi i64)] (-> i64)
-  (al-get [i64] (load (field (wal-at [WStruct] (field g structs) si) offsets)) fi))
-(defn wfield-idx [(g (ptr Wcg)) (si i64) (fname (slice u8))] (-> i64)
-  (let [fs (load (field (wal-at [WStruct] (field g structs) si) fields))
-        n (al-len [Field] (load fs))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (wal-at [Field] fs (load i)) name)) fname) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (when (icmp-lt (load r) 0) (wcg-fail2 "no such field: " fname))
-    (load r)))
-
-(defn walign8 [(n i64)] (-> i64)
-  (imul (idiv (iadd n 7) 8) 8))
+  (field-offset (field g layouts) si fi))
+(defn wfield-idx [(g (ptr Wcg)) (si i64) (name (slice u8))] (-> i64)
+  (field-number (field g layouts) si name))
 (defn wtype-bytes [(g (ptr Wcg)) (t (ptr Type))] (-> i64)
-  (match-else (load t)
-              (TInt [bits _s] (idiv (if (icmp-lt bits 8) 8 bits) 8))
-              (TFloat [bits] (idiv bits 8))
-              (TBool [] 1)
-              (TPtr [_] 8)
-              (TRef [_ _] 8)
-              (TFn [_ _ _] 8)
-              (TNever [] 8)
-              (TArray [elem n] (imul (wtype-bytes g elem) n))
-              (TSlice [_] 16)
-              (TVec [elem n] (imul (wtype-bytes g elem) n))
-              (TStruct [nm] (wtype-bytes-nominal g nm))
-              (_ (wcg-fail "wtype-bytes on unsupported type"))))
-(defn wtype-bytes-nominal [(g (ptr Wcg)) (nm (slice u8))] (-> i64)
-  (let [si (wstruct-idx g nm)]
-    (if (icmp-ge si 0)
-        (let [fs (load (field (wal-at [WStruct] (field g structs) si) fields))
-              n (al-len [Field] (load fs))
-              (mut i) 0
-              (mut tot) 0]
-          (loop (if (icmp-ge (load i) n)
-                    (break)
-                    (do
-                      (store! tot (iadd (load tot) (walign8 (wtype-bytes g (field (wal-at [Field] fs (load i)) ty)))))
-                      (store! i (iadd (load i) 1)))))
-          (load tot))
-        (let [su (wsum-idx g nm)]
-          (if (icmp-ge su 0)
-              (iadd 8 (imul 8 (wsum-words-def g (load (field (wal-at [WSum] (field g sums) su) variants)))))
-              (wcg-fail2 "wtype-bytes: unknown nominal " nm))))))
+  (type-bytes (field g layouts) t))
 (defn wsum-words-def [(g (ptr Wcg)) (variants (ptr (ArrayList Variant)))] (-> i64)
-  (let [n (al-len [Variant] (load variants))
-        (mut vi) 0
-        (mut best) 0]
-    (loop (if (icmp-ge (load vi) n)
-              (break)
-              (do
-                (let [fs (load (field (wal-at [Variant] variants (load vi)) fields))
-                      nf (al-len [Field] (load fs))
-                      (mut fi) 0
-                      (mut tot) 0]
-                  (loop (if (icmp-ge (load fi) nf)
-                            (break)
-                            (do
-                              (store! tot
-                                      (iadd (load tot)
-                                            (walign8 (wtype-bytes g (field (wal-at [Field] fs (load fi)) ty)))))
-                              (store! fi (iadd (load fi) 1)))))
-                  (when (icmp-gt (load tot) (load best)) (store! best (load tot))))
-                (store! vi (iadd (load vi) 1)))))
-    (idiv (iadd (load best) 7) 8)))
-
-; natural byte offset of field fi within a plain field list (variant payloads).
-(defn wnatural-off [(g (ptr Wcg)) (fs (ptr (ArrayList Field))) (fi i64)] (-> i64)
-  (let [(mut i) 0
-        (mut off) 0
-        (mut res) -1]
-    (loop (if (icmp-gt (load i) fi)
-              (break)
-              (do
-                (let [ft (field (wal-at [Field] fs (load i)) ty)
-                      al (wty-align g ft)]
-                  (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (when (icmp-eq (load i) fi) (store! res (load off)) 0)
-                  (store! off (iadd (load off) (wty-size g ft))))
-                (store! i (iadd (load i) 1)))))
-    (load res)))
-
-(defn wvariant-idx [(g (ptr Wcg)) (su i64) (vname (slice u8))] (-> i64)
-  (let [vs (load (field (wal-at [WSum] (field g sums) su) variants))
-        n (al-len [Variant] (load vs))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (wal-at [Variant] vs (load i)) name)) vname) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (when (icmp-lt (load r) 0) (wcg-fail2 "no such variant: " vname))
-    (load r)))
-
-; two-phase registration: create entries first (nominal refs resolve), then sizes.
+  (sum-words (field g layouts) variants))
+(defn wnatural-off [(g (ptr Wcg)) (fields (ptr (ArrayList Field))) (fi i64)] (-> i64)
+  (natural-offset (field g layouts) fields fi))
+(defn wvariant-idx [(g (ptr Wcg)) (su i64) (name (slice u8))] (-> i64)
+  (variant-number (field g layouts) su name))
 (defn wregister-types! [(g (ptr Wcg)) (mp (ptr Program))] (-> i64)
-  (let [ss (load (field mp structs))
-        n (al-len [StructDef] (load ss))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [sd (wal-at [StructDef] ss (load i))
-                      e (alloc-stack WStruct)]
-                  (store! (field e name) (load (field sd name)))
-                  (store! (field e fields) (load (field sd fields)))
-                  (store! (field e layout) (load (field sd layout)))
-                  (store! (field e size) 0)
-                  (store! (field e align) 1)
-                  (store! (field e offsets) (al-new [i64] (load (field g a))))
-                  (al-push! (mut (field g structs)) (load e)))
-                (store! i (iadd (load i) 1))))))
-  (let [ss (load (field mp sums))
-        n (al-len [SumDef] (load ss))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [sd (wal-at [SumDef] ss (load i))
-                      e (alloc-stack WSum)]
-                  (store! (field e name) (load (field sd name)))
-                  (store! (field e variants) (load (field sd variants)))
-                  (store! (field e words) 0)
-                  (al-push! (mut (field g sums)) (load e)))
-                (store! i (iadd (load i) 1))))))
-  (let [n (al-len [WSum] (load (field g sums)))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [e (wal-at [WSum] (field g sums) (load i))]
-                  (store! (field e words) (wsum-words-def g (load (field e variants)))))
-                (store! i (iadd (load i) 1))))))
-  (wcompute-struct-layouts! g)
+  (store! (field g layouts) (LayoutDb::new (load (field g a)) mp "wcg"))
   0)
 
-(defn wnatural-layout! [(g (ptr Wcg)) (si i64)] (-> i64)
-  (let [e (wal-at [WStruct] (field g structs) si)
-        fs (load (field e fields))
-        nf (al-len [Field] (load fs))
-        (mut off) 0
-        (mut maxal) 1
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) nf)
-              (break)
-              (do
-                (let [ft (field (wal-at [Field] fs (load i)) ty)
-                      al (wty-align g ft)]
-                  (when (icmp-gt al (load maxal)) (store! maxal al))
-                  (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (al-push! (mut (field e offsets)) (load off))
-                  (store! off (iadd (load off) (wty-size g ft))))
-                (store! i (iadd (load i) 1)))))
-    (store! (field e align) (load maxal))
-    (store! (field e size) (imul (idiv (iadd (load off) (isub (load maxal) 1)) (load maxal)) (load maxal)))
-    0))
-
-(defn wcompute-one-struct! [(g (ptr Wcg)) (si i64)] (-> i64)
-  (let [e (wal-at [WStruct] (field g structs) si)
-        fs (load (field e fields))
-        nf (al-len [Field] (load fs))]
-    (match (load (field e layout))
-      (LBits [backing _offs]
-             (do (store! (field e size) (idiv backing 8)) (store! (field e align) (idiv backing 8)) 0))
-      (LExplicit [offs usize align]
-                 (do
-                   (let [(mut mx) 0
-                         (mut i) 0]
-                     (loop (if (icmp-ge (load i) nf)
-                               (break)
-                               (do
-                                 (let [end
-                                         (iadd (al-get [i64] (load offs) (load i))
-                                               (wty-size g (field (wal-at [Field] fs (load i)) ty)))]
-                                   (when (icmp-gt end (load mx)) (store! mx end)))
-                                 (store! i (iadd (load i) 1)))))
-                     (let [sz (match-else usize (Some [u] (if (icmp-gt u (load mx)) u (load mx))) (_ (load mx)))]
-                       (store! (field e size) sz)
-                       (store! (field e align) (if (icmp-gt align 0) align 1))
-                       (let [(mut i) 0]
-                         (loop (if (icmp-ge (load i) nf)
-                                   (break)
-                                   (do
-                                     (al-push! (mut (field e offsets)) (al-get [i64] (load offs) (load i)))
-                                     (store! i (iadd (load i) 1))))))))
-                   0))
-      (LPacked []
-               (do
-                 (let [(mut off) 0
-                       (mut i) 0]
-                   (loop (if (icmp-ge (load i) nf)
-                             (break)
-                             (do
-                               (al-push! (mut (field e offsets)) (load off))
-                               (store! off (iadd (load off) (wty-size g (field (wal-at [Field] fs (load i)) ty))))
-                               (store! i (iadd (load i) 1)))))
-                   (store! (field e size) (load off))
-                   (store! (field e align) 1))
-                 0))
-      (LAligned [al]
-                (do
-                  (wnatural-layout! g si)
-                  (when (icmp-gt al (load (field e align))) (store! (field e align) al))
-                  (let [a2 (load (field e align))
-                        sz (load (field e size))]
-                    (store! (field e size) (imul (idiv (iadd sz (isub a2 1)) a2) a2)))
-                  0))
-      (LC [] (wnatural-layout! g si)))))
-
-(defn wty-ready [(g (ptr Wcg)) (t (ptr Type)) (done (mut (ArrayList i64)))] (-> bool)
-  (match-else (load t)
-              (TStruct [nm]
-                       (let [si (wstruct-idx g nm)]
-                         (if (icmp-ge si 0) (icmp-eq (al-get [i64] (load done) si) 1) true)))
-              (TArray [elem _n] (wty-ready g elem (mut done)))
-              (TVec [elem _n] (wty-ready g elem (mut done)))
-              (_ true)))
-(defn wstruct-fields-ready [(g (ptr Wcg)) (si i64) (done (mut (ArrayList i64)))] (-> bool)
-  (let [fs (load (field (wal-at [WStruct] (field g structs) si) fields))
-        nf (al-len [Field] (load fs))
-        (mut i) 0
-        (mut ok) true]
-    (loop (if (icmp-ge (load i) nf)
-              (break)
-              (do
-                (when (not (wty-ready g (field (wal-at [Field] fs (load i)) ty) (mut done))) (store! ok false) 0)
-                (store! i (iadd (load i) 1)))))
-    (load ok)))
-(defn wcompute-struct-layouts! [(g (ptr Wcg))] (-> i64)
-  (let [n (al-len [WStruct] (load (field g structs)))
-        (mut done) (al-new [i64] (load (field g a)))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do (al-push! (mut done) 0) (store! i (iadd (load i) 1)))))
-    (let [(mut pass) 0]
-      (loop (if (icmp-ge (load pass) (iadd n 1))
-                (break)
-                (do
-                  (let [(mut si) 0
-                        (mut alldone) true]
-                    (loop (if (icmp-ge (load si) n)
-                              (break)
-                              (do
-                                (when (icmp-eq (al-get [i64] (load done) (load si)) 0)
-                                      (if (wstruct-fields-ready g (load si) (mut done))
-                                          (do (wcompute-one-struct! g (load si)) (al-set! (mut done) (load si) 1) 0)
-                                          (do (store! alldone false) 0)))
-                                (store! si (iadd (load si) 1)))))
-                    (when (load alldone) (break)))
-                  (store! pass (iadd (load pass) 1))))))
-    (let [(mut si) 0]
-      (loop (if (icmp-ge (load si) n)
-                (break)
-                (do
-                  (when (icmp-eq (al-get [i64] (load done) (load si)) 0)
-                        (wcg-fail2 "struct layout cycle at "
-                                   (load (field (wal-at [WStruct] (field g structs) (load si)) name))))
-                  (store! si (iadd (load si) 1))))))
-    0))
-
-; size of a slot for a value of type tp: scalars are 8-byte i64-canonical, aggregates
-; are their natural size.
+; Frame slots are Wasm-specific even though aggregate layout is shared.
 (defn wslot-new! [(g (ptr Wcg)) (size i64) (align i64)] (-> i64)
   (let [f (load (field g frame))
         aligned (imul (idiv (iadd f (isub align 1)) align) align)]
@@ -1415,7 +1097,7 @@
           sumty (alloc-stack Type)]
       (store! sumty (TStruct sum))
       (let [slot (wslot-for-ty! g sumty)
-            vs (load (field (wal-at [WSum] (field g sums) su) variants))
+            vs (load (field (sum-at (field g layouts) su) variants))
             vfields (load (field (wal-at [Variant] vs vidx) fields))
             n (al-len [Expr] (load args))
             (mut i) 0]
@@ -1441,7 +1123,7 @@
           su (wsum-idx g sumname)]
       (when (icmp-lt su 0) (wcg-fail2 "match on non-sum: " sumname))
       (let [sslot (av-v sav)
-            vs (load (field (wal-at [WSum] (field g sums) su) variants))
+            vs (load (field (sum-at (field g layouts) su) variants))
             narms (al-len [Arm] (load arms))
             tslot (wslot-new! g 8 8)
             (mut rslot) -1
@@ -1606,7 +1288,7 @@
                        (let [si (wstruct-idx g nm)]
                          (when (icmp-lt si 0) (wcg-fail2 "llvm-ir: extract from unknown struct " nm))
                          (store! offp (wfield-off g si idx))
-                         (load (field (wal-at [Field] (load (field (wal-at [WStruct] (field g structs) si) fields)) idx)
+                         (load (field (wal-at [Field] (load (field (struct-at (field g layouts) si) fields)) idx)
                                       ty))))
               (_ (do (wcg-fail "llvm-ir: extract/insert on unsupported aggregate") (TInt 64 true)))))
 (defn ir-value [(g (ptr Wcg)) (env (ptr WScope)) (avs (ptr (ArrayList WAVal))) (tk (slice u8)) (t Type)] (-> WAVal)
@@ -1827,7 +1509,7 @@
                                              off (wfield-off g si fi)
                                              fty
                                                (load (field (wal-at [Field]
-                                                                    (load (field (wal-at [WStruct] (field g structs) si)
+                                                                    (load (field (struct-at (field g layouts) si)
                                                                                  fields))
                                                                     fi)
                                                             ty))
@@ -2132,8 +1814,6 @@
 (defn wcg-build-module [(a (ptr Allocator)) (mp (ptr Program)) (side-module bool)] (-> (slice u8))
   (let [g (alloc-stack Wcg)]
     (store! (field g a) a)
-    (store! (field g structs) (al-new [WStruct] a))
-    (store! (field g sums) (al-new [WSum] a))
     (store! (field g sigs) (al-new [WSig] a))
     (store! (field g imports) (al-new [WImport] a))
     (store! (field g types) (al-new [(slice u8)] a))

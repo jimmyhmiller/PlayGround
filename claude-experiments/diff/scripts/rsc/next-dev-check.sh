@@ -142,7 +142,7 @@ echo "OK (gate D1b): the linked /rsc.css is served as text/css and carries globa
 # `data-uid` is still asserted present, because the console is only meaningful if the
 # probe actually rendered — a useId that never ran cannot mismatch, and a silently
 # dropped probe would turn this gate green forever.
-ssr_uid="$(curl -s "$base/" | grep -oE -m1 'data-uid="[^"]*"' | sed 's/data-uid="//;s/"//')"
+ssr_uid="$(curl -s "$base/" | grep -oE -m1 'data-uid="[^"]*"' | sed 's/data-uid="//;s/"//' || true)"
 [ -n "$ssr_uid" ] || { curl -s "$base/" | head -20; fail "dev: the island did not server-render its useId probe (data-uid); the seam probe is gone and this gate can no longer detect anything"; }
 agent-browser console --clear >/dev/null 2>&1
 agent-browser open "$base/" >/dev/null 2>&1

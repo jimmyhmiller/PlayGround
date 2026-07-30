@@ -63,11 +63,7 @@ pub enum ResumePlan {
 /// view of repair: the frozen instruction "yields", and supplying a well-typed
 /// value is resuming it with that result. `result_ty` is the trapped function's
 /// declared result type (needed for a `Return`).
-pub fn resume_shape(
-    instruction: &Instruction,
-    result_ty: &Type,
-    world: &World,
-) -> Result<(Type, ResumePlan), String> {
+pub fn resume_shape(instruction: &Instruction, result_ty: &Type, world: &World) -> Result<(Type, ResumePlan), String> {
     Ok(match instruction {
         Instruction::AddI64 { dst, .. }
         | Instruction::SubI64 { dst, .. }
@@ -78,20 +74,16 @@ pub fn resume_shape(
         | Instruction::SubF64 { dst, .. }
         | Instruction::MulF64 { dst, .. }
         | Instruction::DivF64 { dst, .. } => (Type::F64, ResumePlan::SetAdvance(*dst)),
-        Instruction::LtF64 { dst, .. }
-        | Instruction::LeF64 { dst, .. }
-        | Instruction::EqF64 { dst, .. } => (Type::Bool, ResumePlan::SetAdvance(*dst)),
-        Instruction::NewArray { dst, elem, .. } => {
-            (Type::Array(Box::new(elem.clone())), ResumePlan::SetAdvance(*dst))
-        }
-        Instruction::LtI64 { dst, .. } | Instruction::EqI64 { dst, .. } | Instruction::Not { dst, .. }
-        | Instruction::EqStr { dst, .. } => {
+        Instruction::LtF64 { dst, .. } | Instruction::LeF64 { dst, .. } | Instruction::EqF64 { dst, .. } => {
             (Type::Bool, ResumePlan::SetAdvance(*dst))
         }
+        Instruction::NewArray { dst, elem, .. } => (Type::Array(Box::new(elem.clone())), ResumePlan::SetAdvance(*dst)),
+        Instruction::LtI64 { dst, .. }
+        | Instruction::EqI64 { dst, .. }
+        | Instruction::Not { dst, .. }
+        | Instruction::EqStr { dst, .. } => (Type::Bool, ResumePlan::SetAdvance(*dst)),
         Instruction::ConcatStr { dst, .. } => (Type::Str, ResumePlan::SetAdvance(*dst)),
-        Instruction::Branch {
-            then_pc, else_pc, ..
-        } => (Type::Bool, ResumePlan::Branch(*then_pc, *else_pc)),
+        Instruction::Branch { then_pc, else_pc, .. } => (Type::Bool, ResumePlan::Branch(*then_pc, *else_pc)),
         Instruction::New { dst, type_id, .. } | Instruction::NewVariant { dst, type_id, .. } => {
             (Type::Ref(*type_id), ResumePlan::SetAdvance(*dst))
         }
@@ -106,7 +98,9 @@ pub fn resume_shape(
             (f.result.clone(), ResumePlan::SetAdvance(*dst))
         }
         Instruction::Return { .. } => (result_ty.clone(), ResumePlan::ReturnValue),
-        other => return Err(format!("cannot resume a {other:?} trap by supplying a value")),
+        other => {
+            return Err(format!("cannot resume a {other:?} trap by supplying a value"));
+        }
     })
 }
 
@@ -212,8 +206,7 @@ impl World {
                 let Some(new_variant) = new.variant(old_variant.id) else {
                     continue; // removed: leave the gap
                 };
-                let Some(fields) = Self::derive_fields(&old_variant.fields, &new_variant.fields)
-                else {
+                let Some(fields) = Self::derive_fields(&old_variant.fields, &new_variant.fields) else {
                     continue; // reshaped beyond derivation: leave the gap
                 };
                 variants.insert(
@@ -243,10 +236,7 @@ impl World {
     }
 
     /// The copy-or-default rule shared by struct and per-variant derivation.
-    fn derive_fields(
-        old: &[crate::Field],
-        new: &[crate::Field],
-    ) -> Option<BTreeMap<FieldId, MigrationSource>> {
+    fn derive_fields(old: &[crate::Field], new: &[crate::Field]) -> Option<BTreeMap<FieldId, MigrationSource>> {
         let mut fields = BTreeMap::new();
         for field in new {
             let source = match old.iter().find(|f| f.id == field.id) {
@@ -258,11 +248,7 @@ impl World {
         Some(fields)
     }
 
-    pub fn install_migration(
-        &mut self,
-        migration: Migration,
-        heap: &Heap,
-    ) -> Result<(), InstallError> {
+    pub fn install_migration(&mut self, migration: Migration, heap: &Heap) -> Result<(), InstallError> {
         if migration.to.0 != migration.from.0 + 1 {
             return Err(InstallError::BadVersion);
         }
@@ -283,8 +269,7 @@ impl World {
             if migration.fields.is_empty() {
                 for (from_variant, vm) in &migration.variants {
                     let Some(old_variant) = old.variant(*from_variant) else {
-                        errors
-                            .push(format!("migration maps unknown source variant {from_variant}"));
+                        errors.push(format!("migration maps unknown source variant {from_variant}"));
                         continue;
                     };
                     let Some(new_variant) = new.variant(vm.to_variant) else {
@@ -294,13 +279,7 @@ impl World {
                         ));
                         continue;
                     };
-                    self.check_field_plan(
-                        &vm.fields,
-                        &old_variant.fields,
-                        &new_variant.fields,
-                        heap,
-                        &mut errors,
-                    );
+                    self.check_field_plan(&vm.fields, &old_variant.fields, &new_variant.fields, heap, &mut errors);
                 }
             } else {
                 errors.push("an enum migration maps variants, not top-level fields".into());
@@ -365,6 +344,25 @@ impl World {
                         None
                     }
                 }
+                MigrationSource::BoolToVariant {
+                    source,
+                    type_id,
+                    false_variant,
+                    true_variant,
+                } => {
+                    let input_is_bool = old_field(*source).is_some_and(|f| f.ty == Type::Bool);
+                    let target = self
+                        .current_schemas
+                        .get(type_id)
+                        .and_then(|v| self.schemas.get(&(*type_id, *v)));
+                    let variants_are_fieldless = target.is_some_and(|schema| {
+                        schema.is_enum()
+                            && [false_variant, true_variant]
+                                .into_iter()
+                                .all(|id| schema.variant(*id).is_some_and(|variant| variant.fields.is_empty()))
+                    });
+                    (input_is_bool && variants_are_fieldless).then_some(Type::Ref(*type_id))
+                }
             };
             if source_ty.as_ref() != Some(&field.ty) {
                 errors.push(format!("migration for '{}' has the wrong type", field.name));
@@ -395,9 +393,22 @@ impl World {
         let id = state.id();
         let version = state.version();
         let published_ready = matches!(state, FunctionState::Ready(_));
+        let invalidate_callers = match self.current_functions.get(&id) {
+            Some(old_version) => match (self.functions.get(&(id, *old_version)), &state) {
+                (Some(FunctionState::Ready(old)), FunctionState::Ready(new)) => {
+                    old.params != new.params || old.result != new.result
+                }
+                (_, FunctionState::Broken { .. }) => true,
+                _ => false,
+            },
+            None => false,
+        };
         self.functions.insert((id, version), state);
         self.current_functions.insert(id, version);
         self.epoch += 1;
+        if invalidate_callers {
+            self.invalidate_callers(id);
+        }
         // Installing a good version can un-break whatever was broken only
         // because *this* function was broken — the repair-the-root-cause path.
         if published_ready {
@@ -406,10 +417,42 @@ impl World {
         Ok(())
     }
 
-    pub fn install_verified_function(
+    pub fn install_verified_function(&mut self, function: Function, deps: BTreeSet<DefId>) -> Result<(), InstallError> {
+        let expected = self
+            .current_functions
+            .get(&function.id)
+            .map_or(Version(1), |v| Version(v.0 + 1));
+        if function.version != expected {
+            return Err(InstallError::BadVersion);
+        }
+        let id = function.id;
+        let signature_changed =
+            self.current_functions
+                .get(&id)
+                .is_some_and(|old_version| match self.functions.get(&(id, *old_version)) {
+                    Some(FunctionState::Ready(old)) => old.params != function.params || old.result != function.result,
+                    _ => false,
+                });
+        let version = function.version;
+        self.function_deps.insert(id, deps);
+        self.functions.insert((id, version), FunctionState::Ready(function));
+        self.current_functions.insert(id, version);
+        self.epoch += 1;
+        if signature_changed {
+            self.invalidate_callers(id);
+        }
+        // Same as `install_function`: a good version can revive its callers.
+        self.revalidate_functions();
+        Ok(())
+    }
+
+    /// Publish a parsed/lowered redefinition whose verifier diagnostics are
+    /// already known. Live editing accepts this state so execution can stop at
+    /// the call boundary and the developer can repair it incrementally.
+    pub fn install_broken_function(
         &mut self,
         function: Function,
-        deps: BTreeSet<DefId>,
+        diagnostics: Vec<String>,
     ) -> Result<(), InstallError> {
         let expected = self
             .current_functions
@@ -420,13 +463,18 @@ impl World {
         }
         let id = function.id;
         let version = function.version;
-        self.function_deps.insert(id, deps);
-        self.functions
-            .insert((id, version), FunctionState::Ready(function));
+        self.functions.insert(
+            (id, version),
+            FunctionState::Broken {
+                id,
+                version,
+                name: function.name,
+                diagnostics,
+            },
+        );
         self.current_functions.insert(id, version);
         self.epoch += 1;
-        // Same as `install_function`: a good version can revive its callers.
-        self.revalidate_functions();
+        self.invalidate_callers(id);
         Ok(())
     }
 
@@ -434,18 +482,28 @@ impl World {
     /// brokenness through the call graph to a fixpoint. See the long note that
     /// used to live on `Runtime::invalidate_functions`.
     fn invalidate_functions(&mut self, changed: DefId) {
-        let mut work: Vec<DefId> = self
+        let work: Vec<DefId> = self
             .current_functions
             .keys()
-            .filter(|id| {
-                self.function_deps
-                    .get(id)
-                    .is_some_and(|deps| deps.contains(&changed))
-            })
+            .filter(|id| self.function_deps.get(id).is_some_and(|deps| deps.contains(&changed)))
             .copied()
             .collect();
-        let mut seen: BTreeSet<DefId> = work.iter().copied().collect();
+        self.invalidate_work(work);
+    }
 
+    fn invalidate_callers(&mut self, changed: DefId) {
+        let work = self
+            .current_functions
+            .iter()
+            .filter_map(|(caller, version)| match self.functions.get(&(*caller, *version)) {
+                Some(FunctionState::Ready(function)) if calls(function, changed) => Some(*caller),
+                _ => None,
+            })
+            .collect();
+        self.invalidate_work(work);
+    }
+
+    fn invalidate_work(&mut self, mut work: Vec<DefId>) {
         while let Some(id) = work.pop() {
             let version = self.current_functions[&id];
             let Some(FunctionState::Ready(function)) = self.functions.get(&(id, version)) else {
@@ -469,14 +527,12 @@ impl World {
             let callers: Vec<DefId> = self
                 .current_functions
                 .iter()
-                .filter(|(caller, _)| !seen.contains(caller))
                 .filter_map(|(caller, cver)| match self.functions.get(&(*caller, *cver)) {
                     Some(FunctionState::Ready(f)) if calls(f, id) => Some(*caller),
                     _ => None,
                 })
                 .collect();
             for caller in callers {
-                seen.insert(caller);
                 work.push(caller);
             }
         }
@@ -532,8 +588,7 @@ impl World {
                 let version = Version(self.current_functions[&id].0 + 1);
                 function.version = version;
                 self.function_deps.insert(id, deps);
-                self.functions
-                    .insert((id, version), FunctionState::Ready(function));
+                self.functions.insert((id, version), FunctionState::Ready(function));
                 self.current_functions.insert(id, version);
                 self.epoch += 1;
                 revived = true;

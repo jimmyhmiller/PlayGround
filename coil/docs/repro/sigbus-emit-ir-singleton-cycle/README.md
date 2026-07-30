@@ -1,5 +1,13 @@
 # `SIGBUS` in code emission: recursive cycle through an `alloc-static` singleton that interns a sum variant with a struct payload
 
+## Fixed
+
+This was the same over-broad metaprogram closure: retaining every application impl
+pulled `Eq Ty`, its helpers, and the otherwise-unreachable singleton cycle into the
+compiler's macro engine. The closure now keeps impls by reachable owner module and
+iterates their ordinary-function dependencies to a fixpoint. `check`, LLVM `emit-ir`,
+and ARM64 `build` are regression-gated in `selfhost/oracle/gate-cli.sh`.
+
 Reproduced with the `coil` on PATH, macOS arm64, 2026-07-29. Deterministic: 5 out of 5 runs.
 
 ```sh

@@ -26,8 +26,15 @@ for f in *.sh; do
   # Only gates that enable -e can suffer the silent-abort class.
   grep -qE '^[[:space:]]*set -[A-Za-z]*e' "$f" || grep -q "$prelude" "$f" || continue
 
-  grep -q "source \"\$(dirname \"\$0\")/$prelude\"" "$f" \
-    || note "$f: does not source $prelude (no ERR net — an abort here would be silent)"
+  # `_`-prefixed files are SOURCED helpers, not gates: they run inside a gate that has
+  # already installed the net, and sourcing the prelude a second time from one would be
+  # the duplication flagged two checks below. They are still linted for the capture
+  # shape — a silent abort inside a helper is just as invisible as one in a gate.
+  case "$f" in
+    _*) ;;
+    *) grep -q "source \"\$(dirname \"\$0\")/$prelude\"" "$f" \
+         || note "$f: does not source $prelude (no ERR net — an abort here would be silent)" ;;
+  esac
   # A duplicated strict-mode line means the file drifted back to its own prelude. A bare
   # `set -e` is NOT flagged: gates legitimately restore it after a `set +e` window around a
   # command that is EXPECTED to fail (e.g. next-missing-dep-check.sh's negative build).

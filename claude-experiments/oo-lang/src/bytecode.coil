@@ -103,6 +103,8 @@
 (const BLT_FILE_WRITE 36)        ; pop content(String), path(String) -> truncate+write, push Bool ok
 (const BLT_FILE_APPEND 37)       ; pop content(String), path(String) -> append, push Bool ok
 (const BLT_FILE_EXISTS 38)       ; pop path(String) -> push Bool (stat succeeds)
+(const BLT_PROC_CAPTURE 39)      ; pop cmd(String) -> run `/bin/sh -c <cmd>`, push stdout only String (cooperative)
+(const BLT_PROC_EXEC 40)         ; pop cmd(String) -> push ProcessResult { exitCode, stdout } (cooperative)
 
 ; ============================ FieldInfo kinds ===============================
 (const FIELD_I64 0) (const FIELD_F64 1) (const FIELD_BOOL 2)

@@ -200,15 +200,31 @@
    (type_params (ptr (ArrayList (slice u8))))
    (requires (ptr (ArrayList (slice u8))))
    (methods (ptr (ArrayList TraitMethod)))])
+; An impl's kind owns its trait name when there is one. Keeping this distinction
+; explicit prevents inherent impls from masquerading as a trait named "".
+(defsum ImplKind
+  (TraitImpl [(trait_name (slice u8))])
+  (InherentImpl []))
 ; A GENERIC impl `(impl [T] Push (ArrayList T) …)` carries its type params and
 ; the full implementing-type pattern in `self_type`; `for_type` is the dispatch
 ; BASE name derived from it (kept in sync by the resolver after qualification).
+; Both kinds share one record so their methods use the same qualify/check/lower
+; pipeline without encoding the distinction in a magic string.
 (defstruct ImplDef
-  [(trait_name (slice u8))
+  [(kind ImplKind)
    (for_type (slice u8))
    (type_params (ptr (ArrayList (slice u8))))
    (self_type Type)
    (methods (ptr (ArrayList Func)))])
+
+(defn impl-is-inherent [(im (ptr ImplDef))] (-> bool)
+  (match-else (load (field im kind)) (InherentImpl [] true) (_ false)))
+(defn impl-is-trait [(im (ptr ImplDef))] (-> bool)
+  (not (impl-is-inherent im)))
+(defn impl-trait-name [(im (ptr ImplDef))] (-> (slice u8))
+  (match (load (field im kind))
+    (TraitImpl [name] name)
+    (InherentImpl [] (do (abort) (zeroed (slice u8))))))
 
 (defstruct ExportC
   [(name (slice u8))

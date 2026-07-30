@@ -68,6 +68,7 @@
 (defstruct EnvEntry [(name (slice u8)) (ty Type) (bid i64)])
 (defstruct EvalPair [(e Expr) (t Type)])
 (defstruct FBox [(items (ArrayList Func))])
+(defstruct ImplBucket [(items (ArrayList i64))])
 
 (defstruct Cx
   [(a (ptr Allocator))
@@ -82,6 +83,11 @@
    (trait_defs (ArrayList TraitDef))
    (methods (ArrayList MethodEntry))
    (impls (ArrayList ImplDef))
+   ; Candidate buckets contain indices into `impls`. Dispatch hashes directly to
+   ; the relevant trait/type or method/type bucket instead of scanning every impl.
+   (trait_impl_idx (HashMap (slice u8) (ptr ImplBucket)))
+   (inherent_impl_idx (HashMap (slice u8) (ptr ImplBucket)))
+   (inherent_name_idx (HashMap (slice u8) (ptr ImplBucket)))
    (imports (ptr (ArrayList ImpEntry)))
    (exports (ptr (ArrayList ExpEntry)))
    (conventions (ptr (ArrayList Convention)))
@@ -92,6 +98,27 @@
   (let [p (alloc-stack EvalPair)] (store! (field p e) e) (store! (field p t) t) (load p)))
 (defn env-new [(a (ptr Allocator))] (-> (ptr (ArrayList EnvEntry)))
   (box-al [EnvEntry] a (al-new [EnvEntry] a)))
+
+; Length-prefix the left component so `(ab,c)` cannot alias `(a,bc)`.
+(defn impl-index-key [(a (ptr Allocator)) (left (slice u8)) (right (slice u8))] (-> (slice u8))
+  (sconcat a (sconcat3 a (i64->str a (slice-len left)) ":" left) right))
+(defn impl-index-add! [(a (ptr Allocator))
+                       (idx (mut (HashMap (slice u8) (ptr ImplBucket))))
+                       (key (slice u8))
+                       (value i64)] (-> i64)
+  (match (hm-get [(slice u8) (ptr ImplBucket)] (load idx) key)
+    (Some [bucket] (al-push! (mut (field bucket items)) value))
+    (None []
+      (let [bucket (unwrap-ptr [ImplBucket] (create [ImplBucket] a))]
+        (store! (field bucket items) (al-new [i64] a))
+        (al-push! (mut (field bucket items)) value)
+        (hm-put! [(slice u8) (ptr ImplBucket)] (mut idx) key bucket))))
+  0)
+(defn impl-index-get [(idx (ptr (HashMap (slice u8) (ptr ImplBucket))))
+                      (key (slice u8))] (-> (ptr ImplBucket))
+  (match (hm-get [(slice u8) (ptr ImplBucket)] (load idx) key)
+    (Some [bucket] bucket)
+    (None [] (cast (ptr ImplBucket) 0))))
 
 ; ---- Cx table lookups (return a live (ptr T) or null) ----------------------
 ; Record that the signature just appended is the one `name` now resolves to. Overwriting
@@ -265,18 +292,10 @@
                 (store! i (iadd (load i) 1)))))
     (load r)))
 (defn impl-has [(cx (ptr Cx)) (tr (slice u8)) (forty (slice u8))] (-> bool)
-  (let [n (al-len [ImplDef] (load (field cx impls)))
-        (mut i) 0
-        (mut f) false]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [ip (al-elem [ImplDef] (field cx impls) (load i))]
-                  (when (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) forty))
-                        (store! f true)
-                        (break)))
-                (store! i (iadd (load i) 1)))))
-    (load f)))
+  (icmp-ne (cast i64
+                 (impl-index-get (field cx trait_impl_idx)
+                                 (impl-index-key (load (field cx a)) tr forty)))
+           0))
 
 ; ============================ pure type helpers ====================
 (defn type-is-void [(t (ptr Type))] (-> bool)
@@ -777,6 +796,9 @@
   (store! (field cx trait_defs) (al-new [TraitDef] a))
   (store! (field cx methods) (al-new [MethodEntry] a))
   (store! (field cx impls) (al-new [ImplDef] a))
+  (store! (field cx trait_impl_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
+  (store! (field cx inherent_impl_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
+  (store! (field cx inherent_name_idx) (hm-new [(slice u8) (ptr ImplBucket)] a (str-keyops)))
   (store! (field cx cur_bounds) (al-new [Bound] a))
   (store! (field cx loops) (al-new [LoopFrame] a))
   0)
@@ -918,6 +940,8 @@
     0))
 (defn tmfn [(a (ptr Allocator)) (tr (slice u8)) (ty (slice u8)) (m (slice u8))] (-> (slice u8))
   (sconcat3 a (sconcat3 a tr "$" ty) "$" m))
+(defn inherent-fn-name [(a (ptr Allocator)) (im (ptr ImplDef)) (m (slice u8))] (-> (slice u8))
+  (tmfn a "inherent" (impl-mangle-key a (field im self_type) (load (field im type_params))) m))
 
 ; ---- impl mangling: one symbol per IMPL, not per (trait, key) ----------------
 ; Several impls can now share a dispatch key — `(Pair A B)` and `(Pair i64 i64)` both
@@ -1129,7 +1153,7 @@
 
 (defn check-impl-methods [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (td (ptr TraitDef)) (cty (ptr Type))] (-> (Result i64
                                                                                                                                  Diag))
-  (let [tr (load (field im trait_name))
+  (let [tr (impl-trait-name im)
         forty (load (field im for_type))
         selfp (load (field td self_param))
         extras (load (field td type_params))
@@ -1165,7 +1189,7 @@
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn append-impl-methods [(a (ptr Allocator)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> i64)
   ; the IMPL's key, not the bare dispatch key — several impls can share the latter
-  (let [tr (load (field im trait_name))
+  (let [tr (impl-trait-name im)
         forty (impl-mangle-key a (field im self_type) (load (field im type_params)))
         ms (load (field im methods))
         n (al-len [Func] (load ms))
@@ -1179,9 +1203,134 @@
                   (al-push! (mut (field fb items)) (load lf)))
                 (store! i (iadd (load i) 1)))))
     0))
-(defn setup-one-impl [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> (Result i64 Diag))
+(defn append-inherent-methods [(a (ptr Allocator)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> i64)
+  (let [ms (load (field im methods))
+        n (al-len [Func] (load ms))
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [lf (alloc-stack Func)]
+                  (store! lf (al-get [Func] (load ms) (load i)))
+                  (store! (field lf name) (inherent-fn-name a im (load (field lf name))))
+                  (al-push! (mut (field fb items)) (load lf)))
+                (store! i (iadd (load i) 1)))))
+    0))
+
+(defn register-impl! [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef))] (-> i64)
+  (let [slot (al-len [ImplDef] (load (field cx impls)))]
+    (al-push! (mut (field cx impls)) (load im))
+    (if (impl-is-trait im)
+        (impl-index-add! a
+                         (mut (field cx trait_impl_idx))
+                         (impl-index-key a (impl-trait-name im) (load (field im for_type)))
+                         slot)
+        (let [ms (load (field im methods))
+              n (al-len [Func] (load ms))
+              (mut i) 0]
+          (loop (if (icmp-ge (load i) n)
+                    (break)
+                    (do
+                      (let [name (load (field (al-elem [Func] ms (load i)) name))]
+                        (impl-index-add! a
+                                         (mut (field cx inherent_impl_idx))
+                                         (impl-index-key a name (load (field im for_type)))
+                                         slot)
+                        (impl-index-add! a (mut (field cx inherent_name_idx)) name slot))
+                      (store! i (iadd (load i) 1)))))))
+    0))
+
+; An inherent method is receiver-dispatched when its first parameter, after
+; peeling ptr/ref, is the impl target pattern. Otherwise it is an associated
+; function and must be called as `Type::name` because no argument identifies its
+; owner. Parameter names carry no semantics; `(db (ptr LayoutDb))` works as well
+; as `(self (ptr LayoutDb))`.
+(defn inherent-receiver? [(a (ptr Allocator)) (im (ptr ImplDef)) (m (ptr Func))] (-> bool)
+  (let [ps (load (field m params))]
+    (if (icmp-eq (al-len [Param] (load ps)) 0)
+        false
+        (let [pt (field (al-elem [Param] ps 0) ty)
+              base (peel-ref-ptr pt)
+              tps (load (field im type_params))]
+          (or (and (pat-matches? a (field im self_type) tps pt)
+                   (pat-matches? a pt tps (field im self_type)))
+              (and (pat-matches? a (field im self_type) tps base)
+                   (pat-matches? a base tps (field im self_type))))))))
+
+(defn inherent-method-duplicate? [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (m (ptr Func))] (-> bool)
+  (let [name (load (field m name))
+        recv (inherent-receiver? a im m)
+        bucket (impl-index-get (field cx inherent_impl_idx)
+                               (impl-index-key a name (load (field im for_type))))
+        n (if (icmp-eq (cast i64 bucket) 0) 0 (al-len [i64] (load (field bucket items))))
+        (mut i) 0
+        (mut dup) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [old (al-elem [ImplDef] (field cx impls) (al-get [i64] (load (field bucket items)) (load i)))
+                      om (impl-find-method old name)]
+                  (unless (icmp-eq (cast i64 om) 0)
+                          (let [orecv (inherent-receiver? a old om)]
+                                    ; Associated functions have no receiver to select a
+                                    ; specialization, so one owner/name is the limit.
+                                    ; Every exact-pattern duplicate collides after
+                                    ; lowering, including receiver-vs-associated. Ordered
+                                    ; receiver specializations remain legal.
+                                    (when (or (and (pat-matches? a
+                                                                (field old self_type)
+                                                                (load (field old type_params))
+                                                                (field im self_type))
+                                                   (pat-matches? a
+                                                                 (field im self_type)
+                                                                 (load (field im type_params))
+                                                                 (field old self_type)))
+                                              (and (not recv)
+                                                   (and (not orecv)
+                                                        (str-eq (load (field old for_type))
+                                                                (load (field im for_type))))) )
+                                  (store! dup true)
+                                  (break)))))
+                (store! i (iadd (load i) 1)))))
+    (load dup)))
+
+(defn setup-one-inherent [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> (Result i64 Diag))
   (try (do
-         (let [tr (load (field im trait_name))
+         (let [ms (load (field im methods))
+                 n (al-len [Func] (load ms))
+                 (mut i) 0]
+             (loop (if (icmp-ge (load i) n)
+                       (break)
+                       (do
+                         (let [m (al-elem [Func] ms (load i))]
+                           (let [(mut j) 0]
+                             (loop (if (icmp-ge (load j) (load i))
+                                       (break)
+                                       (do
+                                         (when (str-eq (load (field (al-elem [Func] ms (load j)) name))
+                                                       (load (field m name)))
+                                               (break :try
+                                                      (Err [i64 Diag]
+                                                           (derr (sconcat3 a
+                                                                           "duplicate inherent method '"
+                                                                           (load (field m name))
+                                                                           "' in one impl")))))
+                                         (store! j (iadd (load j) 1))))))
+                           (when (inherent-method-duplicate? a cx im m)
+                                 (break :try
+                                        (Err [i64 Diag]
+                                             (derr (sconcat a
+                                                            (sconcat3 a "duplicate inherent method '" (load (field m name)) "' for '")
+                                                            (sconcat a (ty-str a (field im self_type)) "'")))))))
+                         (store! i (iadd (load i) 1))))))
+           (register-impl! a cx im)
+           (append-inherent-methods a im fb)
+           (Ok 0))))
+(defn setup-one-impl [(a (ptr Allocator)) (cx (ptr Cx)) (im (ptr ImplDef)) (fb (ptr FBox))] (-> (Result i64 Diag))
+  (if (impl-is-inherent im)
+      (setup-one-inherent a cx im fb)
+      (try (do
+         (let [tr (impl-trait-name im)
                forty (load (field im for_type))]
            (when (icmp-eq (cast i64 (trait-find cx tr)) 0)
                  (break :try (Err [i64 Diag] (derr (sconcat3 a "impl: unknown trait '" tr "'")))))
@@ -1196,12 +1345,12 @@
                              (derr (sconcat a
                                             (sconcat3 a "duplicate impl of '" tr "' for '")
                                             (sconcat a (ty-str a (field im self_type)) "'"))))))
-           (al-push! (mut (field cx impls)) (load im))
+           (register-impl! a cx im)
            (let [td (trait-find cx tr)
                  cty (box-type a (load (field im self_type)))]
              (try! (check-impl-methods a cx im td cty)))
            (append-impl-methods a im fb)
-           (Ok 0)))))
+           (Ok 0))))))
 (defn setup-impls [(a (ptr Allocator)) (cx (ptr Cx)) (prog (ptr Program)) (fb (ptr FBox))] (-> (Result i64 Diag))
   (let [is (load (field prog impls))
         n (al-len [ImplDef] (load is))
@@ -1229,10 +1378,11 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (let [im (al-elem [ImplDef] is (load i))
-                      tr (load (field im trait_name))
-                      td (trait-find cx tr)]
-                  (when (icmp-ne (cast i64 td) 0)
+                (let [im (al-elem [ImplDef] is (load i))]
+                  (when (impl-is-trait im)
+                    (let [tr (impl-trait-name im)
+                          td (trait-find cx tr)]
+                      (when (icmp-ne (cast i64 td) 0)
                         (let [reqs (load (field td requires))
                               nr (al-len [(slice u8)] (load reqs))
                               (mut k) 0]
@@ -1241,19 +1391,21 @@
                                     (do
                                       (let [req (al-get [(slice u8)] (load reqs) (load k))]
                                         (when (not (impl-match a cx req (field im self_type)))
-                                              (store! err
-                                                      (derr (sconcat a
-                                                                     (impl-prefix a
-                                                                                  (display-name tr)
-                                                                                  (ty-str a (field im self_type)))
-                                                                     (sconcat a
-                                                                              "requires an impl of supertrait '"
-                                                                              (sconcat a
-                                                                                       (display-name req)
-                                                                                       "' for the same type (declared by ':requires' on the trait)")))))
-                                              (store! failed true)
-                                              (break)))
-                                      (if (load failed) (break) (store! k (iadd (load k) 1)))))))))
+                                          (store! err
+                                                  (derr (sconcat a
+                                                                 (impl-prefix a
+                                                                              (display-name tr)
+                                                                              (ty-str a (field im self_type)))
+                                                                 (sconcat a
+                                                                          "requires an impl of supertrait '"
+                                                                          (sconcat a
+                                                                                   (display-name req)
+                                                                                   "' for the same type (declared by ':requires' on the trait)")))))
+                                          (store! failed true)
+                                          (break)))
+                                      (if (load failed)
+                                          (break)
+                                          (store! k (iadd (load k) 1)))))))))))
                 (if (load failed) (break) (store! i (iadd (load i) 1))))))
     (if (load failed) (Err (load err)) (Ok [i64 Diag] 0))))
 (defn setup-one-sig [(a (ptr Allocator)) (cx (ptr Cx)) (fp (ptr Func))] (-> i64)
@@ -1974,24 +2126,32 @@
 (defstruct ImplSel [(ip (ptr ImplDef)) (ambiguous bool)])
 ; Does candidate `ip` of `tr` accept `recv`? (`key` narrows by head constructor first)
 (defn impl-cand? [(a (ptr Allocator)) (tr (slice u8)) (key (slice u8)) (recv (ptr Type)) (ip (ptr ImplDef))] (-> bool)
-  (and (and (str-eq (load (field ip trait_name)) tr) (str-eq (load (field ip for_type)) key))
+  (and (and (and (impl-is-trait ip) (str-eq (impl-trait-name ip) tr)) (str-eq (load (field ip for_type)) key))
        (pat-matches? a (field ip self_type) (load (field ip type_params)) recv)))
-; Takes the impl LIST, not a Cx — so mono can call the very same selection with its own
-; table instead of keeping a parallel copy that can drift out of agreement with this one.
-(defn impl-select [(a (ptr Allocator)) (impls (ptr (ArrayList ImplDef))) (tr (slice u8)) (recv (ptr Type))] (-> ImplSel)
+; Takes an impl list plus its precomputed candidate bucket, so check and mono share
+; one specificity algorithm without either phase scanning unrelated impls.
+(defn impl-select-indexed [(a (ptr Allocator))
+                           (impls (ptr (ArrayList ImplDef)))
+                           (bucket (ptr ImplBucket))
+                           (tr (slice u8))
+                           (recv (ptr Type))] (-> ImplSel)
   (let [r (alloc-stack ImplSel)]
     (store! (field r ip) (cast (ptr ImplDef) 0))
     (store! (field r ambiguous) false)
     (if (not (has-impl-name a recv))
         (load r)
         (let [key (type-impl-name a recv)
-              n (al-len [ImplDef] (load impls))]
+              n (if (icmp-eq (cast i64 bucket) 0)
+                    0
+                    (al-len [i64] (load (field bucket items))))]
           ; pass 1 — greedy minimum under the specificity order
           (let [(mut i) 0]
             (loop (if (icmp-ge (load i) n)
                       (break)
                       (do
-                        (let [ip (al-elem [ImplDef] impls (load i))]
+                        (let [ip (al-elem [ImplDef]
+                                          impls
+                                          (al-get [i64] (load (field bucket items)) (load i)))]
                           (when (impl-cand? a tr key recv ip)
                                 (let [best (load (field r ip))]
                                   (when (or (icmp-eq (cast i64 best) 0) (impl-le? a ip best)) (store! (field r ip) ip) 0))))
@@ -2006,13 +2166,146 @@
                     (loop (if (icmp-ge (load j) n)
                               (break)
                               (do
-                                (let [ip (al-elem [ImplDef] impls (load j))]
+                                (let [ip (al-elem [ImplDef]
+                                                  impls
+                                                  (al-get [i64] (load (field bucket items)) (load j)))]
                                   (when (impl-cand? a tr key recv ip)
                                         (unless (impl-le? a best ip) (store! (field r ambiguous) true) (break))))
                                 (store! j (iadd (load j) 1)))))))
           (load r)))))
+
+(defn inherent-owner-matches? [(owner (slice u8)) (qual (slice u8))] (-> bool)
+  (or (icmp-eq (slice-len qual) 0)
+      (or (str-eq owner qual) (str-eq (after-last-dot owner) qual))))
+(defn inherent-cand? [(a (ptr Allocator))
+                      (name (slice u8))
+                      (qual (slice u8))
+                      (key (slice u8))
+                      (recv (ptr Type))
+                      (ip (ptr ImplDef))] (-> bool)
+  (if (or (impl-is-trait ip)
+          (or (not (str-eq (load (field ip for_type)) key))
+              (not (inherent-owner-matches? (load (field ip for_type)) qual))))
+      false
+      (let [m (impl-find-method ip name)]
+        (and (icmp-ne (cast i64 m) 0)
+             (and (inherent-receiver? a ip m)
+                  (pat-matches? a (field ip self_type) (load (field ip type_params)) recv))))))
+
+; Receiver-method selection is the trait specialization order restricted to
+; inherent impls that actually define `name`. A generic `(impl [T] (Box T) …)`
+; and a concrete `(impl (Box i64) …)` may coexist; the concrete method wins for
+; Box<i64>, while unordered overlaps are diagnosed at the call site.
+(defn inherent-select [(a (ptr Allocator))
+                       (cx (ptr Cx))
+                       (name (slice u8))
+                       (qual (slice u8))
+                       (recv (ptr Type))] (-> ImplSel)
+  (let [r (alloc-stack ImplSel)]
+    (store! (field r ip) (cast (ptr ImplDef) 0))
+    (store! (field r ambiguous) false)
+    (if (not (has-impl-name a recv))
+        (load r)
+        (let [key (type-impl-name a recv)
+              bucket (impl-index-get (field cx inherent_impl_idx) (impl-index-key a name key))
+              n (if (icmp-eq (cast i64 bucket) 0)
+                    0
+                    (al-len [i64] (load (field bucket items))))
+              (mut i) 0]
+          (loop (if (icmp-ge (load i) n)
+                    (break)
+                    (do
+                      (let [ip (al-elem [ImplDef]
+                                        (field cx impls)
+                                        (al-get [i64] (load (field bucket items)) (load i)))]
+                        (when (inherent-cand? a name qual key recv ip)
+                              (let [best (load (field r ip))]
+                                (when (or (icmp-eq (cast i64 best) 0) (impl-le? a ip best))
+                                      (store! (field r ip) ip)
+                                      0))))
+                      (store! i (iadd (load i) 1)))))
+          (let [best (load (field r ip))
+                (mut j) 0]
+            (unless (icmp-eq (cast i64 best) 0)
+                    (loop (if (icmp-ge (load j) n)
+                              (break)
+                              (do
+                                (let [ip (al-elem [ImplDef]
+                                                  (field cx impls)
+                                                  (al-get [i64] (load (field bucket items)) (load j)))]
+                                  (when (inherent-cand? a name qual key recv ip)
+                                        (unless (impl-le? a best ip)
+                                                (store! (field r ambiguous) true)
+                                                (break))))
+                                (store! j (iadd (load j) 1)))))))
+          (load r)))))
+
+; Like trait autoderef, try the receiver's own type before peeling. This matters
+; now that structural types can carry extension methods: an impl on `(ptr T)` must
+; win over a method on T when the argument itself is a pointer.
+(defn inherent-select-deref [(a (ptr Allocator))
+                             (cx (ptr Cx))
+                             (name (slice u8))
+                             (qual (slice u8))
+                             (recv0 (ptr Type))] (-> ImplSel)
+  (let [out (alloc-stack ImplSel)
+        (mut recv) recv0
+        (mut done) false]
+    (store! (field out ip) (cast (ptr ImplDef) 0))
+    (store! (field out ambiguous) false)
+    (loop (if (load done)
+              (break)
+              (let [one (alloc-stack ImplSel)]
+                (store! one (inherent-select a cx name qual (load recv)))
+                (if (or (load (field one ambiguous))
+                        (icmp-ne (cast i64 (load (field one ip))) 0))
+                    (do (store! out (load one)) (store! done true) 0)
+                    (let [tg (type-tag (load recv))]
+                      (if (or (icmp-eq tg 4) (icmp-eq tg 5))
+                          (store! recv (t-inner (load recv)))
+                          (store! done true)))))))
+    (load out)))
+
+; Associated functions have no receiver from which to choose a specialization.
+; Setup rejects duplicate owner/name definitions, so more than one match here can
+; only be a short-name ambiguity between modules and is reported as such.
+(defn inherent-associated-select [(a (ptr Allocator))
+                                  (cx (ptr Cx))
+                                  (name (slice u8))
+                                  (qual (slice u8))] (-> ImplSel)
+  (let [r (alloc-stack ImplSel)
+        bucket (impl-index-get (field cx inherent_name_idx) name)
+        n (if (icmp-eq (cast i64 bucket) 0)
+              0
+              (al-len [i64] (load (field bucket items))))
+        (mut i) 0]
+    (store! (field r ip) (cast (ptr ImplDef) 0))
+    (store! (field r ambiguous) false)
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (let [ip (al-elem [ImplDef]
+                                  (field cx impls)
+                                  (al-get [i64] (load (field bucket items)) (load i)))]
+                  (when (and (impl-is-inherent ip)
+                             (inherent-owner-matches? (load (field ip for_type)) qual))
+                        (let [m (impl-find-method ip name)]
+                          (when (and (icmp-ne (cast i64 m) 0) (not (inherent-receiver? a ip m)))
+                                (if (icmp-eq (cast i64 (load (field r ip))) 0)
+                                    (store! (field r ip) ip)
+                                    (store! (field r ambiguous) true))))))
+                (store! i (iadd (load i) 1)))))
+    (load r)))
+
+(defn inherent-has-name [(cx (ptr Cx)) (name (slice u8))] (-> bool)
+  (icmp-ne (cast i64 (impl-index-get (field cx inherent_name_idx) name)) 0))
 (defn cx-impl-select [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (recv (ptr Type))] (-> ImplSel)
-  (impl-select a (field cx impls) tr recv))
+  (let [key (type-impl-name a recv)]
+    (impl-select-indexed a
+                         (field cx impls)
+                         (impl-index-get (field cx trait_impl_idx) (impl-index-key a tr key))
+                         tr
+                         recv)))
 (defn impl-match [(a (ptr Allocator)) (cx (ptr Cx)) (tr (slice u8)) (recv (ptr Type))] (-> bool)
   (let [s (alloc-stack ImplSel)]
     (store! s (cx-impl-select a cx tr recv))
@@ -2026,16 +2319,19 @@
                  (tr (slice u8))
                  (st (ptr Type))
                  (params (ptr (ArrayList (slice u8))))] (-> bool)
-  (let [n (al-len [ImplDef] (load (field cx impls)))
+  (let [forty (type-impl-name a st)
+        bucket (impl-index-get (field cx trait_impl_idx) (impl-index-key a tr forty))
+        n (if (icmp-eq (cast i64 bucket) 0) 0 (al-len [i64] (load (field bucket items))))
         (mut i) 0
         (mut f) false]
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (let [ip (al-elem [ImplDef] (field cx impls) (load i))]
-                  (when (and (str-eq (load (field ip trait_name)) tr)
-                             (and (pat-matches? a (field ip self_type) (load (field ip type_params)) st)
-                                  (pat-matches? a st params (field ip self_type))))
+                (let [ip (al-elem [ImplDef]
+                                  (field cx impls)
+                                  (al-get [i64] (load (field bucket items)) (load i)))]
+                  (when (and (pat-matches? a (field ip self_type) (load (field ip type_params)) st)
+                             (pat-matches? a st params (field ip self_type)))
                         (store! f true)
                         (break)))
                 (store! i (iadd (load i) 1)))))
@@ -3967,6 +4263,104 @@
                      ; generic impl, so it lands here.
                      (ok-ep (mk-expr (ECall call_func out_targs new_args) elo ehi esrc ectxt) ret)))))))))
 
+(defn synth-inherent-general [(a (ptr Allocator))
+                              (func (slice u8))
+                              (call-func (slice u8))
+                              (type-args (ptr (ArrayList Type)))
+                              (args (ptr (ArrayList Expr)))
+                              (expected (ptr Type))
+                              (env (ptr (ArrayList EnvEntry)))
+                              (cx (ptr Cx))
+                              (tps (ptr (ArrayList (slice u8))))
+                              (fname (slice u8))
+                              (elo i64)
+                              (ehi i64)
+                              (esrc i64)
+                              (ectxt i64)] (-> (Result (Option EvalPair) Diag))
+  (match (synth-call-general a func call-func type-args args expected env cx tps fname elo ehi esrc ectxt)
+    (Err [d] (Err [(Option EvalPair) Diag] d))
+    (Ok [ep] (Ok [(Option EvalPair) Diag] (Some [EvalPair] ep)))))
+
+; Try inherent dispatch without stealing ordinary or trait calls. A qualified
+; `Type::name` first considers receiverless associated functions, then receiver
+; methods. A bare `name` considers receiver methods only and infers the owner from
+; argument zero. None means "not an inherent call" and the existing trait/general
+; resolution continues unchanged.
+(defn synth-inherent-call [(a (ptr Allocator))
+                           (func (slice u8))
+                           (mname (slice u8))
+                           (qual (slice u8))
+                           (qualified bool)
+                           (type-args (ptr (ArrayList Type)))
+                           (args (ptr (ArrayList Expr)))
+                           (expected (ptr Type))
+                           (env (ptr (ArrayList EnvEntry)))
+                           (cx (ptr Cx))
+                           (tps (ptr (ArrayList (slice u8))))
+                           (fname (slice u8))
+                           (elo i64)
+                           (ehi i64)
+                           (esrc i64)
+                           (ectxt i64)] (-> (Result (Option EvalPair) Diag))
+  (try (do
+         (when qualified
+               (let [asel (alloc-stack ImplSel)]
+                 (store! asel (inherent-associated-select a cx mname qual))
+                 (when (load (field asel ambiguous))
+                       (break :try
+                              (Err [(Option EvalPair) Diag]
+                                   (derr (sconcat a
+                                                  (sconcat5 a "in '" fname "': inherent method qualifier '" qual "' is ambiguous for '")
+                                                  (sconcat a mname "'"))))))
+                 (let [aip (load (field asel ip))]
+                   (unless (icmp-eq (cast i64 aip) 0)
+                           (return-from :try
+                                        (synth-inherent-general a
+                                                                func
+                                                                (inherent-fn-name a aip mname)
+                                                                type-args
+                                                                args
+                                                                expected
+                                                                env
+                                                                cx
+                                                                tps
+                                                                fname
+                                                                elo
+                                                                ehi
+                                                                esrc
+                                                                ectxt))))))
+         (when (and (icmp-gt (al-len [Expr] (load args)) 0) (inherent-has-name cx mname))
+               (let [sp0 (try! (do-synth a (al-elem [Expr] args 0) (null-type) env cx tps fname))
+                     sp (alloc-stack SynPair)]
+                 (store! sp sp0)
+                 (let [recv (load (field sp t))
+                       sel (alloc-stack ImplSel)]
+                   (store! sel (inherent-select-deref a cx mname (if qualified qual "") recv))
+                   (when (load (field sel ambiguous))
+                         (break :try
+                                (Err [(Option EvalPair) Diag]
+                                     (derr (sconcat a
+                                                    (sconcat5 a "in '" fname "': ambiguous inherent method '" mname "' for '")
+                                                    (sconcat a (ty-str a recv) "'"))))))
+                   (let [ip (load (field sel ip))]
+                     (unless (icmp-eq (cast i64 ip) 0)
+                             (return-from :try
+                                          (synth-inherent-general a
+                                                                  func
+                                                                  (inherent-fn-name a ip mname)
+                                                                  type-args
+                                                                  args
+                                                                  expected
+                                                                  env
+                                                                  cx
+                                                                  tps
+                                                                  fname
+                                                                  elo
+                                                                  ehi
+                                                                  esrc
+                                                                  ectxt)))))))
+         (Ok [(Option EvalPair) Diag] (None [EvalPair])))))
+
 (defn synth-call [(a (ptr Allocator))
                   (func (slice u8))
                   (type_args (ptr (ArrayList Type)))
@@ -3990,6 +4384,25 @@
                qual (if (icmp-ge cc 0) (subslice [u8] func 0 cc) "")
                mname (if (icmp-ge cc 0) (subslice [u8] func (iadd cc 2) (slice-len [u8] func)) func)
                (mut call_func) func]
+           (let [inh (try! (synth-inherent-call a
+                                                func
+                                                mname
+                                                qual
+                                                (icmp-ge cc 0)
+                                                type_args
+                                                args
+                                                expected
+                                                env
+                                                cx
+                                                tps
+                                                fname
+                                                elo
+                                                ehi
+                                                esrc
+                                                ectxt))]
+             (match inh
+               (Some [ep] (return-from :try (Ok [EvalPair Diag] ep)))
+               (None [] 0)))
            (if (methods-has cx mname)
                (let [me0 (try! (resolve-method-qual a cx mname qual fname))
                      me (alloc-stack MethodEntry)]
@@ -4118,15 +4531,13 @@
                                                (impl-mangle-key a (field ipp self_type) (load (field ipp type_params)))
                                                mname))
                                  0))))))))
-               ; `mname` is not a trait method. A bare call falls through to the general
-               ; path (an ordinary function or a genuine undefined ref); a `Trait::method`
-               ; head, however, promised a method — say so, located, rather than reporting
-               ; the whole `Trait::method` string as an undefined function.
+               ; `mname` is neither an inherent nor trait method. A bare call falls
+               ; through to the general path; a qualified head promised a method.
                (when (icmp-ge cc 0)
                      (break :try
                             (err-ep (derr (sconcat a
                                                    (sconcat5 a "in '" fname "': '" func "' names no trait method '")
-                                                   (sconcat a mname "'")))))))
+                                                   (sconcat3 a mname "' or inherent method '" (sconcat a mname "'"))))))))
            (synth-call-general a func (load call_func) type_args args expected env cx tps fname elo ehi esrc ectxt)))))
 ; ELet
 (defn mk-bind [(name (slice u8)) (mutable bool) (value Expr)] (-> Bind)

@@ -141,6 +141,11 @@
       td.miss { color: var(--warn); }
       td.adv { color: var(--text); font-weight: 700; }
       td.adv.slower { color: var(--warn); }
+      /* How the change arrived: patched into the running page, or a document swap that
+         threw away whatever the user had on screen. */
+      .how { font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.85; }
+      .how.hot { color: var(--dim); }
+      .how.reload { color: var(--warn); }
       tr.summary td { background: #131a27; border-top: 1px solid var(--line); }
       .log { font: 10.5px/1.45 var(--mono); padding: 4px 10px; }
       .log div { white-space: pre-wrap; word-break: break-all; }
@@ -223,6 +228,16 @@
       // do: a side still building edit 2 when edit 3 lands never displays edit 2 at
       // all, because the source only ever holds one token. That outcome is recorded
       // as "not shown", not quietly dropped and not called a timeout.
+      //
+      // Three rules keep the two clocks comparable:
+      //   * Navigation and editing are separate phases. A route chip only changes
+      //     the two iframe URLs; a scenario may navigate and settle first, then performs
+      //     exactly one source edit.
+      //   * Every landing says HOW it arrived: `hot` (the running page was patched) or
+      //     `reload` (that side replaced the document, losing everything on screen).
+      //     A fast reload is not plainly better than a slower in-place patch.
+      //   * A non-zero exit is FAILED, never a timeout. A crash on one side must not
+      //     be readable as the other side being fast.
 
       const SIDE_KEYS = ["dp", "tp"];
       const ui = {};
@@ -232,7 +247,14 @@
       let burst = null; // { kind, count, shown: {dp, tp}, closed }
       const visited = { dp: new Set(), tp: new Set() }; // compiled route patterns each side has served
       const pendingLoad = { dp: null, tp: null }; // race id a set-src should resolve
-
+      const loadedPath = { dp: null, tp: null }; // path whose iframe load has completed
+      // The document instance each side's probe last reported from. A reload gives the
+      // probe a new id, which is how a cell can say "patched in place" or "reloaded".
+      const lastDoc = { dp: null, tp: null };
+      // Most recent probe report per side. An extremely fast update can become visible
+      // while `/api/edit` is still returning its token; caching the report lets the
+      // race consume it as soon as the response arms that token.
+      const latestProbe = { dp: null, tp: null };
       const $ = (id) => document.getElementById(id);
       const fmt = (ms) =>
         ms == null ? "—" : ms < 1000 ? `${(ms / 1000).toFixed(3)} s` : `${(ms / 1000).toFixed(2)} s`;
@@ -315,8 +337,13 @@
           paintRouteChip(b);
         }
         $("caveat").textContent =
-          "Both dev servers run at once and contend for this machine, and the in-frame probe polls every " +
-          "8 ms — identical on both sides. For isolated, interleaved, multi-sample numbers: " +
+          "Both dev servers run at once and contend for this machine; which side is spawned first " +
+          "alternates every race. The in-frame probe polls every 8 ms, identically on both sides. " +
+          "Route chips only navigate; scenarios navigate and settle if needed, then edit exactly once. " +
+          "`hot` / `reload` says whether that side patched the running page or replaced the document. " +
+          "next build runs with --turbopack, and with this checkout's tsc + eslint build checks off " +
+          "(diffpack does no type checking, so neither side pays for tsc). Build memory is the summed " +
+          "RSS of the whole process tree, sampled. For isolated, interleaved, multi-sample numbers: " +
           "node scripts/bench-calcom.mjs";
       }
 
@@ -345,7 +372,13 @@
           expect: spec.expect,
           timeoutMs: spec.timeoutMs ?? 60000,
           burst: spec.burst ?? null,
-          sides: { dp: { done: false, ms: null, why: null }, tp: { done: false, ms: null, why: null } },
+          // Which document instance each side was showing when the clock started, so
+          // the landing report can say whether that document survived the edit.
+          docAtStart: { dp: lastDoc.dp, tp: lastDoc.tp },
+          sides: {
+            dp: { done: false, ms: null, why: null, how: null },
+            tp: { done: false, ms: null, why: null, how: null },
+          },
         };
         // A fresh edit of the same class replaces the token the previous one planted,
         // so any side still building that previous edit will never display it.
@@ -363,17 +396,24 @@
         return r;
       }
 
-      function settle(race, sideKey, ms, why) {
+      // `why`: null when the change actually landed, else "superseded" (a newer edit
+      // replaced the token this one was waiting for), "timeout", or "failed" (the
+      // process exited non-zero — a crash, which must never read as the other side
+      // being fast). `how`: "hot" or "reload" for edits, null where it makes no sense.
+      const MISSED = { superseded: "not shown", failed: "FAILED", timeout: "TIMEOUT" };
+
+      function settle(race, sideKey, ms, why, how) {
         const s = race.sides[sideKey];
         if (s.done) return;
         s.done = true;
         s.ms = ms ?? null;
         s.why = why ?? null;
+        s.how = how ?? null;
         if (why === null) {
           ui[sideKey].clock.textContent = fmt(s.ms);
           ui[sideKey].clock.className = "clock";
         } else {
-          ui[sideKey].clock.textContent = why === "superseded" ? "NOT SHOWN" : "TIMEOUT";
+          ui[sideKey].clock.textContent = (MISSED[why] ?? "TIMEOUT").toUpperCase();
           ui[sideKey].clock.className = "clock bad";
         }
         if (race.burst && burst) {
@@ -383,8 +423,8 @@
         if (SIDE_KEYS.every((k) => race.sides[k].done)) closeRace(race);
       }
 
-      function land(race, sideKey, ms) {
-        settle(race, sideKey, ms ?? performance.now() - race.t0, null);
+      function land(race, sideKey, ms, how) {
+        settle(race, sideKey, ms ?? performance.now() - race.t0, null, how);
       }
 
       function closeRace(race) {
@@ -436,9 +476,16 @@
       }
       requestAnimationFrame(tickClocks);
 
+      // A time alone does not say what the user got. Both bundlers fall back to a full
+      // page reload when a hot update cannot be applied, and a reload throws away
+      // everything on screen — so a fast cell that reloaded is not straightforwardly
+      // better than a slower one that patched the running page. The label says which.
       function cell(side, cls) {
-        if (side.ms != null) return `<td class="${cls}">${fmt(side.ms)}</td>`;
-        return `<td class="miss">${side.why === "superseded" ? "not shown" : "TIMEOUT"}</td>`;
+        if (side.ms != null) {
+          const how = side.how ? ` <span class="how ${side.how}">${side.how}</span>` : "";
+          return `<td class="${cls}">${fmt(side.ms)}${how}</td>`;
+        }
+        return `<td class="miss">${MISSED[side.why] ?? "TIMEOUT"}</td>`;
       }
 
       // One place that writes a row, so the axes that are not times — CPU seconds,
@@ -455,6 +502,15 @@
         return tr;
       }
 
+      // What the advantage column says when one side produced no number at all. A
+      // failed process is called a failure: "diffpack timed out" for a build that
+      // exited 1 would read as slowness, and would flatter whichever side survived.
+      function missedText(why, label) {
+        if (why === "superseded") return `${label} never showed it`;
+        if (why === "failed") return `${label} FAILED (non-zero exit), not a time`;
+        return `${label} timed out`;
+      }
+
       function addResult(race, opts) {
         const tb = $("results");
         const tr = document.createElement("tr");
@@ -469,9 +525,9 @@
             adv = `${(a.ms / z.ms).toFixed(1)}× Turbopack`;
             cls = "adv slower";
           }
-        } else if (a.ms != null) adv = z.why === "superseded" ? "Turbopack never showed it" : "Turbopack timed out";
-        else if (z.ms != null) adv = a.why === "superseded" ? "diffpack never showed it" : "diffpack timed out";
-        else adv = "neither side showed it";
+        } else if (a.ms != null) adv = missedText(z.why, "Turbopack");
+        else if (z.ms != null) adv = missedText(a.why, "diffpack");
+        else adv = `neither side showed it (${MISSED[a.why] ?? "TIMEOUT"} / ${MISSED[z.why] ?? "TIMEOUT"})`;
         tr.innerHTML = `<td class="what"></td>${cell(a, "dp")}${cell(z, "tp")}<td class="${cls}">${adv}</td>`;
         tr.querySelector(".what").textContent = race.label;
         tb.prepend(tr);
@@ -500,6 +556,9 @@
       // ----------------------------------------------------------------------
       // Scenario: an edit to a real source file. One write, both watchers.
 
+      // Exactly one write per press. If needed, the button first navigates both frames
+      // and waits for their documents to load and settle; only then does it perform the
+      // one requested edit. Navigation itself never mutates source code.
       async function runEdit(scenario) {
         await ensureRoute(scenario.url);
         const race = startRace({
@@ -518,9 +577,10 @@
           return;
         }
         race.expect.token = res.token;
+        for (const k of SIDE_KEYS) landFromProbe(race, k, latestProbe[k]);
         // The first edit of a class plants the badge, so it adds new content to the
         // module instead of changing an attribute in place — a different, usually
-        // slower thing than the steady-state edits after it.
+        // slower thing than the steady-state edits after it, so label it explicitly.
         race.label = res.warmup ? `${scenario.name} — first of this class, plants the badge` : scenario.name;
         for (const k of SIDE_KEYS) ui[k].stage.textContent = `${race.detail} — token ${res.token}`;
       }
@@ -553,12 +613,15 @@
 
       function navigate(sideKey, path, raceId) {
         const u = ui[sideKey];
+        // A navigation replaces the document and, for a new route, the module graph
+        // behind it. It never mutates the source tree.
         const already = u.iframe.dataset.path === path;
         // Re-visiting the same path needs a distinct URL or the frame will not
         // reload; an unknown query key does not change which route gets compiled.
         const src = `${u.side.origin}${path}${already ? `?dpnav=${raceId ?? Date.now()}` : ""}`;
         u.iframe.dataset.path = path;
         u.iframe.dataset.pattern = patternFor(path);
+        loadedPath[sideKey] = null;
         pendingLoad[sideKey] = raceId ?? null;
         u.curtain.hidden = true;
         u.iframe.src = src;
@@ -566,6 +629,7 @@
 
       function onFrameLoad(sideKey) {
         const u = ui[sideKey];
+        loadedPath[sideKey] = u.iframe.dataset.path || null;
         if (u.iframe.dataset.pattern) {
           visited[sideKey].add(u.iframe.dataset.pattern);
           repaintRouteChips();
@@ -576,21 +640,25 @@
         if (race.expect.type === "load" || race.expect.type === "boot") land(race, sideKey);
       }
 
-      // Both frames must already be showing the page a scenario edits, or the edit
-      // would be measured against a page that never renders it.
+      // Bring both frames to the route an edit exercises, then let the freshly loaded
+      // documents hydrate and connect HMR before writing. This is navigation + waiting
+      // only: no warm-up or priming edit occurs here.
+      const POST_LOAD_SETTLE_MS = 1200;
       function ensureRoute(path) {
         const pending = [];
         for (const k of SIDE_KEYS) {
           const u = ui[k];
-          if (u.iframe.dataset.path === path) continue;
+          if (u.iframe.dataset.path === path && loadedPath[k] === path) continue;
           pending.push(
             new Promise((resolve) => {
               const done = () => {
                 u.iframe.removeEventListener("load", done);
-                setTimeout(resolve, 1200); // let hydration and the HMR socket settle
+                setTimeout(resolve, POST_LOAD_SETTLE_MS);
               };
               u.iframe.addEventListener("load", done);
-              navigate(k, path, null);
+              // If an explicit route-chip navigation is already loading this path,
+              // join that load instead of replacing its document a second time.
+              if (u.iframe.dataset.path !== path) navigate(k, path, null);
             }),
           );
         }
@@ -601,14 +669,25 @@
       // Frame -> dashboard. The probe is the only thing that can see inside a
       // cross-origin frame; it posts the visible token set on every change.
 
+      function landFromProbe(race, sideKey, report) {
+        if (!report || report.receivedAt < race.t0) return;
+        if (!race.expect.token || !report.tokens.includes(race.expect.token)) return;
+        const before = race.docAtStart[sideKey];
+        const how = report.doc && before ? (report.doc === before ? "hot" : "reload") : null;
+        land(race, sideKey, report.receivedAt - race.t0, how);
+      }
+
       window.addEventListener("message", (ev) => {
         const msg = ev.data;
         if (!msg || msg.source !== "diffpack-demo-probe") return;
         const sideKey = SIDE_KEYS.find((k) => ui[k] && ui[k].side.origin === ev.origin);
         if (!sideKey || !Array.isArray(msg.tokens)) return;
+        if (msg.doc) lastDoc[sideKey] = msg.doc;
+        const report = { tokens: msg.tokens, doc: msg.doc || null, receivedAt: performance.now() };
+        latestProbe[sideKey] = report;
         for (const race of [...active]) {
           if (race.expect.type !== "token" || !race.expect.token) continue;
-          if (msg.tokens.includes(race.expect.token)) land(race, sideKey);
+          landFromProbe(race, sideKey, report);
         }
       });
 
@@ -633,7 +712,7 @@
       async function runBuild() {
         startRace({
           label: "production build (concurrent race, outputs wiped)",
-          detail: "next build --turbopack vs diffpack build-app, both from scratch",
+          detail: "next build --turbopack vs diffpack build-app production, both from scratch",
           expect: { type: "build" },
           timeoutMs: 900000,
         });
@@ -652,9 +731,14 @@
           ui[k].iframe.src = "about:blank";
           ui[k].iframe.dataset.path = "";
           visited[k].clear();
+          lastDoc[k] = null;
+          latestProbe[k] = null;
+          loadedPath[k] = null;
         }
         repaintRouteChips();
       }
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
       // ----------------------------------------------------------------------
       // Server stream
@@ -705,44 +789,77 @@
             }
             break;
           case "restart-begin":
-            logLine("sys", `restarting ${m.sides.join(" + ")}${m.wipe ? ", output wiped" : ""}`);
+            logLine(
+              "sys",
+              `restarting ${m.sides.join(" + ")}${m.wipe ? ", every output tree wiped" : ""}` +
+                `${m.order ? `, ${m.order[0]} spawned first (alternates every race)` : ""}`,
+            );
             setBusy("restart");
             break;
           case "build-begin":
-            logLine("sys", "stopping dev servers, wiping outputs, then racing both builds");
+            logLine(
+              "sys",
+              "stopping dev servers, wiping outputs, then racing both builds" +
+                `${m.order ? `, ${m.order[0]} spawned first (alternates every race)` : ""}`,
+            );
             setBusy("build");
             break;
           case "build-end": {
             logLine("sys", `${m.side} build finished in ${fmt(m.ms)} (exit ${m.code})`);
             const race = active.find((r) => r.expect.type === "build");
             if (race) {
+              // A non-zero exit is a FAILURE, not a slow build and not a timeout.
               if (m.code === 0) land(race, m.side, m.ms);
-              else settle(race, m.side, null, "timeout");
+              else settle(race, m.side, null, "failed");
               const extra = [];
               if (m.cpuUserS != null) extra.push(`${m.cpuUserS.toFixed(1)} s CPU`);
-              if (m.peakRssMb != null) extra.push(`${(m.peakRssMb / 1024).toFixed(2)} GiB peak RSS`);
+              if (m.peakRssMb != null) extra.push(`${(m.peakRssMb / 1024).toFixed(2)} GiB peak RSS (tree)`);
               if (extra.length) ui[m.side].stage.textContent = extra.join(", ");
               // Wall is not the only thing a build costs; CPU and peak memory go in
               // the table too rather than scrolling away with the stage line.
-              (race.cost ??= {})[m.side] = { cpuUserS: m.cpuUserS, peakRssMb: m.peakRssMb };
+              (race.cost ??= {})[m.side] = {
+                cpuUserS: m.cpuUserS,
+                peakRssMb: m.peakRssMb,
+                peakRssSingleMb: m.peakRssSingleMb,
+                rssSamples: m.rssSamples,
+              };
               if (SIDE_KEYS.every((k) => race.cost[k])) {
                 const c = race.cost;
                 const ratio = (x, y) => (x && y ? `${(y / x).toFixed(1)}x diffpack` : "—");
+                const gib = (mb) => `${(mb / 1024).toFixed(2)} GiB`;
                 if (c.dp.cpuUserS != null && c.tp.cpuUserS != null) {
                   addRow(
-                    "production build CPU (user)",
+                    "production build CPU (user, whole process tree)",
                     `${c.dp.cpuUserS.toFixed(1)} s`,
                     `${c.tp.cpuUserS.toFixed(1)} s`,
                     ratio(c.dp.cpuUserS, c.tp.cpuUserS),
                     { summary: true },
                   );
                 }
+                // The comparable memory number. Both sides are process TREES —
+                // diffpack runs client, react-server and ssr at once, next build
+                // spawns workers — so this is the sum over the tree, sampled every
+                // 250 ms and maxed. A spike shorter than the sampling interval is
+                // missed, which is why the sample count is shown.
                 if (c.dp.peakRssMb != null && c.tp.peakRssMb != null) {
                   addRow(
-                    "production build peak RSS",
-                    `${(c.dp.peakRssMb / 1024).toFixed(2)} GiB`,
-                    `${(c.tp.peakRssMb / 1024).toFixed(2)} GiB`,
+                    `production build peak RSS, whole tree (sampled every 250 ms; ` +
+                      `${c.dp.rssSamples ?? 0}/${c.tp.rssSamples ?? 0} samples)`,
+                    gib(c.dp.peakRssMb),
+                    gib(c.tp.peakRssMb),
                     ratio(c.dp.peakRssMb, c.tp.peakRssMb),
+                    { summary: true },
+                  );
+                }
+                // Kept for continuity with `/usr/bin/time -l`, and labelled for what
+                // it is: ru_maxrss is the largest SINGLE process, so it under-reports
+                // both trees, by different amounts. Never the headline.
+                if (c.dp.peakRssSingleMb != null && c.tp.peakRssSingleMb != null) {
+                  addRow(
+                    "…and its largest single process (ru_maxrss: under-reports both, unequally)",
+                    gib(c.dp.peakRssSingleMb),
+                    gib(c.tp.peakRssSingleMb),
+                    ratio(c.dp.peakRssSingleMb, c.tp.peakRssSingleMb),
                     { summary: true },
                   );
                 }
@@ -754,6 +871,7 @@
             setBusy(null);
             break;
           case "reset":
+            // The badges are gone, so the next explicit edit of every class plants one.
             logLine("sys", "sources restored to pristine cal.com");
             break;
           case "log":

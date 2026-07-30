@@ -2825,6 +2825,26 @@
     (loop (if (icmp-ge (load i) n)
               (break)
               (do (al-push! (mut out) (load (field (al-elem [Func] fs (load i)) name))) (store! i (iadd (load i) 1)))))
+    ; Keep method heads in the call-name universe too. They have no ordinary
+    ; Func entry yet, but seeing one in a reachable body tells closure selection
+    ; which structural/primitive impl families can actually dispatch.
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni)
+                (break)
+                (do
+                  (let [ms (load (field (al-elem [ImplDef] is (load ii)) methods))
+                        nm (al-len [Func] (load ms))
+                        (mut mi) 0]
+                    (loop (if (icmp-ge (load mi) nm)
+                              (break)
+                              (do
+                                (let [name (load (field (al-elem [Func] ms (load mi)) name))]
+                                  (unless (set-contains (mut out) name)
+                                          (al-push! (mut out) name)))
+                                (store! mi (iadd (load mi) 1))))))
+                  (store! ii (iadd (load ii) 1))))))
     (box-al [(slice u8)] a (load out))))
 (defn prog-fn-find [(p (ptr Program)) (name (slice u8))] (-> (ptr Func))
   (let [fs (load (field p funcs))
@@ -2839,6 +2859,56 @@
                       (break))
                 (store! i (iadd (load i) 1)))))
     (load r)))
+
+; A macro-engine closure needs impls owned by modules that are actually in that
+; closure, plus structural/primitive impls (whose target has no module). Pulling
+; every application impl into every compiler invocation both exposed bodies to a
+; pre-expansion scope and defeated dead-code reachability.
+(defn closure-module-wanted? [(wanted (ptr (ArrayList (slice u8)))) (m (slice u8))] (-> bool)
+  (if (icmp-eq (slice-len m) 0)
+      true
+      (let [n (al-len [(slice u8)] (load wanted))
+            (mut i) 0
+            (mut found) false]
+        (loop (if (icmp-ge (load i) n)
+                  (break)
+                  (do
+                    (when (str-eq (qual-module-of (al-get [(slice u8)] (load wanted) (load i))) m)
+                          (store! found true)
+                          (break))
+                    (store! i (iadd (load i) 1)))))
+        (load found))))
+(defn closure-impl-wanted? [(a (ptr Allocator)) (wanted (ptr (ArrayList (slice u8)))) (ip (ptr ImplDef))] (-> bool)
+  (let [m (qual-module-of (impl-base-name a (field ip self_type)))
+        ms (load (field ip methods))
+        n (al-len [Func] (load ms))
+        (mut i) 0
+        (mut called) false]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do
+                (when (set-contains wanted (load (field (al-elem [Func] ms (load i)) name)))
+                      (store! called true)
+                      (break))
+                (store! i (iadd (load i) 1)))))
+    (and (load called) (closure-module-wanted? wanted m))))
+(defn closure-drain! [(p (ptr Program))
+                      (names (ptr (ArrayList (slice u8))))
+                      (stackb (ptr SBox))
+                      (wantedb (ptr SBox))] (-> i64)
+  (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0)
+            (break)
+            (do
+              (let [sl (load (field stackb items))
+                    top (al-len [(slice u8)] sl)
+                    nm (al-get [(slice u8)] sl (isub top 1))]
+                (store! (field (field stackb items) len) (isub top 1))
+                (unless (set-contains (field wantedb items) nm)
+                        (al-push! (mut (field wantedb items)) nm)
+                        (let [f (prog-fn-find p nm)]
+                          (unless (icmp-eq (cast i64 f) 0)
+                                  (cc-list (load (field f body)) names stackb))))))))
+  0)
 (defn closure-funcs [(p (ptr Program)) (seeds (ptr (ArrayList (slice u8)))) (a (ptr Allocator))] (-> (ptr (ArrayList (slice u8))))
   (let [names (prog-fn-names p a)
         stackb (unwrap-ptr [SBox] (create [SBox] a))
@@ -2852,25 +2922,6 @@
                 (do
                   (al-push! (mut (field stackb items)) (al-get [(slice u8)] (load seeds) (load si)))
                   (store! si (iadd (load si) 1))))))
-    ; The sub-program keeps every impl, and checking lowers each impl's METHODS,
-    ; whose bodies call ordinary library functions — those callees must ride
-    ; along or the sub-program's check reports them undefined.
-    (let [is (load (field p impls))
-          ni (al-len [ImplDef] (load is))
-          (mut ii) 0]
-      (loop (if (icmp-ge (load ii) ni)
-                (break)
-                (do
-                  (let [ip (al-elem [ImplDef] is (load ii))
-                        ms (load (field ip methods))
-                        nm2 (al-len [Func] (load ms))
-                        (mut mi) 0]
-                    (loop (if (icmp-ge (load mi) nm2)
-                              (break)
-                              (do
-                                (cc-list (load (field (al-elem [Func] ms (load mi)) body)) names stackb)
-                                (store! mi (iadd (load mi) 1))))))
-                  (store! ii (iadd (load ii) 1))))))
     ; The sub-program keeps EVERY const (closure-subprogram), and a const's value is a
     ; compile-time computation that check/finish folds. A const that calls an ordinary
     ; function would otherwise report that callee "undefined" here — exactly like an
@@ -2883,18 +2934,42 @@
                 (do
                   (collect-calls (field (al-elem [Const] cs (load ci)) value) names stackb)
                   (store! ci (iadd (load ci) 1))))))
-    (loop (if (icmp-eq (al-len [(slice u8)] (load (field stackb items))) 0)
-              (break)
-              (do
-                (let [sl (load (field stackb items))
-                      top (al-len [(slice u8)] sl)
-                      nm (al-get [(slice u8)] sl (isub top 1))]
-                  ; pop
-                  (store! (field (field stackb items) len) (isub top 1))
-                  (unless (set-contains (field wantedb items) nm)
-                          (al-push! (mut (field wantedb items)) nm)
-                          (let [f (prog-fn-find p nm)]
-                            (unless (icmp-eq (cast i64 f) 0) (cc-list (load (field f body)) names stackb))))))))
+    (closure-drain! p names stackb wantedb)
+    ; Module reachability can grow through an impl body, so repeat to a bounded
+    ; fixpoint. Re-seeding an already-wanted callee is harmless.
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut selected) (al-new [i64] a)
+          (mut init) 0
+          (mut pass) 0]
+      (loop (if (icmp-ge (load init) ni)
+                (break)
+                (do (al-push! (mut selected) 0) (store! init (iadd (load init) 1)))))
+      (loop (if (icmp-gt (load pass) ni)
+                (break)
+                (let [(mut ii) 0
+                      (mut added) false]
+                  (loop (if (icmp-ge (load ii) ni)
+                            (break)
+                            (do
+                              (let [ip (al-elem [ImplDef] is (load ii))]
+                                (when (and (icmp-eq (al-get [i64] (load selected) (load ii)) 0)
+                                           (closure-impl-wanted? a (field wantedb items) ip))
+                                      (al-set! (mut selected) (load ii) 1)
+                                      (store! added true)
+                                      (let [ms (load (field ip methods))
+                                            nm (al-len [Func] (load ms))
+                                            (mut mi) 0]
+                                        (loop (if (icmp-ge (load mi) nm)
+                                                  (break)
+                                                  (do
+                                                    (cc-list (load (field (al-elem [Func] ms (load mi)) body)) names stackb)
+                                                    (store! mi (iadd (load mi) 1))))))))
+                              (store! ii (iadd (load ii) 1)))))
+                  (closure-drain! p names stackb wantedb)
+                  (unless (load added) (break))
+                  (store! pass (iadd (load pass) 1)))))
+      0)
     (field wantedb items)))
 ; ---- pruned closure (macro STAGING, interp deletion step 5 Phase B) ---------------
 ; closure-funcs minus the impl-method and const-value seeding: only the seeds'
@@ -2961,6 +3036,7 @@
         fs (load (field p funcs))
         n (al-len [Func] (load fs))
         (mut keep) (al-new [Func] a)
+        (mut keepi) (al-new [ImplDef] a)
         (mut i) 0]
     (loop (if (icmp-ge (load i) n)
               (break)
@@ -2968,6 +3044,15 @@
                 (let [fp (al-elem [Func] fs (load i))]
                   (when (set-contains wanted (load (field fp name))) (al-push! (mut keep) (load fp)) 0))
                 (store! i (iadd (load i) 1)))))
+    (let [is (load (field p impls))
+          ni (al-len [ImplDef] (load is))
+          (mut ii) 0]
+      (loop (if (icmp-ge (load ii) ni)
+                (break)
+                (do
+                  (let [ip (al-elem [ImplDef] is (load ii))]
+                    (when (closure-impl-wanted? a wanted ip) (al-push! (mut keepi) (load ip)) 0))
+                  (store! ii (iadd (load ii) 1))))))
     (store! (field pp conventions) (load (field p conventions)))
     (store! (field pp structs) (load (field p structs)))
     (store! (field pp sums) (load (field p sums)))
@@ -2976,7 +3061,7 @@
     (store! (field pp asserts) (box-al [StaticAssert] a (al-new [StaticAssert] a)))
     (store! (field pp consts) (load (field p consts)))
     (store! (field pp traits) (load (field p traits)))
-    (store! (field pp impls) (load (field p impls)))
+    (store! (field pp impls) (box-al [ImplDef] a (load keepi)))
     (store! (field pp metas) (box-al [Expr] a (al-new [Expr] a)))
     (store! (field pp exports) (box-al [ExportC] a (al-new [ExportC] a)))
     pp))

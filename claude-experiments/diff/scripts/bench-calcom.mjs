@@ -10,8 +10,9 @@
 //
 //   PRODUCTION BUILD  (interleaved diffpack/Turbopack pairs, outputs wiped each time)
 //     1. cold build wall
-//     2. cold build CPU (user time)
-//     3. cold build peak RSS
+//     2. cold build CPU (user time, whole tree)
+//     3. cold build peak RSS, whole process tree (sampled) — the comparable one
+//     4. …and ru_maxrss, its largest single process, labelled as under-reporting
 //   DEV SERVER        (cold, per bundler: wipe output, boot, first 200, second route)
 //     4. cold start -> first 200 on /auth/login
 //     5. second route (/pro/30min), first request after that first 200
@@ -29,8 +30,26 @@
 // METHOD, and why each choice is the fair one:
 //   * Builds are INTERLEAVED (dp, tp, dp, tp, ...) so ambient load lands on both
 //     roughly equally; every raw sample is reported, never just the median.
-//   * Wall is measured by this process; CPU (user) and peak RSS come from
-//     `/usr/bin/time -l`, which on macOS reports bytes.
+//   * Wall is measured by this process. CPU (user) comes from `/usr/bin/time -l`,
+//     which accumulates waited-for descendants and is therefore a true tree total.
+//   * PEAK MEMORY is SAMPLED over each side's whole process tree (250 ms, summed,
+//     maxed), because `/usr/bin/time -l`'s `maximum resident set size` is `ru_maxrss`
+//     — the largest SINGLE process — and both sides are trees: diffpack's production
+//     build runs client, react-server and ssr concurrently, `next build` spawns
+//     workers. ru_maxrss under-reports both, unequally. It is still reported, on its
+//     own clearly labelled row, and it is never the headline.
+//   * `next build` is given `--turbopack` EXPLICITLY. Next 16 defaults to it, but the
+//     default is version- and config-dependent (Next hard-exits when it auto-selects
+//     Turbopack for a project with a webpack config and no turbopack config), and a
+//     harness about Turbopack must not depend on that resolving the way it does today.
+//   * Both sides build with this checkout's `typescript.ignoreBuildErrors` and
+//     `eslint.ignoreDuringBuilds` (the benchmark next.config wrapper): diffpack does no
+//     type checking, so leaving `tsc` inside `next build` would time a compiler only
+//     one side runs.
+//   * READY means the real page: 200, plus `--ready-marker` (default "Cal.diy") in the
+//     body, plus a closed `</html>`. A bare 200 from an error shell or an unfinished
+//     stream would otherwise hand a side startup time it did not earn; those are
+//     counted and printed.
 //   * FORCE_COLOR=0 everywhere: this environment exports FORCE_COLOR=3 and Node
 //     ANSI-colorizes bare numbers, which has corrupted a parsed run before.
 //   * The port is checked before every boot and the full descendant tree is killed
@@ -53,6 +72,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadavg } from "node:os";
+import { sampleTreeRss } from "./tree-rss.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptsDir);
@@ -68,6 +88,15 @@ const SETTLE_MS = args.settle ?? 4200; // after the warmup edit, before the meas
 const CADENCE_GAP_MS = args.cadence ?? 800; // "~1/sec" sustained-edit gap
 const ONLY = args.only ?? "all";       // all | build | dev
 const OUT = args.out ?? join(repoRoot, "bench", "results", "calcom-vs-turbopack.json");
+// A 200 alone is not proof a page rendered: a dev server that answers an error shell, or
+// that streams a document it never closes, would be credited with a startup time it did
+// not earn — and the two sides need not fail the same way. Ready therefore means 200 AND
+// the body carries `READY_MARKER` AND the document is closed. Bare 200s are counted and
+// reported rather than ignored, since a side that produces them is exactly the side a
+// status-code-only gate would flatter. Declared HERE, with the other config: the sections
+// below run during module evaluation, so a `const` further down the file is still in its
+// temporal dead zone when `waitFor200` first reads it.
+const READY_MARKER = args.readyMarker ?? "Cal.diy";
 
 const diffpackBin = join(repoRoot, "target", "release", "diffpack");
 const nextBin = join(APP, "node_modules", ".bin", "next");
@@ -81,15 +110,23 @@ const SIDES = [
   {
     key: "diffpack",
     label: "diffpack",
-    outDir: join(WEB, ".diffpack-output"),
+    // Every generated tree a cold run has to remove. `.diffpack-next/` is generated
+    // glue rather than compiled output and is rewritten on every boot, but a cold run
+    // that wipes all of one side's generated files and part of the other's leaves a
+    // question open for no reason.
+    outDirs: [join(WEB, ".diffpack-output"), join(WEB, ".diffpack-next")],
     build: () => ({ cmd: diffpackBin, argv: ["build-app", ".", "production"], cwd: WEB }),
     dev: () => ({ cmd: diffpackBin, argv: ["dev", WEB, String(PORT)], cwd: repoRoot }),
   },
   {
     key: "turbopack",
     label: "Turbopack",
-    outDir: join(WEB, ".next"),
-    build: () => ({ cmd: nextBin, argv: ["build"], cwd: WEB }),
+    outDirs: [join(WEB, ".next")],
+    // `--turbopack` explicitly: Next 16 defaults to it for `build`, but the default is
+    // version- and config-dependent (and Next hard-exits when it auto-selects
+    // Turbopack for a project with a webpack config and no turbopack config), so a
+    // harness whose whole subject is Turbopack should not be relying on it.
+    build: () => ({ cmd: nextBin, argv: ["build", "--turbopack"], cwd: WEB }),
     dev: () => ({ cmd: nextBin, argv: ["dev", "--turbopack", "--port", String(PORT)], cwd: WEB }),
   },
 ];
@@ -252,12 +289,12 @@ process.exit(0);
 
 async function buildSection() {
   banner("PRODUCTION BUILD");
-  for (const s of SIDES) report.build[s.key] = { wallMs: [], cpuUserS: [], peakRssMb: [] };
+  for (const s of SIDES) report.build[s.key] = { wallMs: [], cpuUserS: [], peakRssTreeMb: [], peakRssSingleMb: [], rssSamples: [] };
 
   for (let pair = 1; pair <= PAIRS; pair++) {
     for (const side of SIDES) {
       const { cmd, argv, cwd } = side.build();
-      rmSync(side.outDir, { recursive: true, force: true });
+      for (const dir of side.outDirs) rmSync(dir, { recursive: true, force: true });
       const load0 = loadavg()[0];
       const t0 = Date.now();
       const res = await runTimed(cmd, argv, cwd);
@@ -266,10 +303,13 @@ async function buildSection() {
       const r = report.build[side.key];
       r.wallMs.push(wall);
       r.cpuUserS.push(res.userS);
-      r.peakRssMb.push(res.maxRssMb);
+      r.peakRssTreeMb.push(res.treePeakMb);
+      r.peakRssSingleMb.push(res.maxRssMb);
+      r.rssSamples.push(res.rssSamples);
       console.log(
         `  [${pair}/${PAIRS}] ${side.label.padEnd(9)} wall=${fmtS(wall)} cpu(user)=${res.userS.toFixed(1)}s ` +
-        `peakRSS=${fmtMb(res.maxRssMb)} (load ${load0.toFixed(1)} -> ${loadavg()[0].toFixed(1)})`,
+        `peakRSS(tree)=${fmtMb(res.treePeakMb)} peakRSS(largest single proc)=${fmtMb(res.maxRssMb)} ` +
+        `[${res.rssSamples} samples] (load ${load0.toFixed(1)} -> ${loadavg()[0].toFixed(1)})`,
       );
     }
   }
@@ -282,7 +322,7 @@ async function devSection() {
   for (const side of SIDES) {
     console.log(`\n---- ${side.label} dev ----`);
     restoreAll(); // every side starts from pristine sources
-    rmSync(side.outDir, { recursive: true, force: true });
+    for (const dir of side.outDirs) rmSync(dir, { recursive: true, force: true });
     requirePortFree();
 
     const out = { startup: null, secondRouteMs: null, hmr: {}, fresh: {} };
@@ -434,10 +474,20 @@ function printTable(r, outPath) {
       bd.cpuUserS.map((x) => `${x.toFixed(1)} s`).join(" / "), bt.cpuUserS.map((x) => `${x.toFixed(1)} s`).join(" / "),
       ratio(median(bd.cpuUserS), median(bt.cpuUserS)),
     );
+    // The comparable memory axis: both sides are process trees, so this is the summed
+    // RSS of the tree, sampled every 250 ms.
     row(
-      "Cold build peak RSS",
-      bd.peakRssMb.map(fmtMb).join(" / "), bt.peakRssMb.map(fmtMb).join(" / "),
-      ratio(median(bd.peakRssMb), median(bt.peakRssMb)),
+      "Cold build peak RSS (whole process tree, sampled)",
+      bd.peakRssTreeMb.map(fmtMb).join(" / "), bt.peakRssTreeMb.map(fmtMb).join(" / "),
+      ratio(median(bd.peakRssTreeMb), median(bt.peakRssTreeMb)),
+    );
+    // Reported for continuity with `/usr/bin/time -l` and labelled for what it is:
+    // ru_maxrss is the largest single process, so it under-reports both trees, and not
+    // by the same factor. Not the headline.
+    row(
+      "…largest single process only (ru_maxrss, under-reports both)",
+      bd.peakRssSingleMb.map(fmtMb).join(" / "), bt.peakRssSingleMb.map(fmtMb).join(" / "),
+      ratio(median(bd.peakRssSingleMb), median(bt.peakRssSingleMb)),
     );
   }
 
@@ -520,20 +570,37 @@ function tail(s, n) { return s.length > n ? s.slice(-n) : s; }
 
 // Run a build under `/usr/bin/time -l` (macOS: bytes) and return wall-independent
 // resource facts. Wall is timed by the caller so it covers spawn to exit exactly.
+//
+// CPU (user) comes from `/usr/bin/time -l`, which accumulates waited-for descendants,
+// so it is a true tree total. PEAK MEMORY does not: `maximum resident set size` is
+// `ru_maxrss`, the largest SINGLE process in the tree. Both sides here are trees
+// (diffpack's production build runs client, react-server and ssr concurrently; `next
+// build` spawns workers), so ru_maxrss under-reports both, by different amounts, and
+// comparing the two is comparing each side's biggest process rather than its
+// footprint. So the tree is sampled too, and `treePeakMb` is the comparable number.
 function runTimed(cmd, argv, cwd) {
   return new Promise((resolve) => {
     const p = spawn("/usr/bin/time", ["-l", cmd, ...argv], { cwd, env: benchEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    const rssSampler = sampleTreeRss(p.pid);
     let out = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (out += d));
     p.on("close", (code) => {
+      const treePeakMb = rssSampler.stop();
       const user = /([0-9.]+)\s+user/.exec(out);
       const rss = /([0-9]+)\s+maximum resident set size/.exec(out);
       if (!user || !rss) {
-        resolve({ code: code === 0 ? 1 : code, output: `${out}\n(could not parse /usr/bin/time -l output)`, userS: 0, maxRssMb: 0 });
+        resolve({ code: code === 0 ? 1 : code, output: `${out}\n(could not parse /usr/bin/time -l output)`, userS: 0, maxRssMb: 0, treePeakMb: 0, rssSamples: 0 });
         return;
       }
-      resolve({ code, output: out, userS: Number(user[1]), maxRssMb: Number(rss[1]) / (1024 * 1024) });
+      resolve({
+        code,
+        output: out,
+        userS: Number(user[1]),
+        maxRssMb: Number(rss[1]) / (1024 * 1024),
+        treePeakMb: treePeakMb ?? 0,
+        rssSamples: rssSampler.count(),
+      });
     });
   });
 }
@@ -554,15 +621,27 @@ function benchEnv() {
 
 async function waitFor200(url, timeoutMs, getLog) {
   const deadline = Date.now() + timeoutMs;
+  let shellHits = 0;
   while (Date.now() < deadline) {
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(30000), redirect: "manual" });
-      if (r.status === 200) { await r.text(); return; }
-      await r.text().catch(() => {});
+      const body = await r.text().catch(() => "");
+      if (r.status === 200) {
+        if (body.includes(READY_MARKER) && body.includes("</html>")) {
+          if (shellHits) {
+            console.log(`    (${url} answered 200 without ${JSON.stringify(READY_MARKER)} ${shellHits}x first; those did not count)`);
+          }
+          return { shellHits };
+        }
+        shellHits++;
+      }
     } catch {}
     await sleep(20);
   }
-  throw new Error(`no 200 from ${url} within ${timeoutMs} ms. Server log tail:\n${tail(getLog(), 4000)}`);
+  throw new Error(
+    `no 200 carrying ${JSON.stringify(READY_MARKER)} from ${url} within ${timeoutMs} ms ` +
+    `(${shellHits} bare 200s; a wrong --ready-marker looks exactly like this). Server log tail:\n${tail(getLog(), 4000)}`,
+  );
 }
 
 // Kill the whole descendant tree: both dev servers outlive a bare kill of the
@@ -669,6 +748,7 @@ function parseArgs(a) {
     else if (k === "--settle") o.settle = Number(a[++i]);
     else if (k === "--cadence") o.cadence = Number(a[++i]);
     else if (k === "--only") o.only = a[++i];
+    else if (k === "--ready-marker") o.readyMarker = a[++i];
     else if (k === "--out") o.out = a[++i];
     else throw new Error(`unknown arg ${k}`);
   }

@@ -1,0 +1,6 @@
+fn main() {
+  let ok = Process.exec("printf structured-ok")
+  Console.log("ok=${ok.exitCode} stdout=${ok.stdout}")
+  let bad = Process.exec("printf structured-fail; exit 7")
+  Console.log("bad=${bad.exitCode} stdout=${bad.stdout}")
+}

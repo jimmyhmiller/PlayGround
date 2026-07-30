@@ -357,17 +357,17 @@ fn check_instruction(
                 function: callee,
                 args,
             } => {
-                // Resolve the callee's signature from the world (its current
-                // Ready version) or, failing that, from the batch of functions
-                // being installed together (`extra`) — which is how a call to a
-                // not-yet-installed function, including recursion, type-checks.
-                let (params, result) = if let Some(version) = world.current_functions.get(callee) {
+                // Prefer the batch being installed together (`extra`) over the
+                // current world. That lets mutually-dependent Broken functions
+                // be repaired in one edit; otherwise their old Broken entries
+                // would prevent either new body from verifying first.
+                let (params, result) = if let Some(sig) = extra.get(callee) {
+                    sig.clone()
+                } else if let Some(version) = world.current_functions.get(callee) {
                     match &world.functions[&(*callee, *version)] {
                         crate::FunctionState::Ready(f) => (f.params.clone(), f.result.clone()),
                         _ => return Err(format!("callee {callee} is broken")),
                     }
-                } else if let Some(sig) = extra.get(callee) {
-                    sig.clone()
                 } else {
                     return Err(format!("unknown function {callee}"));
                 };

@@ -148,6 +148,34 @@ the pointee's.
 
 ⚠ You cannot impl on a reference type `(mut T)` — impl on `T` itself.
 
+**Inherent/extension methods.** Omit the trait to attach methods directly to a type.
+Generic and imported targets work too. A method whose first parameter is the target
+type (possibly behind `ptr`/`mut`) is receiver-dispatched from argument zero, so the
+call is bare; the parameter name is ordinary and need not be `self`.
+
+    (defstruct Point [(x i64) (y i64)])
+    (impl Point
+      (new [(x i64) (y i64)] (-> Point) …)       ; associated: no receiver
+      (sum [(p Point)] (-> i64) …)               ; receiver by value
+      (shift! [(p (mut Point)) (d i64)] (-> i64) …))
+
+    (let [(mut p) (Point::new 10 20)]
+      (shift! (mut p) 1)                         ; owner inferred from p
+      (sum p))
+
+A receiverless associated function has no argument from which to infer its owner, so
+call it as `Type::name`. Inherent methods take precedence over a same-named trait
+method for a matching receiver; `Trait::method` still explicitly selects the trait.
+Every type that can carry a trait impl can be extended: structs, sums, scalars,
+generic instances, pointers, slices, arrays, vectors, function pointers, and `Code`.
+An extension is present when its defining module is imported; duplicate applicable
+definitions are reported rather than silently selected. For a generic target:
+
+    (impl [T] (Box T)
+      (box [(x T)] (-> (Box T)) …)
+      (get [(b (Box T))] (-> T) …))
+    (let [b (Box::box 42)] (get b))              ; T inferred = i64
+
 **Trait objects:** `(defdyn Trait)` after the trait reflects its methods into a vtable.
 A `(dyn Trait)` param then accepts a pointer to *any* implementer — the coercion is
 automatic at call/return sites, or explicit with `(make-dyn Trait p)`. The trait's
@@ -170,8 +198,9 @@ bit reinterpret**. For a bitcast (e.g. NaN-boxing) round-trip through memory:
 
 ## Control flow
 
-Core: `if`, `do`, `let`, `loop`/`break`/`continue`. Macros (no import needed —
-reexported from core): `when unless cond case case-by while for and or not`.
+Core: `if`, `do`, `let`, `loop`/`break`/`continue`. `cond` is defined directly in
+`coil.core`; the other everyday macros are reexported there, so none require an
+import: `when unless cond case case-by while for and or not`.
 
     (if cond then else)      ; ⚠ BOTH branches required, and they must have the
                              ;    SAME type (the whole if yields a value).
@@ -417,8 +446,9 @@ source span underlined, and the build fails after printing them all if any was a
 the diagnostic gains a `help: try: …` line. Nothing is written by an ordinary build —
 `coil lint --fix` is the only writer, and it renders any node that came from source as
 its **original bytes**, so comments and formatting inside an untouched branch survive
-and only the part that changed is new text. A round that stops compiling is reverted,
-and a fix that would delete a comment is reported but never applied. See
+and only the part that changed is new text. A round that stops compiling is reverted.
+Comments between nodes — the one thing no `Code` value records — are carried across the
+rewrite, so collapsing a commented `if` chain keeps every comment. See
 `docs/AUTOFIX.md`, and `metaprog-poc/condlint.coil` for a rule that turns a chain of
 three or more nested `if`s into a `cond`:
 
@@ -547,7 +577,7 @@ as a struct field name. When in doubt, prefix your name (`p-call`, `vm-call`).
 These modules ship inside the compiler — `(import \"NAME.coil\" :use *)` works from
 anywhere, no path or install step:
 `alloc` (allocators), `arraylist`, `hashmap`, `slice`, `str`, `mem`, `io`, `fmt`,
-`print`, `fs` (files), `result` (Option/Result), `control` (case/cond/while/for/…),
+`print`, `fs` (files), `result` (Option/Result), `control` (case/while/for/…),
 `match`, `try`, `thread`, `atomic`, `simd`, `closure`, `derive`, `mmio`, `sexp`,
 `assert` (assert/deftest), `dbgalloc` and `stacklint` (both used by
 `--debug-checks`). The common ones are summarized above; import a module and call

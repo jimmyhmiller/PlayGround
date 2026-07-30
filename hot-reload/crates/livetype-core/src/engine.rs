@@ -45,17 +45,13 @@
 
 use crate::mt::{Outcome, Shared};
 use crate::native::{
-    NativeHost, OUT_CALL, OUT_CONDITION, OUT_RETURN, OUT_TYPE_ERROR, OUT_YIELD, RawFrame, RawSlot,
-    TAG_BOOL, TAG_F64, TAG_FNREF, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF,
-    TAG_STR, TAG_UNIT, step_at,
+    NativeHost, OUT_CALL, OUT_CONDITION, OUT_RETURN, OUT_TYPE_ERROR, OUT_YIELD, RawFrame, RawSlot, TAG_BOOL, TAG_F64,
+    TAG_FNREF, TAG_FOREIGN, TAG_I64, TAG_KIND_SHIFT, TAG_MASK, TAG_REF, TAG_STR, TAG_UNIT, step_at,
 };
-use crate::runtime::{
-    ERR_INDIRECT_NON_FN, ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape,
-};
+use crate::runtime::{ERR_INDIRECT_NON_FN, ForeignFn, InstallError, ResumePlan, operand_type_error, resume_shape};
 use crate::{
-    ActorStatus, Condition, DefId, Flow, ForeignCall, ForeignFnId, Frame, Function, FunctionState,
-    GlobalRead, Heap, Instruction, Machine, Migration, ObjectId, RecvResult, Schema, Type, Value,
-    Version, World, step_instruction,
+    ActorStatus, Condition, DefId, Flow, ForeignCall, ForeignFnId, Frame, Function, FunctionState, GlobalRead, Heap,
+    Instruction, Machine, Migration, ObjectId, RecvResult, Schema, Type, Value, Version, World, step_instruction,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -279,6 +275,9 @@ impl Engine {
     ) -> Result<(), InstallError> {
         self.shared.install_verified_function(function, deps)
     }
+    pub fn install_broken_function(&self, function: Function, diagnostics: Vec<String>) -> Result<(), InstallError> {
+        self.shared.install_broken_function(function, diagnostics)
+    }
     pub fn install_migration(&self, migration: Migration) -> Result<(), InstallError> {
         self.shared.install_migration(migration)
     }
@@ -310,19 +309,15 @@ impl Engine {
 
     /// Spawn with an explicit tid — [`Engine::run_threads`] uses dense `0..n`
     /// tids so hand-built `Send` targets stay meaningful.
-    pub fn spawn_with_tid(
-        &self,
-        tid: usize,
-        func: DefId,
-        args: Vec<Value>,
-    ) -> Result<Actor, Condition> {
+    pub fn spawn_with_tid(&self, tid: usize, func: DefId, args: Vec<Value>) -> Result<Actor, Condition> {
         let world = self.shared.world_read();
-        let version = *world.current_functions.get(&func).ok_or_else(|| {
-            Condition::BrokenFunction {
+        let version = *world
+            .current_functions
+            .get(&func)
+            .ok_or_else(|| Condition::BrokenFunction {
                 function: func,
                 diagnostics: vec!["unknown function".into()],
-            }
-        })?;
+            })?;
         let registers_len = match &world.functions[&(func, version)] {
             FunctionState::Ready(f) => f.registers,
             FunctionState::Broken { diagnostics, .. } => {
@@ -434,10 +429,7 @@ impl Engine {
     /// developer knows what to hand back. `None` if the actor isn't paused on a
     /// value-resumable type trap.
     pub fn pause_expected(&self, actor: &Actor) -> Option<Type> {
-        if !matches!(
-            actor.status,
-            ActorStatus::Paused(Condition::RuntimeTypeError { .. })
-        ) {
+        if !matches!(actor.status, ActorStatus::Paused(Condition::RuntimeTypeError { .. })) {
             return None;
         }
         let frame = actor.stack.last()?;
@@ -456,10 +448,7 @@ impl Engine {
     /// repair can never reintroduce an ill-typed value. Leaves the actor
     /// `Runnable` (or `Complete`); call [`Engine::run`] to continue it.
     pub fn resume_with(&self, actor: &mut Actor, value: Value) -> Result<(), String> {
-        if !matches!(
-            actor.status,
-            ActorStatus::Paused(Condition::RuntimeTypeError { .. })
-        ) {
+        if !matches!(actor.status, ActorStatus::Paused(Condition::RuntimeTypeError { .. })) {
             return Err("actor is not paused on a resumable type trap".into());
         }
         let (expected, plan) = {
@@ -471,9 +460,7 @@ impl Engine {
             resume_shape(&f.code[frame.pc()], &f.result, &world)?
         };
         if !self.shared.value_ok(&value, &expected) {
-            return Err(format!(
-                "supplied value does not have the expected type {expected:?}"
-            ));
+            return Err(format!("supplied value does not have the expected type {expected:?}"));
         }
         match plan {
             ResumePlan::SetAdvance(dst) => {
@@ -620,12 +607,7 @@ impl Engine {
             let mut host = NativeHost::new(&self.shared);
             let out = unsafe { step(&mut raw, &mut host as *mut NativeHost) };
             frame.pc = raw.pc as usize;
-            (
-                out,
-                host.take_pending(),
-                raw.scratch,
-                (frame.func_id, frame.version),
-            )
+            (out, host.take_pending(), raw.scratch, (frame.func_id, frame.version))
         };
 
         match outcome {
@@ -646,9 +628,7 @@ impl Engine {
                         actor.status = ActorStatus::Paused(Condition::RuntimeTypeError {
                             function: fid,
                             pc: ret_pc,
-                            message: format!(
-                                "return value: expected {ty:?}, found a value of another type"
-                            ),
+                            message: format!("return value: expected {ty:?}, found a value of another type"),
                         });
                         return Turn::Paused;
                     }
@@ -662,9 +642,7 @@ impl Engine {
             OUT_CALL => self.jit_handle_call(actor),
             OUT_YIELD => Turn::Yielded,
             OUT_CONDITION => {
-                actor.status = ActorStatus::Paused(
-                    pending.expect("CONDITION outcome without a stashed condition"),
-                );
+                actor.status = ActorStatus::Paused(pending.expect("CONDITION outcome without a stashed condition"));
                 Turn::Paused
             }
             OUT_TYPE_ERROR => {
@@ -681,8 +659,7 @@ impl Engine {
                     FunctionState::Ready(f) => f.code[trap_pc].clone(),
                     _ => unreachable!("a frame only pins ready code"),
                 });
-                actor.status =
-                    ActorStatus::Paused(operand_type_error(key.0, trap_pc, &instruction));
+                actor.status = ActorStatus::Paused(operand_type_error(key.0, trap_pc, &instruction));
                 Turn::Paused
             }
             other => {
@@ -873,16 +850,9 @@ impl Engine {
             // A function value matches any fn type at a data boundary (the
             // call itself re-checks against the current signature).
             Type::Fn(..) => slot.tag == TAG_FNREF,
-            Type::Array(_) => {
-                slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected)
-            }
-            Type::Foreign(kind) => {
-                slot.tag & TAG_MASK == TAG_FOREIGN
-                    && (slot.tag >> TAG_KIND_SHIFT) as u32 == *kind
-            }
-            Type::Ref(_) => {
-                slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected)
-            }
+            Type::Array(_) => slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected),
+            Type::Foreign(kind) => slot.tag & TAG_MASK == TAG_FOREIGN && (slot.tag >> TAG_KIND_SHIFT) as u32 == *kind,
+            Type::Ref(_) => slot.tag == TAG_REF && self.shared.value_ok(&slot.to_value(), expected),
         }
     }
 
@@ -1080,18 +1050,10 @@ impl Machine for EngineMachine<'_> {
     fn call_foreign(&mut self, id: ForeignFnId, args: &[Value]) -> ForeignCall {
         match self.engine.shared.call_foreign(id, args) {
             Some(v) => ForeignCall::Done(Ok(v)),
-            None => ForeignCall::Done(Err(format!(
-                "foreign fn {id} has no registered implementation"
-            ))),
+            None => ForeignCall::Done(Err(format!("foreign fn {id} has no registered implementation"))),
         }
     }
-    fn push_call(
-        &mut self,
-        callee: DefId,
-        version: Version,
-        registers: Vec<Option<Value>>,
-        return_reg: usize,
-    ) {
+    fn push_call(&mut self, callee: DefId, version: Version, registers: Vec<Option<Value>>, return_reg: usize) {
         self.engine
             .push_callee(self.world, self.actor, callee, version, registers, Some(return_reg));
     }

@@ -162,7 +162,7 @@
     [a (load (field m alc)) oldslots (load (field m slots)) oldcap (load (field m cap))]
     (match
       (alloc-slice [(Entry K V)] a newcap)
-      (None [] (do (oom) -1))
+      (None [] (do (oom-at c"hashmap hm-grow!" (imul newcap (sizeof (Entry K V)))) -1))
       (Some
         [ns]
         (do

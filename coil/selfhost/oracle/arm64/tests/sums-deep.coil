@@ -51,6 +51,23 @@
   (Packed [(cells (array i32 4))])
   (Empty []))
 
+; Arbitrary-width integers must round partial bytes up during payload sizing.
+; Five u9 cells occupy ten bytes, so the payload needs two i64 words.
+(defsum OddArr
+  (OddPacked [(cells (array u9 5))])
+  (OddEmpty []))
+
+; LLVM has allocation alignment but no aligned-struct type. These assertions and
+; the nested runtime access pin LayoutDb's size/alignment/offset contract across
+; the LLVM and native backends.
+(defstruct Over :layout (align 16) [(value i64)])
+(defstruct OverOuter [(tag u8) (inner Over) (tail u8)])
+(static-assert (icmp-eq (sizeof Over) 16) "over-aligned size")
+(static-assert (icmp-eq (alignof Over) 16) "over-aligned alignment")
+(static-assert (icmp-eq (offsetof OverOuter inner) 16) "nested aligned offset")
+(static-assert (icmp-eq (offsetof OverOuter tail) 32) "nested aligned tail")
+(static-assert (icmp-eq (sizeof OverOuter) 48) "nested aligned size")
+
 (defn arr-stride [] (-> i64)
   (let [p (alloc-stack (array Arr 2)) q (cast (ptr Arr) p)]
     (isub (cast i64 (index q 1)) (cast i64 (index q 0)))))
@@ -70,6 +87,34 @@
                 (store! j (iadd (load j) 1)))))
           (load tot))))))
 
+(defn odd-arr-stride [] (-> i64)
+  (let [p (alloc-stack (array OddArr 2)) q (cast (ptr OddArr) p)]
+    (isub (cast i64 (index q 1)) (cast i64 (index q 0)))))
+
+(defn odd-arr-roundtrip [] (-> i64)
+  (let [cell (alloc-stack (array u9 5)) (mut i) 0]
+    (loop (if (icmp-ge (load i) 5) (break)
+      (do (store! (index cell (load i)) (cast u9 (imul (iadd (load i) 1) 60)))
+          (store! i (iadd (load i) 1)))))
+    (match (OddPacked (load cell))
+      (OddEmpty [] -1)
+      (OddPacked [cs]
+        (let [c (alloc-stack (array u9 5)) (mut j) 0 (mut tot) 0]
+          (store! c cs)
+          (loop (if (icmp-ge (load j) 5) (break)
+            (do (store! tot (iadd (load tot) (cast i64 (load (index c (load j))))))
+                (store! j (iadd (load j) 1)))))
+          (load tot))))))
+
+(defn aligned-roundtrip [] (-> i64)
+  (let [p (alloc-stack OverOuter)]
+    (store! (field p tag) (cast u8 1))
+    (store! (field (field p inner) value) 40)
+    (store! (field p tail) (cast u8 1))
+    (iadd (cast i64 (load (field p tag)))
+          (iadd (load (field (field p inner) value))
+                (cast i64 (load (field p tail)))))))
+
 (defn tree-sum [(t Tree)] (-> i64)
   (match t
     (Leaf [v] v)
@@ -88,6 +133,10 @@
     (out w "arr-sizeof"    (sizeof Arr))
     (out w "arr-ct-sizeof" (comptime (sizeof Arr)))
     (out w "arr-sum"       (arr-roundtrip))
+    (out w "odd-arr-stride" (odd-arr-stride))
+    (out w "odd-arr-sizeof" (sizeof OddArr))
+    (out w "odd-arr-sum" (odd-arr-roundtrip))
+    (out w "aligned" (aligned-roundtrip))
     ; all 8 variants through one dispatcher, built in a loop
     (let [(mut k) 0 (mut acc) 0]
       (loop (if (icmp-ge (load k) 8) (break)

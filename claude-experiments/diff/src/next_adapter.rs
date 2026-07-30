@@ -5825,10 +5825,17 @@ async function main() {{
 // and the SSR flight client dies decoding a duplicated row
 // (`chunk.reason.enqueueModel is not a function`), with a flight exactly 2x its correct
 // size. Keyed by this module's own URL so a process that legitimately hosts two
-// different entries still starts each one.
+// different entries still starts each one. Strip search/hash first: importing the SAME
+// entry through a cache-busting `server.mjs?v=...` URL must not turn it into a second
+// worker. That was the old dev refresh mechanism, and stale orchestrators / pending
+// refreshes can still have such an import in flight while the worker is coming up.
 const __diffpackStarted = (globalThis.__diffpack_rsc_entry_started ??= new Set());
-if (!__diffpackStarted.has(import.meta.url)) {{
-  __diffpackStarted.add(import.meta.url);
+const __diffpackEntryUrl = new URL(import.meta.url);
+__diffpackEntryUrl.search = "";
+__diffpackEntryUrl.hash = "";
+const __diffpackEntryKey = __diffpackEntryUrl.href;
+if (!__diffpackStarted.has(__diffpackEntryKey)) {{
+  __diffpackStarted.add(__diffpackEntryKey);
   main().catch((error) => {{
     console.error(error && error.stack ? error.stack : String(error));
     process.exit(1);
@@ -6155,6 +6162,20 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       resolve(html);
     }});
     sink.on("error", reject);
+    // react-dom's ready callbacks are NOT fire-once, so `pipe` (which throws
+    // "React currently only supports piping to one writable stream." on a second call)
+    // has to be guarded. Measured, not defensive: when the last work to finish is a
+    // Suspense boundary that still holds abortable fallback tasks, `finishedTask`
+    // decrements `allPendingTasks` FIRST, then aborts those fallback tasks — and each
+    // abort re-enters `finishedTask`, whose own tail sees the counter already at 0 and
+    // calls `completeAll` -> `onAllReady`. The outer frame's tail then calls it AGAIN.
+    // (Stack captured on React 19.3.0-canary as vendored by Next 16, rendering
+    // `integration/next-app-router`'s /error-demo.) Everything React itself passes for
+    // `onAllReady` is a promise `resolve`, which absorbs the second call silently; ours
+    // did not, and the throw came back out through the enclosing task's catch as a
+    // RECOVERABLE error — logged once per request, and enough to mark an
+    // already-completed boundary client-rendered had the destination not already closed.
+    let piped = false;
     const {{ pipe }} = renderToPipeableStream(root, {{
       // Content-Security-Policy: the request's `script-src 'nonce-…'` value, so every
       // script react-dom emits (the bootstrap module + the inline bootstrap content)
@@ -6171,6 +6192,8 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onAllReady() {{
+        if (piped) return;
+        piped = true;
         pipe(sink);
       }},
       // A fatal shell error (before the first Suspense boundary) aborts the render.
@@ -6313,6 +6336,11 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
     }});
     sink.on("finish", resolve);
     sink.on("error", reject);
+    // Guarded for the same reason the buffered path's `onAllReady` is (see there): a
+    // react-dom ready callback can fire more than once, and the second `pipe` throws.
+    // Here it would ALSO be a second `res.writeHead` on a response whose head has gone
+    // out — ERR_HTTP_HEADERS_SENT, which this path is otherwise careful to never risk.
+    let piped = false;
     const {{ pipe }} = renderToPipeableStream(root, {{
       nonce: nonce || undefined,
       // See the buffered path: react-dom would emit this `async`, which is unordered against
@@ -6326,6 +6354,8 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
         "window.__DIFFPACK_PARAMS__ = " + JSON.stringify(params || {{}}) + ";" +
         "window.__DIFFPACK_URL__ = " + JSON.stringify({{ pathname: pathname, search: search }}) + ";",
       onShellReady() {{
+        if (piped) return;
+        piped = true;
         res.writeHead(status || 200, headers);
         pipe(sink);
       }},
@@ -12320,6 +12350,111 @@ console.log(out.join("|"));
         assert!(
             ssr.contains("if (!shellStarted && !res.headersSent) {"),
             "onShellError must check res.headersSent: {ssr}",
+        );
+    }
+
+    /// Starting the react-server entry twice attaches two stdin readers. Both consume
+    /// each request and publish a Flight under the same id, so the orchestrator joins
+    /// the two byte streams and React fails in `resolveModelChunk` with
+    /// `chunk.reason.enqueueModel is not a function`. A cache-busting query does not
+    /// identify a different entry and therefore must not bypass the once guard.
+    #[test]
+    fn rsc_worker_once_key_ignores_cache_busting_url_parts() {
+        let app = scratch("rsc-worker-once-key");
+        std::fs::write(
+            app.join("layout.tsx"),
+            "export default function Layout({children}){return children;}\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("page.tsx"), "export default function Page(){return null;}\n")
+            .unwrap();
+        let layout = first_existing(&app, "layout");
+        let disc = discover_routes(&app, layout.as_deref()).unwrap();
+        let rsc = rsc_entry_module(
+            &disc,
+            &UnbuiltPatterns::default(),
+            &crate::next_font::FontOutput::default(),
+            &app.join("error-boundary.tsx"),
+            &app.join("segment-boundary.tsx"),
+            &app.join("control-boundary.tsx"),
+            &app.join("request-context.ts"),
+            None,
+            "",
+        );
+        assert!(
+            rsc.contains("const __diffpackEntryUrl = new URL(import.meta.url);")
+                && rsc.contains("__diffpackEntryUrl.search = \"\";")
+                && rsc.contains("__diffpackEntryUrl.hash = \"\";")
+                && rsc.contains("const __diffpackEntryKey = __diffpackEntryUrl.href;"),
+            "the worker identity must be the query/hash-free entry URL: {rsc}",
+        );
+        assert!(
+            rsc.contains("if (!__diffpackStarted.has(__diffpackEntryKey))")
+                && rsc.contains("__diffpackStarted.add(__diffpackEntryKey);"),
+            "the normalized key must guard main(), which installs the stdin reader: {rsc}",
+        );
+        assert!(
+            !rsc.contains("__diffpackStarted.has(import.meta.url)")
+                && !rsc.contains("__diffpackStarted.add(import.meta.url)"),
+            "a raw cache-busted URL would start a second worker: {rsc}",
+        );
+    }
+
+    /// Both renderers pipe AT MOST ONCE, because react-dom's ready callbacks are not
+    /// fire-once. When the last work to finish is a Suspense boundary that still holds
+    /// abortable fallback tasks (a boundary whose FALLBACK suspends), `finishedTask`
+    /// decrements `allPendingTasks`, then aborts those fallback tasks — each abort
+    /// re-enters `finishedTask`, whose tail sees the counter at 0 and calls
+    /// `completeAll`; the outer frame's tail then calls it again. The second `pipe`
+    /// throws "React currently only supports piping to one writable stream." into the
+    /// enclosing task's catch, which React reports as RECOVERABLE — so the document
+    /// still arrives and only a log line marks it. cal.com logged exactly that once per
+    /// request.
+    ///
+    /// `scripts/rsc/tests/ssr-pipe-once.test.mjs` is the executable half: it reproduces
+    /// the upstream double call against the vendored react-dom and shows this guard
+    /// absorbing it. This test is what ties that conclusion to the SHIPPED entry.
+    #[test]
+    fn both_renderers_pipe_at_most_once_however_often_react_says_ready() {
+        let ssr = ssr_entry_module(
+            Path::new("/app/.diffpack-next"),
+            &[],
+            &BTreeSet::new(),
+            Path::new("/app/.diffpack-next/hooks-context.ts"),
+            "",
+            &[],
+        );
+        // Every `pipe(sink)` in the entry stands behind a `piped` once-flag, and the flag
+        // is SET BEFORE the call (a `pipe` that throws must not leave the door open).
+        assert_eq!(
+            ssr.matches("pipe(sink);").count(),
+            2,
+            "the buffered and streaming renderers are the only pipe sites: {ssr}",
+        );
+        assert_eq!(
+            ssr.matches("if (piped) return;\n        piped = true;").count(),
+            2,
+            "both pipe sites must be guarded by the once-flag, set before piping: {ssr}",
+        );
+        assert_eq!(
+            ssr.matches("let piped = false;").count(),
+            2,
+            "each render declares its OWN flag (a shared one would break concurrent requests): {ssr}",
+        );
+        // The streaming path's guard also covers `res.writeHead`, where a second call is
+        // not a log line but ERR_HTTP_HEADERS_SENT thrown at the request handler.
+        let stream = ssr
+            .find("export async function renderFlightToStream")
+            .expect("the entry exports the streaming renderer");
+        let guard = ssr[stream..]
+            .find("if (piped) return;")
+            .expect("the streaming renderer guards its ready callback");
+        let head = ssr[stream..]
+            .find("res.writeHead(status || 200, headers);")
+            .expect("the streaming renderer writes the head from onShellReady");
+        assert!(
+            guard < head,
+            "the once-guard must precede res.writeHead, not just the pipe: {ssr}",
         );
     }
 

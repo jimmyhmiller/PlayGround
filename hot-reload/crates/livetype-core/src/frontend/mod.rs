@@ -22,7 +22,7 @@ mod parser;
 pub use ast::*;
 
 use crate::{
-    Condition, DefId, Engine, ForeignFn, Schema, Type, Value, Version, verify_function_with,
+    Condition, DefId, Engine, ForeignFn, Migration, MigrationSource, Schema, Type, Value, Version, verify_function_with,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -120,8 +120,7 @@ impl Session {
             self.ids.global_types().into_iter().collect(),
         );
 
-        let schema_by_id: BTreeMap<DefId, Schema> =
-            lowered.schemas.iter().map(|s| (s.type_id, s.clone())).collect();
+        let schema_by_id: BTreeMap<DefId, Schema> = lowered.schemas.iter().map(|s| (s.type_id, s.clone())).collect();
         let struct_deps: HashMap<DefId, Vec<DefId>> = lowered
             .schemas
             .iter()
@@ -153,6 +152,50 @@ impl Session {
                 .map_err(|e| format!("installing a struct: {e:?}"))?;
         }
 
+        for m in &lowered.bool_to_enum_migrations {
+            let (from, to, old, new) = self.engine.with_world(|w| {
+                let to = w.current_schemas[&m.type_id];
+                let from = Version(to.0.saturating_sub(1));
+                (
+                    from,
+                    to,
+                    w.schemas.get(&(m.type_id, from)).cloned(),
+                    w.schemas.get(&(m.type_id, to)).cloned(),
+                )
+            });
+            let old = old.ok_or_else(|| "a migration needs an older type version".to_string())?;
+            let new = new.ok_or_else(|| "migration target type is missing".to_string())?;
+            let mut fields = BTreeMap::new();
+            for field in &new.fields {
+                if field.id == m.field_id {
+                    fields.insert(
+                        field.id,
+                        MigrationSource::BoolToVariant {
+                            source: m.field_id,
+                            type_id: m.enum_id,
+                            false_variant: m.false_variant,
+                            true_variant: m.true_variant,
+                        },
+                    );
+                } else if old.field(field.id).is_some_and(|f| f.ty == field.ty) {
+                    fields.insert(field.id, MigrationSource::Copy(field.id));
+                } else if let Some(default) = field.default {
+                    fields.insert(field.id, MigrationSource::Value(default));
+                } else {
+                    return Err(format!("field `{}.{}` also needs a migration", new.name, field.name));
+                }
+            }
+            self.engine
+                .install_migration(Migration {
+                    type_id: m.type_id,
+                    from,
+                    to,
+                    fields,
+                    variants: BTreeMap::new(),
+                })
+                .map_err(|e| format!("installing migration: {e:?}"))?;
+        }
+
         let sigs: BTreeMap<DefId, (Vec<Type>, Type)> = lowered
             .functions
             .iter()
@@ -165,16 +208,25 @@ impl Session {
             // verification runs against the world as of this moment — the read
             // guard is released before installing (the write lock is not
             // reentrant with it).
-            let deps = self.engine.with_world(|w| {
+            let (existed, deps) = self.engine.with_world(|w| {
+                let existed = w.current_functions.contains_key(&func.id);
                 let v = w.current_functions.get(&func.id).map_or(1, |c| c.0 + 1);
                 func.version = Version(v);
-                verify_function_with(&func, w, &sigs)
+                (existed, verify_function_with(&func, w, &sigs))
             });
-            let deps =
-                deps.map_err(|diags| format!("in `{}`: {}", func.name, diags.join("; ")))?;
-            self.engine
-                .install_verified_function(func, deps)
-                .map_err(|e| format!("installing a function: {e:?}"))?;
+            match deps {
+                Ok(deps) => self
+                    .engine
+                    .install_verified_function(func, deps)
+                    .map_err(|e| format!("installing a function: {e:?}"))?,
+                Err(diags) if existed => self
+                    .engine
+                    .install_broken_function(func, diags)
+                    .map_err(|e| format!("installing a broken function: {e:?}"))?,
+                Err(diags) => {
+                    return Err(format!("in `{}`: {}", func.name, diags.join("; ")));
+                }
+            }
         }
 
         // Run each `letonce` initializer exactly once: only if the global is not

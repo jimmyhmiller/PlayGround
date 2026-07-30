@@ -1219,9 +1219,17 @@
   ; Phase 8b: object Env { get(name: String) -> Option<String> } — read a process env var.
   (let [e (mkbuiltin DK_BUILTIN_OBJ c"Env")]
     (bdm e (bt-fn1 c"get" (bt-param c"name" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String")))))
-  ; object Process { run(cmd: String) -> String } — run a shell command, return its combined output.
+  ; class ProcessResult { exitCode: Int ; stdout: String }
+  (let [px (mkbuiltin DK_CLASS c"ProcessResult")]
+    (bdm px (bt-field c"exitCode" (bt-type c"Int")))
+    (bdm px (bt-field c"stdout" (bt-type c"String"))))
+  ; object Process { run(cmd) -> String ; capture(cmd) -> String ; exec(cmd) -> ProcessResult }
+  ; run returns combined stdout+stderr for interactive tools; capture keeps stderr separate so
+  ; machine-readable stdout from a child CLI remains parseable.
   (let [pr (mkbuiltin DK_BUILTIN_OBJ c"Process")]
-    (bdm pr (bt-fn1 c"run" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String"))))
+    (bdm pr (bt-fn1 c"run" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String")))
+    (bdm pr (bt-fn1 c"capture" (bt-param c"cmd" (bt-type c"String")) (bt-type c"String")))
+    (bdm pr (bt-fn1 c"exec" (bt-param c"cmd" (bt-type c"String")) (bt-type c"ProcessResult"))))
   ; object File { read(path) -> Option<String> ; write/append(path, content) -> Bool ; exists(path) -> Bool }
   (let [fl (mkbuiltin DK_BUILTIN_OBJ c"File")]
     (bdm fl (bt-fn1 c"read" (bt-param c"path" (bt-type c"String")) (bt-type1 c"Option" (bt-type c"String"))))

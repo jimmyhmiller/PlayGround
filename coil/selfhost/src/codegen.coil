@@ -19,6 +19,7 @@
 (import "normalize.coil" :use *)
 (import "parser.coil" :use *)
 (import "resolve.coil" :use *)
+(import "layoutdb.coil" :use *)
 
 (defstruct Tv [(val (ptr i8)) (ty Type)])
 (defn mk-tv [(v (ptr i8)) (t Type)] (-> Tv)
@@ -99,6 +100,7 @@
    (module (ptr i8))
    (builder (ptr i8))
    (td (ptr i8))
+   (layouts LayoutDb)
    (structs (ArrayList CgStruct))
    (sums (ArrayList CgSum))
    (funcs (ArrayList CgFunc))
@@ -116,26 +118,9 @@
 
 ; ---- map lookups (linear; names are unique so first/last match is the same) ----
 (defn cg-struct-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [CgStruct] (load (field cg structs)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (al-elem [CgStruct] (field cg structs) (load i)) name)) nm)
-                      (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+  (struct-index (field cg layouts) nm))
 (defn cg-sum-idx [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [CgSum] (load (field cg sums)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (al-elem [CgSum] (field cg sums) (load i)) name)) nm) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
+  (sum-index (field cg layouts) nm))
 (defn cg-func [(cg (ptr Cg)) (nm (slice u8))] (-> (ptr i8))  ; 0 if absent
   (let [n (al-len [CgFunc] (load (field cg funcs)))
         (mut i) 0
@@ -247,98 +232,33 @@
               (load (field (al-elem [CgSum] (field cg sums) ui) ty))
               (do (unimplemented "codegen/basic_ty: unknown nominal type") (cast (ptr i8) 0)))))))
 
-; ---- layout helpers: conservative payload sizing for sums.
+; ---- layout helpers: one shared source for runtime representation.
+; align8 also remains a local LLVM ABI utility for padded temporary slots.
 (defn align8 [(x i64)] (-> i64)
   (imul (udiv (iadd x 7) 8) 8))
-(defn type-bytes [(cg (ptr Cg)) (t (ptr Type))] (-> i64)
-  (match (load t)
-    (TInt [bits s] (udiv (iadd bits 7) 8))
-    (TFloat [bits] (udiv bits 8))
-    (TBool [] 1)
-    (TPtr [i] 8)
-    (TFn [c p r] 8)
-    (TRef [m i] 8)
-    (TSlice [el] 16)
-    ; An array does NOT pad its elements to 8 — LLVM's own [N x iM] packs them, and
-    ; so does the arm64 backend (codegen_a64.coil g-type-bytes). Padding here made a
-    ; sum carrying an array a DIFFERENT SIZE in the two backends: a sum wrapping
-    ; (array i32 4) measured 40 bytes under LLVM and 24 under arm64. The per-field
-    ; align8 below stays — it is what keeps the accumulated payload a whole number of
-    ; i64 words, which `udiv … 8` then relies on.
-    (TArray [el n] (imul (type-bytes cg el) n))
-    (TVec [el n] (imul (type-bytes cg el) n))
-    (TStruct [nm] (cg-type-bytes-nominal cg nm))
-    (TNever [] (do (unimplemented "codegen/type_bytes: Never has no size") 0))
-    (TCode [] (do (unimplemented "codegen/type_bytes: Code has no size") 0))
-    (TExternRef [] (do (unimplemented "codegen/type_bytes: externref has no memory layout") 0))
-    (TVoid [] (do (unimplemented "codegen/type_bytes: void has no size") 0))
-    (TApp [n a] 8)))
-(defn cg-type-bytes-nominal [(cg (ptr Cg)) (nm (slice u8))] (-> i64)
-  (let [si (cg-struct-idx cg nm)]
-    (if (icmp-ge si 0)
-        (let [sp (al-elem [CgStruct] (field cg structs) si)
-              fs (load (field sp fields))
-              n (al-len [Field] (load fs))
-              (mut i) 0
-              (mut sum) 0]
-          (loop (if (icmp-ge (load i) n)
-                    (break)
-                    (do
-                      (store! sum (iadd (load sum) (align8 (type-bytes cg (field (al-elem [Field] fs (load i)) ty)))))
-                      (store! i (iadd (load i) 1)))))
-          (load sum))
-        (let [ui (cg-sum-idx cg nm)]
-          (if (icmp-ge ui 0)
-              (iadd 8 (imul (cg-sum-words cg (al-elem [CgSum] (field cg sums) ui)) 8))
-              8)))))
 (defn cg-sum-words [(cg (ptr Cg)) (sp (ptr CgSum))] (-> i64)
-  (let [vs (load (field sp variants))
-        nv (al-len [Variant] (load vs))
-        (mut i) 0
-        (mut maxb) 0]
-    (loop (if (icmp-ge (load i) nv)
-              (break)
-              (do
-                (let [vp (al-elem [Variant] vs (load i))
-                      fs (load (field vp fields))
-                      nf (al-len [Field] (load fs))
-                      (mut j) 0
-                      (mut acc) 0]
-                  (loop (if (icmp-ge (load j) nf)
-                            (break)
-                            (do
-                              (store! acc
-                                      (iadd (load acc)
-                                            (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
-                              (store! j (iadd (load j) 1)))))
-                  (when (icmp-gt (load acc) (load maxb)) (store! maxb (load acc))))
-                (store! i (iadd (load i) 1)))))
-    (udiv (load maxb) 8)))
-; sum_words from a SumDef (used during type registration, before CgSum exists).
+  (sum-words (field cg layouts) (load (field sp variants))))
 (defn cg-sum-words-def [(cg (ptr Cg)) (sd (ptr SumDef))] (-> i64)
-  (let [vs (load (field sd variants))
-        nv (al-len [Variant] (load vs))
-        (mut i) 0
-        (mut maxb) 0]
-    (loop (if (icmp-ge (load i) nv)
-              (break)
-              (do
-                (let [vp (al-elem [Variant] vs (load i))
-                      fs (load (field vp fields))
-                      nf (al-len [Field] (load fs))
-                      (mut j) 0
-                      (mut acc) 0]
-                  (loop (if (icmp-ge (load j) nf)
-                            (break)
-                            (do
-                              (store! acc
-                                      (iadd (load acc)
-                                            (align8 (type-bytes cg (field (al-elem [Field] fs (load j)) ty)))))
-                              (store! j (iadd (load j) 1)))))
-                  (when (icmp-gt (load acc) (load maxb)) (store! maxb (load acc))))
-                (store! i (iadd (load i) 1)))))
-    (udiv (load maxb) 8)))
-
+  (sum-words (field cg layouts) (load (field sd variants))))
+; Keep LLVM authoritative for target-dependent scalar/view types (notably
+; wasm32 pointers). Declared struct layouts, and arrays of them, are Coil's
+; contract and come from the shared database.
+(defn cg-layout-size [(cg (ptr Cg)) (t (ptr Type))] (-> i64)
+  (match-else (load t)
+              (TStruct [name]
+                       (if (icmp-ge (struct-index (field cg layouts) name) 0)
+                           (size (field cg layouts) t)
+                           (LLVMABISizeOfType (load (field cg td)) (basic-ty cg t))))
+              (TArray [elem n] (imul (cg-layout-size cg elem) n))
+              (_ (LLVMABISizeOfType (load (field cg td)) (basic-ty cg t)))))
+(defn cg-layout-align [(cg (ptr Cg)) (t (ptr Type))] (-> i64)
+  (match-else (load t)
+              (TStruct [name]
+                       (if (icmp-ge (struct-index (field cg layouts) name) 0)
+                           (align (field cg layouts) t)
+                           (cast i64 (LLVMABIAlignmentOfType (load (field cg td)) (basic-ty cg t)))))
+              (TArray [elem _n] (cg-layout-align cg elem))
+              (_ (cast i64 (LLVMABIAlignmentOfType (load (field cg td)) (basic-ty cg t))))))
 ; ---- offset_of / const_eval (for static-assert) ----
 (defn cg-offset-of [(cg (ptr Cg)) (t (ptr Type)) (fname (slice u8))] (-> i64)
   (match-else (load t)
@@ -347,23 +267,10 @@
                          (if (icmp-lt si 0)
                              (do (unimplemented "codegen/offsetof: non-struct") 0)
                              (let [sp (al-elem [CgStruct] (field cg structs) si)
-                                   fs (load (field sp fields))
-                                   n (al-len [Field] (load fs))
-                                   (mut i) 0
-                                   (mut idx) -1]
-                               (loop (if (icmp-ge (load i) n)
-                                         (break)
-                                         (do
-                                           (when (str-eq (load (field (al-elem [Field] fs (load i)) name)) fname)
-                                                 (store! idx (load i)))
-                                           (store! i (iadd (load i) 1)))))
-                               (if (icmp-lt (load idx) 0)
-                                   (do (unimplemented "codegen/offsetof: no such field") 0)
-                                   (match-else (load (field sp layout))
-                                               (LExplicit [offs sz al] (al-get [i64] (load offs) (load idx)))
-                                               (_ (LLVMOffsetOfElement (load (field cg td))
-                                                                       (load (field sp ty))
-                                                                       (cast i32 (load idx))))))))))
+                                   idx (field-number (field cg layouts) si fname)]
+                               (match-else (load (field sp layout))
+                                           (LBits [_ _] 0)
+                                           (_ (field-offset (field cg layouts) si idx)))))))
               (_ (do (unimplemented "codegen/offsetof: needs a struct") 0))))
 ; const_eval_t -> (value, is_unsigned). Faithful to:3153.
 (defstruct CEval [(v i64) (uns bool)])
@@ -431,11 +338,9 @@
                 (EBool [b] (mk-ceval (when b 1) false))
                 (EIf [c thn els]
                      (if (icmp-ne (cev-v (const-eval-t cg c)) 0) (const-eval-t cg thn) (const-eval-t cg els)))
-                (ESizeOf [t] (mk-ceval (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (box-type a t))) false))
+                (ESizeOf [t] (mk-ceval (cg-layout-size cg (box-type a t)) false))
                 (EAlignOf [t]
-                          (mk-ceval (cast i64
-                                          (LLVMABIAlignmentOfType (load (field cg td)) (basic-ty cg (box-type a t))))
-                                    false))
+                          (mk-ceval (cg-layout-align cg (box-type a t)) false))
                 (EOffsetOf [t fname] (mk-ceval (cg-offset-of cg (box-type a t) fname) false))
                 (ECast [t inner]
                        (mk-ceval (cev-v (const-eval-t cg inner)) (match-else t (TInt [bits s] (not s)) (_ false))))
@@ -1034,12 +939,10 @@
       (EIndex [pe idx] (emit-index cg pe idx scp))
       (ECast [t inner] (emit-cast cg (box-type a t) inner scp))
       (ESizeOf [t]
-               (mk-tv (cg-const-i64 cg (LLVMABISizeOfType (load (field cg td)) (basic-ty cg (box-type a t))))
+               (mk-tv (cg-const-i64 cg (cg-layout-size cg (box-type a t)))
                       (TInt 64 true)))
       (EAlignOf [t]
-                (mk-tv (cg-const-i64 cg
-                                     (cast i64
-                                           (LLVMABIAlignmentOfType (load (field cg td)) (basic-ty cg (box-type a t)))))
+                (mk-tv (cg-const-i64 cg (cg-layout-align cg (box-type a t)))
                        (TInt 64 true)))
       (EOffsetOf [t fname] (mk-tv (cg-const-i64 cg (cg-offset-of cg (box-type a t) fname)) (TInt 64 true)))
       (EFree [p] (let [pv (emit-expr cg p scp)] (LLVMBuildFree b (tv-val pv)) (mk-tv (cg-zero-i64 cg) (TInt 64 true))))
@@ -1258,23 +1161,23 @@
               (let [fty (load (field (al-elem [Field] fs (load idx)) ty))
                     gep
                       (match-else (load (field sp layout))
-                                  (LExplicit [offs sz al]
-                                             (let [(mut ix) (al-new [(ptr i8)] a)]
-                                               (al-push! (mut ix)
-                                                         (LLVMConstInt (cg-i64t cg)
-                                                                       (al-get [i64] (load offs) (load idx))
-                                                                       0))
-                                               (LLVMBuildGEP2 b
-                                                              (LLVMInt8TypeInContext (cg-ctx cg))
-                                                              (tv-val pv)
-                                                              (carr a (load ix))
-                                                              1
-                                                              (cg-bl cg "field"))))
-                                  (_ (LLVMBuildStructGEP2 b
-                                                          (load (field sp ty))
-                                                          (tv-val pv)
-                                                          (cast i32 (load idx))
-                                                          (cg-bl cg "field"))))]
+                                  (LBits [_ _]
+                                         (LLVMBuildStructGEP2 b
+                                                             (load (field sp ty))
+                                                             (tv-val pv)
+                                                             0
+                                                             (cg-bl cg "field")))
+                                  (_ (let [(mut ix) (al-new [(ptr i8)] a)]
+                                       (al-push! (mut ix)
+                                                 (LLVMConstInt (cg-i64t cg)
+                                                               (field-offset (field cg layouts) si (load idx))
+                                                               0))
+                                       (LLVMBuildGEP2 b
+                                                      (LLVMInt8TypeInContext (cg-ctx cg))
+                                                      (tv-val pv)
+                                                      (carr a (load ix))
+                                                      1
+                                                      (cg-bl cg "field")))))]
                 (mk-tv gep (TPtr (box-type a fty)))))))))
 (defn cg-bug-sl [(msg (slice u8))] (-> (slice u8))
   (unimplemented msg)
@@ -1495,12 +1398,12 @@
               (TStruct [nm]
                        (let [si (cg-struct-idx cg nm)]
                          (unless (icmp-lt si 0)
-                                 (match (load (field (al-elem [CgStruct] (field cg structs) si) layout))
-                                        (LAligned [n] n)
-                                        (LExplicit [offs sz al] (when (icmp-gt al 0) al))
-                                        (LC [] 0)
-                                        (LPacked [] 0)
-                                        (LBits [$g6718 $g6719] 0)))))
+                                 (let [want (load (field (struct-at (field cg layouts) si) align))
+                                       natural (cast i64
+                                                     (LLVMABIAlignmentOfType (load (field cg td))
+                                                                             (basic-ty cg t)))]
+                                   (if (icmp-gt want natural) want 0)))))
+              (TArray [elem _n] (cg-force-align cg elem))
               (_ 0)))
 (defn emit-alloc [(cg (ptr Cg)) (storage i64) (t (ptr Type))] (-> Tv)
   (let [a (load (field cg a))
@@ -2214,6 +2117,7 @@
         (store! (field cgp arch) (arch-from-triple (cstr->slice triple)))
         (store! (field cgp mach_o) (triple-mach-o (cstr->slice triple)))
         (store! (field cgp a) a)
+        (store! (field cgp layouts) (LayoutDb::new a p "codegen"))
         (cg-register-types cgp p)
         (cg-eval-asserts cgp p)
         (cg-declare-externs cgp p)
@@ -2287,6 +2191,11 @@
               (do
                 (cg-set-struct-body cg (al-elem [StructDef] ss (load i)))
                 (store! i (iadd (load i) 1)))))
+    ; LLVM IR has no type-level over-alignment. Once every named body exists,
+    ; finalize them in dependency order and append tail padding until LLVM's
+    ; by-value size/array stride matches LayoutDb. Allocation sites separately
+    ; carry the database alignment via cg-force-align.
+    (cg-finalize-struct-layouts! cg p)
     ; 0d. per-variant field structs.
     (store! i 0)
     (loop (if (icmp-ge (load i) nu)
@@ -2294,6 +2203,65 @@
               (do
                 (cg-fill-variant-structs cg (al-elem [SumDef] us (load i)) (load i))
                 (store! i (iadd (load i) 1)))))
+    0))
+
+(defn cg-finalize-struct-layouts! [(cg (ptr Cg)) (p (ptr Program))] (-> i64)
+  (let [a (load (field cg a))
+        ctx (cg-ctx cg)
+        ss (load (field p structs))
+        n (al-len [StructDef] (load ss))
+        (mut done) (al-new [i64] a)
+        (mut i) 0]
+    (loop (if (icmp-ge (load i) n)
+              (break)
+              (do (al-push! (mut done) 0) (store! i (iadd (load i) 1)))))
+    (let [(mut pass) 0]
+      (loop (if (icmp-ge (load pass) (iadd n 1))
+                (break)
+                (do
+                  (let [(mut si) 0]
+                    (loop (if (icmp-ge (load si) n)
+                              (break)
+                              (do
+                                (when (and (icmp-eq (al-get [i64] (load done) (load si)) 0)
+                                           (struct-ready? (field cg layouts) (load si) (mut done)))
+                                  (let [sd (al-elem [StructDef] ss (load si))
+                                        sp (al-elem [CgStruct] (field cg structs) (load si))]
+                                    (match-else (load (field sd layout))
+                                                (LBits [_ _] 0)
+                                                (LExplicit [_ _ _] 0)
+                                                (_ (let [fs (load (field sd fields))
+                                                        nf (al-len [Field] (load fs))
+                                                        (mut bs) (al-new [(ptr i8)] a)
+                                                        (mut fi) 0
+                                                        packed (match-else (load (field sd layout)) (LPacked [] 1) (_ 0))]
+                                                     (loop (if (icmp-ge (load fi) nf)
+                                                               (break)
+                                                               (do
+                                                                 (al-push! (mut bs)
+                                                                           (basic-ty cg (field (al-elem [Field] fs (load fi)) ty)))
+                                                                 (store! fi (iadd (load fi) 1)))))
+                                                     (LLVMStructSetBody (load (field sp ty))
+                                                                        (carr a (load bs))
+                                                                        (cast i32 nf)
+                                                                        (cast i32 packed))
+                                                     (let [actual (LLVMABISizeOfType (load (field cg td)) (load (field sp ty)))
+                                                           want (load (field (struct-at (field cg layouts) (load si)) size))]
+                                                       (when (icmp-gt actual want)
+                                                             (cg-fail "LLVM struct layout exceeds LayoutDb size"))
+                                                       (when (icmp-lt actual want)
+                                                             (do
+                                                               (al-push! (mut bs)
+                                                                         (LLVMArrayType2 (LLVMInt8TypeInContext ctx)
+                                                                                         (isub want actual)))
+                                                               (LLVMStructSetBody (load (field sp ty))
+                                                                                  (carr a (load bs))
+                                                                                  (cast i32 (al-len [(ptr i8)] (load bs)))
+                                                                                  (cast i32 packed))
+                                                               0))))))
+                                    (al-set! (mut done) (load si) 1)))
+                                (store! si (iadd (load si) 1))))))
+                  (store! pass (iadd (load pass) 1))))))
     0))
 (defn cg-set-struct-body [(cg (ptr Cg)) (sd (ptr StructDef))] (-> i64)
   (let [a (load (field cg a))
@@ -2625,11 +2593,8 @@
   (if (icmp-eq al 0) x (imul (udiv (iadd x (isub al 1)) al) al)))
 ; Flatten CgStruct `si`'s fields into scalar leaves at absolute byte offsets,
 ; recursing into nested structs and arrays. Offsets come from
-; the struct's REAL layout — LLVMOffsetOfElement for LC/packed bodies (field i ==
-; element i), the declared :at offsets for :layout explicit (whose LLVM body is one
-; opaque [size x i8]) — never re-derived by natural alignment, which mis-places
-; every packed/explicit field (packed {u8 i64} put b at offset 8, past the 9-byte
-; struct, and the guard below aborted the build).
+; the struct's REAL LayoutDb offsets — never LLVM's natural offsets, which cannot
+; express Coil's explicit/packed/over-aligned nesting contract.
 (defn abi-flatten-cs [(cg (ptr Cg)) (si i64) (base i64) (out (ptr AbiLeafBox))] (-> i64)
   (let [td (load (field cg td))
         sp (al-elem [CgStruct] (field cg structs) si)
@@ -2664,10 +2629,7 @@
                                (do
                                  (abi-flatten-type cg
                                                    (field (al-elem [Field] fs (load i)) ty)
-                                                   (iadd base
-                                                         (LLVMOffsetOfElement td
-                                                                              (load (field sp ty))
-                                                                              (cast i32 (load i))))
+                                                   (iadd base (field-offset (field cg layouts) si (load i)))
                                                    out)
                                  (store! i (iadd (load i) 1)))))
                      0)))))
@@ -2815,11 +2777,11 @@
 ; classify a struct for the C ABI (StructAbi by pointer). Takes the CgStruct INDEX
 ; so the SysV flatten can honor the struct's real layout (packed/explicit offsets).
 (defn abi-classify [(cg (ptr Cg)) (si i64)] (-> (ptr StructAbi))
-  (let [td (load (field cg td))
-        sp (al-elem [CgStruct] (field cg structs) si)
+  (let [sp (al-elem [CgStruct] (field cg structs) si)
         sty (load (field sp ty))
-        size (LLVMABISizeOfType td sty)
-        align (LLVMABIAlignmentOfType td sty)]
+        le (struct-at (field cg layouts) si)
+        size (load (field le size))
+        align (cast i32 (load (field le align)))]
     (if (icmp-eq (load (field cg arch)) 1)
         (abi-classify-aapcs64 cg (load (field sp fields)) sty size align)
         (abi-classify-sysv cg si sty size align))))

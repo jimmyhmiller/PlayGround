@@ -2,19 +2,28 @@
 
 (extern close :cc c [i32] (-> i32))
 
+(defn
+  os-pick
+  [(linux Code) (darwin Code)]
+  (-> Code)
+  (if (code-eq (target-os) (quasiquote linux)) linux darwin))
+
+(defn
+  gen-open-flags
+  []
+  (-> Code)
+  (quasiquote
+    (do
+      (const O_APPEND (unquote (os-pick (quasiquote 1024) (quasiquote 8))))
+      (const O_CREAT (unquote (os-pick (quasiquote 64) (quasiquote 512))))
+      (const O_TRUNC (unquote (os-pick (quasiquote 512) (quasiquote 1024))))
+      (const O_EXCL (unquote (os-pick (quasiquote 128) (quasiquote 2048)))))))
+
 (const O_RDONLY 0)
 
 (const O_WRONLY 1)
 
 (const O_RDWR 2)
-
-(const O_APPEND 8)
-
-(const O_CREAT 512)
-
-(const O_TRUNC 1024)
-
-(const O_EXCL 2048)
 
 (const FILE_MODE_DEFAULT 420)
 
@@ -44,9 +53,17 @@
     [r (cast :i64 (close (cast i32 (file-fd f))))]
     (if (icmp-lt r 0) (Err (Errno r)) (Ok r))))
 
-(defn file-reader [(f (ptr File))] (-> (ptr Reader)) (fd-reader (file-fd f)))
+(defn
+  file-reader
+  [(r (ptr Reader)) (f (ptr File))]
+  (-> (ptr Reader))
+  (fd-reader r (file-fd f)))
 
-(defn file-writer [(f (ptr File))] (-> (ptr Writer)) (fd-writer (file-fd f)))
+(defn
+  file-writer
+  [(w (ptr Writer)) (f (ptr File))]
+  (-> (ptr Writer))
+  (fd-writer w (file-fd f)))
 
 (defn
   read-file
@@ -117,12 +134,14 @@
       (let
         [fd
           (open cp (cast i32 (| O_WRONLY (| O_CREAT O_TRUNC))) FILE_MODE_DEFAULT)
+          w
+          (alloc-stack Writer)
           res
           (if
             (icmp-lt fd 0)
             (Err [:i64 IoError] (Errno (cast :i64 fd)))
             (write-all
-              (fd-writer (cast :i64 fd))
+              (fd-writer w (cast :i64 fd))
               (cast (ptr i8) (slice-data data))
               (slice-len data)))]
         (if (icmp-ge fd 0) (close fd) 0)

@@ -11,24 +11,6 @@
   (quasiquote (if (unquote c) 0 (do (unquote-splicing body)))))
 
 (defn
-  cond-arms
-  [(cs Code)]
-  (-> Code)
-  (if
-    (icmp-eq (code-count cs) 0)
-    (quasiquote 0)
-    (if
-      (icmp-eq (code-count cs) 1)
-      (code-nth cs 0)
-      (quasiquote
-        (if
-          (unquote (code-nth cs 0))
-          (unquote (code-nth cs 1))
-          (unquote (cond-arms (code-rest (code-rest cs)))))))))
-
-(defn cond [& (cs Code)] (-> Code) (cond-arms cs))
-
-(defn
   case-arms
   [(v Code) (eq Code) (clauses Code)]
   (-> Code)

@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 
-
 fn rt_type_error(message: &str) -> Condition {
     Condition::RuntimeTypeError {
         function: 0,
@@ -172,11 +171,14 @@ impl Shared {
         self.code_epoch.store(world.epoch, Ordering::Release);
         result
     }
+    pub fn install_broken_function(&self, function: Function, diagnostics: Vec<String>) -> Result<(), InstallError> {
+        let mut world = self.world.write().unwrap();
+        let result = world.install_broken_function(function, diagnostics);
+        self.code_epoch.store(world.epoch, Ordering::Release);
+        result
+    }
     pub fn install_migration(&self, migration: Migration) -> Result<(), InstallError> {
-        self.world
-            .write()
-            .unwrap()
-            .install_migration(migration, &self.heap)
+        self.world.write().unwrap().install_migration(migration, &self.heap)
     }
 
     /// The current code epoch (mirrors `world.epoch`) without taking the world
@@ -278,11 +280,7 @@ impl Shared {
 
     // ── JIT bridge (called by the `livetype` crate's externs/driver) ─────────
     /// Allocate at the current schema (thread-safe) — the JIT's `lt_new`.
-    pub fn jit_new(
-        &self,
-        type_id: DefId,
-        supplied: &[(FieldId, Value)],
-    ) -> Result<ObjectId, Condition> {
+    pub fn jit_new(&self, type_id: DefId, supplied: &[(FieldId, Value)]) -> Result<ObjectId, Condition> {
         let world = self.world.read().unwrap();
         self.heap.new_object(type_id, supplied, &world)
     }
@@ -304,11 +302,7 @@ impl Shared {
     }
     /// The `match` barrier — the JIT's `lt_case_variant` (see
     /// [`Heap::variant_case`]).
-    pub fn jit_case_variant(
-        &self,
-        id: ObjectId,
-        arms: &[(VariantId, usize)],
-    ) -> Result<usize, Condition> {
+    pub fn jit_case_variant(&self, id: ObjectId, arms: &[(VariantId, usize)]) -> Result<usize, Condition> {
         let world = self.world.read().unwrap();
         self.heap.variant_case(id, arms, &world)
     }
@@ -326,11 +320,7 @@ impl Shared {
     }
 
     /// The full `CallForeign` semantics for the JIT extern (concurrent tier).
-    pub fn jit_call_foreign(
-        &self,
-        foreign: ForeignFnId,
-        args: &[Value],
-    ) -> Result<Value, Condition> {
+    pub fn jit_call_foreign(&self, foreign: ForeignFnId, args: &[Value]) -> Result<Value, Condition> {
         let result_ty = self
             .world
             .read()
@@ -339,9 +329,9 @@ impl Shared {
             .get(&foreign)
             .map(|(_, r)| r.clone())
             .ok_or_else(|| rt_type_error("call to unknown foreign fn"))?;
-        let result = self.call_foreign(foreign, args).ok_or_else(|| {
-            rt_type_error(&format!("foreign fn {foreign} has no registered implementation"))
-        })?;
+        let result = self
+            .call_foreign(foreign, args)
+            .ok_or_else(|| rt_type_error(&format!("foreign fn {foreign} has no registered implementation")))?;
         if !self.value_ok(&result, &result_ty) {
             return Err(rt_type_error(&format!(
                 "foreign result: expected {result_ty:?}, found a value of another type"

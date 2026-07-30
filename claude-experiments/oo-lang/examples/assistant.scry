@@ -44,7 +44,7 @@
 // The brain + tools + loop live in std/agent.scry (imported below); this file is the app shell:
 // the REPL, the orchestrator, the real sub-agent threads, and the viewer-facing entities.
 
-import agent.core.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
+import agent.core.{Message, Conversation, Tool, Model, ModelResponse, ScriptedModel, AnthropicModel, CliModel, ShellTool, SearchTool, CalcTool, WeatherTool, FileReadTool, FileWriteTool, runAgentLoop, mkTextMessage}
 
 // ============================ small string helpers ============================
 fn startsWith(s: String, p: String) -> Bool {
@@ -204,6 +204,12 @@ class Orchestrator {
   handles: List<ThreadHandle>
   tools: List<Tool>
   brainName: String
+  provider: String
+  access: String
+  modelId: String
+  apiBaseUrl: String
+  maxTurns: Int
+  configError: String
 
   fn init() {
     self.tools = List<Tool>()
@@ -214,14 +220,68 @@ class Orchestrator {
     self.tools.push(FileReadTool(root: "."))             // REAL: reads files
     self.tools.push(FileWriteTool(root: "."))            // REAL: writes files
 
-    // Pick the brain: a real AnthropicModel when ANTHROPIC_API_KEY is set, else the ScriptedModel.
-    let brain = chooseBrain()
-    self.brainName = brainLabel()
+    // Provider policy is live application state, not process configuration. Startup is deliberately
+    // offline + read-only; choose Claude/Codex/API and permissions from this entity's viewer actions.
+    self.provider = "offline"
+    self.access = "read-only"
+    self.modelId = ""
+    self.apiBaseUrl = "https://api.deepseek.com/anthropic"
+    self.maxTurns = 8
+    self.configError = ""
+    self.brainName = "ScriptedModel - offline"
     self.agent = Agent(name: "assistant", role: "orchestrator", color: "36",
-                       model: brain, tools: self.tools)
+                       model: ScriptedModel(persona: "assistant"), tools: self.tools)
     self.subs = List<Agent>()
     self.handles = List<ThreadHandle>()
   }
+
+  fn applyConfig() {
+    self.configError = ""
+    if self.provider == "claude" {
+      self.agent.model = CliModel(provider: "claude", executable: "claude", modelId: self.modelId,
+                                  access: self.access, maxTurns: self.maxTurns)
+      self.brainName = "Claude subscription (" + self.access + ")"
+    } else if self.provider == "codex" {
+      self.agent.model = CliModel(provider: "codex", executable: "codex", modelId: self.modelId,
+                                  access: self.access, maxTurns: self.maxTurns)
+      self.brainName = "Codex subscription (" + self.access + ")"
+    } else if self.provider == "api" {
+      match resolveKey() {
+        Some(key) -> {
+          var selectedModel = "deepseek-v4-pro"
+          if self.modelId.len() > 0 { selectedModel = self.modelId }
+          self.agent.model = AnthropicModel(modelId: selectedModel, apiKey: key,
+                                            systemPrompt: "You are a concise assistant. Use the provided tools when they help.",
+                                            baseUrl: self.apiBaseUrl)
+          self.brainName = "Anthropic-compatible API (" + selectedModel + ")"
+        }
+        None -> {
+          self.provider = "offline"
+          self.agent.model = ScriptedModel(persona: "assistant")
+          self.brainName = "ScriptedModel - offline"
+          self.configError = "No API key is available in the process environment"
+        }
+      }
+    } else {
+      self.provider = "offline"
+      self.agent.model = ScriptedModel(persona: "assistant")
+      self.brainName = "ScriptedModel - offline"
+    }
+  }
+
+  fn useClaude() { self.provider = "claude" self.applyConfig() }
+  fn useCodex() { self.provider = "codex" self.applyConfig() }
+  fn useApi() { self.provider = "api" self.applyConfig() }
+  fn useOffline() { self.provider = "offline" self.applyConfig() }
+  fn allowWorkspaceWrites() { self.access = "workspace-write" self.applyConfig() }
+  fn requireReadOnly() { self.access = "read-only" self.applyConfig() }
+  fn setModel(model: String) { self.modelId = model self.applyConfig() }
+  fn useProviderDefaultModel() { self.modelId = "" self.applyConfig() }
+  fn setMaxTurns(turns: Int) {
+    if turns > 0 { self.maxTurns = turns self.applyConfig() }
+    else { self.configError = "maxTurns must be greater than zero" }
+  }
+  fn setApiBaseUrl(url: String) { self.apiBaseUrl = url self.applyConfig() }
 
   fn help() {
     Console.log(self.agent.banner() + " I can:")
@@ -279,13 +339,9 @@ class Orchestrator {
   }
 }
 
-// Choose the brain from the environment. Default target is DeepSeek's Anthropic-compatible
-// endpoint (deepseek-v4-pro over https://api.deepseek.com/anthropic) — the same /v1/messages
-// tool-use protocol, so AnthropicModel is unchanged but the API key. All three are overridable:
+// API secrets still come from the environment, but provider/model/access selection is live state on
+// Orchestrator and is changed through viewer actions. The native API path accepts:
 //   key:   DEEPSEEK_API_KEY | DEEPSEEK_KEY | ANTHROPIC_API_KEY
-//   base:  ANTHROPIC_BASE_URL   (default https://api.deepseek.com/anthropic)
-//   model: SCRY_MODEL           (default deepseek-v4-pro)
-// No key at all -> the deterministic ScriptedModel. Both implement Model, so the loop is identical.
 fn resolveKey() -> Option<String> {
   match Env.get("DEEPSEEK_API_KEY") {
     Some(k) -> Some(k)
@@ -293,36 +349,6 @@ fn resolveKey() -> Option<String> {
       Some(k) -> Some(k)
       None -> Env.get("ANTHROPIC_API_KEY")
     }
-  }
-}
-
-fn modelBase() -> String {
-  match Env.get("ANTHROPIC_BASE_URL") {
-    Some(u) -> u
-    None -> "https://api.deepseek.com/anthropic"
-  }
-}
-
-fn modelName() -> String {
-  match Env.get("SCRY_MODEL") {
-    Some(m) -> m
-    None -> "deepseek-v4-pro"
-  }
-}
-
-fn chooseBrain() -> Model {
-  match resolveKey() {
-    Some(key) -> AnthropicModel(modelId: modelName(), apiKey: key,
-                                systemPrompt: "You are a concise assistant. Use the provided tools when they help.",
-                                baseUrl: modelBase())
-    None -> ScriptedModel(persona: "assistant")
-  }
-}
-
-fn brainLabel() -> String {
-  match resolveKey() {
-    Some(key) -> "AnthropicModel (" + modelName() + " @ " + modelBase() + ") - LIVE"
-    None -> "ScriptedModel - offline (set DEEPSEEK_API_KEY for the live model)"
   }
 }
 
@@ -393,3 +419,13 @@ action "Resume" for Agent { self.resume() }
 // live-model call AND the question + reply show in the terminal, exactly like typing at the prompt.
 action "Ask"    for Agent (question: String) { let h = Thread.spawn(TurnWorker(agent: self, text: question)) }
 action "Spawn researcher" for Orchestrator (topic: String) { self.research(topic) }
+action "Use Claude" for Orchestrator { self.useClaude() }
+action "Use Codex" for Orchestrator { self.useCodex() }
+action "Use native API" for Orchestrator { self.useApi() }
+action "Go offline" for Orchestrator { self.useOffline() }
+action "Allow workspace writes" for Orchestrator { self.allowWorkspaceWrites() }
+action "Require read-only" for Orchestrator { self.requireReadOnly() }
+action "Set model" for Orchestrator (model: String) { self.setModel(model) }
+action "Use provider default model" for Orchestrator { self.useProviderDefaultModel() }
+action "Set max turns" for Orchestrator (turns: Int) { self.setMaxTurns(turns) }
+action "Set API base URL" for Orchestrator (url: String) { self.setApiBaseUrl(url) }

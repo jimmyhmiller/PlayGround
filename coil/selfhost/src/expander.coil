@@ -208,7 +208,14 @@
                                 (let [core (imports-find impb "coil.core")]
                                   (if (icmp-eq (cast i64 core) 0)
                                       (None [(slice u8)])
-                                      (macro-reexport-match core macros expb head a)))))))))))))
+                                      ; Direct definitions in coil.core are ambient too,
+                                      ; not only names it reexports from imported modules.
+                                      ; This lets core own macros such as `cond` itself.
+                                      (let [coreq (sconcat a "coil.core." head)]
+                                        (if (and (macros-has? macros coreq)
+                                                 (exports-check expb "coil.core" head))
+                                            (Some coreq)
+                                            (macro-reexport-match core macros expb head a)))))))))))))))
 ; Tag every macro-synthesized (dummy-span) node with the expansion `ctxt`, located
 ; at the call site. Non-dummy nodes (template literals, ~unquote-spliced caller
 ; code) keep their own span. Faithful.
@@ -2224,7 +2231,8 @@
   (wb w 41)
   0)
 (defn dump-expand-program [(a (ptr Allocator)) (src (slice u8)) (cwd (slice u8))] (-> i64)
-  (let [w (stdout)
+  (let [bout (alloc-stack BufferedOutput)
+        w (buffered-output-writer bout (stdout))
         s (alloc-stack LS)]
     (store! (field s a) a)
     (store! (field s out) (al-new [TaggedForm] a))
@@ -2248,7 +2256,8 @@
             (load-program (mut s) forms cwd)
             (match (expand-stage3 (mut s))
               (Err [d] (let [dp (alloc-stack Diag)] (store! dp d) (dump-error w dp)))
-              (Ok [_] (d-expanded w a (mut s))))))))
+              (Ok [_] (d-expanded w a (mut s)))))))
+    (buffered-output-flush bout))
   0)
 
 ; ── `coil expand FILE` — the program AS SOURCE after macros AND transforms ────

@@ -41,6 +41,7 @@
 (import "match.coil" :use *)
 (import "ast.coil" :use *)
 (import "parser.coil" :use *)
+(import "layoutdb.coil" :use *)
 (import "x64.coil" :use *)
 (import "elf.coil" :use *)
 (import "dwarf.coil" :use *)
@@ -52,15 +53,6 @@
 (extern cgx64.exit [i32] (-> i64))
 
 ; ============================ state ==========================================
-(defstruct GStruct
-  [(name (slice u8))
-   (fields (ptr (ArrayList Field)))
-   (layout Layout)
-   (size i64)
-   (align i64)
-   (offsets (ArrayList i64))])
-(defstruct GSum
-  [(name (slice u8)) (variants (ptr (ArrayList Variant))) (words i64)])
 (defstruct GSig  ; one callable (function or extern)
   [(name (slice u8))
    (params (ptr (ArrayList Type)))
@@ -93,8 +85,7 @@
 
 (defstruct Cga
   [(a (ptr Allocator))
-   (structs (ArrayList GStruct))
-   (sums (ArrayList GSum))
+   (layouts LayoutDb)
    (sigs (ArrayList GSig))  ; funcs + externs, keyed by name
    (obj EObj)
    (text i64)
@@ -159,408 +150,42 @@
     (GNil [] (None [AVal]))
     (GBind [n av rest] (if (str-eq n name) (Some [AVal] av) (gscope-get rest name)))))
 
-; ---- table lookups --------------------------------------------------------
-(defn g-struct-idx [(g (ptr Cga)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [GStruct] (load (field g structs)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (xal-at [GStruct] (field g structs) (load i)) name)) nm) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn g-sum-idx [(g (ptr Cga)) (nm (slice u8))] (-> i64)
-  (let [n (al-len [GSum] (load (field g sums)))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (xal-at [GSum] (field g sums) (load i)) name)) nm) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (load r)))
-(defn g-sig-idx [(g (ptr Cga)) (nm (slice u8))] (-> i64)
+; ---- shared type layout ----------------------------------------------------
+(defn g-struct-idx [(g (ptr Cga)) (name (slice u8))] (-> i64)
+  (struct-index (field g layouts) name))
+(defn g-sum-idx [(g (ptr Cga)) (name (slice u8))] (-> i64)
+  (sum-index (field g layouts) name))
+(defn g-sig-idx [(g (ptr Cga)) (name (slice u8))] (-> i64)
   (let [n (al-len [GSig] (load (field g sigs)))
         (mut i) 0
-        (mut r) -1]
+        (mut found) -1]
     (loop (if (icmp-ge (load i) n)
               (break)
               (do
-                (when (str-eq (load (field (xal-at [GSig] (field g sigs) (load i)) name)) nm) (store! r (load i)))
+                (when (str-eq (load (field (xal-at [GSig] (field g sigs) (load i)) name)) name)
+                  (store! found (load i))
+                  (break))
                 (store! i (iadd (load i) 1)))))
-    (load r)))
-
-; ============================ type layout ====================================
-; Natural (C) layout, mirroring LLVM's data layout for the same types.
-; Sum payload sizing mirrors codegen.coil's conservative type-bytes/align8
-; word count exactly (the payload is [words x i64]).
-;
-; That "exactly" is load-bearing and was once false: codegen.coil used to align-8
-; each ARRAY ELEMENT while g-type-bytes packed them, so a sum wrapping
-; (array i32 4) was 40 bytes under LLVM and 24 under arm64 — the same type with two
-; sizes depending on which backend built it. Both now pack array elements. If you
-; touch either sizing function, change BOTH, and re-check with a sum whose variant
-; carries an array.
-
+    (load found)))
 (defn ty-align [(g (ptr Cga)) (t (ptr Type))] (-> i64)
-  (match (load t)
-    (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
-    (TFloat [bits] (idiv bits 8))
-    (TBool [] 1)
-    (TVoid [] (cgx-fail "ty-align on void"))
-    (TPtr [_] 8)
-    (TRef [_ _] 8)
-    (TFn [_ _ _] 8)
-    (TNever [] 8)
-    (TArray [elem _n] (ty-align g elem))
-    (TSlice [_] 8)
-    (TVec [elem n] (imul (ty-align g elem) n))  ; 16 for (vec f32 4)
-    (TStruct [nm]
-             (let [si (g-struct-idx g nm)]
-               (if (icmp-ge si 0)
-                   (load (field (xal-at [GStruct] (field g structs) si) align))
-                   (if (icmp-ge (g-sum-idx g nm) 0)
-                       8
-                       (cgx-fail2 "unknown nominal type: " nm)))))
-    (TApp [_ _] (cgx-fail "TApp reached cgx64 (mono bug)"))
-    (TCode [] (cgx-fail "TCode reached cgx64 (mono bug)"))
-    (TExternRef [] (cgx-fail "TCode reached cgx64 (mono bug)"))))
-
+  (align (field g layouts) t))
 (defn ty-size [(g (ptr Cga)) (t (ptr Type))] (-> i64)
-  (match (load t)
-    (TInt [bits _s] (cond (icmp-le bits 8) 1 (icmp-le bits 16) 2 (icmp-le bits 32) 4 :else 8))
-    (TFloat [bits] (idiv bits 8))
-    (TBool [] 1)
-    (TVoid [] (cgx-fail "ty-size on void"))
-    (TPtr [_] 8)
-    (TRef [_ _] 8)
-    (TFn [_ _ _] 8)
-    (TNever [] 8)
-    (TArray [elem n] (imul (ty-size g elem) n))
-    (TSlice [_] 16)
-    (TVec [elem n] (imul (ty-size g elem) n))
-    (TStruct [nm]
-             (let [si (g-struct-idx g nm)]
-               (if (icmp-ge si 0)
-                   (load (field (xal-at [GStruct] (field g structs) si) size))
-                   (let [su (g-sum-idx g nm)]
-                     (if (icmp-ge su 0)
-                         (iadd 8 (imul 8 (load (field (xal-at [GSum] (field g sums) su) words))))
-                         (cgx-fail2 "unknown nominal type: " nm))))))
-    (TApp [_ _] (cgx-fail "TApp reached cgx64 (mono bug)"))
-    (TCode [] (cgx-fail "TCode reached cgx64 (mono bug)"))
-    (TExternRef [] (cgx-fail "TCode reached cgx64 (mono bug)"))))
-
-; field byte offset within struct `si` (by field index).
+  (size (field g layouts) t))
 (defn g-field-off [(g (ptr Cga)) (si i64) (fi i64)] (-> i64)
-  (al-get [i64] (load (field (xal-at [GStruct] (field g structs) si) offsets)) fi))
-(defn g-field-idx [(g (ptr Cga)) (si i64) (fname (slice u8))] (-> i64)
-  (let [fs (load (field (xal-at [GStruct] (field g structs) si) fields))
-        n (al-len [Field] (load fs))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (xal-at [Field] fs (load i)) name)) fname) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (when (icmp-lt (load r) 0) (cgx-fail2 "no such field: " fname))
-    (load r)))
-
-; conservative byte size for SUM PAYLOAD sizing only — a faithful port of
-; codegen.coil type-bytes/align8 (payload words must agree between backends
-; only in being self-consistent; we mirror the reference to be safe).
-(defn galign8 [(n i64)] (-> i64)
-  (imul (idiv (iadd n 7) 8) 8))
+  (field-offset (field g layouts) si fi))
+(defn g-field-idx [(g (ptr Cga)) (si i64) (name (slice u8))] (-> i64)
+  (field-number (field g layouts) si name))
 (defn g-type-bytes [(g (ptr Cga)) (t (ptr Type))] (-> i64)
-  (match (load t)
-    (TInt [bits _s] (idiv (if (icmp-lt bits 8) 8 bits) 8))
-    (TFloat [bits] (idiv bits 8))
-    (TBool [] 1)
-    (TPtr [_] 8)
-    (TRef [_ _] 8)
-    (TFn [_ _ _] 8)
-    (TNever [] 8)
-    (TArray [elem n] (imul (g-type-bytes g elem) n))
-    (TSlice [_] 16)
-    (TVec [elem n] (imul (g-type-bytes g elem) n))
-    (TStruct [nm] (g-type-bytes-nominal g nm))
-    (TVoid [] (cgx-fail "g-type-bytes void"))
-    (TApp [_ _] (cgx-fail "g-type-bytes TApp"))
-    (TCode [] (cgx-fail "g-type-bytes TCode"))
-    (TExternRef [] (cgx-fail "g-type-bytes TCode"))))
-(defn g-type-bytes-nominal [(g (ptr Cga)) (nm (slice u8))] (-> i64)
-  (let [si (g-struct-idx g nm)]
-    (if (icmp-ge si 0)
-        (let [fs (load (field (xal-at [GStruct] (field g structs) si) fields))
-              n (al-len [Field] (load fs))
-              (mut i) 0
-              (mut tot) 0]
-          (loop (if (icmp-ge (load i) n)
-                    (break)
-                    (do
-                      (store! tot (iadd (load tot) (galign8 (g-type-bytes g (field (xal-at [Field] fs (load i)) ty)))))
-                      (store! i (iadd (load i) 1)))))
-          (load tot))
-        (let [su (g-sum-idx g nm)]
-          (if (icmp-ge su 0)
-              ; recompute from the definition (NOT the cached words): during
-              ; registration other sums' caches may not be filled yet, and sum
-              ; sizing must be order-independent (mirrors cg-sum-words-def).
-              (iadd 8 (imul 8 (g-sum-words-def g (load (field (xal-at [GSum] (field g sums) su) variants)))))
-              (cgx-fail2 "g-type-bytes: unknown nominal " nm))))))
-; payload words for a sum def: max over variants of sum of align8(type-bytes).
+  (type-bytes (field g layouts) t))
 (defn g-sum-words-def [(g (ptr Cga)) (variants (ptr (ArrayList Variant)))] (-> i64)
-  (let [n (al-len [Variant] (load variants))
-        (mut vi) 0
-        (mut best) 0]
-    (loop (if (icmp-ge (load vi) n)
-              (break)
-              (do
-                (let [fs (load (field (xal-at [Variant] variants (load vi)) fields))
-                      nf (al-len [Field] (load fs))
-                      (mut fi) 0
-                      (mut tot) 0]
-                  (loop (if (icmp-ge (load fi) nf)
-                            (break)
-                            (do
-                              (store! tot
-                                      (iadd (load tot)
-                                            (galign8 (g-type-bytes g (field (xal-at [Field] fs (load fi)) ty)))))
-                              (store! fi (iadd (load fi) 1)))))
-                  (when (icmp-gt (load tot) (load best)) (store! best (load tot))))
-                (store! vi (iadd (load vi) 1)))))
-    (idiv (iadd (load best) 7) 8)))
-
-; natural offsets of a plain field list (used for variant payload structs).
-; returns the total size too (via the returned list's last+1 semantics kept
-; simple: caller uses ty-size for whole-struct sizes; this is for variants).
-(defn g-natural-off [(g (ptr Cga)) (fs (ptr (ArrayList Field))) (fi i64)] (-> i64)
-  (let [(mut i) 0
-        (mut off) 0
-        (mut res) -1]
-    (loop (if (icmp-gt (load i) fi)
-              (break)
-              (do
-                (let [ft (field (xal-at [Field] fs (load i)) ty)
-                      al (ty-align g ft)]
-                  (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (when (icmp-eq (load i) fi) (store! res (load off)) 0)
-                  (store! off (iadd (load off) (ty-size g ft))))
-                (store! i (iadd (load i) 1)))))
-    (load res)))
-
-; variant index within a sum (declaration order = tag value).
-(defn g-variant-idx [(g (ptr Cga)) (su i64) (vname (slice u8))] (-> i64)
-  (let [vs (load (field (xal-at [GSum] (field g sums) su) variants))
-        n (al-len [Variant] (load vs))
-        (mut i) 0
-        (mut r) -1]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (when (str-eq (load (field (xal-at [Variant] vs (load i)) name)) vname) (store! r (load i)))
-                (store! i (iadd (load i) 1)))))
-    (when (icmp-lt (load r) 0) (cgx-fail2 "no such variant: " vname))
-    (load r)))
-
-; ============================ registration ===================================
-; two-phase like cg-register-types: create entries first (so nominal
-; references resolve), then compute sizes/offsets.
+  (sum-words (field g layouts) variants))
+(defn g-natural-off [(g (ptr Cga)) (fields (ptr (ArrayList Field))) (fi i64)] (-> i64)
+  (natural-offset (field g layouts) fields fi))
+(defn g-variant-idx [(g (ptr Cga)) (su i64) (name (slice u8))] (-> i64)
+  (variant-number (field g layouts) su name))
 (defn g-register-types! [(g (ptr Cga)) (mp (ptr Program))] (-> i64)
-  ; phase 1: names
-  (let [ss (load (field mp structs))
-        n (al-len [StructDef] (load ss))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [sd (xal-at [StructDef] ss (load i))
-                      e (alloc-stack GStruct)]
-                  (store! (field e name) (load (field sd name)))
-                  (store! (field e fields) (load (field sd fields)))
-                  (store! (field e layout) (load (field sd layout)))
-                  (store! (field e size) 0)
-                  (store! (field e align) 1)
-                  (store! (field e offsets) (al-new [i64] (load (field g a))))
-                  (al-push! (mut (field g structs)) (load e)))
-                (store! i (iadd (load i) 1))))))
-  (let [ss (load (field mp sums))
-        n (al-len [SumDef] (load ss))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [sd (xal-at [SumDef] ss (load i))
-                      e (alloc-stack GSum)]
-                  (store! (field e name) (load (field sd name)))
-                  (store! (field e variants) (load (field sd variants)))
-                  (store! (field e words) 0)
-                  (al-push! (mut (field g sums)) (load e)))
-                (store! i (iadd (load i) 1))))))
-  ; phase 2a: sum payload words (needs type-bytes over all nominals)
-  (let [n (al-len [GSum] (load (field g sums)))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do
-                (let [e (xal-at [GSum] (field g sums) (load i))]
-                  (store! (field e words) (g-sum-words-def g (load (field e variants)))))
-                (store! i (iadd (load i) 1))))))
-  ; phase 2b: struct sizes/aligns/offsets. Iterate until fixed (nested structs);
-  ; declaration order is arbitrary, so run size computation in dependency-safe
-  ; repeated passes: computing lazily instead — offsets computed per struct now,
-  ; recursing through ty-size which reads OTHER structs' stored sizes... to keep
-  ; it simple and correct we compute recursively on demand with memo semantics:
-  ; a struct's size is computed from field ty-sizes, which recurse into nested
-  ; struct entries that may not be computed yet. So: compute in multiple passes
-  ; until stable. Cycles are impossible (checked upstream).
-  (g-compute-struct-layouts! g)
+  (store! (field g layouts) (LayoutDb::new (load (field g a)) mp "cgx64"))
   0)
-
-(defn g-compute-one-struct! [(g (ptr Cga)) (si i64)] (-> i64)
-  (let [e (xal-at [GStruct] (field g structs) si)
-        fs (load (field e fields))
-        nf (al-len [Field] (load fs))]
-    (match (load (field e layout))
-      (LBits [backing _offs]
-             (do
-               (store! (field e size) (idiv backing 8))
-               (store! (field e align) (idiv backing 8))
-               0))
-      (LExplicit [offs usize align]
-                 (do
-                   (let [(mut mx) 0
-                         (mut i) 0]
-                     (loop (if (icmp-ge (load i) nf)
-                               (break)
-                               (do
-                                 (let [end
-                                         (iadd (al-get [i64] (load offs) (load i))
-                                               (ty-size g (field (xal-at [Field] fs (load i)) ty)))]
-                                   (when (icmp-gt end (load mx)) (store! mx end)))
-                                 (store! i (iadd (load i) 1)))))
-                     (let [sz (match-else usize (Some [u] (if (icmp-gt u (load mx)) u (load mx))) (_ (load mx)))]
-                       (store! (field e size) sz)
-                       (store! (field e align) (if (icmp-gt align 0) align 1))
-                       ; offsets list = the explicit offsets
-                       (let [(mut i) 0]
-                         (loop (if (icmp-ge (load i) nf)
-                                   (break)
-                                   (do
-                                     (al-push! (mut (field e offsets)) (al-get [i64] (load offs) (load i)))
-                                     (store! i (iadd (load i) 1))))))))
-                   0))
-      (LPacked []
-               (do
-                 (let [(mut off) 0
-                       (mut i) 0]
-                   (loop (if (icmp-ge (load i) nf)
-                             (break)
-                             (do
-                               (al-push! (mut (field e offsets)) (load off))
-                               (store! off (iadd (load off) (ty-size g (field (xal-at [Field] fs (load i)) ty))))
-                               (store! i (iadd (load i) 1)))))
-                   (store! (field e size) (load off))
-                   (store! (field e align) 1))
-                 0))
-      (LAligned [al]
-                (do
-                  (g-natural-layout! g si)
-                  (when (icmp-gt al (load (field e align))) (store! (field e align) al))
-                  ; size rounds up to the forced align too
-                  (let [a2 (load (field e align))
-                        sz (load (field e size))]
-                    (store! (field e size) (imul (idiv (iadd sz (isub a2 1)) a2) a2)))
-                  0))
-      (LC []
-          (g-natural-layout! g si)))))
-
-(defn g-natural-layout! [(g (ptr Cga)) (si i64)] (-> i64)
-  (let [e (xal-at [GStruct] (field g structs) si)
-        fs (load (field e fields))
-        nf (al-len [Field] (load fs))
-        (mut off) 0
-        (mut maxal) 1
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) nf)
-              (break)
-              (do
-                (let [ft (field (xal-at [Field] fs (load i)) ty)
-                      al (ty-align g ft)]
-                  (when (icmp-gt al (load maxal)) (store! maxal al))
-                  (store! off (imul (idiv (iadd (load off) (isub al 1)) al) al))
-                  (al-push! (mut (field e offsets)) (load off))
-                  (store! off (iadd (load off) (ty-size g ft))))
-                (store! i (iadd (load i) 1)))))
-    (store! (field e align) (load maxal))
-    (store! (field e size) (imul (idiv (iadd (load off) (isub (load maxal) 1)) (load maxal)) (load maxal)))
-    0))
-
-; struct sizes depend on nested struct sizes; compute in dependency order by
-; repeatedly computing any struct whose fields' nominal types are all done.
-; A struct is "done" when size>0 or it has zero fields (size 0 legal for LC
-; empty structs — track doneness in a parallel list instead).
-(defn g-compute-struct-layouts! [(g (ptr Cga))] (-> i64)
-  (let [n (al-len [GStruct] (load (field g structs)))
-        (mut done) (al-new [i64] (load (field g a)))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) n)
-              (break)
-              (do (al-push! (mut done) 0) (store! i (iadd (load i) 1)))))
-    (let [(mut pass) 0]
-      (loop (if (icmp-ge (load pass) (iadd n 1))
-                (break)
-                (do
-                  (let [(mut si) 0
-                        (mut alldone) true]
-                    (loop (if (icmp-ge (load si) n)
-                              (break)
-                              (do
-                                (when (icmp-eq (al-get [i64] (load done) (load si)) 0)
-                                      (if (g-struct-fields-ready g (load si) (mut done))
-                                          (do
-                                            (g-compute-one-struct! g (load si))
-                                            (al-set! (mut done) (load si) 1)
-                                            0)
-                                          (do (store! alldone false) 0)))
-                                (store! si (iadd (load si) 1)))))
-                    (when (load alldone) (break)))
-                  (store! pass (iadd (load pass) 1))))))
-    ; if anything is still not done there is a dependency cycle (upstream bug)
-    (let [(mut si) 0]
-      (loop (if (icmp-ge (load si) n)
-                (break)
-                (do
-                  (when (icmp-eq (al-get [i64] (load done) (load si)) 0)
-                        (cgx-fail2 "struct layout cycle at "
-                                   (load (field (xal-at [GStruct] (field g structs) (load si)) name))))
-                  (store! si (iadd (load si) 1))))))
-    0))
-
-; are all nominal struct types referenced by struct si's fields already laid out?
-; (sums are always "ready": their size needs only type-bytes, not layout.)
-(defn g-struct-fields-ready [(g (ptr Cga)) (si i64) (done (mut (ArrayList i64)))] (-> bool)
-  (let [fs (load (field (xal-at [GStruct] (field g structs) si) fields))
-        nf (al-len [Field] (load fs))
-        (mut i) 0
-        (mut ok) true]
-    (loop (if (icmp-ge (load i) nf)
-              (break)
-              (do
-                (when (not (g-ty-ready g (field (xal-at [Field] fs (load i)) ty) (mut done))) (store! ok false) 0)
-                (store! i (iadd (load i) 1)))))
-    (load ok)))
-(defn g-ty-ready [(g (ptr Cga)) (t (ptr Type)) (done (mut (ArrayList i64)))] (-> bool)
-  (match-else (load t)
-              (TStruct [nm]
-                       (let [si (g-struct-idx g nm)]
-                         (if (icmp-ge si 0) (icmp-eq (al-get [i64] (load done) si) 1) true)))
-              (TArray [elem _n] (g-ty-ready g elem (mut done)))
-              (TVec [elem _n] (g-ty-ready g elem (mut done)))
-              (_ true)))
-
 ; ============================ program registration ===========================
 ; extern "io.write" links against C symbol "write" (last dot component; ELF adds no underscore).
 (defn g-last-component [(nm (slice u8))] (-> (slice u8))
@@ -1123,7 +748,7 @@
       (TStruct [nm]
                (let [si (g-struct-idx g nm)]
                  (if (icmp-ge si 0)
-                     (let [fs (load (field (xal-at [GStruct] (field g structs) si) fields))
+                     (let [fs (load (field (struct-at (field g layouts) si) fields))
                            nf (al-len [Field] (load fs))
                            (mut i) 0]
                        (loop (if (icmp-ge (load i) nf)
@@ -2053,7 +1678,7 @@
           sumty (alloc-stack Type)]
       (store! sumty (TStruct sum))
       (let [slot (slot-for-ty! g sumty)
-            vs (load (field (xal-at [GSum] (field g sums) su) variants))
+            vs (load (field (sum-at (field g layouts) su) variants))
             vfields (load (field (xal-at [Variant] vs vidx) fields))
             n (al-len [Expr] (load args))
             (mut i) 0]
@@ -2109,7 +1734,7 @@
           su (g-sum-idx g sumname)]
       (when (icmp-lt su 0) (cgx-fail2 "match on non-sum: " sumname))
       (let [sslot (av-slot! g sav)
-            vs (load (field (xal-at [GSum] (field g sums) su) variants))
+            vs (load (field (sum-at (field g layouts) su) variants))
             narms (al-len [Arm] (load arms))
             lend (x64-new-label (mut (field g asm)))
             (mut armlabels) (al-new [i64] a)
@@ -2557,7 +2182,7 @@
                                              off (g-field-off g si fi)
                                              fty
                                                (load (field (xal-at [Field]
-                                                                   (load (field (xal-at [GStruct] (field g structs) si)
+                                                                   (load (field (struct-at (field g layouts) si)
                                                                                 fields))
                                                                    fi)
                                                             ty))
@@ -2704,7 +2329,7 @@
                    (backp (ptr i64))] (-> i64)
   (let [si (g-struct-idx g nm)]
     (when (icmp-lt si 0) (cgx-fail2 "bit access on unknown struct: " nm))
-    (let [e (xal-at [GStruct] (field g structs) si)]
+    (let [e (struct-at (field g layouts) si)]
       (match-else (load (field e layout))
                   (LBits [backing offs]
                          (let [fi (g-field-idx g si fname)]
@@ -2831,7 +2456,7 @@
                              (let [si (g-struct-idx g snm)]
                                (if (icmp-lt si 0)
                                    -1  ; sums: deliberately undescribed
-                                   (let [sp (xal-at [GStruct] (field g structs) si)]
+                                   (let [sp (struct-at (field g layouts) si)]
                                      (match-else (load (field sp layout))
                                                  (LC []
                                                      ; reserve the entry FIRST (recursion through pointers)
@@ -3065,7 +2690,7 @@
                        (let [si (g-struct-idx g nm)]
                          (when (icmp-lt si 0) (cgx-fail2 "llvm-ir: extract from unknown struct " nm))
                          (store! offp (g-field-off g si idx))
-                         (load (field (xal-at [Field] (load (field (xal-at [GStruct] (field g structs) si) fields)) idx)
+                         (load (field (xal-at [Field] (load (field (struct-at (field g layouts) si) fields)) idx)
                                       ty))))
               (_ (do
                    (cgx-fail "llvm-ir: extract/insert on unsupported aggregate")
@@ -3995,8 +3620,6 @@
                         (emit-dwarf bool)] (-> EObj)
   (let [g (alloc-stack Cga)]
     (store! (field g a) a)
-    (store! (field g structs) (al-new [GStruct] a))
-    (store! (field g sums) (al-new [GSum] a))
     (store! (field g sigs) (al-new [GSig] a))
     (store! (field g obj) (eobj-new a))
     (store! (field g asm) (xasm-new a))
