@@ -187,6 +187,28 @@
     (wl-push! r) (wl-push! ph))
   (iterate!) 0)
 
+;; Two nested loops with real exits, so the loop tree has something to nest. The annotations on
+;; the control nodes are the loop-nesting depth, which is what block frequency will be estimated
+;; from once there is a scheduler.
+(defn fx-nested [] (-> i64)
+  (graph-reset! 1)
+  (let [outer (n-new OP-LOOP 0)]
+    (n-add-def! outer NO-NODE) (n-add-def! outer (g-start)) (n-add-def! outer NO-NODE)
+    (n-peephole outer)
+    (let [inner (n-new OP-LOOP 0)]
+      (n-add-def! inner NO-NODE) (n-add-def! inner outer) (n-add-def! inner NO-NODE)
+      (n-peephole inner)
+      (let [iin   (mk-if inner (mk-arg (t-dyn)))
+            ibody (mk-cproj iin 0)
+            iexit (mk-cproj iin 1)]
+        (n-set-def! inner 2 ibody)
+        (let [iout  (mk-if iexit (mk-arg (t-dyn)))
+              obody (mk-cproj iout 0)
+              oexit (mk-cproj iout 1)]
+          (n-set-def! outer 2 obody)
+          (ret-to oexit (mk-int 0))))))
+  (iterate!) 0)
+
 (defn emit [(w (ptr Writer)) (name (slice u8))] (-> i64)
   (ps w "=== FIXTURE ") (ps w name) (ps w "\n")
   ; counts come from the compiler, not from counting lines in the output afterwards
@@ -210,5 +232,6 @@
     (fx-branch-dead)     (emit w "10-dead-branch-after")
     (fx-diamond)         (emit w "11-diamond")
     (fx-loop)            (emit w "12-loop")
-    (fx-guard)           (emit w "13-guard"))
+    (fx-guard)           (emit w "13-guard")
+    (fx-nested)          (emit w "14-nested-loops"))
   0)

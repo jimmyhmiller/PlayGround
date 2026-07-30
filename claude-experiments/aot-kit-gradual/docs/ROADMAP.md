@@ -116,9 +116,17 @@ phase structure, which analyses to a fixpoint before transforming anything.
   gives an infinite loop an exit edge, and that rewrite exists solely so global code motion can
   assume every block reaches `Stop`. Adding the op now, with nothing implementing its purpose,
   would be worse than not having it. It lands with GCM in M10.
-- **The loop tree** (`idom`, `idepth`, nesting depth). Its consumers are all later: GCM's block
-  placement, loop optimisation, and the never-exit rewrite. It lands next, before M3, since it
-  is small and the visualizer can use the nesting depth immediately.
+- **The loop tree** (`idom`, `idepth`, nesting depth). **Now DONE**, gated by
+  `tests/loop-tree-test.coil` (5 tests: straight line, diamond, loop, nested loops, staleness).
+  Natural loop bodies by backward reachability from each back edge; nesting depth is the number
+  of bodies containing a node. A loop header's immediate dominator is its entry and never its
+  back edge, which is both correct and what makes the idepth relaxation converge.
+
+  Both tables are rebuilt wholesale by `g-build-loop-tree!` with no incremental maintenance, and
+  a `cfgver` epoch makes reading a stale one a hard error. Dominators computed against a stale
+  CFG are a classic scheduling bug that only appears under optimisation, and it is much cheaper
+  to refuse the read than to debug the schedule. Asking for the idepth of a *data* node is also
+  an error rather than a `-1`: a data node has no dominator depth until a scheduler gives it one.
 
 ## M3. Tooling: textual IR, verifier, evaluator
 

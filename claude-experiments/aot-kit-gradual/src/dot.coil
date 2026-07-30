@@ -69,6 +69,12 @@
           (do (ps w (op-name (n-op n)))
               (if (op-shows-type? (n-op n)) (do (ps w "\\n") (ty-print w (n-ty n)) 0) 0)
               0)))))
+  ; Loop nesting applies to EVERY control node, so it goes outside the chain above. Having it
+  ; inside meant CProj returned early and the branch arms of a loop showed no nesting at all,
+  ; which made the diagram disagree with a correct loop tree.
+  (if (and (op-control? (n-op n)) (> (g-loop-depth n) 0))
+      (do (fmt w "\\nloop {d}" (g-loop-depth n)) 0)
+    0)
   (ps w "\" ")
   0)
 
@@ -146,7 +152,11 @@
 ; ---------------------------------------------------------------------------
 ; Entry points
 ; ---------------------------------------------------------------------------
+;; Loop nesting is derived from control edges, so it is rebuilt here when stale rather than
+;; assumed. Annotating it is the cheapest way to see whether the loop tree agrees with the
+;; picture.
 (defn g-print-dot [(w (ptr Writer))] (-> i64)
+  (if (g-dom-fresh?) 0 (g-build-loop-tree!))
   (dot-header w)
   (dot-nodes w)
   (dot-edges w)

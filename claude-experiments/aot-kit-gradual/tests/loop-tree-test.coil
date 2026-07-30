@@ -1,0 +1,200 @@
+;; Dominators and the loop tree.
+;;
+;; Nothing consumes these until global code motion in M10, so the whole value of this file is
+;; that the numbers are checked against hand-worked answers now, rather than discovered to be
+;; wrong later through a mis-scheduled instruction.
+;;
+;;   coil test tests/loop-tree-test.coil
+(module looptreetest)
+
+(import "../src/ty.coil"   :use *)
+(import "../src/node.coil" :use *)
+(import "assert.coil"      :use *)
+(import "control.coil"     :use *)
+(import "io.coil"          :use *)
+(import "fmt.coil"         :use *)
+(import "alloc.coil"       :use *)
+(import "arraylist.coil"   :use *)
+(import "slice.coil"       :use *)
+
+(defn mk-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn mk-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn mk-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn mk-if [(ctrl i64) (pred i64)] (-> i64) (n-peephole (n-new2 OP-IF 0 ctrl pred)))
+(defn mk-cproj [(iff i64) (idx i64)] (-> i64) (n-peephole (n-new1 OP-CPROJ idx iff)))
+(defn new-region2 [(a i64) (b i64)] (-> i64)
+  (let [r (n-new OP-REGION 0)]
+    (n-add-def! r NO-NODE) (n-add-def! r a) (n-add-def! r b) r))
+(defn ret-to [(ctrl i64) (v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 ctrl v))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) r))
+
+(defn expect-idepth [(label (slice u8)) (n i64) (want i64)] (-> i64)
+  (let [got (g-idepth n)]
+    (if (= got want) 0
+      (do (let [w (stderr)]
+            (ps w "\nIDEPTH ") (ps w label)
+            (fmt w ": node n{d} has idepth {d}, expected {d}\n" n got want)
+            (g-print-flat w))
+          (abort) 0))))
+
+(defn expect-loop-depth [(label (slice u8)) (n i64) (want i64)] (-> i64)
+  (let [got (g-loop-depth n)]
+    (if (= got want) 0
+      (do (let [w (stderr)]
+            (ps w "\nLOOP DEPTH ") (ps w label)
+            (fmt w ": node n{d} is in {d} loops, expected {d}\n" n got want)
+            (g-print-flat w))
+          (abort) 0))))
+
+; ---------------------------------------------------------------------------
+; Straight line
+; ---------------------------------------------------------------------------
+(deftest a_straight_line_has_increasing_idepth
+  (graph-reset! 1)
+  (let [r (ret-to (g-start) (mk-int 1))]
+    (iterate!)
+    (g-build-loop-tree!)
+    (expect-idepth "straight" (g-start) 0)
+    (expect-idepth "straight" r 1)
+    (expect-idepth "straight" (g-stop) 2)
+    (expect-loop-depth "straight" r 0)))
+
+; ---------------------------------------------------------------------------
+; A diamond
+; ---------------------------------------------------------------------------
+;; Both arms are one deeper than the If's projections, and the merge is dominated by the If
+;; itself rather than by either arm. Getting that wrong places code in a block where it does not
+;; actually run.
+(deftest a_diamond_dominates_from_the_branch
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        r   (n-peephole (new-region2 t f))]
+    (ret-to r (mk-int 7))
+    (iterate!)
+    (g-build-loop-tree!)
+    ; the empty diamond collapses, so build one the optimiser keeps: guard the merge with a phi
+    0)
+
+  ; a diamond that survives, because the arms carry different values
+  (graph-reset! 1)
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))
+        t   (mk-cproj iff 0)
+        f   (mk-cproj iff 1)
+        r   (new-region2 t f)
+        ph  (let [p (n-new OP-PHI (t-dyn))]
+              (n-add-def! p r) (n-add-def! p (mk-int 1)) (n-add-def! p (mk-int 2)) p)]
+    (ret-to r ph)
+    (wl-push! r) (wl-push! ph)
+    (iterate!)
+    (g-build-loop-tree!)
+    (expect-idepth "diamond" (g-start) 0)
+    (expect-idepth "diamond" iff 1)
+    (expect-idepth "diamond" t 2)
+    (expect-idepth "diamond" f 2)
+    (expect-idepth "diamond" r 3)
+    ; the merge's immediate dominator is the branch, not either arm
+    (assert (= (n-idom r) iff))
+    (assert (= (n-idom t) iff))
+    (expect-loop-depth "diamond" r 0)))
+
+; ---------------------------------------------------------------------------
+; A loop
+; ---------------------------------------------------------------------------
+;; `i = 0; while (arg) i = i + 1;`  The header, the body projection and the back edge are all
+;; inside the loop; the exit and everything after it are not.
+(deftest a_loop_body_is_inside_the_loop
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE)
+    (n-add-def! lp (g-start))
+    (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp)
+      (n-add-def! ph (mk-int 0))
+      (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx  (mk-bin OP-ADD ph (mk-int 1))
+            iff (mk-if lp (mk-arg (t-dyn)))
+            body (mk-cproj iff 0)
+            exit (mk-cproj iff 1)]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 body)
+        (ret-to exit ph)
+        (wl-push! lp) (wl-push! ph) (wl-push! nx)
+        (iterate!)
+        (g-build-loop-tree!)
+        ; the header is dominated by its entry, never by its back edge
+        (assert (= (n-idom lp) (g-start)))
+        (expect-idepth "loop" lp 1)
+        (expect-idepth "loop" iff 2)
+        (expect-idepth "loop" body 3)
+        (expect-idepth "loop" exit 3)
+        ; header, test and body are in the loop; the exit is not
+        (expect-loop-depth "loop" lp 1)
+        (expect-loop-depth "loop" iff 1)
+        (expect-loop-depth "loop" body 1)
+        (expect-loop-depth "loop" exit 0)
+        (expect-loop-depth "loop" (g-start) 0)))))
+
+;; Nesting is what block frequency will be estimated from, so an inner body has to read as two
+;; loops deep and not one.
+(deftest nested_loops_nest
+  (graph-reset! 1)
+  (let [outer (n-new OP-LOOP 0)]
+    (n-add-def! outer NO-NODE)
+    (n-add-def! outer (g-start))
+    (n-add-def! outer NO-NODE)
+    (n-peephole outer)
+    (let [inner (n-new OP-LOOP 0)]
+      (n-add-def! inner NO-NODE)
+      (n-add-def! inner outer)
+      (n-add-def! inner NO-NODE)
+      (n-peephole inner)
+      (let [iin  (mk-if inner (mk-arg (t-dyn)))
+            ibody (mk-cproj iin 0)
+            iexit (mk-cproj iin 1)]
+        (n-set-def! inner 2 ibody)
+        (let [iout (mk-if iexit (mk-arg (t-dyn)))
+              obody (mk-cproj iout 0)
+              oexit (mk-cproj iout 1)]
+          (n-set-def! outer 2 obody)
+          (ret-to oexit (mk-int 0))
+          (iterate!)
+          (g-build-loop-tree!)
+          ; the inner header sits inside the outer loop as well as its own
+          (expect-loop-depth "nested" outer 1)
+          (expect-loop-depth "nested" inner 2)
+          (expect-loop-depth "nested" ibody 2)
+          ; the inner exit is still in the outer loop, having left only the inner one
+          (expect-loop-depth "nested" iexit 1)
+          (expect-loop-depth "nested" obody 1)
+          ; and past the outer exit there is no loop at all
+          (expect-loop-depth "nested" oexit 0)
+          (assert (= (n-idom inner) outer))
+          (assert (= (n-idom outer) (g-start))))))))
+
+; ---------------------------------------------------------------------------
+; Staleness
+; ---------------------------------------------------------------------------
+;; A stale dominator table is the classic source of a scheduling bug that only shows up under
+;; optimisation, so reading one is a hard error. This checks the freshness bookkeeping directly:
+;; changing a control edge must invalidate, and rebuilding must revalidate.
+(deftest changing_control_invalidates_the_tables
+  (graph-reset! 1)
+  (ret-to (g-start) (mk-int 1))
+  (iterate!)
+  (assert (not (g-dom-fresh?)))          ; never built
+  (g-build-loop-tree!)
+  (assert (g-dom-fresh?))
+  ; adding a control edge invalidates
+  (let [iff (mk-if (g-start) (mk-arg (t-dyn)))]
+    (assert (not (g-dom-fresh?)))
+    (g-build-loop-tree!)
+    (assert (g-dom-fresh?))
+    ; a pure data edge does not
+    (mk-bin OP-ADD (mk-int 1) (mk-arg (t-int)))
+    (assert (g-dom-fresh?))))

@@ -128,6 +128,10 @@
    (seed   i64)                ; drives worklist pop order; varying it must not change results
    (start  i64)
    (stop   i64)
+   (idep   (ArrayList i64))    ; id -> dominator-tree depth; see g-build-loop-tree!
+   (ldep   (ArrayList i64))    ; id -> how many loops contain it
+   (cfgver i64)                ; bumped whenever a control edge changes
+   (domver i64)                ; the cfgver the tables above were built at; -1 = never
    (inited bool)])
 
 (defn graph [] (-> (ptr Graph))
@@ -141,6 +145,10 @@
           (store! (field p seed)  123)
           (store! (field p start) NO-NODE)
           (store! (field p stop)  NO-NODE)
+          (store! (field p idep)  (al-new [i64] (malloc-allocator)))
+          (store! (field p ldep)  (al-new [i64] (malloc-allocator)))
+          (store! (field p cfgver) 0)
+          (store! (field p domver) -1)
           0))
     p))
 
@@ -152,6 +160,10 @@
     (hm-clear! [i64 i64] (field p gvn))
     (al-clear! [i64]  (field p wl))
     (al-clear! [bool] (field p onwl))
+    (al-clear! [i64]  (field p idep))
+    (al-clear! [i64]  (field p ldep))
+    (store! (field p cfgver) 0)
+    (store! (field p domver) -1)
     (store! (field p seed) seed)
     (store! (field p start) (n-new OP-START 0))
     (store! (field p stop)  (n-new OP-STOP 0))
@@ -201,7 +213,16 @@
     (al-push! [bool] (field p onwl)  false)
     id))
 
+;; Dominators and loop nesting are derived from control edges, so any change to one invalidates
+;; them. Bumping an epoch here is what lets a stale read be a hard error instead of a subtly
+;; wrong placement decision later.
+(defn n-bump-cfg! [(n i64)] (-> i64)
+  (if (op-control? (n-op n))
+      (do (store! (field (graph) cfgver) (+ (load (field (graph) cfgver)) 1)) 0)
+    0))
+
 (defn n-add-def! [(n i64) (d i64)] (-> i64)
+  (n-bump-cfg! n)
   (al-push! [i64] (field (nd n) ins) d)
   (if (!= d NO-NODE) (do (al-push! [i64] (field (nd d) outs) n) 0) 0)
   (store! (field (nd n) hash) 0)
@@ -259,6 +280,7 @@
 
 (defn n-set-def! [(n i64) (i i64) (d i64)] (-> i64)
   (n-check-loop-close n i d)
+  (n-bump-cfg! n)
   (let [old (n-in n i)]
     (if (= old d) 0
       (do
@@ -589,6 +611,7 @@
 ;; Only valid for nodes whose inputs are a positional LIST (a Region's paths, a Phi's values,
 ;; Stop's returns) rather than fixed slots. Compressing an Add's operands would be nonsense.
 (defn n-del-def! [(n i64) (i i64)] (-> i64)
+  (n-bump-cfg! n)
   (let [old (n-in n i) len (n-nins n) ins (field (nd n) ins) (mut k) i]
     (loop
       (if (>= (+ (load k) 1) len) (break)
@@ -1219,3 +1242,196 @@
     (fixed-buffer-writer w fb)
     (n-print w n)
     (slice-new [u8] (cast (ptr u8) buf) (load (field fb len)))))
+
+
+; ============================================================================
+; Dominators and the loop tree
+; ============================================================================
+;; Every consumer of this is later: global code motion needs dominators to place a node in its
+;; shallowest legal block and loop nesting to weigh blocks, loop optimisation needs the tree, and
+;; the never-exit-loop rewrite needs both. It is built now because it is small, because the
+;; visualizer can annotate nesting depth immediately, and because dominators computed against a
+;; stale CFG are a classic source of scheduling bugs that only appear under optimisation.
+;;
+;; There is NO incremental maintenance. `g-build-loop-tree!` computes both tables, and reading
+;; either one after a control edge changed is a hard error rather than a wrong answer.
+
+;; A CFG node's control predecessors live in a half-open input range that depends on its op: a
+;; merge's paths start at 1, Stop's returns start at 0, and everything else has exactly input 0.
+(defn n-cpred-lo [(n i64)] (-> i64) (if (op-merge? (n-op n)) 1 0))
+(defn n-cpred-hi [(n i64)] (-> i64)
+  (if (op-merge? (n-op n)) (n-nins n)
+    (if (= (n-op n) OP-STOP) (n-nins n)
+      (if (or (= (n-op n) OP-START) (= (n-op n) OP-XCTRL)) 0
+        1))))
+
+(defn g-idep-raw [(n i64)] (-> i64) (al-get (load (field (graph) idep)) n))
+
+(defn g-dom-fresh? [] (-> bool)
+  (let [p (graph)] (= (load (field p domver)) (load (field p cfgver)))))
+
+(defn g-dom-check-fresh [] (-> i64)
+  (if (g-dom-fresh?) 0
+    (do (panic-corrupt "dominator tables are stale: call g-build-loop-tree! after changing control edges") 0)))
+
+;; Both tables describe CONTROL nodes. A data node has no dominator depth and no loop membership
+;; until a scheduler assigns it one, so asking is a caller bug rather than a question with a
+;; harmless default answer.
+(defn g-dom-check-cfg [(n i64)] (-> i64)
+  (if (op-control? (n-op n)) 0
+    (do (panic-corrupt "idepth/loop-depth asked of a non-control node") 0)))
+
+(defn g-idepth [(n i64)] (-> i64)
+  (g-dom-check-fresh) (g-dom-check-cfg n) (g-idep-raw n))
+(defn g-loop-depth [(n i64)] (-> i64)
+  (g-dom-check-fresh) (g-dom-check-cfg n)
+  (al-get (load (field (graph) ldep)) n))
+
+;; The immediate dominator. A Loop is dominated by its ENTRY alone: the back edge does not
+;; dominate the header, and counting it would neither terminate nor mean anything.
+(defn n-idom [(n i64)] (-> i64)
+  (case (n-op n)
+    OP-START  NO-NODE
+    OP-XCTRL  NO-NODE
+    OP-LOOP   (n-in n 1)
+    OP-REGION (cfg-lca-of-preds n)
+    OP-STOP   (cfg-lca-of-preds n)
+    (n-in n 0)))
+
+;; Walk the deeper of the two up the dominator tree until they meet: the standard lowest common
+;; ancestor, using idepth as the ranking.
+(defn cfg-lca [(a i64) (b i64)] (-> i64)
+  (if (= a NO-NODE) b
+    (if (= b NO-NODE) a
+      (let [(mut x) a (mut y) b]
+        (loop
+          (if (or (= (load x) (load y))
+                  (or (= (load x) NO-NODE) (= (load y) NO-NODE))) (break)
+            (let [dx (g-idep-raw (load x)) dy (g-idep-raw (load y))]
+              (if (>= dx dy) (store! x (n-idom (load x))) 0)
+              (if (<= dx dy) (store! y (n-idom (load y))) 0)
+              0)))
+        (if (= (load x) (load y)) (load x) NO-NODE)))))
+
+(defn cfg-lca-of-preds [(n i64)] (-> i64)
+  (let [lo (n-cpred-lo n) hi (n-cpred-hi n) (mut acc) NO-NODE (mut i) lo]
+    (loop
+      (if (>= (load i) hi) (break)
+        (do (let [d (n-in n (load i))]
+              ; a path that cannot be reached dominates nothing
+              (if (or (= d NO-NODE) (= (n-ty d) (t-xctrl))) 0
+                (store! acc (cfg-lca (load acc) d))))
+            (store! i (+ (load i) 1))
+            0)))
+    (load acc)))
+
+;; idepth by relaxation to a fixpoint. Start is 0; every other CFG node is one deeper than its
+;; deepest reachable predecessor. Excluding a Loop's back edge is what makes the dependency
+;; graph acyclic, so this converges.
+(defn g-compute-idepth! [] (-> i64)
+  (let [p (graph) n (n-count) (mut i) 0]
+    (al-clear! [i64] (field p idep))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [i64] (field p idep) -1) (store! i (+ (load i) 1)) 0)))
+    (al-set! [i64] (field p idep) (g-start) 0)
+    (let [(mut changed) true (mut rounds) 0]
+      (loop
+        (if (not (load changed)) (break)
+          (do (store! changed false)
+              (store! rounds (+ (load rounds) 1))
+              (if (> (load rounds) (+ n 2))
+                  (do (panic-corrupt "idepth did not converge") 0)
+                0)
+              (let [(mut k) 0]
+                (loop
+                  (if (>= (load k) n) (break)
+                    (do (if (or (n-dead? (load k)) (not (op-control? (n-op (load k))))) 0
+                          (if (= (load k) (g-start)) 0
+                            (let [d (idepth-of-preds (load k))]
+                              (if (and (!= d -1) (!= d (g-idep-raw (load k))))
+                                  (do (al-set! [i64] (field p idep) (load k) d)
+                                      (store! changed true)
+                                      0)
+                                0))))
+                        (store! k (+ (load k) 1))
+                        0))))
+              0))))
+    0))
+
+;; One deeper than the deepest predecessor that actually dominates. A Loop consults its entry
+;; only; anything with no known predecessor yet reports -1 so relaxation revisits it.
+(defn idepth-of-preds [(n i64)] (-> i64)
+  (if (= (n-op n) OP-LOOP)
+      (let [e (n-in n 1)]
+        (if (= e NO-NODE) -1 (let [d (g-idep-raw e)] (if (= d -1) -1 (+ d 1)))))
+    (let [lo (n-cpred-lo n) hi (n-cpred-hi n) (mut best) -1 (mut i) lo]
+      (loop
+        (if (>= (load i) hi) (break)
+          (do (let [d (n-in n (load i))]
+                (if (or (= d NO-NODE) (= (n-ty d) (t-xctrl))) 0
+                  (let [dd (g-idep-raw d)]
+                    (if (and (!= dd -1) (> (+ dd 1) (load best)))
+                        (store! best (+ dd 1))
+                      0))))
+              (store! i (+ (load i) 1))
+              0)))
+      (load best))))
+
+;; Natural loop bodies. For a Loop header L whose back edge comes from B, the body is L together
+;; with every CFG node that reaches B without passing through L. Each node's loop depth is the
+;; number of bodies containing it, which for reducible control flow is exactly its nesting.
+(defn g-compute-loop-depth! [] (-> i64)
+  (let [p (graph) n (n-count) (mut i) 0]
+    (al-clear! [i64] (field p ldep))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [i64] (field p ldep) 0) (store! i (+ (load i) 1)) 0)))
+    (let [(mut h) 0]
+      (loop
+        (if (>= (load h) n) (break)
+          (do (if (and (not (n-dead? (load h))) (= (n-op (load h)) OP-LOOP))
+                  (mark-loop-body! (load h))
+                0)
+              (store! h (+ (load h) 1))
+              0))))
+    0))
+
+(defn mark-loop-body! [(header i64)] (-> i64)
+  (let [p (graph) n (n-count)
+        (mut seen) (al-new [bool] (malloc-allocator))
+        (mut stack) (al-new [i64] (malloc-allocator))
+        (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [bool] (mut seen) false) (store! i (+ (load i) 1)) 0)))
+    ; the header is in its own body, and the walk stops there
+    (al-set! [bool] (mut seen) header true)
+    (al-set! [i64] (field p ldep) header (+ (al-get (load (field p ldep)) header) 1))
+    (let [back (if (>= (n-nins header) 3) (n-in header 2) NO-NODE)]
+      (if (!= back NO-NODE) (do (al-push! [i64] (mut stack) back) 0) 0))
+    (loop
+      (if (= (al-len [i64] (load stack)) 0) (break)
+        (let [k (al-get (load stack) (- (al-len [i64] (load stack)) 1))]
+          (al-pop! [i64] (mut stack))
+          (if (or (al-get (load seen) k) (n-dead? k)) 0
+            (do (al-set! [bool] (mut seen) k true)
+                (al-set! [i64] (field p ldep) k (+ (al-get (load (field p ldep)) k) 1))
+                (let [lo (n-cpred-lo k) hi (n-cpred-hi k) (mut j) lo]
+                  (loop
+                    (if (>= (load j) hi) (break)
+                      (do (let [d (n-in k (load j))]
+                            (if (= d NO-NODE) 0 (do (al-push! [i64] (mut stack) d) 0)))
+                          (store! j (+ (load j) 1))
+                          0))))
+                0))
+          0)))
+    (al-free! [bool] (mut seen))
+    (al-free! [i64] (mut stack))
+    0))
+
+(defn g-build-loop-tree! [] (-> i64)
+  (g-compute-idepth!)
+  (g-compute-loop-depth!)
+  (store! (field (graph) domver) (load (field (graph) cfgver)))
+  0)

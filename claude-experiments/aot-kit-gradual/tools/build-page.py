@@ -300,6 +300,20 @@ BODY = f"""
         "twelve worklist seeds, because inferred types that depend on visit order are a latent "
         "miscompile.")}
 
+{single("14-nested-loops",
+        "Nesting, and why it is recorded", "while (a) { while (b) { } }",
+        "Dominators and loop nesting have no consumer yet. Global code motion will need them to "
+        "place a node in the shallowest block where it is still legal, and to weigh how often a "
+        "block runs. They are built now because they are small, and because a dominator table "
+        "computed against a stale graph is a scheduling bug that only surfaces under "
+        "optimisation.",
+        "The <code>loop N</code> annotations are nesting depth. The inner header, its test and "
+        "its body read <code>loop 2</code>; the inner <em>exit</em> reads <code>loop 1</code>, "
+        "because leaving the inner loop does not leave the outer one; past the outer exit there "
+        "is no annotation at all. Note also that a loop header's immediate dominator is its "
+        "entry and never its back edge. Changing any control edge invalidates both tables, and "
+        "reading a stale one is a hard error rather than a quietly wrong answer.")}
+
 {single("13-guard",
         "A guard, in full", "if (x < 100) { fast: (int)x + 1 } else { slow: x + 1 }",
         "This is the shape DECISIONS.md D4 describes and the reason for the whole design. There "
