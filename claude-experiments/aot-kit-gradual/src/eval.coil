@@ -1,0 +1,571 @@
+;; The IR interpreter, and therefore the differential oracle.
+;;
+;; This is the most important thing in M3. Golden strings tell you a graph CHANGED; only running
+;; it tells you it still computes the same thing. From here on, every optimisation is gated on the
+;; observable result being identical before and after the pass, over the whole corpus.
+;;
+;; HOW IT WALKS A SEA OF NODES. There is no schedule yet, so control is followed explicitly and
+;; data is evaluated on demand:
+;;
+;;   - control moves one node at a time from Start, choosing an If's arm by evaluating its
+;;     predicate, and stops at a Return.
+;;   - data is evaluated by recursion on inputs. That recursion terminates because PHIS CUT EVERY
+;;     CYCLE: a Phi never recurses into its inputs, it reads the environment.
+;;   - arriving at a merge from path i computes every Phi on that merge at once, from the OLD
+;;     environment, and only then commits. Simultaneous update is not a detail: `x, y = y, x`
+;;     written as two phis on one region is wrong under sequential update, and a loop that swaps
+;;     two variables is exactly that.
+;;
+;; WHAT IT REFUSES TO GUESS. Every operation the op set claims but the runtime value domain cannot
+;; represent yet returns a NAMED status rather than a plausible number. Integer overflow is the
+;; clearest case: JavaScript would promote to a double, and doing that properly needs M5's NaN
+;; boxing, so overflow reports EV-OVERFLOW instead of silently wrapping. A wrapped answer would
+;; make this oracle quietly disagree with the language it is supposed to be defining.
+;;
+;; A FAILING CAST IS A COMPILER BUG, NOT A PROGRAM CONDITION. Reaching a `Cast` whose value does
+;; not satisfy the cast means the compiler narrowed a type somewhere it had not proven, so that
+;; gets its own status and its own test.
+(module eval)
+
+(import "alloc.coil"     :use *)
+(import "arraylist.coil" :use *)
+(import "control.coil"   :use *)
+(import "io.coil"        :use *)
+(import "fmt.coil"       :use *)
+(import "slice.coil"     :use *)
+(import "ty.coil"        :use *)
+(import "node.coil"      :use *)
+
+; ============================================================================
+; Runtime values
+; ============================================================================
+;; Deliberately NOT NaN-boxed. That representation arrives with M5 and belongs to generated code;
+;; an oracle wants to be obviously correct rather than fast. Floats are held as bit patterns for
+;; the same reason the lattice does: NaN is not reflexive under comparison, and an oracle that
+;; cannot distinguish two NaNs cannot check a program that produces one.
+(defsum RtVal
+  (RUndef)
+  (RNull)
+  (RBool [(b bool)])
+  (RInt  [(n i64)])
+  (RFlt  [(bits i64)]))
+
+; ============================================================================
+; Statuses
+; ============================================================================
+(const EV-OK        i64 0)
+(const EV-STEPS     i64 1)   ; step budget exhausted: the program may not terminate
+(const EV-STUCK     i64 2)   ; control has nowhere to go, or arrived somewhere impossible
+(const EV-UNBOUND   i64 3)   ; an Arg with no bound value
+(const EV-TYPE      i64 4)   ; an operation on a value it is not defined for
+(const EV-OVERFLOW  i64 5)   ; integer overflow; JS promotes to double, which needs M5
+(const EV-CAST      i64 6)   ; a Cast whose value does not satisfy it: a COMPILER bug
+(const EV-DEAD      i64 7)   ; control reached a dead or unreachable node
+
+(defn ev-status-name [(s i64)] (-> (slice u8))
+  (case s
+    EV-OK "ok" EV-STEPS "step budget exhausted" EV-STUCK "control is stuck"
+    EV-UNBOUND "unbound argument" EV-TYPE "undefined for these values"
+    EV-OVERFLOW "integer overflow (JS would promote to double: needs M5)"
+    EV-CAST "a Cast was not satisfied: the compiler narrowed without proof"
+    EV-DEAD "control reached a dead node"
+    "?"))
+
+; ============================================================================
+; Interpreter state
+; ============================================================================
+(defstruct Ev
+  [(bound  (ArrayList bool))    ; node id -> is this Arg bound
+   (args   (ArrayList RtVal))   ; node id -> its bound value
+   (hasphi (ArrayList bool))    ; node id -> does the environment hold a value for this Phi
+   (env    (ArrayList RtVal))   ; node id -> a Phi's current value
+   (status i64)
+   (steps  i64)
+   (result RtVal)
+   (at     i64)                 ; the node a non-OK status happened at
+   (inited bool)])
+
+(defn ev [] (-> (ptr Ev))
+  (let [p (alloc-static Ev)]
+    (if (load (field p inited)) 0
+      (do (store! (field p inited) true)
+          (store! (field p bound)  (al-new [bool]  (malloc-allocator)))
+          (store! (field p args)   (al-new [RtVal] (malloc-allocator)))
+          (store! (field p hasphi) (al-new [bool]  (malloc-allocator)))
+          (store! (field p env)    (al-new [RtVal] (malloc-allocator)))
+          0))
+    p))
+
+;; Sized to the graph on every run, because node ids are dense per graph and a stale table from a
+;; previous, larger graph would be read with the wrong indices.
+(defn ev-reset! [] (-> i64)
+  (let [p (ev) n (n-count) (mut i) 0]
+    (al-clear! [bool]  (field p bound))
+    (al-clear! [RtVal] (field p args))
+    (al-clear! [bool]  (field p hasphi))
+    (al-clear! [RtVal] (field p env))
+    (loop
+      (if (>= (load i) n) (break)
+        (do (al-push! [bool]  (field p bound)  false)
+            (al-push! [RtVal] (field p args)   (RUndef))
+            (al-push! [bool]  (field p hasphi) false)
+            (al-push! [RtVal] (field p env)    (RUndef))
+            (store! i (+ (load i) 1))
+            0)))
+    (store! (field p status) EV-OK)
+    (store! (field p steps) 0)
+    (store! (field p result) (RUndef))
+    (store! (field p at) NO-NODE)
+    0))
+
+(defn ev-bind! [(n i64) (v RtVal)] (-> i64)
+  (let [p (ev)]
+    (al-set! [bool]  (field p bound) n true)
+    (al-set! [RtVal] (field p args)  n v)
+    0))
+
+(defn ev-status [] (-> i64) (load (field (ev) status)))
+(defn ev-steps  [] (-> i64) (load (field (ev) steps)))
+(defn ev-at     [] (-> i64) (load (field (ev) at)))
+(defn ev-result [] (-> RtVal) (load (field (ev) result)))
+
+(defn ev-fail! [(s i64) (n i64)] (-> RtVal)
+  (let [p (ev)]
+    ; the FIRST failure is the interesting one; later ones are consequences of it
+    (if (= (load (field p status)) EV-OK)
+        (do (store! (field p status) s) (store! (field p at) n) 0)
+      0)
+    (RUndef)))
+
+(defn ev-failed? [] (-> bool) (!= (load (field (ev) status)) EV-OK))
+
+; ============================================================================
+; Value helpers
+; ============================================================================
+;; A runtime value's most specific type. This is how a Cast is checked and how the interpreter and
+;; the lattice are held to the same story: membership is `ty-isa` against the same lattice the
+;; optimiser reasoned with, not a second hand-written notion of what an int is.
+(defn rt-ty [(v RtVal)] (-> i64)
+  (match v
+    (RUndef  [] (t-undef))
+    (RNull   [] (t-null))
+    (RBool [b] (t-bool-con b))
+    (RInt  [n] (t-int-con n))
+    (RFlt  [bits] (t-flt-bits bits))))
+
+(defn rt-print [(w (ptr Writer)) (v RtVal)] (-> i64)
+  (match v
+    (RUndef  [] (ps w "undefined"))
+    (RNull   [] (ps w "null"))
+    (RBool [b] (ps w (if b "true" "false")))
+    (RInt  [n] (do (fmt w "{d}" n) 0))
+    (RFlt  [bits] (do (fmt w "{f}" (bits-f64 bits)) 0))))
+
+(defn rt-eq? [(a RtVal) (b RtVal)] (-> bool)
+  ; identity of runtime values, for the differential comparison. Bit equality on floats on
+  ; purpose: two NaNs are the same OUTCOME even though `==` says otherwise, and an oracle
+  ; comparing two runs of the same program wants outcomes.
+  (match a
+    (RUndef [] (match b (RUndef [] true) (RNull [] false) (RBool [x] false) (RInt [x] false) (RFlt [x] false)))
+    (RNull  [] (match b (RNull [] true) (RUndef [] false) (RBool [x] false) (RInt [x] false) (RFlt [x] false)))
+    (RBool [x] (match b (RBool [y] (= x y)) (RUndef [] false) (RNull [] false) (RInt [y] false) (RFlt [y] false)))
+    (RInt  [x] (match b (RInt [y] (= x y)) (RUndef [] false) (RNull [] false) (RBool [y] false) (RFlt [y] false)))
+    (RFlt  [x] (match b (RFlt [y] (= x y)) (RUndef [] false) (RNull [] false) (RBool [y] false) (RInt [y] false)))))
+
+;; JavaScript truthiness, on a concrete value. It has to agree with `ty-can-be-falsey?` in
+;; node.coil or the interpreter takes a different branch than the compiler predicted, which would
+;; make the oracle worse than useless. Both are tested against each other.
+(defn rt-truthy? [(v RtVal)] (-> bool)
+  (match v
+    (RUndef  [] false)
+    (RNull   [] false)
+    (RBool [b] b)
+    (RInt  [n] (!= n 0))
+    (RFlt  [bits] (not (fbits-falsey? bits)))))
+
+; ============================================================================
+; Data evaluation
+; ============================================================================
+;; Recursion on inputs, terminating because a Phi reads the environment instead of recursing. Any
+;; node reached here whose op the interpreter does not implement is a hard error, not a status: it
+;; means an op was added without teaching the oracle about it, and an oracle that silently answers
+;; for an op it does not know is the worst possible outcome.
+(defn ev-data [(n i64)] (-> RtVal)
+  (if (= n NO-NODE) (ev-fail! EV-STUCK n)
+    (if (n-dead? n) (ev-fail! EV-DEAD n)
+      (if (ev-failed?) (RUndef)
+        (case (n-op n)
+          OP-CONST (ev-const n)
+          OP-ARG   (ev-arg n)
+          OP-PHI   (ev-phi n)
+          OP-CAST  (ev-cast n)
+          OP-ADD   (ev-arith n OP-ADD)
+          OP-SUB   (ev-arith n OP-SUB)
+          OP-MUL   (ev-arith n OP-MUL)
+          OP-DIV   (ev-div n)
+          OP-MINUS (ev-minus n)
+          OP-NOT   (ev-not n)
+          OP-EQ    (ev-cmp n OP-EQ)
+          OP-LT    (ev-cmp n OP-LT)
+          OP-LE    (ev-cmp n OP-LE)
+          OP-PROJ  (ev-fail! EV-STUCK n)   ; no multi-node produces a data value yet
+          (do (ev-unknown-op n) (RUndef)))))))
+
+(defn ev-unknown-op [(n i64)] (-> i64)
+  (let [w (stderr)]
+    (ps w "eval: no rule for op ") (ps w (op-name (n-op n)))
+    (ps w "\n  The interpreter is the differential oracle. An op it does not implement must be a\n")
+    (ps w "  hard error: answering anyway would make every later differential test meaningless.\n"))
+  (abort) 0)
+
+;; A constant's value is read out of its TYPE, which is the single source of truth for what a
+;; constant is. Anything the type says is constant but that has no runtime representation yet is a
+;; typed failure rather than a guess.
+(defn ev-const [(n i64)] (-> RtVal) (ev-from-ty (n-ty n) n))
+
+(defn ev-from-ty [(t i64) (n i64)] (-> RtVal)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)]
+        (if (= k VK-UNDEF) (RUndef)
+          (if (= k VK-NULL) (RNull)
+            (if (= k VK-BOOL)
+                (if (= (val-ilo v) (val-ihi v)) (RBool (!= (val-ilo v) 0)) (ev-fail! EV-TYPE n))
+              (if (= k VK-INT)
+                  (if (= (val-ilo v) (val-ihi v)) (RInt (val-ilo v)) (ev-fail! EV-TYPE n))
+                (if (= k VK-FLT)
+                    (if (= (val-fsz v) FSZ-CON) (RFlt (val-fbits v)) (ev-fail! EV-TYPE n))
+                  (ev-fail! EV-TYPE n))))))))
+    (TBot [] (ev-fail! EV-TYPE n)) (TTop [] (ev-fail! EV-TYPE n))
+    (TCtrl [] (ev-fail! EV-TYPE n)) (TXCtrl [] (ev-fail! EV-TYPE n))
+    (TTuple [o l] (ev-fail! EV-TYPE n))))
+
+(defn ev-arg [(n i64)] (-> RtVal)
+  (let [p (ev)]
+    (if (al-get (load (field p bound)) n) (al-get (load (field p args)) n)
+      (ev-fail! EV-UNBOUND n))))
+
+(defn ev-phi [(n i64)] (-> RtVal)
+  (let [p (ev)]
+    (if (al-get (load (field p hasphi)) n) (al-get (load (field p env)) n)
+      ; a Phi with no environment entry means control never arrived at its merge
+      (ev-fail! EV-STUCK n))))
+
+;; The check that earns this its own status. A Cast is the compiler asserting a narrower type on a
+;; control path; if the value does not satisfy it, the compiler narrowed without proof.
+(defn ev-cast [(n i64)] (-> RtVal)
+  (let [v (ev-data (n-in n 1))]
+    (if (ev-failed?) v
+      (if (ty-isa (rt-ty v) (n-aux n)) v (ev-fail! EV-CAST n)))))
+
+; ---------------------------------------------------------------------------
+; Arithmetic
+; ---------------------------------------------------------------------------
+;; Numbers only. `+` on a string would concatenate, which is real JavaScript and is why
+;; `arith-compute` reports `dyn` for it, but there are no runtime strings yet, so a non-numeric
+;; operand is a typed failure rather than an invented answer.
+(defn rt-num? [(v RtVal)] (-> bool)
+  (match v (RInt [n] true) (RFlt [b] true) (RUndef [] false) (RNull [] false) (RBool [b] false)))
+(defn rt-int? [(v RtVal)] (-> bool)
+  (match v (RInt [n] true) (RFlt [b] false) (RUndef [] false) (RNull [] false) (RBool [b] false)))
+(defn rt-as-f64 [(v RtVal)] (-> f64)
+  (match v
+    (RInt [n] (cast f64 n))
+    (RFlt [b] (bits-f64 b))
+    (RUndef [] 0.0) (RNull [] 0.0) (RBool [b] 0.0)))
+(defn rt-as-int [(v RtVal)] (-> i64)
+  (match v (RInt [n] n) (RFlt [b] 0) (RUndef [] 0) (RNull [] 0) (RBool [b] 0)))
+
+(defn ev-arith [(n i64) (op i64)] (-> RtVal)
+  (let [a (ev-data (n-in n 1))]
+    (if (ev-failed?) a
+      (let [b (ev-data (n-in n 2))]
+        (if (ev-failed?) b
+          (if (not (and (rt-num? a) (rt-num? b))) (ev-fail! EV-TYPE n)
+            (if (and (rt-int? a) (rt-int? b)) (ev-int-arith n op (rt-as-int a) (rt-as-int b))
+              (ev-flt-arith op (rt-as-f64 a) (rt-as-f64 b)))))))))
+
+(defn ev-int-arith [(n i64) (op i64) (x i64) (y i64)] (-> RtVal)
+  (if (= op OP-ADD)
+      (let [s (+ x y)] (if (add-ovf? x y s) (ev-fail! EV-OVERFLOW n) (RInt s)))
+    (if (= op OP-SUB)
+        (if (= y TY-IMIN) (ev-fail! EV-OVERFLOW n)
+          (let [s (- x y)] (if (add-ovf? x (- 0 y) s) (ev-fail! EV-OVERFLOW n) (RInt s))))
+      (let [pr (* x y)] (if (mul-ovf? x y pr) (ev-fail! EV-OVERFLOW n) (RInt pr))))))
+
+(defn ev-flt-arith [(op i64) (x f64) (y f64)] (-> RtVal)
+  (RFlt (f64-bits (if (= op OP-ADD) (+ x y) (if (= op OP-SUB) (- x y) (* x y))))))
+
+;; Division leaves the integers: 1/2 is 0.5 and x/0 is an infinity. An exact integer quotient
+;; stays an integer, which is what `div-numeric` claims in the lattice.
+(defn ev-div [(n i64)] (-> RtVal)
+  (let [a (ev-data (n-in n 1))]
+    (if (ev-failed?) a
+      (let [b (ev-data (n-in n 2))]
+        (if (ev-failed?) b
+          (if (not (and (rt-num? a) (rt-num? b))) (ev-fail! EV-TYPE n)
+            (if (and (rt-int? a) (rt-int? b))
+                (let [x (rt-as-int a) y (rt-as-int b)]
+                  (if (= y 0) (RFlt (f64-bits (/ (cast f64 x) 0.0)))
+                    (if (and (= x TY-IMIN) (= y -1)) (ev-fail! EV-OVERFLOW n)
+                      (if (= (% x y) 0) (RInt (/ x y))
+                        (RFlt (f64-bits (/ (cast f64 x) (cast f64 y))))))))
+              (RFlt (f64-bits (/ (rt-as-f64 a) (rt-as-f64 b)))))))))))
+
+(defn ev-minus [(n i64)] (-> RtVal)
+  (let [a (ev-data (n-in n 1))]
+    (if (ev-failed?) a
+      (if (not (rt-num? a)) (ev-fail! EV-TYPE n)
+        (if (rt-int? a)
+            (let [x (rt-as-int a)]
+              (if (= x TY-IMIN) (ev-fail! EV-OVERFLOW n) (RInt (- 0 x))))
+          (RFlt (f64-bits (- 0.0 (rt-as-f64 a)))))))))
+
+(defn ev-not [(n i64)] (-> RtVal)
+  (let [a (ev-data (n-in n 1))]
+    (if (ev-failed?) a (RBool (not (rt-truthy? a))))))
+
+(defn ev-cmp [(n i64) (op i64)] (-> RtVal)
+  (let [a (ev-data (n-in n 1))]
+    (if (ev-failed?) a
+      (let [b (ev-data (n-in n 2))]
+        (if (ev-failed?) b
+          (if (and (rt-num? a) (rt-num? b))
+              (if (and (rt-int? a) (rt-int? b))
+                  (let [x (rt-as-int a) y (rt-as-int b)]
+                    (RBool (if (= op OP-EQ) (= x y) (if (= op OP-LT) (< x y) (<= x y)))))
+                (let [x (rt-as-f64 a) y (rt-as-f64 b)]
+                  (RBool (if (= op OP-EQ) (fcmp-eq x y) (if (= op OP-LT) (fcmp-lt x y) (fcmp-le x y))))))
+            ; only `==` is defined on non-numbers here, and only between like kinds
+            (if (= op OP-EQ) (RBool (rt-eq? a b)) (ev-fail! EV-TYPE n))))))))
+
+; ============================================================================
+; Control
+; ============================================================================
+;; The unique live control successor. There is no schedule, so this is found by looking at the
+;; def-use edges: exactly one live control node should read this one as its control input.
+(defn ev-ctrl-succ [(n i64)] (-> i64)
+  (let [len (n-nouts n) (mut found) NO-NODE (mut count) 0 (mut i) 0]
+    (loop
+      (if (>= (load i) len) (break)
+        (do (let [u (n-out n (load i))]
+              ; `u == n` is a self back edge (a bodyless loop is its own back edge). It is a real
+              ; control edge but not a forward step, and counting it made every such loop look
+              ; ambiguous and therefore stuck.
+              (if (or (or (= u NO-NODE) (n-dead? u)) (= u n)) 0
+                (if (and (op-control? (n-op u)) (ev-reads-ctrl? u n))
+                    (do (store! count (+ (load count) 1))
+                        (if (= (load found) NO-NODE) (store! found u) 0)
+                        0)
+                  0)))
+            (store! i (+ (load i) 1))
+            0)))
+    ; Stop is not a successor to step into: a Return ends the run
+    (if (= (load count) 1) (load found) NO-NODE)))
+
+;; Does `u` read `n` as CONTROL (as opposed to as a value)? For a merge that means any path slot;
+;; for everything else it means slot 0.
+(defn ev-reads-ctrl? [(u i64) (n i64)] (-> bool)
+  (if (= (n-op u) OP-STOP) false
+    (let [lo (n-cpred-lo u) hi (n-cpred-hi u) (mut i) lo (mut yes) false]
+      (loop
+        (if (or (>= (load i) hi) (load yes)) (break)
+          (do (if (= (n-in u (load i)) n) (store! yes true) 0)
+              (store! i (+ (load i) 1))
+              0)))
+      (load yes))))
+
+(defn ev-pred-index [(merge i64) (from i64)] (-> i64)
+  (let [hi (n-nins merge) (mut i) 1 (mut at) NO-NODE]
+    (loop
+      (if (or (>= (load i) hi) (!= (load at) NO-NODE)) (break)
+        (do (if (= (n-in merge (load i)) from) (store! at (load i)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load at)))
+
+;; SIMULTANEOUS update, and it has to be. Every Phi on this merge takes the value on the incoming
+;; path as evaluated in the OLD environment, and only then are they all committed. Updating them
+;; one at a time would let an earlier phi's new value feed a later phi's input, which silently
+;; miscompiles a loop that swaps two variables.
+(defn ev-enter-merge! [(merge i64) (from i64)] (-> i64)
+  (let [p (ev) idx (ev-pred-index merge from)]
+    (if (= idx NO-NODE) (do (ev-fail! EV-STUCK merge) 0)
+      (let [len (n-nouts merge)
+            (mut pending-n) (al-new [i64] (malloc-allocator))
+            (mut pending-v) (al-new [RtVal] (malloc-allocator))
+            (mut i) 0]
+        (loop
+          (if (>= (load i) len) (break)
+            (do (let [u (n-out merge (load i))]
+                  (if (or (n-dead? u) (not (op-phi? (n-op u)))) 0
+                    (if (>= idx (n-nins u)) (do (ev-fail! EV-STUCK u) 0)
+                      (do (al-push! [i64] (mut pending-n) u)
+                          (al-push! [RtVal] (mut pending-v) (ev-data (n-in u idx)))
+                          0))))
+                (store! i (+ (load i) 1))
+                0)))
+        (let [m (al-len [i64] (load pending-n)) (mut k) 0]
+          (loop
+            (if (>= (load k) m) (break)
+              (do (let [u (al-get (load pending-n) (load k))]
+                    (al-set! [bool]  (field p hasphi) u true)
+                    (al-set! [RtVal] (field p env)    u (al-get (load pending-v) (load k))))
+                  (store! k (+ (load k) 1))
+                  0))))
+        (al-free! [i64] (mut pending-n))
+        (al-free! [RtVal] (mut pending-v))
+        0))))
+
+;; Run from Start until a Return, or until the step budget runs out. The budget is what turns a
+;; non-terminating program into a reported status rather than a hung test.
+(defn ev-run [(budget i64)] (-> i64)
+  (ev-reset!)
+  (ev-run-nobind budget))
+
+;; The run proper, without resetting, so bindings made beforehand survive.
+(defn ev-run-nobind [(budget i64)] (-> i64)
+  (let [p (ev) (mut cur) (g-start) (mut prev) NO-NODE]
+    (loop
+      (if (ev-failed?) (break)
+        (do (store! (field p steps) (+ (load (field p steps)) 1))
+            (if (> (load (field p steps)) budget) (do (ev-fail! EV-STEPS (load cur)) 0)
+              (let [c (load cur)]
+                (if (n-dead? c) (do (ev-fail! EV-DEAD c) 0)
+                  (if (= (n-ty c) (t-xctrl)) (do (ev-fail! EV-DEAD c) 0)
+                    (case (n-op c)
+                      OP-RETURN
+                        (do (store! (field p result) (ev-data (n-in c 1)))
+                            (if (ev-failed?) 0 (store! (field p status) EV-OK))
+                            (break))
+                      OP-IF
+                        (let [pred (ev-data (n-in c 1))]
+                          (if (ev-failed?) 0
+                            (let [want (if (rt-truthy? pred) 0 1)
+                                  arm  (ev-if-arm c want)]
+                              (if (= arm NO-NODE) (do (ev-fail! EV-STUCK c) 0)
+                                (do (store! prev c) (store! cur arm) 0)))))
+                      OP-REGION
+                        (do (ev-enter-merge! c (load prev))
+                            (if (ev-failed?) 0
+                              (let [nx (ev-ctrl-succ c)]
+                                (if (= nx NO-NODE) (do (ev-fail! EV-STUCK c) 0)
+                                  (do (store! prev c) (store! cur nx) 0)))))
+                      OP-LOOP
+                        (do (ev-enter-merge! c (load prev))
+                            (if (ev-failed?) 0
+                              (let [nx (ev-ctrl-succ c)]
+                                (if (= nx NO-NODE) (do (ev-fail! EV-STUCK c) 0)
+                                  (do (store! prev c) (store! cur nx) 0)))))
+                      OP-STOP (do (ev-fail! EV-STUCK c) 0)
+                      ; Start and CProj just pass control along
+                      (let [nx (ev-ctrl-succ c)]
+                        (if (= nx NO-NODE) (do (ev-fail! EV-STUCK c) 0)
+                          (do (store! prev c) (store! cur nx) 0))))))))
+            0))))
+  (load (field (ev) status)))
+
+;; The CProj off this If with the wanted slot index. Note the If may have been folded away, in
+;; which case there is no projection and control does not branch here at all.
+(defn ev-if-arm [(iff i64) (idx i64)] (-> i64)
+  (let [len (n-nouts iff) (mut found) NO-NODE (mut i) 0]
+    (loop
+      (if (or (>= (load i) len) (!= (load found) NO-NODE)) (break)
+        (do (let [u (n-out iff (load i))]
+              (if (and (and (not (n-dead? u)) (= (n-op u) OP-CPROJ)) (= (n-aux u) idx))
+                  (store! found u)
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (load found)))
+
+; ============================================================================
+; Binding arguments for a differential run
+; ============================================================================
+;; A value that SATISFIES the given type. Binding an argument to something outside its declared
+;; type would invalidate the whole exercise: the optimiser reasoned from that declaration, so
+;; feeding it a value the declaration forbids does not test the optimisation, it tests what happens
+;; when you lie to the compiler.
+(defn ev-value-in [(t i64) (seed i64)] (-> RtVal)
+  (match (ty-get t)
+    (TVal [v]
+      (let [k (val-kinds v)
+            lo (val-ilo v)
+            hi (val-ihi v)]
+        (if (!= (& k VK-INT) 0)
+            ; inside the range, and biased away from 0 so truthiness is exercised rather than
+            ; every branch always going the same way
+            (if (or (> lo hi) (= lo TY-IMIN)) (RInt (+ 1 (% (abs64 seed) 97)))
+              (if (= lo hi) (RInt lo)
+                (RInt (+ lo (% (abs64 seed) (+ (- hi lo) 1))))))
+          (if (!= (& k VK-BOOL) 0) (RBool (= (% (abs64 seed) 2) 0))
+            (if (!= (& k VK-FLT) 0)
+                (if (= (val-fsz v) FSZ-CON) (RFlt (val-fbits v))
+                  (RFlt (f64-bits (+ 0.5 (cast f64 (% (abs64 seed) 13))))))
+              (if (= k VK-UNDEF) (RUndef)
+                (if (= k VK-NULL) (RNull)
+                  (do (ev-no-value-for t) (RUndef)))))))))
+    (TBot [] (do (ev-no-value-for t) (RUndef)))
+    (TTop [] (do (ev-no-value-for t) (RUndef)))
+    (TCtrl [] (do (ev-no-value-for t) (RUndef)))
+    (TXCtrl [] (do (ev-no-value-for t) (RUndef)))
+    (TTuple [o l] (do (ev-no-value-for t) (RUndef)))))
+
+(defn abs64 [(x i64)] (-> i64) (if (< x 0) (- 0 x) x))
+
+(defn ev-no-value-for [(t i64)] (-> i64)
+  (let [w (stderr)]
+    (ps w "eval: no runtime value can represent the type ") (ty-print w t) (ps w "\n")
+    (ps w "  A differential run needs an inhabitant of every argument's declared type. Inventing\n")
+    (ps w "  one outside the type would test lying to the compiler rather than the optimisation.\n"))
+  (abort) 0)
+
+;; Bind every live Arg. Keyed by DECLARED TYPE and position among the arguments sharing that type,
+;; deliberately not by node id: an optimisation may delete an argument and shift every later id, and
+;; the `big` fixture really does drop one of its two arguments. Two arguments of the identical type
+;; therefore receive the same value, which weakens those cases rather than invalidating them; when
+;; the corpus grows an interesting pair like that, the fixture should name its arguments instead.
+(defn ev-bind-args! [(seed i64)] (-> i64)
+  (let [n (n-count) (mut i) 0
+        (mut seen-t) (al-new [i64] (malloc-allocator))]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (or (n-dead? (load i)) (!= (n-op (load i)) OP-ARG)) 0
+              (let [t (n-aux (load i))
+                    k (count-of (load seen-t) t)]
+                (al-push! [i64] (mut seen-t) t)
+                (ev-bind! (load i) (ev-value-in t (+ (* seed 31) (* k 7919))))
+                0))
+            (store! i (+ (load i) 1))
+            0)))
+    (al-free! [i64] (mut seen-t))
+    0))
+
+(defn count-of [(l (ArrayList i64)) (x i64)] (-> i64)
+  (let [n (al-len [i64] l) (mut i) 0 (mut c) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (if (= (al-get l (load i)) x) (store! c (+ (load c) 1)) 0)
+            (store! i (+ (load i) 1))
+            0)))
+    (load c)))
+
+;; One differential run: build the graph, bind arguments from the seed, run, and hand back both the
+;; status and the value so the caller can compare two builds of the same program.
+(defn ev-run-bound [(seed i64) (budget i64)] (-> i64)
+  (ev-reset!)
+  (ev-bind-args! seed)
+  (ev-run-nobind budget))
+
+; ============================================================================
+; Reporting
+; ============================================================================
+(defn ev-print [(w (ptr Writer))] (-> i64)
+  (let [s (ev-status)]
+    (if (= s EV-OK)
+        (do (ps w "=> ") (rt-print w (ev-result) ) (fmt w "  ({d} steps)" (ev-steps)) 0)
+      (do (ps w "!! ") (ps w (ev-status-name s))
+          (if (= (ev-at) NO-NODE) 0
+            (do (fmt w " at n{d} " (ev-at)) (ps w (op-name (n-op (ev-at)))) 0))
+          (fmt w "  ({d} steps)" (ev-steps))
+          0))))

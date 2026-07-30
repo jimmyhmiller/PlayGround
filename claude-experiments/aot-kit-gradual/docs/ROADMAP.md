@@ -139,6 +139,39 @@ the corpus and *red* on a set of deliberately corrupted graphs (a verifier that 
 not a verifier); the interpreter agrees with expected results on the corpus, before and after
 `Opto`.
 
+**Slice 1, the verifier: DONE** (`src/verify.coil`, `src/corpus.coil`, 19 tests). One named code
+per check, which is what stops the corrupted-graph half from being vacuous: "verify returned
+non-zero" is satisfied by a verifier that always fails, whereas "corrupting the phi/region lockstep
+reports `VERR-PHI-ARITY`" is a claim about a specific check noticing. It runs `compute` and never
+`idealize`, because unlike Simple's equivalent our `idealize` MUTATES (`region-remove-path!`
+deletes edges, `stop-idealize` deletes an input), so a reducibility check would silently transform
+the graph it was verifying.
+
+**Slice 2, the IR interpreter: DONE** (`src/eval.coil`, 12 tests). The differential oracle is live:
+every corpus program that exists in both a raw and an optimised build produces the same observable
+result, over 12 argument bindings. From here on that is the gate for every optimisation.
+
+Three things worth keeping from it:
+
+- **Arguments are bound to values INSIDE their declared types**, keyed by type rather than node id.
+  Feeding an argument something its declaration forbids does not test the optimisation, it tests
+  what happens when you lie to the compiler. Keying by id would break because optimisation deletes
+  arguments and shifts every later id.
+- **It refuses to guess.** Integer overflow reports `EV-OVERFLOW` rather than wrapping, because
+  JavaScript promotes to a double and doing that properly needs M5's value domain. A wrapped answer
+  would make the oracle quietly disagree with the language it exists to define.
+- **A failing `Cast` is a compiler bug, not a program condition**, so it has its own status. A guard
+  placed where it was not proven is now caught by running the program.
+
+It also found two things immediately. A bodyless `Loop` whose back edge is itself is **not** an
+infinite loop: control's only forward step from the header is the `Return`, so nothing ever
+iterates. The corpus loop fixture was exactly that shape, drawn for the diagram and never run, so
+it has a real exit test now and counts to 5. And the interpreter's truthiness is checked directly
+against `ty-can-be-truthy?`, because an interpreter that takes a different branch than the compiler
+predicted is worse than no oracle at all.
+
+**Slice 3, the textual IR parser: still to do.**
+
 ## M4. Memory SSA and shapes
 
 Alias classes, `New`, `Load`, `Store`, `MemMerge`, memory `Phi`. Object shapes with a

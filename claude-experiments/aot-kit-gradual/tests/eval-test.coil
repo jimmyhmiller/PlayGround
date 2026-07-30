@@ -1,0 +1,337 @@
+;; M3 slice 2: the IR interpreter, and the differential property it exists for.
+;;
+;; Two halves. First the interpreter is pinned against hand-computed answers, because an oracle
+;; nobody checked is not an oracle. Then the property that makes it valuable: for every corpus
+;; program that exists in both a raw and an optimised build, both builds must produce the SAME
+;; observable result, under many argument bindings.
+;;
+;; That second half is what every milestone after this one is gated on. A golden string tells you a
+;; graph changed; only this tells you it still computes the same thing.
+;;
+;;   coil test tests/eval-test.coil
+(module evaltest)
+
+(import "../src/ty.coil"     :use *)
+(import "../src/node.coil"   :use *)
+(import "../src/corpus.coil" :use *)
+(import "../src/eval.coil"   :use *)
+(import "assert.coil"        :use *)
+(import "control.coil"       :use *)
+(import "io.coil"            :use *)
+(import "fmt.coil"           :use *)
+(import "alloc.coil"         :use *)
+(import "arraylist.coil"     :use *)
+(import "slice.coil"         :use *)
+
+(const BUDGET i64 100000)
+
+(defn a-arg [(t i64)] (-> i64) (n-peephole (n-new1 OP-ARG t (g-start))))
+(defn a-int [(v i64)] (-> i64) (n-const (t-int-con v)))
+(defn a-con [(t i64)] (-> i64) (n-const t))
+(defn a-bin [(op i64) (a i64) (b i64)] (-> i64) (n-peephole (n-new3 op 0 NO-NODE a b)))
+(defn a-un  [(op i64) (a i64)] (-> i64) (n-peephole (n-new2 OP-MINUS 0 NO-NODE a)))
+(defn a-ret [(v i64)] (-> i64)
+  (let [r (n-peephole (n-new2 OP-RETURN 0 (g-start) v))]
+    (n-add-def! (g-stop) r) (n-peephole (g-stop)) (iterate!) r))
+
+(defn fail [(what (slice u8))] (-> i64)
+  (let [w (stderr)]
+    (ps w "\n") (ps w what) (ps w "\n  eval: ") (ev-print w) (ps w "\n")
+    (g-print-flat w))
+  (abort) 0)
+
+;; Run the current graph with no arguments and require an integer result.
+(defn expect-int [(what (slice u8)) (want i64)] (-> i64)
+  (ev-run BUDGET)
+  (if (!= (ev-status) EV-OK) (fail what) 0)
+  (if (rt-eq? (ev-result) (RInt want)) 0
+    (do (let [w (stderr)]
+          (ps w "\n") (ps w what) (ps w "\n  want: ") (rt-print w (RInt want))
+          (ps w "\n  got:  ") (rt-print w (ev-result)) (ps w "\n"))
+        (abort) 0)))
+
+(defn expect-bool [(what (slice u8)) (want bool)] (-> i64)
+  (ev-run BUDGET)
+  (if (!= (ev-status) EV-OK) (fail what) 0)
+  (if (rt-eq? (ev-result) (RBool want)) 0 (fail what)))
+
+(defn expect-status [(what (slice u8)) (want i64)] (-> i64)
+  (ev-run BUDGET)
+  (if (= (ev-status) want) 0
+    (do (let [w (stderr)]
+          (ps w "\n") (ps w what) (ps w "\n  want status: ") (ps w (ev-status-name want))
+          (ps w "\n  got:         ") (ps w (ev-status-name (ev-status))) (ps w "\n"))
+        (abort) 0)))
+
+; ---------------------------------------------------------------------------
+; The oracle is itself checked
+; ---------------------------------------------------------------------------
+(deftest straight_line_arithmetic
+  (graph-reset! 1) (a-ret (a-int 7))                            (expect-int "7" 7)
+  (graph-reset! 1) (a-ret (a-bin OP-ADD (a-int 2) (a-int 3)))    (expect-int "2+3" 5)
+  (graph-reset! 1) (a-ret (a-bin OP-SUB (a-int 2) (a-int 9)))    (expect-int "2-9" -7)
+  (graph-reset! 1) (a-ret (a-bin OP-MUL (a-int 6) (a-int 7)))    (expect-int "6*7" 42)
+  (graph-reset! 1) (a-ret (a-bin OP-DIV (a-int 12) (a-int 4)))   (expect-int "12/4" 3)
+  (graph-reset! 1) (a-ret (a-un OP-MINUS (a-int 5)))             (expect-int "-5" -5))
+
+;; Inexact division leaves the integers, which is what the lattice claims with `num` and what the
+;; interpreter has to actually do, or the two disagree about the language.
+(deftest division_leaves_the_integers
+  (graph-reset! 1)
+  (a-ret (a-bin OP-DIV (a-int 1) (a-int 2)))
+  (ev-run BUDGET)
+  (assert (= (ev-status) EV-OK))
+  (assert (rt-eq? (ev-result) (RFlt (f64-bits 0.5))))
+
+  ; and dividing by zero is an infinity, not a trap
+  (graph-reset! 1)
+  (a-ret (a-bin OP-DIV (a-int 1) (a-int 0)))
+  (ev-run BUDGET)
+  (assert (= (ev-status) EV-OK))
+  (assert (not (rt-eq? (ev-result) (RInt 0)))))
+
+(deftest comparisons_and_truthiness
+  (graph-reset! 1) (a-ret (a-bin OP-LT (a-int 1) (a-int 2)))  (expect-bool "1<2" true)
+  (graph-reset! 1) (a-ret (a-bin OP-LT (a-int 2) (a-int 1)))  (expect-bool "2<1" false)
+  (graph-reset! 1) (a-ret (a-bin OP-EQ (a-int 3) (a-int 3)))  (expect-bool "3==3" true)
+  (graph-reset! 1) (a-ret (n-peephole (n-new2 OP-NOT 0 NO-NODE (a-int 0))))  (expect-bool "!0" true)
+  (graph-reset! 1) (a-ret (n-peephole (n-new2 OP-NOT 0 NO-NODE (a-int 9))))  (expect-bool "!9" false))
+
+;; The interpreter's truthiness and the compiler's must agree, or the interpreter takes a different
+;; branch than the compiler predicted and the oracle is worse than useless. Checked directly, over
+;; every constant the runtime domain can represent.
+(deftest runtime_truthiness_agrees_with_the_lattice
+  (let [n 9 (mut i) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (let [v (case (load i)
+                  0 (RInt 0) 1 (RInt 1) 2 (RInt -3)
+                  3 (RBool true) 4 (RBool false)
+                  5 (RUndef) 6 (RNull)
+                  7 (RFlt (f64-bits 0.0))
+                  8 (RFlt 9221120237041090560)          ; NaN, which is falsey
+                  (RUndef))]
+          (let [t (rt-ty v)
+                runtime (rt-truthy? v)
+                compiler-can-be-truthy (ty-can-be-truthy? t)
+                compiler-can-be-falsey (ty-can-be-falsey? t)]
+            ; each of these is a single concrete value, so the compiler must be DECIDED about it
+            ; and must decide the same way the interpreter does
+            (if (= runtime compiler-can-be-truthy) 0
+              (do (let [w (stderr)]
+                    (ps w "\ntruthiness disagreement on ") (rt-print w v)
+                    (ps w " : ") (ty-print w t)
+                    (fmt w "\n  interpreter says truthy={d}, lattice says can-be-truthy={d}\n"
+                         (if runtime 1 0) (if compiler-can-be-truthy 1 0)))
+                  (abort) 0))
+            (if (!= runtime compiler-can-be-falsey) 0
+              (do (let [w (stderr)]
+                    (ps w "\nfalseyness disagreement on ") (rt-print w v) (ps w "\n"))
+                  (abort) 0))
+            0))
+        )
+      (store! i (+ (load i) 1))
+      0)))
+
+; ---------------------------------------------------------------------------
+; Control flow
+; ---------------------------------------------------------------------------
+(deftest branches_take_the_right_arm
+  ; if (arg) 10 else 20, with arg bound both ways
+  (let [(mut trial) 0]
+    (loop
+      (if (>= (load trial) 2) (break)
+        (do (graph-reset! 1)
+            (let [a   (a-arg (t-dyn))
+                  iff (n-peephole (n-new2 OP-IF 0 (g-start) a))
+                  t   (n-peephole (n-new1 OP-CPROJ 0 iff))
+                  f   (n-peephole (n-new1 OP-CPROJ 1 iff))
+                  r   (n-new OP-REGION 0)]
+              (n-add-def! r NO-NODE) (n-add-def! r t) (n-add-def! r f)
+              (let [ph (n-new OP-PHI (t-dyn))]
+                (n-add-def! ph r) (n-add-def! ph (a-int 10)) (n-add-def! ph (a-int 20))
+                (let [ret (n-peephole (n-new2 OP-RETURN 0 r ph))]
+                  (n-add-def! (g-stop) ret) (n-peephole (g-stop))
+                  (wl-push! r) (wl-push! ph) (iterate!))
+                (ev-reset!)
+                (ev-bind! a (if (= (load trial) 0) (RInt 1) (RInt 0)))
+                (ev-run-nobind BUDGET)
+                (assert (= (ev-status) EV-OK))
+                (assert (rt-eq? (ev-result) (RInt (if (= (load trial) 0) 10 20)))))
+              0)
+            (store! trial (+ (load trial) 1))
+            0)))))
+
+;; A counted loop actually counts. This is the test that a Phi environment and simultaneous update
+;; work: `i = 0; while (i < 5) i = i + 1; return i;` must return 5 and not 1, 0, or a hang.
+(deftest a_counted_loop_counts
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))]
+      (n-add-def! ph lp) (n-add-def! ph (a-int 0)) (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx   (a-bin OP-ADD ph (a-int 1))
+            test (a-bin OP-LT ph (a-int 5))
+            iff  (n-peephole (n-new2 OP-IF 0 lp test))
+            body (n-peephole (n-new1 OP-CPROJ 0 iff))
+            exit (n-peephole (n-new1 OP-CPROJ 1 iff))]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 body)
+        (let [ret (n-peephole (n-new2 OP-RETURN 0 exit ph))]
+          (n-add-def! (g-stop) ret) (n-peephole (g-stop)))
+        (wl-push! lp) (wl-push! ph) (wl-push! nx) (iterate!)
+        (expect-int "counted loop to 5" 5))))
+
+  ; And a loop whose test never fails reports the budget rather than hanging. Note it needs a real
+  ; branch: a Loop whose back edge is ITSELF, with a Return hanging off it, is not an infinite loop
+  ; at all. It is a loop nothing iterates, because control's only forward step is the Return. That
+  ; distinction cost a debugging round, and it is the reason the corpus loop fixture was rebuilt
+  ; with a genuine exit test.
+  (graph-reset! 1)
+  (let [lp (n-new OP-LOOP 0)]
+    (n-add-def! lp NO-NODE) (n-add-def! lp (g-start)) (n-add-def! lp NO-NODE)
+    (n-peephole lp)
+    (let [ph (n-new OP-PHI (t-int))
+          keep (a-arg (t-dyn))]
+      (n-add-def! ph lp) (n-add-def! ph (a-int 0)) (n-add-def! ph NO-NODE)
+      (n-peephole ph)
+      (let [nx   (a-bin OP-ADD ph (a-int 1))
+            iff  (n-peephole (n-new2 OP-IF 0 lp keep))
+            body (n-peephole (n-new1 OP-CPROJ 0 iff))
+            exit (n-peephole (n-new1 OP-CPROJ 1 iff))]
+        (n-set-def! ph 2 nx)
+        (n-set-def! lp 2 body)
+        (let [ret (n-peephole (n-new2 OP-RETURN 0 exit ph))]
+          (n-add-def! (g-stop) ret) (n-peephole (g-stop)))
+        (wl-push! lp) (wl-push! ph) (wl-push! nx) (iterate!)
+        (ev-reset!)
+        (ev-bind! keep (RInt 1))            ; the test never fails, so control never leaves
+        (ev-run-nobind 500)
+        (assert (= (ev-status) EV-STEPS))))))
+
+; ---------------------------------------------------------------------------
+; It refuses to guess
+; ---------------------------------------------------------------------------
+;; Overflow is where a lazy interpreter would silently wrap and quietly disagree with JavaScript,
+;; which promotes to a double. Reporting a named status is the honest answer until M5 gives the
+;; runtime a value domain that can hold the result.
+(deftest overflow_is_reported_not_wrapped
+  (graph-reset! 1)
+  (let [a (a-arg (t-int))]
+    (a-ret (a-bin OP-ADD a a))
+    (ev-reset!)
+    (ev-bind! a (RInt 5000000000000000000))
+    (ev-run-nobind BUDGET)
+    (assert (= (ev-status) EV-OVERFLOW))))
+
+(deftest an_unbound_argument_is_reported
+  (graph-reset! 1)
+  (let [a (a-arg (t-int))]
+    (a-ret (a-bin OP-ADD a (a-int 1)))
+    (expect-status "unbound arg" EV-UNBOUND)))
+
+;; A Cast that fails at runtime means the compiler narrowed a type it had not proven. That is a
+;; compiler bug and gets its own status, so a future guard that is placed wrongly is caught by
+;; running the program rather than by inspecting the graph.
+(deftest a_failing_cast_is_reported_as_a_compiler_bug
+  (graph-reset! 1)
+  (let [a (a-arg (t-dyn))
+        c (n-peephole (n-new2 OP-CAST (t-int) (g-start) a))]
+    (a-ret c)
+    ; the cast survived, because nothing proved the argument is an int
+    (assert (!= c a))
+    ; bind it to something that satisfies the cast: fine
+    (ev-reset!) (ev-bind! a (RInt 3)) (ev-run-nobind BUDGET)
+    (assert (= (ev-status) EV-OK))
+    (assert (rt-eq? (ev-result) (RInt 3)))
+    ; bind it to something that does not: the cast is unsatisfied
+    (ev-reset!) (ev-bind! a (RNull)) (ev-run-nobind BUDGET)
+    (assert (= (ev-status) EV-CAST))))
+
+; ---------------------------------------------------------------------------
+; THE DIFFERENTIAL PROPERTY
+; ---------------------------------------------------------------------------
+;; Every corpus program that exists in both a raw and an optimised build must produce the same
+;; observable result. The pairs are the four the corpus names: fold, gvn, big, dead-branch.
+;;
+;; Arguments are bound to values INSIDE their declared types, keyed by type rather than by node id,
+;; because optimisation deletes arguments and shifts ids. See ev-bind-args!.
+(defn diff-pair [(raw i64) (opt i64) (label (slice u8))] (-> i64)
+  (let [(mut seed) 1]
+    (loop
+      (if (> (load seed) 12) (break)
+        (do (corpus-build! raw)
+            (let [sr (ev-run-bound (load seed) BUDGET)
+                  vr (ev-result)]
+              (corpus-build! opt)
+              (let [so (ev-run-bound (load seed) BUDGET)
+                    vo (ev-result)]
+                (if (and (= sr so) (rt-eq? vr vo)) 0
+                  (do (let [w (stderr)]
+                        (ps w "\nDIFFERENTIAL FAILURE: ") (ps w label)
+                        (fmt w "  (seed {d})\n  raw:       " (load seed))
+                        (ps w (ev-status-name sr)) (ps w " ") (rt-print w vr)
+                        (ps w "\n  optimised: ")
+                        (ps w (ev-status-name so)) (ps w " ") (rt-print w vo)
+                        (ps w "\n"))
+                      (abort) 0))))
+            (store! seed (+ (load seed) 1))
+            0)))
+    0))
+
+(deftest optimisation_preserves_the_answer
+  (diff-pair CX-FOLD-BEFORE CX-FOLD-AFTER  "1 + 2*3, folded")
+  (diff-pair CX-GVN-BEFORE  CX-GVN-AFTER   "(arg+2)-(2+arg), value numbered")
+  (diff-pair CX-BIG-BEFORE  CX-BIG-AFTER   "nine expressions collapsing to one multiply")
+  (diff-pair CX-DEAD-BEFORE CX-DEAD-AFTER  "if(0), dead branch removed"))
+
+;; Every corpus program must reach a DEFINITE outcome, and specifically must never report a defect.
+;; STUCK, TYPE, CAST and DEAD each mean something is wrong with the graph or the compiler, so none
+;; is ever acceptable. EV-STEPS is different: two fixtures are infinite loops by construction, and
+;; demanding a value from them would be demanding the interpreter be wrong. Those two are named
+;; here so that a THIRD fixture quietly becoming non-terminating is a failure rather than a shrug.
+(defn corpus-may-not-terminate? [(i i64)] (-> bool)
+  (= i CX-NESTED))  ; while (a) while (b) {}, and an opaque `a` stays truthy for ever
+
+(deftest every_corpus_program_reaches_a_definite_outcome
+  (let [n (corpus-count) (mut i) 0 (mut valued) 0 (mut looped) 0]
+    (loop
+      (if (>= (load i) n) (break)
+        (do (corpus-build! (load i))
+            (let [st (ev-run-bound 5 BUDGET)]
+              (if (= st EV-OK) (store! valued (+ (load valued) 1))
+                (if (and (= st EV-STEPS) (corpus-may-not-terminate? (load i)))
+                    (store! looped (+ (load looped) 1))
+                  (do (let [w (stderr)]
+                        (ps w "\ncorpus program reached no definite outcome: ")
+                        (ps w (corpus-name (load i)))
+                        (ps w "\n  ") (ev-print w)
+                        (ps w "\n  STUCK/TYPE/CAST/DEAD are defects; STEPS is only acceptable for a\n")
+                        (ps w "  fixture listed in corpus-may-not-terminate?.\n")
+                        (g-print-flat w))
+                      (abort) 0))))
+            (store! i (+ (load i) 1))
+            0)))
+    (let [w (stdout)]
+      (fmt w "\n{d} corpus programs returned a value, {d} ran for ever as designed, {d} total\n"
+           (load valued) (load looped) n))
+    (assert (= (+ (load valued) (load looped)) n))
+    ; and the ones that do terminate really are the majority: a corpus of infinite loops would
+    ; satisfy the check above while testing almost nothing
+    (assert (>= (load valued) 13))))
+
+;; The diagram fixtures and the differential corpus are the same graphs, so a printed result next to
+;; each one is free and makes the gallery show what a program DOES rather than only its shape.
+(deftest print_corpus_results
+  (let [w (stdout) n (corpus-count) (mut i) 0]
+    (ps w "\n--- corpus results (seed 5) ---\n")
+    (loop
+      (if (>= (load i) n) (break)
+        (do (corpus-build! (load i))
+            (ev-run-bound 5 BUDGET)
+            (ps w "  ") (ps w (corpus-name (load i))) (ps w ": ") (ev-print w) (ps w "\n")
+            (store! i (+ (load i) 1))
+            0)))
+    0))

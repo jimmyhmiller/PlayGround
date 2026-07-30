@@ -272,6 +272,12 @@
 ;; whole termination story: widening is what stops the range climbing for ever.
 ;; Built in the order the in-progress contract requires: open the merge, open the phi, build
 ;; and peephole the body INSIDE that window, close the phis, then close control.
+;; `i = 0; while (i < 5) i = i + 1; return i;`
+;;
+;; This was originally a bodyless loop whose back edge was the Loop itself, which drew a tidy
+;; diagram and was NOT a loop: control's only forward step from the header was the Return, so
+;; nothing ever iterated. The interpreter found that immediately. A fixture that cannot be run is a
+;; fixture no differential test covers, so it has a real exit test now and actually counts to 5.
 (defn fx-loop [] (-> i64)
   (graph-reset! 1)
   (let [lp (n-new OP-LOOP 0)]
@@ -280,15 +286,17 @@
     (let [ph (n-new OP-PHI (t-int))]
       (n-add-def! ph lp) (n-add-def! ph (mk-int 0)) (n-add-def! ph NO-NODE)
       (n-peephole ph)
-      (let [nx (mk-bin OP-ADD ph (mk-int 1))]
+      (let [nx   (mk-bin OP-ADD ph (mk-int 1))
+            test (mk-bin OP-LT ph (mk-int 5))
+            iff  (mk-if lp test)
+            body (mk-cproj iff 0)
+            exit (mk-cproj iff 1)]
         (n-set-def! ph 2 nx)
-        (n-set-def! lp 2 lp)
-        (ret-to lp ph)
+        (n-set-def! lp 2 body)
+        (ret-to exit ph)
         (wl-push! lp) (wl-push! ph) (wl-push! nx))))
   (iterate!) 0)
 
-;; A guard, in the shape DECISIONS.md D4 describes: test the value, and on the taken edge a Cast
-;; carries the narrowed type into the fast path. The generic value still reaches the merge.
 (defn fx-guard [] (-> i64)
   (graph-reset! 1)
   (let [x   (mk-arg (t-dyn))
