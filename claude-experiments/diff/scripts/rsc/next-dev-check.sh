@@ -115,6 +115,44 @@ grep -q "._${module_class#_}" /tmp/diffpack-dev-rsc.css || grep -q ".$module_cla
 rm -f /tmp/diffpack-dev-rsc.css
 echo "OK (gate D1b): the linked /rsc.css is served as text/css and carries globals.css + the CSS-Module rule for .$module_class"
 
+# --- Gate D1c: useId survives the SSR -> hydration seam ---------------------------
+# Runs BEFORE D2 deliberately: it reloads the page to capture a clean console, which
+# resets the island's useState, and D3 asserts Fast Refresh PRESERVES the 6 that D2
+# clicks in. Ordered after D2 it put the counter back to 5 and failed D3 with
+# "expected 'tally: 6' ... got 'tally: 5'" — a real gate reporting a bug that was not
+# there.
+#
+# REGRESSION. React derives `useId` from the tree-id FORK a multi-child parent pushes,
+# not from the rendered markup. The SSR entry wrapped the flight root as a SINGLE child
+# of the hooks providers, while the client's Router wrapped it in a Fragment holding TWO
+# children — the tree and the intercept-modal slot, which is a `null` SLOT (not an absent
+# child) whenever no modal is open, i.e. always at hydration. One extra fork on the client
+# shifted every useId beneath it, so the two sides generated different ids from identical
+# markup. On cal.com that surfaced as base-ui rendering `base-ui-_R_2lmdbpi_` on the server
+# and `base-ui-_R_amplf69_` on the client: React reports it as a mismatch it "won't patch
+# up", and every <label for> is left pointing at an id no input carries.
+#
+# The assertion is on REACT'S OWN VERDICT, not on the DOM, and that distinction is the
+# whole gate. React reports this mismatch and then leaves the server's attribute in place
+# ("This won't be patched up"), so the hydrated DOM still reads back the SERVER's id and
+# an SSR-vs-DOM attribute comparison passes while the bug is live — measured, not assumed:
+# that comparison was tried here first and passed against a deliberately reverted build.
+# Only the console distinguishes the two.
+#
+# `data-uid` is still asserted present, because the console is only meaningful if the
+# probe actually rendered — a useId that never ran cannot mismatch, and a silently
+# dropped probe would turn this gate green forever.
+ssr_uid="$(curl -s "$base/" | grep -oE -m1 'data-uid="[^"]*"' | sed 's/data-uid="//;s/"//')"
+[ -n "$ssr_uid" ] || { curl -s "$base/" | head -20; fail "dev: the island did not server-render its useId probe (data-uid); the seam probe is gone and this gate can no longer detect anything"; }
+agent-browser console --clear >/dev/null 2>&1
+agent-browser open "$base/" >/dev/null 2>&1
+agent-browser wait "#island" >/dev/null 2>&1 || fail "dev: #island never appeared, so hydration never ran"
+for _ in $(seq 1 20); do [ -n "$(agent-browser eval "document.getElementById('inc') ? '1' : ''" 2>/dev/null | tr -d '\"')" ] && break; sleep 0.3; done
+sleep 1
+mismatch="$(agent-browser console 2>/dev/null | grep -cE "didn't match|hydrated but" || true)"
+[ "$mismatch" = "0" ] || { agent-browser console 2>/dev/null | grep -A20 -E "hydrated but" | head -30; fail "dev: React reported a hydration mismatch — the SSR and client entries disagree on the tree shape above the flight root, so every useId under the tree differs across the seam"; }
+echo "OK (gate D1c): useId ($ssr_uid) crossed the SSR -> hydration seam with no React hydration mismatch"
+
 # --- Gate D2: island hydrated + interactive (5 -> 6) -----------------------------
 agent-browser open "$base/" >/dev/null 2>&1
 agent-browser wait "#inc" >/dev/null 2>&1 || fail "dev: #inc island button not present"

@@ -5965,7 +5965,7 @@ fn ssr_entry_module(
 // and on the client (no hydration mismatch — the client entry feeds the SAME values).
 import {{ createFromReadableStream }} from "react-server-dom-webpack/client";
 import {{ renderToPipeableStream, renderToStaticMarkup }} from "react-dom/server";
-import {{ createElement }} from "react";
+import {{ createElement, Fragment }} from "react";
 import {{ PathParamsContext, PathnameContext, SearchParamsContext, ServerInsertedHTMLContext }} from {hooks_import};
 {flight_sink}
 // --- pages-router api runtime (src/next_runtime/pages_api.js, verbatim) -------------
@@ -6104,7 +6104,22 @@ export async function renderFlightToDocument(flightBytes, serverConsumerManifest
       createElement(
         PathnameContext.Provider,
         {{ value: pathname }},
-        createElement(SearchParamsContext.Provider, {{ value: search }}, flightRoot),
+        // The SAME shape the client's `Router` hydrates with: its innermost provider
+        // wraps a Fragment holding TWO children — the tree, and the intercept-modal
+        // slot, which is a `null` SLOT (not an absent child) whenever no modal is open,
+        // which is always the case at hydration. React's `useId` is derived from the
+        // tree-id FORK a multi-child parent pushes, not from the rendered markup, so a
+        // single-child `flightRoot` here and a two-child Fragment there made every
+        // `useId` under the tree disagree across the seam: cal.com's base-ui inputs
+        // server-rendered `base-ui-_R_2lmdbpi_` and client-rendered `base-ui-_R_amplf69_`,
+        // which React reports as a hydration mismatch it "won't patch up" — leaving every
+        // <label for> pointing at an id no input carries. Providers rendering no DOM is
+        // why this was invisible in the markup and still wrong.
+        createElement(
+          SearchParamsContext.Provider,
+          {{ value: search }},
+          createElement(Fragment, null, flightRoot, null),
+        ),
       ),
     ),
   );
@@ -6258,7 +6273,22 @@ export async function renderFlightToStream(flightChunks, serverConsumerManifest,
       createElement(
         PathnameContext.Provider,
         {{ value: pathname }},
-        createElement(SearchParamsContext.Provider, {{ value: search }}, flightRoot),
+        // The SAME shape the client's `Router` hydrates with: its innermost provider
+        // wraps a Fragment holding TWO children — the tree, and the intercept-modal
+        // slot, which is a `null` SLOT (not an absent child) whenever no modal is open,
+        // which is always the case at hydration. React's `useId` is derived from the
+        // tree-id FORK a multi-child parent pushes, not from the rendered markup, so a
+        // single-child `flightRoot` here and a two-child Fragment there made every
+        // `useId` under the tree disagree across the seam: cal.com's base-ui inputs
+        // server-rendered `base-ui-_R_2lmdbpi_` and client-rendered `base-ui-_R_amplf69_`,
+        // which React reports as a hydration mismatch it "won't patch up" — leaving every
+        // <label for> pointing at an id no input carries. Providers rendering no DOM is
+        // why this was invisible in the markup and still wrong.
+        createElement(
+          SearchParamsContext.Provider,
+          {{ value: search }},
+          createElement(Fragment, null, flightRoot, null),
+        ),
       ),
     ),
   );
