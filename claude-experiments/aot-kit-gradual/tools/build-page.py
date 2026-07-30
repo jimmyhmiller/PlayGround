@@ -395,21 +395,38 @@ BODY = f"""
         "mechanism in that picture already existed for other reasons, which is exactly why "
         "guards are not a node kind.")}
 
-{single("19-object",
-        "A heap, in five nodes", "o = {{x}};  o.x = 5;  return o.x;",
+{pair("20-object-raw", "19-object",
+        "A heap, and what pointer identity buys", "o = {{x}};  o.x = 5;  return o.x;",
         "Memory is in SSA form and split into alias classes, so there is no alias analysis pass "
         "anywhere in this compiler: the blue dashed edges ARE the aliasing, and a load reads the "
-        "state its own memory edge names. Follow them from the bottom.",
+        "state its own memory edge names. Follow them from the bottom. On the left nothing has "
+        "been rewritten; on the right the load is gone.",
         "The <code>New</code> is a multi node like an <code>If</code>: slot 0 of its tuple is the "
         "object and slot 1 is field <code>x</code>'s memory AFTER the allocation, which is why "
         "the allocation is a link in the field's memory chain rather than a node that appears out "
-        "of nowhere. Note what the <code>Load</code> is typed: <code>undefined|int</code>, not "
-        "<code>int=5</code>. A memory type describes a whole alias CLASS, and every object in that "
-        "class holds whatever it held, so an alias-level analysis cannot say that this pointer's "
-        "word is the one the store wrote. Recovering the 5 needs the observation that the load's "
-        "pointer is the same NODE as the store's, which is structural rather than a type, and it "
-        "is the next slice. The union is pinned exactly by a test so that the improvement is "
-        "measured rather than asserted.")}
+        "of nowhere. Now look at how the <code>Load</code> on the left is typed: "
+        "<code>undefined|int</code>, not <code>int=5</code>. A memory type describes a whole alias "
+        "CLASS, and every object in that class still holds whatever it held, so an alias-level "
+        "analysis cannot say that this pointer's word is the one the store wrote. That union is "
+        "pinned exactly by a test, and it is the number the right-hand graph beats. What beats it "
+        "is not a better type: it is the observation that the load's pointer is the SAME NODE as "
+        "the store's, which is a fact about the graph. The <code>Store</code> and the "
+        "<code>New</code> survive on the right, rooted by the <code>Return</code>'s memory slot, "
+        "because forwarding a read says nothing about whether the write is observable.")}
+
+{single("23-object-two",
+        "The load that must not forward",
+        "a = {{x}};  a.x = 1;  b = {{x}};  b.x = 2;  return a.x;",
+        "Two allocations of ONE shape, so both stores name the same alias class and both pointers "
+        "have the same type. This is the specimen that says the rule above is about pointers and "
+        "not about types.",
+        "The <code>Load</code> is still here, and that is the point. Its memory input is "
+        "<code>b.x = 2</code>: same alias class, same pointer TYPE (<code>obj@2</code> on both), "
+        "and a forwarding rule that compared classes and skipped the pointer would hand back 2. "
+        "The answer is 1. Note what would NOT have caught that: the graph returning 2 is well "
+        "formed, its types are at a fixpoint, the verifier is clean, it survives print and "
+        "reparse, and every structural count is unchanged. Only running it says otherwise, which "
+        "is the whole argument for keeping an interpreter as the differential oracle.")}
 
 {single("21-shape-polymorphic",
         "Two shapes through one merge",

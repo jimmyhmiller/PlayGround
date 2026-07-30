@@ -27,7 +27,7 @@ Two rules that apply throughout:
 | **M2** | Control flow | done | `tests/control-test.coil` |
 | | Dominators and the loop tree | done | `tests/loop-tree-test.coil` |
 | **M3** | Verifier, interpreter, textual IR | done | `verify-`, `eval-`, `text-`, `gtext-test.coil` |
-| **M4** | Memory SSA and shapes | **in progress**: shapes, the memory type, all four memory ops and load-after-store forwarding are in and run; store-after-store elimination and dead-store removal are not | `tests/shape-test.coil`, `tests/mem-test.coil` |
+| **M4** | Memory SSA and shapes | **in progress**, slices 4a/4b/4c-1 done: shapes, the memory type, all four memory ops and load-after-store forwarding are in, run, and differentially gated. Two of the gate's three rewrites are open: store-after-store elimination (4c-2) and dead-allocation removal (4c-3) | `tests/shape-test.coil`, `tests/mem-test.coil` |
 | M5 | Dynamic values end to end | not started | |
 | M6 | Functions, calls, closures | not started | |
 | M7 | Closed-world inference | not started | |
@@ -93,6 +93,12 @@ when the forwarded load is the store's last reader, subsuming it runs the kill c
 entire memory chain, and the `Return` built on the next line is wired to a corpse. `n-keep!` on
 the memory value across the load's construction is the fix, and the corpus-wide verifier
 (`VERR-DEAD-INPUT`) is what catches a missed one, a long way from the cause.
+
+READ **[Open at 4c-1's close](#m4-memory-ssa-and-shapes)** BEFORE STARTING EITHER SLICE. One of its
+four items is an obligation on these two rather than a note: the corpus forwarding gate counts dead
+`Load`s as a stand-in for forwardings, which is only an equality while forwarding is the sole thing
+that removes a load. 4c-2 and 4c-3 both remove loads by cascade, so each has to bring a real counter
+with it or it silently inflates the number that says 4c-1 still works.
 
 Two things are open from M3 and are worth reading, because the first one will bite around memory
 edges:
@@ -324,6 +330,81 @@ Where the clauses stand after 4c-1:
 | load-after-store forwarding | **done (4c-1)**. `load-idealize`: the load's memory input is a Store on the SAME alias class whose pointer is the SAME NODE, so the load is that store's value. Decided structurally and never from a type; Simple's offset-overlap rule is deliberately not ported, because it reads a type and then rewrites irreversibly. `fx-object` (19) forwards; `fx-object-two` (23) is the negative witness, two allocations of one shape where the pointer check is the only thing between the right answer and 2 |
 | store-after-store elimination | 4c-2 |
 | dead-allocation removal | partly, and for free: killing a `New`'s last projection drops its last use and the cascade collects it. A store to an object nothing reads still survives |
+
+**Status: slice 4c-1 DONE; M4 ITSELF IS NOT.** Two of the gate's three named rewrites, 4c-2 and
+4c-3, are still open, and the table above is what "M4 done" would have to mean. Saying so here
+rather than ticking the milestone is the same rule as everywhere else in this file: a status
+nobody can check is worth less than no status. What is green today is `tools/gate.sh`:
+**185 tests across ten suites** (ty 31, node 27, control 19, loop-tree 5, verify 22, eval 24,
+text 14, gtext 7, shape 13, mem 23), plus 26 diagram fixtures rendered and the gallery rebuilt.
+The memory corpus is fixtures 19 to 25, and the gallery now carries the 4c-1 story as a pair
+(`20-object-raw` next to `19-object`, the same program unrewritten and forwarded) plus
+`23-object-two`, the load that must NOT forward.
+
+**What M4 has taught so far**, six things. The long-form record with the measurement behind each
+is in [JOURNAL.md](JOURNAL.md); these are the parts that outlive the milestone:
+
+- **A check written on one path is not a check, and `n-peephole` has two paths.** It runs the
+  constant fold BEFORE `idealize`, so every guard living in `load-idealize` had a second door
+  around it: whenever a Load's type was constant the node became a `Const` and the alias
+  comparison never ran. Six of the review's eight findings are that one defect in different
+  clothes. The fix is never to block the fold for the op; it is to make `compute` not produce the
+  bogus type, because otherwise the bad type stays in the graph and the `Add` above the load folds
+  instead.
+- **A refusal has a DIRECTION, and monotonicity picks it.** `load-compute` answers **ANY** when the
+  memory state's alias bitset lacks the node's class and **ALL** when some shape the pointer can be
+  lacks the word. Backwards on either one is a compute that rises, and
+  `every_memory_compute_is_monotone_in_every_slot` says so by name. The shape predicate must be
+  "some shape misses it" rather than "no shape has it" for the same reason: a shape set only grows.
+- **LAW 3 forbids ACTING on a provisional type; it has never forbidden READING one in order to
+  DECLINE.** `load-idealize` asks `access-refused?` of the store it is about to consume, which is a
+  type read inside an irreversible rewrite and is sound precisely because its only effect is not to
+  fire. Without it, forwarding a correct load off a bogus store drops the store's last reader and
+  the cascade takes the `EV-SHAPE` the program owed with it.
+- **The `n-ty-proven?` guard on a STRUCTURAL rule is not about disbelieving a type.** 4c-1 reads
+  node identity and an alias number, neither of which can be provisional. The guard is there
+  because the rewrite is irreversible and the graph is not finished: a store in a still-settling
+  cone is one the sweep may yet replace, and taking its value commits to its identity for ever.
+  Every one of 4c-2 and 4c-3 inherits that reasoning, not the type-disbelief version.
+- **Root the memory BEFORE building the load.** A forwarded load that was the store's last reader
+  drops it, and the cascade collects the store, both projections and the `New` before the `Return`
+  meant to root them exists; the next line then wires a corpse. `n-keep!`/`n-unkeep!` across the
+  load's construction is the fix, and the only thing that reports it is the corpus-wide verifier's
+  `VERR-DEAD-INPUT`, a long way from the cause. It hit three separate fixtures, two of them tests
+  written before the rewrite existed.
+- **"The load disappeared" is a vacuous gate**, satisfied by a rule that deletes every load. The
+  weight is carried by the negative witness, `23-object-two`: two allocations of one shape, so both
+  stores name the same alias class and both pointers carry the identical type `obj@2`, and the only
+  thing between the right answer and 2 is that the store's pointer is a different NODE. The graph
+  that returns 2 is well formed, at a type fixpoint, clean under `g-verify`, survives print and
+  reparse, and has every structural count unchanged. Only running it tells them apart, which is
+  D12's whole argument.
+
+**Open at 4c-1's close**, recorded here so none of it is lost between slices. Nothing is red.
+
+1. **The D8 proof gate on `load-idealize` is unreachable from every corpus fixture.** Instrumenting
+   the refusal branch counted **0** proof-gated refusals over 40 seeds on eager `19-object`, on
+   raw-then-`iterate!` `20-object-raw`, on `22-object-loop` and on `21-shape-polymorphic`: an
+   analysed cone is already settled before any peephole runs. The clause is therefore gated on a
+   locally built UNANALYSED graph in `a_refused_forwarding_is_deferred_and_lands_under_every_seed`
+   (119 refusals over 40 seeds, 40/40 refusing at the hand peephole). It is properly tested; what is
+   open is that a later gate sweeping the CORPUS for coverage would not see the guard at all.
+2. **There is no engine counter for forwardings.** `the_corpus_forwards_loads_and_leaves_none_forwardable`
+   counts "Loads created and now dead" (`n-kill!` leaves the op in the arena), which equals
+   forwardings only because forwarding is today the only thing that removes a `Load`. It is held
+   honest by the companion forwardable-survivor counts in both modes. **4c-2 and 4c-3 can remove
+   loads by cascade and will make the stand-in drift, so replacing it with a real counter is part of
+   those slices, not a later tidy-up.**
+3. **`every_seed_builds_the_same_memory_graph` cannot vary the seed**, because every corpus builder
+   calls `graph-reset! 1` itself and re-seeding before `corpus-build!` gets seed 1 back. It was kept
+   and re-commented as what it actually gates, which is worth having and is not the seed claim: a
+   fixture is a pure function of its own source, with nothing carried over from whatever the
+   previous test left in the arena, the shape table or the GVN map. The seed claim lives in the test
+   named above, which builds through a local builder that takes the seed.
+4. **"Both modes" in the corpus sweep means each fixture in the mode it declares**, with both modes
+   asserted present; the suite does NOT run every fixture through both. A raw fixture's contract is
+   that it is unrewritten, and iterating them all is open item 2 at the top of this file (the
+   `g-analyze!`-then-`iterate!` phase order), which 4c-1 covers for the object program only.
 
 ## M5. Dynamic values end to end
 
